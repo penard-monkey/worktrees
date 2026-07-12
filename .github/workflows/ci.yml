@@ -1,0 +1,54 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - name: shellcheck + bash -n + bash-3.2 gates
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          make lint
+      - name: bash 3.2 parse gate (real 3.2 via docker)
+        run: docker run --rm -v "$PWD:/s" bash:3.2 bash -n /s/bin/worktrees
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - name: install tmux (ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q tmux
+      - name: install tmux (macos)
+        if: runner.os == 'macOS'
+        run: brew install tmux
+      - name: unit suite (shimmed tmux, system bash)
+        run: make test
+      - name: real-tmux smoke
+        run: make test-real-tmux
+      - name: full suite under REAL bash 3.2 (stock /bin/bash)
+        if: runner.os == 'macOS'
+        run: RUN_BASH=/bin/bash make test
+
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: make install + smoke
+        run: |
+          make install BINDIR="$RUNNER_TEMP/xbin"
+          "$RUNNER_TEMP/xbin/worktrees" --version
+          "$RUNNER_TEMP/xbin/worktrees" help >/dev/null
