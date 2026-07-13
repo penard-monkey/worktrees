@@ -243,9 +243,10 @@ setup() {
 }
 
 @test "new: tmux absent → warns and still creates the worktree" {
-  remove_fake_tmux
-  # Keep only shims + system dirs (verified: no tmux under /usr/bin or /bin).
-  export PATH="$SHIMS:/usr/bin:/bin"
+  # Symlink-built PATH without tmux — "no tmux in /usr/bin" only holds on
+  # macOS; ubuntu's apt tmux IS /usr/bin/tmux, and hitting the real binary
+  # daemonizes a server that hangs bats (holds its FDs).
+  install_no_tmux_path
 
   run_wt new feat-notmux
   [ "$status" -eq 0 ]

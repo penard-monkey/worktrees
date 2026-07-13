@@ -22,6 +22,7 @@ common_setup() {
   install_fake_cmd fake-ai
   install_fake_cmd pnpm; install_fake_cmd npm; install_fake_cmd yarn; install_fake_cmd bun
   unset TMUX                      # don't inherit the developer's real tmux
+  export BATS_TEST_TIMEOUT=120    # no single test may hang the suite (CI backstop)
   export WORKTREES_AI_CMD="fake-ai"
   unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX XDG_CONFIG_HOME || true
 
@@ -133,6 +134,27 @@ EOF
 }
 
 remove_fake_tmux() { rm -f "$SHIMS/tmux"; }
+
+# Make tmux UNFINDABLE, portably. Removing the shim is not enough: a real tmux
+# on the runner (ubuntu: /usr/bin/tmux) would then be picked up, and launching
+# a REAL server on a fresh runner daemonizes with bats' FDs held open — the
+# suite hangs forever. Build a PATH of symlinks to exactly the tools the CLI +
+# harness need, plus every shim except tmux.
+install_no_tmux_path() {
+  NO_TMUX_BIN="$BATS_TEST_TMPDIR/no-tmux-bin"; mkdir -p "$NO_TMUX_BIN"
+  local t p
+  for t in bash sh git grep sed awk tr cut head tail sort date stat basename \
+           dirname rm mv mkdir ln cat uname env mktemp; do
+    p="$(command -v "$t" 2>/dev/null)" || continue
+    ln -sf "$p" "$NO_TMUX_BIN/$t"
+  done
+  for p in "$SHIMS"/*; do
+    [ -f "$p" ] || continue
+    t="$(basename "$p")"; [ "$t" = tmux ] && continue
+    ln -sf "$p" "$NO_TMUX_BIN/$t"
+  done
+  export PATH="$NO_TMUX_BIN"
+}
 
 # Assertion sugar over the shim state.
 tmux_session_exists() { [ -f "$TMUX_STATE/$1" ]; }

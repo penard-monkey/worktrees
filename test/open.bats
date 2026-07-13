@@ -99,9 +99,7 @@ session_count() {
 
 @test "open hard-errors when tmux is absent (unlike new)" {
   make_worktree feat-x
-  remove_fake_tmux
-  # Strip homebrew's real tmux from PATH too; keep system dirs for git/bash.
-  export PATH="$SHIMS:/usr/bin:/bin"
+  install_no_tmux_path   # portable tmux-less PATH (ubuntu's tmux is /usr/bin/tmux)
   run_wt open feat-x
   [ "$status" -eq 1 ]
   [[ "$output" == *"tmux not found"* ]]
