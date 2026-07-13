@@ -70,8 +70,11 @@ main() {
   fi
 
   # ── download + verify + install atomically ────────────────────────────────
-  local tmp; tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  # TMP_DIR is a global on purpose: the EXIT trap fires after main() returns,
+  # when a `local` would already be out of scope (set -u would abort cleanup).
+  TMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "${TMP_DIR:-}"' EXIT
+  local tmp="$TMP_DIR"
   echo "downloading worktrees $version ..."
   curl -fsSL -o "$tmp/$BIN_NAME" "https://raw.githubusercontent.com/$REPO/$version/bin/worktrees"
   if curl -fsSL -o "$tmp/checksums.txt" "https://github.com/$REPO/releases/download/$version/checksums.txt" 2>/dev/null; then
