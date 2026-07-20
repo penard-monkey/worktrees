@@ -532,9 +532,14 @@ WT_SCHEMA_VERSION=1
 # Replacement literals route through vars: bash 3.2's ${v//pat/repl} mangles a
 # backslash-bearing inline replacement (the same reason sq() does it).
 json_str() {
-  # shellcheck disable=SC1003  # '\\' and '\"' are literal JSON escapes, not mis-escaped quotes
-  local s=${1-} bs='\\' dq='\"' tb='\t' nl='\n' cr='\r' ff='\f'
-  s=${s//$'\\'/$bs}; s=${s//\"/$dq}
+  # shellcheck disable=SC1003  # '\"' etc. are literal JSON escapes, not mis-escaped quotes
+  local s=${1-} dq='\"' tb='\t' nl='\n' cr='\r' ff='\f'
+  # Backslash first, via sed — portable across bash 3.2 AND 5.x. A pure-bash
+  # \\-doubling is NOT portable: 3.2 keeps ${//} replacement backslashes literal,
+  # but 5.x reprocesses them (\\ → \), leaving a lone \ that invalidates the JSON.
+  # Fast-path: only fork sed when a backslash is actually present (usually none).
+  case $s in *\\*) s=$(printf '%s' "$s" | sed 's/\\/\\\\/g') ;; esac
+  s=${s//\"/$dq}
   s=${s//$'\t'/$tb}; s=${s//$'\n'/$nl}; s=${s//$'\r'/$cr}; s=${s//$'\f'/$ff}
   case $s in
     *[$'\001'-$'\010'$'\013'$'\016'-$'\037']*)
