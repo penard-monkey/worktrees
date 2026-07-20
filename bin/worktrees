@@ -10,7 +10,7 @@
 #   worktrees co  <branch>                # checkout a REMOTE branch (fetch if needed)
 #   worktrees switch [<worktree>] <branch> [base]  # move a worktree to another branch
 #   worktrees open <name>                 # reopen an existing worktree's tmux session
-#   worktrees ls                          # list worktrees + their state
+#   worktrees ls [--json]                 # list worktrees + state (--json = machine-readable, schema v1)
 #   worktrees rm  <name> [name...]        # tear one (or more) down
 #   worktrees -V | --version              # print version   (also: help / -h)
 #   worktrees                             # (no args) → ls
@@ -518,8 +518,128 @@ ago() {          # epoch → compact age vs $NOW (e.g. 3h, 5d, 2w)
 
 fit() { local s="$1" w="$2"; (( ${#s} > w )) && s="${s:0:w-1}~"; printf '%s' "$s"; }  # truncate to width w (~ marks a cut)
 
+# ── JSON output (schema_version 1) ─────────────────────────────────────────────
+# Machine-readable `ls --json`, for the UI (and any consumer). Emitted by a path
+# SEPARATE from the human `ls` so the table stays byte-for-byte identical (its
+# bats assertions must not move). No jq — strings are escaped in pure bash, the
+# same zero-runtime-deps discipline the config uses. Everything here is READ-ONLY,
+# derived live from git/tmux exactly like cmd_ls.
+WT_SCHEMA_VERSION=1
+
+# JSON-escape $1 → a quoted scalar. Escapes backslash, quote, and the common
+# control chars; any remaining C0 byte (0x00-0x1F) → '?' via awk (a raw control
+# byte otherwise makes the whole document invalid JSON and blanks the UI).
+# Replacement literals route through vars: bash 3.2's ${v//pat/repl} mangles a
+# backslash-bearing inline replacement (the same reason sq() does it).
+json_str() {
+  # shellcheck disable=SC1003  # '\\' and '\"' are literal JSON escapes, not mis-escaped quotes
+  local s=${1-} bs='\\' dq='\"' tb='\t' nl='\n' cr='\r' ff='\f'
+  s=${s//$'\\'/$bs}; s=${s//\"/$dq}
+  s=${s//$'\t'/$tb}; s=${s//$'\n'/$nl}; s=${s//$'\r'/$cr}; s=${s//$'\f'/$ff}
+  case $s in
+    *[$'\001'-$'\010'$'\013'$'\016'-$'\037']*)
+      s=$(printf '%s' "$s" | LC_ALL=C awk '{gsub(/[\001-\010\013\016-\037]/,"?");print}') ;;
+  esac
+  printf '"%s"' "$s"
+}
+json_bool() { [[ "${1-}" == true ]] && printf true || printf false; }
+json_nn()   { [[ "${1-}" =~ ^-?[0-9]+$ ]] && printf '%s' "$1" || printf null; }   # int or null
+
+# Upstream tracking ref of worktree $1 (empty if none).
+wt_upstream()     { git -C "$1" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true; }
+# "<behind>\t<ahead>" vs @{u} (empty when there's no upstream). Net-new — no
+# existing helper computed divergence.
+wt_ahead_behind() { git -C "$1" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null || true; }
+
+# Claude Code stores per-project session logs under ~/.claude/projects/<mangled>,
+# the project's ABSOLUTE path with every '/' and '.' turned into '-'. This mapping
+# is OBSERVED, not documented — a mismatch degrades to false, never an error.
+# Honors $HOME (so test isolation reports false cleanly).
+claude_dir_for()     { printf '%s/.claude/projects/%s' "${HOME:-}" "$(printf '%s' "$1" | LC_ALL=C sed 's#[/.]#-#g')"; }
+claude_has_session() { local d="$1" f; [[ -n "$d" && -d "$d" ]] || return 1; for f in "$d"/*.jsonl; do [[ -e "$f" ]] && return 0; done; return 1; }
+
+# One place → one JSON object (schema v1). $1=dir  $2=is_main (true/false). Reuses
+# the same derived-state helpers as cmd_ls; unknowable fields are explicit null so
+# a consumer deserializes a fixed shape. A stale UNREGISTERED dir emits a minimal
+# object (registered:false) — never run branch/dirty git ops in it (they'd read MAIN).
+emit_place_json() {
+  local d="$1" is_main="${2:-false}" slug session cdir cpresent=false tmux_up=false bepoch created life
+  if [[ "$is_main" == true ]]; then slug='(main)'; else slug="$(basename "$d")"; fi
+  session="$(wt_session "$slug")"; session_exists "$session" && tmux_up=true
+  cdir="$(claude_dir_for "$d")"; claude_has_session "$cdir" && cpresent=true
+  bepoch="$(stat_birth "$d")"; created="$(fmt_date "$bepoch")"
+  life=closed; [[ "$tmux_up" == true ]] && life=active   # P0: no declared store yet → live-only
+
+  if [[ "$is_main" != true ]] && ! wt_registered "$d"; then
+    printf '{"schema_version":%s,"slug":%s,"path":%s,"is_main":false,"registered":false,' \
+      "$WT_SCHEMA_VERSION" "$(json_str "$slug")" "$(json_str "$d")"
+    printf '"branch":null,"detached":null,"dirty":null,"dirty_files":null,"ahead":null,"behind":null,"upstream":null,'
+    printf '"created":%s,"created_epoch":%s,"last_commit_epoch":null,"last_commit_subject":null,' \
+      "$(json_str "$created")" "$(json_nn "$bepoch")"
+    printf '"tmux_session":{"name":%s,"up":%s},' "$(json_str "$session")" "$(json_bool "$tmux_up")"
+    printf '"claude_session_present":%s,"claude_session_dir":%s,' "$(json_bool "$cpresent")" "$(json_str "$cdir")"
+    printf '"install_cmd":null,"stack":null,"declared":null,"lifecycle_effective":%s}' "$(json_str "$life")"
+    return 0
+  fi
+
+  local raw branch detached dirtytext dirty dirty_files upstream ab behind ahead cepoch csubj install
+  raw="$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+  if [[ -z "$raw" || "$raw" == HEAD ]]; then detached=true; branch=''; else detached=false; branch="$raw"; fi
+  dirtytext="$(wt_dirty "$d" || true)"
+  if [[ -n "$dirtytext" ]]; then dirty=true; dirty_files="$(printf '%s\n' "$dirtytext" | grep -c .)"; else dirty=false; dirty_files=0; fi
+  upstream="$(wt_upstream "$d")"
+  ab="$(wt_ahead_behind "$d")"; behind=''; ahead=''
+  [[ -n "$ab" ]] && read -r behind ahead <<<"$ab"
+  cepoch="$(git -C "$d" log -1 --format=%ct 2>/dev/null || echo 0)"
+  csubj="$(git -C "$d" log -1 --format=%s 2>/dev/null || true)"
+  install="$(detect_install_cmd "$d")"
+
+  printf '{"schema_version":%s,"slug":%s,"path":%s,"is_main":%s,"registered":true,' \
+    "$WT_SCHEMA_VERSION" "$(json_str "$slug")" "$(json_str "$d")" "$(json_bool "$is_main")"
+  if [[ "$detached" == true ]]; then printf '"branch":null,"detached":true,'; else printf '"branch":%s,"detached":false,' "$(json_str "$branch")"; fi
+  printf '"dirty":%s,"dirty_files":%s,' "$(json_bool "$dirty")" "$(json_nn "$dirty_files")"
+  printf '"ahead":%s,"behind":%s,' "$(json_nn "$ahead")" "$(json_nn "$behind")"
+  if [[ -n "$upstream" ]]; then printf '"upstream":%s,' "$(json_str "$upstream")"; else printf '"upstream":null,'; fi
+  printf '"created":%s,"created_epoch":%s,' "$(json_str "$created")" "$(json_nn "$bepoch")"
+  if [[ "${cepoch:-0}" -gt 0 ]] 2>/dev/null; then printf '"last_commit_epoch":%s,' "$(json_nn "$cepoch")"; else printf '"last_commit_epoch":null,'; fi
+  if [[ -n "$csubj" ]]; then printf '"last_commit_subject":%s,' "$(json_str "$csubj")"; else printf '"last_commit_subject":null,'; fi
+  printf '"tmux_session":{"name":%s,"up":%s},' "$(json_str "$session")" "$(json_bool "$tmux_up")"
+  printf '"claude_session_present":%s,"claude_session_dir":%s,' "$(json_bool "$cpresent")" "$(json_str "$cdir")"
+  if [[ -n "$install" ]]; then printf '"install_cmd":%s,' "$(json_str "$install")"; else printf '"install_cmd":null,'; fi
+  printf '"stack":null,"declared":null,"lifecycle_effective":%s}' "$(json_str "$life")"
+}
+
+# `ls --json` — full snapshot: main place FIRST, then each .worktrees/* in the
+# SAME last-commit-recency order the human ls uses (stable; ties keep glob order).
+emit_ls_json() {
+  printf '{"schema_version":%s,"repo":%s,"prefix":%s,"places_file":%s,"places":[' \
+    "$WT_SCHEMA_VERSION" "$(json_str "$MAIN_ROOT")" "$(json_str "$PREFIX")" "$(json_str "$MAIN_ROOT/.worktrees.places.json")"
+  emit_place_json "$MAIN_ROOT" true
+  if [[ -d "$WT_ROOT" ]]; then
+    shopt -s nullglob; local dirs=("$WT_ROOT"/*/); shopt -u nullglob
+    if [[ ${#dirs[@]} -gt 0 ]]; then
+      local key d
+      while IFS=$'\t' read -r key d; do
+        [[ -n "$d" ]] || continue
+        printf ','; emit_place_json "$d" false
+      done < <(
+        for wd in "${dirs[@]}"; do
+          wd="${wd%/}"; bep="$(stat_birth "$wd")"
+          if wt_registered "$wd"; then cep="$(git -C "$wd" log -1 --format=%ct 2>/dev/null || echo 0)"; else cep=0; fi
+          k="$cep"; [[ "${k:-0}" -gt 0 ]] 2>/dev/null || k="${bep:-0}"
+          printf '%s\t%s\n' "${k:-0}" "$wd"
+        done | sort -s -t$'\t' -k1,1 -rn
+      )
+    fi
+  fi
+  printf ']}\n'
+}
+
 # ── ls ───────────────────────────────────────────────────────────────────────
 cmd_ls() {
+  local a
+  for a in "$@"; do case "$a" in --json) emit_ls_json; return 0 ;; esac; done
+  [[ "${WORKTREES_JSON:-}" == 1 ]] && { emit_ls_json; return 0; }
   [[ -d "$WT_ROOT" ]] || { info "No worktrees (.worktrees/ is empty)."; return 0; }
   shopt -s nullglob; local dirs=("$WT_ROOT"/*/); shopt -u nullglob
   [[ ${#dirs[@]} -gt 0 ]] || { info "No worktrees (.worktrees/ is empty)."; return 0; }
@@ -672,7 +792,7 @@ case "$SUB" in
   co|checkout)          cmd_new "$@" ;;
   switch|sw|branch)     cmd_switch "$@" ;;
   open|reopen|attach|a) cmd_open "$@" ;;
-  ls|list)              cmd_ls ;;
+  ls|list)              cmd_ls "$@" ;;
   rm|remove|delete)     cmd_rm "$@" ;;
   *) error "Unknown command: $SUB"; echo; usage; exit 1 ;;
 esac

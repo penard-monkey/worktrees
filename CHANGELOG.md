@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- `worktrees ls --json` (also `WORKTREES_JSON=1 worktrees ls`): a machine-readable
+  snapshot (`schema_version` 1) of every place — the main checkout first, then each
+  worktree with live derived state (branch/detached, dirty + file count, ahead/behind
+  vs upstream, tmux session up/down, last commit, install command, Claude-session
+  presence, and a computed `lifecycle_effective`). The human `ls` table is unchanged.
+  Pure-bash JSON serialization (RFC 8259-safe, control-char escaping) — no `jq` needed.
+
 ## [0.1.0] - 2026-07-12
 
 ### Added
