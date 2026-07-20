@@ -171,13 +171,17 @@ detect_install_cmd() {
   echo ""
 }
 
-# Make sure .worktrees/ is ignored in THIS repo (local, untracked).
+# Keep worktrees' own untracked files out of git in THIS repo: the .worktrees/
+# tree and the UI's declared-state sidecar (.worktrees.places.json, written by
+# the app next to .worktrees/). Local, per-repo, never committed.
 ensure_excluded() {
-  local excl="$GIT_COMMON/info/exclude" p='.worktrees/'
+  local excl="$GIT_COMMON/info/exclude" p
   [[ -e "$excl" ]] || : > "$excl" 2>/dev/null || return 0
-  git -C "$MAIN_ROOT" check-ignore -q "$p" 2>/dev/null && return 0   # already ignored
-  grep -qxF "$p" "$excl" 2>/dev/null && return 0
-  echo "$p" >> "$excl"
+  for p in '.worktrees/' '.worktrees.places.json'; do
+    git -C "$MAIN_ROOT" check-ignore -q "$p" 2>/dev/null && continue   # already ignored
+    grep -qxF "$p" "$excl" 2>/dev/null && continue
+    echo "$p" >> "$excl"
+  done
 }
 
 # Single-quote $1 for safe embedding in a shell -c/-ic string ('… '\'' …' idiom).

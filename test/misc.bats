@@ -54,6 +54,15 @@ write_config() {
   [ "$(grep -cFx '.worktrees/' "$REPO/.git/info/exclude")" -eq 1 ]
 }
 
+@test "new also excludes the UI declared-state sidecar, exactly once" {
+  run_wt new feat-a --no-tmux
+  [ "$status" -eq 0 ]
+  grep -qFx '.worktrees.places.json' "$REPO/.git/info/exclude"
+  run_wt new feat-b --no-tmux
+  [ "$status" -eq 0 ]
+  [ "$(grep -cFx '.worktrees.places.json' "$REPO/.git/info/exclude")" -eq 1 ]
+}
+
 # ── default_base ─────────────────────────────────────────────────────────────
 
 @test "default base falls back to master when main does not exist" {
