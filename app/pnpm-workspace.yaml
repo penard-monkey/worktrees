@@ -1,0 +1,4 @@
+# esbuild ships a prebuilt platform binary but pnpm 11 flags its install script
+# as "ignored" and then fails `pnpm run`. Allow it so `pnpm tauri dev` works.
+allowBuilds:
+  esbuild: true
