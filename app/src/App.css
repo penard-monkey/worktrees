@@ -78,3 +78,30 @@ html, body, #root { height: 100%; margin: 0; }
   margin: auto; text-align: center; color: #565f89; line-height: 1.7;
 }
 .empty code { background: #24283b; padding: 2px 6px; border-radius: 4px; color: #c0caf5; }
+
+/* ── P2: search + lifecycle groups + actions + note ── */
+.search {
+  margin: 0 8px 6px; padding: 5px 8px;
+  background: #16161e; color: #c0caf5;
+  border: 1px solid #24283b; border-radius: 6px; font-size: 12px;
+}
+.scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.group { margin-top: 4px; }
+.group-h {
+  padding: 4px 12px 2px; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: #565f89;
+}
+.topbar .actions { margin-left: auto; display: flex; gap: 4px; }
+.topbar .actions button {
+  background: #24283b; color: #a9b1d6; border: 0;
+  border-radius: 5px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+}
+.topbar .actions button:hover { background: #2f3549; }
+.topbar .actions button.on { background: #7aa2f7; color: #16161e; }
+.topbar .life { margin-left: 0; }
+.note {
+  margin: 0; padding: 5px 12px;
+  background: #1a1b26; color: #a9b1d6;
+  border: 0; border-bottom: 1px solid #24283b; font-size: 12px;
+}
+.note:focus { outline: none; background: #1e2030; }
