@@ -53,7 +53,7 @@ worktrees new <branch> --name <topic> ...place named independently of the branch
 worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
 worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
 worktrees open <name>                 reopen a worktree's tmux session
-worktrees ls                          list worktrees + their state
+worktrees ls [--json]                 list worktrees + their state (--json: machine-readable)
 worktrees rm <name> [name...]         tear one (or more) down
 worktrees                             (no args) → ls
 ```
@@ -86,6 +86,23 @@ CLI through an interactive shell (so shell aliases resolve), pane 1 runs the
 detected package-manager install (pnpm/bun/yarn/npm, by lockfile) and drops to a
 shell. Sessions are reused, never duplicated — `open` finds a session already
 living in the worktree even under a different name.
+
+## JSON output
+
+`worktrees ls --json` (or `WORKTREES_JSON=1 worktrees ls`) emits a machine-readable
+snapshot instead of the table — for editors, scripts, and tooling. The human `ls`
+output is byte-for-byte unchanged. Shape (`schema_version` 1):
+
+- a wrapper `{schema_version, repo, prefix, places_file, places:[…]}`;
+- the **main checkout first** (`slug:"(main)", is_main:true`), then each worktree in
+  the same recency order as the table;
+- per place: `slug, path, branch` (null when detached, with `detached:true`),
+  `dirty, dirty_files, ahead, behind, upstream` (the last three null when there's no
+  upstream), `created, created_epoch, last_commit_epoch, last_commit_subject,
+  tmux_session:{name,up}, claude_session_present, install_cmd`, and `lifecycle_effective`.
+
+All state is derived live on every call — nothing is cached. `stack` and `declared`
+are reserved (null for now). No `jq` required to produce it.
 
 ## Configuration
 
