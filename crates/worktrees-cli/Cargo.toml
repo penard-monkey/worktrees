@@ -1,0 +1,16 @@
+[package]
+name = "worktrees-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The `worktrees` CLI binary — a thin front-end over worktrees-core."
+
+[[bin]]
+name = "worktrees"
+path = "src/main.rs"
+
+[dependencies]
+worktrees-core = { workspace = true }
+serde_json = { workspace = true }
+# clap is added when subcommand dispatch lands (Increment 1/2). Increment 0 only
+# needs version/help, which is trivial by hand.

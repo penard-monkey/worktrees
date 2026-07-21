@@ -1,3 +1,6 @@
 dist/
 *.log
 .DS_Store
+
+# Rust workspace build artifacts (shared root target/ now that app/ joined the workspace)
+/target/
