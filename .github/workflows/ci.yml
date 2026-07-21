@@ -9,13 +9,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }
-      - name: shellcheck + bash -n + bash-3.2 gates
+      - name: shellcheck + bash-3.2 gates
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           make lint
-      - name: bash 3.2 parse gate (real 3.2 via docker)
-        run: docker run --rm -v "$PWD:/s" bash:3.2 bash -n /s/bin/worktrees
+      - name: bash 3.2 parse gate (real 3.2 via docker) — shim + legacy engine
+        run: |
+          docker run --rm -v "$PWD:/s" bash:3.2 bash -n /s/bin/worktrees
+          docker run --rm -v "$PWD:/s" bash:3.2 bash -n /s/bin/worktrees.bash
 
+  # Rust unit tests + build (fast, no tmux).
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build + test core/cli (GitHub runners ship Rust stable)
+        run: |
+          cargo build -p worktrees-core -p worktrees-cli --locked
+          cargo test -p worktrees-core --locked
+
+  # Default gate: the bats suite against the Rust binary (the shipped engine).
   test:
     strategy:
       fail-fast: false
@@ -31,32 +48,14 @@ jobs:
       - name: install tmux (macos)
         if: runner.os == 'macOS'
         run: brew install tmux
-      - name: unit suite (shimmed tmux, system bash)
-        run: make test
-      - name: real-tmux smoke
-        run: make test-real-tmux
-      - name: full suite under REAL bash 3.2 (stock /bin/bash)
-        if: runner.os == 'macOS'
-        run: RUN_BASH=/bin/bash make test
-
-  install:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: make install + smoke
+      - name: unit + real-tmux vs the Rust binary
         run: |
-          make install BINDIR="$RUNNER_TEMP/xbin"
-          "$RUNNER_TEMP/xbin/worktrees" --version
-          "$RUNNER_TEMP/xbin/worktrees" help >/dev/null
+          make test
+          make test-real-tmux
 
-  # Rust workspace: build/test worktrees-core + worktrees-cli only. The Tauri app
-  # (app/src-tauri) is intentionally excluded here — it needs webkit/system deps
-  # and gets its own job when the app CI lands (migration Increment 4/5).
-  rust:
+  # Parallel legacy gate: the bats suite against the bash engine (until the
+  # migration retires it). Includes the stock macOS bash 3.2 run.
+  bash:
     strategy:
       fail-fast: false
       matrix:
@@ -71,11 +70,24 @@ jobs:
       - name: install tmux (macos)
         if: runner.os == 'macOS'
         run: brew install tmux
-      - name: build + test core/cli (GitHub runners ship Rust stable)
+      - name: unit + real-tmux vs the bash engine
         run: |
-          cargo build -p worktrees-core -p worktrees-cli --locked
-          cargo test -p worktrees-core --locked
-      - name: conformance — full bats suite vs the compiled Rust binary
+          make test-bash
+          make test-real-tmux-bash
+      - name: bash engine under REAL bash 3.2 (stock /bin/bash)
+        if: runner.os == 'macOS'
+        run: RUN_BASH=/bin/bash make test-bash
+
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: make install (build release + symlink binary) + smoke
         run: |
-          make test-rust
-          make test-rust-real-tmux
+          make install BINDIR="$RUNNER_TEMP/xbin"
+          "$RUNNER_TEMP/xbin/worktrees" --version
+          "$RUNNER_TEMP/xbin/worktrees" help >/dev/null

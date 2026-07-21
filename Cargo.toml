@@ -1,6 +1,7 @@
 # Virtual workspace: the Rust CLI core + binary, and the Tauri app, share one
-# target/ and Cargo.lock. See MIGRATION.md. The bash CLI (bin/worktrees) is
-# untouched and remains the shipped CLI until Increment 3.
+# target/ and Cargo.lock. See MIGRATION.md. The Rust binary (crates/worktrees-cli)
+# is the shipped CLI; the legacy bash engine lives at bin/worktrees.bash as a
+# parallel test gate until the migration retires it.
 [workspace]
 resolver = "2"
 members = ["crates/worktrees-core", "crates/worktrees-cli", "app/src-tauri"]
