@@ -1,0 +1,12 @@
+[package]
+name = "worktrees-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Engine for the worktrees CLI + app: git-worktree-as-place, shelling out to git/tmux."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Deliberately NO git2/gix (we shell out to `git` for a 1:1 port + the stale-dir
+# trap), NO clap (that's the CLI), NO portable-pty (that's app-only).

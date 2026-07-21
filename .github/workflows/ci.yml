@@ -52,3 +52,19 @@ jobs:
           make install BINDIR="$RUNNER_TEMP/xbin"
           "$RUNNER_TEMP/xbin/worktrees" --version
           "$RUNNER_TEMP/xbin/worktrees" help >/dev/null
+
+  # Rust workspace: build/test worktrees-core + worktrees-cli only. The Tauri app
+  # (app/src-tauri) is intentionally excluded here — it needs webkit/system deps
+  # and gets its own job when the app CI lands (migration Increment 4/5).
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build + test core/cli (GitHub runners ship Rust stable)
+        run: |
+          cargo build -p worktrees-core -p worktrees-cli --locked
+          cargo test -p worktrees-core --locked
