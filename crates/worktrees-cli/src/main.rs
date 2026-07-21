@@ -4,8 +4,9 @@
 //! the bats suite via the bash shim. Write ops (new/switch/…) land Increment 2.
 //! See MIGRATION.md.
 
+use worktrees_core::ops;
 use worktrees_core::render::error_line;
-use worktrees_core::Project;
+use worktrees_core::{CliUi, Project};
 
 const USAGE: &str = "\
 worktrees — one git worktree per branch, one tmux session per worktree.
@@ -56,9 +57,10 @@ fn run() -> i32 {
     };
 
     let sub = args.first().map(String::as_str).unwrap_or("ls");
+    let rest = args.get(1..).unwrap_or(&[]);
+    let mut ui = CliUi;
     match sub {
         "ls" | "list" => {
-            let rest = args.get(1..).unwrap_or(&[]);
             let json = rest.iter().any(|a| a == "--json")
                 || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
             if json {
@@ -68,10 +70,11 @@ fn run() -> i32 {
             }
             0
         }
+        "new" | "create" | "co" | "checkout" => ops::cmd_new(&project, &mut ui, rest),
+        "switch" | "sw" | "branch" => ops::cmd_switch(&project, &mut ui, rest),
+        "open" | "reopen" | "attach" | "a" => ops::cmd_open(&project, &mut ui, rest),
+        "rm" | "remove" | "delete" => ops::cmd_rm(&project, &mut ui, rest),
         other => {
-            // Increment 1 ports only the read path; new/co/switch/open/rm land
-            // in Increment 2. Unknown (or not-yet-ported) command → usage + exit 1,
-            // matching the bash dispatch's unknown-command path.
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));
             println!();
             println!("{USAGE}");

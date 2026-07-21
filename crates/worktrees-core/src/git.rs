@@ -27,3 +27,10 @@ pub fn git_ok(cwd: &str, args: &[&str]) -> bool {
 pub fn have_git() -> bool {
     Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
+
+/// Run `git -C cwd <args>` inheriting stdio (git's own messages reach the
+/// terminal, like the bash CLI's un-redirected mutating commands). Returns
+/// whether it exited 0.
+pub fn git_status(cwd: &str, args: &[&str]) -> bool {
+    Command::new("git").arg("-C").arg(cwd).args(args).status().map(|s| s.success()).unwrap_or(false)
+}

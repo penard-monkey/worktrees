@@ -37,12 +37,16 @@ test:
 test-real-tmux:
 	$(BATS) --filter-tags real-tmux test/
 
-# Conformance gate: run the read-path bats against the compiled Rust binary via
-# the shim (Increment 1 ports ls/ls --json + version/help; write ops land later).
+# Conformance gate: run the bats suite against the compiled Rust binary via the
+# shim. The full unit suite (Increment 2 ports the write ops); real-tmux smokes
+# via test-rust-real-tmux.
 test-rust:
 	cargo build -p worktrees-cli
-	WT_BIN=$(RUST_SHIM) $(BATS) test/ls.bats test/json.bats
-	WT_BIN=$(RUST_SHIM) $(BATS) --filter 'version|help|unknown subcommand|outside a git repo' test/misc.bats
+	WT_BIN=$(RUST_SHIM) $(BATS) --filter-tags '!real-tmux' test/
+
+test-rust-real-tmux:
+	cargo build -p worktrees-cli
+	WT_BIN=$(RUST_SHIM) $(BATS) --filter-tags real-tmux test/
 
 check: lint test
 
