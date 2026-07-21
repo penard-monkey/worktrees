@@ -13,6 +13,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   presence, and a computed `lifecycle_effective`). The human `ls` table is unchanged.
   Pure-bash JSON serialization (RFC 8259-safe, control-char escaping) — no `jq` needed.
 
+### Changed
+- The CLI is now a compiled Rust binary (`crates/worktrees-cli`), behavior-identical
+  to the bash version (gated by the same bats suite). `install.sh` fetches a prebuilt
+  binary per platform (macOS/Linux, x86_64/arm64) or builds from source with `cargo`;
+  `make install` compiles + symlinks the release binary. The legacy bash engine is kept
+  at `bin/worktrees.bash` as a parallel test gate; `bin/worktrees` is a shim that runs
+  the built binary from a clone.
+
 ## [0.1.0] - 2026-07-12
 
 ### Added

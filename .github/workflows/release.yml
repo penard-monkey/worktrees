@@ -7,31 +7,70 @@ permissions:
   contents: write
 
 jobs:
+  # Cross-compile the worktrees binary for the common desktop/server targets.
+  # Pure-Rust (git/tmux are shelled out at runtime), so cross-compilation only
+  # needs the target + (for aarch64-linux) a cross linker.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,  target: aarch64-apple-darwin }
+          - { os: macos-latest,  target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: version gate — tag matches Cargo.toml workspace version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          grep -q "^version = \"$tag\"$" Cargo.toml \
+            || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
+      - name: aarch64-linux cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: build
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo build --release -p worktrees-cli --target "${{ matrix.target }}" --locked
+      - name: package + checksum
+        run: |
+          mkdir -p dist
+          asset="worktrees-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/worktrees" "dist/$asset"
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum "$asset" > "$asset.sha256"
+          else shasum -a 256 "$asset" > "$asset.sha256"; fi
+          cat "$asset.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: worktrees-${{ matrix.target }}
+          path: dist/*
+
   release:
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { submodules: true }
-      - name: gate — tag matches embedded version
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: assemble binaries + combined checksums
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          grep -q "^WORKTREES_VERSION=\"$tag\"$" bin/worktrees \
-            || { echo "tag v$tag != WORKTREES_VERSION in bin/worktrees"; exit 1; }
-      - name: lint + test
-        run: |
-          sudo apt-get update -q && sudo apt-get install -y -q shellcheck tmux
-          make check
-      - name: checksums
-        run: |
-          mkdir -p dist && cp bin/worktrees dist/
-          (cd dist && shasum -a 256 worktrees > checksums.txt && cat checksums.txt)
-      - name: extract changelog section
+          mkdir -p dist
+          find art -type f -name 'worktrees-*' ! -name '*.sha256' -exec cp {} dist/ \;
+          cat art/*/*.sha256 > dist/checksums.txt
+          echo "── checksums ──"; cat dist/checksums.txt
+      - name: changelog notes for this tag
         run: |
           v="${GITHUB_REF_NAME#v}"
-          awk -v v="$v" '$0 ~ "^## \\["v"\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > dist/notes.md
+          awk -v v="$v" '$0 ~ "^## \\["v"\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > dist/notes.md || true
+          [ -s dist/notes.md ] || echo "worktrees $GITHUB_REF_NAME" > dist/notes.md
           cat dist/notes.md
       - name: create GitHub release
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/worktrees dist/checksums.txt \
+          gh release create "$GITHUB_REF_NAME" dist/worktrees-* dist/checksums.txt \
             --title "worktrees $GITHUB_REF_NAME" --notes-file dist/notes.md

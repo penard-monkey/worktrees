@@ -4,19 +4,38 @@
 # Recommended (reproducible) team form — pin the tag:
 #   curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/v0.1.0/install.sh | bash
 #
-# Installs the LATEST RELEASE (not main) to ~/.local/bin/worktrees.
-#   WORKTREES_INSTALL_VERSION=v0.1.0   pin a specific release
-#   WORKTREES_INSTALL_DIR=~/bin        alternate target dir
-#   install.sh --uninstall             remove the installed binary (only that)
+# Installs the LATEST RELEASE (not main) to ~/.local/bin/worktrees. worktrees is
+# a compiled binary: this fetches the prebuilt binary for your platform, or (if
+# none matches, or you set WORKTREES_INSTALL_FROM_SOURCE=1) builds it from source
+# with cargo.
+#   WORKTREES_INSTALL_VERSION=v0.1.0     pin a specific release
+#   WORKTREES_INSTALL_DIR=~/bin          alternate target dir
+#   WORKTREES_INSTALL_FROM_SOURCE=1      force a cargo build from source
+#   install.sh --uninstall               remove the installed binary (only that)
 #
-# Checksums: the payload is verified against the release's checksums.txt. This
-# protects against truncation/corruption — it does NOT prove authorship (the
+# Checksums: a downloaded binary is verified against the release's checksums.txt.
+# This protects against truncation/corruption — it does NOT prove authorship (the
 # checksums come from the same repo). curl|bash of this installer is
 # trust-on-first-use; pin the tag form above once you trust it.
 set -euo pipefail
 
 REPO="penard-monkey/worktrees"
 BIN_NAME="worktrees"
+
+sha256_check() {   # reads "<hash>  <name>" on stdin, verifies <name> in cwd
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -
+  else shasum -a 256 -c -; fi
+}
+
+detect_triple() {  # Rust target triple for this host, or "" if unknown
+  case "$(uname -s)/$(uname -m)" in
+    Darwin/arm64)               echo aarch64-apple-darwin ;;
+    Darwin/x86_64)              echo x86_64-apple-darwin ;;
+    Linux/x86_64)               echo x86_64-unknown-linux-gnu ;;
+    Linux/aarch64|Linux/arm64)  echo aarch64-unknown-linux-gnu ;;
+    *)                          echo "" ;;
+  esac
+}
 
 main() {
   local dir="${WORKTREES_INSTALL_DIR:-$HOME/.local/bin}"
@@ -53,7 +72,7 @@ main() {
 
   # Existing clone-managed symlink? Don't fight `make install`.
   if [ -L "$target" ] && [ "${WORKTREES_INSTALL_FORCE:-}" != "1" ]; then
-    echo "ERROR: $target is a symlink (managed by a git clone — upgrade with 'git pull' there)." >&2
+    echo "ERROR: $target is a symlink (managed by a git clone — upgrade with 'git pull' + 'make install' there)." >&2
     echo "       Set WORKTREES_INSTALL_FORCE=1 to overwrite with a copy." >&2
     exit 1
   fi
@@ -69,29 +88,51 @@ main() {
     esac
   fi
 
-  # ── download + verify + install atomically ────────────────────────────────
   # TMP_DIR is a global on purpose: the EXIT trap fires after main() returns,
   # when a `local` would already be out of scope (set -u would abort cleanup).
   TMP_DIR="$(mktemp -d)"
   trap 'rm -rf "${TMP_DIR:-}"' EXIT
   local tmp="$TMP_DIR"
-  echo "downloading worktrees $version ..."
-  curl -fsSL -o "$tmp/$BIN_NAME" "https://raw.githubusercontent.com/$REPO/$version/bin/worktrees"
-  if curl -fsSL -o "$tmp/checksums.txt" "https://github.com/$REPO/releases/download/$version/checksums.txt" 2>/dev/null; then
-    ( cd "$tmp" && grep " $BIN_NAME\$" checksums.txt | shasum -a 256 -c - ) \
-      || { echo "ERROR: checksum verification FAILED" >&2; exit 1; }
-    echo "checksum ok (integrity only — not authorship; see header note)"
-  else
-    echo "WARNING: no checksums.txt on release $version — skipping verification" >&2
-  fi
-  head -n 1 "$tmp/$BIN_NAME" | grep -q '^#!' || { echo "ERROR: download doesn't look like a script" >&2; exit 1; }
-
   local old=""
   [ -x "$target" ] && old="$("$target" --version 2>/dev/null || true)"
   mkdir -p "$dir"
-  chmod +x "$tmp/$BIN_NAME"
-  mv -f "$tmp/$BIN_NAME" "$target"      # atomic on same fs; tmp→$dir may cross devices, mv still safe-ish for a single file
-  echo "installed: $target ($("$target" --version))"
+
+  local triple; triple="$(detect_triple)"
+  local dl="https://github.com/$REPO/releases/download/$version"
+  local installed_via=""
+
+  # ── prefer a prebuilt binary; fall back to building from source ─────────────
+  if [ "${WORKTREES_INSTALL_FROM_SOURCE:-}" != "1" ] && [ -n "$triple" ] \
+     && curl -fsSL -o "$tmp/worktrees-$triple" "$dl/worktrees-$triple" 2>/dev/null; then
+    local asset="worktrees-$triple"
+    if curl -fsSL -o "$tmp/checksums.txt" "$dl/checksums.txt" 2>/dev/null; then
+      ( cd "$tmp" && grep "  $asset\$" checksums.txt | sha256_check ) \
+        || { echo "ERROR: checksum verification FAILED" >&2; exit 1; }
+      echo "checksum ok (integrity only — not authorship; see header note)"
+    else
+      echo "WARNING: no checksums.txt on release $version — skipping verification" >&2
+    fi
+    chmod +x "$tmp/$asset"
+    mv -f "$tmp/$asset" "$target"
+    installed_via="prebuilt $triple"
+  else
+    # from source
+    command -v cargo >/dev/null 2>&1 || {
+      echo "ERROR: no prebuilt binary for $(uname -s)/$(uname -m) at $version, and cargo not found to build from source." >&2
+      echo "       Install Rust (https://rustup.rs) and re-run, or: git clone https://github.com/$REPO && cd worktrees && make install" >&2
+      exit 1
+    }
+    echo "building worktrees $version from source with cargo ..."
+    git clone --depth 1 --branch "$version" "https://github.com/$REPO" "$tmp/src" >/dev/null 2>&1 \
+      || { echo "ERROR: git clone of $version failed" >&2; exit 1; }
+    ( cd "$tmp/src" && cargo build --release -p worktrees-cli ) \
+      || { echo "ERROR: cargo build failed" >&2; exit 1; }
+    chmod +x "$tmp/src/target/release/worktrees"
+    mv -f "$tmp/src/target/release/worktrees" "$target"
+    installed_via="source build"
+  fi
+
+  echo "installed: $target ($("$target" --version)) [$installed_via]"
   [ -n "$old" ] && echo "upgraded from: $old"
 
   # ── PATH + shadowing checks ────────────────────────────────────────────────

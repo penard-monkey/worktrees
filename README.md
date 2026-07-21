@@ -33,7 +33,12 @@ Teams should pin the tag for reproducibility:
 curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/v0.1.0/install.sh | bash
 ```
 
-Or clone (the clone is the dev loop — `git pull` upgrades in place):
+The installer fetches the prebuilt binary for your platform (macOS/Linux,
+x86_64/arm64); with no match, or `WORKTREES_INSTALL_FROM_SOURCE=1`, it builds
+from source with `cargo`.
+
+Or clone and build (`make install` compiles the release binary and symlinks it —
+`git pull && make install` upgrades):
 
 ```sh
 git clone https://github.com/penard-monkey/worktrees && cd worktrees && make install
@@ -43,7 +48,8 @@ Re-running the installer upgrades. `install.sh --uninstall` removes the binary
 (your repos' worktrees and tmux sessions are untouched).
 
 **Requires:** git ≥ 2.23. tmux ≥ 1.9 recommended (`new` degrades to `--no-tmux`
-without it; `open` needs it). Runs on stock macOS bash 3.2 and Linux.
+without it; `open` needs it). Prebuilt binaries for macOS + Linux (x86_64/arm64);
+building from source needs a Rust toolchain.
 
 ## Commands
 

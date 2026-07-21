@@ -4,7 +4,9 @@
 # commands. RUN_BASH picks the bash the CLI runs under (CI sets /bin/bash on
 # macOS = real 3.2).
 
-WT_BIN="$BATS_TEST_DIRNAME/../bin/worktrees"
+# Default: bin/worktrees (the shim → the Rust binary). Override WT_BIN to gate a
+# different engine, e.g. WT_BIN=.../bin/worktrees.bash for the legacy bash CLI.
+WT_BIN="${WT_BIN:-$BATS_TEST_DIRNAME/../bin/worktrees}"
 
 common_setup() {
   export HOME="$BATS_TEST_TMPDIR/home"; mkdir -p "$HOME"

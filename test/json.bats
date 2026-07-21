@@ -145,6 +145,18 @@ assert_valid_json() { printf '%s' "$output" | python3 -m json.tool >/dev/null; }
   [ "$(field feat-x 'p["declared"]')" = "None" ]
 }
 
+@test "ls --json: a populated .worktrees.places.json does not change the CLI (stays live-only)" {
+  run_wt new feat-x --no-tmux
+  cat > "$REPO/.worktrees.places.json" <<'JSON'
+{ "version": 1, "places": { "feat-x": { "lifecycle": "saved", "pinned": true, "note": "hi" } } }
+JSON
+  run_wt ls --json
+  [ "$status" -eq 0 ]
+  assert_valid_json
+  [ "$(field feat-x 'p["declared"]')" = "None" ]                 # CLI ignores the store
+  [ "$(field feat-x 'p["lifecycle_effective"]')" = "closed" ]    # live-only (no session)
+}
+
 @test "WORKTREES_JSON=1 makes a plain ls emit JSON" {
   run_wt new feat-x --no-tmux
   export WORKTREES_JSON=1

@@ -1,23 +1,32 @@
-# worktrees — install/lint/test/release
-# `make install` symlinks (the clone is the dev loop: `git pull` upgrades in place).
-# `make install-copy` copies instead (bin dir on another volume, etc.).
+# worktrees — build/install/lint/test/release
+# The shipped CLI is the Rust binary (crates/worktrees-cli). `bin/worktrees` is a
+# shim that runs the built binary from a clone; `make install` symlinks the binary
+# itself onto your PATH. The legacy bash engine (bin/worktrees.bash) is kept as a
+# parallel test gate until the migration completes (MIGRATION.md).
 
 BINDIR ?= $(HOME)/.local/bin
 BATS   := ./test/lib/bats-core/bin/bats
-SCRIPT := bin/worktrees
-RUST_SHIM := $(CURDIR)/bin/worktrees-rs
+BASH_ENGINE := $(CURDIR)/bin/worktrees.bash
+RELEASE_BIN := $(CURDIR)/target/release/worktrees
 
-.PHONY: install install-copy uninstall lint test test-real-tmux test-rust check release
+.PHONY: build build-debug install install-copy uninstall lint \
+        test test-real-tmux test-bash test-real-tmux-bash check release
 
-install:
+build:
+	cargo build --release -p worktrees-cli
+
+build-debug:
+	cargo build -p worktrees-cli
+
+install: build
 	mkdir -p $(BINDIR)
-	ln -sfn $(CURDIR)/$(SCRIPT) $(BINDIR)/worktrees
-	@echo "installed: $(BINDIR)/worktrees -> $(CURDIR)/$(SCRIPT)"
+	ln -sfn $(RELEASE_BIN) $(BINDIR)/worktrees
+	@echo "installed: $(BINDIR)/worktrees -> $(RELEASE_BIN)"
 	@case ":$$PATH:" in *:"$(BINDIR)":*) ;; *) echo "WARNING: $(BINDIR) is not on your PATH";; esac
 
-install-copy:
+install-copy: build
 	mkdir -p $(BINDIR)
-	install -m 0755 $(SCRIPT) $(BINDIR)/worktrees
+	install -m 0755 $(RELEASE_BIN) $(BINDIR)/worktrees
 	@echo "installed (copy): $(BINDIR)/worktrees"
 
 uninstall:
@@ -25,36 +34,33 @@ uninstall:
 	@echo "removed: $(BINDIR)/worktrees"
 
 lint:
-	shellcheck -x $(SCRIPT) bin/worktrees-rs install.sh test/helpers/*.bash
-	bash -n $(SCRIPT) && bash -n bin/worktrees-rs && bash -n install.sh
-	@# bash-4-ism gate: strip comments first, then hunt builtins/syntax bash 3.2 lacks
-	@if sed 's/[[:space:]]*#.*//' $(SCRIPT) | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
+	shellcheck -x bin/worktrees bin/worktrees.bash install.sh test/helpers/*.bash
+	bash -n bin/worktrees && bash -n bin/worktrees.bash && bash -n install.sh
+	@# bash-4-ism gate on the shim + the legacy engine (both must run on 3.2)
+	@if sed 's/[[:space:]]*#.*//' bin/worktrees bin/worktrees.bash | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
 	  echo "bash-4-ism found (see above)"; exit 1; else echo "bash-3.2 gate: clean"; fi
 
-test:
+# Default gate = the Rust binary (bin/worktrees shim is common.bash's WT_BIN).
+test: build-debug
 	$(BATS) --filter-tags '!real-tmux' test/
 
-test-real-tmux:
+test-real-tmux: build-debug
 	$(BATS) --filter-tags real-tmux test/
 
-# Conformance gate: run the bats suite against the compiled Rust binary via the
-# shim. The full unit suite (Increment 2 ports the write ops); real-tmux smokes
-# via test-rust-real-tmux.
-test-rust:
-	cargo build -p worktrees-cli
-	WT_BIN=$(RUST_SHIM) $(BATS) --filter-tags '!real-tmux' test/
+# Parallel legacy gate = the bash engine.
+test-bash:
+	WT_BIN=$(BASH_ENGINE) $(BATS) --filter-tags '!real-tmux' test/
 
-test-rust-real-tmux:
-	cargo build -p worktrees-cli
-	WT_BIN=$(RUST_SHIM) $(BATS) --filter-tags real-tmux test/
+test-real-tmux-bash:
+	WT_BIN=$(BASH_ENGINE) $(BATS) --filter-tags real-tmux test/
 
 check: lint test
 
-# make release VERSION=x.y.z — bump must already be committed; gate tag == embedded version.
+# make release VERSION=x.y.z — bump the workspace version in Cargo.toml first.
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=x.y.z"; exit 1; }
-	@grep -q '^WORKTREES_VERSION="$(VERSION)"$$' $(SCRIPT) || { \
-	  echo "WORKTREES_VERSION in $(SCRIPT) != $(VERSION) — bump it first"; exit 1; }
+	@grep -q '^version = "$(VERSION)"$$' Cargo.toml || { \
+	  echo "workspace version in Cargo.toml != $(VERSION) — bump it first"; exit 1; }
 	@git diff --quiet || { echo "working tree dirty"; exit 1; }
 	git tag -a "v$(VERSION)" -m "worktrees v$(VERSION)"
 	@echo "tagged v$(VERSION) — push with: git push origin main v$(VERSION)"
