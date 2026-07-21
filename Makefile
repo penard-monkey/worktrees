@@ -5,8 +5,9 @@
 BINDIR ?= $(HOME)/.local/bin
 BATS   := ./test/lib/bats-core/bin/bats
 SCRIPT := bin/worktrees
+RUST_SHIM := $(CURDIR)/bin/worktrees-rs
 
-.PHONY: install install-copy uninstall lint test test-real-tmux check release
+.PHONY: install install-copy uninstall lint test test-real-tmux test-rust check release
 
 install:
 	mkdir -p $(BINDIR)
@@ -24,8 +25,8 @@ uninstall:
 	@echo "removed: $(BINDIR)/worktrees"
 
 lint:
-	shellcheck -x $(SCRIPT) install.sh test/helpers/*.bash
-	bash -n $(SCRIPT) && bash -n install.sh
+	shellcheck -x $(SCRIPT) bin/worktrees-rs install.sh test/helpers/*.bash
+	bash -n $(SCRIPT) && bash -n bin/worktrees-rs && bash -n install.sh
 	@# bash-4-ism gate: strip comments first, then hunt builtins/syntax bash 3.2 lacks
 	@if sed 's/[[:space:]]*#.*//' $(SCRIPT) | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
 	  echo "bash-4-ism found (see above)"; exit 1; else echo "bash-3.2 gate: clean"; fi
@@ -35,6 +36,13 @@ test:
 
 test-real-tmux:
 	$(BATS) --filter-tags real-tmux test/
+
+# Conformance gate: run the read-path bats against the compiled Rust binary via
+# the shim (Increment 1 ports ls/ls --json + version/help; write ops land later).
+test-rust:
+	cargo build -p worktrees-cli
+	WT_BIN=$(RUST_SHIM) $(BATS) test/ls.bats test/json.bats
+	WT_BIN=$(RUST_SHIM) $(BATS) --filter 'version|help|unknown subcommand|outside a git repo' test/misc.bats
 
 check: lint test
 

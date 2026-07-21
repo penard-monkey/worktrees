@@ -1,10 +1,11 @@
 //! `worktrees` CLI — thin front-end over worktrees-core.
 //!
-//! Increment 0: only `--version` / help build out (proves the binary compiles
-//! and matches the bash version string). Command dispatch (ls, new, switch, …)
-//! lands in Increment 1+. See MIGRATION.md.
+//! Increment 1: `--version`/help + the read path (`ls`, `ls --json`), gated by
+//! the bats suite via the bash shim. Write ops (new/switch/…) land Increment 2.
+//! See MIGRATION.md.
 
-use std::process::exit;
+use worktrees_core::render::error_line;
+use worktrees_core::Project;
 
 const USAGE: &str = "\
 worktrees — one git worktree per branch, one tmux session per worktree.
@@ -19,19 +20,62 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees                             (no args) -> ls";
 
 fn main() {
+    std::process::exit(run());
+}
+
+fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // help/version work anywhere — handled BEFORE the git guard (like bash).
     match args.first().map(String::as_str) {
-        Some("-V") | Some("--version") => {
-            println!("worktrees {}", env!("CARGO_PKG_VERSION"));
-        }
         Some("-h") | Some("--help") | Some("help") => {
             println!("{USAGE}");
+            return 0;
         }
-        _ => {
-            // Increment 0: dispatch not ported yet. The shipped CLI is still the
-            // bash bin/worktrees; this binary is not on any real path yet.
-            eprintln!("worktrees: command dispatch not yet implemented in the Rust CLI (MIGRATION.md Increment 1)");
-            exit(1);
+        Some("-V") | Some("--version") => {
+            println!("worktrees {}", env!("CARGO_PKG_VERSION"));
+            return 0;
+        }
+        _ => {}
+    }
+
+    // git guards run for every other command (incl. no-args -> ls).
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{}", error_line(&e.to_string()));
+            return 1;
+        }
+    };
+    let project = match Project::discover(&cwd) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", error_line(&e.msg));
+            return e.code;
+        }
+    };
+
+    let sub = args.first().map(String::as_str).unwrap_or("ls");
+    match sub {
+        "ls" | "list" => {
+            let rest = args.get(1..).unwrap_or(&[]);
+            let json = rest.iter().any(|a| a == "--json")
+                || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
+            if json {
+                print!("{}", project.ls_json());
+            } else {
+                print!("{}", project.ls_human());
+            }
+            0
+        }
+        other => {
+            // Increment 1 ports only the read path; new/co/switch/open/rm land
+            // in Increment 2. Unknown (or not-yet-ported) command → usage + exit 1,
+            // matching the bash dispatch's unknown-command path.
+            eprintln!("{}", error_line(&format!("Unknown command: {other}")));
+            println!();
+            println!("{USAGE}");
+            1
         }
     }
 }
