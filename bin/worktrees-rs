@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Conformance shim: exec the compiled Rust `worktrees` binary. Used ONLY as the
+# bats WT_BIN target (`make test-rust`) so the suite gates the Rust CLI while the
+# shipped CLI stays bin/worktrees (bash). Being a shebang SCRIPT (not the binary)
+# is what lets `bash "$WT_BIN"` work with zero harness edits — see MIGRATION.md.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+for b in "$here/target/debug/worktrees" "$here/target/release/worktrees"; do
+  if [ -x "$b" ]; then exec "$b" "$@"; fi
+done
+echo "worktrees-rs: compiled binary not found — run: cargo build -p worktrees-cli" >&2
+exit 127

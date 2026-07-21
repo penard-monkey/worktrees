@@ -9,8 +9,11 @@ pub mod config;
 pub mod error;
 pub mod git;
 pub mod model;
+pub mod project;
+pub mod render;
 pub mod sysclock;
 pub mod tmux;
 
 pub use error::{Result, WtError};
 pub use model::{LsJson, Place, TmuxSession, SCHEMA_VERSION};
+pub use project::Project;
