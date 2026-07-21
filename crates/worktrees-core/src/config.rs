@@ -92,6 +92,20 @@ pub fn resolve_ai_resume_arg_from(env: Option<&str>, cfg: Option<&str>) -> Strin
         .to_string()
 }
 
+/// Live resolution reading env + user config.
+pub fn resolve_ai_cmd(flag: Option<&str>) -> String {
+    let env_ai = std::env::var("WORKTREES_AI_CMD").ok();
+    let env_claude = std::env::var("WORKTREES_CLAUDE_CMD").ok();
+    let cfg = cfg_get(&config_path(), "ai_cmd");
+    resolve_ai_cmd_from(flag, env_ai.as_deref(), env_claude.as_deref(), cfg.as_deref())
+}
+
+pub fn resolve_ai_resume_arg() -> String {
+    let env = std::env::var("WORKTREES_AI_RESUME_ARG").ok();
+    let cfg = cfg_get(&config_path(), "ai_resume_arg");
+    resolve_ai_resume_arg_from(env.as_deref(), cfg.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

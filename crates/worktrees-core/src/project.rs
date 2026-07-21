@@ -252,6 +252,78 @@ impl Project {
     }
 }
 
+// ── helpers used by the write ops (Increment 2) ──────────────────────────────
+impl Project {
+    pub fn is_registered(&self, dir: &str) -> bool {
+        self.registrations().contains(dir)
+    }
+
+    /// Dir of the `.worktrees/` worktree currently ON `refs/heads/<branch>`.
+    pub fn wt_for_branch(&self, branch: &str) -> Option<String> {
+        let out = git::git_out(&self.main_root, &["worktree", "list", "--porcelain"])?;
+        let target = format!("refs/heads/{branch}");
+        let root = format!("{}/", self.wt_root);
+        let mut wt = String::new();
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                wt = p.to_string();
+            } else if let Some(b) = line.strip_prefix("branch ") {
+                if b == target && wt.starts_with(&root) {
+                    return Some(wt);
+                }
+            }
+        }
+        None
+    }
+
+    /// Default base for a NEW branch: main, else master, else current HEAD.
+    pub fn default_base(&self) -> String {
+        for cand in ["main", "master"] {
+            if git::git_ok(&self.main_root, &["show-ref", "--verify", "-q", &format!("refs/heads/{cand}")])
+                || git::git_ok(&self.main_root, &["show-ref", "--verify", "-q", &format!("refs/remotes/origin/{cand}")])
+            {
+                return cand.to_string();
+            }
+        }
+        git::git_out(&self.main_root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|| "main".into())
+    }
+
+    /// Branch of worktree `dir`; `(detached)` on a detached HEAD.
+    pub fn wt_branch(&self, dir: &str) -> String {
+        let b = git::git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+        if b == "HEAD" { "(detached)".to_string() } else { b }
+    }
+
+    pub fn wt_dirty(&self, dir: &str) -> String {
+        git::git_out(dir, &["status", "--porcelain"]).unwrap_or_default()
+    }
+
+    /// Exclude `.worktrees/` + the app sidecar in THIS repo (local, untracked).
+    pub fn ensure_excluded(&self) {
+        let excl = format!("{}/info/exclude", self.git_common);
+        if !Path::new(&excl).exists() {
+            let _ = std::fs::File::create(&excl);
+        }
+        for p in [".worktrees/", ".worktrees.places.json"] {
+            if git::git_ok(&self.main_root, &["check-ignore", "-q", p]) {
+                continue;
+            }
+            let existing = std::fs::read_to_string(&excl).unwrap_or_default();
+            if existing.lines().any(|l| l == p) {
+                continue;
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&excl) {
+                use std::io::Write;
+                let _ = writeln!(f, "{p}");
+            }
+        }
+    }
+
+    pub fn wt_root_dir(&self) -> &str {
+        &self.wt_root
+    }
+}
+
 fn resolve_prefix(main_root: &str) -> String {
     let raw = std::env::var("WORKTREES_PREFIX").ok().filter(|s| !s.is_empty())
         .or_else(|| {

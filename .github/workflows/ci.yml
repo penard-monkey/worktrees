@@ -65,9 +65,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }
+      - name: install tmux (ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q tmux
+      - name: install tmux (macos)
+        if: runner.os == 'macOS'
+        run: brew install tmux
       - name: build + test core/cli (GitHub runners ship Rust stable)
         run: |
           cargo build -p worktrees-core -p worktrees-cli --locked
           cargo test -p worktrees-core --locked
-      - name: conformance — read-path bats vs the compiled Rust binary
-        run: make test-rust
+      - name: conformance — full bats suite vs the compiled Rust binary
+        run: |
+          make test-rust
+          make test-rust-real-tmux
