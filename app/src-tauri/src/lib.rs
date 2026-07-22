@@ -13,9 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
-use worktrees_core::{store, sysclock, Project};
+use worktrees_core::ui::CaptureUi;
+use worktrees_core::{ops, store, sysclock, Project};
 
 // ── state: core-derived places + declared overlay + reconciled lifecycle ─────
 
@@ -67,6 +69,80 @@ fn set_note(repo: String, slug: String, note: String) -> Result<(), String> {
 #[tauri::command]
 fn touch_place(repo: String, slug: String) -> Result<(), String> {
     store::edit(&repo, &slug, |d| d.last_opened_epoch = Some(sysclock::now_epoch()))
+}
+
+// ── mutating ops via core (create/switch/rm from the UI) ─────────────────────
+
+/// Outcome of a core op: exit code + the op's own messages (the loud guards),
+/// surfaced to the UI verbatim.
+#[derive(Serialize)]
+struct CmdResult {
+    ok: bool,
+    code: i32,
+    output: String,
+}
+
+fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(repo: &str, f: F) -> Result<CmdResult, String> {
+    let project = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
+    let mut ui = CaptureUi::default();
+    let code = f(&project, &mut ui);
+    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n") })
+}
+
+/// Create a worktree (`new`). `--no-attach`: the session is created (pane 0 AI,
+/// pane 1 shell) but the app embeds it via its own PTY rather than attaching.
+#[tauri::command]
+fn new_place(
+    repo: String,
+    branch: String,
+    base: Option<String>,
+    name: Option<String>,
+) -> Result<CmdResult, String> {
+    let mut args: Vec<String> = vec![branch];
+    if let Some(b) = base.filter(|s| !s.is_empty()) {
+        args.push(b);
+    }
+    if let Some(n) = name.filter(|s| !s.is_empty()) {
+        args.push("--name".into());
+        args.push(n);
+    }
+    args.push("--no-attach".into());
+    run_op(&repo, |p, ui| ops::cmd_new(p, ui, &args))
+}
+
+/// Move a place to another branch (`switch <slug> <branch> [base]`). `-y` skips
+/// the inside-a-worktree ambiguity prompt (the UI targets a place explicitly).
+#[tauri::command]
+fn switch_place(
+    repo: String,
+    slug: String,
+    branch: String,
+    base: Option<String>,
+) -> Result<CmdResult, String> {
+    let mut args: Vec<String> = vec![slug, branch];
+    if let Some(b) = base.filter(|s| !s.is_empty()) {
+        args.push(b);
+    }
+    args.push("-y".into());
+    run_op(&repo, |p, ui| ops::cmd_switch(p, ui, &args))
+}
+
+/// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
+#[tauri::command]
+fn remove_place(
+    repo: String,
+    slug: String,
+    del_branch: bool,
+    force: bool,
+) -> Result<CmdResult, String> {
+    let mut args: Vec<String> = vec![slug, "-y".into()];
+    if del_branch {
+        args.push("--branch".into());
+    }
+    if force {
+        args.push("--force".into());
+    }
+    run_op(&repo, |p, ui| ops::cmd_rm(p, ui, &args))
 }
 
 // ── PTY host: attach to a live tmux session ─────────────────────────────────
@@ -179,6 +255,9 @@ pub fn run() {
             set_pin,
             set_note,
             touch_place,
+            new_place,
+            switch_place,
+            remove_place,
             term_open,
             term_write,
             term_resize,

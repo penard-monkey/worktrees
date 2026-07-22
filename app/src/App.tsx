@@ -27,6 +27,7 @@ type Place = {
   lifecycle_effective: string;
 };
 type Snapshot = { repo: string; prefix: string; places: Place[] };
+type CmdResult = { ok: boolean; code: number; output: string };
 
 const DEFAULT_REPO = "/Users/davidpena/workspace/worktrees";
 
@@ -55,6 +56,11 @@ function App() {
   const [err, setErr] = useState("");
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [showNew, setShowNew] = useState(false);
+  const [newBranch, setNewBranch] = useState("");
+  const [newName, setNewName] = useState("");
+  const [switchTo, setSwitchTo] = useState("");
+  const [confirmRm, setConfirmRm] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -84,6 +90,52 @@ function App() {
   const openPlace = (p: Place) => {
     setSelectedSlug(p.slug);
     mutate(invoke("touch_place", { repo, slug: p.slug })); // stamp last-opened
+  };
+
+  // Run a mutating op command (returns CmdResult); surface the op's messages on failure.
+  const runCmd = async (name: string, args: Record<string, unknown>): Promise<boolean> => {
+    try {
+      setErr("");
+      const r = await invoke<CmdResult>(name, args);
+      if (!r.ok) setErr(r.output || `${name} failed (exit ${r.code})`);
+      await refresh();
+      return r.ok;
+    } catch (e) {
+      setErr(String(e));
+      return false;
+    }
+  };
+
+  const createPlace = async () => {
+    const branch = newBranch.trim();
+    if (!branch) return;
+    const name = newName.trim();
+    const ok = await runCmd("new_place", { repo, branch, base: null, name: name || null });
+    if (ok) {
+      setSelectedSlug((name || branch).replace(/\//g, "-"));
+      setShowNew(false);
+      setNewBranch("");
+      setNewName("");
+    }
+  };
+
+  const doSwitch = async () => {
+    const b = switchTo.trim();
+    if (!b || !selected) return;
+    if (await runCmd("switch_place", { repo, slug: selected.slug, branch: b, base: null })) {
+      setSwitchTo("");
+    }
+  };
+
+  const doRemove = async (slug: string) => {
+    if (confirmRm !== slug) {
+      setConfirmRm(slug);
+      return;
+    }
+    setConfirmRm(null);
+    if (await runCmd("remove_place", { repo, slug, del_branch: false, force: false })) {
+      if (selectedSlug === slug) setSelectedSlug(null);
+    }
   };
 
   // Filter + group the non-main places; main is always rendered first.
@@ -142,6 +194,27 @@ function App() {
           value={filter}
           onChange={(e) => setFilter(e.currentTarget.value)}
         />
+        <button className="newbtn" onClick={() => setShowNew((v) => !v)}>
+          {showNew ? "× cancel" : "＋ new worktree"}
+        </button>
+        {showNew && (
+          <div className="newform">
+            <input
+              placeholder="branch (e.g. feat/x)"
+              value={newBranch}
+              autoFocus
+              onChange={(e) => setNewBranch(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && createPlace()}
+            />
+            <input
+              placeholder="name (optional)"
+              value={newName}
+              onChange={(e) => setNewName(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && createPlace()}
+            />
+            <button onClick={createPlace} disabled={!newBranch.trim()}>Create</button>
+          </div>
+        )}
         {err && <div className="err">{err}</div>}
         <div className="scroll">
           {main && (
@@ -196,6 +269,25 @@ function App() {
                     {s.label}
                   </button>
                 ))}
+                {!selected.is_main && (
+                  <>
+                    <input
+                      className="switchto"
+                      placeholder="switch to branch…"
+                      value={switchTo}
+                      onChange={(e) => setSwitchTo(e.currentTarget.value)}
+                      onKeyDown={(e) => e.key === "Enter" && doSwitch()}
+                    />
+                    <button onClick={doSwitch} disabled={!switchTo.trim()}>Switch</button>
+                    <button
+                      className={confirmRm === selected.slug ? "danger" : ""}
+                      onClick={() => doRemove(selected.slug)}
+                      onBlur={() => setConfirmRm(null)}
+                    >
+                      {confirmRm === selected.slug ? "Confirm?" : "Remove"}
+                    </button>
+                  </>
+                )}
               </div>
             </header>
             <input
