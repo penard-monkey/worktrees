@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { TerminalPane } from "./TerminalPane";
 import "./App.css";
 
@@ -27,56 +28,48 @@ type Place = {
   lifecycle_effective: string;
 };
 type Snapshot = { repo: string; prefix: string; places: Place[] };
+type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
+type Workspace = { projects: ProjectView[] };
 type CmdResult = { ok: boolean; code: number; output: string };
 
-const DEFAULT_REPO = "/Users/davidpena/workspace/worktrees";
-
-// Nav section order. A pinned place floats to "pinned" regardless of state.
 const GROUPS = ["pinned", "active", "idle", "saved", "closed", "archived", "abandoned"] as const;
 const GROUP_LABEL: Record<string, string> = {
-  pinned: "Pinned",
-  active: "Active",
-  idle: "Idle",
-  saved: "Saved",
-  closed: "Closed",
-  archived: "Archived",
-  abandoned: "Abandoned",
+  pinned: "Pinned", active: "Active", idle: "Idle", saved: "Saved",
+  closed: "Closed", archived: "Archived", abandoned: "Abandoned",
 };
-// Lifecycle a user can set (active/idle are derived, never written).
-const SETTABLE: { label: string; value: string }[] = [
+const SETTABLE = [
   { label: "Close", value: "closed" },
   { label: "Save", value: "saved" },
   { label: "Archive", value: "archived" },
   { label: "Abandon", value: "abandoned" },
 ];
+const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 
 function App() {
-  const [repo, setRepo] = useState(DEFAULT_REPO);
-  const [snap, setSnap] = useState<Snapshot | null>(null);
+  const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
-  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [sel, setSel] = useState<{ repo: string; slug: string } | null>(null);
   const [filter, setFilter] = useState("");
-  const [showNew, setShowNew] = useState(false);
+  const [newFor, setNewFor] = useState<string | null>(null); // project root the new-form targets
   const [newBranch, setNewBranch] = useState("");
   const [newName, setNewName] = useState("");
   const [switchTo, setSwitchTo] = useState("");
-  const [confirmRm, setConfirmRm] = useState<string | null>(null);
+  const [confirmRm, setConfirmRm] = useState<string | null>(null); // "repo|slug"
 
   const refresh = useCallback(async () => {
     try {
       setErr("");
-      setSnap(await invoke<Snapshot>("list_places", { repo }));
+      setWs(await invoke<Workspace>("list_workspace"));
     } catch (e) {
       setErr(String(e));
-      setSnap(null);
     }
-  }, [repo]);
-
+  }, []);
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  const selected = snap?.places.find((p) => p.slug === selectedSlug) ?? null;
+  const selected: Place | null =
+    (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
 
   const mutate = async (p: Promise<unknown>) => {
     try {
@@ -86,13 +79,6 @@ function App() {
       setErr(String(e));
     }
   };
-
-  const openPlace = (p: Place) => {
-    setSelectedSlug(p.slug);
-    mutate(invoke("touch_place", { repo, slug: p.slug })); // stamp last-opened
-  };
-
-  // Run a mutating op command (returns CmdResult); surface the op's messages on failure.
   const runCmd = async (name: string, args: Record<string, unknown>): Promise<boolean> => {
     try {
       setErr("");
@@ -106,61 +92,69 @@ function App() {
     }
   };
 
-  const createPlace = async () => {
+  const addProject = async () => {
+    try {
+      const dir = await open({ directory: true, title: "Add a git project" });
+      if (typeof dir === "string") {
+        setErr("");
+        setWs(await invoke<Workspace>("add_project", { dir }));
+      }
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+  const removeProject = async (root: string) => {
+    try {
+      setWs(await invoke<Workspace>("remove_project", { root }));
+      if (sel?.repo === root) setSel(null);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  const openPlace = (repo: string, p: Place) => {
+    setSel({ repo, slug: p.slug });
+    mutate(invoke("touch_place", { repo, slug: p.slug }));
+  };
+  const createPlace = async (repo: string) => {
     const branch = newBranch.trim();
     if (!branch) return;
     const name = newName.trim();
-    const ok = await runCmd("new_place", { repo, branch, base: null, name: name || null });
-    if (ok) {
-      setSelectedSlug((name || branch).replace(/\//g, "-"));
-      setShowNew(false);
+    if (await runCmd("new_place", { repo, branch, base: null, name: name || null })) {
+      setSel({ repo, slug: (name || branch).replace(/\//g, "-") });
+      setNewFor(null);
       setNewBranch("");
       setNewName("");
     }
   };
-
   const doSwitch = async () => {
+    if (!sel) return;
     const b = switchTo.trim();
-    if (!b || !selected) return;
-    if (await runCmd("switch_place", { repo, slug: selected.slug, branch: b, base: null })) {
-      setSwitchTo("");
-    }
+    if (!b) return;
+    if (await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null })) setSwitchTo("");
   };
-
-  const doRemove = async (slug: string) => {
-    if (confirmRm !== slug) {
-      setConfirmRm(slug);
+  const doRemove = async () => {
+    if (!sel) return;
+    const key = `${sel.repo}|${sel.slug}`;
+    if (confirmRm !== key) {
+      setConfirmRm(key);
       return;
     }
     setConfirmRm(null);
-    if (await runCmd("remove_place", { repo, slug, del_branch: false, force: false })) {
-      if (selectedSlug === slug) setSelectedSlug(null);
-    }
+    if (await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, del_branch: false, force: false })) setSel(null);
   };
 
-  // Filter + group the non-main places; main is always rendered first.
-  const { main, groups } = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    const match = (p: Place) =>
-      !q ||
-      p.slug.toLowerCase().includes(q) ||
-      (p.branch ?? "").toLowerCase().includes(q) ||
-      (p.declared?.note ?? "").toLowerCase().includes(q);
-    const places = (snap?.places ?? []).filter(match);
-    const main = places.find((p) => p.is_main) ?? null;
-    const buckets: Record<string, Place[]> = {};
-    for (const p of places) {
-      if (p.is_main) continue;
-      const key = p.declared?.pinned ? "pinned" : p.lifecycle_effective;
-      (buckets[key] ??= []).push(p);
-    }
-    return { main, groups: buckets };
-  }, [snap, filter]);
+  const q = filter.trim().toLowerCase();
+  const matchPlace = (p: Place) =>
+    !q ||
+    p.slug.toLowerCase().includes(q) ||
+    (p.branch ?? "").toLowerCase().includes(q) ||
+    (p.declared?.note ?? "").toLowerCase().includes(q);
 
-  const Row = ({ p }: { p: Place }) => (
+  const Row = ({ repo, p }: { repo: string; p: Place }) => (
     <li
-      className={selectedSlug === p.slug ? "sel" : ""}
-      onClick={() => openPlace(p)}
+      className={sel?.repo === repo && sel?.slug === p.slug ? "sel" : ""}
+      onClick={() => openPlace(repo, p)}
     >
       <span className={"dot " + (p.tmux_session.up ? "on" : "off")} />
       <span className="slug">
@@ -168,24 +162,77 @@ function App() {
         {p.declared?.pinned ? "★ " : ""}
         {p.slug}
       </span>
-      <span className="branch">
-        {p.branch ?? (p.detached ? "(detached)" : "—")}
-      </span>
+      <span className="branch">{p.branch ?? (p.detached ? "(detached)" : "—")}</span>
       {p.dirty ? <span className="tag dirty">dirty</span> : null}
       {p.claude_session_present ? <span className="tag ai">ai</span> : null}
     </li>
   );
 
+  const ProjectTree = ({ pv }: { pv: ProjectView }) => {
+    const places = (pv.snapshot?.places ?? []).filter(matchPlace);
+    const main = places.find((p) => p.is_main) ?? null;
+    const buckets: Record<string, Place[]> = {};
+    for (const p of places) {
+      if (p.is_main) continue;
+      const key = p.declared?.pinned ? "pinned" : p.lifecycle_effective;
+      (buckets[key] ??= []).push(p);
+    }
+    return (
+      <div className="project">
+        <div className="project-h">
+          <span className="pname" title={pv.root}>{basename(pv.root)}</span>
+          <button className="mini" title="new worktree" onClick={() => setNewFor(newFor === pv.root ? null : pv.root)}>＋</button>
+          <button className="mini" title="remove project" onClick={() => removeProject(pv.root)}>×</button>
+        </div>
+        {newFor === pv.root && (
+          <div className="newform">
+            <input
+              placeholder="branch (e.g. feat/x)"
+              value={newBranch}
+              autoFocus
+              onChange={(e) => setNewBranch(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && createPlace(pv.root)}
+            />
+            <input
+              placeholder="name (optional)"
+              value={newName}
+              onChange={(e) => setNewName(e.currentTarget.value)}
+              onKeyDown={(e) => e.key === "Enter" && createPlace(pv.root)}
+            />
+            <button onClick={() => createPlace(pv.root)} disabled={!newBranch.trim()}>Create</button>
+          </div>
+        )}
+        {!pv.ok ? (
+          <div className="project-err">{pv.error ?? "unavailable"}</div>
+        ) : (
+          <>
+            {main && (
+              <ul className="places">
+                <Row repo={pv.root} p={main} />
+              </ul>
+            )}
+            {GROUPS.filter((g) => buckets[g]?.length).map((g) => (
+              <div key={g} className="group">
+                <div className="group-h">{GROUP_LABEL[g]}</div>
+                <ul className="places">
+                  {buckets[g].map((p) => (
+                    <Row key={p.slug} repo={pv.root} p={p} />
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="app">
       <aside className="nav">
         <div className="repo">
-          <input
-            value={repo}
-            spellCheck={false}
-            onChange={(e) => setRepo(e.currentTarget.value)}
-            onKeyDown={(e) => e.key === "Enter" && refresh()}
-          />
+          <b className="title">Projects</b>
+          <button onClick={addProject} title="add a git project">＋ add</button>
           <button onClick={refresh} title="refresh">↻</button>
         </div>
         <input
@@ -194,49 +241,17 @@ function App() {
           value={filter}
           onChange={(e) => setFilter(e.currentTarget.value)}
         />
-        <button className="newbtn" onClick={() => setShowNew((v) => !v)}>
-          {showNew ? "× cancel" : "＋ new worktree"}
-        </button>
-        {showNew && (
-          <div className="newform">
-            <input
-              placeholder="branch (e.g. feat/x)"
-              value={newBranch}
-              autoFocus
-              onChange={(e) => setNewBranch(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === "Enter" && createPlace()}
-            />
-            <input
-              placeholder="name (optional)"
-              value={newName}
-              onChange={(e) => setNewName(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === "Enter" && createPlace()}
-            />
-            <button onClick={createPlace} disabled={!newBranch.trim()}>Create</button>
-          </div>
-        )}
         {err && <div className="err">{err}</div>}
         <div className="scroll">
-          {main && (
-            <ul className="places">
-              <Row p={main} />
-            </ul>
+          {ws && ws.projects.length === 0 && (
+            <div className="empty small">No projects yet.<br />Click <b>＋ add</b> to open one.</div>
           )}
-          {GROUPS.filter((g) => groups[g]?.length).map((g) => (
-            <div key={g} className="group">
-              <div className="group-h">{GROUP_LABEL[g]}</div>
-              <ul className="places">
-                {groups[g].map((p) => (
-                  <Row key={p.slug} p={p} />
-                ))}
-              </ul>
-            </div>
-          ))}
+          {ws?.projects.map((pv) => <ProjectTree key={pv.root} pv={pv} />)}
         </div>
       </aside>
 
       <main className="main">
-        {selected ? (
+        {selected && sel ? (
           <>
             <header className="topbar">
               <b className="slug">
@@ -252,9 +267,7 @@ function App() {
                 <button
                   className={selected.declared?.pinned ? "on" : ""}
                   title={selected.declared?.pinned ? "unpin" : "pin"}
-                  onClick={() =>
-                    mutate(invoke("set_pin", { repo, slug: selected.slug, on: !selected.declared?.pinned }))
-                  }
+                  onClick={() => mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on: !selected.declared?.pinned }))}
                 >
                   ★
                 </button>
@@ -262,9 +275,7 @@ function App() {
                   <button
                     key={s.value}
                     className={selected.declared?.lifecycle === s.value ? "on" : ""}
-                    onClick={() =>
-                      mutate(invoke("set_lifecycle", { repo, slug: selected.slug, label: s.value }))
-                    }
+                    onClick={() => mutate(invoke("set_lifecycle", { repo: sel.repo, slug: sel.slug, label: s.value }))}
                   >
                     {s.label}
                   </button>
@@ -280,11 +291,11 @@ function App() {
                     />
                     <button onClick={doSwitch} disabled={!switchTo.trim()}>Switch</button>
                     <button
-                      className={confirmRm === selected.slug ? "danger" : ""}
-                      onClick={() => doRemove(selected.slug)}
+                      className={confirmRm === `${sel.repo}|${sel.slug}` ? "danger" : ""}
+                      onClick={doRemove}
                       onBlur={() => setConfirmRm(null)}
                     >
-                      {confirmRm === selected.slug ? "Confirm?" : "Remove"}
+                      {confirmRm === `${sel.repo}|${sel.slug}` ? "Confirm?" : "Remove"}
                     </button>
                   </>
                 )}
@@ -294,21 +305,16 @@ function App() {
               className="note"
               placeholder="note…"
               defaultValue={selected.declared?.note ?? ""}
-              key={selected.slug + (selected.declared?.note ?? "")}
-              onBlur={(e) =>
-                mutate(invoke("set_note", { repo, slug: selected.slug, note: e.currentTarget.value }))
-              }
+              key={sel.repo + sel.slug + (selected.declared?.note ?? "")}
+              onBlur={(e) => mutate(invoke("set_note", { repo: sel.repo, slug: sel.slug, note: e.currentTarget.value }))}
             />
             {selected.tmux_session.up ? (
-              <TerminalPane
-                key={selected.tmux_session.name}
-                session={selected.tmux_session.name}
-              />
+              <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} />
             ) : (
               <div className="empty">
                 No live tmux session for <b>{selected.slug}</b>.
                 <br />
-                Start one: <code>worktrees open {selected.slug}</code>
+                Open it: create/switch spins one up, or run <code>worktrees open {selected.slug}</code>.
               </div>
             )}
           </>

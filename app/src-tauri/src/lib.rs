@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,19 +15,18 @@ use std::thread;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use worktrees_core::ui::CaptureUi;
 use worktrees_core::{ops, store, sysclock, Project};
 
 // ── state: core-derived places + declared overlay + reconciled lifecycle ─────
 
-/// The merged snapshot the UI renders: core's live `ls` with the DECLARED store
-/// overlaid and `lifecycle_effective` reconciled per place.
-#[tauri::command]
-fn list_places(repo: String) -> Result<serde_json::Value, String> {
-    let project = Project::discover(Path::new(&repo)).map_err(|e| e.msg)?;
+/// One repo's merged snapshot: core's live `ls` + DECLARED store overlay +
+/// reconciled `lifecycle_effective` per place.
+fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
+    let project = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
     let mut v = serde_json::to_value(project.ls()).map_err(|e| e.to_string())?;
-    let store = store::read_lenient(&repo);
+    let store = store::read_lenient(repo);
     let now = sysclock::now_epoch();
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
@@ -41,6 +40,80 @@ fn list_places(repo: String) -> Result<serde_json::Value, String> {
         }
     }
     Ok(v)
+}
+
+/// Single-repo snapshot (kept for direct use / back-compat).
+#[tauri::command]
+fn list_places(repo: String) -> Result<serde_json::Value, String> {
+    snapshot(&repo)
+}
+
+// ── multi-project workspace (tracked in the app config dir) ──────────────────
+
+#[derive(Serialize)]
+struct ProjectView {
+    root: String,
+    ok: bool,
+    error: Option<String>,
+    snapshot: Option<serde_json::Value>,
+}
+#[derive(Serialize)]
+struct Workspace {
+    projects: Vec<ProjectView>,
+}
+
+fn projects_file(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("projects.json"))
+}
+fn read_projects(app: &AppHandle) -> Vec<String> {
+    projects_file(app)
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
+        .unwrap_or_default()
+}
+fn write_projects(app: &AppHandle, list: &[String]) -> Result<(), String> {
+    let p = projects_file(app)?;
+    let json = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
+    std::fs::write(p, json).map_err(|e| e.to_string())
+}
+
+/// Every tracked project with its snapshot (or an error if it's gone/broken —
+/// one dead repo greys its node without blanking the rest).
+#[tauri::command]
+fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
+    let projects = read_projects(&app)
+        .into_iter()
+        .map(|root| match snapshot(&root) {
+            Ok(s) => ProjectView { root, ok: true, error: None, snapshot: Some(s) },
+            Err(e) => ProjectView { root, ok: false, error: Some(e), snapshot: None },
+        })
+        .collect();
+    Ok(Workspace { projects })
+}
+
+/// Add a git repo to the workspace (stored by its canonical main root, so a
+/// subdir resolves to the repo and dedupes).
+#[tauri::command]
+fn add_project(app: AppHandle, dir: String) -> Result<Workspace, String> {
+    let project = Project::discover(Path::new(&dir)).map_err(|e| e.msg)?;
+    let root = project.main_root.clone();
+    let mut roots = read_projects(&app);
+    if !roots.contains(&root) {
+        roots.push(root);
+        write_projects(&app, &roots)?;
+    }
+    list_workspace(app)
+}
+
+#[tauri::command]
+fn remove_project(app: AppHandle, root: String) -> Result<Workspace, String> {
+    let mut roots = read_projects(&app);
+    roots.retain(|r| r != &root);
+    write_projects(&app, &roots)?;
+    list_workspace(app)
 }
 
 const LIFECYCLE_LABELS: [&str; 4] = ["closed", "saved", "archived", "abandoned"];
@@ -248,9 +321,13 @@ fn term_close(id: u32, terms: State<'_, Terminals>) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Terminals::default())
         .invoke_handler(tauri::generate_handler![
             list_places,
+            list_workspace,
+            add_project,
+            remove_project,
             set_lifecycle,
             set_pin,
             set_note,
