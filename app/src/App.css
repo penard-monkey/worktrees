@@ -105,3 +105,27 @@ html, body, #root { height: 100%; margin: 0; }
   border: 0; border-bottom: 1px solid #24283b; font-size: 12px;
 }
 .note:focus { outline: none; background: #1e2030; }
+
+/* ── 5a: create / switch / remove controls ── */
+.newbtn {
+  margin: 0 8px 6px; padding: 6px 8px; text-align: left; cursor: pointer;
+  background: #24283b; color: #c0caf5; border: 1px solid #2f3549;
+  border-radius: 6px; font-size: 12px;
+}
+.newbtn:hover { background: #2f3549; }
+.newform { display: flex; flex-direction: column; gap: 6px; margin: 0 8px 8px; }
+.newform input {
+  background: #16161e; color: #c0caf5; border: 1px solid #24283b;
+  border-radius: 6px; padding: 6px 8px; font-size: 12px;
+}
+.newform button {
+  background: #7aa2f7; color: #16161e; border: 0; border-radius: 6px;
+  padding: 6px 8px; font-size: 12px; cursor: pointer;
+}
+.newform button:disabled { opacity: 0.5; cursor: default; }
+.topbar .actions input.switchto {
+  background: #16161e; color: #c0caf5; border: 1px solid #24283b;
+  border-radius: 5px; padding: 3px 6px; font-size: 11px; width: 130px;
+}
+.topbar .actions button.danger { background: #f7768e; color: #16161e; }
+.topbar .actions button:disabled { opacity: 0.5; cursor: default; }

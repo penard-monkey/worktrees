@@ -51,6 +51,38 @@ impl Ui for CliUi {
     }
 }
 
+/// Captures op output for programmatic callers (the Tauri app), instead of
+/// printing. Confirms are declined — callers run non-interactive ops (`-y`),
+/// and any unexpected prompt safely aborts rather than proceeding. The collected
+/// lines are plain text (ops pass plain messages; ANSI is a CliUi concern).
+#[derive(Default)]
+pub struct CaptureUi {
+    pub lines: Vec<String>,
+    pub errored: bool,
+}
+
+impl Ui for CaptureUi {
+    fn info(&mut self, msg: &str) {
+        self.lines.push(msg.to_string());
+    }
+    fn warn(&mut self, msg: &str) {
+        self.lines.push(msg.to_string());
+    }
+    fn error(&mut self, msg: &str) {
+        self.errored = true;
+        self.lines.push(msg.to_string());
+    }
+    fn header(&mut self, msg: &str) {
+        self.lines.push(msg.to_string());
+    }
+    fn plain(&mut self, msg: &str) {
+        self.lines.push(msg.to_string());
+    }
+    fn confirm(&mut self, _prompt: &str) -> bool {
+        false
+    }
+}
+
 /// Helpers for the color constants used when building pre-formatted `plain` lines.
 pub mod fmt {
     use crate::render::{CYAN, NC, YELLOW};
