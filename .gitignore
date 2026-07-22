@@ -4,3 +4,10 @@ dist/
 
 # Rust workspace build artifacts (shared root target/ now that app/ joined the workspace)
 /target/
+
+# planning-with-files working docs — the plan for the CURRENT work stream, kept
+# local and archived out-of-repo when a stream completes. (DESIGN.md + MIGRATION.md
+# are tracked design docs; these three are scratch/working memory.)
+/task_plan.md
+/findings.md
+/progress.md
