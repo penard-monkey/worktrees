@@ -15,11 +15,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Changed
 - The CLI is now a compiled Rust binary (`crates/worktrees-cli`), behavior-identical
-  to the bash version (gated by the same bats suite). `install.sh` fetches a prebuilt
-  binary per platform (macOS/Linux, x86_64/arm64) or builds from source with `cargo`;
-  `make install` compiles + symlinks the release binary. The legacy bash engine is kept
-  at `bin/worktrees.bash` as a parallel test gate; `bin/worktrees` is a shim that runs
-  the built binary from a clone.
+  to the original bash version (gated by the same 118-case bats suite + real-tmux
+  smokes). `install.sh` fetches a prebuilt binary per platform (macOS/Linux,
+  x86_64/arm64) or builds from source with `cargo`; `make install` compiles +
+  symlinks the release binary; `bin/worktrees` is a shim that runs the built binary
+  from a clone. The Tauri app links the same engine as a library (`worktrees-core`).
+  The legacy bash implementation was retired once the binary reached full parity.
 
 ## [0.1.0] - 2026-07-12
 

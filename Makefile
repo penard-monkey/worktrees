@@ -1,16 +1,15 @@
 # worktrees — build/install/lint/test/release
 # The shipped CLI is the Rust binary (crates/worktrees-cli). `bin/worktrees` is a
 # shim that runs the built binary from a clone; `make install` symlinks the binary
-# itself onto your PATH. The legacy bash engine (bin/worktrees.bash) is kept as a
-# parallel test gate until the migration completes (MIGRATION.md).
+# itself onto your PATH. (The legacy bash engine was retired once the Rust binary
+# reached full parity — see MIGRATION.md.)
 
 BINDIR ?= $(HOME)/.local/bin
 BATS   := ./test/lib/bats-core/bin/bats
-BASH_ENGINE := $(CURDIR)/bin/worktrees.bash
 RELEASE_BIN := $(CURDIR)/target/release/worktrees
 
 .PHONY: build build-debug install install-copy uninstall lint \
-        test test-real-tmux test-bash test-real-tmux-bash check release
+        test test-real-tmux check release
 
 build:
 	cargo build --release -p worktrees-cli
@@ -34,25 +33,18 @@ uninstall:
 	@echo "removed: $(BINDIR)/worktrees"
 
 lint:
-	shellcheck -x bin/worktrees bin/worktrees.bash install.sh test/helpers/*.bash
-	bash -n bin/worktrees && bash -n bin/worktrees.bash && bash -n install.sh
-	@# bash-4-ism gate on the shim + the legacy engine (both must run on 3.2)
-	@if sed 's/[[:space:]]*#.*//' bin/worktrees bin/worktrees.bash | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
+	shellcheck -x bin/worktrees install.sh test/helpers/*.bash
+	bash -n bin/worktrees && bash -n install.sh
+	@# bash-4-ism gate on the shim + installer (must run on stock bash 3.2)
+	@if sed 's/[[:space:]]*#.*//' bin/worktrees install.sh | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
 	  echo "bash-4-ism found (see above)"; exit 1; else echo "bash-3.2 gate: clean"; fi
 
-# Default gate = the Rust binary (bin/worktrees shim is common.bash's WT_BIN).
+# The gate = the Rust binary (bin/worktrees shim is common.bash's WT_BIN).
 test: build-debug
 	$(BATS) --filter-tags '!real-tmux' test/
 
 test-real-tmux: build-debug
 	$(BATS) --filter-tags real-tmux test/
-
-# Parallel legacy gate = the bash engine.
-test-bash:
-	WT_BIN=$(BASH_ENGINE) $(BATS) --filter-tags '!real-tmux' test/
-
-test-real-tmux-bash:
-	WT_BIN=$(BASH_ENGINE) $(BATS) --filter-tags real-tmux test/
 
 check: lint test
 

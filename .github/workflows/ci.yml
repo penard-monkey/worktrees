@@ -13,10 +13,8 @@ jobs:
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           make lint
-      - name: bash 3.2 parse gate (real 3.2 via docker) — shim + legacy engine
-        run: |
-          docker run --rm -v "$PWD:/s" bash:3.2 bash -n /s/bin/worktrees
-          docker run --rm -v "$PWD:/s" bash:3.2 bash -n /s/bin/worktrees.bash
+      - name: bash 3.2 parse gate (real 3.2 via docker) — the shim
+        run: docker run --rm -v "$PWD:/s" bash:3.2 bash -n /s/bin/worktrees
 
   # Rust unit tests + build (fast, no tmux).
   rust:
@@ -52,31 +50,6 @@ jobs:
         run: |
           make test
           make test-real-tmux
-
-  # Parallel legacy gate: the bats suite against the bash engine (until the
-  # migration retires it). Includes the stock macOS bash 3.2 run.
-  bash:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-        with: { submodules: true }
-      - name: install tmux (ubuntu)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -y -q tmux
-      - name: install tmux (macos)
-        if: runner.os == 'macOS'
-        run: brew install tmux
-      - name: unit + real-tmux vs the bash engine
-        run: |
-          make test-bash
-          make test-real-tmux-bash
-      - name: bash engine under REAL bash 3.2 (stock /bin/bash)
-        if: runner.os == 'macOS'
-        run: RUN_BASH=/bin/bash make test-bash
 
   install:
     strategy:

@@ -1,10 +1,12 @@
 # MIGRATION — bash CLI → shared Rust `worktrees-core`
 
+> **STATUS: COMPLETE.** All increments (0–5) shipped. The Rust binary is the CLI; the
+> Tauri app links `worktrees-core`; the legacy bash engine has been retired. History below.
+>
 > Decision (owner): rewrite the CLI as a Rust `worktrees-core` crate shared by a `worktrees`
 > CLI binary AND the Tauri app; the bash `bin/worktrees` becomes a thin shim that execs the
 > binary. Done BEFORE more features so multi-repo + infra are built once. Produced by the
-> `design-rust-core-migration` workflow (4 facets → critique → synthesis). See DESIGN.md for
-> the app, task_plan.md for status.
+> `design-rust-core-migration` workflow (4 facets → critique → synthesis).
 
 ## Why & the load-bearing decisions
 - **Shell out to `git`/`tmux`** via `std::process::Command` (always `git -C <cwd>`), NOT gix/git2.
@@ -33,8 +35,8 @@
 /crates/worktrees-cli/          # bin `worktrees` (thin main → core::cli::run)
 /app/src-tauri/                 # existing Tauri crate, now a workspace member (deps worktrees-core)
 /bin/worktrees                  # bash SHIM (execs the compiled binary) — from Increment 3
-/bin/worktrees.bash             # the ORIGINAL script, kept until Increment 5 (dual-engine gate)
-/test/                          # bats suite UNCHANGED (helpers/common.bash not edited)
+                                # (bin/worktrees.bash — the original engine — retired in Increment 5c)
+/test/                          # bats suite (common.bash honors a WT_BIN override)
 ```
 git/tmux via subprocess; no git2/gix/portable-pty in core (PTY stays app-only).
 
