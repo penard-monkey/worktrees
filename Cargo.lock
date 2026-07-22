@@ -57,6 +57,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "worktrees-core",
 ]
 
 [[package]]

@@ -144,7 +144,9 @@ impl Project {
     }
 
     // ── `ls --json` (live-only: declared=null, lifecycle active|closed) ──────
-    pub fn ls_json(&self) -> String {
+    /// Typed snapshot — the app consumes this directly (core-as-lib); the CLI
+    /// serializes it via `ls_json`.
+    pub fn ls(&self) -> LsJson {
         let reg = self.registrations();
         let mut places = vec![self.place_json(&self.main_root, true, &reg)];
         // worktrees, recency-sorted like the human ls (stable, glob-order ties)
@@ -162,16 +164,19 @@ impl Project {
         for (_, d) in keyed {
             places.push(self.place_json(&d, false, &reg));
         }
-        let ls = LsJson {
+        LsJson {
             schema_version: SCHEMA_VERSION,
             repo: self.main_root.clone(),
             prefix: self.prefix.clone(),
             places_file: format!("{}/.worktrees.places.json", self.main_root),
             places,
-        };
+        }
+    }
+
+    pub fn ls_json(&self) -> String {
         // serde_json compact = same shape/order as the bash emitter; add the
         // trailing newline the bash `printf ']}\n'` produced.
-        format!("{}\n", serde_json::to_string(&ls).unwrap_or_default())
+        format!("{}\n", serde_json::to_string(&self.ls()).unwrap_or_default())
     }
 
     fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>) -> Place {
