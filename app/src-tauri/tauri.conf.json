@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "app",
+  "productName": "worktrees",
   "version": "0.1.0",
   "identifier": "net.casadelvalle.worktrees",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "app",
-        "width": 800,
-        "height": 600
+        "title": "worktrees",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 560
       }
     ],
     "security": {
