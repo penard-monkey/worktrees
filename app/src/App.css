@@ -129,3 +129,25 @@ html, body, #root { height: 100%; margin: 0; }
 }
 .topbar .actions button.danger { background: #f7768e; color: #16161e; }
 .topbar .actions button:disabled { opacity: 0.5; cursor: default; }
+
+/* ── 5b: multi-project tree ── */
+.repo .title { flex: 1; font-size: 13px; }
+.project { margin-top: 6px; }
+.project-h {
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 8px; font-size: 12px;
+}
+.project-h .pname {
+  flex: 1; font-weight: 600; color: #7aa2f7;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mini {
+  background: #24283b; color: #c0caf5; border: 0; border-radius: 5px;
+  padding: 1px 7px; font-size: 12px; cursor: pointer; line-height: 1.4;
+}
+.mini:hover { background: #2f3549; }
+.project-err {
+  margin: 0 8px 6px; padding: 6px 8px; font-size: 11px;
+  color: #f7768e; background: #2d202a; border-radius: 6px; white-space: pre-wrap;
+}
+.empty.small { margin: 16px 8px; font-size: 12px; line-height: 1.7; }
