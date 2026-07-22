@@ -12,6 +12,7 @@ pub mod model;
 pub mod ops;
 pub mod project;
 pub mod render;
+pub mod store;
 pub mod sysclock;
 pub mod tmux;
 pub mod ui;

@@ -17,14 +17,13 @@ so closing the app **detaches** and the session survives.
 
 ## Run (dev)
 
-Requires: Rust, Node, pnpm, tmux (macOS/Linux — Windows is a non-goal).
+Requires: Rust, Node, pnpm, tmux, git on PATH (macOS/Linux — Windows is a non-goal).
 
-The app drives the `worktrees` CLI. Point it at **this repo's** CLI — a `worktrees`
-already on your `PATH` may be the older CDV script without `--json`:
+The app links `worktrees-core` in-process (no subprocess, no `WORKTREES_BIN`); core
+shells out to `git`/`tmux` directly, so just:
 
 ```sh
-cd <repo root>
-WORKTREES_BIN="$PWD/bin/worktrees" pnpm --dir app tauri dev
+pnpm --dir app tauri dev
 ```
 
 ## Verify P1 (exit criteria)
