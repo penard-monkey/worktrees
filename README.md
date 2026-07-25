@@ -59,6 +59,7 @@ worktrees new <branch> --name <topic> ...place named independently of the branch
 worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
 worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
 worktrees open <name>                 reopen a worktree's tmux session
+worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
 worktrees ls [--json]                 list worktrees + their state (--json: machine-readable)
 worktrees rm <name> [name...]         tear one (or more) down
 worktrees                             (no args) → ls

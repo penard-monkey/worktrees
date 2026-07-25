@@ -10,6 +10,10 @@ dist/
 .playwright-mcp/
 /baseline-*.png
 /redesign-*.png
+/ctx-*.png
+
+# IDE
+.idea/
 
 # Rust workspace build artifacts (shared root target/ now that app/ joined the workspace)
 /target/

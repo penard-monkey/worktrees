@@ -249,6 +249,41 @@ button { cursor: pointer; }
 .pop-item.danger { color: var(--danger); }
 .pop-item.danger.armed { background: color-mix(in srgb, var(--danger) 18%, transparent); font-weight: var(--fw-bold); }
 
+/* right-click context menu (shares .pop-item / .pop-hint with the popovers) */
+.ctxmenu {
+  position: fixed; z-index: 60; min-width: 230px; max-width: 300px;
+  background: var(--bg-panel); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-float); padding: var(--s1);
+  animation: pop var(--dur-slow) var(--ease);
+}
+.ctx-sep { height: 1px; margin: var(--s1) var(--s2); background: var(--line); }
+.ctx-life { display: flex; gap: 4px; padding: 0 var(--s2) var(--s2); }
+.ctx-life button {
+  flex: 1; padding: 3px 0; font-size: var(--fs-meta); color: var(--txt);
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.ctx-life button:hover { border-color: var(--line-strong); color: var(--txt-hi); }
+.ctx-life button.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent); color: var(--txt-hi);
+}
+.setting .hint { font-size: var(--fs-micro); color: var(--txt-mute); margin-top: 2px; }
+
+/* new-worktree form pinned at the top of the nav (visible in every lens) */
+.nav-newform {
+  margin: 0 var(--s2) var(--s2);
+  padding: var(--s2);
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+.newform-h {
+  display: flex; align-items: center; gap: var(--s1);
+  font-size: var(--fs-meta); color: var(--txt-mute);
+}
+.newform-h b { color: var(--txt); }
+.newform-h .mini { margin-left: auto; }
+
 /* note */
 .note-strip {
   margin: 0; padding: var(--s2) var(--s3);

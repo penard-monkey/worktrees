@@ -434,6 +434,90 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     0
 }
 
+// ── close ────────────────────────────────────────────────────────────────────
+/// End a place's tmux session; the worktree, branch, and declared state all
+/// stay. The inverse of `open` — the place goes dormant, ready to re-enter.
+pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let mut names: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            s if s.starts_with('-') => {
+                ui.error(&format!("Unknown flag: {s}"));
+                return 1;
+            }
+            s => names.push(s.to_string()),
+        }
+    }
+    if names.is_empty() {
+        ui.error("close needs a worktree (slug or branch), or 'main'. See: worktrees ls");
+        return 1;
+    }
+    if !tmux::have_tmux() {
+        ui.error("tmux not found");
+        return 1;
+    }
+    let mut rc = 0;
+    for n in &names {
+        if close_one(p, ui, n).is_err() {
+            rc = 1;
+        }
+    }
+    rc
+}
+
+fn close_one(p: &Project, ui: &mut dyn Ui, name: &str) -> Result<(), i32> {
+    let s = slugify(name);
+    if name != "(main)" && (s.is_empty() || s == "." || s == "..") {
+        ui.error(&format!("Invalid worktree name '{name}'."));
+        return Err(1);
+    }
+    // Resolve like `open`/`rm`: the slug DIR wins first, so a worktree literally
+    // named "main" is closed by name (parity with open/rm). `(main)` — the slug
+    // the app passes — always means the main checkout; bare `main` is a CLI
+    // convenience that falls through to the checkout only when no worktree
+    // shadows it. Then the branch's holder worktree, like `open`.
+    let slug = if name == "(main)" {
+        "(main)".to_string()
+    } else if Path::new(&format!("{}/{}", p.wt_root_dir(), s)).is_dir() {
+        s
+    } else if name == "main" {
+        "(main)".to_string()
+    } else if let Some(holder) = p.wt_for_branch(strip_origin(name)) {
+        let holder_slug = basename(&holder);
+        ui.info(&format!("Branch '{name}' lives in worktree '{holder_slug}' — closing that."));
+        holder_slug
+    } else {
+        ui.error(&format!("No worktree '{s}' under .worktrees/. See: worktrees ls"));
+        return Err(1);
+    };
+    let session = p.session_name(&slug);
+    if tmux::session_exists(&session) {
+        tmux::kill_session(&session);
+        if slug == "(main)" {
+            ui.info(&format!("closed tmux {session} — checkout untouched."));
+        } else {
+            ui.info(&format!("closed tmux {session} — worktree kept. Reopen: worktrees open {slug}"));
+        }
+        return Ok(());
+    }
+    // No canonical session — but `open` ADOPTS any session with a pane cwd'd in
+    // the worktree (tmux::worktree_session), so close must be its inverse or an
+    // adopted session becomes unclosable. Same ai-word derivation as launch().
+    if slug != "(main)" {
+        let wt = format!("{}/{}", p.wt_root_dir(), slug);
+        let ai_cmd = crate::config::resolve_ai_cmd(None);
+        let ai_word_full = ai_cmd.split_whitespace().next().unwrap_or("");
+        let ai_word = basename(if ai_word_full.is_empty() { "claude" } else { ai_word_full });
+        if let Some(adopted) = tmux::worktree_session(&wt, &ai_word) {
+            tmux::kill_session(&adopted);
+            ui.info(&format!("closed adopted tmux {adopted} (session living in '{slug}') — worktree kept."));
+            return Ok(());
+        }
+    }
+    ui.info(&format!("no live session for '{slug}' ({session}) — nothing to close."));
+    Ok(())
+}
+
 // ── rm ───────────────────────────────────────────────────────────────────────
 pub fn cmd_rm(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut del_branch, mut force, mut yes) = (false, false, false);

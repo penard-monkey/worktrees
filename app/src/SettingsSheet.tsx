@@ -56,6 +56,15 @@ export function SettingsSheet({
           </section>
 
           <section className="setting">
+            <label>Editor command</label>
+            <input
+              type="text" value={settings.editor_cmd}
+              onChange={(e) => onChange({ editor_cmd: e.currentTarget.value })}
+            />
+            <div className="hint">Used by right-click “Open in editor” (e.g. code, cursor, subl)</div>
+          </section>
+
+          <section className="setting">
             <label>Theme</label>
             <select value={settings.theme} onChange={(e) => onChange({ theme: e.currentTarget.value as "dark" })}>
               <option value="dark">Tokyo Night (dark)</option>

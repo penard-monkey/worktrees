@@ -13,6 +13,7 @@ export type Settings = {
   window_w: number;
   window_h: number;
   nav_width: number; // 220–460
+  editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   lens: "places" | "recent" | "attention";
   collapsed: Record<string, boolean>; // per-project-root collapse
 };
@@ -26,6 +27,7 @@ export const DEFAULTS: Settings = {
   window_w: 1280,
   window_h: 820,
   nav_width: 300,
+  editor_cmd: "code",
   lens: "places",
   collapsed: {},
 };

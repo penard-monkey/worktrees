@@ -15,6 +15,7 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
   worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
   worktrees open <name>                 reopen a worktree's tmux session
+  worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
   worktrees ls [--json]                 list worktrees + state (--json = machine-readable)
   worktrees rm <name> [name...]         tear one (or more) down
   worktrees -V | --version              print version   (also: help / -h)
@@ -73,6 +74,7 @@ fn run() -> i32 {
         "new" | "create" | "co" | "checkout" => ops::cmd_new(&project, &mut ui, rest),
         "switch" | "sw" | "branch" => ops::cmd_switch(&project, &mut ui, rest),
         "open" | "reopen" | "attach" | "a" => ops::cmd_open(&project, &mut ui, rest),
+        "close" => ops::cmd_close(&project, &mut ui, rest),
         "rm" | "remove" | "delete" => ops::cmd_rm(&project, &mut ui, rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));
