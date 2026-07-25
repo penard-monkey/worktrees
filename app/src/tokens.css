@@ -1,0 +1,104 @@
+/* Design tokens — the single source every component + Settings reads/writes.
+ * Everything is a CSS custom property so (a) the Settings UI-font slider is ONE
+ * write to --ui-rem and the whole app scales, and (b) a future light theme is an
+ * alternate [data-theme] color map. Terminal font is deliberately INDEPENDENT
+ * (px, set only on .xterm) so UI zoom never disturbs the xterm grid.
+ * Imported before App.css. See DESIGN.md + the redesign spec. */
+
+:root {
+  color-scheme: dark;
+
+  /* ── color layers ── */
+  --bg-abyss: #0f0f16;   /* app backdrop / rail base */
+  --bg-tree: #16161e;    /* nav surface */
+  --bg-panel: #1a1b26;   /* top bar, cards, popovers (raised) */
+  --bg-elev: #1e2030;    /* hover, selected wash, menus */
+  --bg-input: #12131c;   /* inset fields */
+  --line: #252838;       /* hairline borders / dividers */
+  --line-strong: #33384f;/* focus base, active outline, splitter */
+
+  --txt-hi: #e6eaff;     /* slugs, headings */
+  --txt: #c0caf5;        /* body, notes */
+  --txt-dim: #8a93bf;    /* metadata: age, counts, commit subject */
+  --txt-mute: #565f89;   /* placeholders, disabled, broken node */
+
+  --accent: #7aa2f7;     /* brand / interactive / primary */
+  --accent-ink: #0f0f16; /* text on accent fills */
+  --branch: #9aa5ce;     /* branch text (calm) */
+  --branch-hi: #7dcfff;  /* branch text when it DIVERGES (work flowing through) */
+
+  --ok: #9ece6a;         /* live tmux / active / ahead / listening */
+  --ai: #bb9af7;         /* AI (claude) session */
+  --dirty: #e0af68;      /* uncommitted / behind */
+  --danger: #f7768e;     /* destructive / broken / error */
+  --idle: #7e8ab8;       /* dormant-but-recent */
+  --sticky: #565f89;     /* closed/saved/archived/abandoned dot */
+  --pin: #f2c97d;        /* pinned star */
+
+  /* ── type: ONE knob (--ui-rem) scales everything below (rem) ── */
+  --ui-rem: 15px;
+  --fs-micro: 0.6875rem; /* ahead/behind counts, tooltips */
+  --fs-meta: 0.75rem;    /* group counts, age, commit subject */
+  --fs-label: 0.8125rem; /* branch, chips, button labels */
+  --fs-body: 0.875rem;   /* secondary text, note */
+  --fs-row: 0.9375rem;   /* place slug — primary tree unit */
+  --fs-h: 0.9375rem;     /* top-bar slug (weight 600) */
+  --fs-title: 1.0625rem; /* settings headings */
+  --fw-body: 400;
+  --fw-med: 500;
+  --fw-bold: 600;
+  --lh-row: 1.5;
+  --lh-prose: 1.6;
+  --font-ui: ui-sans-serif, -apple-system, "Inter", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", monospace;
+
+  /* terminal — INDEPENDENT of --ui-rem (px), set only on .xterm */
+  --term-family: "SF Mono", Menlo, Monaco, monospace;
+  --term-size: 13px;
+
+  /* ── spacing (4px grid) ── */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --row-pad-v: 6px;
+  --row-pad-h: 10px;
+
+  /* ── layout ── */
+  --rail-w: 44px;
+  --nav-w: 300px;
+
+  /* ── radius ── */
+  --r-sm: 5px;
+  --r-md: 7px;
+  --r-lg: 10px;
+  --r-full: 999px;
+
+  /* ── motion + depth ── */
+  --dur-fast: 90ms;
+  --dur: 140ms;
+  --dur-slow: 180ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* denser rows on demand (Settings → Density) */
+:root[data-density="compact"] {
+  --row-pad-v: 4px;
+  --row-pad-h: 6px;
+}
+
+html {
+  font-size: var(--ui-rem);
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; }
+}

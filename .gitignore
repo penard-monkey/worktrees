@@ -2,6 +2,15 @@ dist/
 *.log
 .DS_Store
 
+# app declared-store / worktrees created while dogfooding THIS repo in the app
+/.worktrees.places.json
+/.worktrees/
+
+# design-review artifacts (browser harness screenshots + playwright output)
+.playwright-mcp/
+/baseline-*.png
+/redesign-*.png
+
 # Rust workspace build artifacts (shared root target/ now that app/ joined the workspace)
 /target/
 

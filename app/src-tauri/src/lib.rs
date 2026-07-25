@@ -14,10 +14,11 @@ use std::thread;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
+use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{ops, store, sysclock, Project};
+use worktrees_core::{ops, store, sysclock, Project, Ui};
 
 // ── state: core-derived places + declared overlay + reconciled lifecycle ─────
 
@@ -116,6 +117,32 @@ fn remove_project(app: AppHandle, root: String) -> Result<Workspace, String> {
     list_workspace(app)
 }
 
+// ── UI settings (app-global; ui-state.json in app-config-dir) ────────────────
+// Kept SEPARATE from per-repo declared state (.worktrees.places.json). Free-form
+// JSON so the frontend owns the schema; a corrupt/absent file → null (defaults).
+
+fn ui_state_file(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("ui-state.json"))
+}
+
+#[tauri::command]
+fn get_settings(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let p = ui_state_file(&app)?;
+    match std::fs::read(&p) {
+        Ok(b) => Ok(serde_json::from_slice(&b).ok()),
+        Err(_) => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
+    let p = ui_state_file(&app)?;
+    let json = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(p, json).map_err(|e| e.to_string())
+}
+
 const LIFECYCLE_LABELS: [&str; 4] = ["closed", "saved", "archived", "abandoned"];
 
 #[tauri::command]
@@ -198,6 +225,28 @@ fn switch_place(
     }
     args.push("-y".into());
     run_op(&repo, |p, ui| ops::cmd_switch(p, ui, &args))
+}
+
+/// Enter a place: ensure its tmux session exists (create if down) WITHOUT attaching
+/// — the app embeds it via its own PTY. Worktrees go through `open` (reuses the
+/// existing launch path); the main checkout is launched directly since `open` only
+/// targets worktrees under `.worktrees/`.
+#[tauri::command]
+fn open_place(repo: String, slug: String) -> Result<CmdResult, String> {
+    run_op(&repo, move |p, ui| {
+        if slug == "(main)" {
+            if !worktrees_core::tmux::have_tmux() {
+                ui.error("tmux not found");
+                return 1;
+            }
+            let session = p.session_name("(main)");
+            let ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
+            ops::launch(p, ui, &p.main_root, &session, "", &ai_cmd, false);
+            0
+        } else {
+            ops::cmd_open(p, ui, &[slug, "--no-attach".into()])
+        }
+    })
 }
 
 /// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
@@ -323,6 +372,17 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Terminals::default())
+        .setup(|app| {
+            // Coarse live-refresh: nudge the UI to re-pull so tmux liveness / branch
+            // edits made in a bare terminal surface without a manual refresh. The UI
+            // re-runs list_workspace (in-process); cheap for a handful of projects.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(4));
+                let _ = handle.emit("places:changed", ());
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_places,
             list_workspace,
@@ -335,6 +395,9 @@ pub fn run() {
             new_place,
             switch_place,
             remove_place,
+            open_place,
+            get_settings,
+            set_settings,
             term_open,
             term_write,
             term_resize,
