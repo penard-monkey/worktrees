@@ -171,6 +171,7 @@ function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
+  const [termFocus, setTermFocus] = useState(0);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -269,8 +270,9 @@ function App() {
     setSel({ repo, slug: p.slug });
     setMenu(null);
     closeCtx();
+    setTermFocus((v) => v + 1); // hand the keyboard back to the terminal
     (async () => {
-      await invoke("touch_place", { repo, slug: p.slug }).catch(() => {});
+      invoke("touch_place", { repo, slug: p.slug }).catch(() => {}); // fire-and-forget recency stamp
       await runCmd("open_place", { repo, slug: p.slug, fresh: opts?.fresh ?? false });
     })();
   };
@@ -643,7 +645,7 @@ function App() {
               onBlur={(e) => mutate(invoke("set_note", { repo: sel.repo, slug: sel.slug, note: e.currentTarget.value }))} />
 
             {selected.tmux_session.up ? (
-              <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} />
+              <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus} />
             ) : (
               <div className="term-empty">
                 <div className="term-empty-card">

@@ -15,7 +15,7 @@ function termFont() {
   return { family, size, bg };
 }
 
-export function TerminalPane({ session, termVersion = 0 }: { session: string; termVersion?: number }) {
+export function TerminalPane({ session, termVersion = 0, focusToken = 0 }: { session: string; termVersion?: number; focusToken?: number }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -81,6 +81,13 @@ export function TerminalPane({ session, termVersion = 0 }: { session: string; te
       idRef.current = null;
     };
   }, [session]);
+
+  // Re-grab keyboard focus when the user re-enters the place (clicking any
+  // chrome — rows, pin, popovers — moves focus there and nothing else returns
+  // it; xterm only self-focuses on a click inside its own canvas).
+  useEffect(() => {
+    termRef.current?.focus();
+  }, [focusToken]);
 
   // live re-fit when Settings change the terminal font
   useEffect(() => {
