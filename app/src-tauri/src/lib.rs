@@ -45,7 +45,7 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
 
 /// Single-repo snapshot (kept for direct use / back-compat).
 #[tauri::command]
-fn list_places(repo: String) -> Result<serde_json::Value, String> {
+async fn list_places(repo: String) -> Result<serde_json::Value, String> {
     snapshot(&repo)
 }
 
@@ -84,7 +84,7 @@ fn write_projects(app: &AppHandle, list: &[String]) -> Result<(), String> {
 /// Every tracked project with its snapshot (or an error if it's gone/broken —
 /// one dead repo greys its node without blanking the rest).
 #[tauri::command]
-fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
+async fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
     // Fan out per project — each snapshot() is an independent git sweep, so
     // serial across projects stacked their latencies. Bounded: each snapshot
     // itself runs up to 16 concurrent git calls (place_json_par), so cap
@@ -113,7 +113,7 @@ fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
 /// Add a git repo to the workspace (stored by its canonical main root, so a
 /// subdir resolves to the repo and dedupes).
 #[tauri::command]
-fn add_project(app: AppHandle, dir: String) -> Result<Workspace, String> {
+async fn add_project(app: AppHandle, dir: String) -> Result<Workspace, String> {
     let project = Project::discover(Path::new(&dir)).map_err(|e| e.msg)?;
     let root = project.main_root.clone();
     let mut roots = read_projects(&app);
@@ -121,15 +121,15 @@ fn add_project(app: AppHandle, dir: String) -> Result<Workspace, String> {
         roots.push(root);
         write_projects(&app, &roots)?;
     }
-    list_workspace(app)
+    list_workspace(app).await
 }
 
 #[tauri::command]
-fn remove_project(app: AppHandle, root: String) -> Result<Workspace, String> {
+async fn remove_project(app: AppHandle, root: String) -> Result<Workspace, String> {
     let mut roots = read_projects(&app);
     roots.retain(|r| r != &root);
     write_projects(&app, &roots)?;
-    list_workspace(app)
+    list_workspace(app).await
 }
 
 // ── UI settings (app-global; ui-state.json in app-config-dir) ────────────────
@@ -143,7 +143,7 @@ fn ui_state_file(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn get_settings(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+async fn get_settings(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
     let p = ui_state_file(&app)?;
     match std::fs::read(&p) {
         Ok(b) => Ok(serde_json::from_slice(&b).ok()),
@@ -152,7 +152,7 @@ fn get_settings(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
 }
 
 #[tauri::command]
-fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
+async fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let p = ui_state_file(&app)?;
     let json = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(p, json).map_err(|e| e.to_string())
@@ -161,7 +161,7 @@ fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), Strin
 const LIFECYCLE_LABELS: [&str; 4] = ["closed", "saved", "archived", "abandoned"];
 
 #[tauri::command]
-fn set_lifecycle(repo: String, slug: String, label: String) -> Result<(), String> {
+async fn set_lifecycle(repo: String, slug: String, label: String) -> Result<(), String> {
     if !LIFECYCLE_LABELS.contains(&label.as_str()) {
         return Err(format!("invalid lifecycle label: {label}"));
     }
@@ -169,12 +169,12 @@ fn set_lifecycle(repo: String, slug: String, label: String) -> Result<(), String
 }
 
 #[tauri::command]
-fn set_pin(repo: String, slug: String, on: bool) -> Result<(), String> {
+async fn set_pin(repo: String, slug: String, on: bool) -> Result<(), String> {
     store::edit(&repo, &slug, |d| d.pinned = Some(on))
 }
 
 #[tauri::command]
-fn set_note(repo: String, slug: String, note: String) -> Result<(), String> {
+async fn set_note(repo: String, slug: String, note: String) -> Result<(), String> {
     store::edit(&repo, &slug, |d| {
         d.note = if note.trim().is_empty() { None } else { Some(note) }
     })
@@ -182,7 +182,7 @@ fn set_note(repo: String, slug: String, note: String) -> Result<(), String> {
 
 /// Stamp last-opened (drives the `idle` window). Called when a place is opened.
 #[tauri::command]
-fn touch_place(repo: String, slug: String) -> Result<(), String> {
+async fn touch_place(repo: String, slug: String) -> Result<(), String> {
     store::edit(&repo, &slug, |d| d.last_opened_epoch = Some(sysclock::now_epoch()))
 }
 
@@ -207,7 +207,7 @@ fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(repo: &str, f: F) -> Resul
 /// Create a worktree (`new`). `--no-attach`: the session is created (pane 0 AI,
 /// pane 1 shell) but the app embeds it via its own PTY rather than attaching.
 #[tauri::command]
-fn new_place(
+async fn new_place(
     repo: String,
     branch: String,
     base: Option<String>,
@@ -228,7 +228,7 @@ fn new_place(
 /// Move a place to another branch (`switch <slug> <branch> [base]`). `-y` skips
 /// the inside-a-worktree ambiguity prompt (the UI targets a place explicitly).
 #[tauri::command]
-fn switch_place(
+async fn switch_place(
     repo: String,
     slug: String,
     branch: String,
@@ -247,7 +247,7 @@ fn switch_place(
 /// existing launch path); the main checkout is launched directly since `open` only
 /// targets worktrees under `.worktrees/`.
 #[tauri::command]
-fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<CmdResult, String> {
+async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<CmdResult, String> {
     run_op(&repo, move |p, ui| {
         // Auto-resume: if this place already has a Claude Code conversation on
         // disk, launch the AI pane with the resume arg (-r) instead of cold.
@@ -289,7 +289,7 @@ fn ai_is_claude() -> bool {
 
 /// End a place's tmux session — the worktree stays (right-click "Close session").
 #[tauri::command]
-fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
+async fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
     run_op(&repo, move |p, ui| ops::cmd_close(p, ui, &[slug]))
 }
 
@@ -297,7 +297,7 @@ fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
 /// github.com, the repo home for other hosts, None with no origin. The UI opens
 /// it via the opener plugin.
 #[tauri::command]
-fn github_url(repo: String, slug: String) -> Result<Option<String>, String> {
+async fn github_url(repo: String, slug: String) -> Result<Option<String>, String> {
     let p = Project::discover(Path::new(&repo)).map_err(|e| e.msg)?;
     let Some(remote) = worktrees_core::git::git_out(&p.main_root, &["remote", "get-url", "origin"])
         .filter(|s| !s.is_empty())
@@ -337,7 +337,7 @@ fn normalize_remote(remote: &str) -> Option<String> {
 /// Open a place in the user's editor (`editor_cmd` from Settings, e.g. `code`).
 /// The command is the user's own configured tool — same trust model as ai_cmd.
 #[tauri::command]
-fn open_editor(path: String, cmd: String) -> Result<(), String> {
+async fn open_editor(path: String, cmd: String) -> Result<(), String> {
     let mut it = cmd.split_whitespace();
     let Some(prog) = it.next() else {
         return Err("no editor configured (Settings → Editor command)".into());
@@ -356,7 +356,7 @@ fn open_editor(path: String, cmd: String) -> Result<(), String> {
 
 /// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
 #[tauri::command]
-fn remove_place(
+async fn remove_place(
     repo: String,
     slug: String,
     del_branch: bool,
@@ -391,7 +391,7 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 /// scrollback; this app is just another tmux client. Closing detaches (the
 /// session survives and stays `tmux attach`-able from a bare terminal).
 #[tauri::command]
-fn term_open(
+async fn term_open(
     session: String,
     cols: u16,
     rows: u16,
@@ -442,7 +442,7 @@ fn term_open(
 }
 
 #[tauri::command]
-fn term_write(id: u32, data: Vec<u8>, terms: State<'_, Terminals>) -> Result<(), String> {
+async fn term_write(id: u32, data: Vec<u8>, terms: State<'_, Terminals>) -> Result<(), String> {
     let mut map = terms.0.lock().unwrap();
     let term = map.get_mut(&id).ok_or("no such terminal")?;
     term.writer.write_all(&data).map_err(|e| e.to_string())?;
@@ -450,7 +450,7 @@ fn term_write(id: u32, data: Vec<u8>, terms: State<'_, Terminals>) -> Result<(),
 }
 
 #[tauri::command]
-fn term_resize(id: u32, cols: u16, rows: u16, terms: State<'_, Terminals>) -> Result<(), String> {
+async fn term_resize(id: u32, cols: u16, rows: u16, terms: State<'_, Terminals>) -> Result<(), String> {
     let map = terms.0.lock().unwrap();
     let term = map.get(&id).ok_or("no such terminal")?;
     term.master
@@ -463,7 +463,7 @@ fn term_resize(id: u32, cols: u16, rows: u16, terms: State<'_, Terminals>) -> Re
 /// AI CLI) live on. The killed client also closes the slave, so the reader
 /// thread hits EOF and exits.
 #[tauri::command]
-fn term_close(id: u32, terms: State<'_, Terminals>) -> Result<(), String> {
+async fn term_close(id: u32, terms: State<'_, Terminals>) -> Result<(), String> {
     if let Some(mut term) = terms.0.lock().unwrap().remove(&id) {
         term.stop.store(true, Ordering::Relaxed);
         let _ = term.child.kill(); // kills the CLIENT = detach, not the session
