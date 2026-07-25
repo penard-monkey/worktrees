@@ -22,6 +22,22 @@ pub fn session_exists(name: &str) -> bool {
     }
 }
 
+/// Sorted, newline-joined live session names — a cheap change signal the app
+/// polls (empty when tmux is down / no sessions). Sessions come and go as places
+/// are opened/closed even from a bare terminal, so a change here is worth a
+/// UI refresh; an unchanged value lets the poll skip the full git sweep.
+pub fn session_fingerprint() -> String {
+    match tmux(&["list-sessions", "-F", "#{session_name}"]) {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let mut names: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+            names.sort_unstable();
+            names.join("\n")
+        }
+        _ => String::new(),
+    }
+}
+
 /// Single-quote `s` for embedding in a shell `-c`/`-ic` string (bash `sq`).
 pub fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -91,11 +107,11 @@ pub fn attach_or_switch(session: &str) {
     let _ = Command::new("tmux").args([sub, "-t", session]).status();
 }
 
-/// Kill EXACTLY `name`: `-t =name` (exact-match), falling back to `-t name`.
+/// Kill EXACTLY `name` (`-t =name`). NO bare fallback: on tmux ≥ 2.1 the exact
+/// form only fails when the session is already gone, so a bare `-t name` retry
+/// could only ever PREFIX-match a sibling (api → api-fix) — the precise case
+/// the `=` guard exists to prevent.
 pub fn kill_session(name: &str) {
     let eq = format!("={name}");
-    if tmux(&["kill-session", "-t", &eq]).map(|o| o.status.success()).unwrap_or(false) {
-        return;
-    }
-    let _ = tmux(&["kill-session", "-t", name]);
+    let _ = tmux(&["kill-session", "-t", &eq]);
 }

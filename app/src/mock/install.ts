@@ -118,6 +118,23 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       });
       return { ok: true, code: 0, output: `Opened ${args.slug}` };
     }
+    case "close_place": {
+      editPlace(args.repo, args.slug, (p) => {
+        p.tmux_session.up = false;
+        reconcile(p);
+      });
+      return { ok: true, code: 0, output: `closed tmux ${args.slug} — worktree kept.` };
+    }
+    case "github_url":
+      return `https://github.com/demo/${(args.repo as string).split("/").pop()}/tree/mock-branch`;
+    case "open_editor":
+      console.info("[mock] open_editor:", args);
+      return null;
+    case "plugin:opener|open_url":
+    case "plugin:opener|reveal_item_in_dir":
+      console.info("[mock] opener:", cmd, args);
+      return null;
+
     case "switch_place":
       editPlace(args.repo, args.slug, (p) => { p.branch = args.branch; });
       return { ok: true, code: 0, output: `Switched ${args.slug} → ${args.branch}` };

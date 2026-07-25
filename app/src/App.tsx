@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
 import { applySettings, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings } from "./settings";
@@ -82,6 +83,77 @@ function glyphs(p: Place) {
   return g;
 }
 
+// Right-click context menu shell: fixed at the cursor, clamped to the viewport,
+// Esc / click-away / right-click-away all close. Top-level (NOT nested in App)
+// so its position state survives App re-renders.
+function CtxMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({
+      left: Math.max(4, Math.min(x, window.innerWidth - r.width - 8)),
+      top: Math.max(4, Math.min(y, window.innerHeight - r.height - 8)),
+    });
+  }, [x, y]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <>
+      <div className="menu-catch" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
+      <div ref={ref} className="ctxmenu" style={pos} onContextMenu={(e) => e.preventDefault()}>
+        {children}
+      </div>
+    </>
+  );
+}
+
+type Ctx =
+  | { kind: "place"; x: number; y: number; repo: string; slug: string }
+  | { kind: "project"; x: number; y: number; root: string };
+
+// Single-quote for pasting into a shell (the main session name carries parens).
+const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+
+// New-worktree form. Module scope + OWN draft state: components defined inside
+// App get a fresh identity every render, which remounts their DOM and drops
+// input focus per keystroke — the form must live outside that churn.
+function NewPlaceForm({ project, initialBase, onCreate, onCancel }: {
+  project: string;
+  initialBase: string;
+  onCreate: (branch: string, name: string, base: string) => void;
+  onCancel: () => void;
+}) {
+  const [branch, setBranch] = useState("");
+  const [name, setName] = useState("");
+  const [base, setBase] = useState(initialBase);
+  const submit = () => { if (branch.trim()) onCreate(branch.trim(), name.trim(), base.trim()); };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") submit();
+    if (e.key === "Escape") onCancel();
+  };
+  return (
+    <div className="newform nav-newform">
+      <div className="newform-h">
+        New worktree · <b>{basename(project)}</b>
+        <button className="mini" title="cancel (Esc)" onClick={onCancel}>✕</button>
+      </div>
+      <input placeholder="branch (e.g. feat/x)" value={branch} autoFocus
+        onChange={(e) => setBranch(e.currentTarget.value)} onKeyDown={onKey} />
+      <input placeholder="name (optional)" value={name}
+        onChange={(e) => setName(e.currentTarget.value)} onKeyDown={onKey} />
+      <input placeholder="base (default: main)" value={base}
+        onChange={(e) => setBase(e.currentTarget.value)} onKeyDown={onKey} />
+      <button onClick={submit} disabled={!branch.trim()}>Create</button>
+    </div>
+  );
+}
+
 function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
@@ -89,8 +161,8 @@ function App() {
   const [filter, setFilter] = useState("");
   const [lens, setLens] = useState<Lens>("places");
   const [newFor, setNewFor] = useState<string | null>(null);
-  const [newBranch, setNewBranch] = useState("");
-  const [newName, setNewName] = useState("");
+  const [newBase, setNewBase] = useState("");
+  const [ctx, setCtx] = useState<Ctx | null>(null);
   const [switchTo, setSwitchTo] = useState("");
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
   const [menu, setMenu] = useState<"life" | "more" | null>(null);
@@ -141,6 +213,20 @@ function App() {
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
 
+  // ctx target derived live from ws (a refresh while the menu is open must not go stale)
+  const ctxPlace: Place | null =
+    ctx?.kind === "place"
+      ? ws?.projects.find((v) => v.root === ctx.repo)?.snapshot?.places.find((pl) => pl.slug === ctx.slug) ?? null
+      : null;
+
+  // if a refresh removes the ctx target, finalize the close (else a stale ctx
+  // resurrects the menu — with its armed remove — when the target reappears)
+  useEffect(() => {
+    if (!ctx || !ws) return;
+    if (ctx.kind === "place" && !ctxPlace) { setCtx(null); setConfirmRm(null); }
+    if (ctx.kind === "project" && !ws.projects.some((v) => v.root === ctx.root)) setCtx(null);
+  }, [ctx, ctxPlace, ws]);
+
   const mutate = async (p: Promise<unknown>) => {
     try { await p; await refresh(); } catch (e) { setErr(String(e)); }
   };
@@ -170,23 +256,89 @@ function App() {
     } catch (e) { setErr(String(e)); }
   };
 
+  // Every ctx-menu dismissal goes through here: an armed confirmRm must NEVER
+  // survive the menu (it would leak into the topbar ⋯ popover as one-click remove).
+  const closeCtx = () => {
+    setCtx(null);
+    setConfirmRm(null);
+  };
+
   // THE primary verb: inhabit a place — stamp recency, ensure its session, select it.
-  const enterPlace = (repo: string, p: Place) => {
+  // `fresh` (right-click "Open fresh") skips the AI auto-resume.
+  const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
     setSel({ repo, slug: p.slug });
     setMenu(null);
+    closeCtx();
     (async () => {
       await invoke("touch_place", { repo, slug: p.slug }).catch(() => {});
-      await runCmd("open_place", { repo, slug: p.slug });
+      await runCmd("open_place", { repo, slug: p.slug, fresh: opts?.fresh ?? false });
     })();
   };
 
-  const createPlace = async (repo: string) => {
-    const branch = newBranch.trim();
+  // ── context-menu verbs ──
+  const closeSession = (repo: string, slug: string) => {
+    closeCtx();
+    runCmd("close_place", { repo, slug });
+  };
+  const copyText = (text: string) => {
+    closeCtx();
+    navigator.clipboard?.writeText(text).catch(() => {});
+  };
+  const openOnRemote = async (repo: string, slug: string) => {
+    closeCtx();
+    try {
+      const url = await invoke<string | null>("github_url", { repo, slug });
+      if (url) await openUrl(url);
+      else setErr("No origin remote for this project.");
+    } catch (e) { setErr(String(e)); }
+  };
+  const revealPlace = (path: string) => {
+    closeCtx();
+    revealItemInDir(path).catch((e) => setErr(String(e)));
+  };
+  const editIn = (path: string) => {
+    closeCtx();
+    invoke("open_editor", { path, cmd: settings.editor_cmd }).catch((e) => setErr(String(e)));
+  };
+  const editNote = (repo: string, p: Place) => {
+    closeCtx();
+    setSel({ repo, slug: p.slug });
+    setTimeout(() => document.querySelector<HTMLInputElement>(".note-strip")?.focus(), 60);
+  };
+  const newFromBranch = (root: string, base: string) => {
+    closeCtx();
+    setNewFor(root);
+    setNewBase(base);
+  };
+  const removePlaceCtx = async (repo: string, slug: string) => {
+    const key = `ctx|${repo}|${slug}`; // namespaced: never matches the topbar's key
+    if (confirmRm !== key) { setConfirmRm(key); return; } // arm; menu stays open
+    closeCtx();
+    if (await runCmd("remove_place", { repo, slug, del_branch: false, force: false })) {
+      if (sel?.repo === repo && sel?.slug === slug) setSel(null);
+    }
+  };
+  const placeCtx = (e: React.MouseEvent, repo: string, p: Place) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu(null);
+    setConfirmRm(null);
+    setCtx({ kind: "place", x: e.clientX, y: e.clientY, repo, slug: p.slug });
+  };
+  const projectCtx = (e: React.MouseEvent, root: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu(null);
+    setConfirmRm(null);
+    setCtx({ kind: "project", x: e.clientX, y: e.clientY, root });
+  };
+
+  const createPlace = async (repo: string, branch: string, name: string, base: string) => {
     if (!branch) return;
-    const name = newName.trim();
-    if (await runCmd("new_place", { repo, branch, base: null, name: name || null })) {
+    if (await runCmd("new_place", { repo, branch, base: base || null, name: name || null })) {
       setSel({ repo, slug: (name || branch).replace(/\//g, "-") });
-      setNewFor(null); setNewBranch(""); setNewName("");
+      setNewFor(null);
+      setNewBase("");
     }
   };
   const doSwitch = async () => {
@@ -259,6 +411,7 @@ function App() {
       <li
         className={"row" + (sel?.repo === repo && sel?.slug === p.slug ? " sel" : "")}
         onClick={() => enterPlace(repo, p)}
+        onContextMenu={(e) => placeCtx(e, repo, p)}
         title={p.slug}
       >
         <span
@@ -301,28 +454,16 @@ function App() {
 
     return (
       <div className="project">
-        <div className="project-h">
+        <div className="project-h" onContextMenu={(e) => projectCtx(e, pv.root)}>
           <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? "▾" : "▸"}</span>
           {pv.ok
             ? <span className={"rollup " + (rollupLive ? "on" : "off")} />
             : <span className="rollup broken" title="repo gone">⊘</span>}
           <span className="pname" title={pv.root} onClick={() => toggleProject(pv.root)}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
-          <button className="mini" title="new worktree" onClick={() => setNewFor(newFor === pv.root ? null : pv.root)}>＋</button>
+          <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}>＋</button>
           <button className="mini" title="remove project" onClick={() => removeProject(pv.root)}>✕</button>
         </div>
-
-        {newFor === pv.root && (
-          <div className="newform">
-            <input placeholder="branch (e.g. feat/x)" value={newBranch} autoFocus
-              onChange={(e) => setNewBranch(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === "Enter" && createPlace(pv.root)} />
-            <input placeholder="name (optional)" value={newName}
-              onChange={(e) => setNewName(e.currentTarget.value)}
-              onKeyDown={(e) => e.key === "Enter" && createPlace(pv.root)} />
-            <button onClick={() => createPlace(pv.root)} disabled={!newBranch.trim()}>Create</button>
-          </div>
-        )}
 
         {open && pv.ok && (
           <>
@@ -407,6 +548,15 @@ function App() {
         </div>
         <input ref={searchRef} className="search" placeholder="filter places…" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} />
         {err && <div className="err">{err}</div>}
+        {newFor && (
+          <NewPlaceForm
+            key={newFor + "|" + newBase}
+            project={newFor}
+            initialBase={newBase}
+            onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
+            onCancel={() => { setNewFor(null); setNewBase(""); }}
+          />
+        )}
         <div className="nav-scroll">
           {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Click ＋ to add one.</div>}
           {lens === "places" && ws?.projects.map((pv) => <ProjectNode key={pv.root} pv={pv} />)}
@@ -447,7 +597,11 @@ function App() {
 
               <div className="controls">
                 {selected.tmux_session.up ? (
-                  <span className="live-badge" title="session live"><span className="status-dot live" style={{ background: "var(--ok)" }} /> live</span>
+                  <>
+                    <span className="live-badge" title="session live"><span className="status-dot live" style={{ background: "var(--ok)" }} /> live</span>
+                    <button className="ctrl" title="end the tmux session — the worktree stays"
+                      onClick={() => runCmd("close_place", { repo: sel.repo, slug: sel.slug })}>Close</button>
+                  </>
                 ) : (
                   <button className="enter-btn" onClick={() => enterPlace(sel.repo, selected)}>Enter ▸</button>
                 )}
@@ -529,7 +683,7 @@ function App() {
             <div className="resume">
               {resume.length === 0 && <div className="empty small">No places yet — ＋ add a project.</div>}
               {resume.map(({ pv, p }) => (
-                <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)}>
+                <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
                   <span className="status-dot" style={{ background: DOT_COLOR[p.lifecycle_effective] ?? "var(--sticky)" }} />
                   <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{p.slug}</span>
                   <span className="rr-proj">{basename(pv.root)}</span>
@@ -546,6 +700,80 @@ function App() {
 
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)} />
       {menu && <div className="menu-catch" onClick={() => setMenu(null)} />}
+
+      {/* ── right-click: place ── */}
+      {ctx?.kind === "place" && ctxPlace && (
+        <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
+          <div className="pop-hint">{ctxPlace.is_main ? "◆ main" : ctxPlace.slug}</div>
+          <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace)}>Enter ▸</button>
+          {!ctxPlace.tmux_session.up && ctxPlace.claude_session_present && (
+            <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: true })}>Open fresh (skip resume)</button>
+          )}
+          {ctxPlace.tmux_session.up && (
+            <>
+              <button className="pop-item" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>Close session</button>
+              <button className="pop-item" onClick={() => copyText(`tmux attach -t ${shq(ctxPlace.tmux_session.name)}`)}>Copy attach command</button>
+            </>
+          )}
+          <div className="ctx-sep" />
+          {!ctxPlace.is_main && (
+            <>
+              <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("set_pin", { repo: ctx.repo, slug: ctxPlace.slug, on: !ctxPlace.declared?.pinned })); }}>
+                {ctxPlace.declared?.pinned ? "★ Unpin" : "☆ Pin"}
+              </button>
+              <div className="pop-hint">lifecycle</div>
+              <div className="ctx-life">
+                {SETTABLE.map((s) => (
+                  <button key={s.value} className={ctxPlace.declared?.lifecycle === s.value ? "on" : ""}
+                    onClick={() => { closeCtx(); mutate(invoke("set_lifecycle", { repo: ctx.repo, slug: ctxPlace.slug, label: s.value })); }}>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              <button className="pop-item" onClick={() => editNote(ctx.repo, ctxPlace)}>Edit note…</button>
+              <div className="ctx-sep" />
+              {ctxPlace.branch && (
+                <button className="pop-item" onClick={() => newFromBranch(ctx.repo, ctxPlace.branch!)}>New worktree off {ctxPlace.branch}…</button>
+              )}
+            </>
+          )}
+          <button className="pop-item" onClick={() => openOnRemote(ctx.repo, ctxPlace.slug)}>Open on GitHub</button>
+          <button className="pop-item" onClick={() => revealPlace(ctxPlace.path)}>Reveal in Finder</button>
+          <button className="pop-item" onClick={() => editIn(ctxPlace.path)}>Open in editor</button>
+          <button className="pop-item" onClick={() => copyText(ctxPlace.path)}>Copy path</button>
+          {ctxPlace.branch && <button className="pop-item" onClick={() => copyText(ctxPlace.branch!)}>Copy branch</button>}
+          {!ctxPlace.is_main && (
+            <>
+              <div className="ctx-sep" />
+              <button
+                className={"pop-item danger" + (confirmRm === `ctx|${ctx.repo}|${ctxPlace.slug}` ? " armed" : "")}
+                onClick={() => removePlaceCtx(ctx.repo, ctxPlace.slug)}
+              >
+                {confirmRm === `ctx|${ctx.repo}|${ctxPlace.slug}` ? "Confirm remove?" : "Remove worktree…"}
+              </button>
+            </>
+          )}
+        </CtxMenu>
+      )}
+
+      {/* ── right-click: project ── */}
+      {ctx?.kind === "project" && (() => {
+        const pv = ws?.projects.find((v) => v.root === ctx.root);
+        const main = pv?.snapshot?.places.find((p) => p.is_main) ?? null;
+        return (
+          <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
+            <div className="pop-hint">{basename(ctx.root)}</div>
+            <button className="pop-item" onClick={() => { closeCtx(); setNewFor(ctx.root); setNewBase(""); }}>New worktree…</button>
+            {main && <button className="pop-item" onClick={() => enterPlace(ctx.root, main)}>Enter main ▸</button>}
+            <div className="ctx-sep" />
+            <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
+            <button className="pop-item" onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>
+            <button className="pop-item" onClick={() => editIn(ctx.root)}>Open in editor</button>
+            <div className="ctx-sep" />
+            <button className="pop-item danger" onClick={() => { closeCtx(); removeProject(ctx.root); }}>Remove from workspace</button>
+          </CtxMenu>
+        );
+      })()}
     </div>
   );
 }

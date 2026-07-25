@@ -85,13 +85,28 @@ fn write_projects(app: &AppHandle, list: &[String]) -> Result<(), String> {
 /// one dead repo greys its node without blanking the rest).
 #[tauri::command]
 fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
-    let projects = read_projects(&app)
-        .into_iter()
-        .map(|root| match snapshot(&root) {
-            Ok(s) => ProjectView { root, ok: true, error: None, snapshot: Some(s) },
-            Err(e) => ProjectView { root, ok: false, error: Some(e), snapshot: None },
-        })
-        .collect();
+    // Fan out per project — each snapshot() is an independent git sweep, so
+    // serial across projects stacked their latencies. Bounded: each snapshot
+    // itself runs up to 16 concurrent git calls (place_json_par), so cap
+    // projects-in-flight to keep the product (~4×16 processes) sane.
+    let roots = read_projects(&app);
+    let mut projects: Vec<ProjectView> = Vec::with_capacity(roots.len());
+    for chunk in roots.chunks(4) {
+        let batch: Vec<ProjectView> = std::thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .cloned()
+                .map(|root| {
+                    s.spawn(move || match snapshot(&root) {
+                        Ok(sn) => ProjectView { root, ok: true, error: None, snapshot: Some(sn) },
+                        Err(e) => ProjectView { root, ok: false, error: Some(e), snapshot: None },
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        projects.extend(batch);
+    }
     Ok(Workspace { projects })
 }
 
@@ -232,21 +247,111 @@ fn switch_place(
 /// existing launch path); the main checkout is launched directly since `open` only
 /// targets worktrees under `.worktrees/`.
 #[tauri::command]
-fn open_place(repo: String, slug: String) -> Result<CmdResult, String> {
+fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<CmdResult, String> {
     run_op(&repo, move |p, ui| {
+        // Auto-resume: if this place already has a Claude Code conversation on
+        // disk, launch the AI pane with the resume arg (-r) instead of cold.
+        // `fresh` (right-click "Open fresh") skips it. Gated on the configured
+        // AI actually being Claude — appending -r to an arbitrary ai_cmd breaks it.
+        let resume = !fresh.unwrap_or(false)
+            && ai_is_claude()
+            && worktrees_core::project::claude_session_present(&p.place_dir(&slug));
         if slug == "(main)" {
             if !worktrees_core::tmux::have_tmux() {
                 ui.error("tmux not found");
                 return 1;
             }
             let session = p.session_name("(main)");
-            let ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
+            let mut ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
+            if resume && !ai_cmd.is_empty() {
+                ai_cmd = format!("{ai_cmd} {}", worktrees_core::config::resolve_ai_resume_arg());
+            }
             ops::launch(p, ui, &p.main_root, &session, "", &ai_cmd, false);
             0
         } else {
-            ops::cmd_open(p, ui, &[slug, "--no-attach".into()])
+            let mut args = vec![slug, "--no-attach".into()];
+            if resume {
+                args.push("-r".into());
+            }
+            ops::cmd_open(p, ui, &args)
         }
     })
+}
+
+/// Auto-resume only applies when the AI pane actually runs Claude Code (same
+/// first-word/basename derivation as ops::launch).
+fn ai_is_claude() -> bool {
+    let cmd = worktrees_core::config::resolve_ai_cmd(None);
+    let word = cmd.split_whitespace().next().unwrap_or("");
+    let base = word.rsplit('/').next().unwrap_or(word);
+    base == "claude"
+}
+
+/// End a place's tmux session — the worktree stays (right-click "Close session").
+#[tauri::command]
+fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
+    run_op(&repo, move |p, ui| ops::cmd_close(p, ui, &[slug]))
+}
+
+/// Web URL for a place's branch on its origin remote: a /tree/<branch> link on
+/// github.com, the repo home for other hosts, None with no origin. The UI opens
+/// it via the opener plugin.
+#[tauri::command]
+fn github_url(repo: String, slug: String) -> Result<Option<String>, String> {
+    let p = Project::discover(Path::new(&repo)).map_err(|e| e.msg)?;
+    let Some(remote) = worktrees_core::git::git_out(&p.main_root, &["remote", "get-url", "origin"])
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(base) = normalize_remote(&remote) else {
+        return Ok(None);
+    };
+    let branch = p.wt_branch(&p.place_dir(&slug));
+    if branch.is_empty() || branch == "(detached)" || !base.starts_with("https://github.com/") {
+        return Ok(Some(base));
+    }
+    Ok(Some(format!("{base}/tree/{branch}")))
+}
+
+/// `git@host:owner/repo(.git)` / `ssh://git@host/…` / `http(s)://host/…` → the
+/// https web base; None for exotic remotes (local paths, other protocols).
+fn normalize_remote(remote: &str) -> Option<String> {
+    let r = remote.trim();
+    let r = r.strip_suffix(".git").unwrap_or(r);
+    if let Some(rest) = r.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        Some(format!("https://{host}/{path}"))
+    } else if let Some(rest) = r.strip_prefix("ssh://git@") {
+        // the authority may carry a port (host:2222/owner/repo) — strip it
+        let (auth, path) = rest.split_once('/')?;
+        let host = auth.split(':').next().unwrap_or(auth);
+        Some(format!("https://{host}/{path}"))
+    } else if r.starts_with("https://") || r.starts_with("http://") {
+        Some(r.to_string())
+    } else {
+        None
+    }
+}
+
+/// Open a place in the user's editor (`editor_cmd` from Settings, e.g. `code`).
+/// The command is the user's own configured tool — same trust model as ai_cmd.
+#[tauri::command]
+fn open_editor(path: String, cmd: String) -> Result<(), String> {
+    let mut it = cmd.split_whitespace();
+    let Some(prog) = it.next() else {
+        return Err("no editor configured (Settings → Editor command)".into());
+    };
+    let mut child = std::process::Command::new(prog)
+        .args(it)
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("couldn't launch '{cmd}': {e}"))?;
+    // reap in the background — a dropped Child is never waited on (zombie per click)
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
@@ -373,13 +478,25 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Terminals::default())
         .setup(|app| {
-            // Coarse live-refresh: nudge the UI to re-pull so tmux liveness / branch
-            // edits made in a bare terminal surface without a manual refresh. The UI
-            // re-runs list_workspace (in-process); cheap for a handful of projects.
+            // Live-refresh, change-gated. The tmux session set is a cheap
+            // fingerprint that shifts whenever a place is opened/closed (even from a
+            // bare terminal); emit only when it changes, so the UI's full re-pull (a
+            // git sweep) doesn't fire every few seconds. A slow safety re-emit
+            // (~30s) still catches dirty/branch drift that leaves no tmux trace.
             let handle = app.handle().clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(4));
-                let _ = handle.emit("places:changed", ());
+            std::thread::spawn(move || {
+                let mut last = worktrees_core::tmux::session_fingerprint();
+                let mut ticks: u32 = 0;
+                loop {
+                    std::thread::sleep(Duration::from_secs(3));
+                    let fp = worktrees_core::tmux::session_fingerprint();
+                    ticks += 1;
+                    if fp != last || ticks >= 10 {
+                        last = fp;
+                        ticks = 0;
+                        let _ = handle.emit("places:changed", ());
+                    }
+                }
             });
             Ok(())
         })
@@ -396,6 +513,9 @@ pub fn run() {
             switch_place,
             remove_place,
             open_place,
+            close_place,
+            github_url,
+            open_editor,
             get_settings,
             set_settings,
             term_open,

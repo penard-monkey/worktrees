@@ -28,6 +28,15 @@ fn basename(p: &str) -> String {
     Path::new(p).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string())
 }
 
+/// Recency sort key for a place: last-commit epoch, else creation epoch — the
+/// same key the human `ls` used, read from the epochs already inside the Place.
+fn recency_key(p: &Place) -> i64 {
+    match p.last_commit_epoch {
+        Some(c) if c > 0 => c,
+        _ => p.created_epoch.unwrap_or(0),
+    }
+}
+
 impl Project {
     /// git guards + roots + prefix, from `cwd`. Mirrors the top-of-script setup.
     pub fn discover(cwd: &Path) -> Result<Project> {
@@ -148,22 +157,19 @@ impl Project {
     /// serializes it via `ls_json`.
     pub fn ls(&self) -> LsJson {
         let reg = self.registrations();
-        let mut places = vec![self.place_json(&self.main_root, true, &reg)];
-        // worktrees, recency-sorted like the human ls (stable, glob-order ties)
-        let mut keyed: Vec<(i64, String)> = self
-            .worktree_dirs()
-            .into_iter()
-            .map(|d| {
-                let bepoch = self.clock.stat_birth(&d);
-                let cepoch = if reg.contains(&d) { self.commit_epoch(&d) } else { 0 };
-                let key = if cepoch > 0 { cepoch } else { bepoch };
-                (key, d)
-            })
+        // Build every place's snapshot in parallel — each place shells out to git
+        // (status/divergence/log), and summed serially this froze the app on big
+        // repos. Main first, then worktrees; recency-sort the worktrees afterwards
+        // from the epochs already inside each Place (no second git pass for the key).
+        let tasks: Vec<(String, bool)> = std::iter::once((self.main_root.clone(), true))
+            .chain(self.worktree_dirs().into_iter().map(|d| (d, false)))
             .collect();
-        keyed.sort_by(|a, b| b.0.cmp(&a.0)); // stable desc
-        for (_, d) in keyed {
-            places.push(self.place_json(&d, false, &reg));
-        }
+        let mut computed = self.place_json_par(&tasks, &reg);
+        let main = computed.remove(0);
+        computed.sort_by(|a, b| recency_key(b).cmp(&recency_key(a))); // stable desc, glob-order ties
+        let mut places = Vec::with_capacity(computed.len() + 1);
+        places.push(main);
+        places.extend(computed);
         LsJson {
             schema_version: SCHEMA_VERSION,
             repo: self.main_root.clone(),
@@ -253,6 +259,39 @@ impl Project {
             last_commit_subject: csubj,
             install_cmd: install,
             ..base
+        }
+    }
+
+    /// Compute many places with bounded fan-out. Each place shells out to git
+    /// (status / divergence / last-commit); running them concurrently turns a
+    /// sum-of-latencies into ~max. `LANES` caps concurrent git processes so a repo
+    /// with many worktrees can't thrash. Order is preserved (caller keeps main first).
+    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>) -> Vec<Place> {
+        const LANES: usize = 16;
+        let mut out = Vec::with_capacity(tasks.len());
+        for chunk in tasks.chunks(LANES) {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|(dir, is_main)| {
+                        let is_main = *is_main;
+                        s.spawn(move || self.place_json(dir, is_main, reg))
+                    })
+                    .collect();
+                for h in handles {
+                    out.push(h.join().unwrap());
+                }
+            });
+        }
+        out
+    }
+
+    /// Physical dir for a place slug; `(main)` → the main checkout.
+    pub fn place_dir(&self, slug: &str) -> String {
+        if slug == "(main)" {
+            self.main_root.clone()
+        } else {
+            format!("{}/{}", self.wt_root, slug)
         }
     }
 }
@@ -357,9 +396,18 @@ fn detect_install_cmd(dir: &str) -> Option<String> {
     }
 }
 
+/// True if a Claude Code conversation history already exists for this working
+/// dir — drives the app's auto-resume (`-r`). Same detection as the per-place
+/// `claude_session_present` field.
+pub fn claude_session_present(dir: &str) -> bool {
+    claude_has_session(&claude_dir_for(dir))
+}
+
 fn claude_dir_for(dir: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
-    let mangled: String = dir.chars().map(|c| if c == '/' || c == '.' { '-' } else { c }).collect();
+    // Claude Code names a project dir by replacing EVERY non-alphanumeric char
+    // with '-' (not just '/' and '.') — match it or paths with '_' etc. miss.
+    let mangled: String = dir.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     format!("{home}/.claude/projects/{mangled}")
 }
 
