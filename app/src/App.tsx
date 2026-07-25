@@ -190,22 +190,34 @@ function App() {
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
 
-  // hydrate persisted settings BEFORE first meaningful paint
+  // hydrate persisted settings BEFORE first meaningful paint. A pre-hydration
+  // interaction (⌘B at launch) must neither be visually reverted nor let its
+  // debounced save write a DEFAULTS-seeded object over the on-disk settings —
+  // so: record early patches, merge them over the loaded state, and gate every
+  // save on hydration having landed.
+  const hydrated = useRef(false);
+  const preHydration = useRef<Partial<Settings>>({});
   useLayoutEffect(() => {
     (async () => {
       const s = await loadSettings();
-      applySettings(s);
-      setSettings(s);
-      setLens(s.lens);
-      setCollapsed(s.collapsed ?? {});
+      const merged = { ...s, ...preHydration.current };
+      hydrated.current = true;
+      applySettings(merged);
+      setSettings(merged);
+      if (Object.keys(preHydration.current).length > 0) saveSettings(merged);
+      setLens(merged.lens);
+      setCollapsed(merged.collapsed ?? {});
     })();
   }, []);
 
   const updateSettings = (patch: Partial<Settings>) => {
     setSettings((prev) => {
-      const next = { ...prev, ...patch };
+      // resizing a hidden nav is dead UI — bring it back for live preview
+      const auto = patch.nav_width !== undefined && prev.nav_collapsed ? { nav_collapsed: false } : null;
+      const next = { ...prev, ...patch, ...auto };
       applySettings(next);
-      saveSettings(next);
+      if (hydrated.current) saveSettings(next);
+      else Object.assign(preHydration.current, patch, auto);
       return next;
     });
     if (patch.term_family !== undefined || patch.term_size !== undefined) setTermVersion((v) => v + 1);
@@ -307,10 +319,15 @@ function App() {
     setSel({ repo, slug: p.slug });
     setTimeout(() => document.querySelector<HTMLInputElement>(".note-strip")?.focus(), 60);
   };
-  const newFromBranch = (root: string, base: string) => {
-    closeCtx();
+  // the form lives in the nav — a ctx-menu path must first bring the nav back
+  const openNewForm = (root: string, base: string) => {
     setNewFor(root);
     setNewBase(base);
+    if (settings.nav_collapsed) toggleNav();
+  };
+  const newFromBranch = (root: string, base: string) => {
+    closeCtx();
+    openNewForm(root, base);
   };
   const removePlaceCtx = async (repo: string, slug: string) => {
     const key = `ctx|${repo}|${slug}`; // namespaced: never matches the topbar's key
@@ -368,7 +385,36 @@ function App() {
   const isOpen = (key: string, def: boolean) => groupOpen[key] ?? def;
   const toggleGroup = (key: string, def: boolean) =>
     setGroupOpen((g) => ({ ...g, [key]: !(g[key] ?? def) }));
-  const changeLens = (l: Lens) => { setLens(l); updateSettings({ lens: l }); };
+
+  // rail-only mode: hide the nav column, keep the rail (persisted in ui-state)
+  const toggleNav = useCallback(() => {
+    setSettings((prev) => {
+      const next = { ...prev, nav_collapsed: !prev.nav_collapsed };
+      applySettings(next);
+      if (hydrated.current) saveSettings(next);
+      else preHydration.current.nav_collapsed = next.nav_collapsed;
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey || e.key.toLowerCase() !== "b") return;
+      // Ctrl+B is the tmux prefix — let the embedded terminal keep it; ⌘B still toggles
+      if (e.ctrlKey && !e.metaKey && e.target instanceof Element && e.target.closest(".term-host")) return;
+      e.preventDefault();
+      toggleNav();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleNav]);
+
+  // lens click: collapsed → expand into that lens; active lens again → collapse (VS Code style)
+  const changeLens = (l: Lens) => {
+    if (settings.nav_collapsed) { setLens(l); updateSettings({ lens: l, nav_collapsed: false }); return; }
+    if (l === lens) { toggleNav(); return; }
+    setLens(l);
+    updateSettings({ lens: l });
+  };
 
   const q = filter.trim().toLowerCase();
   const matchPlace = (p: Place) =>
@@ -529,27 +575,37 @@ function App() {
   ];
 
   return (
-    <div className="app" style={{ gridTemplateColumns: `var(--rail-w) ${settings.nav_width}px 1fr` }}>
+    <div
+      className="app"
+      style={{ gridTemplateColumns: settings.nav_collapsed ? `var(--rail-w) 1fr` : `var(--rail-w) ${settings.nav_width}px 1fr` }}
+    >
       {/* ── activity rail ── */}
       <nav className="rail">
         {RAIL.map((r) => (
-          <button key={r.key} className={"rail-icon" + (lens === r.key ? " active" : "")} title={r.title} onClick={() => changeLens(r.key)}>
+          <button
+            key={r.key}
+            className={"rail-icon" + (lens === r.key ? (settings.nav_collapsed ? " remembered" : " active") : "")}
+            title={r.title}
+            onClick={() => changeLens(r.key)}
+          >
             {r.icon}
           </button>
         ))}
         <div className="rail-spacer" />
+        <button className="rail-icon" title={settings.nav_collapsed ? `show nav — ${lens} (⌘B)` : "hide nav (⌘B)"} onClick={toggleNav}>
+          {settings.nav_collapsed ? "»" : "«"}
+        </button>
         <button className="rail-icon" title="add project" onClick={addProject}>＋</button>
         <button className="rail-icon" title="settings (⌘,)" onClick={() => setSettingsOpen(true)}>⚙</button>
       </nav>
 
-      {/* ── nav ── */}
-      <aside className="nav">
+      {/* ── nav (kept mounted while collapsed so form drafts / scroll survive ⌘B) ── */}
+      <aside className={"nav" + (settings.nav_collapsed ? " hidden" : "")}>
         <div className="nav-head">
           <span className="nav-title">{lens === "places" ? "PLACES" : lens === "recent" ? "RECENT" : "ATTENTION"}</span>
           <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}>⌕</button>
         </div>
         <input ref={searchRef} className="search" placeholder="filter places…" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} />
-        {err && <div className="err">{err}</div>}
         {newFor && (
           <NewPlaceForm
             key={newFor + "|" + newBase}
@@ -700,6 +756,9 @@ function App() {
         )}
       </main>
 
+      {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
+      {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
+
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)} />
       {menu && <div className="menu-catch" onClick={() => setMenu(null)} />}
 
@@ -765,7 +824,7 @@ function App() {
         return (
           <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
             <div className="pop-hint">{basename(ctx.root)}</div>
-            <button className="pop-item" onClick={() => { closeCtx(); setNewFor(ctx.root); setNewBase(""); }}>New worktree…</button>
+            <button className="pop-item" onClick={() => { closeCtx(); openNewForm(ctx.root, ""); }}>New worktree…</button>
             {main && <button className="pop-item" onClick={() => enterPlace(ctx.root, main)}>Enter main ▸</button>}
             <div className="ctx-sep" />
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>

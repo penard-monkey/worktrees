@@ -69,6 +69,7 @@
   /* ── layout ── */
   --rail-w: 44px;
   --nav-w: 300px;
+  --ind: 12px; /* nav tree: one indent step (project → group → row) */
 
   /* ── radius ── */
   --r-sm: 5px;
