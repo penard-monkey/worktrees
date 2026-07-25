@@ -32,6 +32,7 @@ function reconcile(pl: Place) {
 }
 
 let dialogCount = 0;
+let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
 
 type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
@@ -160,6 +161,23 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "term_resize":
     case "term_close":
       return null;
+
+    // update check — stateful: update_cli bumps the fake CLI so the badge-clear
+    // and button-disappear transitions are exercisable in the harness
+    case "check_update":
+      return {
+        app_version: "0.2.1",
+        cli_version: mockCliVersion,
+        cli_path: mockCliVersion ? "/Users/demo/.local/bin/worktrees" : null,
+        latest: "v0.2.1",
+      };
+    case "update_cli": {
+      mockCliVersion = (args.tag as string).replace(/^v/, "");
+      return {
+        ok: true, code: 0,
+        output: `worktrees installer\n→ ${args.tag}: darwin/arm64 prebuilt\n✓ checksum verified\n✓ installed to ~/.local/bin/worktrees\nworktrees ${mockCliVersion}`,
+      };
+    }
 
     // settings — harness has no persistence; App falls back to defaults
     case "get_settings":

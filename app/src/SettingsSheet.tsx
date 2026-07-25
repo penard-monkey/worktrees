@@ -1,20 +1,53 @@
-import { useEffect } from "react";
-import type { Settings } from "./settings";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { Settings, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm } from "./settings";
+
+type CmdResult = { ok: boolean; code: number; output: string };
 
 // Right-side slide-over. Presentational: App owns the Settings state and does the
 // apply-live + persist + terminal-refit on each change. Esc / scrim closes.
+// The Version section owns its own update-run state (log/progress) locally.
 export function SettingsSheet({
   open,
   settings,
   onChange,
   onClose,
+  update,
+  cliStale,
+  cliMissing,
+  appStale,
+  onCheckUpdate,
 }: {
   open: boolean;
   settings: Settings;
   onChange: (patch: Partial<Settings>) => void;
   onClose: () => void;
+  update: UpdateInfo | null;
+  cliStale: boolean;
+  cliMissing: boolean;
+  appStale: boolean;
+  onCheckUpdate: () => Promise<void> | void;
 }) {
+  const [updating, setUpdating] = useState(false);
+  const [updateLog, setUpdateLog] = useState("");
+  const doUpdate = async () => {
+    if (!update?.latest || updating) return;
+    setUpdating(true);
+    setUpdateLog(`$ install.sh @ ${update.latest}\n`);
+    try {
+      const r = await invoke<CmdResult>("update_cli", { tag: update.latest });
+      setUpdateLog((l) => l + r.output + (r.ok ? "\n✓ done" : `\n✗ failed (exit ${r.code})`));
+    } catch (e) {
+      setUpdateLog((l) => l + `\n✗ ${String(e)}`);
+    } finally {
+      // versions re-read BEFORE re-enabling the button — a stale-enabled button
+      // in the re-check window would re-run the whole installer on a click
+      await onCheckUpdate();
+      setUpdating(false);
+    }
+  };
+  const actionable = cliStale || cliMissing;
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -84,6 +117,34 @@ export function SettingsSheet({
                 </button>
               ))}
             </div>
+          </section>
+
+          <section className="setting">
+            <label>Version{actionable ? <span className="upd-tag">{cliMissing ? "cli not installed" : "update available"}</span> : null}</label>
+            <div className="ver-rows">
+              <div className="ver-row">app <b>{update?.app_version ?? "…"}</b></div>
+              <div className="ver-row">
+                cli{" "}
+                {update?.cli_version ? (
+                  <><b>{update.cli_version}</b> <span className="ver-path" title={update.cli_path ?? ""}>{update.cli_path}</span></>
+                ) : (
+                  <i>not installed</i>
+                )}
+              </div>
+              <div className="ver-row">latest {update?.latest ? <b>{update.latest}</b> : <i>unknown (offline?)</i>}</div>
+            </div>
+            {appStale && update?.latest && (
+              <div className="hint">app {update.app_version} · latest {update.latest} — rebuild/download to update the app itself</div>
+            )}
+            <div className="ver-actions">
+              <button className="ctrl sm" onClick={onCheckUpdate}>Check for updates</button>
+              {actionable && update?.latest && (
+                <button className="ctrl sm" disabled={updating} onClick={doUpdate}>
+                  {updating ? "Updating…" : `${cliMissing ? "Install" : "Update"} CLI → ${update.latest}`}
+                </button>
+              )}
+            </div>
+            {updateLog && <pre className="update-log">{updateLog}</pre>}
           </section>
 
           <section className="setting">

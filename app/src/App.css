@@ -289,6 +289,33 @@ button { cursor: pointer; }
 }
 .setting .hint { font-size: var(--fs-micro); color: var(--txt-mute); margin-top: 2px; }
 
+/* version / update section (Settings) + rail badge */
+.rail-icon.upd { position: relative; }
+.rail-icon.upd::after {
+  content: ""; position: absolute; top: 4px; right: 4px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 4px var(--accent);
+}
+.upd-tag {
+  margin-left: var(--s2); padding: 1px var(--s2); border-radius: var(--r-sm);
+  font-size: var(--fs-micro); font-weight: var(--fw-bold); text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.ver-rows { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-label); color: var(--txt); }
+.ver-row b { color: var(--txt-hi); }
+.ver-path {
+  margin-left: var(--s1); font-family: var(--term-family); font-size: var(--fs-micro);
+  color: var(--txt-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ver-actions { display: flex; gap: var(--s2); margin-top: var(--s2); }
+.update-log {
+  margin: var(--s2) 0 0; padding: var(--s2); max-height: 9rem; overflow: auto;
+  background: var(--bg-abyss); border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-family: var(--term-family); font-size: var(--fs-micro); color: var(--txt);
+  white-space: pre-wrap; word-break: break-all;
+}
+
 /* new-worktree form pinned at the top of the nav (visible in every lens) */
 .nav-newform {
   margin: 0 var(--s2) var(--s2);
