@@ -38,6 +38,8 @@ button { cursor: pointer; }
   content: ""; position: absolute; left: -6px; top: 6px; bottom: 6px;
   width: 2px; border-radius: var(--r-full); background: var(--accent);
 }
+/* nav collapsed: the last lens stays faintly marked so re-expand is predictable */
+.rail-icon.remembered { color: var(--txt); }
 
 /* ── nav ── */
 .nav {
@@ -46,6 +48,8 @@ button { cursor: pointer; }
   background: var(--bg-tree);
   border-right: 1px solid var(--line);
 }
+/* rail-only mode: hidden, NOT unmounted — form drafts + scroll survive ⌘B */
+.nav.hidden { display: none; }
 .nav-head {
   display: flex; align-items: center; gap: var(--s2);
   padding: var(--s3) var(--s3) var(--s2);
@@ -73,6 +77,14 @@ button { cursor: pointer; }
   color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
   border-radius: var(--r-md); font-size: var(--fs-meta);
   white-space: pre-wrap; word-break: break-word;
+}
+/* app-level error toast — the nav can be hidden, errors can't be */
+.err-float {
+  position: fixed; left: calc(var(--rail-w) + var(--s3)); bottom: var(--s3);
+  z-index: 80; max-width: 440px; margin: 0; cursor: pointer;
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel));
+  box-shadow: var(--shadow-float);
+  animation: pop var(--dur-slow) var(--ease);
 }
 
 .nav-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: var(--s2); }
@@ -135,14 +147,22 @@ button { cursor: pointer; }
 .group { margin-top: var(--s1); }
 .group-h {
   display: flex; align-items: center; gap: var(--s2);
-  padding: 3px var(--s3); font-size: var(--fs-meta);
+  padding: 3px var(--s3) 3px calc(var(--s3) + var(--ind)); font-size: var(--fs-meta);
   text-transform: uppercase; letter-spacing: 0.06em; color: var(--txt-dim); cursor: pointer;
 }
 .group-h:hover { color: var(--txt); }
 .group-h .count { margin-left: auto; color: var(--txt-mute); text-transform: none; letter-spacing: 0; }
 .dormant-h { color: var(--txt-mute); }
 .subgroup { margin-top: 2px; }
-.subdiv { padding: 2px var(--s3) 2px var(--s5); font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--txt-mute); }
+.subdiv { padding: 2px var(--s3) 2px calc(var(--s3) + var(--ind) * 2); font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--txt-mute); }
+
+/* tree indentation — content indents per depth; the row BOX stays full width so
+ * hover/selection targets don't shrink. Depths: project-h(0) → main row +
+ * group headers(1) → group rows(2) → dormant subdiv(2) → dormant rows(3). */
+.project > .places .row { padding-left: calc(var(--row-pad-h) + var(--ind)); }
+.group > .places .row { padding-left: calc(var(--row-pad-h) + var(--ind) * 2); }
+/* depth-3 (dormant rows) takes a half-step: full 3× starves slugs at min nav width */
+.subgroup > .places .row { padding-left: calc(var(--row-pad-h) + var(--ind) * 2.5); }
 
 /* ── place row (3-col grid → glyphs can never collide) ── */
 .places { list-style: none; margin: 0; padding: 0 var(--s2); }
