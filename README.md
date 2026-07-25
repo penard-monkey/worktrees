@@ -47,6 +47,33 @@ git clone https://github.com/penard-monkey/worktrees && cd worktrees && make ins
 Re-running the installer upgrades. `install.sh --uninstall` removes the binary
 (your repos' worktrees and tmux sessions are untouched).
 
+## Updating
+
+Re-running the installer **is** the updater — it resolves the latest release,
+prints the old → new version, verifies the checksum, and replaces the binary
+in place:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | bash
+worktrees --version   # confirm
+```
+
+Roll back (or hold) a version by pinning the release tag:
+
+```sh
+WORKTREES_INSTALL_VERSION=v0.1.0 \
+  curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | bash
+```
+
+From a clone instead: `git pull && make install` (note: `make install` symlinks
+the clone's release build — later `cargo build`s in that clone update it too.
+For a frozen copy, `install -m 755 target/release/worktrees ~/.local/bin/worktrees`).
+
+Updates never touch your repos' state: worktrees under `.worktrees/`, the
+declared store (`.worktrees.places.json`, schema-versioned), tmux sessions, and
+`~/.config/worktrees/config` all survive binary swaps. Running sessions keep
+running — the CLI attaches to tmux, it doesn't own it.
+
 **Requires:** git ≥ 2.23. tmux ≥ 1.9 recommended (`new` degrades to `--no-tmux`
 without it; `open` needs it). Prebuilt binaries for macOS + Linux (x86_64/arm64);
 building from source needs a Rust toolchain.
