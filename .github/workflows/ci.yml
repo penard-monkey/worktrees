@@ -64,3 +64,35 @@ jobs:
           make install BINDIR="$RUNNER_TEMP/xbin"
           "$RUNNER_TEMP/xbin/worktrees" --version
           "$RUNNER_TEMP/xbin/worktrees" help >/dev/null
+
+  # Tauri app crate ("P4"): frontend typecheck + build (dist feeds tauri-build),
+  # then the Rust shell linking worktrees-core. rust-cache because the tauri dep
+  # tree is the one genuinely slow compile in the workspace.
+  app:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: webkit + gtk deps (ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - uses: Swatinem/rust-cache@v2
+      - name: frontend — install, typecheck (tsc), build
+        run: |
+          pnpm -C app install --frozen-lockfile
+          pnpm -C app build
+      - name: cargo build -p app
+        run: cargo build -p app --locked
