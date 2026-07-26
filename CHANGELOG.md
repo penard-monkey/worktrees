@@ -5,6 +5,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-25
+
+The self-updating release: from here on, updates are one click inside the app.
+
+### Added
+- **App self-update**: releases ship minisign-SIGNED app bundles + a
+  `latest.json` updater manifest; Settings → Version gains "Update app → vX"
+  (verify → download → swap → relaunch) next to the existing "Update CLI"
+  button. The ⚙ badge covers both.
+- The curl installer now OFFERS the desktop app on macOS (`worktrees.app` →
+  /Applications, checksum-verified, quarantine-stripped on explicit opt-in;
+  `WORKTREES_INSTALL_APP=1` / `--with-app` for non-interactive). `make
+  install-app` builds + installs from a clone.
+- Persistent app log (`~/Library/Logs/net.casadelvalle.worktrees/app.log`):
+  every op result, terminal/updater failures, frontend errors, panics, and a
+  startup line with version + resolved PATH. Settings → Logs opens the folder
+  or tails it. "Check for updates" now acknowledges its result.
+
+### Fixed
+- GUI-launched apps inherited launchd's bare PATH (no homebrew → no tmux):
+  every place looked dead in the installed .app. The real PATH is resolved
+  from the login shell at startup.
+- Nav tree: nesting is now DRAWN — per-level plumb-line rails with a lit
+  ancestor trail on selection, the (main) row's dot in the project header's
+  dot column, a recessed Dormant band, and a tighter indent (rails carry the
+  structure, slugs keep their width).
+- Settings → Logs "Open folder" was silently rejected by the capability
+  system (opener:default has no open-path); now reveals app.log in Finder.
+
 ## [0.2.0] - 2026-07-25
 
 The Rust release: one compiled engine behind both the CLI and a desktop app.
