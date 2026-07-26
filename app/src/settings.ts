@@ -17,6 +17,11 @@ export type Settings = {
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   lens: "places" | "recent" | "attention";
   collapsed: Record<string, boolean>; // per-project-root collapse
+  hidden_tiers: string[]; // lifecycle tiers hidden in the Places lens (active/idle/dormant)
+  sort_mode: "recent" | "alpha" | "manual";
+  sort_dir: "asc" | "desc";
+  manual_order: Record<string, string[]>; // repo root -> slug order (Manual sort)
+  last_seen_version: string; // release-notes gate: "" = fresh install (record silently)
 };
 
 export const DEFAULTS: Settings = {
@@ -32,6 +37,11 @@ export const DEFAULTS: Settings = {
   editor_cmd: "code",
   lens: "places",
   collapsed: {},
+  hidden_tiers: [],
+  sort_mode: "recent",
+  sort_dir: "desc",
+  manual_order: {},
+  last_seen_version: "",
 };
 
 /** check_update result — versions the Settings "Version" section renders. */
