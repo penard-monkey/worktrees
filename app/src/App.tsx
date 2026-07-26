@@ -183,12 +183,12 @@ function App() {
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
-  // Badge/button = CLI-ACTIONABLE only (the button installs the CLI; the app
-  // binary can't be updated by it — app drift renders as a passive note).
+  // Badge = actionable updates. CLI via the pinned-tag installer; the app via
+  // tauri-plugin-updater (signed bundles) — both one click in Settings now.
   const cliStale = !!(upd?.latest && upd.cli_version && vnewer(upd.latest, upd.cli_version));
   const cliMissing = !!(upd?.latest && !upd.cli_version);
   const appStale = !!(upd?.latest && vnewer(upd.latest, upd.app_version));
-  const updateAvail = cliStale || cliMissing;
+  const updateAvail = cliStale || cliMissing || appStale;
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   // every surfaced error also lands in the app log (Settings → Logs)

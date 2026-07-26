@@ -137,6 +137,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       console.info("[mock] opener:", cmd, args);
       return null;
 
+    // updater/process — no signed updates in the harness; check() sees "current"
+    case "plugin:updater|check":
+      console.info("[mock] updater check");
+      return null;
+    case "plugin:process|restart":
+      console.info("[mock] relaunch requested");
+      return null;
+
     // app log — mirror to the browser console in the harness
     case "log_event":
       console.info(`[mock applog ${args.level}]`, args.msg);

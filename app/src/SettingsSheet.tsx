@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import type { Settings, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm } from "./settings";
 
@@ -49,6 +51,32 @@ export function SettingsSheet({
     }
   };
   const actionable = cliStale || cliMissing;
+
+  // app self-update: signed bundle via tauri-plugin-updater (latest.json
+  // endpoint on the release). Verify → download → swap → relaunch.
+  const [appUpdating, setAppUpdating] = useState(false);
+  const doAppUpdate = async () => {
+    if (appUpdating) return;
+    setAppUpdating(true);
+    setUpdateLog("checking for a signed app update…\n");
+    try {
+      const up = await checkAppUpdate();
+      if (!up) {
+        setUpdateLog((l) => l + "no newer signed build published.");
+        return;
+      }
+      setUpdateLog((l) => l + `downloading app ${up.version}…\n`);
+      await up.downloadAndInstall();
+      setUpdateLog((l) => l + "installed — relaunching…");
+      await relaunch();
+    } catch (e) {
+      const m = `app update failed: ${String(e)}`;
+      setUpdateLog((l) => l + `\n✗ ${m}`);
+      invoke("log_event", { level: "error", msg: m }).catch(() => {});
+    } finally {
+      setAppUpdating(false);
+    }
+  };
 
   // logs (app.log — backend op results, frontend errors, panics)
   const [logPath, setLogPath] = useState("");
@@ -163,14 +191,16 @@ export function SettingsSheet({
               </div>
               <div className="ver-row">latest {update?.latest ? <b>{update.latest}</b> : <i>unknown (offline?)</i>}</div>
             </div>
-            {appStale && update?.latest && (
-              <div className="hint">app {update.app_version} · latest {update.latest} — rebuild/download to update the app itself</div>
-            )}
             <div className="ver-actions">
               <button className="ctrl sm" onClick={onCheckUpdate}>Check for updates</button>
               {actionable && update?.latest && (
-                <button className="ctrl sm" disabled={updating} onClick={doUpdate}>
+                <button className="ctrl sm" disabled={updating || appUpdating} onClick={doUpdate}>
                   {updating ? "Updating…" : `${cliMissing ? "Install" : "Update"} CLI → ${update.latest}`}
+                </button>
+              )}
+              {appStale && update?.latest && (
+                <button className="ctrl sm" disabled={appUpdating || updating} onClick={doAppUpdate}>
+                  {appUpdating ? "Updating app…" : `Update app → ${update.latest}`}
                 </button>
               )}
             </div>
