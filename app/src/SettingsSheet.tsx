@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import type { Settings, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm } from "./settings";
 
@@ -48,6 +49,27 @@ export function SettingsSheet({
     }
   };
   const actionable = cliStale || cliMissing;
+
+  // logs (app.log — backend op results, frontend errors, panics)
+  const [logPath, setLogPath] = useState("");
+  const [logTail, setLogTail] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    invoke<{ dir: string; file: string }>("log_info").then((i) => setLogPath(i.file)).catch(() => {});
+  }, [open]);
+  const openLogsDir = async () => {
+    try {
+      const i = await invoke<{ dir: string; file: string }>("log_info");
+      await openPath(i.dir);
+    } catch { /* harness */ }
+  };
+  const viewLogTail = async () => {
+    try {
+      setLogTail((await invoke<string>("log_tail", { lines: 200 })) || "(empty)");
+    } catch (e) {
+      setLogTail(String(e));
+    }
+  };
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -145,6 +167,18 @@ export function SettingsSheet({
               )}
             </div>
             {updateLog && <pre className="update-log">{updateLog}</pre>}
+          </section>
+
+          <section className="setting">
+            <label>Logs</label>
+            <div className="ver-rows">
+              <div className="ver-row"><span className="ver-path" title={logPath}>{logPath || "…"}</span></div>
+            </div>
+            <div className="ver-actions">
+              <button className="ctrl sm" onClick={openLogsDir}>Open folder</button>
+              <button className="ctrl sm" onClick={viewLogTail}>{logTail ? "Refresh tail" : "View tail"}</button>
+            </div>
+            {logTail && <pre className="update-log">{logTail}</pre>}
           </section>
 
           <section className="setting">

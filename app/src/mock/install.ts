@@ -133,8 +133,18 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return null;
     case "plugin:opener|open_url":
     case "plugin:opener|reveal_item_in_dir":
+    case "plugin:opener|open_path":
       console.info("[mock] opener:", cmd, args);
       return null;
+
+    // app log — mirror to the browser console in the harness
+    case "log_event":
+      console.info(`[mock applog ${args.level}]`, args.msg);
+      return null;
+    case "log_info":
+      return { dir: "/Users/demo/Library/Logs/net.casadelvalle.worktrees", file: "/Users/demo/Library/Logs/net.casadelvalle.worktrees/app.log" };
+    case "log_tail":
+      return "2026-07-25 20:00:01Z [info] startup v0.2.1 PATH=/usr/bin:...\n2026-07-25 20:00:09Z [info] open messaging fresh=false ok repo=/Users/demo/workspace/cdv\n2026-07-25 20:01:12Z [warn] close api rc=1 repo=/Users/demo/workspace/cdv: no live session";
 
     case "switch_place":
       editPlace(args.repo, args.slug, (p) => { p.branch = args.branch; });
