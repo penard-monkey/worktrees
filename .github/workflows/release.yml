@@ -75,7 +75,9 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
-      - name: build the app bundle
+      - name: build the app bundle (signed updater artifacts)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           rustup target add "${{ matrix.target }}"
           pnpm -C app install --frozen-lockfile
@@ -84,7 +86,11 @@ jobs:
         run: |
           mkdir -p dist
           asset="worktrees-app-${{ matrix.target }}.app.tar.gz"
-          tar -czf "dist/$asset" -C "target/${{ matrix.target }}/release/bundle/macos" worktrees.app
+          bundle="target/${{ matrix.target }}/release/bundle/macos"
+          # createUpdaterArtifacts already produced the tar.gz + minisign .sig —
+          # one artifact serves both install.sh and the in-app updater
+          cp "$bundle/worktrees.app.tar.gz" "dist/$asset"
+          cp "$bundle/worktrees.app.tar.gz.sig" "dist/$asset.sig"
           cd dist
           shasum -a 256 "$asset" > "$asset.sha256"
           cat "$asset.sha256"
@@ -106,6 +112,19 @@ jobs:
           find art -type f -name 'worktrees-*' ! -name '*.sha256' -exec cp {} dist/ \;
           cat art/*/*.sha256 > dist/checksums.txt
           echo "── checksums ──"; cat dist/checksums.txt
+      - name: updater manifest (latest.json — the in-app updater's endpoint)
+        run: |
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          arm="worktrees-app-aarch64-apple-darwin.app.tar.gz"
+          x64="worktrees-app-x86_64-apple-darwin.app.tar.gz"
+          jq -n \
+            --arg version "${GITHUB_REF_NAME#v}" \
+            --arg armurl "$base/$arm" --arg armsig "$(cat "art/worktrees-app-aarch64-apple-darwin/$arm.sig")" \
+            --arg x64url "$base/$x64" --arg x64sig "$(cat "art/worktrees-app-x86_64-apple-darwin/$x64.sig")" \
+            '{version: $version, pub_date: (now | todate), platforms: {
+               "darwin-aarch64": {url: $armurl, signature: $armsig},
+               "darwin-x86_64": {url: $x64url, signature: $x64sig}}}' > dist/latest.json
+          cat dist/latest.json
       - name: changelog notes for this tag
         run: |
           v="${GITHUB_REF_NAME#v}"
@@ -115,5 +134,5 @@ jobs:
       - name: create GitHub release
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/worktrees-* dist/checksums.txt \
+          gh release create "$GITHUB_REF_NAME" dist/worktrees-* dist/checksums.txt dist/latest.json \
             --title "worktrees $GITHUB_REF_NAME" --notes-file dist/notes.md

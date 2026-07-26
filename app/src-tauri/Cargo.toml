@@ -28,4 +28,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # PTY host: attach to a live tmux session (never own a shell). See DESIGN.md P1.
 portable-pty = "0.9"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
