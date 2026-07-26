@@ -37,6 +37,18 @@ The installer fetches the prebuilt binary for your platform (macOS/Linux,
 x86_64/arm64); with no match, or `WORKTREES_INSTALL_FROM_SOURCE=1`, it builds
 from source with `cargo`.
 
+On macOS it also **offers the desktop app** (`worktrees.app` → /Applications,
+checksum-verified; the unsigned bundle's quarantine attr is stripped on your
+explicit opt-in). Non-interactive runs skip the prompt — opt in/out explicitly:
+
+```sh
+WORKTREES_INSTALL_APP=1 \
+  curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | bash
+```
+
+From a clone, `make install-app` builds the app locally and installs it to
+/Applications (no signing or quarantine involved).
+
 Or clone and build (`make install` compiles the release binary and symlinks it —
 `git pull && make install` upgrades):
 
@@ -65,9 +77,13 @@ WORKTREES_INSTALL_VERSION=v0.1.0 \
   curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | bash
 ```
 
+The same re-run updates the desktop app when you opt in (`WORKTREES_INSTALL_APP=1`
+or answer the prompt); quit + reopen the app to pick up the new version.
+
 From a clone instead: `git pull && make install` (note: `make install` symlinks
 the clone's release build — later `cargo build`s in that clone update it too.
 For a frozen copy, `install -m 755 target/release/worktrees ~/.local/bin/worktrees`).
+App from a clone: `git pull && make install-app`.
 
 Updates never touch your repos' state: worktrees under `.worktrees/`, the
 declared store (`.worktrees.places.json`, schema-versioned), tmux sessions, and

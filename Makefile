@@ -8,7 +8,7 @@ BINDIR ?= $(HOME)/.local/bin
 BATS   := ./test/lib/bats-core/bin/bats
 RELEASE_BIN := $(CURDIR)/target/release/worktrees
 
-.PHONY: build build-debug install install-copy uninstall lint \
+.PHONY: build build-debug install install-copy install-app uninstall lint \
         test test-real-tmux check release
 
 build:
@@ -27,6 +27,15 @@ install-copy: build
 	mkdir -p $(BINDIR)
 	install -m 0755 $(RELEASE_BIN) $(BINDIR)/worktrees
 	@echo "installed (copy): $(BINDIR)/worktrees"
+
+# Build the Tauri desktop app + install to /Applications (macOS; local builds
+# aren't quarantined, so no signing needed). App updates = git pull + this.
+install-app:
+	@[ "$$(uname -s)" = Darwin ] || { echo "install-app is macOS-only"; exit 1; }
+	pnpm --dir app tauri build
+	rm -rf /Applications/worktrees.app
+	ditto "$(CURDIR)/target/release/bundle/macos/worktrees.app" /Applications/worktrees.app
+	@echo "installed: /Applications/worktrees.app ($$(plutil -extract CFBundleShortVersionString raw /Applications/worktrees.app/Contents/Info.plist))"
 
 uninstall:
 	rm -f $(BINDIR)/worktrees
