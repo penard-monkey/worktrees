@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { Settings, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm } from "./settings";
 
@@ -57,11 +57,19 @@ export function SettingsSheet({
     if (!open) return;
     invoke<{ dir: string; file: string }>("log_info").then((i) => setLogPath(i.file)).catch(() => {});
   }, [open]);
+  // reveal (not open-path): opener:default only grants open-url +
+  // reveal-item-in-dir — openPath was silently rejected by the capability
+  // system. Reveal also highlights app.log in Finder. Failures are NEVER
+  // swallowed: they land in the tail area AND the log itself.
   const openLogsDir = async () => {
     try {
       const i = await invoke<{ dir: string; file: string }>("log_info");
-      await openPath(i.dir);
-    } catch { /* harness */ }
+      await revealItemInDir(i.file);
+    } catch (e) {
+      const m = `open logs folder failed: ${String(e)}`;
+      setLogTail(m);
+      invoke("log_event", { level: "error", msg: m }).catch(() => {});
+    }
   };
   const viewLogTail = async () => {
     try {
