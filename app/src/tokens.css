@@ -69,7 +69,19 @@
   /* ── layout ── */
   --rail-w: 44px;
   --nav-w: 300px;
-  --ind: 12px; /* nav tree: one indent step (project → group → row) */
+  --ind: 10px; /* nav tree: one indent step — rails carry the structure, so the
+                  step can stay tight and nested slugs keep their width */
+  /* nav tree plumb lines (ancestor spines) — rail x = each level's caret center */
+  --guide: #272c40;
+  --guide-hot: #3d4566;
+  --guide-sel: rgba(122, 162, 247, 0.5);
+  --gx1: calc(var(--s3) + 5px); /* project caret center */
+  --gx2: calc(var(--gx1) + var(--ind)); /* group caret center */
+  --gx3: calc(var(--s3) + var(--ind) * 2 + 2px); /* under dormant subdiv label */
+  /* the project header's dot column (caret 10px + gap): the (main) row's dot
+     sits in the SAME column as the project's rollup dot — parent and child
+     status dots stack exactly */
+  --dotcol: calc(var(--s3) + 10px + var(--s2));
 
   /* ── radius ── */
   --r-sm: 5px;

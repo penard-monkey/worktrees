@@ -20,6 +20,93 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
 use worktrees_core::{ops, store, sysclock, Project, Ui};
 
+// ── app log ──────────────────────────────────────────────────────────────────
+// Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
+// <identifier>/app.log — Console.app finds it). Deliberately AppHandle-free so
+// the panic hook can use it. Every op failure, frontend error, and panic lands
+// here; Settings → Logs opens the folder / tails it.
+
+const APP_IDENT: &str = "net.casadelvalle.worktrees";
+
+fn log_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if cfg!(target_os = "macos") {
+        PathBuf::from(home).join("Library/Logs").join(APP_IDENT)
+    } else {
+        // XDG-ish fallback (linux dev)
+        PathBuf::from(home).join(".local/share").join(APP_IDENT).join("logs")
+    }
+}
+
+fn log_file() -> PathBuf {
+    log_dir().join("app.log")
+}
+
+/// epoch → "YYYY-MM-DD HH:MM:SS" UTC (civil-from-days; avoids a chrono dep).
+fn fmt_utc(epoch: i64) -> String {
+    let (days, secs) = (epoch.div_euclid(86_400), epoch.rem_euclid(86_400));
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    // Howard Hinnant's civil_from_days
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mth <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mth:02}-{d:02} {h:02}:{m:02}:{s:02}")
+}
+
+fn applog(level: &str, msg: &str) {
+    let dir = log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = log_file();
+    // single-slot rotation at ~1MB so the log can't grow unbounded
+    if std::fs::metadata(&path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+        let _ = std::fs::rename(&path, dir.join("app.log.1"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = fmt_utc(sysclock::now_epoch());
+        let _ = writeln!(f, "{ts}Z [{level}] {msg}");
+    }
+}
+
+#[derive(Serialize)]
+struct LogInfo {
+    dir: String,
+    file: String,
+}
+
+#[tauri::command]
+async fn log_info() -> Result<LogInfo, String> {
+    Ok(LogInfo { dir: log_dir().to_string_lossy().into(), file: log_file().to_string_lossy().into() })
+}
+
+/// Frontend errors land in the same file, tagged `ui:`.
+#[tauri::command]
+async fn log_event(level: String, msg: String) -> Result<(), String> {
+    let lv = match level.as_str() {
+        "error" | "warn" | "info" => level.as_str(),
+        _ => "info",
+    };
+    let mut m = msg;
+    m.truncate(4000);
+    applog(lv, &format!("ui: {m}"));
+    Ok(())
+}
+
+#[tauri::command]
+async fn log_tail(lines: Option<usize>) -> Result<String, String> {
+    let n = lines.unwrap_or(200).min(2000);
+    let text = std::fs::read_to_string(log_file()).unwrap_or_default();
+    let all: Vec<&str> = text.lines().collect();
+    let start = all.len().saturating_sub(n);
+    Ok(all[start..].join("\n"))
+}
+
 // ── state: core-derived places + declared overlay + reconciled lifecycle ─────
 
 /// One repo's merged snapshot: core's live `ls` + DECLARED store overlay +
@@ -197,10 +284,18 @@ struct CmdResult {
     output: String,
 }
 
-fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(repo: &str, f: F) -> Result<CmdResult, String> {
-    let project = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
+fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F) -> Result<CmdResult, String> {
+    let project = Project::discover(Path::new(repo)).map_err(|e| {
+        applog("error", &format!("{op} repo={repo}: discover failed: {}", e.msg));
+        e.msg
+    })?;
     let mut ui = CaptureUi::default();
     let code = f(&project, &mut ui);
+    if code == 0 {
+        applog("info", &format!("{op} ok repo={repo}"));
+    } else {
+        applog("warn", &format!("{op} rc={code} repo={repo}: {}", ui.lines.join(" | ")));
+    }
     Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n") })
 }
 
@@ -213,6 +308,7 @@ async fn new_place(
     base: Option<String>,
     name: Option<String>,
 ) -> Result<CmdResult, String> {
+    let branch_log = branch.clone();
     let mut args: Vec<String> = vec![branch];
     if let Some(b) = base.filter(|s| !s.is_empty()) {
         args.push(b);
@@ -222,7 +318,7 @@ async fn new_place(
         args.push(n);
     }
     args.push("--no-attach".into());
-    run_op(&repo, |p, ui| ops::cmd_new(p, ui, &args))
+    run_op(&format!("new {branch_log}"), &repo, |p, ui| ops::cmd_new(p, ui, &args))
 }
 
 /// Move a place to another branch (`switch <slug> <branch> [base]`). `-y` skips
@@ -234,12 +330,13 @@ async fn switch_place(
     branch: String,
     base: Option<String>,
 ) -> Result<CmdResult, String> {
+    let slug_log = slug.clone();
     let mut args: Vec<String> = vec![slug, branch];
     if let Some(b) = base.filter(|s| !s.is_empty()) {
         args.push(b);
     }
     args.push("-y".into());
-    run_op(&repo, |p, ui| ops::cmd_switch(p, ui, &args))
+    run_op(&format!("switch {slug_log}"), &repo, |p, ui| ops::cmd_switch(p, ui, &args))
 }
 
 /// Enter a place: ensure its tmux session exists (create if down) WITHOUT attaching
@@ -248,7 +345,7 @@ async fn switch_place(
 /// targets worktrees under `.worktrees/`.
 #[tauri::command]
 async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<CmdResult, String> {
-    run_op(&repo, move |p, ui| {
+    run_op(&format!("open {slug} fresh={}", fresh.unwrap_or(false)), &repo, move |p, ui| {
         // Auto-resume: if this place already has a Claude Code conversation on
         // disk, launch the AI pane with the resume arg (-r) instead of cold.
         // `fresh` (right-click "Open fresh") skips it. Gated on the configured
@@ -290,7 +387,7 @@ fn ai_is_claude() -> bool {
 /// End a place's tmux session — the worktree stays (right-click "Close session").
 #[tauri::command]
 async fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
-    run_op(&repo, move |p, ui| ops::cmd_close(p, ui, &[slug]))
+    run_op(&format!("close {slug}"), &repo, move |p, ui| ops::cmd_close(p, ui, &[slug]))
 }
 
 // ── update check (Settings → Version) ────────────────────────────────────────
@@ -456,8 +553,12 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
         .args(["-fsSL", "--connect-timeout", "10", "--max-time", "120", "-o"])
         .arg(&script)
         .arg(&url);
-    let f = run_deadline(fetch, 150).map_err(|e| format!("installer download failed: {e}"))?;
+    let f = run_deadline(fetch, 150).map_err(|e| {
+        applog("error", &format!("update_cli {tag}: installer download failed: {e}"));
+        format!("installer download failed: {e}")
+    })?;
     if !f.status.success() {
+        applog("error", &format!("update_cli {tag}: installer download rc={}", f.status.code().unwrap_or(-1)));
         let _ = std::fs::remove_file(&script);
         return Ok(CmdResult {
             ok: false,
@@ -474,13 +575,19 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
             run.env("WORKTREES_INSTALL_DIR", parent);
         }
     }
-    let out = run_deadline(run, 600).map_err(|e| format!("installer run failed: {e}"))?;
+    let out = run_deadline(run, 600).map_err(|e| {
+        applog("error", &format!("update_cli {tag}: installer run failed: {e}"));
+        format!("installer run failed: {e}")
+    })?;
     let _ = std::fs::remove_file(&script);
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
 
     // the real success signal: the resolved CLI now reports the new version
     let verified = cli_binary().map(|(_, v)| format!("v{v}") == tag).unwrap_or(false);
+    if !out.status.success() || !verified {
+        applog("warn", &format!("update_cli {tag}: rc={} verified={verified}", out.status.code().unwrap_or(-1)));
+    }
     if out.status.success() && !verified {
         text.push_str("\n! installer exited 0 but the resolved CLI does not report the new version — check PATH shadowing.");
     }
@@ -560,6 +667,7 @@ async fn remove_place(
     del_branch: bool,
     force: bool,
 ) -> Result<CmdResult, String> {
+    let slug_log = slug.clone();
     let mut args: Vec<String> = vec![slug, "-y".into()];
     if del_branch {
         args.push("--branch".into());
@@ -567,7 +675,7 @@ async fn remove_place(
     if force {
         args.push("--force".into());
     }
-    run_op(&repo, |p, ui| ops::cmd_rm(p, ui, &args))
+    run_op(&format!("rm {slug_log}"), &repo, |p, ui| ops::cmd_rm(p, ui, &args))
 }
 
 // ── PTY host: attach to a live tmux session ─────────────────────────────────
@@ -606,7 +714,10 @@ async fn term_open(
     cmd.args(["attach-session", "-t", &session]);
     cmd.env("TERM", "xterm-256color");
 
-    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+        applog("error", &format!("term_open {session}: tmux attach spawn failed: {e}"));
+        e.to_string()
+    })?;
     drop(pair.slave); // parent doesn't need the slave handle after spawn
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -669,8 +780,51 @@ async fn term_close(id: u32, terms: State<'_, Terminals>) -> Result<(), String> 
     Ok(())
 }
 
+/// GUI-launched apps inherit launchd's bare PATH (/usr/bin:/bin:…) — no
+/// homebrew, no ~/.local/bin — so the engine's tmux/git shell-outs fail even
+/// though they work in every terminal (tmux is homebrew-installed: every place
+/// looks dead and Enter errors). Resolve the user's real PATH from their login
+/// shell once at startup (marker-wrapped so chatty profiles can't corrupt it;
+/// deadline-guarded so a hung profile can't block launch), falling back to
+/// appending the usual install dirs.
+fn fixup_gui_path() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let mut cmd = std::process::Command::new(&shell);
+    cmd.args(["-lc", r#"printf '\n__WTPATH__%s' "$PATH""#]);
+    let from_shell = run_deadline(cmd, 5)
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .rsplit("__WTPATH__")
+                .next()
+                .map(|p| p.trim().to_string())
+        })
+        .filter(|p| !p.is_empty());
+    let path = match from_shell {
+        Some(p) => format!("{p}:{current}"), // dups harmless; current kept as safety net
+        None => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}/.local/bin:{home}/bin:/opt/homebrew/bin:/usr/local/bin:{current}")
+        }
+    };
+    std::env::set_var("PATH", path);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // panics land in the log too (chained: the default stderr hook still runs)
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        applog("panic", &info.to_string());
+        prev_hook(info);
+    }));
+    fixup_gui_path();
+    applog(
+        "info",
+        &format!("startup v{} PATH={}", env!("CARGO_PKG_VERSION"), std::env::var("PATH").unwrap_or_default()),
+    );
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -715,6 +869,9 @@ pub fn run() {
             github_url,
             check_update,
             update_cli,
+            log_info,
+            log_event,
+            log_tail,
             open_editor,
             get_settings,
             set_settings,

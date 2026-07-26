@@ -191,12 +191,19 @@ function App() {
   const updateAvail = cliStale || cliMissing;
   const searchRef = useRef<HTMLInputElement | null>(null);
 
+  // every surfaced error also lands in the app log (Settings → Logs)
+  const fail = useCallback((e: unknown) => {
+    const m = String(e);
+    setErr(m);
+    invoke("log_event", { level: "error", msg: m }).catch(() => {});
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       setErr("");
       setWs(await invoke<Workspace>("list_workspace"));
     } catch (e) {
-      setErr(String(e));
+      fail(e);
     }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -206,6 +213,20 @@ function App() {
     const un = listen("places:changed", () => refresh());
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
+
+  // uncaught frontend errors → app log (the "it just didn't respond" killers)
+  useEffect(() => {
+    const onErr = (e: ErrorEvent) =>
+      invoke("log_event", { level: "error", msg: `window: ${e.message} @ ${e.filename}:${e.lineno}` }).catch(() => {});
+    const onRej = (e: PromiseRejectionEvent) =>
+      invoke("log_event", { level: "error", msg: `unhandledrejection: ${String(e.reason)}` }).catch(() => {});
+    window.addEventListener("error", onErr);
+    window.addEventListener("unhandledrejection", onRej);
+    return () => {
+      window.removeEventListener("error", onErr);
+      window.removeEventListener("unhandledrejection", onRej);
+    };
+  }, []);
 
   // update check: once shortly after launch (delayed off the startup path);
   // manual re-check from Settings. Offline → latest stays null, no nagging.
@@ -268,7 +289,7 @@ function App() {
   }, [ctx, ctxPlace, ws]);
 
   const mutate = async (p: Promise<unknown>) => {
-    try { await p; await refresh(); } catch (e) { setErr(String(e)); }
+    try { await p; await refresh(); } catch (e) { fail(e); }
   };
   const runCmd = async (name: string, args: Record<string, unknown>): Promise<boolean> => {
     try {
@@ -278,7 +299,7 @@ function App() {
       await refresh();
       return r.ok;
     } catch (e) {
-      setErr(String(e));
+      fail(e);
       return false;
     }
   };
@@ -287,13 +308,13 @@ function App() {
     try {
       const dir = await open({ directory: true, title: "Add a git project" });
       if (typeof dir === "string") { setErr(""); setWs(await invoke<Workspace>("add_project", { dir })); }
-    } catch (e) { setErr(String(e)); }
+    } catch (e) { fail(e); }
   };
   const removeProject = async (root: string) => {
     try {
       setWs(await invoke<Workspace>("remove_project", { root }));
       if (sel?.repo === root) setSel(null);
-    } catch (e) { setErr(String(e)); }
+    } catch (e) { fail(e); }
   };
 
   // Every ctx-menu dismissal goes through here: an armed confirmRm must NEVER
@@ -331,15 +352,15 @@ function App() {
       const url = await invoke<string | null>("github_url", { repo, slug });
       if (url) await openUrl(url);
       else setErr("No origin remote for this project.");
-    } catch (e) { setErr(String(e)); }
+    } catch (e) { fail(e); }
   };
   const revealPlace = (path: string) => {
     closeCtx();
-    revealItemInDir(path).catch((e) => setErr(String(e)));
+    revealItemInDir(path).catch((e) => fail(e));
   };
   const editIn = (path: string) => {
     closeCtx();
-    invoke("open_editor", { path, cmd: settings.editor_cmd }).catch((e) => setErr(String(e)));
+    invoke("open_editor", { path, cmd: settings.editor_cmd }).catch((e) => fail(e));
   };
   const editNote = (repo: string, p: Place) => {
     closeCtx();
@@ -541,7 +562,7 @@ function App() {
         </div>
 
         {open && pv.ok && (
-          <>
+          <div className="kids">
             {main && <ul className="places"><PlaceRow repo={pv.root} p={main} /></ul>}
             {LIVE_TIERS.filter((g) => buckets[g]?.length).map((g) => {
               const key = `${pv.root}|${g}`;
@@ -562,16 +583,20 @@ function App() {
                     <span className="caret">{opened ? "▾" : "▸"}</span>
                     Dormant<span className="count">{dormant.length}</span>
                   </div>
-                  {opened && DORMANT_TIERS.filter((t) => buckets[t]?.length).map((t) => (
-                    <div className="subgroup" key={t}>
-                      <div className="subdiv">{GROUP_LABEL[t]}</div>
-                      <ul className="places">{buckets[t].map((p) => <PlaceRow key={p.slug} repo={pv.root} p={p} />)}</ul>
+                  {opened && (
+                    <div className="kids-d">
+                      {DORMANT_TIERS.filter((t) => buckets[t]?.length).map((t) => (
+                        <div className="subgroup" key={t}>
+                          <div className="subdiv">{GROUP_LABEL[t]}</div>
+                          <ul className="places">{buckets[t].map((p) => <PlaceRow key={p.slug} repo={pv.root} p={p} />)}</ul>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
               );
             })()}
-          </>
+          </div>
         )}
       </div>
     );
