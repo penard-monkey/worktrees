@@ -161,7 +161,7 @@ button { cursor: pointer; }
  * land within a few px across siblings. The row BOX stays full width so
  * hover/selection targets don't shrink. Depths: project-h(0) → main row +
  * group headers(1) → group rows(2) → dormant subdiv(2) → dormant rows(2.5). */
-.kids > .places .row { padding-left: calc(var(--s3) + var(--ind)); }
+.kids > .places .row { padding-left: var(--dotcol); } /* (main): dot shares the project rollup's column */
 .group > .places .row { padding-left: calc(var(--s3) + var(--ind) * 2); }
 /* depth-3 (dormant rows) takes a half-step: full 3× starves slugs at min nav width */
 .subgroup > .places .row { padding-left: calc(var(--s3) + var(--ind) * 2.5); }
@@ -191,7 +191,8 @@ button { cursor: pointer; }
  * on the same rail = "contains places". */
 .kids > .places::after {
   content: ""; position: absolute; left: var(--gx1); top: calc(50% - 1px);
-  width: 5px; height: 1px; background: var(--guide-hot); pointer-events: none;
+  width: calc(var(--dotcol) - var(--gx1) - 2px); height: 1px;
+  background: var(--guide-hot); pointer-events: none;
 }
 .kids > .places:has(.row.sel)::after { background: var(--guide-sel); }
 /* dormant recession: darker = deader (full-bleed — rail x-math needs left edge at 0) */
