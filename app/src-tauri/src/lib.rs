@@ -293,6 +293,204 @@ async fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
     run_op(&repo, move |p, ui| ops::cmd_close(p, ui, &[slug]))
 }
 
+// ── update check (Settings → Version) ────────────────────────────────────────
+
+const REPO_SLUG: &str = "penard-monkey/worktrees";
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    app_version: String,
+    cli_version: Option<String>,
+    cli_path: Option<String>,
+    latest: Option<String>, // release tag, e.g. "v0.2.0"
+}
+
+/// Latest release tag via the releases/latest REDIRECT (install.sh's trick —
+/// no API, no rate limit, no auth). None when offline or no releases exist.
+fn latest_release_tag() -> Option<String> {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-fsSLI", "--max-time", "6", "-o", "/dev/null", "-w", "%{url_effective}",
+            &format!("https://github.com/{REPO_SLUG}/releases/latest"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout);
+    let url = url.trim();
+    if !url.contains("/tag/") {
+        return None;
+    }
+    url.rsplit("/tag/").next().map(String::from)
+}
+
+/// Run `cmd` with piped output and a hard deadline; kill past it. Every
+/// update-path subprocess goes through this so a hung login profile or a
+/// stalled network can never wedge an invoke forever. Reader threads drain the
+/// pipes (a >64KB burst would otherwise deadlock try_wait).
+fn run_deadline(mut cmd: std::process::Command, secs: u64) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    let mut child = cmd.spawn()?;
+    let so = child.stdout.take();
+    let se = child.stderr.take();
+    let drain = |s: Option<std::process::ChildStdout>| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            if let Some(mut s) = s {
+                let _ = s.read_to_end(&mut b);
+            }
+            b
+        })
+    };
+    let ho = drain(so);
+    let he = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(mut s) = se {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out after {secs}s")));
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: ho.join().unwrap_or_default(),
+        stderr: he.join().unwrap_or_default(),
+    })
+}
+
+/// Find the installed CLI: whatever `command -v` resolves in the USER'S login
+/// shell (zsh reads ~/.zprofile; plain sh would not — the app may be launched
+/// from Finder with a bare PATH), then the common install dirs. Chatty profiles
+/// are filtered by taking the last absolute-path line. Returns (path, version).
+fn cli_binary() -> Option<(String, String)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let mut candidates: Vec<String> = Vec::new();
+    let mut probe = std::process::Command::new(&shell);
+    probe.args(["-lc", "command -v -- worktrees"]);
+    if let Ok(out) = run_deadline(probe, 5) {
+        if out.status.success() {
+            if let Some(p) = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| l.starts_with('/'))
+            {
+                candidates.push(p.to_string());
+            }
+        }
+    }
+    candidates.push(format!("{home}/.local/bin/worktrees"));
+    candidates.push(format!("{home}/bin/worktrees"));
+    candidates.push("/opt/homebrew/bin/worktrees".into());
+    candidates.push("/usr/local/bin/worktrees".into());
+    for path in candidates {
+        let mut c = std::process::Command::new(&path);
+        c.arg("--version");
+        if let Ok(out) = run_deadline(c, 5) {
+            if out.status.success() {
+                let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                // "worktrees 0.2.0" → "0.2.0"
+                let v = full.rsplit(' ').next().unwrap_or(&full).to_string();
+                return Some((path, v));
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn check_update() -> Result<UpdateInfo, String> {
+    let (cli_path, cli_version) = match cli_binary() {
+        Some((p, v)) => (Some(p), Some(v)),
+        None => (None, None),
+    };
+    Ok(UpdateInfo {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        cli_version,
+        cli_path,
+        latest: latest_release_tag(),
+    })
+}
+
+/// Update the installed CLI via the PINNED-TAG installer — install.sh stays the
+/// single source of truth for download/checksum/replace. Hardening (review):
+/// the webview PROPOSES a tag but this side re-resolves latest and requires an
+/// exact match (no webview-driven downgrade / stale pin); the script downloads
+/// to a temp file with a CHECKED curl (a piped `curl | bash` masks download
+/// failure as success — pipeline status is the last command's); and success is
+/// declared only when the re-probed CLI actually reports the new version.
+#[tauri::command]
+async fn update_cli(tag: String) -> Result<CmdResult, String> {
+    let ok_tag = tag.starts_with('v')
+        && tag.len() > 1
+        && tag[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if !ok_tag {
+        return Err(format!("suspicious tag '{tag}'"));
+    }
+    match latest_release_tag() {
+        Some(latest) if latest == tag => {}
+        Some(latest) => return Err(format!("{tag} is not the latest release ({latest}) — re-check for updates")),
+        None => return Err("could not re-verify the latest release (offline?)".into()),
+    }
+
+    let url = format!("https://raw.githubusercontent.com/{REPO_SLUG}/{tag}/install.sh");
+    let script = std::env::temp_dir().join(format!("worktrees-install-{}.sh", std::process::id()));
+    let mut fetch = std::process::Command::new("curl");
+    fetch
+        .args(["-fsSL", "--connect-timeout", "10", "--max-time", "120", "-o"])
+        .arg(&script)
+        .arg(&url);
+    let f = run_deadline(fetch, 150).map_err(|e| format!("installer download failed: {e}"))?;
+    if !f.status.success() {
+        let _ = std::fs::remove_file(&script);
+        return Ok(CmdResult {
+            ok: false,
+            code: f.status.code().unwrap_or(-1),
+            output: format!("installer download failed\n{}", String::from_utf8_lossy(&f.stderr)),
+        });
+    }
+
+    let mut run = std::process::Command::new("bash");
+    run.arg(&script).env("WORKTREES_INSTALL_VERSION", &tag);
+    // replace the binary that's actually resolved, not blindly ~/.local/bin
+    if let Some((path, _)) = cli_binary() {
+        if let Some(parent) = Path::new(&path).parent() {
+            run.env("WORKTREES_INSTALL_DIR", parent);
+        }
+    }
+    let out = run_deadline(run, 600).map_err(|e| format!("installer run failed: {e}"))?;
+    let _ = std::fs::remove_file(&script);
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    // the real success signal: the resolved CLI now reports the new version
+    let verified = cli_binary().map(|(_, v)| format!("v{v}") == tag).unwrap_or(false);
+    if out.status.success() && !verified {
+        text.push_str("\n! installer exited 0 but the resolved CLI does not report the new version — check PATH shadowing.");
+    }
+    Ok(CmdResult {
+        ok: out.status.success() && verified,
+        code: out.status.code().unwrap_or(-1),
+        output: text,
+    })
+}
+
 /// Web URL for a place's branch on its origin remote: a /tree/<branch> link on
 /// github.com, the repo home for other hosts, None with no origin. The UI opens
 /// it via the opener plugin.
@@ -515,6 +713,8 @@ pub fn run() {
             open_place,
             close_place,
             github_url,
+            check_update,
+            update_cli,
             open_editor,
             get_settings,
             set_settings,

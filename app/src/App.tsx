@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
-import { applySettings, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings } from "./settings";
+import { applySettings, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
 import "./tokens.css";
 import "./App.css";
 
@@ -120,6 +120,16 @@ type Ctx =
 // Single-quote for pasting into a shell (the main session name carries parens).
 const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
+// "v0.2.1" vs "0.2.0" — numeric per-component version compare (a > b).
+const vparts = (s: string) => s.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
+const vnewer = (a: string, b: string) => {
+  const x = vparts(a), y = vparts(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0);
+  }
+  return false;
+};
+
 // New-worktree form. Module scope + OWN draft state: components defined inside
 // App get a fresh identity every render, which remounts their DOM and drops
 // input focus per keystroke — the form must live outside that churn.
@@ -172,6 +182,13 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
+  const [upd, setUpd] = useState<UpdateInfo | null>(null);
+  // Badge/button = CLI-ACTIONABLE only (the button installs the CLI; the app
+  // binary can't be updated by it — app drift renders as a passive note).
+  const cliStale = !!(upd?.latest && upd.cli_version && vnewer(upd.latest, upd.cli_version));
+  const cliMissing = !!(upd?.latest && !upd.cli_version);
+  const appStale = !!(upd?.latest && vnewer(upd.latest, upd.app_version));
+  const updateAvail = cliStale || cliMissing;
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -189,6 +206,16 @@ function App() {
     const un = listen("places:changed", () => refresh());
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
+
+  // update check: once shortly after launch (delayed off the startup path);
+  // manual re-check from Settings. Offline → latest stays null, no nagging.
+  const checkUpdate = useCallback(async () => {
+    try { setUpd(await invoke<UpdateInfo>("check_update")); } catch { /* offline */ }
+  }, []);
+  useEffect(() => {
+    const t = setTimeout(checkUpdate, 3000);
+    return () => clearTimeout(t);
+  }, [checkUpdate]);
 
   // hydrate persisted settings BEFORE first meaningful paint. A pre-hydration
   // interaction (⌘B at launch) must neither be visually reverted nor let its
@@ -596,7 +623,7 @@ function App() {
           {settings.nav_collapsed ? "»" : "«"}
         </button>
         <button className="rail-icon" title="add project" onClick={addProject}>＋</button>
-        <button className="rail-icon" title="settings (⌘,)" onClick={() => setSettingsOpen(true)}>⚙</button>
+        <button className={"rail-icon" + (updateAvail ? " upd" : "")} title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}>⚙</button>
       </nav>
 
       {/* ── nav (kept mounted while collapsed so form drafts / scroll survive ⌘B) ── */}
@@ -759,7 +786,8 @@ function App() {
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
       {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
 
-      <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)} />
+      <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
+        update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate} />
       {menu && <div className="menu-catch" onClick={() => setMenu(null)} />}
 
       {/* ── right-click: place ── */}

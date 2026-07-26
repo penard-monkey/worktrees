@@ -34,6 +34,14 @@ export const DEFAULTS: Settings = {
   collapsed: {},
 };
 
+/** check_update result — versions the Settings "Version" section renders. */
+export type UpdateInfo = {
+  app_version: string;
+  cli_version: string | null;
+  cli_path: string | null;
+  latest: string | null; // release tag, e.g. "v0.2.0"; null offline / no releases
+};
+
 export const clampRem = (v: number) => Math.max(13, Math.min(18, v));
 export const clampTerm = (v: number) => Math.max(10, Math.min(20, v));
 export const clampNav = (v: number) => Math.max(220, Math.min(460, v));
