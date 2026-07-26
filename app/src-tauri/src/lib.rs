@@ -708,8 +708,11 @@ async fn term_open(
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
 
-    // NOTE (DESIGN P1 follow-up): plain attach = correct size while this is the
-    // only client; if a second client attaches, tmux clamps to the smallest.
+    // Sizing: tune the session (window-size latest + aggressive-resize) so a
+    // smaller co-attached client can't clamp us — the clamp left stale painted
+    // cells ("undeletable" artifacts) outside the redrawn region. Covers
+    // sessions that predate the tuning-at-create in ops::launch.
+    worktrees_core::tmux::tune_session(&session);
     let mut cmd = CommandBuilder::new("tmux");
     cmd.args(["attach-session", "-t", &session]);
     cmd.env("TERM", "xterm-256color");
