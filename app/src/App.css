@@ -156,16 +156,18 @@ button { cursor: pointer; }
 .subgroup { margin-top: 2px; }
 .subdiv { padding: 2px var(--s3) 2px calc(var(--s3) + var(--ind) * 2); font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: 0.06em; color: var(--txt-mute); }
 
-/* tree indentation — content indents per depth; the row BOX stays full width so
+/* tree indentation — ONE ladder: every line's left edge is s3 + depth×ind, so
+ * each level's leading glyph (caret or status dot) shares a column and labels
+ * land within a few px across siblings. The row BOX stays full width so
  * hover/selection targets don't shrink. Depths: project-h(0) → main row +
- * group headers(1) → group rows(2) → dormant subdiv(2) → dormant rows(3). */
-.project > .places .row { padding-left: calc(var(--row-pad-h) + var(--ind)); }
-.group > .places .row { padding-left: calc(var(--row-pad-h) + var(--ind) * 2); }
+ * group headers(1) → group rows(2) → dormant subdiv(2) → dormant rows(2.5). */
+.project > .places .row { padding-left: calc(var(--s3) + var(--ind)); }
+.group > .places .row { padding-left: calc(var(--s3) + var(--ind) * 2); }
 /* depth-3 (dormant rows) takes a half-step: full 3× starves slugs at min nav width */
-.subgroup > .places .row { padding-left: calc(var(--row-pad-h) + var(--ind) * 2.5); }
+.subgroup > .places .row { padding-left: calc(var(--s3) + var(--ind) * 2.5); }
 
 /* ── place row (3-col grid → glyphs can never collide) ── */
-.places { list-style: none; margin: 0; padding: 0 var(--s2); }
+.places { list-style: none; margin: 0; padding: 0 var(--s2) 0 0; }
 .places.flat { padding: var(--s2); }
 .flat-empty { color: var(--txt-mute); font-size: var(--fs-label); padding: var(--s3); }
 .row {
