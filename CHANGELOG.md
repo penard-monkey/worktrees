@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-26
+
+### Fixed
+- Embedded terminal drew `…`, `✻`, spinners, and other non-ASCII glyphs as
+  underscores: the app attached tmux without a UTF-8 locale (GUI apps get
+  launchd's bare environment), so tmux deemed the client non-UTF-8 and
+  substituted `_` for every cell without an ACS line-drawing fallback. The
+  embedded client now attaches with `tmux -u`, and the app sets a UTF-8
+  `LANG` at startup when none is present (also covers the tmux server when
+  the app is the first tmux invocation). Reopen embedded panes to pick it
+  up — session content was never corrupted.
+
 ## [0.2.2] - 2026-07-26
 
 ### Added
