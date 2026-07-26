@@ -304,8 +304,22 @@ function App() {
       else Object.assign(preHydration.current, patch, auto);
       return next;
     });
-    if (patch.term_family !== undefined || patch.term_size !== undefined) setTermVersion((v) => v + 1);
+    // theme changes the terminal colors too (xterm reads CSS vars once per version)
+    if (patch.term_family !== undefined || patch.term_size !== undefined || patch.theme !== undefined)
+      setTermVersion((v) => v + 1);
   };
+
+  // theme "system": re-apply when macOS appearance flips
+  useEffect(() => {
+    if (settings.theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const onFlip = () => {
+      applySettings(settings);
+      setTermVersion((v) => v + 1);
+    };
+    mq.addEventListener("change", onFlip);
+    return () => mq.removeEventListener("change", onFlip);
+  }, [settings]);
 
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
