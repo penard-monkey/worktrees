@@ -161,10 +161,41 @@ button { cursor: pointer; }
  * land within a few px across siblings. The row BOX stays full width so
  * hover/selection targets don't shrink. Depths: project-h(0) → main row +
  * group headers(1) → group rows(2) → dormant subdiv(2) → dormant rows(2.5). */
-.project > .places .row { padding-left: calc(var(--s3) + var(--ind)); }
+.kids > .places .row { padding-left: calc(var(--s3) + var(--ind)); }
 .group > .places .row { padding-left: calc(var(--s3) + var(--ind) * 2); }
 /* depth-3 (dormant rows) takes a half-step: full 3× starves slugs at min nav width */
 .subgroup > .places .row { padding-left: calc(var(--s3) + var(--ind) * 2.5); }
+
+/* ── plumb lines: ancestor spines make depth DRAWN, not inferred ──
+ * Each parent drops a 1px rail through its children's gutter; selecting a row
+ * lights its ancestor trail (via :has; degrades to static rails). Rails sit
+ * under row hover/sel rects on purpose — lines break cleanly behind them. */
+.kids, .kids-d, .group > .places, .subgroup > .places { position: relative; }
+.kids::before, .kids-d::before,
+.group > .places::before, .subgroup > .places::before {
+  content: ""; position: absolute; top: 0; bottom: 2px; width: 1px;
+  background: var(--guide); pointer-events: none;
+  transition: background var(--dur-fast);
+}
+.kids::before { left: var(--gx1); opacity: 0.9; }
+.kids-d::before, .group > .places::before { left: var(--gx2); opacity: 0.75; }
+.subgroup > .places::before { left: var(--gx3); opacity: 0.6; }
+/* hover brightens subtree rails only — the project spine stays quiet at rest */
+.kids-d:hover::before, .group > .places:hover::before,
+.subgroup > .places:hover::before { background: var(--guide-hot); }
+.kids:has(.row.sel)::before, .kids-d:has(.row.sel)::before,
+.group > .places:has(.row.sel)::before,
+.subgroup > .places:has(.row.sel)::before { background: var(--guide-sel); opacity: 1; }
+/* (main) = the trunk's first joint: a solder tick from the spine to its dot.
+ * Dot-terminated stub = "this sibling IS a place"; the group headers' carets
+ * on the same rail = "contains places". */
+.kids > .places::after {
+  content: ""; position: absolute; left: var(--gx1); top: calc(50% - 1px);
+  width: 5px; height: 1px; background: var(--guide-hot); pointer-events: none;
+}
+.kids > .places:has(.row.sel)::after { background: var(--guide-sel); }
+/* dormant recession: darker = deader (full-bleed — rail x-math needs left edge at 0) */
+.group.dormant { background: var(--bg-abyss); border-radius: var(--r-md); }
 
 /* ── place row (3-col grid → glyphs can never collide) ── */
 .places { list-style: none; margin: 0; padding: 0 var(--s2) 0 0; }

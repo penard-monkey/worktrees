@@ -70,6 +70,13 @@
   --rail-w: 44px;
   --nav-w: 300px;
   --ind: 12px; /* nav tree: one indent step (project → group → row) */
+  /* nav tree plumb lines (ancestor spines) — rail x = each level's caret center */
+  --guide: #272c40;
+  --guide-hot: #3d4566;
+  --guide-sel: rgba(122, 162, 247, 0.5);
+  --gx1: calc(var(--s3) + 5px); /* project caret center */
+  --gx2: calc(var(--gx1) + var(--ind)); /* group caret center */
+  --gx3: calc(var(--s3) + var(--ind) * 2 + 2px); /* under dormant subdiv label */
 
   /* ── radius ── */
   --r-sm: 5px;

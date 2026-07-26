@@ -562,7 +562,7 @@ function App() {
         </div>
 
         {open && pv.ok && (
-          <>
+          <div className="kids">
             {main && <ul className="places"><PlaceRow repo={pv.root} p={main} /></ul>}
             {LIVE_TIERS.filter((g) => buckets[g]?.length).map((g) => {
               const key = `${pv.root}|${g}`;
@@ -583,16 +583,20 @@ function App() {
                     <span className="caret">{opened ? "▾" : "▸"}</span>
                     Dormant<span className="count">{dormant.length}</span>
                   </div>
-                  {opened && DORMANT_TIERS.filter((t) => buckets[t]?.length).map((t) => (
-                    <div className="subgroup" key={t}>
-                      <div className="subdiv">{GROUP_LABEL[t]}</div>
-                      <ul className="places">{buckets[t].map((p) => <PlaceRow key={p.slug} repo={pv.root} p={p} />)}</ul>
+                  {opened && (
+                    <div className="kids-d">
+                      {DORMANT_TIERS.filter((t) => buckets[t]?.length).map((t) => (
+                        <div className="subgroup" key={t}>
+                          <div className="subdiv">{GROUP_LABEL[t]}</div>
+                          <ul className="places">{buckets[t].map((p) => <PlaceRow key={p.slug} repo={pv.root} p={p} />)}</ul>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
               );
             })()}
-          </>
+          </div>
         )}
       </div>
     );
