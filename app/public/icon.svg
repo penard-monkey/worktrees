@@ -1,0 +1,28 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b7a58"/>
+      <stop offset="1" stop-color="#022c22"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.28" r="0.75">
+      <stop offset="0" stop-color="#10b981" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#10b981" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- squircle ~83% of canvas, Apple-style corner radius -->
+  <rect x="88" y="88" width="848" height="848" rx="186" fill="url(#bg)"/>
+  <rect x="88" y="88" width="848" height="848" rx="186" fill="url(#glow)"/>
+  <!-- trunk -->
+  <path d="M 512 800 L 512 452" stroke="#f0fdf4" stroke-width="56" stroke-linecap="round" fill="none"/>
+  <!-- left branch -->
+  <path d="M 512 640 C 512 520, 322 576, 322 428" stroke="#f0fdf4" stroke-width="56" stroke-linecap="round" fill="none"/>
+  <!-- right branch -->
+  <path d="M 512 584 C 512 464, 702 520, 702 372" stroke="#f0fdf4" stroke-width="56" stroke-linecap="round" fill="none"/>
+  <!-- leaf nodes (commits) -->
+  <circle cx="322" cy="358" r="64" fill="#6ee7b7"/>
+  <circle cx="702" cy="302" r="64" fill="#6ee7b7"/>
+  <circle cx="512" cy="330" r="88" fill="#34d399"/>
+  <circle cx="512" cy="330" r="36" fill="#022c22"/>
+  <!-- root node -->
+  <circle cx="512" cy="800" r="56" fill="#f0fdf4"/>
+</svg>
