@@ -729,8 +729,12 @@ async fn term_open(
     // cells ("undeletable" artifacts) outside the redrawn region. Covers
     // sessions that predate the tuning-at-create in ops::launch.
     worktrees_core::tmux::tune_session(&session);
+    // -u (global flag, must precede the subcommand): declare this client
+    // UTF-8-capable. Without it tmux sniffs LC_ALL/LC_CTYPE/LANG, and a
+    // GUI-launched app has none — tmux then draws every non-ASCII cell as "_".
+    // Always safe here: the receiving end is xterm.js, which is always UTF-8.
     let mut cmd = CommandBuilder::new("tmux");
-    cmd.args(["attach-session", "-t", &session]);
+    cmd.args(["-u", "attach-session", "-t", &session]);
     cmd.env("TERM", "xterm-256color");
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| {
@@ -831,6 +835,21 @@ fn fixup_gui_path() {
     std::env::set_var("PATH", path);
 }
 
+/// Same launchd-bare-env problem as PATH, but for locale: GUI-launched apps
+/// have no LC_ALL/LC_CTYPE/LANG, so everything we spawn (tmux server via the
+/// engine's shell-outs, shells inside sessions) runs locale-less. The embedded
+/// tmux client is already covered by `-u` in term_open; this covers the server
+/// side when this app is the first tmux invocation.
+fn fixup_gui_locale() {
+    let has_utf8 = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .any(|v| v.to_uppercase().contains("UTF-8") || v.to_uppercase().contains("UTF8"));
+    if !has_utf8 {
+        std::env::set_var("LANG", "en_US.UTF-8");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // panics land in the log too (chained: the default stderr hook still runs)
@@ -840,6 +859,7 @@ pub fn run() {
         prev_hook(info);
     }));
     fixup_gui_path();
+    fixup_gui_locale();
     applog(
         "info",
         &format!("startup v{} PATH={}", env!("CARGO_PKG_VERSION"), std::env::var("PATH").unwrap_or_default()),
