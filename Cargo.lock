@@ -49,7 +49,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "portable-pty",
  "serde",
@@ -5238,7 +5238,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worktrees-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde_json",
  "worktrees-core",
@@ -5246,7 +5246,7 @@ dependencies = [
 
 [[package]]
 name = "worktrees-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",

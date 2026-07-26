@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-26
+
+### Added
+- Nav preferences: show/hide the Active / Idle / Dormant tiers (Settings →
+  Nav tiers), and a sort control in the nav header — Last used, A–Z, or
+  Manual with drag-to-reorder (order remembered per project).
+- Release notes on update: the first launch of a new version shows a
+  "What's new" sheet with the changes since the version you were on
+  (offline — the changelog ships inside the app).
+
+### Fixed
+- Embedded terminal artifacts: tmux sized windows to the SMALLEST attached
+  client and only redrew that region, leaving stale "undeletable"
+  characters when a bare `tmux attach` ran alongside the app. Sessions now
+  use `window-size latest` + `aggressive-resize` (session-scoped; your
+  global tmux config is untouched).
+- CI actions bumped off deprecated Node 20.
+
 ## [0.2.1] - 2026-07-25
 
 The self-updating release: from here on, updates are one click inside the app.
