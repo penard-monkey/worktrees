@@ -34,6 +34,11 @@ export function SettingsSheet({
 }) {
   const [updating, setUpdating] = useState(false);
   const [updateLog, setUpdateLog] = useState("");
+  const [checkState, setCheckState] = useState<"" | "checking" | "done">("");
+  const doCheck = async () => {
+    setCheckState("checking");
+    try { await onCheckUpdate(); } finally { setCheckState("done"); }
+  };
   const doUpdate = async () => {
     if (!update?.latest || updating) return;
     setUpdating(true);
@@ -192,7 +197,9 @@ export function SettingsSheet({
               <div className="ver-row">latest {update?.latest ? <b>{update.latest}</b> : <i>unknown (offline?)</i>}</div>
             </div>
             <div className="ver-actions">
-              <button className="ctrl sm" onClick={onCheckUpdate}>Check for updates</button>
+              <button className="ctrl sm" disabled={checkState === "checking"} onClick={doCheck}>
+                {checkState === "checking" ? "Checking…" : "Check for updates"}
+              </button>
               {actionable && update?.latest && (
                 <button className="ctrl sm" disabled={updating || appUpdating} onClick={doUpdate}>
                   {updating ? "Updating…" : `${cliMissing ? "Install" : "Update"} CLI → ${update.latest}`}
@@ -204,6 +211,15 @@ export function SettingsSheet({
                 </button>
               )}
             </div>
+            {checkState === "done" && (
+              <div className="hint">
+                {update?.latest
+                  ? actionable || appStale
+                    ? `updates available (latest ${update.latest})`
+                    : `✓ up to date (latest ${update.latest})`
+                  : "✗ couldn't reach the release feed (offline?)"}
+              </div>
+            )}
             {updateLog && <pre className="update-log">{updateLog}</pre>}
           </section>
 
