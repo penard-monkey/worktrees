@@ -669,8 +669,41 @@ async fn term_close(id: u32, terms: State<'_, Terminals>) -> Result<(), String> 
     Ok(())
 }
 
+/// GUI-launched apps inherit launchd's bare PATH (/usr/bin:/bin:…) — no
+/// homebrew, no ~/.local/bin — so the engine's tmux/git shell-outs fail even
+/// though they work in every terminal (tmux is homebrew-installed: every place
+/// looks dead and Enter errors). Resolve the user's real PATH from their login
+/// shell once at startup (marker-wrapped so chatty profiles can't corrupt it;
+/// deadline-guarded so a hung profile can't block launch), falling back to
+/// appending the usual install dirs.
+fn fixup_gui_path() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let mut cmd = std::process::Command::new(&shell);
+    cmd.args(["-lc", r#"printf '\n__WTPATH__%s' "$PATH""#]);
+    let from_shell = run_deadline(cmd, 5)
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .rsplit("__WTPATH__")
+                .next()
+                .map(|p| p.trim().to_string())
+        })
+        .filter(|p| !p.is_empty());
+    let path = match from_shell {
+        Some(p) => format!("{p}:{current}"), // dups harmless; current kept as safety net
+        None => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}/.local/bin:{home}/bin:/opt/homebrew/bin:/usr/local/bin:{current}")
+        }
+    };
+    std::env::set_var("PATH", path);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    fixup_gui_path();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
