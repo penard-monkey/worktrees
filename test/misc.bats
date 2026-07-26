@@ -15,10 +15,14 @@ write_config() {
 
 # ── version / help / dispatch ────────────────────────────────────────────────
 
-@test "--version prints 'worktrees 0.1.0' and exits 0 outside any git repo" {
+@test "--version prints the workspace version and exits 0 outside any git repo" {
+  # read the expected version from Cargo.toml so releases don't break this test —
+  # the binary-matches-manifest property is exactly what release.yml gates on
+  ver="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$BATS_TEST_DIRNAME/../Cargo.toml" | head -n1)"
+  [ -n "$ver" ]
   run_wt -C "$BATS_TEST_TMPDIR" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "worktrees 0.1.0" ]
+  [ "$output" = "worktrees $ver" ]
 }
 
 @test "help / -h / --help print usage (contains 'worktrees new') and exit 0 outside any git repo" {

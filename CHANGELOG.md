@@ -5,22 +5,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-25
+
+The Rust release: one compiled engine behind both the CLI and a desktop app.
+
 ### Added
 - `worktrees ls --json` (also `WORKTREES_JSON=1 worktrees ls`): a machine-readable
   snapshot (`schema_version` 1) of every place — the main checkout first, then each
   worktree with live derived state (branch/detached, dirty + file count, ahead/behind
   vs upstream, tmux session up/down, last commit, install command, Claude-session
   presence, and a computed `lifecycle_effective`). The human `ls` table is unchanged.
-  Pure-bash JSON serialization (RFC 8259-safe, control-char escaping) — no `jq` needed.
+- `worktrees close <name> [name...]` — end a place's tmux session; the worktree,
+  branch, and declared state all stay (the inverse of `open`). Resolves a branch to
+  its holder worktree, closes adopted sessions (a pane cwd'd in the worktree under
+  another name), and `close main` targets the main checkout — unless a worktree is
+  literally named `main` (the directory wins).
+- **Desktop app** (Tauri, links the engine in-process): multi-project nav tree with
+  lifecycle groups (Pinned/Active/Idle + a Dormant fold), embedded tmux terminals
+  (attach-not-own), create/switch/close/remove and lifecycle/pin/note from the UI,
+  right-click context menus (Enter, open fresh, close session, copy attach command,
+  new worktree off a branch, open on GitHub, reveal in Finder, open in editor…),
+  a collapsible rail-only nav (⌘B), persisted Settings (UI font scale, terminal font,
+  density, nav width, editor command), auto-resume of an existing Claude conversation
+  on open, live refresh, and an in-app update check (Settings → Version) that can
+  update the installed CLI via the pinned-tag installer.
+- Declared lifecycle store (`.worktrees.places.json`, schema-versioned plain JSON):
+  saved/archived/abandoned/closed + pin + note, reconciled with live tmux state.
 
 ### Changed
 - The CLI is now a compiled Rust binary (`crates/worktrees-cli`), behavior-identical
-  to the original bash version (gated by the same 118-case bats suite + real-tmux
-  smokes). `install.sh` fetches a prebuilt binary per platform (macOS/Linux,
+  to the original bash version (gated by the same bats suite — now 137 cases — plus
+  real-tmux smokes). `install.sh` fetches a prebuilt binary per platform (macOS/Linux,
   x86_64/arm64) or builds from source with `cargo`; `make install` compiles +
   symlinks the release binary; `bin/worktrees` is a shim that runs the built binary
-  from a clone. The Tauri app links the same engine as a library (`worktrees-core`).
-  The legacy bash implementation was retired once the binary reached full parity.
+  from a clone. The legacy bash implementation was retired at full parity.
+- Snapshot reads are parallel (bounded fan-out per place and per project) — big
+  monorepos with many worktrees list in ~max(latency) instead of sum.
+- tmux kill targeting is exact-match only (`-t =name`); the prefix-match fallback
+  that could hit a sibling session (`api` → `api-fix`) is gone.
+
+### Fixed
+- Claude project-dir detection now mangles every non-alphanumeric character
+  (matching Claude Code), so resume detection works for paths with `_` etc.
 
 ## [0.1.0] - 2026-07-12
 
