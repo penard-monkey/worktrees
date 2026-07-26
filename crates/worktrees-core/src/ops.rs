@@ -54,6 +54,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
             keep.to_string()
         };
         if let Some(pid) = tmux::new_session(&session, wt, &pane0) {
+            tmux::tune_session(&session);
             tmux::split_window(&pid, wt, &pane1);
             tmux::select_pane(&pid);
         }

@@ -80,6 +80,17 @@ pub fn worktree_session(wt: &str, ai_word: &str) -> Option<String> {
     best
 }
 
+/// Multi-client sizing: by default tmux clamps a window to its SMALLEST
+/// attached client, and only redraws that intersection — a larger client (the
+/// app's embedded terminal next to a bare `tmux attach`) keeps stale painted
+/// cells outside the region ("undeletable" artifacts). `window-size latest` +
+/// `aggressive-resize` make OUR sessions follow the most recently active
+/// client instead. Session-scoped: the user's global tmux config is untouched.
+pub fn tune_session(session: &str) {
+    let _ = tmux(&["set-option", "-t", session, "aggressive-resize", "on"]);
+    let _ = tmux(&["set-option", "-w", "-t", session, "window-size", "latest"]);
+}
+
 /// `new-session -d -s <session> -c <wt> -P -F '#{pane_id}' <pane0>` → pane id.
 pub fn new_session(session: &str, wt: &str, pane0: &str) -> Option<String> {
     let o = tmux(&["new-session", "-d", "-s", session, "-c", wt, "-P", "-F", "#{pane_id}", pane0]).ok()?;
