@@ -50,8 +50,51 @@ jobs:
           name: worktrees-${{ matrix.target }}
           path: dist/*
 
+  # macOS desktop-app bundles. Unsigned — install.sh strips the quarantine attr
+  # on an explicit, checksum-verified install; local `make install-app` needs
+  # neither. Signing/notarization is the later distribution tier (task plan).
+  app-bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: version gate — tag matches Cargo.toml workspace version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          grep -q "^version = \"$tag\"$" Cargo.toml \
+            || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: build the app bundle
+        run: |
+          rustup target add "${{ matrix.target }}"
+          pnpm -C app install --frozen-lockfile
+          pnpm -C app tauri build --target "${{ matrix.target }}"
+      - name: package + checksum
+        run: |
+          mkdir -p dist
+          asset="worktrees-app-${{ matrix.target }}.app.tar.gz"
+          tar -czf "dist/$asset" -C "target/${{ matrix.target }}/release/bundle/macos" worktrees.app
+          cd dist
+          shasum -a 256 "$asset" > "$asset.sha256"
+          cat "$asset.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: worktrees-app-${{ matrix.target }}
+          path: dist/*
+
   release:
-    needs: build
+    needs: [build, app-bundle]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -11,7 +11,13 @@
 #   WORKTREES_INSTALL_VERSION=v0.1.0     pin a specific release
 #   WORKTREES_INSTALL_DIR=~/bin          alternate target dir
 #   WORKTREES_INSTALL_FROM_SOURCE=1      force a cargo build from source
+#   WORKTREES_INSTALL_APP=1|0            also install the macOS desktop app / never ask
+#   install.sh --with-app                same as WORKTREES_INSTALL_APP=1
 #   install.sh --uninstall               remove the installed binary (only that)
+#
+# Desktop app (macOS): with a terminal attached the installer OFFERS to install
+# worktrees.app to /Applications (checksum-verified, then the quarantine attr is
+# stripped — the bundle is unsigned; you explicitly chose to install it).
 #
 # Checksums: a downloaded binary is verified against the release's checksums.txt.
 # This protects against truncation/corruption — it does NOT prove authorship (the
@@ -37,15 +43,55 @@ detect_triple() {  # Rust target triple for this host, or "" if unknown
   esac
 }
 
+install_app() {  # $1 version  $2 release download url  $3 tmp dir
+  local version="$1" dl="$2" tmp="$3"
+  local triple; triple="$(detect_triple)"
+  local asset="worktrees-app-$triple.app.tar.gz"
+  echo "fetching $asset ..."
+  if ! curl -fsSL -o "$tmp/$asset" "$dl/$asset" 2>/dev/null; then
+    echo "NOTE: release $version has no desktop-app bundle ($asset) — app install skipped." >&2
+    echo "      From a clone: make install-app" >&2
+    return 0
+  fi
+  if [ -f "$tmp/checksums.txt" ] || curl -fsSL -o "$tmp/checksums.txt" "$dl/checksums.txt" 2>/dev/null; then
+    ( cd "$tmp" && grep "  $asset\$" checksums.txt | sha256_check ) \
+      || { echo "ERROR: app checksum verification FAILED" >&2; exit 1; }
+    echo "app checksum ok (integrity only — not authorship; see header note)"
+  else
+    echo "WARNING: no checksums.txt on release $version — skipping app verification" >&2
+  fi
+  local appdir="/Applications"
+  [ -w "$appdir" ] || appdir="$HOME/Applications"
+  mkdir -p "$appdir"
+  tar -xzf "$tmp/$asset" -C "$tmp"
+  # Downloaded bundles carry the quarantine attr and the app is unsigned, so
+  # Gatekeeper would refuse it. The user explicitly opted into installing our
+  # unsigned build; integrity was just checksum-verified — strip the attr.
+  xattr -cr "$tmp/worktrees.app" 2>/dev/null || true
+  rm -rf "$appdir/worktrees.app"
+  ditto "$tmp/worktrees.app" "$appdir/worktrees.app"
+  echo "installed: $appdir/worktrees.app  (open -a worktrees)"
+  if pgrep -f "worktrees.app/Contents/MacOS" >/dev/null 2>&1; then
+    echo "NOTE: worktrees.app is currently running — quit + reopen to pick up the new version."
+  fi
+}
+
 main() {
   local dir="${WORKTREES_INSTALL_DIR:-$HOME/.local/bin}"
   local target="$dir/$BIN_NAME"
+
+  # "" = ask when a terminal is attached · 1 = install · 0 = never
+  local with_app="${WORKTREES_INSTALL_APP:-}"
+  if [ "${1:-}" = "--with-app" ]; then with_app=1; fi
 
   if [ "${1:-}" = "--uninstall" ]; then
     if [ -e "$target" ] || [ -L "$target" ]; then
       rm -f "$target"; echo "removed $target (worktrees/.worktrees data in your repos is untouched)"
     else
       echo "nothing installed at $target"
+    fi
+    if [ -d "/Applications/worktrees.app" ] || [ -d "$HOME/Applications/worktrees.app" ]; then
+      echo "desktop app left in place — remove with: rm -rf /Applications/worktrees.app"
     fi
     return 0
   fi
@@ -151,6 +197,25 @@ main() {
   if [ -n "$first" ] && [ "$first" != "$target" ]; then
     echo "WARNING: '$BIN_NAME' currently resolves to $first (earlier on PATH than $target)." >&2
     echo "         Remove/rename it or reorder PATH, or you'll keep running the old one." >&2
+  fi
+
+  # ── desktop app (macOS) ────────────────────────────────────────────────────
+  if [ "$(uname -s)" = Darwin ]; then
+    if [ -z "$with_app" ]; then
+      # curl|bash: stdin is the script itself — ask on the controlling terminal.
+      # ([ -r /dev/tty ] passes even with NO controlling tty; actually open it.)
+      if { : < /dev/tty && : > /dev/tty; } 2>/dev/null; then
+        printf '\nAlso install the desktop app (worktrees.app -> /Applications)? [y/N] ' > /dev/tty
+        ans=""; IFS= read -r ans < /dev/tty || ans=""
+        case "$ans" in y|Y|yes|YES) with_app=1 ;; *) with_app=0 ;; esac
+      else
+        echo ""
+        echo "NOTE: desktop app not installed — rerun with WORKTREES_INSTALL_APP=1 (or --with-app) to add worktrees.app."
+      fi
+    fi
+    if [ "$with_app" = 1 ]; then
+      install_app "$version" "$dl" "$tmp"
+    fi
   fi
 }
 
