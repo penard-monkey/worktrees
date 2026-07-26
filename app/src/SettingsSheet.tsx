@@ -224,6 +224,30 @@ export function SettingsSheet({
           </section>
 
           <section className="setting">
+            <label>Nav tiers</label>
+            <div className="tier-toggles">
+              {(["active", "idle", "dormant"] as const).map((t) => (
+                <label key={t} className="tier-toggle">
+                  <input
+                    type="checkbox"
+                    checked={!settings.hidden_tiers.includes(t)}
+                    onChange={(e) => {
+                      const show = e.currentTarget.checked;
+                      onChange({
+                        hidden_tiers: show
+                          ? settings.hidden_tiers.filter((x) => x !== t)
+                          : [...settings.hidden_tiers, t],
+                      });
+                    }}
+                  />
+                  {t}
+                </label>
+              ))}
+            </div>
+            <div className="hint">Pinned and (main) always show. Sort order lives in the nav header (⇅).</div>
+          </section>
+
+          <section className="setting">
             <label>Logs</label>
             <div className="ver-rows">
               <div className="ver-row"><span className="ver-path" title={logPath}>{logPath || "…"}</span></div>

@@ -29,6 +29,7 @@ type Place = {
   ahead: number | null;
   behind: number | null;
   tmux_session: { name: string; up: boolean };
+  last_commit_epoch?: number | null;
   claude_session_present: boolean;
   declared: Declared;
   lifecycle_effective: string;
@@ -130,6 +131,19 @@ const vnewer = (a: string, b: string) => {
   return false;
 };
 
+// Sections of the embedded CHANGELOG strictly newer than `seen`, up to `current`.
+function changelogBetween(changelog: string, seen: string, current: string): string {
+  const sections = changelog.split(/^## /m).slice(1);
+  const out: string[] = [];
+  for (const sec of sections) {
+    const m = sec.match(/^\[([0-9][^\]]*)\]/);
+    if (!m) continue;
+    const v = m[1];
+    if (vnewer(v, seen) && !vnewer(v, current)) out.push("## " + sec.trimEnd());
+  }
+  return out.join("\n\n");
+}
+
 // New-worktree form. Module scope + OWN draft state: components defined inside
 // App get a fresh identity every render, which remounts their DOM and drops
 // input focus per keystroke — the form must live outside that churn.
@@ -183,6 +197,10 @@ function App() {
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
+  const [sortOpen, setSortOpen] = useState(false);
+  const [drag, setDrag] = useState<{ repo: string; slug: string } | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
+  const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string } | null>(null);
   // Badge = actionable updates. CLI via the pinned-tag installer; the app via
   // tauri-plugin-updater (signed bundles) — both one click in Settings now.
   const cliStale = !!(upd?.latest && upd.cli_version && vnewer(upd.latest, upd.cli_version));
@@ -255,6 +273,24 @@ function App() {
       if (Object.keys(preHydration.current).length > 0) saveSettings(merged);
       setLens(merged.lens);
       setCollapsed(merged.collapsed ?? {});
+      // release notes: embedded CHANGELOG vs last-seen version. Fresh install
+      // (no last_seen) records silently; a version CHANGE shows What's-new.
+      try {
+        const ci = await invoke<{ version: string; changelog: string }>("get_changelog");
+        if (!merged.last_seen_version) {
+          const next = { ...merged, last_seen_version: ci.version };
+          setSettings(next);
+          saveSettings(next);
+        } else if (merged.last_seen_version !== ci.version) {
+          const notes = changelogBetween(ci.changelog, merged.last_seen_version, ci.version);
+          if (notes) setWhatsNew({ version: ci.version, notes });
+          else {
+            const next = { ...merged, last_seen_version: ci.version };
+            setSettings(next);
+            saveSettings(next);
+          }
+        }
+      } catch { /* harness / older backend */ }
     })();
   }, []);
 
@@ -400,6 +436,37 @@ function App() {
     setCtx({ kind: "project", x: e.clientX, y: e.clientY, root });
   };
 
+  // ── nav sorting (Settings-persisted; Manual = drag) ──
+  const recencyOf = (p: Place) => p.declared?.last_opened_epoch ?? p.last_commit_epoch ?? 0;
+  const sortPlaces = (repo: string, arr: Place[]): Place[] => {
+    const out = [...arr];
+    if (settings.sort_mode === "manual") {
+      const order = settings.manual_order[repo] ?? [];
+      const idx = (p: Place) => { const i = order.indexOf(p.slug); return i < 0 ? order.length : i; };
+      out.sort((a, b) => idx(a) - idx(b));
+      return out;
+    }
+    if (settings.sort_mode === "alpha") out.sort((a, b) => a.slug.localeCompare(b.slug));
+    else out.sort((a, b) => recencyOf(b) - recencyOf(a));
+    const flip = settings.sort_mode === "alpha" ? settings.sort_dir === "desc" : settings.sort_dir === "asc";
+    if (flip) out.reverse();
+    return out;
+  };
+  const dropOnRow = (repo: string, targetSlug: string) => {
+    if (!drag || drag.repo !== repo || drag.slug === targetSlug) { setDrag(null); setDragOver(null); return; }
+    const pv = ws?.projects.find((v) => v.root === repo);
+    const slugs = (pv?.snapshot?.places ?? []).filter((p) => !p.is_main).map((p) => p.slug);
+    const existing = settings.manual_order[repo] ?? [];
+    const order = [...existing.filter((x) => slugs.includes(x)), ...slugs.filter((x) => !existing.includes(x))];
+    const from = order.indexOf(drag.slug);
+    if (from >= 0) order.splice(from, 1);
+    const to = order.indexOf(targetSlug);
+    order.splice(to < 0 ? order.length : to, 0, drag.slug);
+    updateSettings({ manual_order: { ...settings.manual_order, [repo]: order } });
+    setDrag(null);
+    setDragOver(null);
+  };
+
   const createPlace = async (repo: string, branch: string, name: string, base: string) => {
     if (!branch) return;
     if (await runCmd("new_place", { repo, branch, base: base || null, name: name || null })) {
@@ -505,9 +572,19 @@ function App() {
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
     return (
       <li
-        className={"row" + (sel?.repo === repo && sel?.slug === p.slug ? " sel" : "")}
+        className={
+          "row" +
+          (sel?.repo === repo && sel?.slug === p.slug ? " sel" : "") +
+          (dragOver === p.slug && drag?.repo === repo ? " dragover" : "")
+        }
         onClick={() => enterPlace(repo, p)}
         onContextMenu={(e) => placeCtx(e, repo, p)}
+        draggable={settings.sort_mode === "manual" && !p.is_main}
+        onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDrag({ repo, slug: p.slug }); }}
+        onDragOver={(e) => { if (drag && drag.repo === repo && drag.slug !== p.slug && !p.is_main) { e.preventDefault(); setDragOver(p.slug); } }}
+        onDragLeave={() => { if (dragOver === p.slug) setDragOver(null); }}
+        onDrop={(e) => { e.preventDefault(); dropOnRow(repo, p.slug); }}
+        onDragEnd={() => { setDrag(null); setDragOver(null); }}
         title={p.slug}
       >
         <span
@@ -546,6 +623,8 @@ function App() {
     const rollupLive = places.some((p) => p.tmux_session.up);
     const buckets: Record<string, Place[]> = {};
     for (const p of places) { if (p.is_main) continue; (buckets[bucketOf(p)] ??= []).push(p); }
+    for (const k of Object.keys(buckets)) buckets[k] = sortPlaces(pv.root, buckets[k]);
+    const hiddenTiers = new Set(settings.hidden_tiers);
     const dormant = DORMANT_TIERS.flatMap((t) => buckets[t] ?? []);
 
     return (
@@ -564,7 +643,7 @@ function App() {
         {open && pv.ok && (
           <div className="kids">
             {main && <ul className="places"><PlaceRow repo={pv.root} p={main} /></ul>}
-            {LIVE_TIERS.filter((g) => buckets[g]?.length).map((g) => {
+            {LIVE_TIERS.filter((g) => buckets[g]?.length && !hiddenTiers.has(g)).map((g) => {
               const key = `${pv.root}|${g}`;
               const opened = isOpen(key, g !== "idle"); // idle collapsed by default
               return (
@@ -574,7 +653,7 @@ function App() {
                 </div>
               );
             })}
-            {dormant.length > 0 && (() => {
+            {dormant.length > 0 && !hiddenTiers.has("dormant") && (() => {
               const key = `${pv.root}|dormant`;
               const opened = isOpen(key, false);
               return (
@@ -655,6 +734,25 @@ function App() {
       <aside className={"nav" + (settings.nav_collapsed ? " hidden" : "")}>
         <div className="nav-head">
           <span className="nav-title">{lens === "places" ? "PLACES" : lens === "recent" ? "RECENT" : "ATTENTION"}</span>
+          <div className="menu-wrap">
+            <button className={"icon-btn" + (settings.sort_mode !== "recent" ? " on" : "")} title="sort places" onClick={() => setSortOpen(!sortOpen)}>⇅</button>
+            {sortOpen && (
+              <div className="popover sortpop">
+                <div className="pop-hint">sort places</div>
+                {([["recent", "Last used"], ["alpha", "A–Z"], ["manual", "Manual (drag rows)"]] as const).map(([m, label]) => (
+                  <button key={m} className="pop-item"
+                    onClick={() => updateSettings({ sort_mode: m, sort_dir: m === "alpha" ? "asc" : "desc" })}>
+                    <span className="check">{settings.sort_mode === m ? "✓" : ""}</span>{label}
+                  </button>
+                ))}
+                <div className="ctx-sep" />
+                <button className="pop-item" disabled={settings.sort_mode === "manual"}
+                  onClick={() => updateSettings({ sort_dir: settings.sort_dir === "desc" ? "asc" : "desc" })}>
+                  <span className="check" />{settings.sort_dir === "desc" ? "↓ descending" : "↑ ascending"}
+                </button>
+              </div>
+            )}
+          </div>
           <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}>⌕</button>
         </div>
         <input ref={searchRef} className="search" placeholder="filter places…" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} />
@@ -810,6 +908,23 @@ function App() {
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
       {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
+
+      {sortOpen && <div className="menu-catch" onClick={() => setSortOpen(false)} />}
+
+      {whatsNew && (
+        <div className="scrim" onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}>
+          <aside className="settings-sheet whatsnew" onClick={(e) => e.stopPropagation()}>
+            <header className="settings-h">
+              <b>What's new — v{whatsNew.version}</b>
+              <button className="icon-btn" title="close"
+                onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}>✕</button>
+            </header>
+            <div className="settings-body">
+              <pre className="notes">{whatsNew.notes}</pre>
+            </div>
+          </aside>
+        </div>
+      )}
 
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate} />

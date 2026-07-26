@@ -98,6 +98,22 @@ async fn log_event(level: String, msg: String) -> Result<(), String> {
     Ok(())
 }
 
+/// The CHANGELOG ships inside the binary — the "What's new" sheet renders the
+/// sections between the last-seen and current versions with zero network.
+#[derive(Serialize)]
+struct ChangelogInfo {
+    version: String,
+    changelog: String,
+}
+
+#[tauri::command]
+async fn get_changelog() -> Result<ChangelogInfo, String> {
+    Ok(ChangelogInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        changelog: include_str!("../../../CHANGELOG.md").to_string(),
+    })
+}
+
 #[tauri::command]
 async fn log_tail(lines: Option<usize>) -> Result<String, String> {
     let n = lines.unwrap_or(200).min(2000);
@@ -877,6 +893,7 @@ pub fn run() {
             log_info,
             log_event,
             log_tail,
+            get_changelog,
             open_editor,
             get_settings,
             set_settings,
