@@ -1,8 +1,10 @@
 /* Design tokens — the single source every component + Settings reads/writes.
  * Everything is a CSS custom property so (a) the Settings UI-font slider is ONE
- * write to --ui-rem and the whole app scales, and (b) a future light theme is an
- * alternate [data-theme] color map. Terminal font is deliberately INDEPENDENT
- * (px, set only on .xterm) so UI zoom never disturbs the xterm grid.
+ * write to --ui-rem and the whole app scales, and (b) each theme is an alternate
+ * [data-theme] color map at the bottom of this file (:root = Tokyo Night, the
+ * default). Terminal font is deliberately INDEPENDENT (px, set only on .xterm)
+ * so UI zoom never disturbs the xterm grid; terminal COLORS (--term-* and
+ * --ansi-*) are per-theme and read by TerminalPane via getComputedStyle.
  * Imported before App.css. See DESIGN.md + the redesign spec. */
 
 :root {
@@ -56,6 +58,22 @@
   --term-family: "SF Mono", Menlo, Monaco, monospace;
   --term-size: 13px;
 
+  /* terminal colors (xterm reads these per theme; Tokyo Night terminal spec) */
+  --term-bg: #0f0f16;
+  --term-fg: #c0caf5;
+  --term-cursor: #c0caf5;
+  --term-sel: rgba(122, 162, 247, 0.3);
+  --ansi-0: #15161e;  --ansi-8: #414868;
+  --ansi-1: #f7768e;  --ansi-9: #ff899d;
+  --ansi-2: #9ece6a;  --ansi-10: #9fe044;
+  --ansi-3: #e0af68;  --ansi-11: #faba4a;
+  --ansi-4: #7aa2f7;  --ansi-12: #8db0ff;
+  --ansi-5: #bb9af7;  --ansi-13: #c7a9ff;
+  --ansi-6: #7dcfff;  --ansi-14: #a4daff;
+  --ansi-7: #a9b1d6;  --ansi-15: #c0caf5;
+
+  --scrim: rgba(0, 0, 0, 0.4);
+
   /* ── spacing (4px grid) ── */
   --s1: 4px;
   --s2: 8px;
@@ -95,6 +113,233 @@
   --dur-slow: 180ms;
   --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
   --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* ── themes ──────────────────────────────────────────────────────────────
+ * :root above = Tokyo Night (default). Each block below is a full color map;
+ * non-color tokens (type/spacing/layout) are theme-invariant. All palettes are
+ * the official upstream values, contrast-verified (text tiers vs surfaces,
+ * ANSI vs terminal bg); deviations from upstream are noted inline. */
+
+/* Tokyo Night Day — the light mode (folke/tokyonight day palette).
+ * txt/txt-hi are official fg darkened (official #3760bf is 3.99:1 on the
+ * sidebar); ansi 0/8 use day dark5/comment — kitty's near-bg blacks are
+ * illegible on a light terminal. */
+:root[data-theme="tokyo-day"] {
+  color-scheme: light;
+  --bg-abyss: #c1c9df;
+  --bg-tree: #d0d5e3;
+  --bg-panel: #e1e2e7;
+  --bg-elev: #eaebf0;
+  --bg-input: #cbd1e1;
+  --line: #c4c8da;
+  --line-strong: #a8aecb;
+  --txt-hi: #28458a;
+  --txt: #2b4c97;
+  --txt-dim: #6172b0;
+  --txt-mute: #848cb5;
+  --accent: #2e7de9;
+  --accent-ink: #0f0f16;
+  --branch: #6172b0;
+  --branch-hi: #007197;
+  --ok: #587539;
+  --ai: #9854f1;
+  --dirty: #b15c00;
+  --danger: #f52a65;
+  --idle: #68709a;
+  --sticky: #848cb5;
+  --pin: #a27629;
+  --guide: #c4c8da;
+  --guide-hot: #8990b3;
+  --guide-sel: rgba(46, 125, 233, 0.5);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.18);
+  --scrim: rgba(0, 0, 0, 0.25);
+  --term-bg: #e1e2e7;
+  --term-fg: #28458a;
+  --term-cursor: #3760bf;
+  --term-sel: rgba(120, 144, 221, 0.35);
+  --ansi-0: #68709a;  --ansi-8: #848cb5;
+  --ansi-1: #f52a65;  --ansi-9: #ff4774;
+  --ansi-2: #587539;  --ansi-10: #5c8524;
+  --ansi-3: #8c6c3e;  --ansi-11: #a27629;
+  --ansi-4: #2e7de9;  --ansi-12: #358aff;
+  --ansi-5: #9854f1;  --ansi-13: #a463ff;
+  --ansi-6: #007197;  --ansi-14: #007ea8;
+  --ansi-7: #6172b0;  --ansi-15: #3760bf;
+}
+
+/* Catppuccin Mocha — crust/mantle/base/surface ladder, official ANSI spec. */
+:root[data-theme="catppuccin-mocha"] {
+  color-scheme: dark;
+  --bg-abyss: #11111b;
+  --bg-tree: #181825;
+  --bg-panel: #1e1e2e;
+  --bg-elev: #313244;
+  --bg-input: #11111b;
+  --line: #313244;
+  --line-strong: #45475a;
+  --txt-hi: #cdd6f4;
+  --txt: #bac2de;
+  --txt-dim: #a6adc8;
+  --txt-mute: #6c7086;
+  --accent: #89b4fa;
+  --accent-ink: #11111b;
+  --branch: #b4befe;
+  --branch-hi: #89dceb;
+  --ok: #a6e3a1;
+  --ai: #cba6f7;
+  --dirty: #fab387;
+  --danger: #f38ba8;
+  --idle: #7f849c;
+  --sticky: #585b70;
+  --pin: #f9e2af;
+  --guide: #313244;
+  --guide-hot: #45475a;
+  --guide-sel: rgba(137, 180, 250, 0.5);
+  --term-bg: #11111b;
+  --term-fg: #cdd6f4;
+  --term-cursor: #f5e0dc;
+  --term-sel: rgba(147, 153, 178, 0.3);
+  --ansi-0: #45475a;  --ansi-8: #585b70;
+  --ansi-1: #f38ba8;  --ansi-9: #f37799;
+  --ansi-2: #a6e3a1;  --ansi-10: #89d88b;
+  --ansi-3: #f9e2af;  --ansi-11: #ebd391;
+  --ansi-4: #89b4fa;  --ansi-12: #74a8fc;
+  --ansi-5: #f5c2e7;  --ansi-13: #f2aede;
+  --ansi-6: #94e2d5;  --ansi-14: #6bd7ca;
+  --ansi-7: #a6adc8;  --ansi-15: #bac2de;
+}
+
+/* Catppuccin Latte — light. ANSI yellow/magenta/brights swapped to
+ * peach/mauve/green (official Latte colors): the stock terminal table's pale
+ * shades fall under 2.5:1 on base. */
+:root[data-theme="catppuccin-latte"] {
+  color-scheme: light;
+  --bg-abyss: #dce0e8;
+  --bg-tree: #e6e9ef;
+  --bg-panel: #eff1f5;
+  --bg-elev: #ccd0da;
+  --bg-input: #e1e5eb;
+  --line: #ccd0da;
+  --line-strong: #acb0be;
+  --txt-hi: #4c4f69;
+  --txt: #5c5f77;
+  --txt-dim: #6c6f85;
+  --txt-mute: #8c8fa1;
+  --accent: #1e66f5;
+  --accent-ink: #ffffff;
+  --branch: #7c7f93;
+  --branch-hi: #209fb5;
+  --ok: #40a02b;
+  --ai: #8839ef;
+  --dirty: #df8e1d;
+  --danger: #d20f39;
+  --idle: #6c6f85;
+  --sticky: #8c8fa1;
+  --pin: #fe640b;
+  --guide: #ccd0da;
+  --guide-hot: #9ca0b0;
+  --guide-sel: rgba(30, 102, 245, 0.5);
+  --shadow-float: 0 8px 24px rgba(76, 79, 105, 0.18);
+  --scrim: rgba(0, 0, 0, 0.25);
+  --term-bg: #eff1f5;
+  --term-fg: #4c4f69;
+  --term-cursor: #dc8a78;
+  --term-sel: rgba(30, 102, 245, 0.25);
+  --ansi-0: #5c5f77;  --ansi-8: #6c6f85;
+  --ansi-1: #d20f39;  --ansi-9: #de293e;
+  --ansi-2: #40a02b;  --ansi-10: #40a02b;
+  --ansi-3: #fe640b;  --ansi-11: #fe640b;
+  --ansi-4: #1e66f5;  --ansi-12: #456eff;
+  --ansi-5: #8839ef;  --ansi-13: #8839ef;
+  --ansi-6: #179299;  --ansi-14: #2d9fa8;
+  --ansi-7: #acb0be;  --ansi-15: #bcc0cc;
+}
+
+/* Nord — Polar Night surfaces, Snow Storm text, Frost accent, Aurora status.
+ * bg-panel is nord1 darkened one hex step so txt-mute nord10 clears 2.5:1. */
+:root[data-theme="nord"] {
+  color-scheme: dark;
+  --bg-abyss: #242933;
+  --bg-tree: #2e3440;
+  --bg-panel: #3a4151;
+  --bg-elev: #434c5e;
+  --bg-input: #292e39;
+  --line: #4c566a;
+  --line-strong: #616e88;
+  --txt-hi: #eceff4;
+  --txt: #d8dee9;
+  --txt-dim: #81a1c1;
+  --txt-mute: #5e81ac;
+  --accent: #88c0d0;
+  --accent-ink: #2e3440;
+  --branch: #81a1c1;
+  --branch-hi: #88c0d0;
+  --ok: #a3be8c;
+  --ai: #b48ead;
+  --dirty: #ebcb8b;
+  --danger: #bf616a;
+  --idle: #5e81ac;
+  --sticky: #4c566a;
+  --pin: #d08770;
+  --guide: #3b4252;
+  --guide-hot: #4c566a;
+  --guide-sel: rgba(136, 192, 208, 0.5);
+  --term-bg: #242933;
+  --term-fg: #d8dee9;
+  --term-cursor: #d8dee9;
+  --term-sel: rgba(136, 192, 208, 0.3);
+  --ansi-0: #3b4252;  --ansi-8: #4c566a;
+  --ansi-1: #bf616a;  --ansi-9: #bf616a;
+  --ansi-2: #a3be8c;  --ansi-10: #a3be8c;
+  --ansi-3: #ebcb8b;  --ansi-11: #ebcb8b;
+  --ansi-4: #81a1c1;  --ansi-12: #81a1c1;
+  --ansi-5: #b48ead;  --ansi-13: #b48ead;
+  --ansi-6: #88c0d0;  --ansi-14: #8fbcbb;
+  --ansi-7: #e5e9f0;  --ansi-15: #eceff4;
+}
+
+/* Gruvbox Dark — medium contrast, bg0_h/bg0/bg0_s/bg1 surface ramp,
+ * canonical terminal ANSI. */
+:root[data-theme="gruvbox-dark"] {
+  color-scheme: dark;
+  --bg-abyss: #1d2021;
+  --bg-tree: #282828;
+  --bg-panel: #32302f;
+  --bg-elev: #3c3836;
+  --bg-input: #222424;
+  --line: #504945;
+  --line-strong: #665c54;
+  --txt-hi: #fbf1c7;
+  --txt: #ebdbb2;
+  --txt-dim: #bdae93;
+  --txt-mute: #928374;
+  --accent: #fe8019;
+  --accent-ink: #1d2021;
+  --branch: #83a598;
+  --branch-hi: #8ec07c;
+  --ok: #b8bb26;
+  --ai: #d3869b;
+  --dirty: #d79921;
+  --danger: #fb4934;
+  --idle: #a89984;
+  --sticky: #7c6f64;
+  --pin: #fabd2f;
+  --guide: #3c3836;
+  --guide-hot: #504945;
+  --guide-sel: rgba(254, 128, 25, 0.5);
+  --term-bg: #1d2021;
+  --term-fg: #ebdbb2;
+  --term-cursor: #ebdbb2;
+  --term-sel: rgba(168, 153, 132, 0.3);
+  --ansi-0: #282828;  --ansi-8: #928374;
+  --ansi-1: #cc241d;  --ansi-9: #fb4934;
+  --ansi-2: #98971a;  --ansi-10: #b8bb26;
+  --ansi-3: #d79921;  --ansi-11: #fabd2f;
+  --ansi-4: #458588;  --ansi-12: #83a598;
+  --ansi-5: #b16286;  --ansi-13: #d3869b;
+  --ansi-6: #689d6a;  --ansi-14: #8ec07c;
+  --ansi-7: #a89984;  --ansi-15: #ebdbb2;
 }
 
 /* denser rows on demand (Settings → Density) */

@@ -445,7 +445,7 @@ button { cursor: pointer; }
 .empty.small { margin: var(--s4); font-size: var(--fs-label); }
 
 /* ── settings slide-over ── */
-.scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); z-index: 100; display: flex; justify-content: flex-end; }
+.scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 100; display: flex; justify-content: flex-end; }
 .settings-sheet {
   width: min(380px, 92%); height: 100%; background: var(--bg-tree);
   border-left: 1px solid var(--line); box-shadow: var(--shadow-float);

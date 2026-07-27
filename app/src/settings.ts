@@ -4,11 +4,31 @@
 // variable assignment — no component re-render logic.
 import { invoke } from "@tauri-apps/api/core";
 
+// Shippable themes: each id is a [data-theme] color map in tokens.css.
+// "system" follows macOS appearance and resolves to the Tokyo Night pair.
+export const THEMES = [
+  { id: "tokyo-night", label: "Tokyo Night", appearance: "dark" },
+  { id: "tokyo-day", label: "Tokyo Night Day", appearance: "light" },
+  { id: "catppuccin-mocha", label: "Catppuccin Mocha", appearance: "dark" },
+  { id: "catppuccin-latte", label: "Catppuccin Latte", appearance: "light" },
+  { id: "nord", label: "Nord", appearance: "dark" },
+  { id: "gruvbox-dark", label: "Gruvbox Dark", appearance: "dark" },
+] as const;
+export type ThemeId = (typeof THEMES)[number]["id"];
+export type ThemeSetting = ThemeId | "system";
+
+/** Concrete [data-theme] value for a setting ("system" → macOS appearance). */
+export function resolveTheme(t: ThemeSetting): ThemeId {
+  if (t === "system")
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "tokyo-day" : "tokyo-night";
+  return t;
+}
+
 export type Settings = {
   ui_rem: number; // 13–18
   term_family: string;
   term_size: number; // 10–20
-  theme: "dark";
+  theme: ThemeSetting;
   density: "comfortable" | "compact";
   window_w: number;
   window_h: number;
@@ -28,7 +48,7 @@ export const DEFAULTS: Settings = {
   ui_rem: 15,
   term_family: '"SF Mono", Menlo, Monaco, monospace',
   term_size: 13,
-  theme: "dark",
+  theme: "tokyo-night",
   density: "comfortable",
   window_w: 1280,
   window_h: 820,
@@ -63,14 +83,22 @@ export function applySettings(s: Settings) {
   root.style.setProperty("--term-family", s.term_family);
   root.style.setProperty("--term-size", `${clampTerm(s.term_size)}px`);
   root.style.setProperty("--nav-w", `${clampNav(s.nav_width)}px`);
-  root.dataset.theme = s.theme;
+  root.dataset.theme = resolveTheme(s.theme);
   root.dataset.density = s.density;
+}
+
+// Pre-theme installs persisted theme:"dark"; unknown ids (downgrades) reset too.
+function normalizeTheme(t: unknown): ThemeSetting {
+  if (t === "system" || THEMES.some((x) => x.id === t)) return t as ThemeSetting;
+  return DEFAULTS.theme;
 }
 
 export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await invoke<Partial<Settings> | null>("get_settings");
-    return { ...DEFAULTS, ...(raw ?? {}) };
+    const s = { ...DEFAULTS, ...(raw ?? {}) };
+    s.theme = normalizeTheme(s.theme);
+    return s;
   } catch {
     return { ...DEFAULTS };
   }

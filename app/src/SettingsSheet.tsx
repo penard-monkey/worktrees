@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import type { Settings, UpdateInfo } from "./settings";
-import { clampNav, clampRem, clampTerm } from "./settings";
+import type { Settings, ThemeSetting, UpdateInfo } from "./settings";
+import { clampNav, clampRem, clampTerm, THEMES } from "./settings";
 
 type CmdResult = { ok: boolean; code: number; output: string };
 
@@ -162,8 +162,13 @@ export function SettingsSheet({
 
           <section className="setting">
             <label>Theme</label>
-            <select value={settings.theme} onChange={(e) => onChange({ theme: e.currentTarget.value as "dark" })}>
-              <option value="dark">Tokyo Night (dark)</option>
+            <select value={settings.theme} onChange={(e) => onChange({ theme: e.currentTarget.value as ThemeSetting })}>
+              <option value="system">System (match macOS)</option>
+              {THEMES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label} ({t.appearance})
+                </option>
+              ))}
             </select>
           </section>
 
