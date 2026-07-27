@@ -77,5 +77,20 @@ CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 ## Planning docs
 
 `task_plan.md` / `findings.md` / `progress.md` are gitignored working memory —
-read them at session start, keep them current. `_tmp/` is a user symlink
+read them at session start, keep them current. At close-out they get
+tarballed into the session archive (see below). `_tmp/` is a user symlink
 (iCloud) where screenshots for review land.
+
+## Scratch files
+
+Screenshots, harness output, and other throwaway artifacts go in
+`/tmp/worktrees/<project>/<worktree-name>/` (e.g.
+`/tmp/worktrees/worktrees/ui-changes/`) — never the repo root.
+
+## Close-out ritual
+
+When a work stream is done and the session is about to be `/clear`ed, run
+the `/close-out` skill (`.claude/skills/close-out/SKILL.md`). Short version:
+scratch → /tmp, session summary + planning tarball →
+`docs/sessions/<date>-<slug>/` (committed), stragglers → `ROADMAP.md`,
+one squash-merged PR, then a fresh branch off origin/main.
