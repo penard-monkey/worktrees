@@ -12,5 +12,20 @@ close-out ritual (.claude/skills/close-out).
 
 - **Stale worktree/branch cleanup** — `New-icon` and `spike-demo` worktrees
   (and their branches) predate the current stream; decide merge/abandon and
-  remove. `release-v0.2.3` worktree is superseded by v0.2.4.
+  remove. `release-v0.2.3` worktree is superseded by v0.2.4. `origin/next`
+  is merged (#38) but the remote branch still exists (local deleted).
   _From: [2026-07-26 themes session](docs/sessions/2026-07-26-themes-v0.2.4/summary.md)_
+
+- **Cut v0.2.5** — CHANGELOG `[Unreleased]` holds shippable work: busy-only
+  status dots, Home + nav restyle, system theme pairs. Follow the release
+  steps in CLAUDE.md.
+  _From: [2026-07-27 busy-dots session](docs/sessions/2026-07-27-busy-dots-nav-home/summary.md)_
+
+- **Work-stream framing sweep** — README + repo description + app tagline now
+  say "a durable place for every work stream"; DESIGN.md, install.sh output,
+  and remaining app copy still lead with "one worktree per branch". Align.
+  _From: [2026-07-27 busy-dots session](docs/sessions/2026-07-27-busy-dots-nav-home/summary.md)_
+
+- **Eyeball busy dot in the real app** — verified via mock harness +
+  design; not yet observed in the Tauri app against a live claude session.
+  _From: [2026-07-27 busy-dots session](docs/sessions/2026-07-27-busy-dots-nav-home/summary.md)_
