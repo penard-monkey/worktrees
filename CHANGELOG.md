@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- The green "working" dot now tracks whether Claude is actually working, not
+  whether you recently touched the session. It read a tmux activity timestamp
+  that only moves when you attach or type — so it would fade a few seconds after
+  you looked away even while Claude kept going, and it lit up for plain shell
+  typing. It now reads Claude's own per-session state: a green blinking dot while
+  Claude is working, a steady amber dot when it's waiting on you (a permission or
+  dialog prompt), and nothing when it's idle — on the nav row, the project
+  folder, and the Home screen alike.
+
 ## [0.3.0] - 2026-07-27
 
 The settings release: a Settings pane that finally does what its controls say,
