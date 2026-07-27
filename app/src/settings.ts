@@ -36,6 +36,7 @@ export type Settings = {
   nav_width: number; // 220–460
   nav_collapsed: boolean; // rail-only mode (nav hidden)
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
+  ai_auto_resume: boolean; // single-click Enter resumes an existing Claude conversation (Claude only)
   lens: "places" | "recent" | "attention";
   collapsed: Record<string, boolean>; // per-project-root collapse
   hidden_tiers: string[]; // lifecycle tiers hidden in the Places lens (active/idle/dormant)
@@ -56,6 +57,7 @@ export const DEFAULTS: Settings = {
   nav_width: 300,
   nav_collapsed: false,
   editor_cmd: "code",
+  ai_auto_resume: true,
   lens: "places",
   collapsed: {},
   hidden_tiers: [],

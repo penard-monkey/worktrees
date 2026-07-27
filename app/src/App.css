@@ -385,6 +385,32 @@ button { cursor: pointer; }
   display: flex; align-items: center; gap: var(--s1);
   font-size: var(--fs-label); color: var(--txt); text-transform: capitalize;
 }
+/* checkbox that stands alone in a setting (not in a tier row): no cramping,
+   full-width click target, normal casing */
+.setting-check { margin-top: var(--s2); text-transform: none; }
+
+/* Shortcuts cheatsheet (read-only) */
+.shortcuts { display: flex; flex-direction: column; gap: 2px; }
+.shortcut-row {
+  display: flex; align-items: center; gap: var(--s3);
+  font-size: var(--fs-label); color: var(--txt);
+}
+.shortcut-row kbd {
+  flex: 0 0 auto; min-width: 2.4em; text-align: center;
+  padding: 1px var(--s2); border-radius: var(--r-sm);
+  background: var(--bg-input); border: 1px solid var(--line);
+  font-family: var(--term-family); font-size: var(--fs-meta); color: var(--txt-hi);
+}
+.shortcut-row span { color: var(--txt-dim); }
+
+/* destructive small button (Settings → Data → Reset), matches .pop-item.danger */
+.ctrl.sm.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); }
+.ctrl.sm.danger:hover { border-color: var(--danger); }
+.ctrl.sm.danger.armed {
+  color: var(--danger); font-weight: var(--fw-bold);
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  border-color: var(--danger);
+}
 .whatsnew .notes {
   margin: 0; white-space: pre-wrap; word-break: break-word;
   font-family: var(--term-family); font-size: var(--fs-meta); line-height: 1.5;
