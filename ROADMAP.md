@@ -17,9 +17,10 @@ close-out ritual (.claude/skills/close-out).
   _From: [2026-07-26 themes session](docs/sessions/2026-07-26-themes-v0.2.4/summary.md)_
 
 - **Cut v0.2.5** — CHANGELOG `[Unreleased]` holds shippable work: busy-only
-  status dots, Home + nav restyle, system theme pairs. Follow the release
-  steps in CLAUDE.md.
-  _From: [2026-07-27 busy-dots session](docs/sessions/2026-07-27-busy-dots-nav-home/summary.md)_
+  status dots, Home + nav restyle, system theme pairs, formatted release
+  notes + Settings "Release notes" button (#40), plus the settings/menu
+  work from #41–#42. Follow the release steps in CLAUDE.md.
+  _From: [2026-07-27 busy-dots session](docs/sessions/2026-07-27-busy-dots-nav-home/summary.md), [2026-07-27 release-notes session](docs/sessions/2026-07-27-release-notes-ui/summary.md)_
 
 - **Work-stream framing sweep** — README + repo description + app tagline now
   say "a durable place for every work stream"; DESIGN.md, install.sh output,
