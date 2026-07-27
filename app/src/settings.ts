@@ -36,7 +36,10 @@ export type Settings = {
   nav_width: number; // 220–460
   nav_collapsed: boolean; // rail-only mode (nav hidden)
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
+  terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
   ai_auto_resume: boolean; // single-click Enter resumes an existing Claude conversation (Claude only)
+  update_auto_check: boolean; // check for updates ~3s after launch (manual check always works)
+  restore_last: boolean; // on launch, SELECT the most recently opened place (selection-only, never enters)
   lens: "places" | "recent" | "attention";
   collapsed: Record<string, boolean>; // per-project-root collapse
   hidden_tiers: string[]; // lifecycle tiers hidden in the Places lens (active/idle/dormant)
@@ -57,7 +60,10 @@ export const DEFAULTS: Settings = {
   nav_width: 300,
   nav_collapsed: false,
   editor_cmd: "code",
+  terminal_cmd: "",
   ai_auto_resume: true,
+  update_auto_check: true,
+  restore_last: false,
   lens: "places",
   collapsed: {},
   hidden_tiers: [],

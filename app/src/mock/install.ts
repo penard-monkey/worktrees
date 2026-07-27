@@ -134,6 +134,9 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "open_editor":
       console.info("[mock] open_editor:", args);
       return null;
+    case "open_terminal":
+      console.info("[mock] open_terminal:", args);
+      return null;
     case "plugin:opener|open_url":
     case "plugin:opener|reveal_item_in_dir":
     case "plugin:opener|open_path":

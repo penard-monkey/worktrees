@@ -335,10 +335,15 @@ function App() {
   const checkUpdate = useCallback(async () => {
     try { setUpd(await invoke<UpdateInfo>("check_update")); } catch { /* offline */ }
   }, []);
+  // Gate on the setting AND keep it in the deps: a timer scheduled pre-hydration
+  // (under DEFAULTS, update_auto_check=true) is CANCELLED by this effect's cleanup
+  // when hydration lands with the toggle off — re-running the flag INSIDE the
+  // callback would already have fired. Manual "Check for updates" is unaffected.
   useEffect(() => {
+    if (!settings.update_auto_check) return;
     const t = setTimeout(checkUpdate, 3000);
     return () => clearTimeout(t);
-  }, [checkUpdate]);
+  }, [checkUpdate, settings.update_auto_check]);
 
   // hydrate persisted settings BEFORE first meaningful paint. A pre-hydration
   // interaction (⌘B at launch) must neither be visually reverted nor let its
@@ -762,6 +767,27 @@ function App() {
     [allPlaces],
   );
 
+  // Restore last place on launch (opt-in). SELECTION-ONLY: this calls setSel and
+  // nothing else — NO enterPlace/touch_place/open_place (those would auto-resume a
+  // Claude session on every reboot). TerminalPane attaches on its own if the tmux
+  // session is up; otherwise the place view shows its normal "Enter ▸ to start".
+  // Target = the most recently opened place across all projects (max
+  // last_opened_epoch, main excluded) — same derivation as the Resume list, so
+  // resume[0]. Fires exactly once, and only after BOTH settings hydration and the
+  // first workspace load have landed, only if restore_last is on, and only if the
+  // user hasn't already selected something.
+  const restoredOnce = useRef(false);
+  useEffect(() => {
+    if (restoredOnce.current) return;
+    if (!hydrated.current || !ws) return; // wait for both hydration + first ws load
+    restoredOnce.current = true; // launch moment passed — one-shot even with the
+    // toggle off, so enabling it later can't yank the selection mid-session
+    if (!settings.restore_last) return;
+    if (sel) return; // user already clicked — don't override their choice
+    const target = resume[0];
+    if (target) setSel({ repo: target.pv.root, slug: target.p.slug });
+  }, [ws, settings.restore_last, resume, sel]);
+
   // ── nav resizer (drag the nav's right edge) ──
   const onResize = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -1168,6 +1194,13 @@ function App() {
             <>
               <button className="pop-item" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>Close session</button>
               <button className="pop-item" onClick={() => copyText(`tmux attach -t ${shq(ctxPlace.tmux_session.name)}`)}>Copy attach command</button>
+              {settings.terminal_cmd.trim() && (
+                <button className="pop-item" onClick={() => {
+                  const session = ctxPlace.tmux_session.name;
+                  closeCtx();
+                  invoke("open_terminal", { cmd: settings.terminal_cmd, session }).catch((e) => fail(e));
+                }}>Open in terminal app</button>
+              )}
             </>
           )}
           <div className="ctx-sep" />

@@ -189,7 +189,13 @@ export function SettingsSheet({
               type="text" value={settings.editor_cmd}
               onChange={(e) => onChange({ editor_cmd: e.currentTarget.value })}
             />
-            <div className="hint">Used by right-click “Open in editor” and ⌘E (e.g. code, cursor, subl)</div>
+            <div className="hint">Used by right-click “Open in editor” and ⌘E. Quoted args work (e.g. code, cursor, open -a "Visual Studio Code").</div>
+            <label className="sub">Terminal command</label>
+            <input
+              type="text" value={settings.terminal_cmd}
+              onChange={(e) => onChange({ terminal_cmd: e.currentTarget.value })}
+            />
+            <div className="hint">Right-click “Open in terminal app”. {"{session}"} is the tmux session name, already shell-quoted (e.g. ghostty -e tmux attach -t {"{session}"}). Leave empty to hide the item.</div>
             <label className="tier-toggle setting-check">
               <input
                 type="checkbox"
@@ -248,7 +254,29 @@ export function SettingsSheet({
           </section>
 
           <section className="setting">
+            <label>Startup</label>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.restore_last}
+                onChange={(e) => onChange({ restore_last: e.currentTarget.checked })}
+              />
+              Restore last place on launch
+            </label>
+            <div className="hint">Reopens the most recently used place, ready but not started — press Enter ▸ to attach.</div>
+          </section>
+
+          <section className="setting">
             <label>Version{actionable ? <span className="upd-tag">{cliMissing ? "cli not installed" : "update available"}</span> : null}</label>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.update_auto_check}
+                onChange={(e) => onChange({ update_auto_check: e.currentTarget.checked })}
+              />
+              Check for updates at launch
+            </label>
+            <div className="hint">“Check for updates” below always works regardless of this setting.</div>
             <div className="ver-rows">
               <div className="ver-row">app <b>{update?.app_version ?? "…"}</b></div>
               <div className="ver-row">
