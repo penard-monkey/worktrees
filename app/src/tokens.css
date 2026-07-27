@@ -33,6 +33,7 @@
   --ai: #bb9af7;         /* AI (claude) session */
   --dirty: #e0af68;      /* uncommitted / behind */
   --danger: #f7768e;     /* destructive / broken / error */
+  --warn: #ff9e64;       /* attention / Claude waiting for input (amber) */
   --idle: #7e8ab8;       /* dormant-but-recent */
   --sticky: #565f89;     /* closed/saved/archived/abandoned dot */
   --pin: #f2c97d;        /* pinned star */
@@ -146,6 +147,7 @@
   --ai: #9854f1;
   --dirty: #b15c00;
   --danger: #f52a65;
+  --warn: #b15c00;       /* amber, darkened for legibility on the light nav */
   --idle: #68709a;
   --sticky: #848cb5;
   --pin: #a27629;
@@ -190,6 +192,7 @@
   --ai: #cba6f7;
   --dirty: #fab387;
   --danger: #f38ba8;
+  --warn: #fab387;       /* Catppuccin peach — amber attention */
   --idle: #7f849c;
   --sticky: #585b70;
   --pin: #f9e2af;
@@ -234,6 +237,7 @@
   --ai: #8839ef;
   --dirty: #df8e1d;
   --danger: #d20f39;
+  --warn: #fe640b;       /* Latte peach — amber, dark enough on the light nav */
   --idle: #6c6f85;
   --sticky: #8c8fa1;
   --pin: #fe640b;
@@ -279,6 +283,7 @@
   --ai: #b48ead;
   --dirty: #ebcb8b;
   --danger: #bf616a;
+  --warn: #ebcb8b;       /* Nord Aurora yellow — amber attention */
   --idle: #5e81ac;
   --sticky: #4c566a;
   --pin: #d08770;
@@ -322,6 +327,7 @@
   --ai: #d3869b;
   --dirty: #d79921;
   --danger: #fb4934;
+  --warn: #fabd2f;       /* Gruvbox bright yellow — amber attention */
   --idle: #a89984;
   --sticky: #7c6f64;
   --pin: #fabd2f;

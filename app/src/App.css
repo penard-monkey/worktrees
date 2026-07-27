@@ -128,6 +128,12 @@ button { cursor: pointer; }
   background: var(--ok); box-shadow: 0 0 0 2px var(--bg-tree);
   animation: breathe 2s ease-in-out infinite;
 }
+/* a waiting child: same corner badge, amber + STATIC (a session needs input) */
+.picon.waiting::after {
+  content: ""; position: absolute; top: -2px; right: -2px;
+  width: 6px; height: 6px; border-radius: var(--r-full);
+  background: var(--warn); box-shadow: 0 0 0 2px var(--bg-tree);
+}
 .rollup.broken { background: transparent; color: var(--danger); width: auto; height: auto; }
 .pname {
   flex: 1; font-weight: var(--fw-bold); color: var(--txt-hi); cursor: pointer;
@@ -238,7 +244,8 @@ button { cursor: pointer; }
 /* the dot means ONE thing: this session is working right now. Empty slot
  * otherwise (fixed width, so names never shift when a dot appears). */
 .status-dot { width: 8px; height: 8px; border-radius: var(--r-full); background: transparent; flex: none; }
-.status-dot.busy { background: var(--ok); animation: breathe 2s ease-in-out infinite; }
+.status-dot.busy { background: var(--ok); animation: breathe 2s ease-in-out infinite; } /* Claude working */
+.status-dot.waiting { background: var(--warn); } /* Claude needs input — STATIC, no blink */
 .status-dot.on { background: var(--ok); } /* static "tmux up" fact (topbar) */
 .row-id { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .row-name {

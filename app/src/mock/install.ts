@@ -307,18 +307,28 @@ function emitEvent(event: string, payload: unknown) {
   metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
 };
 
-// simulated "churning" — cycles the sessions:busy push (lib.rs poll thread's
-// event) so the busy dot + project badge are exercisable in the harness
-const BUSY_CYCLE: string[][] = [
-  ["cdv-billing-refactor", "worktrees-feat-redesign"],
-  ["worktrees-feat-redesign"],
-  [],
+// simulated Claude working state — cycles the sessions:busy push (lib.rs poll
+// thread's event) so the busy (green blink) + waiting (amber static) dots and the
+// project rollup badge are exercisable in the harness. Payload is now { busy,
+// waiting } keyed by WORKTREE PATH (== place.path in fixtures.ts, which builds
+// `${root}/.worktrees/${slug}`), matching lib.rs claude_activity's probe cwds.
+const CDV = "/Users/demo/workspace/casadelvalle/casa-del-valle-monorepo/.worktrees";
+const WT = "/Users/demo/workspace/worktrees/.worktrees";
+const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
+  // both states visible: one place working, another needs input
+  { busy: [`${CDV}/billing-refactor`], waiting: [`${WT}/feat-redesign`] },
+  // working shifts, nothing waiting
+  { busy: [`${CDV}/messaging`], waiting: [] },
+  // only a waiting session (amber, no green)
+  { busy: [], waiting: [`${CDV}/kitchen-sink`] },
+  // idle — no dots at all
+  { busy: [], waiting: [] },
 ];
-let busyIdx = 0;
-setTimeout(() => emitEvent("sessions:busy", BUSY_CYCLE[0]), 400);
+let actIdx = 0;
+setTimeout(() => emitEvent("sessions:busy", ACTIVITY_CYCLE[0]), 400);
 setInterval(() => {
-  busyIdx = (busyIdx + 1) % BUSY_CYCLE.length;
-  emitEvent("sessions:busy", BUSY_CYCLE[busyIdx]);
-}, 6000);
+  actIdx = (actIdx + 1) % ACTIVITY_CYCLE.length;
+  emitEvent("sessions:busy", ACTIVITY_CYCLE[actIdx]);
+}, 5000);
 
 console.info("[mock] Tauri backend mocked — design harness active");
