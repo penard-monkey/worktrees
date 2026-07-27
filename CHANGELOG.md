@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- Nav: a Home entry at the top (app logo + one-click "Open a project" on the
+  Home screen), folder icons on project rows, deeper nesting with more
+  generous indent, and a right-aligned age column on place rows.
+- System theme: pick WHICH light/dark pair "System (match macOS)" flips
+  between (Settings → Theme → Light ↔ dark pair).
+
+### Changed
+- The green dot now means one thing: this session is working right now (tmux
+  output within the last few seconds). Idle-but-open sessions show no dot; a
+  busy place also badges its project's folder icon. The purple ✦ "AI session"
+  glyph is gone — it was true for nearly every place, so it said nothing.
+
 ## [0.2.4] - 2026-07-26
 
 ### Added

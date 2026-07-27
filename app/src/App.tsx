@@ -6,6 +6,7 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
 import { applySettings, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
+import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
 
@@ -52,15 +53,23 @@ const SETTABLE = [
   { label: "Archive", value: "archived" },
   { label: "Abandon", value: "abandoned" },
 ];
-const DOT_COLOR: Record<string, string> = {
-  active: "var(--ok)", idle: "var(--idle)",
-  saved: "var(--sticky)", closed: "var(--sticky)", archived: "var(--sticky)", abandoned: "var(--sticky)",
-};
-
 const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
-const isLive = (p: Place) => p.tmux_session.up || p.claude_session_present;
 const hasAttention = (p: Place) => !!p.dirty || !!p.ahead || !!p.behind;
+
+// nav icons — inline SVG so they inherit currentColor per theme
+const FolderIcon = () => (
+  <svg className="picon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <path d="M1.75 4.25c0-.83.67-1.5 1.5-1.5h2.9l1.6 1.7h5c.83 0 1.5.67 1.5 1.5v6c0 .83-.67 1.5-1.5 1.5H3.25c-.83 0-1.5-.67-1.5-1.5v-7.7Z" />
+  </svg>
+);
+const HomeIcon = () => (
+  <svg className="picon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <path d="M2.5 6.7 8 2.2l5.5 4.5V13a1 1 0 0 1-1 1H9.8v-3.8H6.2V14H3.5a1 1 0 0 1-1-1V6.7Z" />
+  </svg>
+);
 
 function ago(epoch?: number): string {
   if (!epoch) return "";
@@ -74,7 +83,6 @@ function ago(epoch?: number): string {
 // fixed-order signal glyphs; geometry (3-col row grid) guarantees no collision.
 function glyphs(p: Place) {
   const g: { cls: string; text: string; title: string }[] = [];
-  if (p.claude_session_present) g.push({ cls: "g-ai", text: "✦", title: "AI session" });
   if (p.dirty) g.push({ cls: "g-dirty", text: `●${p.dirty_files ?? ""}`, title: `${p.dirty_files ?? "dirty"} uncommitted` });
   if (p.ahead) g.push({ cls: "g-ahead", text: `↑${p.ahead}`, title: `${p.ahead} ahead` });
   if (p.behind) g.push({ cls: "g-behind", text: `↓${p.behind}`, title: `${p.behind} behind` });
@@ -232,6 +240,15 @@ function App() {
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
 
+  // "churning" sessions — pushed by the backend poll thread (sessions with
+  // tmux output in the last few seconds). Pure event state: no extra invokes.
+  const [busySessions, setBusySessions] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const un = listen<string[]>("sessions:busy", (e) => setBusySessions(new Set(e.payload)));
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, []);
+  const isBusy = (p: Place) => busySessions.has(p.tmux_session.name);
+
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
     const onErr = (e: ErrorEvent) =>
@@ -305,7 +322,8 @@ function App() {
       return next;
     });
     // theme changes the terminal colors too (xterm reads CSS vars once per version)
-    if (patch.term_family !== undefined || patch.term_size !== undefined || patch.theme !== undefined)
+    if (patch.term_family !== undefined || patch.term_size !== undefined || patch.theme !== undefined ||
+        patch.theme_light !== undefined || patch.theme_dark !== undefined)
       setTermVersion((v) => v + 1);
   };
 
@@ -558,9 +576,9 @@ function App() {
     [ws],
   );
   const stats = useMemo(() => {
-    let live = 0, dirty = 0, ai = 0;
-    for (const { p } of allPlaces) { if (p.tmux_session.up) live++; if (p.dirty) dirty++; if (p.claude_session_present) ai++; }
-    return { live, dirty, ai };
+    let live = 0, dirty = 0;
+    for (const { p } of allPlaces) { if (p.tmux_session.up) live++; if (p.dirty) dirty++; }
+    return { live, dirty };
   }, [allPlaces]);
   const resume = useMemo(
     () => allPlaces
@@ -602,8 +620,8 @@ function App() {
         title={p.slug}
       >
         <span
-          className={"status-dot" + (isLive(p) ? " live" : "")}
-          style={{ background: DOT_COLOR[p.lifecycle_effective] ?? "var(--sticky)" }}
+          className={"status-dot" + (isBusy(p) ? " busy" : "")}
+          title={isBusy(p) ? "session working" : undefined}
         />
         <span className="row-id">
           <span className="row-name">
@@ -617,6 +635,7 @@ function App() {
           {glyphs(p).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
+          <span className="row-age">{ago(recencyOf(p))}</span>
         </span>
       </li>
     );
@@ -634,7 +653,7 @@ function App() {
     const open = !collapsed[pv.root];
     const places = (pv.snapshot?.places ?? []).filter(matchPlace);
     const main = places.find((p) => p.is_main) ?? null;
-    const rollupLive = places.some((p) => p.tmux_session.up);
+    const rollupBusy = places.some((p) => busySessions.has(p.tmux_session.name));
     const buckets: Record<string, Place[]> = {};
     for (const p of places) { if (p.is_main) continue; (buckets[bucketOf(p)] ??= []).push(p); }
     for (const k of Object.keys(buckets)) buckets[k] = sortPlaces(pv.root, buckets[k]);
@@ -646,7 +665,7 @@ function App() {
         <div className="project-h" onContextMenu={(e) => projectCtx(e, pv.root)}>
           <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? "▾" : "▸"}</span>
           {pv.ok
-            ? <span className={"rollup " + (rollupLive ? "on" : "off")} />
+            ? <span className={"picon" + (rollupBusy ? " busy" : "")} title={rollupBusy ? "a session is working" : undefined}><FolderIcon /></span>
             : <span className="rollup broken" title="repo gone">⊘</span>}
           <span className="pname" title={pv.root} onClick={() => toggleProject(pv.root)}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
@@ -746,6 +765,9 @@ function App() {
 
       {/* ── nav (kept mounted while collapsed so form drafts / scroll survive ⌘B) ── */}
       <aside className={"nav" + (settings.nav_collapsed ? " hidden" : "")}>
+        <button className={"home-item" + (sel ? "" : " on")} onClick={() => { setSel(null); setMenu(null); closeCtx(); }}>
+          <HomeIcon /> Home
+        </button>
         <div className="nav-head">
           <span className="nav-title">{lens === "places" ? "PLACES" : lens === "recent" ? "RECENT" : "ATTENTION"}</span>
           <div className="menu-wrap">
@@ -809,8 +831,7 @@ function App() {
                   </span>
                 )}
                 <span className="status-cluster">
-                  {selected.tmux_session.up && <span className="s ok" title="tmux live"><span className="status-dot live" style={{ background: "var(--ok)" }} /> live</span>}
-                  {selected.claude_session_present && <span className="s ai" title="AI session">✦ ai</span>}
+                  {selected.tmux_session.up && <span className="s ok" title="tmux live"><span className="status-dot on" /> live</span>}
                   {selected.dirty && <span className="s dirty">● {selected.dirty_files ?? ""}</span>}
                   {(selected.ahead || selected.behind) && <span className="s ab">↑{selected.ahead ?? 0} ↓{selected.behind ?? 0}</span>}
                   <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
@@ -820,7 +841,7 @@ function App() {
               <div className="controls">
                 {selected.tmux_session.up ? (
                   <>
-                    <span className="live-badge" title="session live"><span className="status-dot live" style={{ background: "var(--ok)" }} /> live</span>
+                    <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
                     <button className="ctrl" title="end the tmux session — the worktree stays"
                       onClick={() => runCmd("close_place", { repo: sel.repo, slug: sel.slug })}>Close</button>
                   </>
@@ -895,18 +916,24 @@ function App() {
           </>
         ) : (
           <div className="briefing">
-            <h1>Welcome back.</h1>
+            <div className="home-hero">
+              <img className="home-logo" src={logoUrl} alt="worktrees logo" />
+              <div className="home-id">
+                <h1>worktrees</h1>
+                <div className="home-tag">a place for every work stream</div>
+              </div>
+            </div>
+            <button className="enter-btn big home-open" onClick={addProject}>＋ Open a project</button>
             <div className="chips">
               <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
               <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
-              <span className="chip"><span className="dot" style={{ background: "var(--ai)" }} /> {stats.ai} AI</span>
             </div>
             <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
             <div className="resume">
-              {resume.length === 0 && <div className="empty small">No places yet — ＋ add a project.</div>}
+              {resume.length === 0 && <div className="empty small">No places yet — ＋ open a project.</div>}
               {resume.map(({ pv, p }) => (
                 <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
-                  <span className="status-dot" style={{ background: DOT_COLOR[p.lifecycle_effective] ?? "var(--sticky)" }} />
+                  <span className={"status-dot" + (busySessions.has(p.tmux_session.name) ? " busy" : "")} />
                   <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{p.slug}</span>
                   <span className="rr-proj">{basename(pv.root)}</span>
                   <span className="rr-life">{p.lifecycle_effective}</span>
@@ -915,7 +942,6 @@ function App() {
                 </div>
               ))}
             </div>
-            <div className="briefing-foot">＋ Add a project to get started</div>
           </div>
         )}
       </main>

@@ -878,7 +878,12 @@ pub fn run() {
             // (~30s) still catches dirty/branch drift that leaves no tmux trace.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
+                // "churning" = tmux saw output in the session this recently.
+                // 10s absorbs the 3s poll jitter yet decays fast once a session
+                // goes quiet, so the busy dot means "working right now".
+                const BUSY_WINDOW_SECS: i64 = 10;
                 let mut last = worktrees_core::tmux::session_fingerprint();
+                let mut last_busy: Vec<String> = Vec::new();
                 let mut ticks: u32 = 0;
                 loop {
                     std::thread::sleep(Duration::from_secs(3));
@@ -888,6 +893,20 @@ pub fn run() {
                         last = fp;
                         ticks = 0;
                         let _ = handle.emit("places:changed", ());
+                    }
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let mut busy: Vec<String> = worktrees_core::tmux::session_activity()
+                        .into_iter()
+                        .filter(|(_, t)| now - t <= BUSY_WINDOW_SECS)
+                        .map(|(n, _)| n)
+                        .collect();
+                    busy.sort_unstable();
+                    if busy != last_busy {
+                        last_busy = busy.clone();
+                        let _ = handle.emit("sessions:busy", busy);
                     }
                 }
             });
