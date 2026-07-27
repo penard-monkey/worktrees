@@ -211,11 +211,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "set_settings":
       return null;
 
-    // event system — no live emitter in the harness; resolve quietly
-    case "plugin:event|listen":
-      return 0;
-    case "plugin:event|unlisten":
+    // event system — handlers are registered and fired via emitEvent below
+    case "plugin:event|listen": {
+      (eventListeners[args.event] ??= new Set()).add(args.handler);
+      return args.handler;
+    }
+    case "plugin:event|unlisten": {
+      for (const s of Object.values(eventListeners)) s.delete(args.eventId);
       return null;
+    }
 
     default:
       console.warn("[mock] unhandled command:", cmd, args);
@@ -226,6 +230,10 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
 // Minimal internals surface the @tauri-apps/api v2 uses.
 let cbId = 0;
 const callbacks: Record<number, (v: unknown) => void> = {};
+const eventListeners: Record<string, Set<number>> = {};
+function emitEvent(event: string, payload: unknown) {
+  for (const id of eventListeners[event] ?? []) callbacks[id]?.({ event, id, payload });
+}
 (window as any).__TAURI_INTERNALS__ = {
   invoke: (cmd: string, args?: Args) => mockInvoke(cmd, args),
   transformCallback: (cb: (v: unknown) => void) => {
@@ -236,5 +244,19 @@ const callbacks: Record<number, (v: unknown) => void> = {};
   convertFileSrc: (p: string) => p,
   metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
 };
+
+// simulated "churning" — cycles the sessions:busy push (lib.rs poll thread's
+// event) so the busy dot + project badge are exercisable in the harness
+const BUSY_CYCLE: string[][] = [
+  ["cdv-billing-refactor", "worktrees-feat-redesign"],
+  ["worktrees-feat-redesign"],
+  [],
+];
+let busyIdx = 0;
+setTimeout(() => emitEvent("sessions:busy", BUSY_CYCLE[0]), 400);
+setInterval(() => {
+  busyIdx = (busyIdx + 1) % BUSY_CYCLE.length;
+  emitEvent("sessions:busy", BUSY_CYCLE[busyIdx]);
+}, 6000);
 
 console.info("[mock] Tauri backend mocked — design harness active");

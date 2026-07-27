@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import type { Settings, ThemeSetting, UpdateInfo } from "./settings";
+import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, THEMES } from "./settings";
 
 type CmdResult = { ok: boolean; code: number; output: string };
@@ -170,6 +170,25 @@ export function SettingsSheet({
                 </option>
               ))}
             </select>
+            {settings.theme === "system" && (
+              <>
+                <label className="sub">Light ↔ dark pair</label>
+                <div className="row2">
+                  <select value={settings.theme_light} onChange={(e) => onChange({ theme_light: e.currentTarget.value as ThemeId })}>
+                    {THEMES.filter((t) => t.appearance === "light").map((t) => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
+                  </select>
+                  <span className="times">↔</span>
+                  <select value={settings.theme_dark} onChange={(e) => onChange({ theme_dark: e.currentTarget.value as ThemeId })}>
+                    {THEMES.filter((t) => t.appearance === "dark").map((t) => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="hint">Follows macOS appearance: this light theme by day, this dark theme in dark mode.</div>
+              </>
+            )}
           </section>
 
           <section className="setting">

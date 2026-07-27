@@ -50,6 +50,17 @@ button { cursor: pointer; }
 }
 /* rail-only mode: hidden, NOT unmounted — form drafts + scroll survive ⌘B */
 .nav.hidden { display: none; }
+/* Home — a top-level destination above the tree (deselect = go home) */
+.home-item {
+  display: flex; align-items: center; gap: var(--s2);
+  margin: var(--s2) var(--s2) 0; padding: var(--s2) var(--s2);
+  background: transparent; border: 0; border-radius: var(--r-md);
+  color: var(--txt); font-size: var(--fs-label); font-weight: var(--fw-med);
+  text-align: left; transition: color var(--dur-fast), background var(--dur-fast);
+}
+.home-item:hover { background: var(--bg-elev); color: var(--txt-hi); }
+.home-item.on { background: var(--bg-elev); color: var(--accent); }
+
 .nav-head {
   display: flex; align-items: center; gap: var(--s2);
   padding: var(--s3) var(--s3) var(--s2);
@@ -102,15 +113,21 @@ button { cursor: pointer; }
 .nav-resizer:hover { background: var(--line-strong); }
 
 /* ── project node ── */
-.project { margin-top: var(--s1); }
+.project { margin-top: var(--s2); }
 .project-h {
   display: flex; align-items: center; gap: var(--s2);
-  padding: var(--s1) var(--s3); font-size: var(--fs-label);
+  padding: var(--s2) var(--s3); font-size: var(--fs-label);
 }
 .caret { color: var(--txt-mute); font-size: var(--fs-meta); cursor: pointer; width: 10px; }
-.rollup { width: 7px; height: 7px; border-radius: var(--r-full); flex: none; }
-.rollup.on { background: var(--ok); }
-.rollup.off { background: var(--txt-mute); }
+/* project icon; a busy child shows as a small pulsing badge on its corner */
+.picon { position: relative; display: grid; place-items: center; width: 16px; height: 16px; color: var(--txt-dim); flex: none; }
+.picon-svg { display: block; }
+.picon.busy::after {
+  content: ""; position: absolute; top: -2px; right: -2px;
+  width: 6px; height: 6px; border-radius: var(--r-full);
+  background: var(--ok); box-shadow: 0 0 0 2px var(--bg-tree);
+  animation: breathe 2s ease-in-out infinite;
+}
 .rollup.broken { background: transparent; color: var(--danger); width: auto; height: auto; }
 .pname {
   flex: 1; font-weight: var(--fw-bold); color: var(--txt-hi); cursor: pointer;
@@ -213,8 +230,11 @@ button { cursor: pointer; }
   content: ""; position: absolute; left: 2px; top: 4px; bottom: 4px;
   width: 2px; border-radius: var(--r-full); background: var(--accent);
 }
-.status-dot { width: 8px; height: 8px; border-radius: var(--r-full); }
-.status-dot.live { animation: breathe 2s ease-in-out infinite; }
+/* the dot means ONE thing: this session is working right now. Empty slot
+ * otherwise (fixed width, so names never shift when a dot appears). */
+.status-dot { width: 8px; height: 8px; border-radius: var(--r-full); background: transparent; flex: none; }
+.status-dot.busy { background: var(--ok); animation: breathe 2s ease-in-out infinite; }
+.status-dot.on { background: var(--ok); } /* static "tmux up" fact (topbar) */
 .row-id { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .row-name {
   font-size: var(--fs-row); font-weight: var(--fw-med); color: var(--txt-hi);
@@ -226,12 +246,12 @@ button { cursor: pointer; }
 
 .glyphs { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-micro); }
 .g { font-variant-numeric: tabular-nums; }
-.g-ai { color: var(--ai); }
 .g-dirty { color: var(--dirty); }
 .g-ahead { color: var(--ok); }
 .g-behind { color: var(--dirty); }
 .g-det { color: var(--txt-dim); }
 .g-more { color: var(--txt-mute); background: var(--bg-panel); padding: 0 4px; border-radius: var(--r-full); }
+.row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; }
 
 /* ── main ── */
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-abyss); }
@@ -251,7 +271,6 @@ button { cursor: pointer; }
 .status-cluster { display: flex; align-items: center; gap: var(--s3); font-size: var(--fs-meta); }
 .status-cluster .s { display: inline-flex; align-items: center; gap: 3px; }
 .status-cluster .ok { color: var(--ok); }
-.status-cluster .ai { color: var(--ai); }
 .status-cluster .dirty { color: var(--dirty); }
 .status-cluster .ab { color: var(--dirty); font-variant-numeric: tabular-nums; }
 .life {
@@ -417,9 +436,13 @@ button { cursor: pointer; }
 .sb-facts .ok { color: var(--ok); }
 .sb-facts .off { color: var(--txt-mute); }
 
-/* briefing (empty state) */
+/* Home (empty state): logo + open button, then the resume list */
 .briefing { margin: auto; width: min(560px, 82%); padding: var(--s6) 0; }
-.briefing h1 { font-size: 1.6rem; font-weight: var(--fw-bold); color: var(--txt-hi); margin: 0 0 var(--s4); }
+.home-hero { display: flex; align-items: center; gap: var(--s4); margin-bottom: var(--s5); }
+.home-logo { width: 72px; height: 72px; border-radius: 16px; flex: none; }
+.home-id h1 { font-size: 1.6rem; font-weight: var(--fw-bold); color: var(--txt-hi); margin: 0 0 2px; }
+.home-tag { color: var(--txt-dim); font-size: var(--fs-body); }
+.home-open { margin-bottom: var(--s5); }
 .chips { display: flex; gap: var(--s3); margin-bottom: var(--s6); }
 .chip {
   display: inline-flex; align-items: center; gap: var(--s2);
@@ -439,7 +462,6 @@ button { cursor: pointer; }
 .rr-life { color: var(--txt-dim); font-size: var(--fs-meta); text-transform: uppercase; letter-spacing: 0.05em; }
 .rr-age { margin-left: auto; color: var(--txt-mute); font-size: var(--fs-meta); }
 .resume-row .enter-btn { margin-left: 0; }
-.briefing-foot { margin-top: var(--s4); color: var(--txt-mute); font-size: var(--fs-meta); }
 
 .empty { margin: auto; text-align: center; color: var(--txt-mute); line-height: var(--lh-prose); }
 .empty.small { margin: var(--s4); font-size: var(--fs-label); }
@@ -470,4 +492,5 @@ button { cursor: pointer; }
 .seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: var(--fw-med); }
 .row2 { display: flex; align-items: center; gap: var(--s2); }
 .row2 input { width: 90px; }
+.row2 select { flex: 1; min-width: 0; }
 .times { color: var(--txt-mute); }

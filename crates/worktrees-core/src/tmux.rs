@@ -38,6 +38,25 @@ pub fn session_fingerprint() -> String {
     }
 }
 
+/// `(session_name, session_activity_epoch)` for every live session — the app's
+/// "churning" signal (activity = tmux saw output in some window). One cheap
+/// subprocess; empty when tmux is down. CLI doesn't call this.
+pub fn session_activity() -> Vec<(String, i64)> {
+    match tmux(&["list-sessions", "-F", "#{session_name}\t#{session_activity}"]) {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| {
+                let (name, t) = l.split_once('\t')?;
+                if name.is_empty() {
+                    return None;
+                }
+                Some((name.to_string(), t.trim().parse::<i64>().ok()?))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Single-quote `s` for embedding in a shell `-c`/`-ic` string (bash `sq`).
 pub fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))

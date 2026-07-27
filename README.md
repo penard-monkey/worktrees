@@ -1,13 +1,17 @@
 # worktrees
 
-One git worktree per branch, one tmux session per worktree — pane 0 runs your AI
-CLI (claude, codex, opencode, …), pane 1 installs deps and gives you a shell.
+**A durable place for every work stream.** Not a throwaway worktree per branch —
+a place you keep: `ui-changes`, `prod-reviews`, `mcp-server`. Each place is a
+git worktree + a tmux session — pane 0 runs your AI CLI (claude, codex,
+opencode, …), pane 1 installs deps and gives you a shell — and it lives as long
+as the work does: an afternoon, or weeks of async iteration until it's right.
 
-**A worktree is a PLACE** (directory, tmux session + AI CLI history,
-node_modules); **a branch is a unit of work that flows through it**. The place
-is named after its first branch unless `--name` says otherwise; `switch` moves
-it to the next branch without touching anything expensive. Ship a branch, switch
-the place to the next one, keep working.
+**Branches flow through places.** The place keeps the expensive parts
+(directory, AI CLI history, node_modules, the running session); a branch is the
+unit of work currently on it. Ship a branch, `switch` the place to the next one,
+keep working. The place is named after its first branch unless `--name` says
+otherwise; `switch` moves it to the next branch without touching anything
+expensive.
 
 ```
 worktrees new feat/checkout          # worktree + branch + tmux (AI | deps+shell)

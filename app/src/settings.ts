@@ -17,11 +17,12 @@ export const THEMES = [
 export type ThemeId = (typeof THEMES)[number]["id"];
 export type ThemeSetting = ThemeId | "system";
 
-/** Concrete [data-theme] value for a setting ("system" → macOS appearance). */
-export function resolveTheme(t: ThemeSetting): ThemeId {
-  if (t === "system")
-    return window.matchMedia("(prefers-color-scheme: light)").matches ? "tokyo-day" : "tokyo-night";
-  return t;
+/** Concrete [data-theme] value for a setting ("system" → macOS appearance,
+ * flipping between the user's chosen light/dark pair). */
+export function resolveTheme(s: Pick<Settings, "theme" | "theme_light" | "theme_dark">): ThemeId {
+  if (s.theme === "system")
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? s.theme_light : s.theme_dark;
+  return s.theme;
 }
 
 export type Settings = {
@@ -29,6 +30,8 @@ export type Settings = {
   term_family: string;
   term_size: number; // 10–20
   theme: ThemeSetting;
+  theme_light: ThemeId; // the pair "system" flips between
+  theme_dark: ThemeId;
   density: "comfortable" | "compact";
   window_w: number;
   window_h: number;
@@ -49,6 +52,8 @@ export const DEFAULTS: Settings = {
   term_family: '"SF Mono", Menlo, Monaco, monospace',
   term_size: 13,
   theme: "tokyo-night",
+  theme_light: "tokyo-day",
+  theme_dark: "tokyo-night",
   density: "comfortable",
   window_w: 1280,
   window_h: 820,
@@ -83,7 +88,7 @@ export function applySettings(s: Settings) {
   root.style.setProperty("--term-family", s.term_family);
   root.style.setProperty("--term-size", `${clampTerm(s.term_size)}px`);
   root.style.setProperty("--nav-w", `${clampNav(s.nav_width)}px`);
-  root.dataset.theme = resolveTheme(s.theme);
+  root.dataset.theme = resolveTheme(s);
   root.dataset.density = s.density;
 }
 
@@ -92,12 +97,19 @@ function normalizeTheme(t: unknown): ThemeSetting {
   if (t === "system" || THEMES.some((x) => x.id === t)) return t as ThemeSetting;
   return DEFAULTS.theme;
 }
+// System-pair pickers only accept a theme of the right appearance.
+function normalizePair(t: unknown, appearance: "light" | "dark", fallback: ThemeId): ThemeId {
+  const hit = THEMES.find((x) => x.id === t && x.appearance === appearance);
+  return hit ? hit.id : fallback;
+}
 
 export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await invoke<Partial<Settings> | null>("get_settings");
     const s = { ...DEFAULTS, ...(raw ?? {}) };
     s.theme = normalizeTheme(s.theme);
+    s.theme_light = normalizePair(s.theme_light, "light", DEFAULTS.theme_light);
+    s.theme_dark = normalizePair(s.theme_dark, "dark", DEFAULTS.theme_dark);
     return s;
   } catch {
     return { ...DEFAULTS };
