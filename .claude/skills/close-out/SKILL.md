@@ -16,15 +16,16 @@ worktree is clean for a fresh branch + `/clear`.
   `gh pr list --author @me`).
 - Gates green if any code changed since the last merge (see CLAUDE.md Gates).
 
-## 1. Scratch files → /tmp
+## 1. Scratch files → ~/.cache
 
 Scratch artifacts (screenshots, harness output, one-off scripts) live in
-`/tmp/worktrees/<project>/<worktree-name>/` — e.g.
-`/tmp/worktrees/worktrees/ui-changes/`. Create the dir if missing; move any
-strays out of the repo root (nav-*.png, theme-*.png and friends). They are
-NOT committed. If the session summary references one or two pivotal
-screenshots, copying just those into the session archive dir is allowed —
-/tmp does not survive a reboot.
+`~/.cache/worktrees/<project>/<worktree-name>/` — e.g.
+`~/.cache/worktrees/worktrees/ui-changes/`. (XDG cache: survives reboots,
+never auto-purged — unlike /tmp, which macOS wipes on reboot and prunes
+after ~3 days.) Create the dir if missing; move any strays out of the repo
+root (nav-*.png, theme-*.png and friends). They are NOT committed. If the
+session summary references one or two pivotal screenshots, copying just
+those into the session archive dir is allowed.
 
 ## 2. Session summary (committed)
 

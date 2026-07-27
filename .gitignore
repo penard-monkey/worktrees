@@ -26,7 +26,7 @@ dist/
 /findings.md
 /progress.md
 
-# session screenshots belong in /tmp/worktrees/<project>/<worktree>/ — these
+# session screenshots belong in ~/.cache/worktrees/<project>/<worktree>/ — these
 # patterns are the safety net for strays in the repo root
 /nav-*.png
 /upd-*.png

@@ -53,7 +53,7 @@ mode), Catppuccin Mocha, Catppuccin Latte, Nord, Gruvbox Dark.
 All 6 themes + System switched through the real Settings select in the mock
 harness (`pnpm dev:mock` + Playwright); terminal repaint confirmed per theme;
 `tsc` clean; production build clean. Screenshots archived in scratch
-(`/tmp/worktrees/worktrees/ui-changes/`).
+(`~/.cache/worktrees/worktrees/ui-changes/`).
 
 ## Follow-ups
 
