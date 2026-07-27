@@ -30,4 +30,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 portable-pty = "0.9"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# PID-liveness check for Claude session probes (kill(pid, 0)); already in the
+# lock tree transitively. macOS + Linux.
+libc = "0.2"
 

@@ -577,6 +577,89 @@ async fn fetch_origin(root: String) -> Result<(), String> {
     fetch_origin_root(&project.main_root)
 }
 
+// ── Claude working state (nav busy/waiting dots) ─────────────────────────────
+// Claude Code writes ONE probe file per live session at
+// `~/.claude/sessions/<pid>.json` — { pid, cwd, status, waitingFor, updatedAt, … }.
+// `status` ∈ { busy, idle, waiting, shell, (missing) }; `cwd` is the session's
+// working dir = the worktree directory (the app launches pane-0 claude in the
+// place path), so it maps 1:1 to a place's `path`. The file is rewritten on
+// status TRANSITIONS only — `updatedAt` can be minutes old while genuinely still
+// busy — so we DO NOT expire by age. Liveness guard is PID-alive (stale files for
+// dead pids are never cleaned on crash). Everything degrades to "no dot":
+// missing/unreadable dir → empty; unparseable/incomplete file → skipped;
+// dead pid → skipped.
+
+#[derive(serde::Deserialize)]
+struct ClaudeProbe {
+    pid: i32,
+    cwd: String,
+    status: String,
+}
+
+/// True when `pid` is a live process. `kill(pid, 0)` sends no signal but runs the
+/// permission/existence checks: 0 → alive; -1 with errno ESRCH → dead. EPERM
+/// (exists but not ours) still means alive. Never mutates the target.
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill with signal 0 performs no action beyond error checking.
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // rc == -1: alive iff the failure is EPERM (exists, not permitted), not ESRCH.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Scan `~/.claude/sessions/*.json`, keeping only LIVE-pid probes, and bucket
+/// their `cwd`s by status. Returns (busy_cwds, waiting_cwds). Paths are pushed
+/// as-is (the probe cwd and a place's `path` both derive from the same worktree
+/// dir, so the frontend matches raw). Any I/O or parse failure degrades to empty.
+fn claude_activity() -> (Vec<String>, Vec<String>) {
+    let mut busy = Vec::new();
+    let mut waiting = Vec::new();
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return (busy, waiting);
+    }
+    let dir = Path::new(&home).join(".claude/sessions");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return (busy, waiting), // dir missing/unreadable → no dots
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
+            Ok(p) => p,          // missing pid/cwd/status → parse fails → skip
+            Err(_) => continue,
+        };
+        if probe.cwd.is_empty() || !pid_alive(probe.pid) {
+            continue; // dead pid (or crashed-session stale file) → no dot
+        }
+        match probe.status.as_str() {
+            "busy" => busy.push(probe.cwd),
+            "waiting" => waiting.push(probe.cwd),
+            _ => {} // idle / shell / anything else → no dot
+        }
+    }
+    (busy, waiting)
+}
+
+/// Payload for `sessions:busy` — PATHS (worktree dirs), keyed to a place's `path`.
+#[derive(Serialize, Clone)]
+struct ClaudeActivity {
+    busy: Vec<String>,
+    waiting: Vec<String>,
+}
+
 /// Find the installed CLI: whatever `command -v` resolves in the USER'S login
 /// shell (zsh reads ~/.zprofile; plain sh would not — the app may be launched
 /// from Finder with a bare PATH), then the common install dirs. Chatty profiles
@@ -1106,12 +1189,13 @@ pub fn run() {
             // (~30s) still catches dirty/branch drift that leaves no tmux trace.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                // "churning" = tmux saw output in the session this recently.
-                // 10s absorbs the 3s poll jitter yet decays fast once a session
-                // goes quiet, so the busy dot means "working right now".
-                const BUSY_WINDOW_SECS: i64 = 10;
+                // Claude's real working state — read from ~/.claude/sessions/<pid>.json
+                // probes (see claude_activity), keyed by worktree path. Replaces the
+                // old tmux #{session_activity} signal, which tracked CLIENT attach/
+                // keypress, not pane output — so the dot decayed while Claude worked.
                 let mut last = worktrees_core::tmux::session_fingerprint();
                 let mut last_busy: Vec<String> = Vec::new();
+                let mut last_waiting: Vec<String> = Vec::new();
                 let mut ticks: u32 = 0;
                 // Auto-fetch scheduling. The pass runs INLINE on this thread (no
                 // extra thread → passes can never stack; the AtomicU64 interval is
@@ -1137,19 +1221,15 @@ pub fn run() {
                         ticks = 0;
                         let _ = handle.emit("places:changed", ());
                     }
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    let mut busy: Vec<String> = worktrees_core::tmux::session_activity()
-                        .into_iter()
-                        .filter(|(_, t)| now - t <= BUSY_WINDOW_SECS)
-                        .map(|(n, _)| n)
-                        .collect();
+                    let (mut busy, mut waiting) = claude_activity();
                     busy.sort_unstable();
-                    if busy != last_busy {
+                    waiting.sort_unstable();
+                    // Change-gated: emit only when EITHER set shifts, so an idle
+                    // machine stays silent (the frontend just re-applies the last set).
+                    if busy != last_busy || waiting != last_waiting {
                         last_busy = busy.clone();
-                        let _ = handle.emit("sessions:busy", busy);
+                        last_waiting = waiting.clone();
+                        let _ = handle.emit("sessions:busy", ClaudeActivity { busy, waiting });
                     }
                 }
             });

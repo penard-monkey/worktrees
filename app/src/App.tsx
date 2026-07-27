@@ -307,14 +307,22 @@ function App() {
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
 
-  // "churning" sessions — pushed by the backend poll thread (sessions with
-  // tmux output in the last few seconds). Pure event state: no extra invokes.
-  const [busySessions, setBusySessions] = useState<Set<string>>(new Set());
+  // Claude working state — pushed by the backend poll thread from the
+  // ~/.claude/sessions/<pid>.json probes (see lib.rs claude_activity). Keyed by
+  // WORKTREE PATH (probe cwd == place.path), not the tmux session name. Two sets:
+  // busy → green blinking dot, waiting → static amber "needs input". Pure event
+  // state: no extra invokes.
+  const [busyPaths, setBusyPaths] = useState<Set<string>>(new Set());
+  const [waitingPaths, setWaitingPaths] = useState<Set<string>>(new Set());
   useEffect(() => {
-    const un = listen<string[]>("sessions:busy", (e) => setBusySessions(new Set(e.payload)));
+    const un = listen<{ busy: string[]; waiting: string[] }>("sessions:busy", (e) => {
+      setBusyPaths(new Set(e.payload.busy));
+      setWaitingPaths(new Set(e.payload.waiting));
+    });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, []);
-  const isBusy = (p: Place) => busySessions.has(p.tmux_session.name);
+  const activityOf = (p: Place): "busy" | "waiting" | "" =>
+    busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
 
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
@@ -840,8 +848,8 @@ function App() {
         title={p.slug}
       >
         <span
-          className={"status-dot" + (isBusy(p) ? " busy" : "")}
-          title={isBusy(p) ? "session working" : undefined}
+          className={"status-dot" + (activityOf(p) === "busy" ? " busy" : activityOf(p) === "waiting" ? " waiting" : "")}
+          title={activityOf(p) === "busy" ? "Claude working" : activityOf(p) === "waiting" ? "Claude needs input" : undefined}
         />
         <span className="row-id">
           <span className="row-name">
@@ -873,7 +881,12 @@ function App() {
     const open = !collapsed[pv.root];
     const places = (pv.snapshot?.places ?? []).filter(matchPlace);
     const main = places.find((p) => p.is_main) ?? null;
-    const rollupBusy = places.some((p) => busySessions.has(p.tmux_session.name));
+    // Rollup: a working child dominates a waiting one — busy wins, else waiting.
+    const rollup = places.some((p) => activityOf(p) === "busy")
+      ? "busy"
+      : places.some((p) => activityOf(p) === "waiting")
+        ? "waiting"
+        : "";
     const buckets: Record<string, Place[]> = {};
     for (const p of places) { if (p.is_main) continue; (buckets[bucketOf(p)] ??= []).push(p); }
     for (const k of Object.keys(buckets)) buckets[k] = sortPlaces(pv.root, buckets[k]);
@@ -885,7 +898,7 @@ function App() {
         <div className="project-h" onContextMenu={(e) => projectCtx(e, pv.root)}>
           <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? "▾" : "▸"}</span>
           {pv.ok
-            ? <span className={"picon" + (rollupBusy ? " busy" : "")} title={rollupBusy ? "a session is working" : undefined}><FolderIcon /></span>
+            ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : undefined}><FolderIcon /></span>
             : <span className="rollup broken" title="repo gone">⊘</span>}
           <span className="pname" title={pv.root} onClick={() => toggleProject(pv.root)}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
@@ -1164,7 +1177,10 @@ function App() {
               {resume.length === 0 && <div className="empty small">No places yet — ＋ open a project.</div>}
               {resume.map(({ pv, p }) => (
                 <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
-                  <span className={"status-dot" + (busySessions.has(p.tmux_session.name) ? " busy" : "")} />
+                  <span
+                    className={"status-dot" + (activityOf(p) === "busy" ? " busy" : activityOf(p) === "waiting" ? " waiting" : "")}
+                    title={activityOf(p) === "busy" ? "Claude working" : activityOf(p) === "waiting" ? "Claude needs input" : undefined}
+                  />
                   <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{p.slug}</span>
                   <span className="rr-proj">{basename(pv.root)}</span>
                   <span className="rr-life">{p.lifecycle_effective}</span>
