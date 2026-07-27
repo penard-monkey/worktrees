@@ -707,6 +707,117 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
     })
 }
 
+// ── AI command config (Settings → Commands) ──────────────────────────────────
+// Phase 1: read-only visibility of the engine's ai_cmd / ai_resume_arg, which
+// live in the SHARED CLI config (~/.config/worktrees/config). The app exposes
+// nothing to edit yet (no core config writer). All resolution goes through
+// worktrees-core's pub fns so the app never re-implements precedence.
+
+#[derive(Serialize)]
+struct AiConfig {
+    /// Effective resolved ai_cmd (flag=None → env > config > default `claude`).
+    ai_cmd: String,
+    /// Effective resolved resume arg (env > config > default `-r`).
+    ai_resume_arg: String,
+    /// The shared config file path (respects $XDG_CONFIG_HOME).
+    path: String,
+    /// Whether that config file actually exists on disk.
+    exists: bool,
+}
+
+/// The engine's effective AI command + resume arg, plus the shared config path.
+/// Read-only (Phase 1). The frontend shows it under the ai_auto_resume checkbox
+/// and offers a reveal button (reveal the PARENT dir when the file is absent —
+/// revealItemInDir rejects a non-existent path).
+#[tauri::command]
+async fn get_ai_config() -> Result<AiConfig, String> {
+    let path = worktrees_core::config::config_path();
+    Ok(AiConfig {
+        ai_cmd: worktrees_core::config::resolve_ai_cmd(None),
+        ai_resume_arg: worktrees_core::config::resolve_ai_resume_arg(),
+        path: path.to_string_lossy().into_owned(),
+        exists: path.exists(),
+    })
+}
+
+// ── diagnostics (Settings → Logs → Copy diagnostics) ─────────────────────────
+// A single clipboard-ready plaintext block for bug reports. Entirely OFFLINE:
+// no check_update / no network — versions come from the compiled-in constant +
+// the local CLI probe, environment from the (already fixed-up) PATH, and tool
+// versions via short-deadline `which`/`--version` shell-outs.
+
+/// `which <tool>` (resolved path) + first line of `<tool> --version`, each under
+/// a short deadline so a wedged tool can't stall the button. Returns the two as
+/// display strings ("(not found)" when absent).
+fn tool_report(tool: &str) -> (String, String) {
+    let mut which = std::process::Command::new("which");
+    which.arg(tool);
+    let path = match run_deadline(which, 10) {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => "(not found)".to_string(),
+    };
+    let mut ver = std::process::Command::new(tool);
+    ver.arg("--version");
+    let version = match run_deadline(ver, 10) {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string()
+        }
+        _ => "(unknown)".to_string(),
+    };
+    (path, version)
+}
+
+/// Assemble the diagnostics block. `async` (a login-shell CLI probe can take
+/// ~5s and two ~10s tool probes — must never run on the main thread).
+#[tauri::command]
+async fn diagnostics() -> Result<String, String> {
+    let app_version = env!("CARGO_PKG_VERSION").to_string();
+    let (cli_path, cli_version) = match cli_binary() {
+        Some((p, v)) => (p, v),
+        None => ("(not found)".to_string(), "(unknown)".to_string()),
+    };
+    let path = std::env::var("PATH").unwrap_or_default();
+    let (git_path, git_version) = tool_report("git");
+    let (tmux_path, tmux_version) = tool_report("tmux");
+
+    let ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
+    let ai_resume_arg = worktrees_core::config::resolve_ai_resume_arg();
+    let cfg_path = worktrees_core::config::config_path();
+    let cfg_exists = cfg_path.exists();
+
+    let log_tail = {
+        let text = std::fs::read_to_string(log_file()).unwrap_or_default();
+        let all: Vec<&str> = text.lines().collect();
+        let start = all.len().saturating_sub(200);
+        all[start..].join("\n")
+    };
+
+    let block = format!(
+        "worktrees diagnostics\n\
+         =====================\n\
+         app version : {app_version}\n\
+         cli version : {cli_version}\n\
+         cli path    : {cli_path}\n\
+         \n\
+         PATH        : {path}\n\
+         git         : {git_version} @ {git_path}\n\
+         tmux        : {tmux_version} @ {tmux_path}\n\
+         \n\
+         core config\n\
+         -----------\n\
+         ai_cmd        : {ai_cmd}\n\
+         ai_resume_arg : {ai_resume_arg}\n\
+         config file   : {cfg} ({exists})\n\
+         \n\
+         log (last 200 lines)\n\
+         --------------------\n\
+         {log_tail}\n",
+        cfg = cfg_path.to_string_lossy(),
+        exists = if cfg_exists { "exists" } else { "absent" },
+    );
+    Ok(block)
+}
+
 /// Web URL for a place's branch on its origin remote: a /tree/<branch> link on
 /// github.com, the repo home for other hosts, None with no origin. The UI opens
 /// it via the opener plugin.
@@ -1063,6 +1174,8 @@ pub fn run() {
             set_fetch_interval,
             check_update,
             update_cli,
+            get_ai_config,
+            diagnostics,
             log_info,
             log_event,
             log_tail,

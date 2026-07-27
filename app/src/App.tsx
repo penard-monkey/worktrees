@@ -592,11 +592,17 @@ function App() {
     closeCtx();
     openNewForm(root, base);
   };
-  const removePlaceCtx = async (repo: string, slug: string) => {
-    const key = `ctx|${repo}|${slug}`; // namespaced: never matches the topbar's key
-    if (confirmRm !== key) { setConfirmRm(key); return; } // arm; menu stays open
+  // Unarmed click arms (menu stays open, showing the two danger buttons below).
+  const armRemovePlaceCtx = (repo: string, slug: string) => {
+    setConfirmRm(`ctx|${repo}|${slug}`); // namespaced: never matches the topbar's key
+  };
+  // Armed confirm. `delBranch` picks the button: false = remove only, true =
+  // remove + branch. With force:false the core uses `git branch -d`, so only a
+  // MERGED branch is deleted; an unmerged one degrades to a warning while the
+  // remove still succeeds — del_branch is safe by construction.
+  const confirmRemovePlaceCtx = async (repo: string, slug: string, delBranch: boolean) => {
     closeCtx();
-    if ((await runCmd("remove_place", { repo, slug, del_branch: false, force: false }))?.ok) {
+    if ((await runCmd("remove_place", { repo, slug, del_branch: delBranch, force: false }))?.ok) {
       if (sel?.repo === repo && sel?.slug === slug) setSel(null);
     }
   };
@@ -663,12 +669,17 @@ function App() {
     if (!b) return;
     if ((await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null }))?.ok) setSwitchTo("");
   };
-  const doRemove = async () => {
+  // Topbar ⋯ remove — same armed two-button pair as the ctx menu (arm key
+  // `repo|slug`). Unarmed click arms; the armed state renders "Confirm remove"
+  // (del_branch:false) + "Confirm remove + branch" (del_branch:true).
+  const armRemove = () => {
     if (!sel) return;
-    const key = `${sel.repo}|${sel.slug}`;
-    if (confirmRm !== key) { setConfirmRm(key); return; }
+    setConfirmRm(`${sel.repo}|${sel.slug}`);
+  };
+  const confirmRemove = async (delBranch: boolean) => {
+    if (!sel) return;
     closeMenu();
-    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, del_branch: false, force: false }))?.ok) setSel(null);
+    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, del_branch: delBranch, force: false }))?.ok) setSel(null);
   };
 
   const toggleProject = (root: string) => {
@@ -1086,9 +1097,14 @@ function App() {
                     {menu === "more" && (
                       <div className="popover right">
                         <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
-                        <button className={"pop-item danger" + (confirmRm === `${sel.repo}|${sel.slug}` ? " armed" : "")} onClick={doRemove}>
-                          {confirmRm === `${sel.repo}|${sel.slug}` ? "Confirm remove?" : "Remove worktree…"}
-                        </button>
+                        {confirmRm === `${sel.repo}|${sel.slug}` ? (
+                          <>
+                            <button className="pop-item danger armed" onClick={() => confirmRemove(false)}>Confirm remove</button>
+                            <button className="pop-item danger armed" onClick={() => confirmRemove(true)}>Confirm remove + branch</button>
+                          </>
+                        ) : (
+                          <button className="pop-item danger" onClick={armRemove}>Remove worktree…</button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1242,12 +1258,20 @@ function App() {
           {!ctxPlace.is_main && (
             <>
               <div className="ctx-sep" />
-              <button
-                className={"pop-item danger" + (confirmRm === `ctx|${ctx.repo}|${ctxPlace.slug}` ? " armed" : "")}
-                onClick={() => removePlaceCtx(ctx.repo, ctxPlace.slug)}
-              >
-                {confirmRm === `ctx|${ctx.repo}|${ctxPlace.slug}` ? "Confirm remove?" : "Remove worktree…"}
-              </button>
+              {confirmRm === `ctx|${ctx.repo}|${ctxPlace.slug}` ? (
+                <>
+                  <button className="pop-item danger armed" onClick={() => confirmRemovePlaceCtx(ctx.repo, ctxPlace.slug, false)}>
+                    Confirm remove
+                  </button>
+                  <button className="pop-item danger armed" onClick={() => confirmRemovePlaceCtx(ctx.repo, ctxPlace.slug, true)}>
+                    Confirm remove + branch
+                  </button>
+                </>
+              ) : (
+                <button className="pop-item danger" onClick={() => armRemovePlaceCtx(ctx.repo, ctxPlace.slug)}>
+                  Remove worktree…
+                </button>
+              )}
             </>
           )}
         </CtxMenu>

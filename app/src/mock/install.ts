@@ -170,7 +170,24 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       editPlace(args.repo, args.slug, (p) => { p.branch = args.branch; });
       return { ok: true, code: 0, output: `Switched ${args.slug} → ${args.branch}` };
     case "remove_place": {
+      // Mirror the real backend (ops.rs remove_one): refuse a DIRTY worktree
+      // unless --force, WITHOUT deleting. This finally makes the error-banner
+      // path reachable headlessly (several fixtures are dirty:true).
+      console.info("[mock] remove_place:", args); // logs del_branch/force flags
       const pv = findProject(args.repo);
+      const pl = pv?.snapshot?.places.find((p) => p.slug === args.slug);
+      if (pl?.dirty && !args.force) {
+        return {
+          ok: false,
+          code: 1,
+          output:
+            `Worktree '${args.slug}' has uncommitted changes:\n` +
+            `  M …\n` +
+            `Refusing to remove. Commit/stash, or pass --force.`,
+        };
+      }
+      // del_branch is state-invisible here (no branch objects modeled) — the
+      // place is removed either way; the flag is logged above.
       if (pv?.snapshot) pv.snapshot.places = pv.snapshot.places.filter((p) => p.slug !== args.slug);
       return { ok: true, code: 0, output: `Removed ${args.slug}` };
     }
@@ -208,6 +225,36 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         output: `worktrees installer\n→ ${args.tag}: darwin/arm64 prebuilt\n✓ checksum verified\n✓ installed to ~/.local/bin/worktrees\nworktrees ${mockCliVersion}`,
       };
     }
+
+    // AI command config (read-only, Phase 1). exists:false exercises the
+    // reveal-parent fallback chain in SettingsSheet.
+    case "get_ai_config":
+      return { ai_cmd: "claude", ai_resume_arg: "-r", path: "/Users/demo/.config/worktrees/config", exists: false };
+
+    // Copy diagnostics — canned block (the real command probes the login shell,
+    // git/tmux, and tails app.log; none of that exists in the harness).
+    case "diagnostics":
+      return [
+        "worktrees diagnostics",
+        "=====================",
+        "app version : 0.2.4",
+        "cli version : 0.2.4",
+        "cli path    : /Users/demo/.local/bin/worktrees",
+        "",
+        "PATH        : /opt/homebrew/bin:/usr/bin:/bin",
+        "git         : git version 2.45.0 @ /opt/homebrew/bin/git",
+        "tmux        : tmux 3.5a @ /opt/homebrew/bin/tmux",
+        "",
+        "core config",
+        "-----------",
+        "ai_cmd        : claude",
+        "ai_resume_arg : -r",
+        "config file   : /Users/demo/.config/worktrees/config (absent)",
+        "",
+        "log (last 200 lines)",
+        "--------------------",
+        "2026-07-25 20:00:01Z [info] startup v0.2.4 PATH=/usr/bin:...",
+      ].join("\n");
 
     case "get_changelog":
       return {
