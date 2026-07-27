@@ -7,6 +7,7 @@ import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, THEMES } from "./settings";
 
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null };
+type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
 
 // Right-side slide-over. Presentational: App owns the Settings state and does the
 // apply-live + persist + terminal-refit on each change. Esc / scrim closes.
@@ -116,6 +117,58 @@ export function SettingsSheet({
     }
   };
 
+  // Copy diagnostics: backend assembles the plaintext block (app/cli/PATH/git/
+  // tmux/core-config/log-tail); we append the frontend-known UI bits, then write
+  // to the clipboard. SettingsSheet has no fail() — errors surface in the logTail
+  // area (like openLogsDir) AND land in app.log via log_event.
+  const [diagCopied, setDiagCopied] = useState(false);
+  const copyDiagnostics = async () => {
+    try {
+      const back = await invoke<string>("diagnostics");
+      const ui =
+        `\nUI settings\n-----------\n` +
+        `theme   : ${settings.theme}\n` +
+        `density : ${settings.density}\n` +
+        `ui_rem  : ${settings.ui_rem}px\n`;
+      await navigator.clipboard.writeText(back + ui);
+      setDiagCopied(true);
+      setTimeout(() => setDiagCopied(false), 2000);
+    } catch (e) {
+      const m = `copy diagnostics failed: ${String(e)}`;
+      setLogTail(m);
+      invoke("log_event", { level: "error", msg: m }).catch(() => {});
+    }
+  };
+
+  // AI command config (read-only, Phase 1). Fetched when the sheet opens, like
+  // settings_info. Shared with the CLI (~/.config/worktrees/config).
+  const [aiConfig, setAiConfig] = useState<AiConfig | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    invoke<AiConfig>("get_ai_config").then(setAiConfig).catch(() => {});
+  }, [open]);
+  // Reveal the config file — but revealItemInDir REJECTS a non-existent path
+  // (the plugin canonicalizes). When exists:false, reveal the PARENT dir (the
+  // config dir, which may also not exist). If the parent reveal also fails,
+  // surface it in the logTail error area + app.log. Never open-path (the
+  // capability doesn't grant it — it rejects silently).
+  const revealAiConfig = async () => {
+    if (!aiConfig) return;
+    try {
+      if (aiConfig.exists) {
+        await revealItemInDir(aiConfig.path);
+      } else {
+        const parent = aiConfig.path.replace(/\/[^/]*$/, "") || "/";
+        await revealItemInDir(parent);
+      }
+    } catch (e) {
+      // Same error area as Feature 2 (the Logs-section logTail pane) + app.log.
+      const m = `reveal AI config failed: ${String(e)}`;
+      setLogTail(m);
+      invoke("log_event", { level: "error", msg: m }).catch(() => {});
+    }
+  };
+
   // Data section: settings file path (for reveal) + two-click "reset to defaults".
   const [settingsPath, setSettingsPath] = useState("");
   const [dataErr, setDataErr] = useState<string | null>(null);
@@ -205,6 +258,16 @@ export function SettingsSheet({
               Resume Claude conversation on open
             </label>
             <div className="hint">Single-click Enter resumes the last conversation. Only applies when the AI command is claude.</div>
+            <div className="ver-rows">
+              <div className="ver-row">
+                AI command: <b>{aiConfig?.ai_cmd ?? "…"}</b>
+                {aiConfig && <> · resume: <b>{aiConfig.ai_resume_arg}</b></>}
+              </div>
+            </div>
+            <div className="ver-actions">
+              <button className="ctrl sm" onClick={revealAiConfig} disabled={!aiConfig}>Reveal config file</button>
+            </div>
+            <div className="hint">Shared with the CLI (~/.config/worktrees/config). Shell env vars (WORKTREES_AI_CMD) don't reach the GUI.</div>
           </section>
 
           <section className="setting">
@@ -364,6 +427,7 @@ export function SettingsSheet({
             <div className="ver-actions">
               <button className="ctrl sm" onClick={openLogsDir}>Open folder</button>
               <button className="ctrl sm" onClick={viewLogTail}>{logTail ? "Refresh tail" : "View tail"}</button>
+              <button className="ctrl sm" onClick={copyDiagnostics}>{diagCopied ? "Copied ✓" : "Copy diagnostics"}</button>
             </div>
             {logTail && <pre className="update-log">{logTail}</pre>}
           </section>
