@@ -40,6 +40,12 @@ type Workspace = { projects: ProjectView[] };
 type CmdResult = { ok: boolean; code: number; output: string };
 type Lens = "places" | "recent" | "attention";
 
+// ⌘1..N nav targets, in the nav's displayed top-to-bottom order: Home (clear
+// selection → briefing), then the rail's lens entries. Module scope = stable.
+const NAV_CHORDS: { home?: boolean; lens?: Lens }[] = [
+  { home: true }, { lens: "places" }, { lens: "recent" }, { lens: "attention" },
+];
+
 const LIVE_TIERS = ["pinned", "active", "idle"] as const;
 const DORMANT_TIERS = ["saved", "closed", "archived", "abandoned"] as const;
 const GROUP_LABEL: Record<string, string> = {
@@ -494,15 +500,18 @@ function App() {
   };
 
   // THE primary verb: inhabit a place — stamp recency, ensure its session, select it.
-  // `fresh` (right-click "Open fresh") skips the AI auto-resume.
+  // `fresh` skips the AI auto-resume. Explicit opts.fresh (right-click override)
+  // wins; otherwise the ai_auto_resume setting decides — OFF → default opens are
+  // fresh. (Backend no-ops resume unless the AI command is claude anyway.)
   const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
     setSel({ repo, slug: p.slug });
     setMenu(null);
     closeCtx();
     setTermFocus((v) => v + 1); // hand the keyboard back to the terminal
+    const fresh = opts?.fresh ?? !settings.ai_auto_resume;
     (async () => {
       invoke("touch_place", { repo, slug: p.slug }).catch(() => {}); // fire-and-forget recency stamp
-      await runCmd("open_place", { repo, slug: p.slug, fresh: opts?.fresh ?? false });
+      await runCmd("open_place", { repo, slug: p.slug, fresh });
     })();
   };
 
@@ -541,6 +550,16 @@ function App() {
   const editIn = (path: string) => {
     closeCtx();
     invoke("open_editor", { path, cmd: settings.editor_cmd }).catch((e) => fail(e));
+  };
+  // Settings → Data → "Reset to defaults". Preserve last_seen_version so the
+  // What's-new sheet doesn't re-fire, push through the same apply/persist/refit
+  // path as every other change, and reset the React state that MIRRORS settings
+  // (lens + per-project collapsed) so the UI doesn't show stale nav state.
+  const onReset = () => {
+    const next = { ...DEFAULTS, last_seen_version: settings.last_seen_version };
+    updateSettings(next);
+    setLens(next.lens);
+    setCollapsed(next.collapsed);
   };
   const editNote = (repo: string, p: Place) => {
     closeCtx();
@@ -654,6 +673,23 @@ function App() {
       return next;
     });
   }, []);
+  // keyboard lens select (⌘2..N): unlike changeLens, re-selecting the active lens
+  // must NOT toggle/collapse the nav — a keyboard chord always REVEALS the view.
+  const selectLens = useCallback((l: Lens) => {
+    setLens(l);
+    setSettings((prev) => {
+      if (prev.lens === l && !prev.nav_collapsed) return prev;
+      const next = { ...prev, lens: l, nav_collapsed: false };
+      applySettings(next);
+      if (hydrated.current) saveSettings(next);
+      else Object.assign(preHydration.current, { lens: l, nav_collapsed: false });
+      return next;
+    });
+  }, []);
+  // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
+  // the keydown listener stays stable (registered once, no per-render churn).
+  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd });
+  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
@@ -668,11 +704,25 @@ function App() {
         // term-host (its passthrough concerns are ctrl-only). Esc already closes.
         e.preventDefault();
         setSettingsOpen((v) => !v);
+      } else if (e.metaKey && e.key >= "1" && e.key <= "9") {
+        // ⌘1..N — jump to a nav view (Home / lenses). Always REVEALS (never
+        // toggles). Meta-only chord is safe past the term-host.
+        const idx = e.key.charCodeAt(0) - 49; // '1' → 0
+        const target = NAV_CHORDS[idx];
+        if (!target) return;
+        e.preventDefault();
+        if (target.home) { setSel(null); setMenu(null); closeCtx(); if (settings.nav_collapsed) toggleNav(); }
+        else if (target.lens) keyRef.current.selectLens(target.lens);
+      } else if (e.metaKey && k === "e") {
+        // ⌘E — open the selected place in the editor (no-op when nothing selected).
+        e.preventDefault();
+        const path = keyRef.current.selectedPath;
+        if (path) invoke("open_editor", { path, cmd: keyRef.current.editorCmd }).catch((err) => fail(err));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleNav]);
+  }, [toggleNav, fail, settings.nav_collapsed]);
 
   // lens click: collapsed → expand into that lens; active lens again → collapse (VS Code style)
   const changeLens = (l: Lens) => {
@@ -1078,7 +1128,7 @@ function App() {
 
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
-        onShowNotes={showReleaseNotes} />
+        onShowNotes={showReleaseNotes} onReset={onReset} />
 
       {/* after SettingsSheet: opened from Settings, the notes stack ON TOP of it */}
       {whatsNew && (
@@ -1103,7 +1153,11 @@ function App() {
           <div className="pop-hint">{ctxPlace.is_main ? "◆ main" : ctxPlace.slug}</div>
           <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace)}>Enter ▸</button>
           {!ctxPlace.tmux_session.up && ctxPlace.claude_session_present && (
-            <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: true })}>Open fresh (skip resume)</button>
+            settings.ai_auto_resume ? (
+              <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: true })}>Open fresh (skip resume)</button>
+            ) : (
+              <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: false })}>Open with resume</button>
+            )
           )}
           {ctxPlace.tmux_session.up && (
             <>

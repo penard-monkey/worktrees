@@ -22,6 +22,7 @@ export function SettingsSheet({
   appStale,
   onCheckUpdate,
   onShowNotes,
+  onReset,
 }: {
   open: boolean;
   settings: Settings;
@@ -33,6 +34,7 @@ export function SettingsSheet({
   appStale: boolean;
   onCheckUpdate: () => Promise<void> | void;
   onShowNotes: () => void;
+  onReset: () => void;
 }) {
   const [updating, setUpdating] = useState(false);
   const [updateLog, setUpdateLog] = useState("");
@@ -113,6 +115,33 @@ export function SettingsSheet({
       setLogTail(String(e));
     }
   };
+
+  // Data section: settings file path (for reveal) + two-click "reset to defaults".
+  const [settingsPath, setSettingsPath] = useState("");
+  const [dataErr, setDataErr] = useState<string | null>(null);
+  const [resetArmed, setResetArmed] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    setResetArmed(false); // re-arm each time the sheet opens
+    invoke<{ dir: string; file: string }>("settings_info").then((i) => setSettingsPath(i.file)).catch(() => {});
+  }, [open]);
+  // reveal (not open-path): opener:default grants reveal-item-in-dir only.
+  // Failures are NEVER swallowed — they surface here AND land in app.log.
+  const revealSettings = async () => {
+    try {
+      const i = await invoke<{ dir: string; file: string }>("settings_info");
+      await revealItemInDir(i.file);
+    } catch (e) {
+      const m = `reveal settings file failed: ${String(e)}`;
+      setDataErr(m);
+      invoke("log_event", { level: "error", msg: m }).catch(() => {});
+    }
+  };
+  const doReset = () => {
+    if (!resetArmed) { setResetArmed(true); return; } // arm; second click confirms
+    setResetArmed(false);
+    onReset();
+  };
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -154,12 +183,22 @@ export function SettingsSheet({
           </section>
 
           <section className="setting">
-            <label>Editor command</label>
+            <label>Commands</label>
+            <label className="sub">Editor command</label>
             <input
               type="text" value={settings.editor_cmd}
               onChange={(e) => onChange({ editor_cmd: e.currentTarget.value })}
             />
-            <div className="hint">Used by right-click “Open in editor” (e.g. code, cursor, subl)</div>
+            <div className="hint">Used by right-click “Open in editor” and ⌘E (e.g. code, cursor, subl)</div>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.ai_auto_resume}
+                onChange={(e) => onChange({ ai_auto_resume: e.currentTarget.checked })}
+              />
+              Resume Claude conversation on open
+            </label>
+            <div className="hint">Single-click Enter resumes the last conversation. Only applies when the AI command is claude.</div>
           </section>
 
           <section className="setting">
@@ -292,6 +331,42 @@ export function SettingsSheet({
               type="range" min={220} max={460} step={10} value={settings.nav_width}
               onChange={(e) => onChange({ nav_width: clampNav(+e.currentTarget.value) })}
             />
+          </section>
+
+          <section className="setting">
+            <label>Shortcuts</label>
+            <div className="shortcuts">
+              {[
+                ["⌘B", "Toggle the nav"],
+                ["⌘,", "Open Settings"],
+                ["⌘1", "Home (briefing)"],
+                ["⌘2", "Places"],
+                ["⌘3", "Recent"],
+                ["⌘4", "Attention"],
+                ["⌘E", "Open selection in editor"],
+                ["Esc", "Close sheets & menus"],
+              ].map(([key, desc]) => (
+                <div className="shortcut-row" key={key}>
+                  <kbd>{key}</kbd>
+                  <span>{desc}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="setting">
+            <label>Data</label>
+            <div className="ver-rows">
+              <div className="ver-row"><span className="ver-path" title={settingsPath}>{settingsPath || "…"}</span></div>
+            </div>
+            <div className="ver-actions">
+              <button className="ctrl sm" onClick={revealSettings}>Reveal settings file</button>
+              <button className={"ctrl sm danger" + (resetArmed ? " armed" : "")} onClick={doReset}>
+                {resetArmed ? "Confirm reset?" : "Reset to defaults"}
+              </button>
+            </div>
+            {resetArmed && <div className="hint">Restores every setting to its default (theme, fonts, nav, sort, tiers).</div>}
+            {dataErr && <pre className="update-log">{dataErr}</pre>}
           </section>
         </div>
       </aside>

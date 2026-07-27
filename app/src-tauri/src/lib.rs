@@ -245,6 +245,20 @@ fn ui_state_file(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("ui-state.json"))
 }
 
+#[derive(Serialize)]
+struct SettingsInfo {
+    dir: String,
+    file: String,
+}
+
+/// Config dir + the ui-state.json path — for Settings → Data (reveal the file).
+#[tauri::command]
+async fn settings_info(app: AppHandle) -> Result<SettingsInfo, String> {
+    let file = ui_state_file(&app)?;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(SettingsInfo { dir: dir.to_string_lossy().into(), file: file.to_string_lossy().into() })
+}
+
 #[tauri::command]
 async fn get_settings(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
     let p = ui_state_file(&app)?;
@@ -934,6 +948,7 @@ pub fn run() {
             log_tail,
             get_changelog,
             open_editor,
+            settings_info,
             get_settings,
             set_settings,
             term_open,
