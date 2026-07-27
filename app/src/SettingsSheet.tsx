@@ -6,7 +6,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, THEMES } from "./settings";
 
-type CmdResult = { ok: boolean; code: number; output: string };
+type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null };
 
 // Right-side slide-over. Presentational: App owns the Settings state and does the
 // apply-live + persist + terminal-refit on each change. Esc / scrim closes.

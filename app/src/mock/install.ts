@@ -108,7 +108,9 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           declared: { last_opened_epoch: now() }, lifecycle_effective: "active",
         });
       }
-      return { ok: true, code: 0, output: `Created worktree ${slug}` };
+      // Return the computed slug (mirrors core's new_place contract) so the
+      // frontend selects the right place headlessly.
+      return { ok: true, code: 0, output: `Created worktree ${slug}`, slug };
     }
     case "open_place": {
       console.info("[mock] open_place", args); // includes args.fresh so headless tests can assert the flag

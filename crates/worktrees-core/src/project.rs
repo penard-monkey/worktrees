@@ -157,6 +157,11 @@ impl Project {
     /// serializes it via `ls_json`.
     pub fn ls(&self) -> LsJson {
         let reg = self.registrations();
+        // Prefetch the live tmux panes ONCE per snapshot (one `list-panes -a`),
+        // so place_json can detect an ADOPTED (foreign-named) session per place
+        // without shelling out per place — the app polls this every ~3s.
+        let panes = tmux::PaneList::fetch();
+        let ai_word = adopt_ai_word();
         // Build every place's snapshot in parallel — each place shells out to git
         // (status/divergence/log), and summed serially this froze the app on big
         // repos. Main first, then worktrees; recency-sort the worktrees afterwards
@@ -164,7 +169,7 @@ impl Project {
         let tasks: Vec<(String, bool)> = std::iter::once((self.main_root.clone(), true))
             .chain(self.worktree_dirs().into_iter().map(|d| (d, false)))
             .collect();
-        let mut computed = self.place_json_par(&tasks, &reg);
+        let mut computed = self.place_json_par(&tasks, &reg, panes.as_ref(), &ai_word);
         let main = computed.remove(0);
         computed.sort_by(|a, b| recency_key(b).cmp(&recency_key(a))); // stable desc, glob-order ties
         let mut places = Vec::with_capacity(computed.len() + 1);
@@ -185,10 +190,24 @@ impl Project {
         format!("{}\n", serde_json::to_string(&self.ls()).unwrap_or_default())
     }
 
-    fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>) -> Place {
+    fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str) -> Place {
         let slug = if is_main { "(main)".to_string() } else { basename(dir) };
-        let session = self.session_name(&slug);
-        let tmux_up = tmux::session_exists(&session);
+        let canonical = self.session_name(&slug);
+        // Canonical name first (exact match). If it's down, adopt any session
+        // with a pane cwd'd in this dir — the SAME session `open` reuses. Without
+        // this an adopted (foreign-named) session read as "down", the app never
+        // mounted its terminal, and Enter looked dead. Uses the prefetched pane
+        // list (no per-place tmux shell-out). For MAIN, exclude `.worktrees/`:
+        // worktree dirs nest under the main root, so without the exclusion any
+        // live worktree session would falsely read as main's.
+        let exclude = if is_main { Some(self.wt_root.as_str()) } else { None };
+        let (session, tmux_up) = if tmux::session_exists(&canonical) {
+            (canonical, true)
+        } else if let Some(adopted) = panes.and_then(|pl| pl.session_in(dir, ai_word, exclude)) {
+            (adopted, true)
+        } else {
+            (canonical, false)
+        };
         let cdir = claude_dir_for(dir);
         let cpresent = claude_has_session(&cdir);
         let bepoch = self.clock.stat_birth(dir);
@@ -266,7 +285,7 @@ impl Project {
     /// (status / divergence / last-commit); running them concurrently turns a
     /// sum-of-latencies into ~max. `LANES` caps concurrent git processes so a repo
     /// with many worktrees can't thrash. Order is preserved (caller keeps main first).
-    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>) -> Vec<Place> {
+    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str) -> Vec<Place> {
         const LANES: usize = 16;
         let mut out = Vec::with_capacity(tasks.len());
         for chunk in tasks.chunks(LANES) {
@@ -275,7 +294,7 @@ impl Project {
                     .iter()
                     .map(|(dir, is_main)| {
                         let is_main = *is_main;
-                        s.spawn(move || self.place_json(dir, is_main, reg))
+                        s.spawn(move || self.place_json(dir, is_main, reg, panes, ai_word))
                     })
                     .collect();
                 for h in handles {
@@ -318,6 +337,26 @@ impl Project {
             }
         }
         None
+    }
+
+    /// The FINAL slug `cmd_new` will land a new place on — the single source of
+    /// truth for the app, which otherwise re-derives it and guesses wrong.
+    /// Mirrors `cmd_new`: `slugify(name || strip_origin(branch))`, but when no
+    /// explicit `name` is given and the branch already lives in another worktree,
+    /// `cmd_new` REUSES that holder's slug (only if its dir doesn't already exist
+    /// under the derived slug). Same conditions as `cmd_new` so they can't diverge.
+    pub fn resolve_new_slug(&self, branch: &str, name: Option<&str>) -> String {
+        let strip_origin = |s: &str| s.strip_prefix("origin/").unwrap_or(s).to_string();
+        let slugify = |s: &str| s.replace('/', "-");
+        let branch = strip_origin(branch);
+        let mut slug = slugify(name.unwrap_or(&branch));
+        let wt = format!("{}/{}", self.wt_root, slug);
+        if !Path::new(&wt).exists() && name.is_none() {
+            if let Some(holder) = self.wt_for_branch(&branch) {
+                slug = basename(&holder);
+            }
+        }
+        slug
     }
 
     /// Default base for a NEW branch: main, else master, else current HEAD.
@@ -379,6 +418,16 @@ fn resolve_prefix(main_root: &str) -> String {
         .or_else(|| cfg_get(&config_path(), "prefix").filter(|s| !s.is_empty()))
         .unwrap_or_else(|| basename(main_root));
     sanitize_prefix(&raw)
+}
+
+/// The AI-command word used to PREFER an adopted session's AI pane — same
+/// derivation as `ops::launch`/`close_one` (first word of the resolved ai_cmd,
+/// basename, default `claude`). Computed once per snapshot.
+fn adopt_ai_word() -> String {
+    let ai_cmd = crate::config::resolve_ai_cmd(None);
+    let full = ai_cmd.split_whitespace().next().unwrap_or("");
+    let word = if full.is_empty() { "claude" } else { full };
+    basename(word)
 }
 
 fn detect_install_cmd(dir: &str) -> Option<String> {
