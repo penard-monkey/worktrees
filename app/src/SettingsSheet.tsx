@@ -254,6 +254,21 @@ export function SettingsSheet({
           </section>
 
           <section className="setting">
+            <label>Git</label>
+            <label className="sub">Auto-fetch origin</label>
+            <select
+              value={settings.fetch_interval_min}
+              onChange={(e) => onChange({ fetch_interval_min: +e.currentTarget.value })}
+            >
+              <option value={0}>Off</option>
+              <option value={5}>Every 5 min</option>
+              <option value={15}>Every 15 min</option>
+              <option value={60}>Every 60 min</option>
+            </select>
+            <div className="hint">Keeps ahead/behind counts fresh. Fetches each project's origin in the background.</div>
+          </section>
+
+          <section className="setting">
             <label>Startup</label>
             <label className="tier-toggle setting-check">
               <input

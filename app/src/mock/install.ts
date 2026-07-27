@@ -131,6 +131,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     }
     case "github_url":
       return `https://github.com/demo/${(args.repo as string).split("/").pop()}/tree/mock-branch`;
+    case "fetch_origin":
+      console.info("[mock] fetch_origin:", args); // no ahead/behind state to model in the harness
+      return null;
+    case "set_fetch_interval":
+      console.info("[mock] set_fetch_interval:", args);
+      return null;
     case "open_editor":
       console.info("[mock] open_editor:", args);
       return null;
