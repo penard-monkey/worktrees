@@ -25,8 +25,10 @@ fn indent(s: &str) -> String {
 }
 
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
-pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_cmd: &str, ai_cmd: &str, do_attach: bool) {
-    let _ = p;
+// Returns 0 on success (session live / adopted / attached), 1 when tmux refuses
+// to create the session (the reason is surfaced via ui.error — the app shows it
+// and the CLI exits nonzero, instead of the old silent "Session ready" lie).
+pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_cmd: &str, ai_cmd: &str, do_attach: bool) -> i32 {
     let keep = "exec \"${SHELL:-/bin/sh}\"";
     let ai_word_full = ai_cmd.split_whitespace().next().unwrap_or("");
     let ai_word = {
@@ -35,7 +37,11 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
     };
     let mut session = session_in.to_string();
     if !tmux::session_exists(&session) {
-        if let Some(existing) = tmux::worktree_session(wt, &ai_word) {
+        // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
+        // inside the main root, so without the exclusion opening main could
+        // adopt (and attach to) a worktree's session instead of creating main's.
+        let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
+        if let Some(existing) = tmux::worktree_session_excluding(wt, &ai_word, exclude) {
             session = existing;
         }
     }
@@ -53,17 +59,27 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         } else {
             keep.to_string()
         };
-        if let Some(pid) = tmux::new_session(&session, wt, &pane0) {
-            tmux::tune_session(&session);
-            tmux::split_window(&pid, wt, &pane1);
-            tmux::select_pane(&pid);
+        match tmux::new_session(&session, wt, &pane0) {
+            Ok(pid) => {
+                tmux::tune_session(&session);
+                tmux::split_window(&pid, wt, &pane1);
+                tmux::select_pane(&pid);
+            }
+            Err(reason) => {
+                // Loud-guard: a failed new-session must NOT read as "ready". The
+                // app surfaces this in the error banner + app.log; the CLI exits
+                // nonzero. (Fake shims always succeed → bats never sees this path.)
+                ui.error(&format!("Failed to open tmux session '{session}': {reason}"));
+                return 1;
+            }
         }
     }
     if !do_attach {
         ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
-        return;
+        return 0;
     }
     tmux::attach_or_switch(&session);
+    0
 }
 
 // ── do_switch — move a registered worktree to another branch (DWIM) ──────────
@@ -82,7 +98,11 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
         return Err(1);
     }
     let main = &p.main_root;
-    let switch_fail = |ui: &mut dyn Ui| -> Result<(), i32> {
+    // `reason` is git's own captured stderr — surface it FIRST so the real cause
+    // (the app's inherited stderr otherwise vanishes into the launchd void)
+    // replaces the generic "checked out elsewhere?" guess.
+    let switch_fail = |ui: &mut dyn Ui, reason: &str| -> Result<(), i32> {
+        ui.error(reason);
         ui.error("git switch failed. If the branch is checked out in another worktree:");
         if let Some(list) = git::git_out(main, &["worktree", "list"]) {
             ui.plain(&indent(&list));
@@ -92,8 +112,8 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
 
     if git::git_ok(main, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
         ui.info("Branch exists locally — switching.");
-        if !git::git_status(wt, &["switch", branch]) {
-            return switch_fail(ui);
+        if let Err(e) = git::git_status_captured(wt, &["switch", branch]) {
+            return switch_fail(ui, &e);
         }
     } else {
         if do_fetch && !git::git_ok(main, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
@@ -102,8 +122,8 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
         }
         if git::git_ok(main, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
             ui.info(&format!("Tracking remote branch origin/{branch}."));
-            if !git::git_status(wt, &["switch", branch]) {
-                return switch_fail(ui);
+            if let Err(e) = git::git_status_captured(wt, &["switch", branch]) {
+                return switch_fail(ui, &e);
             }
         } else {
             let base = base.map(|s| s.to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| p.default_base());
@@ -115,8 +135,8 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
                 start = format!("origin/{base}");
             }
             ui.info(&format!("Creating new branch '{branch}' off '{start}'."));
-            if !git::git_status(wt, &["switch", "-c", branch, &start]) {
-                return switch_fail(ui);
+            if let Err(e) = git::git_status_captured(wt, &["switch", "-c", branch, &start]) {
+                return switch_fail(ui, &e);
             }
         }
     }
@@ -226,7 +246,9 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         return 1;
     } else if git::git_ok(&p.main_root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
         ui.info(&format!("Branch '{branch}' exists locally — checking it out."));
-        if !git::git_status(&p.main_root, &["worktree", "add", &wt, &branch]) {
+        if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", &wt, &branch]) {
+            ui.error(&e);
+            ui.error(&format!("Failed to add worktree for '{branch}' at {wt}."));
             return 1;
         }
     } else {
@@ -236,7 +258,9 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         if git::git_ok(&p.main_root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
             ui.info(&format!("Checking out remote branch origin/{branch} (tracking)."));
-            if !git::git_status(&p.main_root, &["worktree", "add", "--track", "-b", &branch, &wt, &format!("origin/{branch}")]) {
+            if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", "--track", "-b", &branch, &wt, &format!("origin/{branch}")]) {
+                ui.error(&e);
+                ui.error(&format!("Failed to add tracking worktree for origin/{branch} at {wt}."));
                 return 1;
             }
         } else {
@@ -248,7 +272,9 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
                 start = format!("origin/{base}");
             }
             ui.info(&format!("Creating new branch '{branch}' off '{start}'."));
-            if !git::git_status(&p.main_root, &["worktree", "add", "-b", &branch, &wt, &start]) {
+            if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", "-b", &branch, &wt, &start]) {
+                ui.error(&e);
+                ui.error(&format!("Failed to create branch '{branch}' off '{start}' at {wt}."));
                 return 1;
             }
         }
@@ -268,8 +294,10 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         return 0;
     }
-    launch(p, ui, &wt, &session, &install_cmd, &ai_cmd, do_attach);
-    0
+    // The worktree already exists at this point — a failed session is a partial
+    // success the user MUST see (loud-guard). Propagate launch's rc so cmd_new
+    // returns nonzero. (Fake shims always succeed → bats success path unchanged.)
+    launch(p, ui, &wt, &session, &install_cmd, &ai_cmd, do_attach)
 }
 
 fn detect_install_cmd(dir: &str) -> String {
@@ -431,8 +459,7 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if resume && !ai_cmd.is_empty() {
         ai_cmd = format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg());
     }
-    launch(p, ui, &wt, &session, "", &ai_cmd, do_attach);
-    0
+    launch(p, ui, &wt, &session, "", &ai_cmd, do_attach)
 }
 
 // ── close ────────────────────────────────────────────────────────────────────

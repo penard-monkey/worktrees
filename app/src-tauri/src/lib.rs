@@ -312,6 +312,11 @@ struct CmdResult {
     ok: bool,
     code: i32,
     output: String,
+    /// For `new_place` only: the ACTUAL slug core landed the place on (branch
+    /// slugified, origin/ stripped, holder-reuse applied). The frontend selects
+    /// this instead of re-deriving and guessing wrong. `None` for every other op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slug: Option<String>,
 }
 
 fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F) -> Result<CmdResult, String> {
@@ -326,7 +331,7 @@ fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F
     } else {
         applog("warn", &format!("{op} rc={code} repo={repo}: {}", ui.lines.join(" | ")));
     }
-    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n") })
+    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n"), slug: None })
 }
 
 /// Create a worktree (`new`). `--no-attach`: the session is created (pane 0 AI,
@@ -339,16 +344,28 @@ async fn new_place(
     name: Option<String>,
 ) -> Result<CmdResult, String> {
     let branch_log = branch.clone();
+    let name = name.filter(|s| !s.is_empty());
+    // Resolve the FINAL slug BEFORE the op — wt_for_branch reflects the holder
+    // that reuse targets, and the derived-slug dir doesn't exist yet either way.
+    // After the op the holder may have moved (branch now in the new dir), so the
+    // pre-op resolution is what the frontend should select.
+    let resolved_slug = Project::discover(Path::new(&repo))
+        .ok()
+        .map(|p| p.resolve_new_slug(&branch, name.as_deref()));
     let mut args: Vec<String> = vec![branch];
     if let Some(b) = base.filter(|s| !s.is_empty()) {
         args.push(b);
     }
-    if let Some(n) = name.filter(|s| !s.is_empty()) {
+    if let Some(n) = name {
         args.push("--name".into());
         args.push(n);
     }
     args.push("--no-attach".into());
-    run_op(&format!("new {branch_log}"), &repo, |p, ui| ops::cmd_new(p, ui, &args))
+    let mut r = run_op(&format!("new {branch_log}"), &repo, |p, ui| ops::cmd_new(p, ui, &args))?;
+    if r.ok {
+        r.slug = resolved_slug;
+    }
+    Ok(r)
 }
 
 /// Move a place to another branch (`switch <slug> <branch> [base]`). `-y` skips
@@ -393,8 +410,9 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
             if resume && !ai_cmd.is_empty() {
                 ai_cmd = format!("{ai_cmd} {}", worktrees_core::config::resolve_ai_resume_arg());
             }
-            ops::launch(p, ui, &p.main_root, &session, "", &ai_cmd, false);
-            0
+            // Propagate launch's rc: a failed new-session must reach the UI
+            // banner / app.log, not silently report success.
+            ops::launch(p, ui, &p.main_root, &session, "", &ai_cmd, false)
         } else {
             let mut args = vec![slug, "--no-attach".into()];
             if resume {
@@ -594,6 +612,7 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
             ok: false,
             code: f.status.code().unwrap_or(-1),
             output: format!("installer download failed\n{}", String::from_utf8_lossy(&f.stderr)),
+            slug: None,
         });
     }
 
@@ -625,6 +644,7 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
         ok: out.status.success() && verified,
         code: out.status.code().unwrap_or(-1),
         output: text,
+        slug: None,
     })
 }
 

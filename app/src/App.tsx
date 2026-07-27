@@ -37,7 +37,7 @@ type Place = {
 type Snapshot = { repo: string; prefix: string; places: Place[] };
 type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 type Workspace = { projects: ProjectView[] };
-type CmdResult = { ok: boolean; code: number; output: string };
+type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null };
 type Lens = "places" | "recent" | "attention";
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order: Home (clear
@@ -429,16 +429,18 @@ function App() {
   const mutate = async (p: Promise<unknown>) => {
     try { await p; await refresh(); } catch (e) { fail(e); }
   };
-  const runCmd = async (name: string, args: Record<string, unknown>): Promise<boolean> => {
+  // Returns the op's CmdResult (so callers can read result.slug), or null when
+  // the invoke itself threw. On a non-ok result the error banner is set here.
+  const runCmd = async (name: string, args: Record<string, unknown>): Promise<CmdResult | null> => {
     try {
       setErr("");
       const r = await invoke<CmdResult>(name, args);
       if (!r.ok) setErr(r.output || `${name} failed (exit ${r.code})`);
       await refresh();
-      return r.ok;
+      return r;
     } catch (e) {
       fail(e);
-      return false;
+      return null;
     }
   };
 
@@ -580,7 +582,7 @@ function App() {
     const key = `ctx|${repo}|${slug}`; // namespaced: never matches the topbar's key
     if (confirmRm !== key) { setConfirmRm(key); return; } // arm; menu stays open
     closeCtx();
-    if (await runCmd("remove_place", { repo, slug, del_branch: false, force: false })) {
+    if ((await runCmd("remove_place", { repo, slug, del_branch: false, force: false }))?.ok) {
       if (sel?.repo === repo && sel?.slug === slug) setSel(null);
     }
   };
@@ -632,8 +634,11 @@ function App() {
 
   const createPlace = async (repo: string, branch: string, name: string, base: string) => {
     if (!branch) return;
-    if (await runCmd("new_place", { repo, branch, base: base || null, name: name || null })) {
-      setSel({ repo, slug: (name || branch).replace(/\//g, "-") });
+    const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null });
+    if (r?.ok) {
+      // Select core's ACTUAL final slug (origin/ stripped, holder-reuse applied);
+      // fall back to the old derivation only if the backend didn't report one.
+      setSel({ repo, slug: r.slug ?? (name || branch).replace(/\//g, "-") });
       setNewFor(null);
       setNewBase("");
     }
@@ -642,14 +647,14 @@ function App() {
     if (!sel) return;
     const b = switchTo.trim();
     if (!b) return;
-    if (await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null })) setSwitchTo("");
+    if ((await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null }))?.ok) setSwitchTo("");
   };
   const doRemove = async () => {
     if (!sel) return;
     const key = `${sel.repo}|${sel.slug}`;
     if (confirmRm !== key) { setConfirmRm(key); return; }
     closeMenu();
-    if (await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, del_branch: false, force: false })) setSel(null);
+    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, del_branch: false, force: false }))?.ok) setSel(null);
   };
 
   const toggleProject = (root: string) => {

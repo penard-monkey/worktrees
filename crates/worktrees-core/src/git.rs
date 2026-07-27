@@ -34,3 +34,36 @@ pub fn have_git() -> bool {
 pub fn git_status(cwd: &str, args: &[&str]) -> bool {
     Command::new("git").arg("-C").arg(cwd).args(args).status().map(|s| s.success()).unwrap_or(false)
 }
+
+/// CAPTURED variant of `git_status` for callers that must surface git's own
+/// failure reason (the app's inherited stderr goes to the launchd void).
+/// Behaviour is a superset of `git_status`:
+///  - SUCCESS: git's stdout/stderr are written straight through to this
+///    process's stdout/stderr as RAW BYTES — no reformatting, no added
+///    newlines — so the CLI is byte-identical to the inherited-stdio path and
+///    bats stays green. Returns `Ok(())`.
+///  - FAILURE: nothing is passed through; returns `Err(stderr)` (trimmed; a
+///    spawn error or empty stderr yields a short synthetic reason) so the
+///    caller can route git's real message through `ui.error`.
+pub fn git_status_captured(cwd: &str, args: &[&str]) -> std::result::Result<(), String> {
+    use std::io::Write;
+    let out = match Command::new("git").arg("-C").arg(cwd).args(args).output() {
+        Ok(o) => o,
+        Err(e) => return Err(e.to_string()),
+    };
+    if out.status.success() {
+        // Passthrough as raw bytes to preserve the exact terminal output.
+        let _ = std::io::stdout().write_all(&out.stdout);
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().write_all(&out.stderr);
+        let _ = std::io::stderr().flush();
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            format!("git exited {}", out.status.code().unwrap_or(-1))
+        } else {
+            err
+        })
+    }
+}
