@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-27
+
 ### Fixed
 - The green "working" dot now tracks whether Claude is actually working, not
   whether you recently touched the session. It read a tmux activity timestamp
