@@ -11,8 +11,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   generous indent, and a right-aligned age column on place rows.
 - System theme: pick WHICH light/dark pair "System (match macOS)" flips
   between (Settings → Theme → Light ↔ dark pair).
+- Settings → Version: a "Release notes" button reopens the notes sheet on
+  demand, showing the full released history (not just the unseen slice).
 
 ### Changed
+- "What's new" renders formatted release notes — version headers, colored
+  Added/Changed/Fixed tags, unwrapped bullets, `code` spans — instead of the
+  raw changelog markdown.
 - The green dot now means one thing: this session is working right now (tmux
   output within the last few seconds). Idle-but-open sessions show no dot; a
   busy place also badges its project's folder icon. The purple ✦ "AI session"

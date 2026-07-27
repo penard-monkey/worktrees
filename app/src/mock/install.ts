@@ -201,13 +201,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return {
         version: "0.2.2",
         changelog:
-          "# Changelog\n\n## [Unreleased]\n\n## [0.2.2] - 2026-07-26\n\n### Added\n- Nav tier show/hide, sort modes (last-used / A–Z / manual drag), release notes on update.\n\n### Fixed\n- Multi-client size clamp left stale cells in the embedded terminal.\n\n## [0.2.1] - 2026-07-25\n\n### Added\n- App self-update.\n",
+          "# Changelog\n\n## [Unreleased]\n\n## [0.2.2] - 2026-07-26\n\n### Added\n- Nav tier show/hide, sort modes (last-used / A–Z / manual drag), release\n  notes on update — hard-wrapped like the real CHANGELOG to exercise\n  bullet unwrapping.\n\n### Fixed\n- Multi-client size clamp left stale cells in the embedded terminal;\n  sessions now use `window-size latest` + `aggressive-resize`.\n\n## [0.2.1] - 2026-07-25\n\n### Added\n- App self-update.\n",
       };
 
     // settings — harness has no persistence; App falls back to defaults.
     // `?whatsnew` simulates an app that last saw 0.2.1 → the What's-new sheet.
     case "get_settings":
-      return location.search.includes("whatsnew") ? { last_seen_version: "0.2.1" } : null;
+      return location.search.includes("whatsnew") ? { last_seen_version: "0.2.0" } : null;
     case "set_settings":
       return null;
 
