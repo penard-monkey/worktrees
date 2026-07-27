@@ -5,14 +5,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-27
+
+The settings release: a Settings pane that finally does what its controls say,
+keyboard shortcuts that actually fire, and a batch of silent failures made loud.
+
 ### Added
 - Nav: a Home entry at the top (app logo + one-click "Open a project" on the
   Home screen), folder icons on project rows, deeper nesting with more
   generous indent, and a right-aligned age column on place rows.
 - System theme: pick WHICH light/dark pair "System (match macOS)" flips
   between (Settings → Theme → Light ↔ dark pair).
+- Keyboard shortcuts: ⌘, opens Settings, ⌘1 jumps Home, ⌘2 / ⌘3 / ⌘4 jump to
+  Places / Recent / Attention (keyboard selection always reveals the nav,
+  never collapses it), and ⌘E opens the current selection in your editor. A
+  read-only Shortcuts section in Settings lists every one of them.
+- Settings → Commands: a "Resume Claude conversation on open" toggle. Turn it
+  off and a single click opens a fresh session; right-click then offers "Open
+  with resume" for the times you want to pick up where you left off. The
+  effective AI command and resume argument are shown read-only, with a
+  "Reveal config file" button — the config is shared with the CLI.
+- Settings → Git: "Auto-fetch origin" (Off / 5 / 15 / 60 min) keeps every
+  project's ahead/behind counts and the Attention lens fresh in the
+  background, hardened so a credential prompt can never hang the app. A
+  "Fetch origin" right-click verb on projects does the same on demand.
+- Settings → Commands: an external terminal command with a `{session}` token
+  (e.g. `ghostty -e tmux attach -t {session}`) adds "Open in terminal app" to
+  a place's right-click menu — hidden until you configure it.
+- Settings → Startup: "Restore last place on launch" reselects the place you
+  left off on (it selects, nothing more — it never auto-starts a session).
 - Settings → Version: a "Release notes" button reopens the notes sheet on
-  demand, showing the full released history (not just the unseen slice).
+  demand, showing the full released history (not just the unseen slice), and a
+  "Check for updates at launch" toggle.
+- Settings → Logs: "Copy diagnostics" — one offline click assembles the app
+  and CLI versions, the GUI's real resolved PATH, git/tmux locations, your
+  effective AI config, and the last 200 log lines, ready to paste into a bug
+  report.
+- Settings → Data: reveal the settings file in Finder, and a two-click "Reset
+  to defaults".
+- Removing a worktree now offers "Confirm remove + branch" alongside the plain
+  remove. Branch deletion uses git's merged-only guard (`git branch -d`), so
+  it can never throw away unmerged work.
 
 ### Changed
 - "What's new" renders formatted release notes — version headers, colored
@@ -22,6 +55,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   output within the last few seconds). Idle-but-open sessions show no dot; a
   busy place also badges its project's folder icon. The purple ✦ "AI session"
   glyph is gone — it was true for nearly every place, so it said nothing.
+- The topbar remove action now reads "Remove worktree…" (was "Remove
+  place…"), matching the right-click menu.
+
+### Fixed
+- The "Window default" size inputs did nothing — they were saved but never
+  applied to a window. Removed.
+- "Remove from workspace" could fire with zero confirmation from two different
+  surfaces; both now arm on the first click and remove on the second. A
+  subtler leak also let an armed "Confirm remove?" survive closing the ⋯ menu
+  and then fire on a single click much later — that's fixed too.
+- Copy actions failed silently — a stale clipboard with no signal that
+  anything went wrong. Copy failures now surface.
+- Enter could quietly do nothing. A tmux session that failed to start reported
+  success everywhere (UI, exit code, and log alike), and a session running
+  under a non-canonical name made a live place read as down so its terminal
+  never mounted. Both are now loud and visible.
+- Creating a worktree for a branch that already lived in another place could
+  select a place that didn't exist, leaving the pane blank. The app now
+  selects the place the engine actually used.
+- Creation and switch failures used to show progress-looking lines instead of
+  git's real complaint; git's actual reason now reaches the error banner and
+  the log.
+- Editor commands containing spaces or quotes (`open -a "Visual Studio Code"`)
+  now work, and the new terminal command uses the same quoting.
 
 ## [0.2.4] - 2026-07-26
 
