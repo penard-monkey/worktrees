@@ -19,13 +19,18 @@ dist/
 /target/
 
 # planning-with-files working docs — the plan for the CURRENT work stream, kept
-# local and archived out-of-repo when a stream completes. (DESIGN.md + MIGRATION.md
-# are tracked design docs; these three are scratch/working memory.)
+# local; at close-out they're tarballed into docs/sessions/<date>-<slug>/
+# next to the session summary (see .claude/skills/close-out). (DESIGN.md +
+# MIGRATION.md are tracked design docs; these three are scratch/working memory.)
 /task_plan.md
 /findings.md
 /progress.md
+
+# session screenshots belong in /tmp/worktrees/<project>/<worktree>/ — these
+# patterns are the safety net for strays in the repo root
 /nav-*.png
 /upd-*.png
 /plumb-*.png
 /align-*.png
+/theme-*.png
 /Screenshot*.png
