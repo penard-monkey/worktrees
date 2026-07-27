@@ -15,7 +15,6 @@ type Declared = {
   pinned?: boolean;
   note?: string;
   last_opened_epoch?: number;
-  up_cmd?: string | null;
 } | null;
 
 type Place = {
@@ -414,8 +413,11 @@ function App() {
   // resurrects the menu — with its armed remove — when the target reappears)
   useEffect(() => {
     if (!ctx || !ws) return;
+    // BOTH branches must clear the arm (closeCtx's contract, inlined here to keep
+    // this effect's deps stable): a vanished target must never leave confirmRm
+    // armed — for the project branch that would resurrect a one-click remove.
     if (ctx.kind === "place" && !ctxPlace) { setCtx(null); setConfirmRm(null); }
-    if (ctx.kind === "project" && !ws.projects.some((v) => v.root === ctx.root)) setCtx(null);
+    if (ctx.kind === "project" && !ws.projects.some((v) => v.root === ctx.root)) { setCtx(null); setConfirmRm(null); }
   }, [ctx, ctxPlace, ws]);
 
   const mutate = async (p: Promise<unknown>) => {
@@ -446,11 +448,48 @@ function App() {
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
+  // Two-click arm for the project ctx-menu item (shares confirmRm with the
+  // place-remove; key namespaced "proj|" so it never collides).
+  const removeProjectCtx = (root: string) => {
+    const key = `proj|${root}`;
+    if (confirmRm !== key) { setConfirmRm(key); return; } // arm; menu stays open
+    closeCtx();
+    removeProject(root);
+  };
+  // Two-click arm for the project-header ✕ (key namespaced "hdr|"). Unlike the
+  // popover surfaces there's no dismissal path to clear the arm, so it also
+  // auto-disarms after a few seconds (effect below) and on selection change.
+  const removeProjectHdr = (root: string) => {
+    const key = `hdr|${root}`;
+    if (confirmRm !== key) { setConfirmRm(key); return; }
+    setConfirmRm(null);
+    removeProject(root);
+  };
+  // Auto-disarm the header-✕ confirm (no popover-close to clear it otherwise).
+  useEffect(() => {
+    if (!confirmRm?.startsWith("hdr|")) return;
+    const t = setTimeout(() => setConfirmRm(null), 4000);
+    return () => clearTimeout(t);
+  }, [confirmRm]);
+  // Clear any header-✕ arm when the selection changes (a switch of focus means
+  // the destructive intent is stale). Popover arms are cleared by their own
+  // close paths; this covers the header ✕ which has none.
+  useEffect(() => {
+    setConfirmRm((c) => (c?.startsWith("hdr|") ? null : c));
+  }, [sel]);
 
   // Every ctx-menu dismissal goes through here: an armed confirmRm must NEVER
   // survive the menu (it would leak into the topbar ⋯ popover as one-click remove).
   const closeCtx = () => {
     setCtx(null);
+    setConfirmRm(null);
+  };
+
+  // Same guarantee for the topbar Lifecycle/⋯ popover: dismissing it must also
+  // disarm the ⋯ "Remove worktree…" confirm — otherwise a stray arm survives and
+  // reopening ⋯ shows a pre-armed one-click destructive remove.
+  const closeMenu = () => {
+    setMenu(null);
     setConfirmRm(null);
   };
 
@@ -474,7 +513,9 @@ function App() {
   };
   const copyText = (text: string) => {
     closeCtx();
-    navigator.clipboard?.writeText(text).catch(() => {});
+    closeMenu(); // also dismiss the topbar ⋯ popover (its "Copy path" routes here)
+    if (!navigator.clipboard) { fail("clipboard unavailable"); return; }
+    navigator.clipboard.writeText(text).catch(fail);
   };
   const openOnRemote = async (repo: string, slug: string) => {
     closeCtx();
@@ -588,8 +629,7 @@ function App() {
     if (!sel) return;
     const key = `${sel.repo}|${sel.slug}`;
     if (confirmRm !== key) { setConfirmRm(key); return; }
-    setConfirmRm(null);
-    setMenu(null);
+    closeMenu();
     if (await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, del_branch: false, force: false })) setSel(null);
   };
 
@@ -616,11 +656,19 @@ function App() {
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey || e.key.toLowerCase() !== "b") return;
-      // Ctrl+B is the tmux prefix — let the embedded terminal keep it; ⌘B still toggles
-      if (e.ctrlKey && !e.metaKey && e.target instanceof Element && e.target.closest(".term-host")) return;
-      e.preventDefault();
-      toggleNav();
+      if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === "b") {
+        // Ctrl+B is the tmux prefix — let the embedded terminal keep it; ⌘B still toggles
+        if (e.ctrlKey && !e.metaKey && e.target instanceof Element && e.target.closest(".term-host")) return;
+        e.preventDefault();
+        toggleNav();
+      } else if (e.metaKey && e.key === ",") {
+        // ⌘, opens Settings (macOS convention) — a meta chord is safe past the
+        // term-host (its passthrough concerns are ctrl-only). Esc already closes.
+        e.preventDefault();
+        setSettingsOpen((v) => !v);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -741,7 +789,13 @@ function App() {
           <span className="pname" title={pv.root} onClick={() => toggleProject(pv.root)}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
           <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}>＋</button>
-          <button className="mini" title="remove project" onClick={() => removeProject(pv.root)}>✕</button>
+          <button
+            className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
+            title={confirmRm === `hdr|${pv.root}` ? "click again to remove from workspace" : "remove project"}
+            onClick={() => removeProjectHdr(pv.root)}
+          >
+            {confirmRm === `hdr|${pv.root}` ? "remove?" : "✕"}
+          </button>
         </div>
 
         {open && pv.ok && (
@@ -923,12 +977,12 @@ function App() {
                   onClick={() => mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on: !selected.declared?.pinned }))}>★</button>
 
                 <div className="menu-wrap">
-                  <button className="ctrl" onClick={() => setMenu(menu === "life" ? null : "life")}>Lifecycle ▾</button>
+                  <button className="ctrl" onClick={() => (menu === "life" ? closeMenu() : (setConfirmRm(null), setMenu("life")))}>Lifecycle ▾</button>
                   {menu === "life" && (
                     <div className="popover right">
                       <div className="pop-hint">active / idle are derived</div>
                       {SETTABLE.map((s) => (
-                        <button key={s.value} className="pop-item" onClick={() => { mutate(invoke("set_lifecycle", { repo: sel.repo, slug: sel.slug, label: s.value })); setMenu(null); }}>
+                        <button key={s.value} className="pop-item" onClick={() => { mutate(invoke("set_lifecycle", { repo: sel.repo, slug: sel.slug, label: s.value })); closeMenu(); }}>
                           <span className="check">{selected.declared?.lifecycle === s.value ? "✓" : ""}</span>{s.label}
                         </button>
                       ))}
@@ -938,12 +992,12 @@ function App() {
 
                 {!selected.is_main && (
                   <div className="menu-wrap">
-                    <button className="ctrl" onClick={() => setMenu(menu === "more" ? null : "more")}>⋯</button>
+                    <button className="ctrl" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}>⋯</button>
                     {menu === "more" && (
                       <div className="popover right">
-                        <button className="pop-item" onClick={() => { navigator.clipboard?.writeText(selected.path).catch(() => {}); setMenu(null); }}>Copy path</button>
+                        <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
                         <button className={"pop-item danger" + (confirmRm === `${sel.repo}|${sel.slug}` ? " armed" : "")} onClick={doRemove}>
-                          {confirmRm === `${sel.repo}|${sel.slug}` ? "Confirm remove?" : "Remove place…"}
+                          {confirmRm === `${sel.repo}|${sel.slug}` ? "Confirm remove?" : "Remove worktree…"}
                         </button>
                       </div>
                     )}
@@ -1041,7 +1095,7 @@ function App() {
           </aside>
         </div>
       )}
-      {menu && <div className="menu-catch" onClick={() => setMenu(null)} />}
+      {menu && <div className="menu-catch" onClick={closeMenu} />}
 
       {/* ── right-click: place ── */}
       {ctx?.kind === "place" && ctxPlace && (
@@ -1112,7 +1166,12 @@ function App() {
             <button className="pop-item" onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>
             <button className="pop-item" onClick={() => editIn(ctx.root)}>Open in editor</button>
             <div className="ctx-sep" />
-            <button className="pop-item danger" onClick={() => { closeCtx(); removeProject(ctx.root); }}>Remove from workspace</button>
+            <button
+              className={"pop-item danger" + (confirmRm === `proj|${ctx.root}` ? " armed" : "")}
+              onClick={() => removeProjectCtx(ctx.root)}
+            >
+              {confirmRm === `proj|${ctx.root}` ? "Confirm remove?" : "Remove from workspace"}
+            </button>
           </CtxMenu>
         );
       })()}

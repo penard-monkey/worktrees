@@ -144,6 +144,11 @@ button { cursor: pointer; }
 }
 .project-h:hover .mini { opacity: 1; }
 .mini:hover { color: var(--txt-hi); background: var(--bg-elev); }
+/* armed: stays visible past hover, reads as destructive (two-click remove) */
+.mini.armed {
+  opacity: 1; color: var(--danger); font-weight: var(--fw-bold);
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
 
 .broken-flat { padding: var(--s2) var(--s3); color: var(--txt-mute); font-size: var(--fs-label); display: flex; gap: var(--s2); align-items: center; }
 
