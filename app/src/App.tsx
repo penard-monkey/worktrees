@@ -152,6 +152,68 @@ function changelogBetween(changelog: string, seen: string, current: string): str
   return out.join("\n\n");
 }
 
+// keepachangelog markdown → typed sections, so "What's new" renders formatted
+// notes instead of raw markdown. Hard-wrapped bullet continuations are unwrapped.
+type NotesGroup = { name: string; items: string[] };
+type NotesSection = { version: string; date: string; groups: NotesGroup[] };
+
+function parseNotes(md: string): NotesSection[] {
+  const sections: NotesSection[] = [];
+  let sec: NotesSection | null = null;
+  let group: NotesGroup | null = null;
+  for (const line of md.split("\n")) {
+    const h2 = line.match(/^## \[([^\]]+)\](?:\s*-\s*(.*))?/);
+    if (h2) {
+      sec = { version: h2[1], date: (h2[2] ?? "").trim(), groups: [] };
+      sections.push(sec);
+      group = null;
+      continue;
+    }
+    const h3 = line.match(/^### (.+)/);
+    if (h3 && sec) {
+      group = { name: h3[1].trim(), items: [] };
+      sec.groups.push(group);
+      continue;
+    }
+    const li = line.match(/^[-*] (.+)/);
+    if (li && group) { group.items.push(li[1].trim()); continue; }
+    if (line.trim() && group && group.items.length) {
+      group.items[group.items.length - 1] += " " + line.trim();
+    }
+  }
+  return sections.filter((s) => s.groups.some((g) => g.items.length));
+}
+
+// `code spans` → <code>; the only inline markup the changelog uses.
+function renderInline(s: string): React.ReactNode[] {
+  return s.split(/`([^`]+)`/g).map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part));
+}
+
+function ReleaseNotes({ notes }: { notes: string }) {
+  const sections = parseNotes(notes);
+  if (!sections.length) return <pre className="notes">{notes}</pre>;
+  return (
+    <div className="relnotes">
+      {sections.map((sec) => (
+        <section key={sec.version}>
+          <div className="rel-head">
+            {sections.length > 1 && <b className="rel-v">v{sec.version}</b>}
+            {sec.date && <span className="rel-date">{sec.date}</span>}
+          </div>
+          {sec.groups.map((g) => (
+            <div key={g.name} className="rel-group">
+              <span className={`rel-tag rel-${g.name.toLowerCase()}`}>{g.name}</span>
+              <ul>
+                {g.items.map((it, i) => <li key={i}>{renderInline(it)}</li>)}
+              </ul>
+            </div>
+          ))}
+        </section>
+      ))}
+    </div>
+  );
+}
+
 // New-worktree form. Module scope + OWN draft state: components defined inside
 // App get a fresh identity every render, which remounts their DOM and drops
 // input focus per keystroke — the form must live outside that churn.
@@ -208,7 +270,7 @@ function App() {
   const [sortOpen, setSortOpen] = useState(false);
   const [drag, setDrag] = useState<{ repo: string; slug: string } | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
-  const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string } | null>(null);
+  const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
   // Badge = actionable updates. CLI via the pinned-tag installer; the app via
   // tauri-plugin-updater (signed bundles) — both one click in Settings now.
   const cliStale = !!(upd?.latest && upd.cli_version && vnewer(upd.latest, upd.cli_version));
@@ -425,6 +487,15 @@ function App() {
   const revealPlace = (path: string) => {
     closeCtx();
     revealItemInDir(path).catch((e) => fail(e));
+  };
+  // Settings → "Release notes": the What's-new sheet again, with the FULL
+  // released history (every section ≤ the running version), on top of Settings.
+  const showReleaseNotes = async () => {
+    try {
+      const ci = await invoke<{ version: string; changelog: string }>("get_changelog");
+      const notes = changelogBetween(ci.changelog, "0", ci.version);
+      setWhatsNew({ version: ci.version, notes: notes || ci.changelog, manual: true });
+    } catch (e) { fail(e); }
   };
   const editIn = (path: string) => {
     closeCtx();
@@ -951,23 +1022,25 @@ function App() {
 
       {sortOpen && <div className="menu-catch" onClick={() => setSortOpen(false)} />}
 
+      <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
+        update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
+        onShowNotes={showReleaseNotes} />
+
+      {/* after SettingsSheet: opened from Settings, the notes stack ON TOP of it */}
       {whatsNew && (
         <div className="scrim" onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}>
           <aside className="settings-sheet whatsnew" onClick={(e) => e.stopPropagation()}>
             <header className="settings-h">
-              <b>What's new — v{whatsNew.version}</b>
+              <b>{whatsNew.manual ? "Release notes" : `What's new — v${whatsNew.version}`}</b>
               <button className="icon-btn" title="close"
                 onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}>✕</button>
             </header>
             <div className="settings-body">
-              <pre className="notes">{whatsNew.notes}</pre>
+              <ReleaseNotes notes={whatsNew.notes} />
             </div>
           </aside>
         </div>
       )}
-
-      <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
-        update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate} />
       {menu && <div className="menu-catch" onClick={() => setMenu(null)} />}
 
       {/* ── right-click: place ── */}

@@ -21,6 +21,7 @@ export function SettingsSheet({
   cliMissing,
   appStale,
   onCheckUpdate,
+  onShowNotes,
 }: {
   open: boolean;
   settings: Settings;
@@ -31,6 +32,7 @@ export function SettingsSheet({
   cliMissing: boolean;
   appStale: boolean;
   onCheckUpdate: () => Promise<void> | void;
+  onShowNotes: () => void;
 }) {
   const [updating, setUpdating] = useState(false);
   const [updateLog, setUpdateLog] = useState("");
@@ -224,6 +226,7 @@ export function SettingsSheet({
               <button className="ctrl sm" disabled={checkState === "checking"} onClick={doCheck}>
                 {checkState === "checking" ? "Checking…" : "Check for updates"}
               </button>
+              <button className="ctrl sm" onClick={onShowNotes}>Release notes</button>
               {actionable && update?.latest && (
                 <button className="ctrl sm" disabled={updating || appUpdating} onClick={doUpdate}>
                   {updating ? "Updating…" : `${cliMissing ? "Install" : "Update"} CLI → ${update.latest}`}

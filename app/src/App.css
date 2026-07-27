@@ -385,6 +385,37 @@ button { cursor: pointer; }
   font-family: var(--term-family); font-size: var(--fs-meta); line-height: 1.5;
   color: var(--txt);
 }
+.relnotes { display: flex; flex-direction: column; gap: var(--s5); }
+.relnotes section { display: flex; flex-direction: column; gap: var(--s3); }
+.rel-head { display: flex; align-items: baseline; gap: var(--s2); }
+.rel-head:empty { display: none; }
+.rel-v { font-size: var(--fs-body); color: var(--txt-hi); }
+.rel-date { font-size: var(--fs-meta); color: var(--txt-mute); }
+.rel-tag {
+  display: inline-block; padding: 1px var(--s2); border-radius: var(--r-sm);
+  font-size: var(--fs-micro); font-weight: var(--fw-bold);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.rel-added      { color: var(--ok);       background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.rel-changed    { color: var(--accent);   background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.rel-fixed      { color: var(--dirty);    background: color-mix(in srgb, var(--dirty) 14%, transparent); }
+.rel-removed,
+.rel-deprecated { color: var(--txt-dim);  background: color-mix(in srgb, var(--txt-dim) 14%, transparent); }
+.rel-security   { color: var(--danger);   background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.rel-group ul {
+  margin: var(--s2) 0 0; padding-left: var(--s4);
+  display: flex; flex-direction: column; gap: var(--s2);
+}
+.rel-group li {
+  font-size: var(--fs-body); line-height: var(--lh-prose); color: var(--txt);
+}
+.rel-group li::marker { color: var(--txt-mute); }
+.rel-group code {
+  font-family: var(--font-mono); font-size: 0.85em;
+  padding: 0 3px; border-radius: 3px;
+  background: color-mix(in srgb, var(--txt) 10%, transparent);
+  color: var(--txt-hi);
+}
 
 /* new-worktree form pinned at the top of the nav (visible in every lens) */
 .nav-newform {
