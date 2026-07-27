@@ -287,19 +287,7 @@ export function SettingsSheet({
           </section>
 
           <section className="setting">
-            <label>Window default</label>
-            <div className="row2">
-              <input
-                type="number" min={900} value={settings.window_w}
-                onChange={(e) => onChange({ window_w: +e.currentTarget.value })}
-              />
-              <span className="times">×</span>
-              <input
-                type="number" min={560} value={settings.window_h}
-                onChange={(e) => onChange({ window_h: +e.currentTarget.value })}
-              />
-            </div>
-            <label className="sub">Nav width <span className="val">{settings.nav_width}px</span></label>
+            <label>Nav width <span className="val">{settings.nav_width}px</span></label>
             <input
               type="range" min={220} max={460} step={10} value={settings.nav_width}
               onChange={(e) => onChange({ nav_width: clampNav(+e.currentTarget.value) })}

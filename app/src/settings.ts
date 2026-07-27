@@ -33,8 +33,6 @@ export type Settings = {
   theme_light: ThemeId; // the pair "system" flips between
   theme_dark: ThemeId;
   density: "comfortable" | "compact";
-  window_w: number;
-  window_h: number;
   nav_width: number; // 220–460
   nav_collapsed: boolean; // rail-only mode (nav hidden)
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
@@ -55,8 +53,6 @@ export const DEFAULTS: Settings = {
   theme_light: "tokyo-day",
   theme_dark: "tokyo-night",
   density: "comfortable",
-  window_w: 1280,
-  window_h: 820,
   nav_width: 300,
   nav_collapsed: false,
   editor_cmd: "code",

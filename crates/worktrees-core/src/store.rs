@@ -30,8 +30,6 @@ pub struct Declared {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_opened_epoch: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub up_cmd: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, serde_json::Value>,
 }

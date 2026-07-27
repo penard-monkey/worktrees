@@ -8,7 +8,6 @@ export type Declared = {
   pinned?: boolean;
   note?: string;
   last_opened_epoch?: number;
-  up_cmd?: string | null;
 } | null;
 
 export type Place = {
