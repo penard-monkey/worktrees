@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-26
+
+### Added
+- Themes: the Settings theme picker grows from one option to seven — System
+  (follows macOS light/dark), Tokyo Night (the existing default), Tokyo Night
+  Day (the new light mode), Catppuccin Mocha, Catppuccin Latte, Nord, and
+  Gruvbox Dark. Every palette uses the official upstream colors,
+  contrast-verified for readability on every surface, and the embedded
+  terminal recolors to match, including a full per-theme ANSI palette so
+  colored terminal output stays legible on light backgrounds.
+
 ## [0.2.3] - 2026-07-26
 
 ### Fixed
