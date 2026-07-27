@@ -691,15 +691,39 @@ fn normalize_remote(remote: &str) -> Option<String> {
 
 /// Open a place in the user's editor (`editor_cmd` from Settings, e.g. `code`).
 /// The command is the user's own configured tool — same trust model as ai_cmd.
+/// Run through `/bin/sh -c` so quoted/spaced commands work (`open -a "Visual
+/// Studio Code"`); the path is passed as a positional arg ($0) so it never needs
+/// quoting inside the command string.
 #[tauri::command]
 async fn open_editor(path: String, cmd: String) -> Result<(), String> {
-    let mut it = cmd.split_whitespace();
-    let Some(prog) = it.next() else {
+    if cmd.trim().is_empty() {
         return Err("no editor configured (Settings → Editor command)".into());
-    };
-    let mut child = std::process::Command::new(prog)
-        .args(it)
-        .arg(&path)
+    }
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", &format!("{cmd} \"$0\""), &path])
+        .spawn()
+        .map_err(|e| format!("couldn't launch '{cmd}': {e}"))?;
+    // reap in the background — a dropped Child is never waited on (zombie per click)
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// Open a place's tmux session in the user's external terminal app
+/// (`terminal_cmd` from Settings, e.g. `ghostty -e tmux attach -t {session}`).
+/// Every `{session}` token is replaced with the SINGLE-QUOTED session name —
+/// session names carry parens (`<prefix>-(main)`) that break unquoted sh — then
+/// the whole command runs via `/bin/sh -c`. Same trust model as editor_cmd.
+#[tauri::command]
+async fn open_terminal(cmd: String, session: String) -> Result<(), String> {
+    if cmd.trim().is_empty() {
+        return Err("no terminal command configured (Settings → Terminal command)".into());
+    }
+    let quoted = worktrees_core::tmux::sq(&session);
+    let line = cmd.replace("{session}", &quoted);
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", &line])
         .spawn()
         .map_err(|e| format!("couldn't launch '{cmd}': {e}"))?;
     // reap in the background — a dropped Child is never waited on (zombie per click)
@@ -968,6 +992,7 @@ pub fn run() {
             log_tail,
             get_changelog,
             open_editor,
+            open_terminal,
             settings_info,
             get_settings,
             set_settings,
