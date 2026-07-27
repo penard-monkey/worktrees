@@ -345,6 +345,15 @@ function App() {
     return () => clearTimeout(t);
   }, [checkUpdate, settings.update_auto_check]);
 
+  // Push the auto-fetch cadence to the backend watcher (which owns the pass loop
+  // but can't read the opaque settings blob). Fires post-hydration and on every
+  // change of the setting; before hydration `settings` still holds DEFAULTS
+  // (fetch_interval_min=0 → off), so an early push is a harmless no-op. Idempotent
+  // (a plain store), so re-syncing the same value costs nothing.
+  useEffect(() => {
+    invoke("set_fetch_interval", { mins: settings.fetch_interval_min }).catch(() => {});
+  }, [settings.fetch_interval_min]);
+
   // hydrate persisted settings BEFORE first meaningful paint. A pre-hydration
   // interaction (⌘B at launch) must neither be visually reverted nor let its
   // debounced save write a DEFAULTS-seeded object over the on-disk settings —
@@ -1253,6 +1262,9 @@ function App() {
             <div className="pop-hint">{basename(ctx.root)}</div>
             <button className="pop-item" onClick={() => { closeCtx(); openNewForm(ctx.root, ""); }}>New worktree…</button>
             {main && <button className="pop-item" onClick={() => enterPlace(ctx.root, main)}>Enter main ▸</button>}
+            {pv?.ok && (
+              <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("fetch_origin", { root: ctx.root })); }}>Fetch origin</button>
+            )}
             <div className="ctx-sep" />
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
             <button className="pop-item" onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>

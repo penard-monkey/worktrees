@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -518,6 +518,65 @@ fn run_deadline(mut cmd: std::process::Command, secs: u64) -> std::io::Result<st
     })
 }
 
+// ── origin fetch: shared machinery for the watcher + the manual verb ─────────
+// The app's FIRST background network actor, so every call is hardened the same
+// way regardless of who triggers it.
+
+/// Fetch a single project's origin. Runs `git fetch --prune origin` in the MAIN
+/// ROOT only — every worktree shares the repo's ref store, so one fetch keeps the
+/// whole project's ahead/behind fresh. Hardening: `GIT_TERMINAL_PROMPT=0` +
+/// `GIT_SSH_COMMAND=ssh -oBatchMode=yes` so a credential/host-key prompt can
+/// never hang a thread forever (the GUI has no tty under launchd), and a ~60s
+/// deadline (run_deadline) so a wedged network can't pin the thread either.
+/// Result → app.log only (info ok / warn + git's stderr) — background work never
+/// pops a user-facing banner. `Err` carries git's stderr for the manual command.
+fn fetch_origin_root(main_root: &str) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(main_root)
+        .args(["fetch", "--prune", "origin"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+    match run_deadline(cmd, 60) {
+        Ok(out) if out.status.success() => {
+            applog("info", &format!("fetch ok repo={main_root}"));
+            Ok(())
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            applog("warn", &format!("fetch rc={} repo={main_root}: {stderr}", out.status.code().unwrap_or(-1)));
+            Err(if stderr.is_empty() { format!("git fetch exited {}", out.status.code().unwrap_or(-1)) } else { stderr })
+        }
+        Err(e) => {
+            applog("warn", &format!("fetch failed repo={main_root}: {e}"));
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Auto-fetch interval in SECONDS (0 = off). The settings blob is backend-opaque
+/// (get_settings/set_settings just shuttle JSON), so the watcher thread can't read
+/// it — the frontend pushes the value here via `set_fetch_interval` after every
+/// settings hydration and change.
+static FETCH_INTERVAL_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Frontend → backend sync of the auto-fetch interval. `mins` is 0 (off) or one
+/// of the offered cadences (5 / 15 / 60); stored in whole seconds for the watcher.
+#[tauri::command]
+async fn set_fetch_interval(mins: u64) -> Result<(), String> {
+    FETCH_INTERVAL_SECS.store(mins.saturating_mul(60), Ordering::Relaxed);
+    Ok(())
+}
+
+/// Manual "Fetch origin" verb (project right-click). Discovers the repo from any
+/// path under it, then fetches its main root via the shared fn. The error string
+/// is git's own stderr so the frontend's fail() shows the real reason.
+#[tauri::command]
+async fn fetch_origin(root: String) -> Result<(), String> {
+    let project = Project::discover(Path::new(&root)).map_err(|e| e.msg)?;
+    fetch_origin_root(&project.main_root)
+}
+
 /// Find the installed CLI: whatever `command -v` resolves in the USER'S login
 /// shell (zsh reads ~/.zprofile; plain sh would not — the app may be launched
 /// from Finder with a bare PATH), then the common install dirs. Chatty profiles
@@ -943,8 +1002,23 @@ pub fn run() {
                 let mut last = worktrees_core::tmux::session_fingerprint();
                 let mut last_busy: Vec<String> = Vec::new();
                 let mut ticks: u32 = 0;
+                // Auto-fetch scheduling. The pass runs INLINE on this thread (no
+                // extra thread → passes can never stack; the AtomicU64 interval is
+                // pushed from the frontend). Trade-off: while a pass runs, the 3s
+                // tmux-fingerprint poll below is paused for up to ~60s per repo —
+                // acceptable, since a stale tmux fingerprint only delays a refresh
+                // the fetch itself will trigger via places:changed at the end.
+                let mut last_fetch = std::time::Instant::now();
                 loop {
                     std::thread::sleep(Duration::from_secs(3));
+                    let interval = FETCH_INTERVAL_SECS.load(Ordering::Relaxed);
+                    if interval > 0 && last_fetch.elapsed().as_secs() >= interval {
+                        for root in read_projects(&handle) {
+                            let _ = fetch_origin_root(&root);
+                        }
+                        last_fetch = std::time::Instant::now(); // measure gap AFTER the pass
+                        let _ = handle.emit("places:changed", ()); // re-pull fresh ahead/behind once
+                    }
                     let fp = worktrees_core::tmux::session_fingerprint();
                     ticks += 1;
                     if fp != last || ticks >= 10 {
@@ -985,6 +1059,8 @@ pub fn run() {
             open_place,
             close_place,
             github_url,
+            fetch_origin,
+            set_fetch_interval,
             check_update,
             update_cli,
             log_info,

@@ -39,6 +39,7 @@ export type Settings = {
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
   ai_auto_resume: boolean; // single-click Enter resumes an existing Claude conversation (Claude only)
   update_auto_check: boolean; // check for updates ~3s after launch (manual check always works)
+  fetch_interval_min: number; // background `git fetch origin` cadence (0 = off, else 5 | 15 | 60)
   restore_last: boolean; // on launch, SELECT the most recently opened place (selection-only, never enters)
   lens: "places" | "recent" | "attention";
   collapsed: Record<string, boolean>; // per-project-root collapse
@@ -63,6 +64,7 @@ export const DEFAULTS: Settings = {
   terminal_cmd: "",
   ai_auto_resume: true,
   update_auto_check: true,
+  fetch_interval_min: 0,
   restore_last: false,
   lens: "places",
   collapsed: {},
