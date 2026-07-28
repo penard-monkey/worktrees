@@ -412,7 +412,13 @@ pub fn render(s: &Suggestion) -> String {
              # checkout, because a per-worktree copy drifts and you fix the same value\n\
              # five times. Use mode = \"copy\" ONLY for a file something REWRITES at\n\
              # runtime: a link would scribble on the main checkout, and through it on\n\
-             # every other worktree. Each copy entry should say why it is a copy.\n",
+             # every other worktree. Each copy entry should say why it is a copy.\n\
+             #\n\
+             # ⚠ Every path below is emitted as a LINK: nothing on disk says which of\n\
+             # them a script REWRITES at runtime, and only you know. Getting one wrong\n\
+             # is the widest failure here — the worktree writes through its link into\n\
+             # the main checkout, and every OTHER worktree reads that same file through\n\
+             # its own link. One missed `mode = \"copy\"` breaks them all at once.\n",
         );
         let mut in_credentials = false;
         for c in &s.files {
@@ -454,6 +460,13 @@ pub fn render(s: &Suggestion) -> String {
              # your scripts source. Run `worktrees provision --all` after editing this.\n",
         );
         o.push_str(&format!("# Read out of {}.\n", p.source));
+        o.push_str(
+            "# ⚠ The NAMES matter as much as the numbers: each is emitted as <NAME>_PORT\n\
+             # (PG = 5432 → PG_PORT), and these are that file's SERVICE names, which are\n\
+             # rarely what a script reads. Rename each to the variable your scripts DO\n\
+             # read: a key nothing reads is written, ignored, and the script falls back\n\
+             # to its own default — which is main's port. Nothing errors, they collide.\n",
+        );
         match &p.commented {
             Some(why) => {
                 o.push_str(&format!("# ⚠ Left commented out: {why}.\n"));
@@ -1246,6 +1259,40 @@ mod tests {
         assert_eq!(base, vec![("API".into(), 3000), ("API_3001".into(), 3001)]);
     }
 
+    #[test]
+    fn the_two_things_init_cannot_know_are_warned_about() {
+        // Both divergences the cdv transcription exposed. Neither is knowable from
+        // disk — a filename does not say what rewrites it, and a compose file does
+        // not say what a script reads — and acting on either is silent AND
+        // destructive, so the emitted comments have to carry them.
+        let s = detect(&Facts {
+            files: vec![env("apps/backoffice/.env.local")],
+            compose: vec![compose("docker-compose.worktree.yml", &[("postgres", 5432)])],
+            ..Facts::default()
+        });
+        let out = render(&s);
+        assert!(out.contains("emitted as a LINK"), "the link/copy caveat: {out}");
+        assert!(out.contains("One missed `mode = \"copy\"`"), "{out}");
+        assert!(out.contains("emitted as <NAME>_PORT"), "the key-name caveat: {out}");
+        assert!(out.contains("SERVICE names"), "{out}");
+
+        // The link caveat belongs to the LIST: a repo with nothing to declare gets
+        // the "when one appears" stub, which has no entries to be wrong about.
+        let stub = render(&detect(&Facts {
+            compose: vec![compose("docker-compose.worktree.yml", &[("postgres", 5432)])],
+            ..Facts::default()
+        }));
+        assert!(!stub.contains("emitted as a LINK"), "{stub}");
+
+        // The key-name caveat rides with [ports] whether it is live or commented
+        // out — the names are just as wrong either way.
+        let mut c = compose("docker-compose.worktree.yml", &[]);
+        c.unreadable = 1;
+        let commented = render(&detect(&Facts { compose: vec![c], ..Facts::default() }));
+        assert!(commented.contains("# [ports]") && !commented.contains("\n[ports]"), "{commented}");
+        assert!(commented.contains("emitted as <NAME>_PORT"), "{commented}");
+    }
+
     // ── the round-trip that keeps emitter and parser together ────────────────
 
     #[test]
@@ -1264,49 +1311,63 @@ mod tests {
             ],
         ];
         let prefixes = vec![None, Some("cdv".to_string())];
+        // A candidate the parser refuses rides in the same list and emits its own
+        // commented block between the live entries and [ports] — a section of the
+        // file like any other, so it belongs in the matrix too.
+        let rejects = vec![vec![], vec![env(r"apps$1/.env")]];
         let mut seen_live_ports = false;
+        let mut seen_rejected = false;
         for fs_ in &files {
             for cs in &composes {
                 for pf in &prefixes {
-                    let facts = Facts {
-                        files: fs_.clone(),
-                        compose: cs.clone(),
-                        prefix_file: pf.clone(),
-                        ..Facts::default()
-                    };
-                    let s = detect(&facts);
-                    let text = render(&s);
-                    let (cfg, findings) = projcfg::parse(&text)
-                        .unwrap_or_else(|e| panic!("emitted config must parse: {e}\n---\n{text}"));
-                    assert!(findings.is_empty(), "no findings, got {findings:?}\n---\n{text}");
-                    assert_eq!(cfg.files.len(), s.files.len(), "{text}");
-                    for (got, want) in cfg.files.iter().zip(&s.files) {
-                        assert_eq!(got.path.as_str(), want.rel);
-                        assert_eq!(got.mode, projcfg::Mode::Link, "link is the default (§3)");
-                    }
-                    assert_eq!(
-                        cfg.compose.as_ref().map(|c| c
-                            .files
-                            .iter()
-                            .map(|f| f.as_str().to_string())
-                            .collect::<Vec<_>>()),
-                        s.compose,
-                        "the emitted file list must survive the parser verbatim: {text}"
-                    );
-                    assert_eq!(cfg.project.prefix.as_deref(), s.prefix.as_deref(), "{text}");
-                    if let Some(c) = &cfg.compose {
-                        assert_eq!(c.project, "{prefix}-wt-{slug}");
-                    }
-                    if let Some(p) = &cfg.ports {
-                        seen_live_ports = true;
-                        assert_eq!(p.stride, STRIDE);
-                        assert_eq!(p.base.get("API"), Some(&3000));
-                        assert_eq!(p.base.get("PG"), Some(&5432));
+                    for rj in &rejects {
+                        let mut fl = fs_.clone();
+                        fl.extend(rj.iter().cloned());
+                        let facts = Facts {
+                            files: fl,
+                            compose: cs.clone(),
+                            prefix_file: pf.clone(),
+                            ..Facts::default()
+                        };
+                        let s = detect(&facts);
+                        let text = render(&s);
+                        let (cfg, findings) = projcfg::parse(&text)
+                            .unwrap_or_else(|e| panic!("emitted config must parse: {e}\n---\n{text}"));
+                        assert!(findings.is_empty(), "no findings, got {findings:?}\n---\n{text}");
+                        assert_eq!(cfg.files.len(), s.files.len(), "{text}");
+                        for (got, want) in cfg.files.iter().zip(&s.files) {
+                            assert_eq!(got.path.as_str(), want.rel);
+                            assert_eq!(got.mode, projcfg::Mode::Link, "link is the default (§3)");
+                        }
+                        assert_eq!(
+                            cfg.compose.as_ref().map(|c| c
+                                .files
+                                .iter()
+                                .map(|f| f.as_str().to_string())
+                                .collect::<Vec<_>>()),
+                            s.compose,
+                            "the emitted file list must survive the parser verbatim: {text}"
+                        );
+                        assert_eq!(cfg.project.prefix.as_deref(), s.prefix.as_deref(), "{text}");
+                        if let Some(c) = &cfg.compose {
+                            assert_eq!(c.project, "{prefix}-wt-{slug}");
+                        }
+                        if let Some(p) = &cfg.ports {
+                            seen_live_ports = true;
+                            assert_eq!(p.stride, STRIDE);
+                            assert_eq!(p.base.get("API"), Some(&3000));
+                            assert_eq!(p.base.get("PG"), Some(&5432));
+                        }
+                        if !s.rejected.is_empty() {
+                            seen_rejected = true;
+                            assert!(text.contains("# path = \"apps$1/.env\""), "{text}");
+                        }
                     }
                 }
             }
         }
         assert!(seen_live_ports, "at least one combination must emit a live [ports]");
+        assert!(seen_rejected, "at least one combination must emit the rejected block");
     }
 
     // ── what `probe` can actually hand `detect` ──────────────────────────────

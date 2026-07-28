@@ -515,11 +515,26 @@ function App() {
     invoke("log_event", { level: "error", msg: m }).catch(() => {});
   }, []);
 
+  // The message a FAILED refresh put in the banner, so a later successful one can
+  // retract it — and ONLY it. A blanket clear here is not an option: refresh also
+  // runs on every "places:changed" event, so it would wipe whatever the command
+  // that caused the change had just reported (runCmd, below). That is every
+  // "the op ran and said no" message the app has — a dirty-remove refusal, a
+  // branch collision, a shadowed file on relink — and silence is the bug this
+  // whole surface exists to fix.
+  const refreshErr = useRef("");
   const refresh = useCallback(async () => {
     try {
-      setErr("");
-      setWs(await invoke<Workspace>("list_workspace"));
+      const w = await invoke<Workspace>("list_workspace");
+      // Read the claim into a local FIRST: the updater below runs when React gets
+      // to it, by which time the ref would already be cleared and every message
+      // would look like someone else's.
+      const stale = refreshErr.current;
+      refreshErr.current = "";
+      if (stale) setErr((e) => (e === stale ? "" : e));
+      setWs(w);
     } catch (e) {
+      refreshErr.current = String(e); // same text fail() shows
       fail(e);
     }
   }, []);
@@ -770,19 +785,31 @@ function App() {
     try { await p; await refresh(); } catch (e) { fail(e); }
   };
   // Returns the op's CmdResult (so callers can read result.slug), or null when
-  // the invoke itself threw. On a non-ok result the error banner is set here.
+  // the invoke itself threw. On a non-ok result the error banner is set here —
+  // and it OUTLIVES this call: nothing clears it until the user dismisses it or
+  // the next command starts.
   const runCmd = async (name: string, args: Record<string, unknown>): Promise<CmdResult | null> => {
     try {
+      // A command takes ownership of both banners for its whole run — including
+      // refresh's claim on the error one, so a stale message cannot be retracted
+      // out from under this op's own report.
+      refreshErr.current = "";
       setErr("");
       setNotice("");
       const r = await invoke<CmdResult>(name, args);
+      // Re-read state FIRST, report SECOND. A failed op is normally a PARTIAL
+      // success (`cmd_new` deliberately leaves the worktree in place when tmux
+      // fails), so the list has to be re-pulled either way — but the report must
+      // be the last write to the banner, or it is set and then wiped a tick later
+      // by the very refresh that shows what half-happened.
+      await refresh();
       // EXIT_NEEDS_CONFIRM is not-ok but not a failure: the op stopped to ASK.
       // The caller arms a second click; a red banner would be a lie. That holds
       // even without a `needs_confirm` name — the session died while core was
-      // asking about it, so the question is moot, not broken (the refresh below
-      // shows the place dormant, and doClose says so).
+      // asking about it, so the question is moot, not broken (the refresh above
+      // shows the place dormant, and doClose says so, through `notice`, which
+      // nothing here touches once the run has started).
       if (!r.ok && r.code !== EXIT_NEEDS_CONFIRM) setErr(r.output || `${name} failed (exit ${r.code})`);
-      await refresh();
       return r;
     } catch (e) {
       fail(e);

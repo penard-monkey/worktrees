@@ -49,6 +49,9 @@ wt_stdout_to() {
   grep -q '^path = "\.env"$' "$REPO/.worktrees.toml"
   # the file's whole value is its comments (§8) — assert they survived
   grep -q '^# ── files' "$REPO/.worktrees.toml"
+  # including the caveat init cannot resolve for you: every entry is a LINK, and
+  # a link onto a file some script rewrites breaks every worktree at once
+  grep -q 'emitted as a LINK' "$REPO/.worktrees.toml"
 
   # and the parser agrees with the emitter: doctor neither chokes nor warns
   run_wt doctor
@@ -160,6 +163,9 @@ YAML
   [[ "$output" == *"[ports]"* ]]
   [[ "$output" == *"API = 3000"* ]]
   [[ "$output" == *"PG = 5432"* ]]
+  # the names came off compose SERVICES, and each becomes <NAME>_PORT in
+  # .worktree.env — a key no script reads is silent, so the file says so
+  [[ "$output" == *"emitted as <NAME>_PORT"* ]]
   # no worktree override ⇒ no [compose] section
   [[ "$output" != *"[compose]"* ]]
 }
