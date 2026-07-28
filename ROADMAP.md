@@ -19,31 +19,47 @@ close-out ritual (.claude/skills/close-out).
   `fix/term-resize-artifacts`, `fix/ui-responsiveness`, `next`,
   `release/0.2.0|0.2.1|0.2.2`, `docs/*`, `chore/*`, `settings-next`) — squash
   merges break `git branch --merged`, so verify each against its PR before
-  `git push origin --delete`. (This session's 9 branches were cleaned at close-out.)
+  `git push origin --delete`. (This session's 9 branches were cleaned at close-out;
+  `next-stream` and `release/0.3.2` were cleaned at the 2026-07-28 close-out.)
   _From: [2026-07-26 themes session](docs/sessions/2026-07-26-themes-v0.2.4/summary.md)_
 
-- **Cut v0.3.2** — `[Unreleased]` holds the ⌘K quick switcher (#52). Bundle the
-  global-summon-hotkey with it (below) before cutting, then follow CLAUDE.md
-  release steps. (v0.2.5 was superseded — the accumulated work shipped as
-  v0.3.0 + v0.3.1.)
-  _From: [2026-07-27 settings session](docs/sessions/2026-07-27-settings-and-audits/summary.md)_
+- **cdv migration — the live hazard is still live.** Per-project settings shipped
+  (#58), but `casa-del-valle-monorepo` has not been migrated, so it still runs
+  two worktree tools. Two of its worktrees (`claude-work-integration`,
+  `prod-reviews`) have no `.worktree.env`, and that repo's `deploy-local.sh`
+  reads that absence as "not a worktree" → a global `pkill -9` that kills the
+  main checkout's whole running stack. Eleven more lack `WEBSITE_PORT` and bind
+  main's 3002.
+  Runbook (8 steps, rollback each) and the transcribed config are archived at
+  `docs/sessions/2026-07-28-project-settings/{RUNBOOK.md,cdv.worktrees.toml}`.
+  **Blocked on step 0:** verify `apps/mobile/google-services.json` (sender id
+  `86759926600`) against the Firebase console — the old script's `relink --all`
+  replaced `general-fixes`' only real copy with a symlink on 2026-07-27 21:33
+  and `ln -sfn` leaves no backup.
+  ⚠ **Do not use `worktrees init` there.** Verified against the real repo: it
+  suggests `apps/backoffice/.env.local` as a link (must be `copy` — a script
+  rewrites it, so a link writes through to main and breaks every worktree at
+  once) and emits `POSTGRES`/`LOCALSTACK` where the scripts read
+  `PG_PORT`/`LS_PORT`, missing `WEBSITE` and `META_MOCK`. init now warns about
+  both classes but cannot infer them.
+  Also out of reach: 4 registered worktrees outside `.worktrees/` (three under
+  `.dmux/`, one sibling) that `provision --all` cannot see.
+  _From: [2026-07-28 project-settings session](docs/sessions/2026-07-28-project-settings/summary.md)_
 
-- **Per-project settings (`.worktrees.toml`)** — design decided, nothing built;
-  build slot is **after v0.3.2**. Full spec: `docs/proposals/project-settings.md`.
-  v1 = `[[file]]` link/copy + `[ports]`/`.worktree.env` + `[compose]` namespacing
-  and teardown + `relink`/`provision`/`doctor`. Generic by design — each section
-  stands alone; `casa-del-valle-monorepo` is the first consumer, not the spec.
-  Decided: no repo-supplied argv ever (no `[hooks]`, and `DESIGN.md:225-228`'s
-  `[infra] up/stop/down` is reversed — the tool assembles the compose argv from
-  data); TOML for both human-authored config files; port slot derived from
-  `<wt>/.worktree.env`, never stored in `.worktrees.places.json`.
-  ⚠ Carries a live hazard: two cdv worktrees created by this tool have no
-  `.worktree.env`, and that repo's `deploy-local.sh` treats its absence as
-  "not a worktree" → global `pkill -9` that kills the main checkout's stack.
-  Prereqs that must land with it: `.worktree.env` in `ensure_excluded` (else
-  `switch`/`rm` refuse forever and the GUI can't pass `--force`), and severity
-  in `CaptureUi` (warnings are currently discarded at capture).
-  _From: 2026-07-27 project-settings design session_
+- **Project-settings polish** — small, all from the same session:
+  - `app/src/mock/install.ts`'s `SUGGESTED_TOML` is a hand-written fixture, not
+    a mirror of `init::render()`, so the harness preview lacks init's warnings.
+    No user-facing drift (production uses the real emitter).
+  - A refresh-raised error is retracted by identical-string match; two sources
+    producing byte-identical text would cross-clear.
+  - The 4s arm auto-disarm is tight for "Kill &lt;session&gt; — whole session?".
+  - `doctor`'s session-drift scan skips `(main)` on named-place runs.
+  - Spec §4 still says "the same rules apply to `[compose] file`" — true per
+    entry, but the key is `files` now.
+  - `store.rs`'s `DirLock` still uses 15s-mtime staleness, contradicting
+    `DESIGN.md:205`'s PID-liveness mandate. `provision.rs` deliberately did not
+    copy it; the store's own wart remains.
+  _From: [2026-07-28 project-settings session](docs/sessions/2026-07-28-project-settings/summary.md)_
 
 - **Global summon hotkey (v0.3.2)** — OS-level chord (tauri global-shortcut
   plugin) that fronts the window and drops straight into the ⌘K switcher —
