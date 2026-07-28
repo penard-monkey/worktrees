@@ -9,6 +9,28 @@ pub fn git(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
     Command::new("git").arg("-C").arg(cwd).args(args).output()
 }
 
+/// `git -C cwd <args>` with `input` on stdin. For the one invocation whose `-z`
+/// is `--stdin`-only (`check-ignore`), where NUL-delimited is the only form git
+/// will not C-quote back. Safe against a pipe deadlock only because that command
+/// writes at most one path per path read, and `init.rs` bounds the list.
+pub fn git_stdin(cwd: &str, args: &[&str], input: &[u8]) -> std::io::Result<Output> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut si) = child.stdin.take() {
+        // Errors ignored on purpose: git closing the pipe early is its answer,
+        // not a reason to leave a child unreaped. Dropped here, so git sees EOF.
+        let _ = si.write_all(input);
+    }
+    child.wait_with_output()
+}
+
 /// Trimmed stdout on success, else `None` (stderr silenced, like `2>/dev/null`).
 pub fn git_out(cwd: &str, args: &[&str]) -> Option<String> {
     let o = git(cwd, args).ok()?;

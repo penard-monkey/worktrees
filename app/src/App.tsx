@@ -5,6 +5,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
+import {
+  driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
+  type DoctorReport, type InitSuggestion,
+} from "./ProjectSheet";
 import { applySettings, clampDock, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
@@ -37,8 +41,33 @@ type Place = {
 type Snapshot = { repo: string; prefix: string; places: Place[] };
 type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 type Workspace = { projects: ProjectView[] };
-type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null };
+/** `needs_confirm` (close only): core stopped because killing this session needs
+ *  the user's word, and the string is the session that would die. Not a failure
+ *  — a question, so it must never reach the error banner. */
+type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; needs_confirm?: string | null; warnings?: string[] };
 type Lens = "places" | "recent" | "attention";
+/** Last known `doctor` state for one project root. `slugs` decorates rows,
+ * `issues` is the project-level count (placeless findings included, so it equals
+ * the sheet's Health badge), `error` means the last run did not produce a report
+ * at all — in which case the other two are the last measurement, not this one. */
+type ProjectHealth = { slugs: Set<string>; issues: number; error: string | null };
+
+// Arm keys for the topbar Close (bare control) and the ctx-menu "Close session"
+// (popover). Namespaced so they never collide with the remove arms sharing
+// `confirmRm`. The menu's own dismissal clears `closectx|` too, but it is not
+// the only thing that may — see isBareArm.
+const closeKey = (repo: string, slug: string) => `close|${repo}|${slug}`;
+const closeCtxKey = (repo: string, slug: string) => `closectx|${repo}|${slug}`;
+/** Arms that TIME OUT rather than waiting to be dismissed. The header ✕ has no
+ *  popover to dismiss it at all. Both close arms are here for a second reason:
+ *  an armed kill of a WHOLE tmux session must not outlive the moment it was
+ *  offered, and "the menu is still open" is not a moment — it has no upper
+ *  bound, and the session the label names can be replaced under it (core
+ *  refuses the mismatch, but the stale offer is still a lie). */
+const isBareArm = (k: string | null) =>
+  !!k && (k.startsWith("hdr|") || k.startsWith("close|") || k.startsWith("closectx|"));
+/** core's `diag::EXIT_NEEDS_CONFIRM` — "I stopped to ask", never a failure. */
+const EXIT_NEEDS_CONFIRM = 4;
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order: Home (clear
 // selection → briefing), then the rail's lens entries. Module scope = stable.
@@ -86,8 +115,15 @@ function ago(epoch?: number): string {
 }
 
 // fixed-order signal glyphs; geometry (3-col row grid) guarantees no collision.
-function glyphs(p: Place) {
+//
+// Drift (proposal §10) is a GLYPH, not a dot: `.status-dot.waiting` is already
+// amber = "Claude needs input", the app's highest-value signal, and a second
+// amber dot would be indistinguishable from it. It goes FIRST because the
+// overflow below truncates at MAX — and drift is the one signal here that names
+// a broken worktree rather than ordinary work in progress.
+function glyphs(p: Place, drift?: boolean) {
   const g: { cls: string; text: string; title: string }[] = [];
+  if (drift) g.push({ cls: "g-drift", text: "⚑", title: "config drift — right-click the project → Project settings…" });
   if (p.dirty) g.push({ cls: "g-dirty", text: `●${p.dirty_files ?? ""}`, title: `${p.dirty_files ?? "dirty"} uncommitted` });
   if (p.ahead) g.push({ cls: "g-ahead", text: `↑${p.ahead}`, title: `${p.ahead} ahead` });
   if (p.behind) g.push({ cls: "g-behind", text: `↓${p.behind}`, title: `${p.behind} behind` });
@@ -698,6 +734,17 @@ function App() {
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [switchTo, setSwitchTo] = useState("");
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
+  // The armed Close needs one fact more than `confirmRm` can carry: WHICH tmux
+  // session would die, as the BACKEND named it. It rides alongside the arm
+  // rather than replacing it, so `confirmRm` stays the single register every
+  // dismissal path already clears and this can never re-arm anything by itself
+  // (it is only ever read while confirmRm holds the matching close key).
+  const [closeSess, setCloseSess] = useState("");
+  // Same float as `err`, other colour: something the user must be TOLD but that
+  // nothing failed at (an armed kill that hit a session which had already been
+  // replaced). A red banner for a question is what this whole path exists to
+  // stop, so it does not share the error register.
+  const [notice, setNotice] = useState("");
   const [menu, setMenu] = useState<"life" | "more" | null>(null);
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -711,6 +758,23 @@ function App() {
   const [drag, setDrag] = useState<{ repo: string; slug: string } | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
+  const [projSheet, setProjSheet] = useState<string | null>(null);
+  // Per-project doctor state. Structurally identical to busyPaths/waitingPaths
+  // (the house pattern for row decoration that is NOT in the snapshot) —
+  // deliberately outside `Place`, because `Place.stack` is reserved for the infra
+  // phase and putting drift on the hot path would mean a filesystem probe inside
+  // every 3s poll.
+  //
+  // `slugs` decorates ROWS (place-attached findings only). `issues` is the
+  // project-level count and includes placeless findings, so it matches the
+  // sheet's Health badge exactly. `error` is set when doctor could not run at
+  // all — and when that happens `slugs`/`issues` are LEFT AS THEY WERE (see
+  // takeReport): an unreadable config is the most broken a project gets, and the
+  // one thing it must not do is quietly undecorate everything.
+  const [health, setHealth] = useState<Record<string, ProjectHealth>>({});
+  // What `worktrees init` would suggest per project (§9's nudge). Probed ONCE per
+  // project — it walks the checkout, so it is not poll-path work either.
+  const [suggest, setSuggest] = useState<Record<string, InitSuggestion>>({});
   // Badge = actionable updates. CLI via the pinned-tag installer; the app via
   // tauri-plugin-updater (signed bundles) — both one click in Settings now.
   const cliStale = !!(upd?.latest && upd.cli_version && vnewer(upd.latest, upd.cli_version));
@@ -733,11 +797,26 @@ function App() {
     invoke("log_event", { level: "error", msg: m }).catch(() => {});
   }, []);
 
+  // The message a FAILED refresh put in the banner, so a later successful one can
+  // retract it — and ONLY it. A blanket clear here is not an option: refresh also
+  // runs on every "places:changed" event, so it would wipe whatever the command
+  // that caused the change had just reported (runCmd, below). That is every
+  // "the op ran and said no" message the app has — a dirty-remove refusal, a
+  // branch collision, a shadowed file on relink — and silence is the bug this
+  // whole surface exists to fix.
+  const refreshErr = useRef("");
   const refresh = useCallback(async () => {
     try {
-      setErr("");
-      setWs(await invoke<Workspace>("list_workspace"));
+      const w = await invoke<Workspace>("list_workspace");
+      // Read the claim into a local FIRST: the updater below runs when React gets
+      // to it, by which time the ref would already be cleared and every message
+      // would look like someone else's.
+      const stale = refreshErr.current;
+      refreshErr.current = "";
+      if (stale) setErr((e) => (e === stale ? "" : e));
+      setWs(w);
     } catch (e) {
+      refreshErr.current = String(e); // same text fail() shows
       fail(e);
     }
   }, []);
@@ -765,6 +844,100 @@ function App() {
   }, []);
   const activityOf = (p: Place): "busy" | "waiting" | "" =>
     busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
+
+  // ── project config: drift + the init suggestion ──
+  // NEITHER runs on the 3s poll (proposal §10). `places:changed` already triggers
+  // a full list_workspace (up to 16 concurrent git calls per project); doctor on
+  // top of that would put the config on the hot path §8 keeps it off. So: once on
+  // load, on sheet open, after a repair, and on a slow timer.
+  //
+  // ⚠ The failure branch is the whole point. `cmd_doctor` exits on a guard (an
+  // unreadable .worktrees.toml) BEFORE it emits any JSON, so the report arrives
+  // as `code: 1, findings: [], error: "…"`. Taking that at face value would clear
+  // every glyph in the project — the most-broken state decorating nothing, which
+  // is the exact inversion of the signal. So a failed run keeps the last measured
+  // decoration and adds an `error`; only a run that actually produced a report
+  // may retire a glyph.
+  const takeReport = useCallback((root: string, r: DoctorReport | null) => {
+    setHealth((h) => {
+      const prev = h[root];
+      if (reportFailed(r)) {
+        return {
+          ...h,
+          [root]: {
+            slugs: prev?.slugs ?? new Set<string>(),
+            issues: prev?.issues ?? 0,
+            error: r?.error ?? "doctor produced no report",
+          },
+        };
+      }
+      return { ...h, [root]: { slugs: driftedSlugs(r), issues: issueCount(r), error: null } };
+    });
+  }, []);
+  // A BACKGROUND doctor failure is logged, never banner'd — the user didn't ask
+  // for it, and a repo that can't be probed is already visible as a broken node.
+  // The sheet surfaces its own failures in its own error area.
+  const sweepDoctor = useCallback(async (root: string) => {
+    try {
+      takeReport(root, (await invoke<DoctorReport | null>("doctor", { repo: root, slug: null })) ?? null);
+    } catch (e) {
+      invoke("log_event", { level: "warn", msg: `doctor ${root}: ${String(e)}` }).catch(() => {});
+    }
+  }, [takeReport]);
+  // The sweep's identity key: EVERY project root, sorted. It deliberately does
+  // NOT carry `pv.ok` or the nav's ordering. A project that flips ok under git
+  // contention, or a manual re-order, would otherwise re-run the immediate sweep
+  // for all roots and restart the 5-minute timer on every flip. Only adding or
+  // removing a project may do that.
+  const rootsKey = useMemo(
+    () => (ws?.projects ?? []).map((pv) => pv.root).sort().join("\n"),
+    [ws],
+  );
+  // …so ok-ness is read at sweep TIME instead, through a ref. A root that is not
+  // a readable repo right now is skipped rather than logged every 5 minutes.
+  const okRoots = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    okRoots.current = new Set((ws?.projects ?? []).filter((pv) => pv.ok).map((pv) => pv.root));
+  }, [ws]);
+  // Which roots have already had their once-per-project init probe (below).
+  // Declared here because the sweep effect prunes it alongside the two maps.
+  const suggestedFor = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const roots = rootsKey ? rootsKey.split("\n") : [];
+    // A removed project must not keep its drift decoration, its suggestion, or
+    // its once-only probe marker alive for the rest of the session — re-adding it
+    // would then show stale findings and never re-probe.
+    const live = new Set(roots);
+    for (const r of suggestedFor.current) if (!live.has(r)) suggestedFor.current.delete(r);
+    const prune = <T,>(m: Record<string, T>) =>
+      Object.keys(m).every((k) => live.has(k))
+        ? m
+        : Object.fromEntries(Object.entries(m).filter(([k]) => live.has(k)));
+    setHealth((m) => prune(m));
+    setSuggest((m) => prune(m));
+    if (roots.length === 0) return;
+    const sweep = () => roots.filter((r) => okRoots.current.has(r)).forEach((r) => sweepDoctor(r));
+    sweep();
+    const t = setInterval(sweep, 5 * 60_000); // slow timer, not the poll
+    return () => clearInterval(t);
+  }, [rootsKey, sweepDoctor]);
+  // The suggestion is stable for a given checkout, so probe each project once;
+  // `probeSuggest` re-runs it after a config is written (the banner retires).
+  const probeSuggest = useCallback(async (root: string) => {
+    try {
+      const s = await invoke<InitSuggestion | null>("init_suggest", { repo: root });
+      if (s) setSuggest((m) => ({ ...m, [root]: s }));
+    } catch (e) {
+      invoke("log_event", { level: "warn", msg: `init_suggest ${root}: ${String(e)}` }).catch(() => {});
+    }
+  }, []);
+  useEffect(() => {
+    for (const root of rootsKey ? rootsKey.split("\n") : []) {
+      if (suggestedFor.current.has(root)) continue;
+      suggestedFor.current.add(root);
+      probeSuggest(root);
+    }
+  }, [rootsKey, probeSuggest]);
 
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
@@ -894,13 +1067,31 @@ function App() {
     try { await p; await refresh(); } catch (e) { fail(e); }
   };
   // Returns the op's CmdResult (so callers can read result.slug), or null when
-  // the invoke itself threw. On a non-ok result the error banner is set here.
+  // the invoke itself threw. On a non-ok result the error banner is set here —
+  // and it OUTLIVES this call: nothing clears it until the user dismisses it or
+  // the next command starts.
   const runCmd = async (name: string, args: Record<string, unknown>): Promise<CmdResult | null> => {
     try {
+      // A command takes ownership of both banners for its whole run — including
+      // refresh's claim on the error one, so a stale message cannot be retracted
+      // out from under this op's own report.
+      refreshErr.current = "";
       setErr("");
+      setNotice("");
       const r = await invoke<CmdResult>(name, args);
-      if (!r.ok) setErr(r.output || `${name} failed (exit ${r.code})`);
+      // Re-read state FIRST, report SECOND. A failed op is normally a PARTIAL
+      // success (`cmd_new` deliberately leaves the worktree in place when tmux
+      // fails), so the list has to be re-pulled either way — but the report must
+      // be the last write to the banner, or it is set and then wiped a tick later
+      // by the very refresh that shows what half-happened.
       await refresh();
+      // EXIT_NEEDS_CONFIRM is not-ok but not a failure: the op stopped to ASK.
+      // The caller arms a second click; a red banner would be a lie. That holds
+      // even without a `needs_confirm` name — the session died while core was
+      // asking about it, so the question is moot, not broken (the refresh above
+      // shows the place dormant, and doClose says so, through `notice`, which
+      // nothing here touches once the run has started).
+      if (!r.ok && r.code !== EXIT_NEEDS_CONFIRM) setErr(r.output || `${name} failed (exit ${r.code})`);
       return r;
     } catch (e) {
       fail(e);
@@ -937,17 +1128,24 @@ function App() {
     setConfirmRm(null);
     removeProject(root);
   };
-  // Auto-disarm the header-✕ confirm (no popover-close to clear it otherwise).
+  // Auto-disarm the TIMED arms: the project-header ✕ ("hdr|") and both Close
+  // arms ("close|" bare, "closectx|" in the menu). The first two have no popover
+  // to dismiss them at all; the ctx one does, but a menu can sit open for hours
+  // and an armed whole-session kill must expire like any other offer. The
+  // remaining popover arms ("proj|", `repo|slug`) are cleared by their own close
+  // paths.
+  // `closeSess` is a dep so a re-arm that names a DIFFERENT session (the one
+  // that took the place while the first arm sat) gets a full window of its own
+  // rather than the remainder of the window raised for the session that is gone.
   useEffect(() => {
-    if (!confirmRm?.startsWith("hdr|")) return;
+    if (!isBareArm(confirmRm)) return;
     const t = setTimeout(() => setConfirmRm(null), 4000);
     return () => clearTimeout(t);
-  }, [confirmRm]);
-  // Clear any header-✕ arm when the selection changes (a switch of focus means
-  // the destructive intent is stale). Popover arms are cleared by their own
-  // close paths; this covers the header ✕ which has none.
+  }, [confirmRm, closeSess]);
+  // Clear any bare arm when the selection changes (a switch of focus means the
+  // destructive intent is stale).
   useEffect(() => {
-    setConfirmRm((c) => (c?.startsWith("hdr|") ? null : c));
+    setConfirmRm((c) => (isBareArm(c) ? null : c));
   }, [sel]);
 
   // Every ctx-menu dismissal goes through here: an armed confirmRm must NEVER
@@ -981,10 +1179,45 @@ function App() {
     })();
   };
 
+  // ── close ──
+  // One click when the session is this tool's own (canonical name — no doubt
+  // whose it is). When core reports the session was ADOPTED (found by pane cwd:
+  // started by hand, or left behind by a prefix change) it answers
+  // needs_confirm instead of killing, and we arm a second click — the same
+  // shape as the remove confirms, sharing `confirmRm` so every dismissal path
+  // disarms it. `armed` is the user's word, forwarded as `yes`.
+  //
+  // The armed click sends BACK the session the arm displayed: consent is bound
+  // to that name, and core kills nothing else. Between arming and clicking the
+  // named session can exit and another can adopt the place — then core answers
+  // with a fresh needs_confirm naming the newcomer, which we re-arm and SAY, so
+  // the click reads as "the session changed" rather than as a dud.
+  const doClose = async (repo: string, slug: string, key: string, armed: boolean) => {
+    const expect = armed ? closeSess : "";
+    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null });
+    if (r?.needs_confirm) {
+      if (expect && r.needs_confirm !== expect)
+        setNotice(`${expect} is gone — ${r.needs_confirm} is in this place now. Nothing was killed.`);
+      setCloseSess(r.needs_confirm);
+      setConfirmRm(key); // arm; any open menu stays open
+      return false;
+    }
+    // Code 4 with no session to name: it died while core was asking about it.
+    // Nothing to close any more — the refresh runCmd already did shows that.
+    if (r?.code === EXIT_NEEDS_CONFIRM) setNotice(`${expect || "That session"} is already gone — nothing to close.`);
+    setConfirmRm((c) => (c === key ? null : c));
+    return true;
+  };
+  // Topbar Close (bare control, "close|" key — auto-disarms, see isBareArm).
+  const closeTopbar = (repo: string, slug: string, armed: boolean) =>
+    doClose(repo, slug, closeKey(repo, slug), armed);
   // ── context-menu verbs ──
-  const closeSession = (repo: string, slug: string) => {
-    closeCtx();
-    runCmd("close_place", { repo, slug });
+  // ctx-menu "Close session": same two-click arm, popover key. On the arming
+  // click the menu STAYS open (removeProjectCtx's shape); it closes once the
+  // session is actually gone.
+  const closeSession = async (repo: string, slug: string) => {
+    const key = closeCtxKey(repo, slug);
+    if (await doClose(repo, slug, key, confirmRm === key)) closeCtx();
   };
   const copyText = (text: string) => {
     closeCtx();
@@ -1017,10 +1250,22 @@ function App() {
     closeCtx();
     invoke("open_editor", { path, cmd: settings.editor_cmd }).catch((e) => fail(e));
   };
+  // §9's banner, dismissed for this project until its suggestion CHANGES (the
+  // value is the suggestion's content hash, never a boolean — see settings.ts).
+  const dismissInit = (root: string, hash: string) => {
+    updateSettings({ init_dismissed: { ...(settings.init_dismissed ?? {}), [root]: hash } });
+  };
   // Settings → Data → "Reset to defaults". Preserve last_seen_version so the
   // What's-new sheet doesn't re-fire, push through the same apply/persist/refit
   // path as every other change, and reset the React state that MIRRORS settings
   // (lens + per-project collapsed) so the UI doesn't show stale nav state.
+  //
+  // ⚠ This DOES clear `init_dismissed`, so every dismissed init banner comes
+  // back. That is the right behavior and is deliberate: "reset to defaults" is
+  // asked for when the UI is in an unknown state, the banner is a suggestion
+  // rather than a destructive action, and each one is one click to dismiss
+  // again. `last_seen_version` is the only exception because re-showing What's
+  // new for a version you already read is noise with no corresponding signal.
   const onReset = () => {
     const next = { ...DEFAULTS, last_seen_version: settings.last_seen_version };
     updateSettings(next);
@@ -1317,6 +1562,11 @@ function App() {
   };
 
   // ── row ──
+  // ⚠ Defined inside App() against CLAUDE.md's own rule. It is safe ONLY because
+  // it holds no local state and takes no focus — the drift glyph rides in on the
+  // `drift` prop-by-closure and its tooltip is a plain `title` attribute. The
+  // moment this needs useState (a hover card, an inline editor), hoist it to
+  // module scope with props FIRST.
   const PlaceRow = ({ repo, p, showProject }: { repo: string; p: Place; showProject?: boolean }) => {
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
     return (
@@ -1349,7 +1599,7 @@ function App() {
           {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
         </span>
         <span className="glyphs">
-          {glyphs(p).map((g, i) => (
+          {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
           <span className="row-age">{ago(recencyOf(p))}</span>
@@ -1391,6 +1641,17 @@ function App() {
             : <span className="rollup broken" title="repo gone">⊘</span>}
           <span className="pname" title={pv.root} onClick={() => toggleProject(pv.root)}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
+          {/* An unreadable .worktrees.toml is a PROJECT-level fact — no row can
+              carry it, and the row glyphs are deliberately frozen at their last
+              measurement while doctor can't run. Without this the nav's only
+              honest state for "the config broke" would be silence. */}
+          {pv.ok && health[pv.root]?.error ? (
+            <button
+              className="mini pbroken"
+              title={`config unreadable — doctor could not run here:\n${health[pv.root]!.error}`}
+              onClick={() => setProjSheet(pv.root)}
+            >⚑</button>
+          ) : null}
           <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}>＋</button>
           <button
             className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
@@ -1403,6 +1664,20 @@ function App() {
 
         {open && pv.ok && (
           <div className="kids">
+            {(() => {
+              // §9's passive nudge. Shown only for a QUALIFYING project with no
+              // config, and only until its exact suggestion is dismissed.
+              const sug = suggest[pv.root];
+              if (!sug?.qualifies || sug.exists) return null;
+              if (settings.init_dismissed?.[pv.root] === sug.hash) return null;
+              return (
+                <InitBanner
+                  suggestion={sug}
+                  onOpen={() => setProjSheet(pv.root)}
+                  onDismiss={() => dismissInit(pv.root, sug.hash)}
+                />
+              );
+            })()}
             {main && <ul className="places"><PlaceRow repo={pv.root} p={main} /></ul>}
             {LIVE_TIERS.filter((g) => buckets[g]?.length && !hiddenTiers.has(g)).map((g) => {
               const key = `${pv.root}|${g}`;
@@ -1581,8 +1856,14 @@ function App() {
                 {selected.tmux_session.up ? (
                   <>
                     <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
-                    <button className="ctrl" title="end the tmux session — the worktree stays"
-                      onClick={() => runCmd("close_place", { repo: sel.repo, slug: sel.slug })}>Close</button>
+                    {confirmRm === closeKey(sel.repo, sel.slug) ? (
+                      <button className="ctrl danger armed"
+                        title={`${closeSess} was adopted, not opened under this repo's name — killing it takes the WHOLE session, every window and pane in it`}
+                        onClick={() => closeTopbar(sel.repo, sel.slug, true)}>Kill {closeSess} — whole session?</button>
+                    ) : (
+                      <button className="ctrl" title="end the tmux session — the worktree stays"
+                        onClick={() => closeTopbar(sel.repo, sel.slug, false)}>Close</button>
+                    )}
                   </>
                 ) : (
                   <button className="enter-btn" onClick={() => enterPlace(sel.repo, selected)}>Enter ▸</button>
@@ -1726,8 +2007,23 @@ function App() {
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
       {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
+      {!err && notice && <div className="err err-float notice" title="dismiss" onClick={() => setNotice("")}>{notice}</div>}
 
       {sortOpen && <div className="menu-catch" onClick={() => setSortOpen(false)} />}
+
+      {/* Per-project sheet (right-click a project → Project settings…). Keyed by
+          root so switching projects remounts it with fresh state; `open` gates
+          the render exactly like SettingsSheet's. */}
+      <ProjectSheet
+        key={projSheet ?? "none"}
+        open={!!projSheet}
+        root={projSheet ?? ""}
+        editorCmd={settings.editor_cmd}
+        suggestion={projSheet ? suggest[projSheet] ?? null : null}
+        onClose={() => setProjSheet(null)}
+        onReport={takeReport}
+        onConfigWritten={(root) => { probeSuggest(root); refresh(); }}
+      />
 
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
@@ -1774,7 +2070,13 @@ function App() {
           )}
           {ctxPlace.tmux_session.up && (
             <>
-              <button className="pop-item" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>Close session</button>
+              {confirmRm === closeCtxKey(ctx.repo, ctxPlace.slug) ? (
+                <button className="pop-item danger armed" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>
+                  Kill {closeSess} — whole session?
+                </button>
+              ) : (
+                <button className="pop-item" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>Close session</button>
+              )}
               <button className="pop-item" onClick={() => copyText(`tmux attach -t ${shq(ctxPlace.tmux_session.name)}`)}>Copy attach command</button>
               {settings.terminal_cmd.trim() && (
                 <button className="pop-item" onClick={() => {
@@ -1846,6 +2148,24 @@ function App() {
             {pv?.ok && (
               <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("fetch_origin", { root: ctx.root })); }}>Fetch origin</button>
             )}
+            {pv?.ok && (() => {
+              // The badge is the SHEET's count (issueCount), not the row-glyph set:
+              // those two answer different questions, and a placeless finding used
+              // to make them disagree with no way to tell which was lying. When the
+              // last run couldn't produce a report at all, the count is not a fact
+              // — say so instead of showing a number.
+              const h = health[ctx.root];
+              return (
+                <button className="pop-item" onClick={() => { closeCtx(); setProjSheet(ctx.root); }}>
+                  Project settings…
+                  {h?.error
+                    ? <span className="upd-tag warn" title={h.error}>unchecked</span>
+                    : (h?.issues ?? 0) > 0
+                      ? <span className="upd-tag warn" title="findings from the last doctor run">{h!.issues}</span>
+                      : null}
+                </button>
+              );
+            })()}
             <div className="ctx-sep" />
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
             <button className="pop-item" onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>

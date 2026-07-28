@@ -23,10 +23,18 @@ common_setup() {
   install_fake_tmux
   install_fake_cmd fake-ai
   install_fake_cmd pnpm; install_fake_cmd npm; install_fake_cmd yarn; install_fake_cmd bun
+  # Fake docker ALWAYS, not just in the [compose] tests: `rm` in a repo with a
+  # [compose] section shells out to `docker compose ... down -v`, and a suite
+  # that reaches the developer's real daemon is a suite that can delete their
+  # volumes. Argv lands in $BATS_TEST_TMPDIR/docker.log.
+  install_fake_cmd docker
   unset TMUX                      # don't inherit the developer's real tmux
   export BATS_TEST_TIMEOUT=120    # no single test may hang the suite (CI backstop)
   export WORKTREES_AI_CMD="fake-ai"
-  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX XDG_CONFIG_HOME || true
+  # XDG_STATE_HOME for the same reason as XDG_CONFIG_HOME: `init`'s once-only
+  # hint marker lives under it, and a developer who exports it would have the
+  # suite writing into (and reading back) their real state dir between runs.
+  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME || true
 
   make_repo
 }
@@ -44,6 +52,19 @@ make_repo() {   # $REPO with one commit pushed to bare $ORIGIN
   # shellcheck disable=SC2034  # consumed by misc.bats (symlink regression test)
   REPO_LOGICAL="$REPO"
   REPO="$(cd "$REPO" && pwd -P)"
+}
+
+# .worktrees.toml (the COMMITTED project config) at the repo root. Lines are
+# passed verbatim, like write_config in misc.bats — these tests assert on the
+# tool's reaction to hostile/awkward configs, so the text must stay literal.
+write_project_config() { printf '%s\n' "$@" > "$REPO/.worktrees.toml"; }
+
+# A repo whose credentials are gitignored (the shape [[file]] exists for): the
+# ignore rules are COMMITTED so worktree checkouts inherit them, and the secret
+# itself lives only in main.
+make_secret_repo() {
+  printf '%s\n' "$@" > "$REPO/.gitignore"
+  ( cd "$REPO" && git add -A && git commit -qm gitignore && git push -q origin main )
 }
 
 make_remote_branch() {   # branch that exists ONLY on origin → exercises fetch+track
@@ -137,26 +158,34 @@ EOF
 
 remove_fake_tmux() { rm -f "$SHIMS/tmux"; }
 
-# Make tmux UNFINDABLE, portably. Removing the shim is not enough: a real tmux
-# on the runner (ubuntu: /usr/bin/tmux) would then be picked up, and launching
-# a REAL server on a fresh runner daemonizes with bats' FDs held open — the
-# suite hangs forever. Build a PATH of symlinks to exactly the tools the CLI +
-# harness need, plus every shim except tmux.
-install_no_tmux_path() {
-  NO_TMUX_BIN="$BATS_TEST_TMPDIR/no-tmux-bin"; mkdir -p "$NO_TMUX_BIN"
-  local t p
+# Make the named commands UNFINDABLE, portably. Removing a shim is NOT enough:
+# $SHIMS is prepended to the real PATH, so `rm -f "$SHIMS/x"` just uncovers the
+# developer's/runner's own x. For tmux that means a REAL server daemonizing with
+# bats' FDs held open (the suite hangs forever); for docker it means a real
+# `compose down -v` against a real daemon — and the test silently stops testing
+# the missing-binary path. Build a PATH of symlinks to exactly the tools the CLI
+# + harness need (the materialization and teardown paths shell out to git), plus
+# every shim except the named ones.
+install_path_without() {
+  local hide=" $* " t p
+  PRUNED_BIN="$BATS_TEST_TMPDIR/pruned-bin"; rm -rf "$PRUNED_BIN"; mkdir -p "$PRUNED_BIN"
   for t in bash sh git grep sed awk tr cut head tail sort date stat basename \
            dirname rm mv mkdir ln cat uname env mktemp; do
+    case "$hide" in *" $t "*) continue ;; esac
     p="$(command -v "$t" 2>/dev/null)" || continue
-    ln -sf "$p" "$NO_TMUX_BIN/$t"
+    ln -sf "$p" "$PRUNED_BIN/$t"
   done
   for p in "$SHIMS"/*; do
     [ -f "$p" ] || continue
-    t="$(basename "$p")"; [ "$t" = tmux ] && continue
-    ln -sf "$p" "$NO_TMUX_BIN/$t"
+    t="$(basename "$p")"
+    case "$hide" in *" $t "*) continue ;; esac
+    ln -sf "$p" "$PRUNED_BIN/$t"
   done
-  export PATH="$NO_TMUX_BIN"
+  export PATH="$PRUNED_BIN"
 }
+
+install_no_tmux_path()   { install_path_without tmux; }
+install_no_docker_path() { install_path_without docker; }
 
 # Assertion sugar over the shim state.
 tmux_session_exists() { [ -f "$TMUX_STATE/$1" ]; }

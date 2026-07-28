@@ -5,9 +5,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::config::{cfg_get, config_path, sanitize_prefix};
+use crate::config::resolve_prefix_from;
 use crate::error::{Result, WtError};
 use crate::model::{LsJson, Place, TmuxSession, SCHEMA_VERSION};
+use crate::projcfg;
 use crate::render::{self, Row};
 use crate::sysclock::{now_epoch, SysClock};
 use crate::{git, tmux};
@@ -381,13 +382,21 @@ impl Project {
         git::git_out(dir, &["status", "--porcelain"]).unwrap_or_default()
     }
 
-    /// Exclude `.worktrees/` + the app sidecar in THIS repo (local, untracked).
+    /// Exclude `.worktrees/`, the app sidecar, and the per-worktree port file in
+    /// THIS repo (all local, all untracked).
+    ///
+    /// ⚠ `.worktree.env` is not optional polish (§8). It is untracked, so
+    /// `git status --porcelain` reports it `??`, so `wt_dirty` is true forever,
+    /// so `switch` (ops.rs:96-102) AND `rm` (ops.rs:642-647) refuse without
+    /// `--force` — and the GUI never passes `--force` to switch, which would
+    /// leave the app stuck with no remedy. `info/exclude` lives in the git COMMON
+    /// dir, so one line here covers every worktree.
     pub fn ensure_excluded(&self) {
         let excl = format!("{}/info/exclude", self.git_common);
         if !Path::new(&excl).exists() {
             let _ = std::fs::File::create(&excl);
         }
-        for p in [".worktrees/", ".worktrees.places.json"] {
+        for p in [".worktrees/", ".worktrees.places.json", ".worktree.env"] {
             if git::git_ok(&self.main_root, &["check-ignore", "-q", p]) {
                 continue;
             }
@@ -407,23 +416,44 @@ impl Project {
     }
 }
 
+/// Live prefix resolution — the impure half of `config::resolve_prefix_from`,
+/// which owns the order and the sanitization.
 fn resolve_prefix(main_root: &str) -> String {
-    let raw = std::env::var("WORKTREES_PREFIX").ok().filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_to_string(format!("{main_root}/.worktree-prefix"))
-                .ok()
-                .and_then(|c| c.lines().next().map(|l| l.chars().filter(|c| !c.is_whitespace()).collect::<String>()))
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| cfg_get(&config_path(), "prefix").filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| basename(main_root));
-    sanitize_prefix(&raw)
+    let env = std::env::var("WORKTREES_PREFIX").ok();
+    let file = prefix_file(main_root);
+    let project = projcfg::project_prefix(Path::new(main_root));
+    // `user_cfg`, not the raw `cfg_get`: `~/.config/worktrees/config.toml` is a
+    // tier of the user rung too, and reading only the legacy kv file here was
+    // why `prefix` in `config.toml` silently did nothing.
+    let cfg = crate::config::user_cfg("prefix");
+    resolve_prefix_from(
+        env.as_deref(),
+        file.as_deref(),
+        project.as_deref(),
+        cfg.as_deref(),
+        &basename(main_root),
+    )
+}
+
+/// First line of `<main_root>/.worktree-prefix`, whitespace stripped; a file
+/// that holds only whitespace is ABSENT, not a prefix of `""`.
+///
+/// The one reader of that file, on purpose: `init` transcribes it into
+/// `[project] prefix` through THIS function (`init::probe`), so the config it
+/// writes says what the resolver would produce rather than what the bytes look
+/// like — `doctor` comparing the two must not find a mismatch `init` created.
+pub(crate) fn prefix_file(main_root: &str) -> Option<String> {
+    std::fs::read_to_string(format!("{main_root}/{}", crate::init::PREFIX_FILE))
+        .ok()
+        .and_then(|c| c.lines().next().map(|l| l.chars().filter(|c| !c.is_whitespace()).collect::<String>()))
+        .filter(|s| !s.is_empty())
 }
 
 /// The AI-command word used to PREFER an adopted session's AI pane — same
-/// derivation as `ops::launch`/`close_one` (first word of the resolved ai_cmd,
-/// basename, default `claude`). Computed once per snapshot.
-fn adopt_ai_word() -> String {
+/// derivation as `ops::launch` (first word of the resolved ai_cmd, basename,
+/// default `claude`). Computed once per snapshot here; `ops` calls it too, so
+/// the two adoption paths cannot drift.
+pub(crate) fn adopt_ai_word() -> String {
     let ai_cmd = crate::config::resolve_ai_cmd(None);
     let full = ai_cmd.split_whitespace().next().unwrap_or("");
     let word = if full.is_empty() { "claude" } else { full };

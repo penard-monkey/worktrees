@@ -1,0 +1,66 @@
+# .worktrees.toml — casa-del-valle-monorepo
+#
+# Transcribed from scripts/worktrees.sh on branch `main` (03a0a787), NOT from
+# the proposal doc and NOT from feat/mobile-v1-mensajes. This replaces that
+# script's stack-mode block; commit it — this is project structure, like
+# docker-compose.worktree.yml, not per-machine state.
+
+# ─── Linked secrets ──────────────────────────────────────────────────────────
+# worktrees.sh:79  STACK_ENV_LINKS=(.env apps/api/.env apps/api/.env.meta
+#                                   apps/mobile/.env apps/mobile/.env.local)
+# Linked, not copied: ONE source of truth in the main checkout.
+#
+# ADD ANY NEW UNTRACKED CREDENTIAL FILE HERE. Not just .env files: anything
+# gitignored that a build or a script reads. Miss it and the worktree builds
+# silently without it.
+
+[[file]]
+path = ".env"
+
+[[file]]
+path = "apps/api/.env"
+
+[[file]]
+path = "apps/api/.env.meta"
+
+[[file]]
+path = "apps/mobile/.env"
+
+[[file]]
+path = "apps/mobile/.env.local"
+
+# ─── Copied seed ─────────────────────────────────────────────────────────────
+# worktrees.sh:327 — hardcoded OUTSIDE the array, and `cp`, not `ln`:
+#   [[ -f "$MAIN_ROOT/apps/backoffice/.env.local" ]] && { cp ... }
+# deploy-local.sh rewrites this file at runtime (AUTH_URL / port rewiring), so a
+# link would scribble on the main checkout and on every other worktree.
+
+[[file]]
+path = "apps/backoffice/.env.local"
+mode = "copy"
+
+# ─── Ports ───────────────────────────────────────────────────────────────────
+# worktrees.sh:336-337 — SEVEN bases, stride 100, k in 1..=50 (`seq 1 50`):
+#   bo=$((3000 + 100*k)); api=$((3001 + 100*k)); ws=$((3002 + 100*k))
+#   wo=$((3010 + 100*k)); meta=$((3011 + 100*k))
+#   pg=$((5432 + 100*k)); ls=$((4566 + 100*k))
+# Each NAME here becomes <NAME>_PORT in .worktree.env, which is exactly the set
+# deploy-local.sh:59-65 defaults:  BACKOFFICE_PORT API_PORT WEBSITE_PORT
+# WO_MOCK_PORT META_MOCK_PORT PG_PORT LS_PORT.
+
+[ports]
+stride = 100
+max_slots = 50
+base = { BACKOFFICE = 3000, API = 3001, WEBSITE = 3002, WO_MOCK = 3010, META_MOCK = 3011, PG = 5432, LS = 4566 }
+
+# ─── Compose ─────────────────────────────────────────────────────────────────
+# worktrees.sh:97  wt_proj() { echo "${PREFIX}-wt-${1}"; }
+# PREFIX comes from the committed `.worktree-prefix` file at the repo root
+# (worktrees.sh:71-73) — its contents are "cdv" — so {prefix} renders `cdv` and
+# the project name renders `cdv-wt-<slug>`, byte-identical to today.
+# `[project] prefix` is deliberately NOT set: the legacy file already supplies
+# it, and duplicating it only creates a way for the two to disagree.
+
+[compose]
+file = "docker-compose.worktree.yml"
+project = "{prefix}-wt-{slug}"

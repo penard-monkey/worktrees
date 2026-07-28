@@ -155,18 +155,241 @@ mk_wt() {
   [ -d "$REPO/.worktrees/v1.2" ]
 }
 
-@test "close: kills an ADOPTED session (different name, pane cwd'd in the worktree)" {
-  mk_wt feat-x
-  # simulate `open` having adopted a foreign session: rename the canonical one
-  wt_phys="$(cd "$REPO/.worktrees/feat-x" && pwd -P)"
-  rm -f "$TMUX_STATE/repo-feat-x"
-  printf 'cwd=%s\ncmd0=bash\n' "$wt_phys" > "$TMUX_STATE/scratch-session"
+# An ADOPTED session is found by pane cwd alone, so it may be someone's personal
+# session that merely has ONE pane here (or in a nested unrelated repo under this
+# dir) — and tmux kills whole sessions, every window in them. So close names it
+# and asks, exactly like `rm` does. A canonical-name close still asks nothing.
+adopt_session() {   # $1 = slug, $2 = session name to adopt
+  local phys; phys="$(cd "$REPO/.worktrees/$1" && pwd -P)"
+  rm -f "$TMUX_STATE/repo-$1"
+  printf 'cwd=%s\ncmd0=bash\n' "$phys" > "$TMUX_STATE/$2"
+}
 
-  run_wt close feat-x
+@test "close: an ADOPTED session is named, and answering 'n' spares it" {
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+
+  wt_answer n close feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scratch-session"* ]]
+  [[ "$output" == *"was not opened under this repo's name"* ]]
+  [[ "$output" == *"kills the WHOLE session"* ]]
+  [[ "$output" == *"Skipped feat-x"* ]]
+  tmux_session_exists scratch-session               # still running
+  ! grep -q "kill-session" "$TMUX_LOG"
+  [ -d "$REPO/.worktrees/feat-x" ]
+}
+
+@test "close: an ADOPTED session dies on 'y' — and on -y without a prompt" {
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+
+  wt_answer y close feat-x
   [ "$status" -eq 0 ]
   [[ "$output" == *"closed adopted tmux scratch-session"* ]]
   ! tmux_session_exists scratch-session
   [ -d "$REPO/.worktrees/feat-x" ]
+
+  # -y is the app's/script's path: CaptureUi::confirm always answers no, so a
+  # programmatic caller that means it must say so (same convention as `rm`).
+  adopt_session feat-x other-session
+  run_wt close -y feat-x                            # stdin is /dev/null here
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"closed adopted tmux other-session"* ]]
+  [[ "$output" != *"Kill other-session?"* ]]
+  ! tmux_session_exists other-session
+}
+
+@test "close: EOF on the adopted prompt declines — nothing is killed unasked" {
+  # The app and any redirected caller land here. Declining must be the default.
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+
+  run_wt close feat-x                               # stdin </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Skipped feat-x"* ]]
+  tmux_session_exists scratch-session
+}
+
+@test "close: a CANONICAL-name close is not a question — no prompt, no -y" {
+  # The canonical name is one only this tool writes, so there is no doubt whose
+  # session it is. stdin is /dev/null: a prompt here would decline and fail.
+  mk_wt feat-x
+  run_wt close feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"closed tmux repo-feat-x"* ]]
+  [[ "$output" != *"Kill"* ]]
+  ! tmux_session_exists repo-feat-x
+
+  # …and the same for the main checkout's own session
+  printf 'cwd=%s\ncmd0=bash\n' "$REPO" > "$TMUX_STATE/repo-(main)"
+  run_wt close main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"closed tmux repo-(main)"* ]]
+  ! tmux_session_exists "repo-(main)"
+}
+
+@test "close: main does NOT kill a personal session adopted at the repo root without asking" {
+  # The reported hazard: one pane cwd'd at the repo root (a personal session,
+  # five windows) was killed outright by `worktrees close main`.
+  printf 'cwd=%s\ncmd0=bash\n' "$REPO" > "$TMUX_STATE/my-personal-session"
+
+  run_wt close main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"my-personal-session"* ]]
+  [[ "$output" == *"Skipped (main)"* ]]
+  tmux_session_exists my-personal-session
+  ! grep -q "kill-session" "$TMUX_LOG"
+
+  wt_answer y close main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"closed adopted tmux my-personal-session"* ]]
+  ! tmux_session_exists my-personal-session
+}
+
+# A caller that CANNOT answer (the app's CaptureUi; WORKTREES_NO_PROMPT=1 is the
+# shell's way to say the same thing) has not declined — nobody was asked. Taking
+# its forced "no" as success is what made the app's Close button a silent no-op,
+# so those callers get exit 4 (diag::EXIT_NEEDS_CONFIRM) and re-run with -y once
+# they have the word. A human answering "n" still exits 0: that is an answer.
+@test "close: a caller that cannot answer gets exit 4, not a silent skip" {
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+  export WORKTREES_NO_PROMPT=1
+
+  run_wt close feat-x
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"scratch-session"* ]]              # the session is NAMED
+  [[ "$output" == *"kills the WHOLE session"* ]]
+  [[ "$output" == *"confirm to kill it"* ]]
+  [[ "$output" != *"Kill scratch-session?"* ]]        # never prompts — it can't
+  tmux_session_exists scratch-session
+  ! grep -q "kill-session" "$TMUX_LOG"
+
+  # …and -y is the second click: same caller, now carrying consent.
+  run_wt close -y feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"closed adopted tmux scratch-session"* ]]
+  ! tmux_session_exists scratch-session
+  [ -d "$REPO/.worktrees/feat-x" ]
+}
+
+@test "close: exit 4 is only for the adopted case — canonical and dormant stay 0" {
+  mk_wt feat-x
+  export WORKTREES_NO_PROMPT=1
+  run_wt close feat-x           # canonical name: never a question
+  [ "$status" -eq 0 ]
+  ! tmux_session_exists repo-feat-x
+
+  run_wt close feat-x           # nothing live
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to close"* ]]
+}
+
+@test "close: a real failure outranks a needs-confirmation stop" {
+  # Both in one run: 'nope' errors (1) and feat-x wants confirmation (4). The
+  # caller must see the breakage, not the question.
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+  export WORKTREES_NO_PROMPT=1
+
+  run_wt close feat-x nope
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No worktree 'nope'"* ]]
+  tmux_session_exists scratch-session
+}
+
+# ── --session: the confirmation is bound to the session it NAMED ─────────────
+# The app asks in one call and answers in another, and its ctx-menu arm can sit
+# on screen. In that gap the named session can exit and another can adopt the
+# place by pane cwd — so `-y` alone would authorize a kill of something the user
+# was never shown. `--session <name>` is the answer's subject; core kills that
+# session or nothing.
+@test "close: -y --session refuses when a DIFFERENT session took the place" {
+  mk_wt feat-x
+  adopt_session feat-x scratch-A
+  export WORKTREES_NO_PROMPT=1
+
+  # The app's first call: core stops and names scratch-A (that is the arm label).
+  run_wt close feat-x
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"scratch-A"* ]]
+
+  # While the arm sits: scratch-A exits, scratch-B gets a pane cwd'd here.
+  rm -f "$TMUX_STATE/scratch-A"
+  adopt_session feat-x scratch-B
+
+  # The armed click carries the name it was shown. Nothing dies, and the user is
+  # told WHICH session went and which one is there now — not a silent no-op.
+  run_wt close -y --session scratch-A feat-x
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"is no longer the session in"* ]]
+  [[ "$output" == *"Nothing was killed: you confirmed scratch-A, not scratch-B."* ]]
+  [[ "$output" == *"Confirm again to kill scratch-B"* ]]
+  tmux_session_exists scratch-B
+  ! grep -q "kill-session" "$TMUX_LOG"
+
+  # Re-confirming against what is actually there kills exactly that one.
+  run_wt close -y --session scratch-B feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"closed adopted tmux scratch-B"* ]]
+  ! tmux_session_exists scratch-B
+  [ -d "$REPO/.worktrees/feat-x" ]
+}
+
+@test "close: --session also binds a CANONICAL kill, and needs a value + one name" {
+  mk_wt feat-x
+  tmux_session_exists repo-feat-x
+
+  # A canonical session is never a question, but a stale name is still refused —
+  # the arm may have been raised for an adopted session that has since exited.
+  run_wt close --session scratch-gone feat-x
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"you confirmed scratch-gone, not repo-feat-x."* ]]
+  tmux_session_exists repo-feat-x
+
+  run_wt close --session repo-feat-x feat-x
+  [ "$status" -eq 0 ]
+  ! tmux_session_exists repo-feat-x
+
+  run_wt close feat-x --session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--session needs a value"* ]]
+
+  run_wt close --session -y feat-x          # a flag is never a session name
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--session needs a value (got '-y')"* ]]
+
+  # One answer cannot stand in for sessions the user never saw.
+  run_wt close --session scratch feat-x main
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"answers for ONE worktree"* ]]
+}
+
+@test "close: --session against a place that went dormant is a plain no-op" {
+  # The other half of the race: the named session exited and NOTHING replaced it.
+  # There is nothing to kill and nothing to ask — exit 0, not a refusal.
+  mk_wt feat-x
+  adopt_session feat-x scratch-A
+  rm -f "$TMUX_STATE/scratch-A"
+  export WORKTREES_NO_PROMPT=1
+
+  run_wt close -y --session scratch-A feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to close"* ]]
+  ! grep -q "kill-session" "$TMUX_LOG"
+}
+
+@test "close: WORKTREES_NO_PROMPT does not change an interactive decline" {
+  # The env var marks a caller that cannot answer; a piped answer is still an
+  # answer, so without the var 'n' stays a plain exit 0.
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+
+  wt_answer n close feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Skipped feat-x"* ]]
+  tmux_session_exists scratch-session
 }
 
 @test "close: does not touch the declared store" {

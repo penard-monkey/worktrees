@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-28
+
 ### Added
 - Right dock (⌘J, or the panel button in a place's toolbar): a collapsible,
   resizable side panel with two tabs. **Files** browses the worktree as a lazy
@@ -15,17 +17,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   them all. Each shell is its own tmux session, so they survive app restarts,
   are `tmux attach`-able from a bare terminal, and the open tabs are restored
   from the live sessions next time. The dock's width and last-used tab persist.
-- Quick switcher: press ⌘K anywhere — even with the terminal focused — to
-  fuzzy-jump to any place across every project. Type to filter (matches slug,
-  branch, project, or note), arrow keys to move, Enter to jump, Esc to close;
-  open it with no query and it lists your most recent places. Works with the
-  nav collapsed, and each row shows the same working/needs-input dot as the nav.
+- **Per-project setup (`.worktrees.toml`).** A repo can now declare, in a
+  committed file, the untracked things every worktree of it needs: which
+  gitignored files to link (or copy) from the main checkout, a port map so two
+  stacks can run side by side, and a docker-compose project name per place.
+  Creating a worktree materializes all of it. This replaces the per-repo shell
+  script most people were maintaining next to this tool, and closes the failure
+  it kept causing: a credential added after a worktree existed was missing from
+  it, silently — an Android build with no `google-services.json` gets no push
+  token and reports no error.
+  - `worktrees init` inspects a repo that has never heard of the tool and prints
+    the config it would write, asking before writing anything. It flags
+    credential files louder than `.env`s, because those are the ones that fail
+    without saying so.
+  - `worktrees relink` re-applies the file plan to worktrees that already exist,
+    so adding an entry doesn't strand every place you already had.
+  - `worktrees provision` allocates or repairs a port slot and writes
+    `.worktree.env`.
+  - `worktrees doctor` reports drift — a missing link, a dangling one, a real
+    file shadowing a declared link, a port slot claimed twice, a place with no
+    slot at all — and exits non-zero so CI can gate on it.
+  - A file that already exists where a link belongs is **reported, never
+    overwritten**. The tool it replaces silently destroyed it.
+  - Nothing in the config is ever executed. A cloned repo can describe its
+    structure; it cannot supply a command for the tool to run.
+- **Project settings sheet in the app.** Open it from a project's context menu
+  to see what the project declares, a health badge with the current findings,
+  and Relink / Provision buttons. Places that have drifted get a ⚑ in the nav.
+  A project that qualifies for a config but doesn't have one gets a dismissible
+  suggestion.
 
 ### Changed
 - The app now opens a place's tmux session as a single pane (Claude only) so it
   gets the full width — the scratch shell that used to share the split moved to
   the new dock's Terminal tab. The `worktrees` CLI is unchanged: `new` still
   splits a second pane for the dependency install.
+
+## [0.3.2] - 2026-07-28
+
+### Added
+- Quick switcher: press ⌘K anywhere — even with the terminal focused — to
+  fuzzy-jump to any place across every project. Type to filter (matches slug,
+  branch, project, or note), arrow keys to move, Enter to jump, Esc to close;
+  open it with no query and it lists your most recent places. Works with the
+  nav collapsed, and each row shows the same working/needs-input dot as the nav.
 
 ## [0.3.1] - 2026-07-27
 

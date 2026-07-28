@@ -16,8 +16,13 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
   worktrees open <name>                 reopen a worktree's tmux session
   worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
+                                        (-y to kill an adopted session; --session <s> binds that answer)
   worktrees ls [--json]                 list worktrees + state (--json = machine-readable)
   worktrees rm <name> [name...]         tear one (or more) down
+  worktrees relink [<name>|--all]       re-apply .worktrees.toml's files (--force to overwrite)
+  worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
+  worktrees doctor [<name>]             report declared-file drift (--json --strict --config-only)
+  worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";
 
@@ -76,6 +81,10 @@ fn run() -> i32 {
         "open" | "reopen" | "attach" | "a" => ops::cmd_open(&project, &mut ui, rest),
         "close" => ops::cmd_close(&project, &mut ui, rest),
         "rm" | "remove" | "delete" => ops::cmd_rm(&project, &mut ui, rest),
+        "relink" => ops::cmd_relink(&project, &mut ui, rest),
+        "provision" => ops::cmd_provision(&project, &mut ui, rest),
+        "doctor" => ops::cmd_doctor(&project, &mut ui, rest),
+        "init" => ops::cmd_init(&project, &mut ui, rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));
             println!();
