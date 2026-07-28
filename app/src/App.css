@@ -574,6 +574,10 @@ button { cursor: pointer; }
   border: 1px solid color-mix(in srgb, var(--dirty) 40%, transparent);
   border-radius: var(--r-sm); padding: 0 4px;
 }
+.viewer-tag.conflict {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
 .viewer-hint { align-self: center; margin-top: var(--s4); }
 .viewer-text {
   flex: 1; min-height: 0; resize: none; width: 100%;

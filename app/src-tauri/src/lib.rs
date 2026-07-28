@@ -437,11 +437,8 @@ fn ai_is_claude() -> bool {
 /// End a place's tmux session — the worktree stays (right-click "Close session").
 #[tauri::command]
 async fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
-    run_op(&format!("close {slug}"), &repo, move |p, ui| {
-        let rc = ops::cmd_close(p, ui, &[slug.clone()]);
-        kill_shell_sidecars(&p.session_name(&slug)); // dock shells die with the place
-        rc
-    })
+    // cmd_close sweeps this place's dock shell sidecars itself (core, on success).
+    run_op(&format!("close {slug}"), &repo, move |p, ui| ops::cmd_close(p, ui, &[slug]))
 }
 
 // ── update check (Settings → Version) ────────────────────────────────────────
@@ -1012,6 +1009,19 @@ struct FileContent {
     content: String,
     truncated: bool,
     binary: bool,
+    /// mtime (ms since epoch) — the dock echoes it back on save as a
+    /// compare-and-swap token so a stale buffer can't clobber a newer edit.
+    mtime: u64,
+}
+
+/// File mtime in ms since the epoch (0 if unavailable) — a cheap change token.
+fn file_mtime_ms(p: &Path) -> u64 {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Canonicalize `path` and require it under some registered project root.
@@ -1078,8 +1088,14 @@ fn git_check_ignore<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) -> std
         Ok(c) => c,
         Err(_) => return Default::default(),
     };
+    // Write stdin on its own thread while the parent drains stdout below — a big
+    // directory's path list can exceed the pipe buffer, and writing all of it
+    // before reading would deadlock (git blocks on stdout, we block on stdin).
     if let Some(mut si) = child.stdin.take() {
-        let _ = si.write_all(&stdin_buf);
+        thread::spawn(move || {
+            let _ = si.write_all(&stdin_buf);
+            // drop closes the pipe → git sees EOF
+        });
     }
     let out = match child.wait_with_output() {
         Ok(o) => o,
@@ -1101,49 +1117,89 @@ async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Resu
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
     }
-    let cap = max_bytes.unwrap_or(1_000_000) as usize;
-    let bytes = std::fs::read(&f).map_err(|e| e.to_string())?;
-    let truncated = bytes.len() > cap;
-    let slice = &bytes[..bytes.len().min(cap)];
+    let cap = max_bytes.unwrap_or(1_000_000);
+    // Bounded read: `take(cap+1)` never allocates more than the cap even for a
+    // multi-GB file the user clicks by accident (video, core dump, tarball).
+    let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let truncated = bytes.len() as u64 > cap;
+    let slice = &bytes[..bytes.len().min(cap as usize)];
+    let mtime = file_mtime_ms(&f);
     if slice.contains(&0) {
-        return Ok(FileContent { content: String::new(), truncated, binary: true });
+        return Ok(FileContent { content: String::new(), truncated, binary: true, mtime });
     }
-    Ok(FileContent { content: String::from_utf8_lossy(slice).to_string(), truncated, binary: false })
+    Ok(FileContent { content: String::from_utf8_lossy(slice).to_string(), truncated, binary: false, mtime })
 }
 
 /// Save an edit. The file must already exist (guard canonicalizes) — the dock
-/// edits files it surfaced, it doesn't create new ones.
+/// edits files it surfaced, it doesn't create new ones. `expected_mtime` is a
+/// compare-and-swap guard: if the file changed on disk since the dock read it
+/// (Claude edited it in another pane), the save is refused rather than silently
+/// clobbering. The write is atomic (temp file + rename) so a crash mid-save
+/// can't leave a half-written file, and preserves the file's mode bits.
 #[tauri::command]
-async fn write_file(app: AppHandle, path: String, content: String) -> Result<(), String> {
+async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<(), String> {
     let f = guard_under_projects(&app, &path)?;
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
     }
-    std::fs::write(&f, content).map_err(|e| e.to_string())
+    if let Some(exp) = expected_mtime {
+        if file_mtime_ms(&f) != exp {
+            return Err("file changed on disk since you opened it — reload to see the latest".into());
+        }
+    }
+    let dir = f.parent().ok_or("no parent directory")?;
+    let base = f.file_name().and_then(|n| n.to_str()).unwrap_or("edit");
+    let tmp = dir.join(format!(".{base}.wt-tmp"));
+    std::fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
+    if let Ok(meta) = std::fs::metadata(&f) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions()); // keep the exec bit etc.
+    }
+    std::fs::rename(&tmp, &f).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
 }
 
 // ── dock terminal: scratch-shell sidecar sessions ────────────────────────────
 // The single-pane place session (Claude only) pairs with one or more SIDECAR
 // tmux sessions for the dock's Terminal tab — bare keep-alive shells cwd'd in
-// the worktree, one per shell tab: `<session>-term`, `<session>-term-2`, … Each
+// the worktree, one per shell tab: `<session>~term`, `<session>~term~2`, … Each
 // is persistent + `tmux attach`-able like any place session, and excluded from
 // worktree adoption (tmux::session_in) so none can masquerade as the AI
-// session. Torn down with the place (close/remove).
+// session. Torn down with the place — core cmd_close/cmd_rm sweep them.
 
-/// Ensure the dock's scratch-shell sidecar for `session` + 1-based tab `index`
-/// exists (creating it in `cwd`) and return its name. Idempotent — reused across
-/// dock opens/reboots.
+/// A place's CANONICAL session name + worktree cwd, both derived backend-side
+/// from `repo` + `slug`. The dock never supplies a session name or path — that
+/// keeps the webview from naming/killing arbitrary tmux sessions or opening a
+/// shell outside the workspace, and keeps sidecar names STABLE (a place's
+/// canonical name doesn't change when it briefly runs under an adopted session).
+fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), String> {
+    let p = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
+    Ok((p.session_name(slug), p.place_dir(slug)))
+}
+
+/// Ensure the dock's scratch-shell sidecar for a place + 1-based tab `index`
+/// exists (creating it cwd'd in the worktree) and return its tmux name.
+/// Idempotent — reused across dock opens/reboots.
 #[tauri::command]
-async fn open_shell_session(session: String, cwd: String, index: u32) -> Result<String, String> {
+async fn open_shell_session(repo: String, slug: String, index: u32) -> Result<String, String> {
     if !worktrees_core::tmux::have_tmux() {
         return Err("tmux not found".into());
     }
+    let (session, cwd) = place_session_cwd(&repo, &slug)?;
     let shell = worktrees_core::tmux::shell_sidecar_name(&session, index);
     if !worktrees_core::tmux::session_exists(&shell) {
-        worktrees_core::tmux::new_session(&shell, &cwd, "exec \"${SHELL:-/bin/sh}\"").map_err(|e| {
-            applog("error", &format!("open_shell_session {shell}: {e}"));
-            e
-        })?;
+        if let Err(e) = worktrees_core::tmux::new_session(&shell, &cwd, "exec \"${SHELL:-/bin/sh}\"") {
+            // Lost a create race (React StrictMode double-mounts the effect; rapid
+            // tab flips) → the session now exists; treat that as success, not an
+            // error banner. Any other failure is real.
+            if !worktrees_core::tmux::session_exists(&shell) {
+                applog("error", &format!("open_shell_session {shell}: {e}"));
+                return Err(e);
+            }
+        }
         worktrees_core::tmux::tune_session(&shell);
     }
     Ok(shell)
@@ -1152,7 +1208,8 @@ async fn open_shell_session(session: String, cwd: String, index: u32) -> Result<
 /// The 1-based indices of a place's live shell sidecars — the dock restores its
 /// Terminal tabs from tmux (self-healing across app restarts, no extra state).
 #[tauri::command]
-async fn list_shell_sessions(session: String) -> Result<Vec<u32>, String> {
+async fn list_shell_sessions(repo: String, slug: String) -> Result<Vec<u32>, String> {
+    let (session, _) = place_session_cwd(&repo, &slug)?;
     let mut ids: Vec<u32> = worktrees_core::tmux::session_names()
         .iter()
         .filter_map(|n| worktrees_core::tmux::shell_sidecar_index(&session, n))
@@ -1161,21 +1218,12 @@ async fn list_shell_sessions(session: String) -> Result<Vec<u32>, String> {
     Ok(ids)
 }
 
-/// End one shell tab (`<session>-term[-index]`). Best-effort; missing = no-op.
+/// End one shell tab (`<session>~term[~index]`). Best-effort; missing = no-op.
 #[tauri::command]
-async fn close_shell_session(session: String, index: u32) -> Result<(), String> {
+async fn close_shell_session(repo: String, slug: String, index: u32) -> Result<(), String> {
+    let (session, _) = place_session_cwd(&repo, &slug)?;
     worktrees_core::tmux::kill_session(&worktrees_core::tmux::shell_sidecar_name(&session, index));
     Ok(())
-}
-
-/// End ALL of a place's scratch-shell sidecars. Called alongside close/remove so
-/// no dock shell outlives its place. Best-effort: missing sessions are no-ops.
-fn kill_shell_sidecars(canonical_session: &str) {
-    for n in worktrees_core::tmux::session_names() {
-        if worktrees_core::tmux::shell_sidecar_index(canonical_session, &n).is_some() {
-            worktrees_core::tmux::kill_session(&n);
-        }
-    }
 }
 
 /// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
@@ -1194,12 +1242,9 @@ async fn remove_place(
     if force {
         args.push("--force".into());
     }
-    let sidecar_slug = slug_log.clone();
-    run_op(&format!("rm {slug_log}"), &repo, move |p, ui| {
-        let rc = ops::cmd_rm(p, ui, &args);
-        kill_shell_sidecars(&p.session_name(&sidecar_slug)); // dock shells die with the worktree
-        rc
-    })
+    // cmd_rm sweeps this place's dock shell sidecars itself (core, only once the
+    // removal proceeds past its dirty/confirm guards — a refused rm keeps them).
+    run_op(&format!("rm {slug_log}"), &repo, move |p, ui| ops::cmd_rm(p, ui, &args))
 }
 
 // ── PTY host: attach to a live tmux session ─────────────────────────────────

@@ -40,7 +40,10 @@ let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
 // first listing; files seed content so read/write round-trips.
 type MockEntry = { name: string; path: string; is_dir: boolean };
 const fsChildren = new Map<string, MockEntry[]>();
-const fsFiles = new Map<string, { content: string; binary: boolean }>();
+const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number }>();
+// dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
+const shellSidecars = new Map<string, Set<number>>();
+const sidecarKey = (repo: string, slug: string) => `${repo}|${slug}`;
 
 function seedDir(dir: string) {
   if (fsChildren.has(dir)) return fsChildren.get(dir)!;
@@ -53,7 +56,7 @@ function seedDir(dir: string) {
   fsChildren.set(dir, entries);
   for (const e of entries) {
     if (!e.is_dir && !fsFiles.has(e.path)) {
-      fsFiles.set(e.path, { content: `// ${e.name}\n// mock content — ${e.path}\n\nfn main() {\n    println!("hello from the harness");\n}\n`, binary: false });
+      fsFiles.set(e.path, { content: `// ${e.name}\n// mock content — ${e.path}\n\nfn main() {\n    println!("hello from the harness");\n}\n`, binary: false, mtime: Date.now() });
     }
   }
   return entries;
@@ -234,29 +237,40 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "term_close":
       return null;
 
-    // ── dock Files tab (virtual FS) + Terminal sidecar ──
+    // ── dock Files tab (virtual FS) + Terminal sidecars ──
     case "list_dir":
       return seedDir(args.path as string);
     case "read_file": {
       const f = fsFiles.get(args.path as string);
       return f
-        ? { content: f.content, truncated: false, binary: f.binary }
-        : { content: `// ${args.path}\n`, truncated: false, binary: false };
+        ? { content: f.content, truncated: false, binary: f.binary, mtime: f.mtime }
+        : { content: `// ${args.path}\n`, truncated: false, binary: false, mtime: 0 };
     }
     case "write_file": {
       const path = args.path as string;
       const prev = fsFiles.get(path);
-      fsFiles.set(path, { content: args.content as string, binary: prev?.binary ?? false });
+      // compare-and-swap: mirror the backend's stale-clobber guard
+      if (args.expectedMtime != null && prev && prev.mtime !== args.expectedMtime) {
+        throw new Error("file changed on disk since you opened it — reload to see the latest");
+      }
+      fsFiles.set(path, { content: args.content as string, binary: prev?.binary ?? false, mtime: Date.now() });
       return null;
     }
     case "open_shell_session": {
+      // backend derives the name from repo+slug; the mock just needs a stable,
+      // plausible session name + to track which tabs exist for restore.
       const i = (args.index as number) ?? 1;
-      return i <= 1 ? `${args.session}-term` : `${args.session}-term-${i}`; // → term_open
+      const set = shellSidecars.get(sidecarKey(args.repo, args.slug)) ?? new Set<number>();
+      set.add(i); shellSidecars.set(sidecarKey(args.repo, args.slug), set);
+      const base = `${String(args.slug).replace(/\./g, "-")}~term`;
+      return i <= 1 ? base : `${base}~${i}`; // → term_open
     }
     case "list_shell_sessions":
-      return []; // harness has no live tmux — the dock defaults to one shell tab
-    case "close_shell_session":
+      return [...(shellSidecars.get(sidecarKey(args.repo, args.slug)) ?? new Set<number>())].sort((a, b) => a - b);
+    case "close_shell_session": {
+      shellSidecars.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
       return null;
+    }
 
     // update check — stateful: update_cli bumps the fake CLI so the badge-clear
     // and button-disappear transitions are exercisable in the harness

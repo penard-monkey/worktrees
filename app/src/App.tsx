@@ -420,8 +420,8 @@ type FsEntry = { name: string; path: string; is_dir: boolean };
 
 // One lazy directory node: fetches its children the first time it's expanded and
 // caches them. Files bubble a click up via onOpen; dirs toggle.
-function TreeNode({ entry, depth, openPath, onOpen }: {
-  entry: FsEntry; depth: number; openPath: string | null; onOpen: (path: string) => void;
+function TreeNode({ entry, depth, openPath, onOpen, onError }: {
+  entry: FsEntry; depth: number; openPath: string | null; onOpen: (path: string) => void; onError: (e: unknown) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [kids, setKids] = useState<FsEntry[] | null>(null);
@@ -433,8 +433,10 @@ function TreeNode({ entry, depth, openPath, onOpen }: {
     setOpen(next);
     if (next && kids === null && !loading) {
       setLoading(true);
+      // Surface a failure (permissions, backend error) rather than showing it as
+      // an empty directory — a swallowed error reads as "it just didn't respond".
       try { setKids(await invoke<FsEntry[]>("list_dir", { path: entry.path })); }
-      catch { setKids([]); }
+      catch (e) { setKids([]); onError(e); }
       finally { setLoading(false); }
     }
   };
@@ -456,7 +458,7 @@ function TreeNode({ entry, depth, openPath, onOpen }: {
           {loading && <div className="tree-note">…</div>}
           {kids && kids.length === 0 && !loading && <div className="tree-note">empty</div>}
           {kids?.map((k) => (
-            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath} onOpen={onOpen} />
+            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath} onOpen={onOpen} onError={onError} />
           ))}
         </div>
       )}
@@ -465,7 +467,7 @@ function TreeNode({ entry, depth, openPath, onOpen }: {
 }
 
 // Files tab tree. `root` = the place's worktree path; remount per place via key.
-function FileTree({ root, openPath, onOpen }: { root: string; openPath: string | null; onOpen: (path: string) => void }) {
+function FileTree({ root, openPath, onOpen, onError }: { root: string; openPath: string | null; onOpen: (path: string) => void; onError: (e: unknown) => void }) {
   const [entries, setEntries] = useState<FsEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
@@ -481,42 +483,66 @@ function FileTree({ root, openPath, onOpen }: { root: string; openPath: string |
   if (!entries.length) return <div className="tree-note">empty worktree</div>;
   return (
     <div className="filetree">
-      {entries.map((e) => <TreeNode key={e.path} entry={e} depth={0} openPath={openPath} onOpen={onOpen} />)}
+      {entries.map((e) => <TreeNode key={e.path} entry={e} depth={0} openPath={openPath} onOpen={onOpen} onError={onError} />)}
     </div>
   );
 }
 
 // Editable viewer. Reads on path change; plain textarea (no editor lib). ⌘S /
 // Save writes back. Binary + truncated files are read-only (partial saves would
-// corrupt), with an "Open in editor" escape hatch.
-function FileViewer({ path, onOpenEditor, onError }: {
-  path: string; onOpenEditor: (path: string) => void; onError: (e: unknown) => void;
+// corrupt), with an "Open in editor" escape hatch. Because Claude edits the same
+// tree in another pane, this guards against clobbering: it auto-reloads from disk
+// while the buffer is clean (`reloadToken` bumps on places:changed), and on save
+// passes the file's mtime as a compare-and-swap token — a diverged file is
+// refused, not overwritten.
+type FileRead = { content: string; truncated: boolean; binary: boolean; mtime: number };
+function FileViewer({ path, reloadToken, onOpenEditor, onError }: {
+  path: string; reloadToken: number; onOpenEditor: (path: string) => void; onError: (e: unknown) => void;
 }) {
   const [orig, setOrig] = useState("");
   const [text, setText] = useState("");
-  const [meta, setMeta] = useState<{ binary: boolean; truncated: boolean } | null>(null);
+  const [meta, setMeta] = useState<{ binary: boolean; truncated: boolean; mtime: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [conflict, setConflict] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     let alive = true;
-    setLoading(true); setMeta(null);
-    invoke<{ content: string; truncated: boolean; binary: boolean }>("read_file", { path })
-      .then((r) => { if (!alive) return; setOrig(r.content); setText(r.content); setMeta({ binary: r.binary, truncated: r.truncated }); })
+    setLoading(true); setMeta(null); setConflict(false);
+    invoke<FileRead>("read_file", { path })
+      .then((r) => { if (!alive) return; setOrig(r.content); setText(r.content); setMeta({ binary: r.binary, truncated: r.truncated, mtime: r.mtime }); })
       .catch((e) => { if (alive) onError(e); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [path]);
+  }, [path, onError]);
+
+  useEffect(() => load(), [load]); // (re)load on path change
 
   const dirty = text !== orig;
   const canEdit = !!meta && !meta.binary && !meta.truncated;
 
+  // Auto-refresh from disk when the tree changed elsewhere AND the buffer is
+  // clean — never nuke unsaved edits (the save-time CAS covers the dirty case).
+  const dirtyRef = useRef(false); dirtyRef.current = dirty;
+  const firstReload = useRef(true);
+  useEffect(() => {
+    if (firstReload.current) { firstReload.current = false; return; }
+    if (!dirtyRef.current) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadToken]);
+
   const save = async () => {
     if (!dirty || saving || !canEdit) return;
     setSaving(true);
-    try { await invoke("write_file", { path, content: text }); setOrig(text); }
-    catch (e) { onError(e); }
-    finally { setSaving(false); }
+    try {
+      await invoke("write_file", { path, content: text, expectedMtime: meta?.mtime ?? null });
+      setOrig(text); setConflict(false);
+      const r = await invoke<FileRead>("read_file", { path }); // pick up the new mtime for the next CAS
+      setMeta((m) => (m ? { ...m, mtime: r.mtime } : m));
+    } catch (e) {
+      if (String(e).includes("changed on disk")) setConflict(true);
+      onError(e);
+    } finally { setSaving(false); }
   };
 
   return (
@@ -524,7 +550,9 @@ function FileViewer({ path, onOpenEditor, onError }: {
       <div className="viewer-h">
         <span className="viewer-path" title={path}>{basename(path)}{dirty ? " ●" : ""}</span>
         {meta?.truncated && <span className="viewer-tag">truncated</span>}
+        {conflict && <span className="viewer-tag conflict">changed on disk</span>}
         <span className="dock-spacer" />
+        {conflict && <button className="ctrl sm" onClick={load}>Reload</button>}
         {canEdit && <button className="ctrl sm" disabled={!dirty || saving} onClick={save}>{saving ? "Saving…" : "Save"}</button>}
         <button className="ctrl sm" onClick={() => onOpenEditor(path)}>Editor</button>
       </div>
@@ -549,49 +577,68 @@ function FileViewer({ path, onOpenEditor, onError }: {
 }
 
 // One embedded shell: ensures the place's sidecar for tab `index` exists, then
-// attaches. tmux owns the shell (persistent, `tmux attach`-able); we just attach.
-function DockTerminal({ placeSession, cwd, index, termVersion, focusToken, onError }: {
-  placeSession: string; cwd: string; index: number; termVersion: number; focusToken: number; onError: (e: unknown) => void;
+// attaches. The backend derives the session name + cwd from repo+slug (the
+// webview never names a session), so it stays stable across session up/down.
+function DockTerminal({ repo, slug, index, termVersion, focusToken, onError }: {
+  repo: string; slug: string; index: number; termVersion: number; focusToken: number; onError: (e: unknown) => void;
 }) {
   const [shell, setShell] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     setShell(null);
-    invoke<string>("open_shell_session", { session: placeSession, cwd, index })
+    invoke<string>("open_shell_session", { repo, slug, index })
       .then((s) => { if (alive) setShell(s); })
       .catch((e) => { if (alive) onError(e); });
     return () => { alive = false; };
-  }, [placeSession, cwd, index]);
+  }, [repo, slug, index]);
   if (!shell) return <div className="tree-note">starting shell…</div>;
   return <TerminalPane session={shell} termVersion={termVersion} focusToken={focusToken} />;
 }
 
 // Terminal tab: several shells per place. Tabs are restored from the live tmux
-// sidecars (self-healing across restarts) and default to one. Only the active
-// shell is mounted (tmux keeps the rest warm). `addToken` bumps → add a tab
-// (⌘⇧T from the global handler); ignored on first mount.
-function TerminalTabs({ placeSession, cwd, termVersion, focusToken, addToken, onError }: {
-  placeSession: string; cwd: string; termVersion: number; focusToken: number; addToken: number; onError: (e: unknown) => void;
+// sidecars (self-healing across restarts); a live place defaults to one shell, a
+// closed place to none. Only the active shell is mounted (tmux keeps the rest
+// warm). `addToken` bumps → add a tab (⌘⇧T from the global handler).
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, onError }: {
+  repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number; onError: (e: unknown) => void;
 }) {
   const [ids, setIds] = useState<number[] | null>(null); // null = restoring
   const [active, setActive] = useState<number | null>(null);
   const idsRef = useRef<number[]>([]);
   idsRef.current = ids ?? [];
+  const restoringRef = useRef(true);
 
+  // Restore tabs from live tmux on mount / place change.
   useEffect(() => {
     let alive = true;
+    restoringRef.current = true;
     setIds(null); setActive(null);
-    invoke<number[]>("list_shell_sessions", { session: placeSession })
+    invoke<number[]>("list_shell_sessions", { repo, slug })
       .then((existing) => {
         if (!alive) return;
-        const list = existing.length ? existing : [1];
-        setIds(list); setActive(list[0]);
+        const list = existing.length ? existing : (sessionUp ? [1] : []);
+        setIds(list); setActive(list[0] ?? null); restoringRef.current = false;
       })
-      .catch((e) => { if (!alive) return; setIds([1]); setActive(1); onError(e); });
+      .catch((e) => {
+        if (!alive) return;
+        setIds(sessionUp ? [1] : []); setActive(sessionUp ? 1 : null); restoringRef.current = false; onError(e);
+      });
     return () => { alive = false; };
-  }, [placeSession]);
+    // sessionUp intentionally excluded — its transitions are handled below so a
+    // flip doesn't clobber the user's tabs mid-session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo, slug]);
+
+  // When the place's session goes DOWN (topbar Close swept its sidecars), clear
+  // the tabs so the dock reflects reality instead of resurrecting dead shells.
+  const prevUp = useRef(sessionUp);
+  useEffect(() => {
+    if (prevUp.current && !sessionUp) { setIds([]); setActive(null); }
+    prevUp.current = sessionUp;
+  }, [sessionUp]);
 
   const addTab = useCallback(() => {
+    if (restoringRef.current) return; // don't add a tab the restore is about to overwrite
     const cur = idsRef.current;
     const next = (cur.length ? Math.max(...cur) : 0) + 1;
     setIds([...cur, next]);
@@ -606,7 +653,7 @@ function TerminalTabs({ placeSession, cwd, termVersion, focusToken, addToken, on
   }, [addToken, addTab]);
 
   const closeTab = (id: number) => {
-    invoke("close_shell_session", { session: placeSession, index: id }).catch(onError);
+    invoke("close_shell_session", { repo, slug, index: id }).catch(onError);
     const remaining = idsRef.current.filter((x) => x !== id);
     setIds(remaining);
     if (active === id) setActive(remaining.length ? remaining[remaining.length - 1] : null);
@@ -626,7 +673,7 @@ function TerminalTabs({ placeSession, cwd, termVersion, focusToken, addToken, on
         <button className="termtab-add" title="new terminal (⌘⇧T)" onClick={addTab}>＋</button>
       </div>
       {active != null ? (
-        <DockTerminal key={placeSession + ":" + active} placeSession={placeSession} cwd={cwd}
+        <DockTerminal key={repo + "|" + slug + ":" + active} repo={repo} slug={slug}
           index={active} termVersion={termVersion} focusToken={focusToken} onError={onError} />
       ) : (
         <div className="term-empty">
@@ -676,6 +723,8 @@ function App() {
   useEffect(() => { setDockFile(null); }, [sel?.repo, sel?.slug]);
   // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
   const [newTermToken, setNewTermToken] = useState(0);
+  // bumps on places:changed → the dock's file viewer re-reads from disk when clean.
+  const [placesToken, setPlacesToken] = useState(0);
 
   // every surfaced error also lands in the app log (Settings → Logs)
   const fail = useCallback((e: unknown) => {
@@ -696,7 +745,7 @@ function App() {
 
   // live refresh: backend emits "places:changed" (poll/fs-watch) → re-pull
   useEffect(() => {
-    const un = listen("places:changed", () => refresh());
+    const un = listen("places:changed", () => { refresh(); setPlacesToken((v) => v + 1); });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
 
@@ -1135,11 +1184,12 @@ function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // ⌘⇧T — new dock terminal. Handled BEFORE the meta-only guard (it needs
-      // shift). No-op unless the dock's Terminal tab is mounted (it ignores the
-      // token otherwise), so it's safe to fire unconditionally.
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "t") {
+      // shift). ⌘ only (not ctrl) so Ctrl+Shift+T still reaches the embedded
+      // shell; swallowed while the ⌘K palette owns the keyboard. No-op unless
+      // the dock's Terminal tab is mounted (it ignores the token otherwise).
+      if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "t") {
         e.preventDefault();
-        setNewTermToken((v) => v + 1);
+        if (!keyRef.current.switchOpen) setNewTermToken((v) => v + 1);
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
@@ -1422,7 +1472,7 @@ function App() {
     "var(--rail-w)",
     settings.nav_collapsed ? null : `${settings.nav_width}px`,
     "1fr",
-    dockShown ? `${settings.dock_width}px` : null,
+    dockShown ? `${clampDock(settings.dock_width)}px` : null,
   ].filter(Boolean).join(" ");
 
   return (
@@ -1659,15 +1709,15 @@ function App() {
             {settings.dock_tab === "files" ? (
               <div className="dock-files">
                 <div className="dock-tree">
-                  <FileTree key={selected.path} root={selected.path} openPath={dockFile} onOpen={setDockFile} />
+                  <FileTree key={selected.path} root={selected.path} openPath={dockFile} onOpen={setDockFile} onError={fail} />
                 </div>
                 {dockFile
-                  ? <FileViewer key={dockFile} path={dockFile} onOpenEditor={editIn} onError={fail} />
+                  ? <FileViewer key={dockFile} path={dockFile} reloadToken={placesToken} onOpenEditor={editIn} onError={fail} />
                   : <div className="tree-note viewer-hint">select a file to view</div>}
               </div>
             ) : (
-              <TerminalTabs key={selected.tmux_session.name + "-terms"}
-                placeSession={selected.tmux_session.name} cwd={selected.path}
+              <TerminalTabs key={sel.repo + "|" + sel.slug}
+                repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
                 termVersion={termVersion} focusToken={termFocus} addToken={newTermToken} onError={fail} />
             )}
           </div>

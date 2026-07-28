@@ -532,6 +532,11 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str) -> Result<(), i32> {
         return Err(1);
     };
     let session = p.session_name(&slug);
+    // Any dock scratch shells for this place die with it (canonical-named, so
+    // this matches whether the place ran under its canonical or an adopted
+    // session). Runs for every resolved close — even the adopted / nothing-to-
+    // close paths below — so the CLI cleans up the app's dock shells too.
+    tmux::kill_shell_sidecars(&session);
     if tmux::session_exists(&session) {
         tmux::kill_session(&session);
         if slug == "(main)" {
@@ -643,6 +648,7 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
         tmux::kill_session(&session);
         ui.info(&format!("killed tmux {session}"));
     }
+    tmux::kill_shell_sidecars(&session); // dock shells die with the worktree (past the refusal guards)
     if reg {
         if git::git_status(&p.main_root, &["worktree", "remove", "--force", &path]) {
             ui.info(&format!("removed worktree {slug}"));
