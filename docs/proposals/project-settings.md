@@ -1,6 +1,8 @@
 # Proposal — per-project settings
 
-**Status:** design decided 2026-07-27, nothing built. Build slot: after v0.3.2.
+**Status:** v1, v2, and v3 BUILT on branch `next-stream` (2026-07-28), not yet
+merged. See §12 for what each phase covered. Remaining: the cdv migration.
+Design decided 2026-07-27.
 **Supersedes:** the first draft of this file, written from the consumer side
 during a Casa del Valle push-notifications session. Six of its factual claims were
 wrong; they are corrected inline below and listed in §11.
@@ -719,7 +721,7 @@ worktree lacks fails outright.
 
 ## 12. Phasing
 
-**v1 — files + ports + doctor.** `[[file]]` link/copy, `[ports]` +
+**v1 — files + ports + doctor.** ✅ BUILT. `[[file]]` link/copy, `[ports]` +
 `.worktree.env`, `[compose]` project namespacing and teardown, `relink`,
 `provision`, `doctor`. Plus: `ensure_excluded` gains `.worktree.env`, `CaptureUi`
 gains severity, `config.rs` learns `config.toml`.
@@ -727,10 +729,43 @@ gains severity, `config.rs` learns `config.toml`.
 This is bigger than the original v1 because §1.1 makes ports non-deferrable — and
 because splitting them means shipping a tool that provisions half a stack repo.
 
-**v2 — `init` suggestions + app surface.** `ProjectSheet`, the drift glyph, the
-Relink button, the dismissible banner.
+**v2 — `init` suggestions + app surface.** ✅ BUILT. `ProjectSheet`, the drift
+glyph, the Relink/Provision buttons, the dismissible banner.
 
-**v3 — `[project] prefix`.** Deferred for the session-orphaning reason in §5.
+**v3 — `[project] prefix`.** ✅ BUILT. The parse was trivial; the work was
+cwd-based session adoption so adding a prefix to a repo with live sessions does
+not orphan them (§5's ⚠). That also closed two pre-existing gaps: `rm` had no
+adoption at all and would have left a session in a deleted directory, and `close`
+excluded `(main)` while `launch` and `ls` did not.
+
+### Decisions taken during the build, not in the original design
+
+- **`init` emits anything it cannot confidently declare COMMENTED OUT with the
+  reason** — a path the parser would reject, a `[ports]` map that fails the
+  collision lint, a prefix. The alternative (dropping it, or failing) either
+  re-creates the silent-omission bug or turns a legal repo into a tool that
+  refuses to run.
+- **Backups walk `.bak`, `.bak.2`, …** rather than a fixed name. A fixed `.bak`
+  survives exactly one `--force`, and §7's whole rationale is that the displaced
+  content may be the only copy.
+- **`new` validates the config BEFORE `git worktree add`**, not after. A parse
+  failure is knowable up front, and §1.1 says a created-but-unprovisioned
+  worktree is the destructive state.
+- **A hard failure (exit 1) outranks findings (exit 2)** when a multi-target run
+  aggregates, so the reported class does not depend on directory sort order.
+- **The passive hint counts only the credential class, not `.env*`.** A missing
+  `.env` breaks loudly on the next command; a missing `google-services.json`
+  builds an app that dies on a device days later. Unsolicited output on a hot
+  path should clear the higher bar.
+- **Two dismissal stores, accepted deliberately** — the CLI's under
+  `$XDG_STATE_HOME`, the app's in `ui-state.json`. They gate different surfaces
+  and share the same content-hash re-suggest rule; unifying them would mean the
+  CLI reading an app-owned file. §9 asked for this to be decided rather than
+  allowed to happen.
+- **`Project::discover` does read `.worktrees.toml`**, contrary to §8 — `prefix`
+  is a `Project` field, so there was no way around it. An absent config costs one
+  failed `open(2)`, and a broken one resolves to `None` rather than failing
+  discovery, because `ls` must stay usable.
 
 **Never — `[hooks]`, `[infra] up/stop/down`.** §5. Record as an ADR so this does
 not get quietly re-added in six months.
