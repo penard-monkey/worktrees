@@ -11,6 +11,14 @@ pub trait Ui {
     fn info(&mut self, msg: &str);
     fn warn(&mut self, msg: &str);
     fn error(&mut self, msg: &str);
+    /// A warning from a command whose STDOUT is a FILE (`init --print`, which is
+    /// redirected into `.worktrees.toml`). Same warning, off stdout: prose in
+    /// that stream is the broken config the tool otherwise refuses to create.
+    /// Defaults to `warn`, which is already right for a Ui that captures rather
+    /// than prints.
+    fn warn_aside(&mut self, msg: &str) {
+        self.warn(msg);
+    }
     fn header(&mut self, msg: &str);
     /// A pre-formatted line (may already contain color/indent), like bash `echo`.
     fn plain(&mut self, msg: &str);
@@ -30,6 +38,9 @@ impl Ui for CliUi {
     }
     fn error(&mut self, msg: &str) {
         eprintln!("{RED}✗{NC} {msg}");
+    }
+    fn warn_aside(&mut self, msg: &str) {
+        eprintln!("{YELLOW}▸{NC} {msg}");
     }
     fn header(&mut self, msg: &str) {
         println!("\n{CYAN}═══ {msg} ═══{NC}");

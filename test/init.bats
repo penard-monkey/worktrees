@@ -16,6 +16,14 @@ setup() {
 
 wt() { echo "$REPO/.worktrees/$1"; }
 
+# Same as run_wt, but STDOUT goes to a file — so `$output` is STDERR alone. The
+# only way to assert what `init --print > .worktrees.toml` actually captures.
+wt_stdout_to() {
+  local out="$1"; shift
+  run bash -c 'cd "$1" && o="$2" && shift 2 && "${RUN_BASH:-bash}" "$@" > "$o"' \
+    _ "$REPO" "$out" "$WT_BIN" "$@" < /dev/null
+}
+
 # ── the confirmation gate ────────────────────────────────────────────────────
 
 @test "init: prints the config it would write and, answering n, writes nothing" {
@@ -233,6 +241,79 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" != *"node_modules"* ]]
   [[ "$output" != *".worktrees/"* ]]
+}
+
+# ── paths the config refuses, in a repo that is perfectly legal ──────────────
+
+@test "init: a file the config cannot name is commented out, not a hard failure" {
+  # `$` anywhere and a leading `~` make projcfg reject the WHOLE config, so
+  # emitting either live turned a legal repo into exit 1 "please report this".
+  mkdir -p "$REPO/apps\$1" "$REPO/~backup"
+  printf 'S=1\n' > "$REPO/apps\$1/.env"
+  printf 'S=1\n' > "$REPO/~backup/.env"
+
+  run_wt init -y
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"please report this"* ]]
+  [[ "$output" == *"cannot be declared"* ]]
+  # each is listed, commented out, with the parser's own reason
+  grep -q '^# path = "apps\$1/\.env"$' "$REPO/.worktrees.toml"
+  grep -q '^# path = "~backup/\.env"$' "$REPO/.worktrees.toml"
+  grep -q 'is not expanded' "$REPO/.worktrees.toml"
+  ! grep -q '^path = "apps' "$REPO/.worktrees.toml"
+  # …and the ordinary .env beside them is still declared for real
+  grep -q '^path = "\.env"$' "$REPO/.worktrees.toml"
+
+  # the whole point: what it wrote is still readable by everything downstream
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+  [ -L "$(wt feat-x)/.env" ]
+}
+
+@test "init: a credential under an accented directory is found (git C-quotes those)" {
+  # `git check-ignore` prints "s\303\251crets/.env" under the default
+  # core.quotePath, which matches no candidate — so the file used to fall out of
+  # the filter with no error and no note. That silence is §1.2 itself.
+  git -C "$REPO" config core.quotePath true
+  mkdir -p "$REPO/sécrets"
+  printf '{}\n' > "$REPO/sécrets/google-services.json"
+  printf 'sécrets/\n' >> "$REPO/.gitignore"
+  ( cd "$REPO" && git add -A && git commit -qm ignore-secrets )
+
+  run_wt init --print
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'path = "sécrets/google-services.json"'* ]]
+}
+
+# ── --print writes a FILE, and only a file ───────────────────────────────────
+
+@test "init --print > file: a bare repo still gets a config doctor accepts" {
+  rm "$REPO/.env"                   # nothing left to declare
+  wt_stdout_to "$REPO/.worktrees.toml" init --print
+  [ "$status" -eq 0 ]
+  # the prose that used to land IN the config: not there, in any stream
+  [[ "$output" != *"Nothing to configure"* ]]
+  ! grep -q '▸' "$REPO/.worktrees.toml"
+  grep -q '^# ── files' "$REPO/.worktrees.toml"
+
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+}
+
+@test "init --print: the truncation warning reaches stderr, never the file" {
+  mkdir -p "$REPO/d1/d2/d3/d4/d5/d6/d7/d8/d9"   # one level past MAX_DEPTH
+  wt_stdout_to "$BATS_TEST_TMPDIR/out.toml" init --print
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"search stopped early"* ]]   # reported, never swallowed
+  ! grep -q 'stopped early' "$BATS_TEST_TMPDIR/out.toml"
+
+  cp "$BATS_TEST_TMPDIR/out.toml" "$REPO/.worktrees.toml"
+  run_wt doctor
+  [ "$status" -eq 0 ]
 }
 
 # ── the passive nudge on `new` (§9) ──────────────────────────────────────────

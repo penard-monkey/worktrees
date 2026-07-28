@@ -1341,7 +1341,24 @@ pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 
     let facts = init::probe(Path::new(&p.main_root), Path::new(p.wt_root_dir()));
     let sug = init::detect(&facts);
+    let text = init::render(&sug);
+    // The round-trip, enforced at runtime and not only in the unit test: nothing
+    // this tool cannot itself read is ever written. `init.rs` keeps every
+    // candidate it cannot declare commented out, so reaching this is a bug in the
+    // emitter rather than a property of the repo.
+    if let Err(e) = projcfg::parse(&text) {
+        ui.error(&format!("internal: the generated config does not parse ({e}) — please report this"));
+        return 1;
+    }
+
     if sug.is_empty() {
+        // `--print` still emits the FILE: its stdout is being redirected into
+        // `.worktrees.toml`, and two lines of prose there is precisely the broken
+        // config `new` and `doctor` refuse. An all-comments file parses clean.
+        if print_only {
+            print_config(ui, &text, sug.truncated);
+            return 0;
+        }
         // Exit 0 and say so plainly: "this repo needs no config" is a healthy
         // answer, not a failure.
         ui.info("Nothing to configure — no gitignored credential file, no compose stack publishing ports.");
@@ -1350,30 +1367,21 @@ pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             projcfg::CONFIG_FILE
         ));
         if sug.truncated {
-            ui.warn("(the search stopped early — deep, hidden and vendor directories were not walked)");
+            ui.warn(TRUNCATED);
         }
         return 0;
-    }
-
-    let text = init::render(&sug);
-    // The round-trip, enforced at runtime and not only in the unit test: nothing
-    // this tool cannot itself read is ever written.
-    if let Err(e) = projcfg::parse(&text) {
-        ui.error(&format!("internal: the generated config does not parse ({e}) — please report this"));
-        return 1;
     }
 
     // `--print` emits the FILE and nothing else — no header, no commentary — so
     // `worktrees init --print > .worktrees.toml` is a working move rather than a
     // trap that captures a banner into the config.
-    if !print_only {
-        ui.header(&format!("{} for {}", projcfg::CONFIG_FILE, basename(&p.main_root)));
+    if print_only {
+        print_config(ui, &text, sug.truncated);
+        return 0;
     }
+    ui.header(&format!("{} for {}", projcfg::CONFIG_FILE, basename(&p.main_root)));
     for line in text.lines() {
         ui.plain(line);
-    }
-    if print_only {
-        return 0;
     }
     describe(ui, &sug);
     if !yes && !ui.confirm(&format!("Write {}? [y/N] ", projcfg::CONFIG_FILE)) {
@@ -1404,6 +1412,23 @@ pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     0
 }
 
+/// The walk hit a bound. §9's promise is that this is REPORTED, never swallowed
+/// — which is why it survives `--print`, where every other line of prose does not.
+const TRUNCATED: &str =
+    "The search stopped early (depth or size bound; hidden and vendor dirs are skipped) — add anything it missed by hand.";
+
+/// `--print`: the file on stdout, and nothing else on stdout. The truncation
+/// warning is the one thing still worth saying, so it goes to stderr rather than
+/// nowhere — a caller redirecting stdout still sees it, and the file stays valid.
+fn print_config(ui: &mut dyn Ui, text: &str, truncated: bool) {
+    for line in text.lines() {
+        ui.plain(line);
+    }
+    if truncated {
+        ui.warn_aside(TRUNCATED);
+    }
+}
+
 /// The human commentary that does NOT belong inside the file: why each section
 /// showed up, and what the tool could not read.
 fn describe(ui: &mut dyn Ui, sug: &init::Suggestion) {
@@ -1426,8 +1451,17 @@ fn describe(ui: &mut dyn Ui, sug: &init::Suggestion) {
     if sug.prefix.is_some() {
         ui.info("[project] prefix is commented out — it is not honored yet (changing a prefix renames live tmux sessions).");
     }
+    // Found, and not declarable: §4 refuses these paths for the WHOLE config, so
+    // the file lists them commented out. Said out loud too — a credential nobody
+    // knows about is the failure this whole flow is for.
+    if !sug.rejected.is_empty() {
+        ui.warn(&format!(
+            "{} found file(s) cannot be declared — the config refuses the path. They are in the file, commented out, with the reason.",
+            sug.rejected.len()
+        ));
+    }
     if sug.truncated {
-        ui.warn("The search stopped early (depth or size bound; hidden and vendor dirs are skipped) — add anything it missed by hand.");
+        ui.warn(TRUNCATED);
     }
 }
 

@@ -154,9 +154,22 @@ pub struct PortsSuggestion {
     pub commented: Option<String>,
 }
 
+/// A candidate the config parser would refuse (§4). Emitted COMMENTED OUT with
+/// the parser's own reason — a real repo may legitimately hold `apps$1/.env`,
+/// and dropping it silently is the failure §1.2 is about while failing the run
+/// over it is worse.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rejected {
+    pub rel: String,
+    /// Why Layer A refused it, in the parser's own words.
+    pub why: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Suggestion {
     pub files: Vec<Candidate>,
+    /// Found on disk, not declarable. See [`Rejected`].
+    pub rejected: Vec<Rejected>,
     pub compose: Option<String>,
     pub ports: Option<PortsSuggestion>,
     /// Contents of `.worktree-prefix`. Emitted COMMENTED OUT — §12 defers
@@ -170,9 +183,15 @@ pub struct Suggestion {
 
 impl Suggestion {
     /// Nothing to configure. `stale_places` alone does not count — a divergence
-    /// from an empty declaration is not a divergence.
+    /// from an empty declaration is not a divergence. A REJECTED candidate does
+    /// count: there is a real file here that the config cannot name, and "nothing
+    /// to configure" would be exactly the silent drop this module refuses.
     pub fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.compose.is_none() && self.ports.is_none() && self.prefix.is_none()
+        self.files.is_empty()
+            && self.rejected.is_empty()
+            && self.compose.is_none()
+            && self.ports.is_none()
+            && self.prefix.is_none()
     }
 
     pub fn credentials(&self) -> usize {
@@ -185,11 +204,12 @@ impl Suggestion {
 /// §9's table, as a pure function. Every row is here and nothing here reads the
 /// filesystem.
 pub fn detect(f: &Facts) -> Suggestion {
-    let mut files = f.files.clone();
+    let mut candidates = f.files.clone();
     // Deterministic order: the `.env` group first (it is what a reader expects to
     // see at the top), credentials after, each sorted by path.
-    files.sort_by(|a, b| (a.kind, &a.rel).cmp(&(b.kind, &b.rel)));
-    files.dedup_by(|a, b| a.rel == b.rel);
+    candidates.sort_by(|a, b| (a.kind, &a.rel).cmp(&(b.kind, &b.rel)));
+    candidates.dedup_by(|a, b| a.rel == b.rel);
+    let (files, rejected) = split_declarable(candidates);
 
     let compose = f.compose.iter().find(|c| c.is_override).map(|c| c.rel.clone());
 
@@ -223,12 +243,51 @@ pub fn detect(f: &Facts) -> Suggestion {
 
     Suggestion {
         files,
+        rejected,
         compose,
         ports,
         prefix: f.prefix_file.clone(),
         stale_places: f.places.iter().filter(|p| p.missing > 0).map(|p| p.slug.clone()).collect(),
         truncated: f.truncated,
     }
+}
+
+/// Layer A (§4), applied at DETECT time rather than discovered at write time.
+///
+/// `probe` reads real filenames, and a perfectly legal repo can hold
+/// `apps$1/.env`, a `~backup/` directory, a path over the 1024-byte limit, or
+/// `A/.env` beside `a/.env` on a case-sensitive filesystem. Every one of those
+/// makes `projcfg::parse` reject the WHOLE config — so emitting them live turns
+/// a legal repo into `init` exiting 1 with "please report this". They are
+/// emitted COMMENTED OUT with the parser's own reason instead, exactly like a
+/// `[ports]` map that fails the lint: never dropped, never a failure.
+fn split_declarable(candidates: Vec<Candidate>) -> (Vec<Candidate>, Vec<Rejected>) {
+    let (mut files, mut rejected) = (Vec::new(), Vec::new());
+    let mut seen: Vec<(String, String)> = Vec::new(); // (case-folded, first path)
+    for c in candidates {
+        if let Err(e) = projcfg::RelPath::parse(&c.rel) {
+            rejected.push(Rejected { rel: c.rel, why: e.message });
+            continue;
+        }
+        // The case-only-duplicate rule is list-level — it needs the other
+        // entries, so it cannot live inside `RelPath::parse`. Same fold as
+        // `projcfg`'s (`to_lowercase`), and same caveat: it is a lowercase
+        // mapping, not Unicode case folding.
+        let fold = c.rel.to_lowercase();
+        if let Some((_, first)) = seen.iter().find(|(k, _)| *k == fold) {
+            rejected.push(Rejected {
+                why: format!(
+                    "case-only duplicate: `{}` and `{first}` are one file on macOS and two on Linux",
+                    c.rel
+                ),
+                rel: c.rel,
+            });
+            continue;
+        }
+        seen.push((fold, c.rel.clone()));
+        files.push(c);
+    }
+    (files, rejected)
 }
 
 /// Default `[ports]` stride/max_slots, matching `projcfg`'s own defaults — they
@@ -296,7 +355,7 @@ pub fn render(s: &Suggestion) -> String {
          # Every path is repo-relative; absolute paths, `~`, `$` and `.git` are refused.\n",
     );
 
-    if s.files.is_empty() {
+    if s.files.is_empty() && s.rejected.is_empty() {
         o.push_str(
             "\n# ── files ─────────────────────────────────────────────────────────────────\n\
              # No gitignored credential file was found in this checkout. When one appears,\n\
@@ -329,6 +388,20 @@ pub fn render(s: &Suggestion) -> String {
             }
             o.push_str("\n[[file]]\n");
             o.push_str(&format!("path = {}\n", toml_string(&c.rel)));
+        }
+    }
+
+    if !s.rejected.is_empty() {
+        o.push_str(
+            "\n# ⚠ Found in this checkout and NOT declared. Each breaks a rule the parser\n\
+             # applies to the WHOLE file (§4), so uncommenting one here would fail every\n\
+             # command — rename the file, or link it by hand. They are listed rather than\n\
+             # dropped because a credential nobody knows about is the bug this file fixes.\n",
+        );
+        for r in &s.rejected {
+            o.push_str(&format!("#\n# {}\n", comment_line(&r.why)));
+            o.push_str("# [[file]]\n");
+            o.push_str(&format!("# path = {}\n", toml_string(&r.rel)));
         }
     }
 
@@ -410,6 +483,13 @@ fn toml_string(s: &str) -> String {
     o
 }
 
+/// One `#` comment line's worth of text. The reason a path was rejected quotes
+/// the path itself, and a path can contain a newline — which would end the
+/// comment and leave the rest of the reason standing as live TOML.
+fn comment_line(s: &str) -> String {
+    s.chars().map(|c| if (c as u32) < 0x20 || c == '\u{7f}' { ' ' } else { c }).collect()
+}
+
 fn inline_base(base: &[(String, u32)]) -> String {
     let body: Vec<String> = base.iter().map(|(k, v)| format!("{k} = {v}")).collect();
     format!("{{ {} }}", body.join(", "))
@@ -480,20 +560,49 @@ fn keep_gitignored_untracked(main_root: &Path, candidates: Vec<Candidate>) -> Ve
     }
     let root = main_root.to_string_lossy().into_owned();
     let paths: Vec<String> = candidates.iter().map(|c| c.rel.clone()).collect();
-    let ignored = git_paths(&root, &["check-ignore"], &paths);
-    let tracked = git_paths(&root, &["ls-files"], &paths);
+    let ignored = git_ignored(&root, &paths);
+    let tracked = git_tracked(&root, &paths);
     candidates.into_iter().filter(|c| ignored.contains(&c.rel) && !tracked.contains(&c.rel)).collect()
 }
 
-/// `git -C <root> <args> -- <paths>`, stdout as a set. Captured directly rather
-/// than through `git_out` because both callers exit 1 for the perfectly ordinary
-/// "nothing matched", and that is an empty set, not a failure.
-fn git_paths(root: &str, args: &[&str], paths: &[String]) -> std::collections::BTreeSet<String> {
-    let mut argv: Vec<&str> = args.to_vec();
-    argv.push("--");
+// ⚠ `-z` on both calls is load-bearing, not tidiness. Under git's default
+// `core.quotePath` these commands C-quote any path holding a non-ASCII byte,
+// `"`, `\` or a control character — `sécrets/.env` comes back as
+// `"s\303\251crets/.env"`, which matches no candidate, so the file drops out of
+// the filter with no error and no note. A credential under an accented directory
+// going unmentioned is precisely the silent failure §1.2 exists to catch. NUL
+// delimiting is also the only form that survives a newline in a filename.
+//
+// Both are captured directly rather than through `git_out` because both exit 1
+// for the perfectly ordinary "nothing matched", and that is an empty set, not a
+// failure.
+
+/// Which of `paths` git ignores. `-z` on `check-ignore` "only makes sense with
+/// --stdin", so the list goes in on stdin rather than in argv.
+fn git_ignored(root: &str, paths: &[String]) -> std::collections::BTreeSet<String> {
+    let mut input: Vec<u8> = Vec::new();
+    for p in paths {
+        input.extend_from_slice(p.as_bytes());
+        input.push(0);
+    }
+    let Ok(out) = git::git_stdin(root, &["check-ignore", "-z", "--stdin"], &input) else {
+        return Default::default();
+    };
+    nul_set(&out.stdout)
+}
+
+/// Which of `paths` git tracks.
+fn git_tracked(root: &str, paths: &[String]) -> std::collections::BTreeSet<String> {
+    let mut argv: Vec<&str> = vec!["ls-files", "-z", "--"];
     argv.extend(paths.iter().map(|s| s.as_str()));
     let Ok(out) = git::git(root, &argv) else { return Default::default() };
-    String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(String::from).collect()
+    nul_set(&out.stdout)
+}
+
+/// NUL-delimited stdout as a set. Lossy on both sides of the comparison — a
+/// candidate came out of `to_string_lossy` too, so the same bytes still match.
+fn nul_set(stdout: &[u8]) -> std::collections::BTreeSet<String> {
+    String::from_utf8_lossy(stdout).split('\0').filter(|s| !s.is_empty()).map(String::from).collect()
 }
 
 /// Bounded breadth-first walk of the repo. Returns `(candidates, compose files,
@@ -1083,6 +1192,88 @@ mod tests {
         assert!(seen_live_ports, "at least one combination must emit a live [ports]");
     }
 
+    // ── what `probe` can actually hand `detect` ──────────────────────────────
+    //
+    // The round-trip test above feeds `detect` only well-formed synthetic facts,
+    // so it cannot see this class at all: these are the shapes a REAL `read_dir`
+    // produces and `projcfg::parse` refuses for the whole config. Each must come
+    // back commented out, with the run still succeeding and the output still
+    // parsing clean.
+
+    #[test]
+    fn a_path_the_parser_refuses_is_commented_out_rather_than_failing_the_run() {
+        for (rel, needle) in [
+            (r"apps$1/.env", "`$` is not expanded"), // a directory named `apps$1`
+            ("~backup/.env", "`~` is not expanded"), // a directory named `~backup`
+        ] {
+            let s = detect(&Facts { files: vec![env(rel)], ..Facts::default() });
+            assert!(s.files.is_empty(), "{rel} must not be emitted live");
+            assert_eq!(s.rejected.len(), 1, "{rel} must not be dropped either");
+            assert!(s.rejected[0].why.contains(needle), "{rel}: {:?}", s.rejected[0]);
+            assert!(!s.is_empty(), "{rel}: there IS something to tell the human about");
+            let out = render(&s);
+            assert!(out.contains(&format!("# path = {}", toml_string(rel))), "{out}");
+            assert!(!out.contains("\n[[file]]"), "no live entry: {out}");
+            let (cfg, findings) = projcfg::parse(&out)
+                .unwrap_or_else(|e| panic!("{rel}: the emitted config must still parse: {e}\n{out}"));
+            assert!(cfg.files.is_empty() && findings.is_empty(), "{findings:?}\n{out}");
+        }
+    }
+
+    #[test]
+    fn an_over_length_path_is_commented_out() {
+        // Unreachable through macOS's 1024-byte PATH_MAX, reachable on Linux.
+        let long = format!("{}/.env", "a".repeat(1100));
+        let s = detect(&Facts { files: vec![env(&long)], ..Facts::default() });
+        assert!(s.files.is_empty() && s.rejected.len() == 1);
+        assert!(s.rejected[0].why.contains("over the 1024-byte limit"), "{:?}", s.rejected[0]);
+        let (_, findings) = projcfg::parse(&render(&s)).unwrap();
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn a_case_only_duplicate_keeps_the_first_and_comments_out_the_second() {
+        // Two files on a case-sensitive filesystem, one on macOS — which
+        // `check_file_list` refuses for the whole config, so only one can be live.
+        let s = detect(&Facts { files: vec![env("A/.env"), env("a/.env")], ..Facts::default() });
+        assert_eq!(s.files, vec![env("A/.env")], "the first survives");
+        assert_eq!(s.rejected.len(), 1);
+        assert!(s.rejected[0].why.contains("case-only duplicate"), "{:?}", s.rejected[0]);
+        let out = render(&s);
+        let (cfg, findings) = projcfg::parse(&out).unwrap_or_else(|e| panic!("{e}\n{out}"));
+        assert_eq!(cfg.files.len(), 1);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn a_rejected_path_cannot_break_out_of_its_comment() {
+        // `-z` git output means a filename with a newline now reaches `detect`,
+        // and the reason quotes the path — one unescaped byte would leave the
+        // rest of the reason standing as live TOML.
+        let s = detect(&Facts { files: vec![env("a\nb$/.env")], ..Facts::default() });
+        assert_eq!(s.rejected.len(), 1);
+        let out = render(&s);
+        assert!(out.lines().filter(|l| !l.is_empty()).all(|l| l.starts_with('#')), "{out}");
+        let (cfg, findings) = projcfg::parse(&out).unwrap_or_else(|e| panic!("{e}\n{out}"));
+        assert!(cfg.files.is_empty() && findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn a_rejected_candidate_does_not_suppress_a_good_one() {
+        let s = detect(&Facts {
+            files: vec![env(".env"), cred("apps$x/google-services.json")],
+            ..Facts::default()
+        });
+        assert_eq!(s.files, vec![env(".env")]);
+        assert_eq!(s.rejected.len(), 1);
+        let out = render(&s);
+        assert!(out.contains("\npath = \".env\"\n"), "{out}");
+        assert!(out.contains("# path = \"apps$x/google-services.json\""), "{out}");
+        let (cfg, findings) = projcfg::parse(&out).unwrap();
+        assert_eq!(cfg.files.len(), 1);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
     #[test]
     fn an_awkward_filename_survives_the_emitter() {
         // `\` is an ordinary filename byte on both shipped targets (projcfg §4),
@@ -1166,9 +1357,19 @@ services:
 
     // ── the once-only marker ─────────────────────────────────────────────────
 
+    /// Removes its directory on the way out, so a FAILING assert below does not
+    /// leave a tmpdir behind (the same guard `materialize.rs`'s tests use).
+    struct Tmp(PathBuf);
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn the_hint_marker_is_keyed_by_repo_and_by_what_was_detected() {
-        let root = std::env::temp_dir().join(format!("wtinit-{}", std::process::id()));
+        let tmp = Tmp(std::env::temp_dir().join(format!("wtinit-{}", std::process::id())));
+        let root = &tmp.0;
         let (repo_a, repo_b, state) = (root.join("a"), root.join("b"), root.join("state"));
         fs::create_dir_all(&repo_a).unwrap();
         fs::create_dir_all(&repo_b).unwrap();
@@ -1184,7 +1385,5 @@ services:
         assert!(!hint_seen_in(&state, &repo_b, &d1), "keyed by repo, not global");
         record_hint_in(&state, &repo_a, &d2);
         assert!(hint_seen_in(&state, &repo_a, &d2));
-
-        let _ = fs::remove_dir_all(&root);
     }
 }
