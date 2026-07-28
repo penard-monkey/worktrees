@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::diag::{Code, Finding, Report, Severity};
 use crate::git;
+use crate::init;
 use crate::materialize;
 use crate::projcfg::{self, ProjectConfig};
 use crate::provision::{self, Outcome, ProvisionError, ENV_FILE};
@@ -309,7 +310,14 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // like the session one below: report, keep the worktree, propagate the rc —
     // never roll back.
     let mat_rc = match project_cfg {
-        None => 0,
+        None => {
+            // §9's passive nudge, and the ONLY thing a config-less repo gains
+            // here. Detection runs solely on this branch, so §2.4's
+            // byte-identical guarantee still holds for every repo that has
+            // nothing to link.
+            hint_init(p, ui);
+            0
+        }
         Some((cfg, findings)) => {
             report_findings(ui, &findings);
             let files = materialize_place(p, ui, &cfg, &wt, false);
@@ -1293,6 +1301,165 @@ fn compose_findings(p: &Project, cfg: &ProjectConfig, targets: &[String]) -> Vec
 /// own `schema_version`, every nullable field an explicit `null`.
 fn emit_report(ui: &mut dyn Ui, report: &Report) {
     ui.plain(&serde_json::to_string(report).unwrap_or_default());
+}
+
+// ── init — the suggestion flow (proposal §9) ─────────────────────────────────
+
+/// `worktrees init [--print] [-y] [--force]`.
+///
+/// Prints the `.worktrees.toml` this repo would get and asks. **Writes nothing
+/// without confirmation** — and `CaptureUi::confirm` always answers no, so a
+/// programmatic caller (the app, a script) safely declines rather than having a
+/// config appear under it.
+pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let (mut yes, mut force, mut print_only) = (false, false, false);
+    for a in args {
+        match a.as_str() {
+            "-y" | "--yes" => yes = true,
+            // `--force` also skips the prompt: it is the "I know what I want"
+            // flag, and asking after it would be theatre.
+            "--force" => {
+                force = true;
+                yes = true;
+            }
+            "--print" | "--dry-run" => print_only = true,
+            s => {
+                ui.error(&format!("Unknown flag: {s}"));
+                return 1;
+            }
+        }
+    }
+
+    let existing = Path::new(&p.main_root).join(projcfg::CONFIG_FILE);
+    if existing.exists() && !force && !print_only {
+        ui.error(&format!(
+            "{} already exists — refusing to overwrite it. Edit it by hand, or: worktrees init --force",
+            projcfg::CONFIG_FILE
+        ));
+        return 1;
+    }
+
+    let facts = init::probe(Path::new(&p.main_root), Path::new(p.wt_root_dir()));
+    let sug = init::detect(&facts);
+    if sug.is_empty() {
+        // Exit 0 and say so plainly: "this repo needs no config" is a healthy
+        // answer, not a failure.
+        ui.info("Nothing to configure — no gitignored credential file, no compose stack publishing ports.");
+        ui.info(&format!(
+            "A repo with no {} behaves exactly as it does today. Re-run this after adding one.",
+            projcfg::CONFIG_FILE
+        ));
+        if sug.truncated {
+            ui.warn("(the search stopped early — deep, hidden and vendor directories were not walked)");
+        }
+        return 0;
+    }
+
+    let text = init::render(&sug);
+    // The round-trip, enforced at runtime and not only in the unit test: nothing
+    // this tool cannot itself read is ever written.
+    if let Err(e) = projcfg::parse(&text) {
+        ui.error(&format!("internal: the generated config does not parse ({e}) — please report this"));
+        return 1;
+    }
+
+    // `--print` emits the FILE and nothing else — no header, no commentary — so
+    // `worktrees init --print > .worktrees.toml` is a working move rather than a
+    // trap that captures a banner into the config.
+    if !print_only {
+        ui.header(&format!("{} for {}", projcfg::CONFIG_FILE, basename(&p.main_root)));
+    }
+    for line in text.lines() {
+        ui.plain(line);
+    }
+    if print_only {
+        return 0;
+    }
+    describe(ui, &sug);
+    if !yes && !ui.confirm(&format!("Write {}? [y/N] ", projcfg::CONFIG_FILE)) {
+        ui.info("Nothing written.");
+        return 0;
+    }
+    match init::write_config(Path::new(&p.main_root), &text) {
+        Ok(path) => ui.info(&format!("wrote {}", path.display())),
+        Err(e) => {
+            ui.error(&format!("cannot write {}: {e}", projcfg::CONFIG_FILE));
+            return 1;
+        }
+    }
+    // §9's last row: every worktree that already exists predates this config, and
+    // without relink they all stay stranded — the exact bug §1.2 describes.
+    if !sug.stale_places.is_empty() {
+        ui.warn(&format!(
+            "{} existing worktree(s) are missing at least one declared file: {}",
+            sug.stale_places.len(),
+            sug.stale_places.join(", ")
+        ));
+        ui.info("Repair them now:  worktrees relink --all     (then check: worktrees doctor)");
+    }
+    if sug.ports.is_some() {
+        ui.info("Allocate port slots:  worktrees provision --all");
+    }
+    ui.info("Commit it — this is project structure, like docker-compose.yml.");
+    0
+}
+
+/// The human commentary that does NOT belong inside the file: why each section
+/// showed up, and what the tool could not read.
+fn describe(ui: &mut dyn Ui, sug: &init::Suggestion) {
+    ui.plain("");
+    match sug.credentials() {
+        0 => {}
+        1 => ui.warn(
+            "1 of these is a credential — it fails SILENTLY when missing (that is the whole reason for this file).",
+        ),
+        n => ui.warn(&format!(
+            "{n} of these are credentials — they fail SILENTLY when missing (that is the whole reason for this file)."
+        )),
+    }
+    if let Some(ports) = &sug.ports {
+        match &ports.commented {
+            Some(why) => ui.warn(&format!("[ports] is commented out: {why}.")),
+            None => ui.info(&format!("[ports] numbers were read out of {}. Check them.", ports.source)),
+        }
+    }
+    if sug.prefix.is_some() {
+        ui.info("[project] prefix is commented out — it is not honored yet (changing a prefix renames live tmux sessions).");
+    }
+    if sug.truncated {
+        ui.warn("The search stopped early (depth or size bound; hidden and vendor dirs are skipped) — add anything it missed by hand.");
+    }
+}
+
+/// §9's passive nudge, from `new`. One line, ONCE — see `init.rs`'s marker
+/// comment for where "once" lives and why.
+///
+/// ⚠ Only the CREDENTIAL class counts here, not every `.env*`. `init` still
+/// suggests both (§9's table has two file rows), but the nudge is unsolicited
+/// output on a hot path, and it has to clear a higher bar than "this is a Node
+/// repo". The credential class is the one §1.2 is actually about: a missing
+/// `.env` breaks the build loudly on the next command, while a missing
+/// `google-services.json` builds fine and dies silently on a device days later.
+fn hint_init(p: &Project, ui: &mut dyn Ui) {
+    let files: Vec<init::Candidate> = init::probe_files(Path::new(&p.main_root))
+        .into_iter()
+        .filter(|c| c.kind == init::Kind::Credential)
+        .collect();
+    let n = files.len();
+    if n == 0 {
+        return;
+    }
+    // Digested over exactly what the hint REPORTS, so gaining an unrelated
+    // `.env.local` does not re-nag with a line that says nothing new.
+    let digest = init::digest(&files);
+    if init::hint_seen(Path::new(&p.main_root), &digest) {
+        return;
+    }
+    let (noun, verb) = if n == 1 { ("file", "is") } else { ("files", "are") };
+    ui.warn(&format!(
+        "hint: {n} untracked credential {noun} in main {verb} not linked into this worktree — run 'worktrees init'"
+    ));
+    init::record_hint(Path::new(&p.main_root), &digest);
 }
 
 #[cfg(test)]

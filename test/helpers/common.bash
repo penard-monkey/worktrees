@@ -31,7 +31,10 @@ common_setup() {
   unset TMUX                      # don't inherit the developer's real tmux
   export BATS_TEST_TIMEOUT=120    # no single test may hang the suite (CI backstop)
   export WORKTREES_AI_CMD="fake-ai"
-  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX XDG_CONFIG_HOME || true
+  # XDG_STATE_HOME for the same reason as XDG_CONFIG_HOME: `init`'s once-only
+  # hint marker lives under it, and a developer who exports it would have the
+  # suite writing into (and reading back) their real state dir between runs.
+  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX XDG_CONFIG_HOME XDG_STATE_HOME || true
 
   make_repo
 }
