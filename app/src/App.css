@@ -262,6 +262,9 @@ button { cursor: pointer; }
 .g-ahead { color: var(--ok); }
 .g-behind { color: var(--dirty); }
 .g-det { color: var(--txt-dim); }
+/* config drift (doctor). Amber like the waiting dot on purpose — same "needs a
+   human" class — but a GLYPH, so it can never be mistaken for it. */
+.g-drift { color: var(--warn); }
 .g-more { color: var(--txt-mute); background: var(--bg-panel); padding: 0 4px; border-radius: var(--r-full); }
 .row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; }
 
@@ -367,6 +370,12 @@ button { cursor: pointer; }
   letter-spacing: 0.05em; color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
+/* same tag, attention colour — the Project sheet's doctor badge. --warn already
+   exists in all six theme blocks, so this adds no token. */
+.upd-tag.warn {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
 .ver-rows { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-label); color: var(--txt); }
 .ver-row b { color: var(--txt-hi); }
 .ver-path {
@@ -454,6 +463,52 @@ button { cursor: pointer; }
   background: color-mix(in srgb, var(--txt) 10%, transparent);
   color: var(--txt-hi);
 }
+
+/* ── Project sheet (per-project config + doctor) ── */
+/* An absolute repo path is long enough to widen the whole sheet (a horizontal
+   scrollbar under every section). .ver-path only ellipsizes when it is a BLOCK
+   box — as an inline span, overflow/text-overflow do nothing. Scoped to
+   .project-sheet so Settings' own inline version rows are untouched. */
+.project-sheet .ver-path { display: block; min-width: 0; margin-left: 0; }
+.project-sheet .dx-file { display: flex; align-items: baseline; gap: var(--s1); min-width: 0; }
+.project-sheet .dx-file .ver-path { flex: 1 1 auto; }
+.dx-list { display: flex; flex-direction: column; gap: var(--s2); }
+.dx-row { display: flex; gap: var(--s2); font-size: var(--fs-meta); line-height: var(--lh-prose); }
+.dx-sev { flex: 0 0 auto; font-weight: var(--fw-bold); }
+.dx-sev.error { color: var(--danger); }
+.dx-sev.warn { color: var(--warn); }
+.dx-sev.info { color: var(--txt-mute); }
+.dx-msg { color: var(--txt-dim); }
+.dx-place { color: var(--txt-hi); }
+.dx-code {
+  margin-left: var(--s2); padding: 0 4px; border-radius: var(--r-sm); white-space: nowrap;
+  font-family: var(--term-family); font-size: var(--fs-micro);
+  color: var(--txt-mute); background: var(--bg-elev);
+}
+.dx-mode {
+  flex: 0 0 auto; min-width: 2.6em; padding: 0 4px; border-radius: var(--r-sm);
+  font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--txt-mute); background: var(--bg-elev);
+}
+.dx-mode.copy { color: var(--dirty); background: color-mix(in srgb, var(--dirty) 14%, transparent); }
+
+/* §9's init nudge — box treatment copied from .nav-newform, amber-edged */
+.init-banner {
+  display: flex; flex-direction: column; gap: var(--s2);
+  margin: 0 var(--s2) var(--s2); padding: var(--s2);
+  background: var(--bg-elev);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
+  border-radius: var(--r-md);
+}
+.init-banner-h {
+  display: flex; align-items: center; gap: var(--s1);
+  font-size: var(--fs-meta); color: var(--warn); font-weight: var(--fw-med);
+}
+.init-banner-h .mini { margin-left: auto; }
+.init-banner p {
+  margin: 0; font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt-dim);
+}
+.init-banner .ver-actions { margin-top: 0; }
 
 /* new-worktree form pinned at the top of the nav (visible in every lens) */
 .nav-newform {

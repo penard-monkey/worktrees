@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
+import { driftedSlugs, InitBanner, ProjectSheet, type DoctorReport, type InitSuggestion } from "./ProjectSheet";
 import { applySettings, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
@@ -86,8 +87,15 @@ function ago(epoch?: number): string {
 }
 
 // fixed-order signal glyphs; geometry (3-col row grid) guarantees no collision.
-function glyphs(p: Place) {
+//
+// Drift (proposal §10) is a GLYPH, not a dot: `.status-dot.waiting` is already
+// amber = "Claude needs input", the app's highest-value signal, and a second
+// amber dot would be indistinguishable from it. It goes FIRST because the
+// overflow below truncates at MAX — and drift is the one signal here that names
+// a broken worktree rather than ordinary work in progress.
+function glyphs(p: Place, drift?: boolean) {
   const g: { cls: string; text: string; title: string }[] = [];
+  if (drift) g.push({ cls: "g-drift", text: "⚑", title: "config drift — right-click the project → Project settings…" });
   if (p.dirty) g.push({ cls: "g-dirty", text: `●${p.dirty_files ?? ""}`, title: `${p.dirty_files ?? "dirty"} uncommitted` });
   if (p.ahead) g.push({ cls: "g-ahead", text: `↑${p.ahead}`, title: `${p.ahead} ahead` });
   if (p.behind) g.push({ cls: "g-behind", text: `↓${p.behind}`, title: `${p.behind} behind` });
@@ -436,6 +444,16 @@ function App() {
   const [drag, setDrag] = useState<{ repo: string; slug: string } | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
+  const [projSheet, setProjSheet] = useState<string | null>(null);
+  // Project-config drift, per project root → the slugs doctor blames. Structurally
+  // identical to busyPaths/waitingPaths (the house pattern for row decoration that
+  // is NOT in the snapshot) — deliberately outside `Place`, because `Place.stack`
+  // is reserved for the infra phase and putting drift on the hot path would mean
+  // a filesystem probe inside every 3s poll.
+  const [drift, setDrift] = useState<Record<string, Set<string>>>({});
+  // What `worktrees init` would suggest per project (§9's nudge). Probed ONCE per
+  // project — it walks the checkout, so it is not poll-path work either.
+  const [suggest, setSuggest] = useState<Record<string, InitSuggestion>>({});
   // Badge = actionable updates. CLI via the pinned-tag installer; the app via
   // tauri-plugin-updater (signed bundles) — both one click in Settings now.
   const cliStale = !!(upd?.latest && upd.cli_version && vnewer(upd.latest, upd.cli_version));
@@ -483,6 +501,55 @@ function App() {
   }, []);
   const activityOf = (p: Place): "busy" | "waiting" | "" =>
     busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
+
+  // ── project config: drift + the init suggestion ──
+  // NEITHER runs on the 3s poll (proposal §10). `places:changed` already triggers
+  // a full list_workspace (up to 16 concurrent git calls per project); doctor on
+  // top of that would put the config on the hot path §8 keeps it off. So: once on
+  // load, on sheet open, after a repair, and on a slow timer.
+  const takeReport = useCallback((root: string, r: DoctorReport | null) => {
+    setDrift((d) => ({ ...d, [root]: driftedSlugs(r) }));
+  }, []);
+  // A BACKGROUND doctor failure is logged, never banner'd — the user didn't ask
+  // for it, and a repo that can't be probed is already visible as a broken node.
+  // The sheet surfaces its own failures in its own error area.
+  const sweepDoctor = useCallback(async (root: string) => {
+    try {
+      takeReport(root, (await invoke<DoctorReport | null>("doctor", { repo: root, slug: null })) ?? null);
+    } catch (e) {
+      invoke("log_event", { level: "warn", msg: `doctor ${root}: ${String(e)}` }).catch(() => {});
+    }
+  }, [takeReport]);
+  const rootsKey = useMemo(
+    () => (ws?.projects ?? []).filter((pv) => pv.ok).map((pv) => pv.root).join("\n"),
+    [ws],
+  );
+  useEffect(() => {
+    const roots = rootsKey ? rootsKey.split("\n") : [];
+    if (roots.length === 0) return;
+    const sweep = () => roots.forEach((r) => sweepDoctor(r));
+    sweep();
+    const t = setInterval(sweep, 5 * 60_000); // slow timer, not the poll
+    return () => clearInterval(t);
+  }, [rootsKey, sweepDoctor]);
+  // The suggestion is stable for a given checkout, so probe each project once;
+  // `probeSuggest` re-runs it after a config is written (the banner retires).
+  const probeSuggest = useCallback(async (root: string) => {
+    try {
+      const s = await invoke<InitSuggestion | null>("init_suggest", { repo: root });
+      if (s) setSuggest((m) => ({ ...m, [root]: s }));
+    } catch (e) {
+      invoke("log_event", { level: "warn", msg: `init_suggest ${root}: ${String(e)}` }).catch(() => {});
+    }
+  }, []);
+  const suggestedFor = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const root of rootsKey ? rootsKey.split("\n") : []) {
+      if (suggestedFor.current.has(root)) continue;
+      suggestedFor.current.add(root);
+      probeSuggest(root);
+    }
+  }, [rootsKey, probeSuggest]);
 
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
@@ -735,10 +802,22 @@ function App() {
     closeCtx();
     invoke("open_editor", { path, cmd: settings.editor_cmd }).catch((e) => fail(e));
   };
+  // §9's banner, dismissed for this project until its suggestion CHANGES (the
+  // value is the suggestion's content hash, never a boolean — see settings.ts).
+  const dismissInit = (root: string, hash: string) => {
+    updateSettings({ init_dismissed: { ...(settings.init_dismissed ?? {}), [root]: hash } });
+  };
   // Settings → Data → "Reset to defaults". Preserve last_seen_version so the
   // What's-new sheet doesn't re-fire, push through the same apply/persist/refit
   // path as every other change, and reset the React state that MIRRORS settings
   // (lens + per-project collapsed) so the UI doesn't show stale nav state.
+  //
+  // ⚠ This DOES clear `init_dismissed`, so every dismissed init banner comes
+  // back. That is the right behavior and is deliberate: "reset to defaults" is
+  // asked for when the UI is in an unknown state, the banner is a suggestion
+  // rather than a destructive action, and each one is one click to dismiss
+  // again. `last_seen_version` is the only exception because re-showing What's
+  // new for a version you already read is noise with no corresponding signal.
   const onReset = () => {
     const next = { ...DEFAULTS, last_seen_version: settings.last_seen_version };
     updateSettings(next);
@@ -999,6 +1078,11 @@ function App() {
   };
 
   // ── row ──
+  // ⚠ Defined inside App() against CLAUDE.md's own rule. It is safe ONLY because
+  // it holds no local state and takes no focus — the drift glyph rides in on the
+  // `drift` prop-by-closure and its tooltip is a plain `title` attribute. The
+  // moment this needs useState (a hover card, an inline editor), hoist it to
+  // module scope with props FIRST.
   const PlaceRow = ({ repo, p, showProject }: { repo: string; p: Place; showProject?: boolean }) => {
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
     return (
@@ -1031,7 +1115,7 @@ function App() {
           {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
         </span>
         <span className="glyphs">
-          {glyphs(p).map((g, i) => (
+          {glyphs(p, drift[repo]?.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
           <span className="row-age">{ago(recencyOf(p))}</span>
@@ -1085,6 +1169,20 @@ function App() {
 
         {open && pv.ok && (
           <div className="kids">
+            {(() => {
+              // §9's passive nudge. Shown only for a QUALIFYING project with no
+              // config, and only until its exact suggestion is dismissed.
+              const sug = suggest[pv.root];
+              if (!sug?.qualifies || sug.exists) return null;
+              if (settings.init_dismissed?.[pv.root] === sug.hash) return null;
+              return (
+                <InitBanner
+                  suggestion={sug}
+                  onOpen={() => setProjSheet(pv.root)}
+                  onDismiss={() => dismissInit(pv.root, sug.hash)}
+                />
+              );
+            })()}
             {main && <ul className="places"><PlaceRow repo={pv.root} p={main} /></ul>}
             {LIVE_TIERS.filter((g) => buckets[g]?.length && !hiddenTiers.has(g)).map((g) => {
               const key = `${pv.root}|${g}`;
@@ -1369,6 +1467,20 @@ function App() {
 
       {sortOpen && <div className="menu-catch" onClick={() => setSortOpen(false)} />}
 
+      {/* Per-project sheet (right-click a project → Project settings…). Keyed by
+          root so switching projects remounts it with fresh state; `open` gates
+          the render exactly like SettingsSheet's. */}
+      <ProjectSheet
+        key={projSheet ?? "none"}
+        open={!!projSheet}
+        root={projSheet ?? ""}
+        editorCmd={settings.editor_cmd}
+        suggestion={projSheet ? suggest[projSheet] ?? null : null}
+        onClose={() => setProjSheet(null)}
+        onReport={takeReport}
+        onConfigWritten={(root) => { probeSuggest(root); refresh(); }}
+      />
+
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset} />
@@ -1485,6 +1597,12 @@ function App() {
             {main && <button className="pop-item" onClick={() => enterPlace(ctx.root, main)}>Enter main ▸</button>}
             {pv?.ok && (
               <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("fetch_origin", { root: ctx.root })); }}>Fetch origin</button>
+            )}
+            {pv?.ok && (
+              <button className="pop-item" onClick={() => { closeCtx(); setProjSheet(ctx.root); }}>
+                Project settings…
+                {(drift[ctx.root]?.size ?? 0) > 0 ? <span className="upd-tag warn">{drift[ctx.root].size}</span> : null}
+              </button>
             )}
             <div className="ctx-sep" />
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
