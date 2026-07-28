@@ -253,6 +253,165 @@ function NewPlaceForm({ project, initialBase, onCreate, onCancel }: {
   );
 }
 
+// ── ⌘K quick-switcher ──
+// Fuzzy SUBSEQUENCE match over a composite key (slug + branch + project basename
+// + note). A place matches if the query chars appear IN ORDER (case-insensitive);
+// score prefers a contiguous substring hit over a scattered subsequence, an
+// earlier hit over a later one, and a slug hit over a branch/project hit. Recency
+// (declared.last_opened_epoch desc) breaks ties. Empty query → all places sorted
+// by recency (the instant "recent places" list — the common case).
+type SwitchItem = { pv: ProjectView; p: Place };
+const SWITCH_CAP = 50; // rendered-list cap for big workspaces (perf; query narrows it)
+
+// subsequence test + a small score; higher is better, -1 = no match.
+function fuzzyScore(query: string, hay: string): number {
+  if (!query) return 0;
+  const q = query, h = hay;
+  // strong signal: contiguous substring (and where it lands)
+  const sub = h.indexOf(q);
+  if (sub >= 0) return 1000 - sub; // earlier = better
+  // fall back to in-order subsequence walk
+  let hi = 0, gaps = 0, first = -1;
+  for (let qi = 0; qi < q.length; qi++) {
+    const c = q[qi];
+    const found = h.indexOf(c, hi);
+    if (found < 0) return -1;
+    if (first < 0) first = found;
+    if (qi > 0 && found > hi) gaps++;
+    hi = found + 1;
+  }
+  return 400 - first - gaps * 5; // scattered: below any substring hit
+}
+
+function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: {
+  open: boolean;
+  items: SwitchItem[];
+  busyPaths: Set<string>;
+  waitingPaths: Set<string>;
+  onPick: (root: string, p: Place) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [hi, setHi] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const rec = (p: Place) => p.declared?.last_opened_epoch ?? p.last_commit_epoch ?? 0;
+    if (!q) {
+      return [...items]
+        .sort((a, b) => rec(b.p) - rec(a.p))
+        .slice(0, SWITCH_CAP);
+    }
+    const scored: { it: SwitchItem; score: number }[] = [];
+    for (const it of items) {
+      const { pv, p } = it;
+      const slug = p.slug.toLowerCase();
+      const branch = (p.branch ?? "").toLowerCase();
+      const proj = basename(pv.root).toLowerCase();
+      const note = (p.declared?.note ?? "").toLowerCase();
+      const composite = `${slug} ${branch} ${proj} ${note}`;
+      // reject early: must match the whole composite as a subsequence
+      if (fuzzyScore(q, composite) < 0) continue;
+      // rank on the best field, biased toward the slug
+      const s = Math.max(
+        fuzzyScore(q, slug) + 200, // slug hits win
+        fuzzyScore(q, branch),
+        fuzzyScore(q, proj),
+        fuzzyScore(q, note),
+      );
+      scored.push({ it, score: s });
+    }
+    scored.sort((a, b) => (b.score - a.score) || (rec(b.it.p) - rec(a.it.p)));
+    return scored.slice(0, SWITCH_CAP).map((x) => x.it);
+  }, [items, query]);
+
+  // fresh mount per open (App renders <QuickSwitch> only when open) → autofocus
+  // fires and query/highlight reset. Focus the input on mount as a belt-and-braces
+  // (autoFocus can miss when the node mounts inside a portal-less overlay).
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+
+  // keep the highlighted row in view as Arrow keys move it
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(".qs-row.hi")?.scrollIntoView({ block: "nearest" });
+  }, [hi]);
+
+  if (!open) return null;
+
+  const pick = (it: SwitchItem) => onPick(it.pv.root, it.p);
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHi((i) => (results.length ? Math.min(i + 1, results.length - 1) : 0));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHi((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setHi(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setHi(Math.max(results.length - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const it = results[hi];
+      if (it) pick(it);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
+  return (
+    <div className="scrim scrim-center" onClick={onClose}>
+      <div className="qs-panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Quick switch">
+        <input
+          ref={inputRef}
+          className="qs-input"
+          placeholder="Jump to a place…"
+          value={query}
+          autoFocus
+          spellCheck={false}
+          onChange={(e) => { setQuery(e.currentTarget.value); setHi(0); }}
+          onKeyDown={onKey}
+        />
+        <div className="qs-list" ref={listRef}>
+          {results.length === 0 ? (
+            <div className="qs-empty">No places match</div>
+          ) : (
+            results.map((it, i) => {
+              const { pv, p } = it;
+              const act = busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
+              return (
+                <div
+                  key={`${pv.root}::${p.slug}`}
+                  className={"qs-row" + (i === hi ? " hi" : "")}
+                  onMouseEnter={() => setHi(i)}
+                  onMouseDown={(e) => { e.preventDefault(); pick(it); }} // mousedown: fire before the input blurs
+                >
+                  <span
+                    className={"status-dot" + (act ? " " + act : "")}
+                    title={act === "busy" ? "Claude working" : act === "waiting" ? "Claude needs input" : undefined}
+                  />
+                  <span className="qs-slug">
+                    {p.declared?.pinned ? "★ " : p.is_main ? "◆ " : ""}{p.slug}
+                  </span>
+                  <span className="qs-proj">{basename(pv.root)}</span>
+                  {p.branch && p.branch !== p.slug && <span className="qs-branch">{p.branch}</span>}
+                  <span className={"life " + p.lifecycle_effective}>{p.lifecycle_effective}</span>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
@@ -269,6 +428,7 @@ function App() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [switchOpen, setSwitchOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
@@ -726,12 +886,23 @@ function App() {
   }, []);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
-  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd });
-  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd };
+  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen });
+  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
       const k = e.key.toLowerCase();
+      // ⌘K — quick switcher. A meta chord fires PAST the embedded terminal (like
+      // ⌘B/⌘,) so it opens even with the terminal focused; toggles closed if open.
+      if (e.metaKey && k === "k") {
+        e.preventDefault();
+        setSwitchOpen((v) => !v);
+        return;
+      }
+      // While the palette is open, swallow the OTHER app chords (⌘1-4, ⌘E, ⌘,,
+      // ⌘B) — the palette owns the keyboard; only ⌘K (handled above) and Escape
+      // (owned by the palette itself) do anything.
+      if (keyRef.current.switchOpen) return;
       if (k === "b") {
         // Ctrl+B is the tmux prefix — let the embedded terminal keep it; ⌘B still toggles
         if (e.ctrlKey && !e.metaKey && e.target instanceof Element && e.target.closest(".term-host")) return;
@@ -1201,6 +1372,16 @@ function App() {
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset} />
+
+      {/* ⌘K quick switcher — a full overlay independent of the nav (works in
+          rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query
+          + highlight reset, autofocus fires). enterPlace bumps termFocus, returning
+          focus to the terminal after a pick. */}
+      {switchOpen && (
+        <QuickSwitch open items={allPlaces} busyPaths={busyPaths} waitingPaths={waitingPaths}
+          onPick={(root, p) => { setSwitchOpen(false); enterPlace(root, p); }}
+          onClose={() => setSwitchOpen(false)} />
+      )}
 
       {/* after SettingsSheet: opened from Settings, the notes stack ON TOP of it */}
       {whatsNew && (
