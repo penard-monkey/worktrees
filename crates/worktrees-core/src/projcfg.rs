@@ -147,10 +147,14 @@ impl RelPath {
                 return Err(CfgError::msg(format!("`.git` is never linkable (component `{c}`): {s}")));
             }
         }
-        if s.split('/').next() == Some(".worktrees") {
+        // Case-insensitive for the same reason `.git` is: on APFS `.WORKTREES/`
+        // opens `.worktrees/`, so an exact-match rule here would let a config
+        // declare a link into the tool's own tree — and Layer B containment would
+        // pass, because that tree IS inside the repo.
+        if s.split('/').next().is_some_and(|c| c.eq_ignore_ascii_case(".worktrees")) {
             return Err(CfgError::msg(format!("`.worktrees/` is the tool's own tree: {s}")));
         }
-        if s == CONFIG_FILE || s == ".worktrees.places.json" {
+        if s.eq_ignore_ascii_case(CONFIG_FILE) || s.eq_ignore_ascii_case(".worktrees.places.json") {
             return Err(CfgError::msg(format!("a config file cannot declare itself: {s}")));
         }
         Ok(RelPath(s.to_string()))
@@ -165,6 +169,14 @@ impl RelPath {
     /// Case-folded key for the case-only-duplicate check (§4): `Foo/.env` and
     /// `foo/.env` are one file on macOS and two in Linux CI, and that divergence
     /// must be a config error rather than a race.
+    ///
+    /// ⚠ `to_lowercase` is a lowercase MAPPING, not Unicode case folding, and
+    /// APFS's fold is neither. It catches every ASCII case pair and most Unicode
+    /// ones (U+212A KELVIN → `k`), but not all: `ſ` (U+017F) and `s` are one file
+    /// on APFS and two keys here. Std has no case-folding, and a fold table is not
+    /// worth a dependency for this. The residual case is not silent — Layer B's
+    /// destination check (§4 B7) sees the second entry land on a path that already
+    /// holds a link, and reports it rather than double-writing.
     fn fold_key(&self) -> String {
         self.0.to_lowercase()
     }
@@ -369,8 +381,18 @@ fn survey(text: &str, root: &DeTable, findings: &mut Vec<Finding>) -> Result<(),
                 survey_keys(text, t, "compose", &["file", "project"], findings)?;
             }
             ("project", DeValue::Table(t)) => survey_project(text, t, findings)?,
-            // Wrong-shaped values (`file = 1`) fall through to the typed pass,
-            // which names the expected type far better than this walk could.
+            // `project` is the one known key with NO field in `RawConfig` (§12
+            // defers it), so serde would drop a wrong-shaped one wordlessly —
+            // `project = "myproj"` would parse clean and do nothing. Every other
+            // known key falls through to the typed pass, which names the expected
+            // type far better than this walk could.
+            ("project", _) => {
+                let line = line_of(text, key.span().start);
+                findings.push(Finding::warn(
+                    Code::UnknownKey,
+                    format!("{CONFIG_FILE}:{line}: `project` must be a table — ignored"),
+                ));
+            }
             _ => {}
         }
     }
@@ -387,9 +409,11 @@ fn survey_keys(
     for (key, _) in table.iter() {
         let name = key.get_ref().as_ref();
         let line = line_of(text, key.span().start);
-        // A user-only key is refused wherever it appears — not just at the top
+        // A user-only key is refused in every KNOWN scope, not just the top
         // level. Silent ignore trains people to write it, and eventually someone
-        // "fixes" the ignore (§5).
+        // "fixes" the ignore (§5). Inside an *unknown* table the survey does not
+        // descend — `[future] ai_cmd = …` is warned about as an unknown table and
+        // the whole table is dropped, so the key is inert rather than refused.
         if is_user_only(name) {
             return Err(CfgError::at(line, user_only_message(name)));
         }
@@ -864,6 +888,39 @@ mod tests {
         // `[ports] base` keys are the PROJECT's service names — never surveyed
         let (_, f) = parse("[ports]\nbase = { WEIRD_NAME = 3000 }\n").unwrap();
         assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn the_tools_own_paths_are_refused_case_insensitively() {
+        // APFS opens `.WORKTREES/` as `.worktrees/`, so an exact-match rule would
+        // let a config link into the tool's own tree — and Layer B containment
+        // would pass, since that tree is inside the repo.
+        for bad in [
+            ".WORKTREES/feat/.env",
+            ".Worktrees/x",
+            ".Worktrees.toml",
+            ".WORKTREES.TOML",
+            ".Worktrees.Places.json",
+        ] {
+            let e = RelPath::parse(bad).unwrap_err();
+            assert!(
+                e.message.contains("tool's own tree") || e.message.contains("cannot declare itself"),
+                "{bad}: {e}"
+            );
+        }
+        // a path that merely STARTS with the same letters is still fine
+        assert!(RelPath::parse(".worktrees-notes/readme.md").is_ok());
+    }
+
+    #[test]
+    fn a_wrong_shaped_project_key_warns_instead_of_vanishing() {
+        // `project` is the one known key with no field in RawConfig (§12 defers
+        // it), so serde would drop a scalar wordlessly.
+        let (c, f) = parse("project = \"myproj\"\n").unwrap();
+        assert_eq!(c, ProjectConfig::default());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Warn);
+        assert!(f[0].message.contains("`project` must be a table"), "{}", f[0].message);
     }
 
     #[test]
