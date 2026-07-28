@@ -19,6 +19,7 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees ls [--json]                 list worktrees + state (--json = machine-readable)
   worktrees rm <name> [name...]         tear one (or more) down
   worktrees relink [<name>|--all]       re-apply .worktrees.toml's files (--force to overwrite)
+  worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
   worktrees doctor [<name>]             report declared-file drift (--json --strict --config-only)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";
@@ -79,6 +80,7 @@ fn run() -> i32 {
         "close" => ops::cmd_close(&project, &mut ui, rest),
         "rm" | "remove" | "delete" => ops::cmd_rm(&project, &mut ui, rest),
         "relink" => ops::cmd_relink(&project, &mut ui, rest),
+        "provision" => ops::cmd_provision(&project, &mut ui, rest),
         "doctor" => ops::cmd_doctor(&project, &mut ui, rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));

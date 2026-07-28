@@ -60,8 +60,18 @@ pub enum Code {
     // §6 — port slots
     /// Two places claim the same `WORKTREE_SLOT`.
     SlotConflict,
-    /// No free slot in `1..=max_slots`.
+    /// No free slot in `1..=max_slots` — or, on a place, no slot AT ALL. ⚠ The
+    /// second reading is the important one and is not obvious from §7's list: a
+    /// worktree in a `[ports]` project with no `.worktree.env` is not "portless",
+    /// it is DESTRUCTIVE (§1.1), because the consumer's dev script reads the
+    /// file's absence as "not a worktree" and takes the branch that `pkill -9`s
+    /// the main checkout's stack. It is an Error for that reason alone.
     NoSlot,
+    /// A port this place's slot owns is bound by something else. ⚠ Not in §7's
+    /// slug list; the port checks need a third code because "busy" is neither a
+    /// conflict nor a missing slot. Info, never Error: the overwhelmingly likely
+    /// binder is this place's OWN running stack, which is the healthy state.
+    PortBusy,
     // §5 — config policy
     /// A key `.worktrees.toml` does not understand; ignored, same forward-compat
     /// discipline as `store.rs`'s `#[serde(flatten)] extra`.
@@ -179,6 +189,7 @@ mod tests {
             (Code::NotGitignored, "not-gitignored"),
             (Code::SlotConflict, "slot-conflict"),
             (Code::NoSlot, "no-slot"),
+            (Code::PortBusy, "port-busy"),
             (Code::CopyStale, "copy-stale"),
             (Code::UnknownKey, "unknown-key"),
             (Code::DeferredKey, "deferred-key"),

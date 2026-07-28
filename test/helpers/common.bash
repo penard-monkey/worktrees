@@ -23,6 +23,11 @@ common_setup() {
   install_fake_tmux
   install_fake_cmd fake-ai
   install_fake_cmd pnpm; install_fake_cmd npm; install_fake_cmd yarn; install_fake_cmd bun
+  # Fake docker ALWAYS, not just in the [compose] tests: `rm` in a repo with a
+  # [compose] section shells out to `docker compose ... down -v`, and a suite
+  # that reaches the developer's real daemon is a suite that can delete their
+  # volumes. Argv lands in $BATS_TEST_TMPDIR/docker.log.
+  install_fake_cmd docker
   unset TMUX                      # don't inherit the developer's real tmux
   export BATS_TEST_TIMEOUT=120    # no single test may hang the suite (CI backstop)
   export WORKTREES_AI_CMD="fake-ai"

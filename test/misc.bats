@@ -58,6 +58,17 @@ write_config() {
   [ "$(grep -cFx '.worktrees/' "$REPO/.git/info/exclude")" -eq 1 ]
 }
 
+@test "new also excludes the per-worktree port file, exactly once" {
+  # Not polish: .worktree.env is untracked, so without this wt_dirty is true
+  # forever and switch/rm refuse without --force (proposal §8).
+  run_wt new feat-a --no-tmux
+  [ "$status" -eq 0 ]
+  grep -qFx '.worktree.env' "$REPO/.git/info/exclude"
+  run_wt new feat-b --no-tmux
+  [ "$status" -eq 0 ]
+  [ "$(grep -cFx '.worktree.env' "$REPO/.git/info/exclude")" -eq 1 ]
+}
+
 @test "new also excludes the UI declared-state sidecar, exactly once" {
   run_wt new feat-a --no-tmux
   [ "$status" -eq 0 ]

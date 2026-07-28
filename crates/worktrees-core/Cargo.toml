@@ -9,6 +9,7 @@ description = "Engine for the worktrees CLI + app: git-worktree-as-place, shelli
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+libc = { workspace = true }
 # Deliberately NO git2/gix (we shell out to `git` for a 1:1 port + the stale-dir
 # trap), NO clap (that's the CLI), NO portable-pty (that's app-only).
 # `toml` IS admitted: a pure-data parser in the same trust class as serde_json

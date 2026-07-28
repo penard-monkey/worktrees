@@ -9,6 +9,7 @@ use crate::diag::{Code, Finding, Report, Severity};
 use crate::git;
 use crate::materialize;
 use crate::projcfg::{self, ProjectConfig};
+use crate::provision::{self, Outcome, ProvisionError, ENV_FILE};
 use crate::tmux;
 use crate::ui::{fmt, Ui};
 use crate::Project;
@@ -283,18 +284,27 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
 
-    // Materialize the declared files here — after the worktree exists, BEFORE
-    // install detection and therefore before `launch` starts pane 1 (§8). The
-    // ordering is not optional: pane 1 runs the install command, and `pnpm
-    // install` racing `.env` into existence is exactly the silent-failure class
-    // this fixes. A failure is a loud guard like the session one below: report,
-    // keep the worktree, propagate the rc — never roll back.
+    // Materialize the declared files and allocate the port slot here — after the
+    // worktree exists, BEFORE install detection and therefore before `launch`
+    // starts pane 1 (§8). The ordering is not optional: pane 1 runs the install
+    // command, and `pnpm install` racing `.env` into existence is exactly the
+    // silent-failure class this fixes. The same argument covers ports — the tmux
+    // panes must be able to see `.worktree.env`, since the repo's dev script
+    // treats its absence as "not a worktree" (§1.1). A failure is a loud guard
+    // like the session one below: report, keep the worktree, propagate the rc —
+    // never roll back.
     let mat_rc = match load_project_config(p, ui) {
         Err(code) => code,
         Ok(None) => 0,
         Ok(Some((cfg, findings))) => {
             report_findings(ui, &findings);
-            materialize_place(p, ui, &cfg, &wt, false)
+            let files = materialize_place(p, ui, &cfg, &wt, false);
+            let ports = provision_place(p, ui, &cfg, &wt, &slug, false);
+            if files != 0 {
+                files
+            } else {
+                ports
+            }
         }
     };
 
@@ -649,6 +659,12 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
         }
     }
 
+    // §8: the compose stack comes down HERE — after the confirmation, before the
+    // session dies. Anything after the `worktree remove` below is too late: the
+    // directory (and the compose file, and `.worktree.env` naming the project)
+    // is gone, and the containers are orphaned under a name nothing records.
+    compose_down(p, ui, &slug, &path);
+
     if tmux::session_exists(&session) {
         tmux::kill_session(&session);
         ui.info(&format!("killed tmux {session}"));
@@ -836,6 +852,208 @@ pub fn cmd_relink(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     rc
 }
 
+// ── provision — ports + .worktree.env (proposal §6) ──────────────────────────
+// The mirror of relink: one place at a time, idempotent, and the ONLY thing that
+// writes `.worktree.env`. The slot is derived from the sibling scan, so there is
+// no release step and nothing is ever recorded in the places store.
+
+/// Allocate (or adopt) one place's slot and write its `.worktree.env`.
+/// `0` clean · `1` a guard only the user can resolve (conflict, exhaustion, a
+/// lock someone else holds). Silent when the project declares no `[ports]` —
+/// that is §2.4's byte-identical-behavior guarantee.
+fn provision_place(p: &Project, ui: &mut dyn Ui, cfg: &ProjectConfig, wt: &str, slug: &str, reallocate: bool) -> i32 {
+    if cfg.ports.is_none() {
+        return 0;
+    }
+    let req = provision::Request {
+        main_root: Path::new(&p.main_root),
+        wt_root: Path::new(p.wt_root_dir()),
+        wt: Path::new(wt),
+        prefix: &p.prefix,
+        slug,
+        reallocate,
+    };
+    let n = cfg.ports.as_ref().map(|x| x.base.len()).unwrap_or(0);
+    match provision::provision(&req, cfg) {
+        Ok(Outcome::NoPorts) => 0,
+        Ok(Outcome::Unchanged { slot }) => {
+            ui.info(&format!("slot {slot} — {ENV_FILE} already current"));
+            0
+        }
+        Ok(Outcome::Updated { slot }) => {
+            ui.info(&format!("slot {slot} kept — rewrote {ENV_FILE} ({n} ports)"));
+            warn_if_tracked(ui, wt);
+            0
+        }
+        Ok(Outcome::Allocated { slot }) => {
+            ui.info(&format!("slot {slot} — wrote {ENV_FILE} ({n} ports)"));
+            warn_if_tracked(ui, wt);
+            0
+        }
+        // §6's conflict policy: REFUSE, never silently re-allocate. Rewriting a
+        // slot under a running stack orphans containers on the old project name
+        // and moves ports the developer has bookmarked. Name both paths, print
+        // both remedies.
+        Err(ProvisionError::Conflict { slot, this, other }) => {
+            ui.error(&format!("slot {slot} is claimed by BOTH:"));
+            ui.error(&format!("    {}", this.display()));
+            ui.error(&format!("    {}", other.display()));
+            ui.error(&format!(
+                "Refusing to move a slot under a running stack. Either edit {}/{ENV_FILE} to a free slot by hand,",
+                this.display()
+            ));
+            ui.error(&format!(
+                "or stop that stack and run: worktrees provision {slug} --reallocate"
+            ));
+            1
+        }
+        Err(e) => {
+            ui.error(&e.to_string());
+            1
+        }
+    }
+}
+
+/// §6 step 6: the file is worthless if git can see it — `wt_dirty` would be true
+/// forever and `switch`/`rm` would refuse without `--force`. `ensure_excluded`
+/// has already run; this catches the repo that un-ignores it on purpose.
+fn warn_if_tracked(ui: &mut dyn Ui, wt: &str) {
+    if !git::git_ok(wt, &["check-ignore", "-q", "--", ENV_FILE]) {
+        ui.warn(&format!(
+            "{ENV_FILE} is not gitignored in this worktree — `git status` will show it, and \
+             switch/rm will refuse without --force"
+        ));
+    }
+}
+
+/// `worktrees provision [<wt>|--all] [--reallocate]`. Same argument shape and
+/// same resolve-then-load ordering as `relink`, so a bad worktree name is a
+/// usage guard whether or not the repo has a config.
+pub fn cmd_provision(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let (mut all, mut reallocate) = (false, false);
+    let mut names: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--all" => all = true,
+            "--reallocate" => reallocate = true,
+            s if s.starts_with('-') => {
+                ui.error(&format!("Unknown flag: {s}"));
+                return 1;
+            }
+            s => names.push(s.to_string()),
+        }
+    }
+    if all && !names.is_empty() {
+        ui.error("provision takes either <worktree> or --all, not both.");
+        return 1;
+    }
+    if !all && names.is_empty() {
+        ui.error("provision needs a worktree (slug or branch), or --all. See: worktrees ls");
+        return 1;
+    }
+
+    let targets: Vec<String> = if all {
+        place_dirs(p)
+    } else {
+        let mut out = Vec::with_capacity(names.len());
+        for n in &names {
+            match resolve_place(p, ui, n) {
+                Ok(d) => out.push(d),
+                Err(code) => return code,
+            }
+        }
+        out
+    };
+
+    let Some((cfg, findings)) = (match load_project_config(p, ui) {
+        Ok(c) => c,
+        Err(code) => return code,
+    }) else {
+        ui.info("No .worktrees.toml in this repo — nothing to provision.");
+        return 0;
+    };
+    report_findings(ui, &findings);
+    if cfg.ports.is_none() {
+        ui.info(".worktrees.toml declares no [ports] — nothing to provision.");
+        if cfg.compose.is_some() {
+            // COMPOSE_PROJECT_NAME rides along with a slot; on its own there is
+            // no per-worktree file to write, and `rm` falls back to expanding the
+            // template for teardown.
+            ui.warn("[compose] without [ports]: the project name is derived at teardown, not written to a file.");
+        }
+        return 0;
+    }
+    if targets.is_empty() {
+        ui.info("No worktrees (.worktrees/ is empty).");
+        return 0;
+    }
+    // The file must be invisible to git before it is written, not after.
+    p.ensure_excluded();
+
+    let mut rc = 0;
+    for dir in &targets {
+        let slug = basename(dir);
+        ui.header(&format!("Provisioning {slug}"));
+        let one = provision_place(p, ui, &cfg, dir, &slug, reallocate);
+        if one != 0 {
+            rc = one;
+        }
+    }
+    rc
+}
+
+// ── [compose] teardown (proposal §5, §7) ─────────────────────────────────────
+
+/// `docker compose … down -v --remove-orphans` for a place being removed.
+///
+/// The one behavior in the audited 761-line consumer script that is not
+/// expressible as file/ports config, so it is first-class DATA here and the tool
+/// assembles the argv (§5). Never a command string from the repo.
+///
+/// Everything about this is best-effort: a missing docker, a broken config, or a
+/// failing stack is a WARNING. The removal must still proceed — refusing to
+/// delete a worktree because docker is not running would be a worse bug than the
+/// containers it leaves behind.
+fn compose_down(p: &Project, ui: &mut dyn Ui, slug: &str, wt: &str) {
+    let cfg = match projcfg::load(Path::new(&p.main_root)) {
+        Ok((Some(cfg), _)) => cfg,
+        Ok((None, _)) => return,
+        Err(e) => {
+            ui.warn(&format!("{e} — skipping compose teardown"));
+            return;
+        }
+    };
+    let Some(compose) = cfg.compose.as_ref() else { return };
+    let wt_path = Path::new(wt);
+    let file = wt_path.join(compose.file.as_str());
+    // Layer B, once more: only a real file that resolves INSIDE this worktree is
+    // handed to docker. A symlinked ancestor could otherwise point the compose
+    // file (and its bind mounts) anywhere.
+    let inside = match (std::fs::canonicalize(&file), std::fs::canonicalize(wt_path)) {
+        (Ok(f), Ok(root)) => f.starts_with(&root) && f.is_file(),
+        _ => false,
+    };
+    if !inside {
+        ui.warn(&format!(
+            "[compose] file `{}` is missing here — skipping teardown (containers may be left running)",
+            compose.file.as_str()
+        ));
+        return;
+    }
+    // The place's OWN file first: the running containers are named after what the
+    // stack was STARTED with, and the template may have changed since.
+    let project = provision::compose_project_for(wt_path, compose, &p.prefix, slug);
+    if project.is_empty() {
+        ui.warn("[compose] project name is empty — skipping teardown");
+        return;
+    }
+    ui.info(&format!("docker compose -p {project} down -v --remove-orphans"));
+    match provision::compose_down(&file, &project) {
+        Ok(()) => ui.info(&format!("compose stack '{project}' is down")),
+        Err(e) => ui.warn(&format!("compose teardown skipped: {e}")),
+    }
+}
+
 // ── doctor ───────────────────────────────────────────────────────────────────
 /// Report drift. Ships WITH relink, not after: creation is deliberately
 /// non-transactional, "materialized" is not a state anything records, and a
@@ -908,6 +1126,7 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             let plan = materialize::plan(&cfg, main, wt, &facts, false);
             findings.extend(plan.report().findings);
         }
+        findings.extend(port_findings(p, &cfg, &targets));
     }
 
     if strict {
@@ -939,6 +1158,74 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
     report.exit_code()
+}
+
+/// §6's port findings for the places `doctor` was asked about.
+///
+/// Read-only and deliberately LOCK-FREE: taking the allocation lock here would
+/// let a `doctor` (or, later, the app) block a `provision`, and the cost of a
+/// torn read is a re-run rather than a wrong write.
+fn port_findings(p: &Project, cfg: &ProjectConfig, targets: &[String]) -> Vec<Finding> {
+    let Some(ports) = cfg.ports.as_ref() else { return Vec::new() };
+    let scan = provision::scan(Path::new(&p.main_root), Path::new(p.wt_root_dir()));
+    let mut out = Vec::new();
+    for dir in targets {
+        let slug = basename(dir);
+        let wt = Path::new(dir);
+        let env = provision::read_env(wt);
+        let Some(slot) = env.as_ref().and_then(|(_, e)| e.slot) else {
+            // §1.1 — an Error, and the loudest one in this module. A place with
+            // no slot is not "portless": the consumer's dev script reads the
+            // file's absence as "not a worktree" and takes the branch that
+            // `pkill -9`s the main checkout's whole stack.
+            let what = match env {
+                Some(_) => format!("`{ENV_FILE}` here declares no WORKTREE_SLOT"),
+                None => format!("no `{ENV_FILE}` here"),
+            };
+            out.push(
+                Finding::error(
+                    Code::NoSlot,
+                    format!(
+                        "{what} — this repo declares [ports], and a half-provisioned worktree is \
+                         worse than none: scripts that key off that file will treat this as the \
+                         MAIN checkout. Fix: worktrees provision {slug}"
+                    ),
+                )
+                .at_place(slug.clone())
+                .at_path(ENV_FILE),
+            );
+            continue;
+        };
+        if let Some(other) = scan.other_claimant(slot, wt) {
+            out.push(
+                Finding::error(
+                    Code::SlotConflict,
+                    format!(
+                        "slot {slot} is also claimed by {} — stop one of the two stacks and run: \
+                         worktrees provision {slug} --reallocate",
+                        other.display()
+                    ),
+                )
+                .at_place(slug.clone())
+                .at_path(ENV_FILE),
+            );
+        }
+        for (name, port) in provision::slot_ports(ports, slot).unwrap_or_default() {
+            if !provision::port_free(port) {
+                // Info, never Error: the overwhelmingly likely binder is this
+                // place's own running stack, which is the healthy state (the same
+                // reasoning that keeps copy drift at Info).
+                out.push(
+                    Finding::info(
+                        Code::PortBusy,
+                        format!("{name}={port} is already bound — expected while this place's stack is up"),
+                    )
+                    .at_place(slug.clone()),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// `doctor --json` follows the `ls --json` template: one compact line with its

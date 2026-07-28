@@ -14,6 +14,7 @@ pub mod model;
 pub mod ops;
 pub mod projcfg;
 pub mod project;
+pub mod provision;
 pub mod render;
 pub mod store;
 pub mod sysclock;

@@ -381,13 +381,21 @@ impl Project {
         git::git_out(dir, &["status", "--porcelain"]).unwrap_or_default()
     }
 
-    /// Exclude `.worktrees/` + the app sidecar in THIS repo (local, untracked).
+    /// Exclude `.worktrees/`, the app sidecar, and the per-worktree port file in
+    /// THIS repo (all local, all untracked).
+    ///
+    /// ⚠ `.worktree.env` is not optional polish (§8). It is untracked, so
+    /// `git status --porcelain` reports it `??`, so `wt_dirty` is true forever,
+    /// so `switch` (ops.rs:96-102) AND `rm` (ops.rs:642-647) refuse without
+    /// `--force` — and the GUI never passes `--force` to switch, which would
+    /// leave the app stuck with no remedy. `info/exclude` lives in the git COMMON
+    /// dir, so one line here covers every worktree.
     pub fn ensure_excluded(&self) {
         let excl = format!("{}/info/exclude", self.git_common);
         if !Path::new(&excl).exists() {
             let _ = std::fs::File::create(&excl);
         }
-        for p in [".worktrees/", ".worktrees.places.json"] {
+        for p in [".worktrees/", ".worktrees.places.json", ".worktree.env"] {
             if git::git_ok(&self.main_root, &["check-ignore", "-q", p]) {
                 continue;
             }
