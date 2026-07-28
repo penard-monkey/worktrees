@@ -177,7 +177,12 @@ impl RelPath {
     /// worth a dependency for this. The residual case is not silent — Layer B's
     /// destination check (§4 B7) sees the second entry land on a path that already
     /// holds a link, and reports it rather than double-writing.
-    fn fold_key(&self) -> String {
+    ///
+    /// `pub(crate)` so `init.rs` folds with THIS function rather than its own
+    /// `to_lowercase`: `detect` and `check_file_list` must agree on what a
+    /// case-only duplicate is, or `init` emits a config its own parser refuses
+    /// and the re-parse guard fires.
+    pub(crate) fn fold_key(&self) -> String {
         self.0.to_lowercase()
     }
 }
@@ -224,11 +229,22 @@ pub struct Compose {
     pub project: String,
 }
 
+/// `[project]` — settings about the project ITSELF rather than about the files
+/// it declares. One key so far.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectSection {
+    /// `[project] prefix` (§5). Stored RAW: `sanitize_prefix` is applied by the
+    /// resolver, not here, so this struct keeps saying what the file said and
+    /// there is exactly one place that decides what a prefix may contain.
+    pub prefix: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub files: Vec<FileEntry>,
     pub ports: Option<Ports>,
     pub compose: Option<Compose>,
+    pub project: ProjectSection,
 }
 
 // ── the wire shapes (spans attached) ─────────────────────────────────────────
@@ -276,8 +292,10 @@ struct RawConfig {
     ports: Option<Spanned<RawPorts>>,
     #[serde(default)]
     compose: Option<RawCompose>,
-    // `project` is handled by the survey pass — §12 defers `[project] prefix`
-    // out of v1, so it is warned about rather than stored.
+    // `project` is read by the survey pass, not here. It is the one key whose
+    // *shape* is forgiving — a scalar `project = "myproj"` warns and is ignored
+    // rather than failing the whole file (see `survey`) — and a serde field
+    // typed as a table would turn that warning into a fatal.
 }
 
 // ── parse ────────────────────────────────────────────────────────────────────
@@ -292,9 +310,11 @@ struct RawConfig {
 pub fn parse(text: &str) -> Result<(ProjectConfig, Vec<Finding>), CfgError> {
     let mut findings = Vec::new();
 
-    // Pass 1 — precedence guard + forward-compat warnings.
+    // Pass 1 — precedence guard + forward-compat warnings, and the one key read
+    // straight off the spanned document (`[project] prefix`, see `survey`).
     let doc = DeTable::parse(text).map_err(|e| toml_err(text, &e))?;
-    survey(text, doc.get_ref(), &mut findings)?;
+    let mut project = ProjectSection::default();
+    survey(text, doc.get_ref(), &mut project, &mut findings)?;
 
     // Pass 2 — the typed parse. Every `RelPath` here has already been through
     // Layer A; there is no path in this struct that has not.
@@ -323,7 +343,7 @@ pub fn parse(text: &str) -> Result<(ProjectConfig, Vec<Finding>), CfgError> {
         None => None,
     };
 
-    Ok((ProjectConfig { files, ports, compose }, findings))
+    Ok((ProjectConfig { files, ports, compose, project }, findings))
 }
 
 /// Read `<main_root>/.worktrees.toml`. `Ok((None, vec![]))` when it is absent —
@@ -339,6 +359,24 @@ pub fn load(main_root: &Path) -> Result<(Option<ProjectConfig>, Vec<Finding>), C
     };
     let (cfg, findings) = parse(&text)?;
     Ok((Some(cfg), findings))
+}
+
+/// `[project] prefix`, for the ONE consumer that cannot use `load`:
+/// `Project::discover` resolves the prefix eagerly (it is a field on `Project`),
+/// and §8 keeps the config off that hot path. This is the whole exception, and
+/// it is affordable — the absent case costs one failed `open(2)` and nothing
+/// else, and the present case is a small file parsed in microseconds against
+/// discovery's four subprocesses.
+///
+/// A BROKEN config resolves to `None`, not an error: `discover` has no error
+/// channel that isn't fatal, and a repo whose config does not parse must still
+/// be listable. The ops that would act on that config (`new`, `relink`,
+/// `provision`, `doctor`) all call `load` and refuse loudly.
+pub fn project_prefix(main_root: &Path) -> Option<String> {
+    match load(main_root) {
+        Ok((Some(cfg), _)) => cfg.project.prefix,
+        _ => None,
+    }
 }
 
 // ── validation helpers (pure, individually tested) ───────────────────────────
@@ -361,7 +399,12 @@ fn user_only_message(key: &str) -> String {
 /// so a key is exactly one of: expected, user-only (hard error), or unknown
 /// (warn + ignore). Serde alone cannot do this — `deny_unknown_fields` would
 /// turn a forward-compat key into a fatal, and the default silently drops it.
-fn survey(text: &str, root: &DeTable, findings: &mut Vec<Finding>) -> Result<(), CfgError> {
+fn survey(
+    text: &str,
+    root: &DeTable,
+    project: &mut ProjectSection,
+    findings: &mut Vec<Finding>,
+) -> Result<(), CfgError> {
     survey_keys(text, root, "", &["file", "ports", "compose", "project"], findings)?;
     for (key, val) in root.iter() {
         match (key.get_ref().as_ref(), val.get_ref()) {
@@ -380,12 +423,12 @@ fn survey(text: &str, root: &DeTable, findings: &mut Vec<Finding>) -> Result<(),
             ("compose", DeValue::Table(t)) => {
                 survey_keys(text, t, "compose", &["file", "project"], findings)?;
             }
-            ("project", DeValue::Table(t)) => survey_project(text, t, findings)?,
-            // `project` is the one known key with NO field in `RawConfig` (§12
-            // defers it), so serde would drop a wrong-shaped one wordlessly —
-            // `project = "myproj"` would parse clean and do nothing. Every other
-            // known key falls through to the typed pass, which names the expected
-            // type far better than this walk could.
+            ("project", DeValue::Table(t)) => survey_project(text, t, project, findings)?,
+            // `project` is the one known key with NO field in `RawConfig`, so
+            // serde would drop a wrong-shaped one wordlessly — `project =
+            // "myproj"` would parse clean and do nothing. Every other known key
+            // falls through to the typed pass, which names the expected type far
+            // better than this walk could.
             ("project", _) => {
                 let line = line_of(text, key.span().start);
                 findings.push(Finding::warn(
@@ -435,29 +478,35 @@ fn qualify(scope: &str, name: &str) -> String {
     }
 }
 
-/// `[project]` exists in the schema but §12 defers its only key out of v1, so it
-/// parses and warns rather than silently doing nothing.
-fn survey_project(text: &str, table: &DeTable, findings: &mut Vec<Finding>) -> Result<(), CfgError> {
-    for (key, _) in table.iter() {
+/// `[project]`, read off the spanned document rather than through serde — see
+/// `RawConfig`. `prefix` is the only key; it is stored RAW and sanitized by the
+/// resolver (§5).
+fn survey_project(
+    text: &str,
+    table: &DeTable,
+    project: &mut ProjectSection,
+    findings: &mut Vec<Finding>,
+) -> Result<(), CfgError> {
+    for (key, val) in table.iter() {
         let name = key.get_ref().as_ref();
         let line = line_of(text, key.span().start);
         if is_user_only(name) {
             return Err(CfgError::at(line, user_only_message(name)));
         }
-        findings.push(if name == "prefix" {
-            Finding::warn(
-                Code::DeferredKey,
-                format!(
-                    "{CONFIG_FILE}:{line}: `[project] prefix` is parsed but not yet honored \
-                     (deferred to v3 — changing a prefix renames every live tmux session)"
-                ),
-            )
-        } else {
-            Finding::warn(
+        if name != "prefix" {
+            findings.push(Finding::warn(
                 Code::UnknownKey,
                 format!("{CONFIG_FILE}:{line}: unknown key `project.{name}` — ignored"),
-            )
-        });
+            ));
+            continue;
+        }
+        // A hard error, not a warning: the prefix is the tmux session identity,
+        // and a `prefix = 7` that quietly resolved to the directory basename
+        // would rename every session in the repo for a reason nothing printed.
+        let Some(s) = val.get_ref().as_str() else {
+            return Err(CfgError::at(line, "`[project] prefix` must be a string"));
+        };
+        project.prefix = Some(s.to_string());
     }
     Ok(())
 }
@@ -914,8 +963,8 @@ mod tests {
 
     #[test]
     fn a_wrong_shaped_project_key_warns_instead_of_vanishing() {
-        // `project` is the one known key with no field in RawConfig (§12 defers
-        // it), so serde would drop a scalar wordlessly.
+        // `project` is the one known key with no field in RawConfig, so serde
+        // would drop a scalar wordlessly.
         let (c, f) = parse("project = \"myproj\"\n").unwrap();
         assert_eq!(c, ProjectConfig::default());
         assert_eq!(f.len(), 1);
@@ -924,12 +973,28 @@ mod tests {
     }
 
     #[test]
-    fn project_prefix_parses_but_warns_that_it_is_not_honored() {
+    fn project_prefix_parses_clean_and_is_stored_raw() {
         let (c, f) = parse("[project]\nprefix = \"teamx\"\n").unwrap();
         assert!(c.files.is_empty() && c.ports.is_none() && c.compose.is_none());
+        assert_eq!(c.project.prefix.as_deref(), Some("teamx"));
+        assert!(f.is_empty(), "no finding: the key is honored now — {f:?}");
+
+        // Stored RAW: `sanitize_prefix` belongs to the resolver, so a hostile
+        // value is carried verbatim here and defanged at exactly one place.
+        let (c, _) = parse("[project]\nprefix = \"../../etc; rm -rf /\"\n").unwrap();
+        assert_eq!(c.project.prefix.as_deref(), Some("../../etc; rm -rf /"));
+
+        // Not a string ⇒ hard error. A `prefix = 7` that silently fell back to
+        // the directory basename would rename every session for no stated reason.
+        let e = parse("[project]\nprefix = 7\n").unwrap_err();
+        assert_eq!(e.to_string(), ".worktrees.toml:2: `[project] prefix` must be a string");
+
+        // an unrelated key in the section still warns and is still ignored
+        let (c, f) = parse("[project]\nprefix = \"teamx\"\nfuture = 1\n").unwrap();
+        assert_eq!(c.project.prefix.as_deref(), Some("teamx"));
         assert_eq!(f.len(), 1);
-        assert_eq!(f[0].code, Code::DeferredKey);
-        assert!(f[0].message.contains("not yet honored"), "{}", f[0].message);
+        assert_eq!(f[0].code, Code::UnknownKey);
+        assert!(f[0].message.contains("`project.future`"), "{}", f[0].message);
     }
 
     // ── round-trip + absence ─────────────────────────────────────────────────
@@ -955,6 +1020,9 @@ base = { BACKOFFICE = 3000, API = 3001, WEBSITE = 3002, WO_MOCK = 3010, META_MOC
 [compose]
 file = "docker-compose.worktree.yml"
 project = "{prefix}-wt-{slug}"
+
+[project]
+prefix = "cdv"
 "#;
         let (c, findings) = parse(text).unwrap();
         assert!(findings.is_empty(), "{findings:?}");
@@ -989,6 +1057,7 @@ project = "{prefix}-wt-{slug}"
                     file: RelPath::parse("docker-compose.worktree.yml").unwrap(),
                     project: "{prefix}-wt-{slug}".into(),
                 }),
+                project: ProjectSection { prefix: Some("cdv".into()) },
             }
         );
     }

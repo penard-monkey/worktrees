@@ -130,6 +130,39 @@ pub fn resolve_ai_cmd_from(
     }
 }
 
+/// The prefix chain (§5), as a pure function:
+///
+/// ```text
+/// $WORKTREES_PREFIX > .worktree-prefix > [project] prefix > user config > basename(main_root)
+/// ```
+///
+/// The legacy `.worktree-prefix` file comes FIRST among the two project-scoped
+/// sources on purpose: every repo that already ships one keeps the name it has,
+/// so adding `[project] prefix` alongside it is a no-op rather than a rename.
+/// `doctor` reports the disagreement instead of the tool silently picking.
+///
+/// ⚠ Everything leaves through `sanitize_prefix`, and that is what makes a
+/// PROJECT-settable prefix safe at all: a cloned repo's string is reduced to
+/// `[a-z0-9_-]`, so it can carry no shell metacharacter, no path separator, no
+/// leading `-`, and no whitespace into a tmux session name or a `docker -p`
+/// argument. The allow-list in §5 rests on this one call — do not add a path
+/// that skips it.
+pub fn resolve_prefix_from(
+    env: Option<&str>,
+    prefix_file: Option<&str>,
+    project: Option<&str>,
+    cfg: Option<&str>,
+    fallback: &str,
+) -> String {
+    let raw = env
+        .filter(|s| !s.is_empty())
+        .or(prefix_file.filter(|s| !s.is_empty()))
+        .or(project.filter(|s| !s.is_empty()))
+        .or(cfg.filter(|s| !s.is_empty()))
+        .unwrap_or(fallback);
+    sanitize_prefix(raw)
+}
+
 /// Resume arg (`-r` appends it): `$WORKTREES_AI_RESUME_ARG` > `ai_resume_arg` > `-r`.
 pub fn resolve_ai_resume_arg_from(env: Option<&str>, cfg: Option<&str>) -> String {
     env.filter(|s| !s.is_empty())
@@ -190,6 +223,49 @@ mod tests {
         assert_eq!(resolve_ai_cmd_from(None, None, None, Some("cfg")), "cfg");
         assert_eq!(resolve_ai_cmd_from(None, None, None, None), "claude");
         assert_eq!(resolve_ai_cmd_from(Some("none"), None, None, None), "");
+    }
+
+    #[test]
+    fn prefix_precedence_puts_the_legacy_file_ahead_of_the_project_config() {
+        let r = |e, f, p, c| resolve_prefix_from(e, f, p, c, "reponame");
+        // the full chain, one rung at a time
+        assert_eq!(r(Some("envp"), Some("filep"), Some("projp"), Some("cfgp")), "envp");
+        assert_eq!(r(None, Some("filep"), Some("projp"), Some("cfgp")), "filep");
+        assert_eq!(r(None, None, Some("projp"), Some("cfgp")), "projp");
+        assert_eq!(r(None, None, None, Some("cfgp")), "cfgp");
+        assert_eq!(r(None, None, None, None), "reponame");
+        // §5's migration rule, stated as an assertion: adding [project] prefix to
+        // a repo that already ships .worktree-prefix renames NOTHING.
+        assert_eq!(r(None, Some("legacy"), Some("brandnew"), None), "legacy");
+        // an empty value is not a value, in every tier
+        assert_eq!(r(Some(""), Some(""), Some(""), Some("")), "reponame");
+        assert_eq!(r(Some(""), None, Some("projp"), None), "projp");
+    }
+
+    #[test]
+    fn a_hostile_project_prefix_cannot_survive_sanitization() {
+        // THE reason §5 lets a project set this at all: whatever a cloned repo
+        // writes is reduced to [a-z0-9_-] before it can reach a tmux session
+        // name or a `docker -p` argument.
+        for hostile in [
+            "; rm -rf /",
+            "$(whoami)",
+            "../../etc",
+            "--force",
+            "a b\tc",
+            "Team.X!",
+            "sess'name",
+            "\u{1b}[31m",
+        ] {
+            let got = resolve_prefix_from(None, None, Some(hostile), None, "reponame");
+            assert!(
+                got.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'),
+                "{hostile} → {got}"
+            );
+        }
+        assert_eq!(resolve_prefix_from(None, None, Some("Team.X!"), None, "r"), "team-x-");
+        // and the fallback is sanitized too — a repo directory can be named anything
+        assert_eq!(resolve_prefix_from(None, None, None, None, "My Repo"), "my-repo");
     }
 
     #[test]

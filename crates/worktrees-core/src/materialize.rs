@@ -897,6 +897,7 @@ mod tests {
                 .collect(),
             ports: None,
             compose: None,
+            project: Default::default(),
         }
     }
 

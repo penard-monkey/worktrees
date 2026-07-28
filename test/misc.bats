@@ -122,6 +122,164 @@ write_config() {
   tmux_session_exists confpfx-feat-x
 }
 
+# ── [project] prefix (proposal §5) ───────────────────────────────────────────
+# Full order: $WORKTREES_PREFIX > .worktree-prefix > [project] prefix >
+# user config > basename(main_root). The legacy file is ahead of the config key
+# so that adding one to a repo that has the other renames nothing.
+
+@test "[project] prefix names new tmux sessions" {
+  write_project_config '[project]' 'prefix = "teamx"'
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists teamx-feat-x
+}
+
+@test ".worktree-prefix still wins over [project] prefix" {
+  echo "legacy" > "$REPO/.worktree-prefix"
+  write_project_config '[project]' 'prefix = "teamx"'
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists legacy-feat-x
+  [ ! -f "$TMUX_STATE/teamx-feat-x" ]
+}
+
+@test "WORKTREES_PREFIX still wins over both project-scoped sources" {
+  echo "legacy" > "$REPO/.worktree-prefix"
+  write_project_config '[project]' 'prefix = "teamx"'
+  export WORKTREES_PREFIX=zzz
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists zzz-feat-x
+  [ ! -f "$TMUX_STATE/legacy-feat-x" ]
+  [ ! -f "$TMUX_STATE/teamx-feat-x" ]
+}
+
+@test "[project] prefix beats the user config, and config.toml is read for it" {
+  export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg"
+  mkdir -p "$XDG_CONFIG_HOME/worktrees"
+  printf 'prefix = "tomlpfx"\n' > "$XDG_CONFIG_HOME/worktrees/config.toml"
+  # config.toml alone: it used to be read through the kv-only path, so `prefix`
+  # there silently did nothing.
+  run_wt new feat-a --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists tomlpfx-feat-a
+
+  write_project_config '[project]' 'prefix = "teamx"'
+  run_wt new feat-b --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists teamx-feat-b
+}
+
+@test "a hostile [project] prefix is sanitized before it names anything" {
+  # The config arrives with a git clone (§4). sanitize_prefix is the whole
+  # reason a project may set this key at all.
+  write_project_config '[project]' 'prefix = "Ev;il $x/../rm -rf"'
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  # Assert the PROPERTY, not a hand-computed name: nothing a cloned repo writes
+  # can carry a shell metacharacter, a path separator or whitespace into the
+  # session name (or, later, into `docker -p`).
+  local sess; sess="$(ls -1 "$TMUX_STATE")"
+  [[ "$sess" =~ ^[a-z0-9_-]+$ ]]
+  [[ "$sess" == *"-feat-x" ]]
+}
+
+# ── a prefix change must not orphan live sessions (§5's ⚠) ───────────────────
+# The hazard: merely ADDING a config with a prefix to a repo that has running
+# sessions renames every one of them at once. The sessions are found by pane
+# cwd, so close/rm/open/ls keep working on the old-named session; new sessions
+# get the new name.
+
+@test "prefix change: close still closes a session running under the OLD name" {
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-x
+
+  write_project_config '[project]' 'prefix = "teamx"'
+
+  run_wt close feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"closed adopted tmux repo-feat-x"* ]]
+  [[ "$output" != *"nothing to close"* ]]
+  ! tmux_session_exists repo-feat-x
+  [ -d "$REPO/.worktrees/feat-x" ]
+}
+
+@test "prefix change: rm still kills a session running under the OLD name" {
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+
+  write_project_config '[project]' 'prefix = "teamx"'
+
+  run_wt rm -y feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"killed tmux repo-feat-x"* ]]
+  grep -q "kill-session -t =repo-feat-x" "$TMUX_LOG"
+  ! tmux_session_exists repo-feat-x
+  [ ! -e "$REPO/.worktrees/feat-x" ]
+}
+
+@test "prefix change: ls still shows the old-named session as live" {
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+
+  write_project_config '[project]' 'prefix = "teamx"'
+
+  run_wt ls
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"●"* ]]
+  run_wt ls --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"name":"repo-feat-x","up":true'* ]]
+}
+
+@test "prefix change: open re-attaches the old session instead of starting a second one" {
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+
+  write_project_config '[project]' 'prefix = "teamx"'
+
+  run_wt open feat-x --no-attach
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tmux session 'repo-feat-x' already in this worktree"* ]]
+  [ ! -f "$TMUX_STATE/teamx-feat-x" ]
+}
+
+@test "prefix change: a NEW worktree gets the new name, and doctor reports the drift" {
+  run_wt new feat-old --no-install --no-attach
+  [ "$status" -eq 0 ]
+
+  write_project_config '[project]' 'prefix = "teamx"'
+
+  run_wt new feat-new --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists teamx-feat-new
+
+  run_wt doctor
+  # a Warn, so still exit 0 — nothing is broken, it is just not obvious
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"repo-feat-old"* ]]
+  [[ "$output" == *"teamx-feat-old"* ]]
+  [[ "$output" != *"feat-new"* ]]
+}
+
+@test "doctor: warns when .worktree-prefix and [project] prefix disagree, naming the winner" {
+  echo "legacy" > "$REPO/.worktree-prefix"
+  write_project_config '[project]' 'prefix = "teamx"'
+
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'says `legacy`'* ]]
+  [[ "$output" == *'[project] prefix says `teamx`'* ]]
+  [[ "$output" == *'legacy-<slug>'* ]]
+
+  # sources that agree say nothing at all
+  echo "teamx" > "$REPO/.worktree-prefix"
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"[project] prefix says"* ]]
+}
+
 # ── AI command precedence chain ──────────────────────────────────────────────
 
 @test "config ai_cmd is used when env vars are unset" {

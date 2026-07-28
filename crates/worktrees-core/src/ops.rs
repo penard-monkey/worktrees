@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::config::sanitize_prefix;
 use crate::diag::{Code, Finding, Report, Severity};
 use crate::git;
 use crate::init;
@@ -27,6 +28,38 @@ fn strip_origin(s: &str) -> &str {
 /// Indent every line by 4 spaces (bash `sed 's/^/    /'`).
 fn indent(s: &str) -> String {
     s.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+}
+
+// ── session adoption — the prefix is not a stable identity ───────────────────
+//
+// `session_name` is `<prefix>-<slug>`, and since §5's `[project] prefix` a repo
+// can CHANGE the prefix by committing a config. Nothing about a running tmux
+// session changes when it does: `close`, `rm` and `ls` would look up a name that
+// no live session answers to, report "nothing to close" for a session that is
+// very much alive, and leave it orphaned when the worktree is deleted.
+//
+// The fix records nothing. A session is found by PANE CWD — `PaneList::session_in`
+// (tmux.rs:106) already does exactly that for `open`/`ls` — because the cwd of a
+// running process is a fact no config edit can invalidate, while any name the
+// tool wrote down would be one more thing to keep in sync with the truth (and
+// would go missing exactly when `.worktrees.places.json` is lost, which that
+// store's contract says is safe). New sessions get the new name; a session
+// started under the old one is adopted until it is closed, and `doctor` reports
+// the mismatch so the drift is visible rather than mysterious.
+
+/// The tmux session actually LIVING in `wt`, whatever it is named: the canonical
+/// name when it exists, else any session with a pane cwd'd there.
+///
+/// `slug == "(main)"` must exclude `.worktrees/` — worktree dirs nest under the
+/// main root, so without it main would adopt (and `close`/`rm` would kill) a
+/// worktree's session. Same exclusion `launch` and `place_json` apply.
+fn live_session(p: &Project, slug: &str, wt: &str) -> Option<String> {
+    let canonical = p.session_name(slug);
+    if tmux::session_exists(&canonical) {
+        return Some(canonical);
+    }
+    let exclude = if slug == "(main)" { Some(p.wt_root_dir()) } else { None };
+    tmux::worktree_session_excluding(wt, &crate::project::adopt_ai_word(), exclude)
 }
 
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
@@ -571,31 +604,29 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str) -> Result<(), i32> {
         ui.error(&format!("No worktree '{s}' under .worktrees/. See: worktrees ls"));
         return Err(1);
     };
-    let session = p.session_name(&slug);
-    if tmux::session_exists(&session) {
-        tmux::kill_session(&session);
-        if slug == "(main)" {
-            ui.info(&format!("closed tmux {session} — checkout untouched."));
-        } else {
-            ui.info(&format!("closed tmux {session} — worktree kept. Reopen: worktrees open {slug}"));
-        }
+    let canonical = p.session_name(&slug);
+    // `open` ADOPTS any session with a pane cwd'd in the place (tmux::
+    // worktree_session_excluding), so close must be its inverse or an adopted
+    // session — including one left under a PREVIOUS prefix (§5) — becomes
+    // unclosable. Unlike before, `(main)` adopts too: it is a place whose
+    // canonical name a prefix change moves like any other.
+    let Some(session) = live_session(p, &slug, &p.place_dir(&slug)) else {
+        ui.info(&format!("no live session for '{slug}' ({canonical}) — nothing to close."));
         return Ok(());
-    }
-    // No canonical session — but `open` ADOPTS any session with a pane cwd'd in
-    // the worktree (tmux::worktree_session), so close must be its inverse or an
-    // adopted session becomes unclosable. Same ai-word derivation as launch().
-    if slug != "(main)" {
-        let wt = format!("{}/{}", p.wt_root_dir(), slug);
-        let ai_cmd = crate::config::resolve_ai_cmd(None);
-        let ai_word_full = ai_cmd.split_whitespace().next().unwrap_or("");
-        let ai_word = basename(if ai_word_full.is_empty() { "claude" } else { ai_word_full });
-        if let Some(adopted) = tmux::worktree_session(&wt, &ai_word) {
-            tmux::kill_session(&adopted);
-            ui.info(&format!("closed adopted tmux {adopted} (session living in '{slug}') — worktree kept."));
-            return Ok(());
+    };
+    tmux::kill_session(&session);
+    match (session == canonical, slug.as_str()) {
+        (true, "(main)") => ui.info(&format!("closed tmux {session} — checkout untouched.")),
+        (true, _) => {
+            ui.info(&format!("closed tmux {session} — worktree kept. Reopen: worktrees open {slug}"))
         }
+        (false, "(main)") => ui.info(&format!(
+            "closed adopted tmux {session} (session living in the main checkout) — checkout untouched."
+        )),
+        (false, _) => ui.info(&format!(
+            "closed adopted tmux {session} (session living in '{slug}') — worktree kept."
+        )),
     }
-    ui.info(&format!("no live session for '{slug}' ({session}) — nothing to close."));
     Ok(())
 }
 
@@ -657,7 +688,12 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
         ui.warn(&format!("'{slug}' is not a registered worktree (stale dir) — will plain-delete it."));
         (String::new(), String::new())
     };
-    let session = p.session_name(&slug);
+    // Resolved BEFORE the prompt, not at kill time: the prompt names what will
+    // actually die, and after a prefix change (§5) that is not always the
+    // canonical name. Falls back to the canonical name for display when nothing
+    // is running, which is what the line meant all along.
+    let live = live_session(p, &slug, &path);
+    let session = live.clone().unwrap_or_else(|| p.session_name(&slug));
 
     if !dirty.is_empty() && !force {
         ui.warn(&format!("Worktree '{slug}' has uncommitted changes:"));
@@ -685,8 +721,8 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
     // is gone, and the containers are orphaned under a name nothing records.
     compose_down(p, ui, &slug, &path);
 
-    if tmux::session_exists(&session) {
-        tmux::kill_session(&session);
+    if let Some(session) = &live {
+        tmux::kill_session(session);
         ui.info(&format!("killed tmux {session}"));
     }
     if reg {
@@ -1149,6 +1185,10 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         return 0;
     };
 
+    // Config-vs-config, so it belongs in `--config-only` too: both sources are
+    // COMMITTED files, present on a bare clone with no filesystem state.
+    findings.extend(prefix_findings(p, &cfg));
+
     if config_only {
         // The CI mode: no filesystem state, so it works on a bare clone where
         // every declared (gitignored) source is absent by definition.
@@ -1163,6 +1203,7 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         findings.extend(port_findings(p, &cfg, &targets));
         findings.extend(compose_findings(p, &cfg, &targets));
+        findings.extend(session_findings(p, &targets));
     }
 
     if strict {
@@ -1194,6 +1235,68 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
     report.exit_code()
+}
+
+/// §5's prefix findings: the two project-scoped sources disagreeing, and — the
+/// point of saying it out loud — WHICH one is in effect.
+///
+/// The legacy `.worktree-prefix` wins so that adding `[project] prefix` to a repo
+/// that already has one renames nothing. That is the right default and the
+/// surprising one: someone who writes `[project] prefix` expects it to take, and
+/// nothing else in the repo would ever tell them it did not.
+fn prefix_findings(p: &Project, cfg: &ProjectConfig) -> Vec<Finding> {
+    let (Some(file), Some(project)) =
+        (crate::project::prefix_file(&p.main_root), cfg.project.prefix.as_deref())
+    else {
+        return Vec::new();
+    };
+    // Compare what each source would RESOLVE to, not what it says: `Team.X` and
+    // `team-x` are the same prefix once sanitized, and a finding about a
+    // difference that changes no session name is noise.
+    let (want, got) = (sanitize_prefix(&file), sanitize_prefix(project));
+    if want == got {
+        return Vec::new();
+    }
+    vec![Finding::warn(
+        Code::PrefixMismatch,
+        format!(
+            "{} says `{want}` but [project] prefix says `{got}` — the file wins, so sessions are \
+             named `{want}-<slug>`. Delete {} to switch to the config (then: worktrees doctor, \
+             to see which sessions are still running under the old name).",
+            init::PREFIX_FILE,
+            init::PREFIX_FILE
+        ),
+    )
+    .at_path(init::PREFIX_FILE)]
+}
+
+/// The session half of the prefix hazard (§5): a place whose LIVE session is not
+/// named what the current prefix renders.
+///
+/// Resolved through `live_session` — the same function `close` and `rm` use — so
+/// this finding cannot claim a session those two would fail to find. That costs
+/// a couple of tmux calls per place, which is fine: `doctor` is on demand and
+/// §10 keeps it off the app's 3s poll for exactly this reason.
+fn session_findings(p: &Project, targets: &[String]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for dir in targets {
+        let slug = basename(dir);
+        let canonical = p.session_name(&slug);
+        let Some(live) = live_session(p, &slug, dir).filter(|s| *s != canonical) else { continue };
+        out.push(
+            Finding::warn(
+                Code::SessionDrift,
+                format!(
+                    "live tmux session is `{live}`, but this repo's prefix now renders \
+                     `{canonical}` — the running session is still found (by pane cwd), and the \
+                     new name applies the next time it is opened. Rename it now with: \
+                     worktrees close {slug} && worktrees open {slug}"
+                ),
+            )
+            .at_place(slug),
+        );
+    }
+    out
 }
 
 /// §6's port findings for the places `doctor` was asked about.
@@ -1448,8 +1551,11 @@ fn describe(ui: &mut dyn Ui, sug: &init::Suggestion) {
             None => ui.info(&format!("[ports] numbers were read out of {}. Check them.", ports.source)),
         }
     }
-    if sug.prefix.is_some() {
-        ui.info("[project] prefix is commented out — it is not honored yet (changing a prefix renames live tmux sessions).");
+    if let Some(prefix) = &sug.prefix {
+        ui.info(&format!(
+            "[project] prefix = \"{prefix}\" was transcribed from {} — which still wins, so nothing is renamed. Delete that file to switch over.",
+            init::PREFIX_FILE
+        ));
     }
     // Found, and not declarable: §4 refuses these paths for the WHOLE config, so
     // the file lists them commented out. Said out loud too — a credential nobody

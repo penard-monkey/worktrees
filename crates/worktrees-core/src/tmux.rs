@@ -43,14 +43,13 @@ pub fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// A session already living in worktree dir `wt` (a pane cwd'd there), so `open`
-/// reuses an AI pane running under any name. Prefers a pane whose command looks
-/// like the configured AI CLI (`ai_word`) or `node`; else the first match.
-pub fn worktree_session(wt: &str, ai_word: &str) -> Option<String> {
-    worktree_session_excluding(wt, ai_word, None)
-}
-
-/// `worktree_session` with a subtree EXCLUSION — required when `wt` is the MAIN
+/// A session already living in place dir `wt` (a pane cwd'd there), so `open`
+/// reuses an AI pane running under any name — including one started under a
+/// prefix this repo has since changed (`ops::live_session`). Prefers a pane whose
+/// command looks like the configured AI CLI (`ai_word`) or `node`; else the first
+/// match.
+///
+/// `exclude_under` skips a subtree, and is required when `wt` is the MAIN
 /// checkout: worktree dirs live UNDER it (`<main_root>/.worktrees/<slug>`), so
 /// without excluding `.worktrees/` any worktree pane would falsely count as
 /// main's session and main would adopt (and attach to!) a worktree's session.
@@ -97,7 +96,7 @@ impl PaneList {
         Some(PaneList { panes })
     }
 
-    /// Same selection as `worktree_session` but over the prefetched panes: a
+    /// Same selection as `worktree_session_excluding` but over the prefetched panes: a
     /// pane cwd'd in `wt` (exact or a subdir), preferring one whose command
     /// looks like the AI CLI (`ai_word`) or `node`, else the first match.
     /// `exclude_under` skips panes in that subtree — pass the project's

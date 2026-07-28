@@ -901,6 +901,7 @@ mod tests {
                     file: RelPath::parse("docker-compose.worktree.yml").unwrap(),
                     project: "{prefix}-wt-{slug}".into(),
                 }),
+                project: Default::default(),
             }
         }
         fn run_cfg(&self, slug: &str, reallocate: bool, cfg: &ProjectConfig) -> Result<Outcome, ProvisionError> {

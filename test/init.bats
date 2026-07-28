@@ -201,15 +201,20 @@ YAML
   [ "$status" -eq 0 ]
 }
 
-@test "init: .worktree-prefix is folded in COMMENTED OUT (v3 defers honoring it)" {
+@test "init: .worktree-prefix is transcribed into a LIVE [project] prefix, renaming nothing" {
   printf 'teamx\n' > "$REPO/.worktree-prefix"
   run_wt init -y
   [ "$status" -eq 0 ]
-  grep -q '^# prefix = "teamx"$' "$REPO/.worktrees.toml"
-  # an UNcommented [project] prefix would warn on every command from here on
+  grep -q '^\[project\]$' "$REPO/.worktrees.toml"
+  grep -q '^prefix = "teamx"$' "$REPO/.worktrees.toml"
+  # It is a TRANSCRIPTION: the legacy file still wins (§5), so the two agree,
+  # doctor is clean, and the session name is exactly what it was before.
   run_wt doctor
   [ "$status" -eq 0 ]
-  [[ "$output" != *"not yet honored"* ]]
+  [[ "$output" != *"prefix"* ]]
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists teamx-feat-x
 }
 
 @test "init: existing worktrees that predate the config are named for relink" {

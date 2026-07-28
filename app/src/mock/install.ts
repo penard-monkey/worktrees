@@ -68,7 +68,7 @@ const mockConfigs: Record<string, MockCfg> = {
     },
     compose: { file: "docker-compose.worktree.yml", project: "{prefix}-wt-{slug}" },
     error: null,
-    warnings: ["[project] prefix is not honored yet — ignored"],
+    warnings: ["future_thing = 1 — unknown key, ignored"],
   },
   [WT_ROOT]: {
     path: `${WT_ROOT}/.worktrees.toml`,

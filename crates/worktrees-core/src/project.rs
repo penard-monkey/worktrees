@@ -5,9 +5,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::config::{cfg_get, config_path, sanitize_prefix};
+use crate::config::resolve_prefix_from;
 use crate::error::{Result, WtError};
 use crate::model::{LsJson, Place, TmuxSession, SCHEMA_VERSION};
+use crate::projcfg;
 use crate::render::{self, Row};
 use crate::sysclock::{now_epoch, SysClock};
 use crate::{git, tmux};
@@ -415,23 +416,38 @@ impl Project {
     }
 }
 
+/// Live prefix resolution — the impure half of `config::resolve_prefix_from`,
+/// which owns the order and the sanitization.
 fn resolve_prefix(main_root: &str) -> String {
-    let raw = std::env::var("WORKTREES_PREFIX").ok().filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_to_string(format!("{main_root}/.worktree-prefix"))
-                .ok()
-                .and_then(|c| c.lines().next().map(|l| l.chars().filter(|c| !c.is_whitespace()).collect::<String>()))
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| cfg_get(&config_path(), "prefix").filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| basename(main_root));
-    sanitize_prefix(&raw)
+    let env = std::env::var("WORKTREES_PREFIX").ok();
+    let file = prefix_file(main_root);
+    let project = projcfg::project_prefix(Path::new(main_root));
+    // `user_cfg`, not the raw `cfg_get`: `~/.config/worktrees/config.toml` is a
+    // tier of the user rung too, and reading only the legacy kv file here was
+    // why `prefix` in `config.toml` silently did nothing.
+    let cfg = crate::config::user_cfg("prefix");
+    resolve_prefix_from(
+        env.as_deref(),
+        file.as_deref(),
+        project.as_deref(),
+        cfg.as_deref(),
+        &basename(main_root),
+    )
+}
+
+/// First line of `<main_root>/.worktree-prefix`, whitespace stripped.
+pub(crate) fn prefix_file(main_root: &str) -> Option<String> {
+    std::fs::read_to_string(format!("{main_root}/{}", crate::init::PREFIX_FILE))
+        .ok()
+        .and_then(|c| c.lines().next().map(|l| l.chars().filter(|c| !c.is_whitespace()).collect::<String>()))
+        .filter(|s| !s.is_empty())
 }
 
 /// The AI-command word used to PREFER an adopted session's AI pane — same
-/// derivation as `ops::launch`/`close_one` (first word of the resolved ai_cmd,
-/// basename, default `claude`). Computed once per snapshot.
-fn adopt_ai_word() -> String {
+/// derivation as `ops::launch` (first word of the resolved ai_cmd, basename,
+/// default `claude`). Computed once per snapshot here; `ops` calls it too, so
+/// the two adoption paths cannot drift.
+pub(crate) fn adopt_ai_word() -> String {
     let ai_cmd = crate::config::resolve_ai_cmd(None);
     let full = ai_cmd.split_whitespace().next().unwrap_or("");
     let word = if full.is_empty() { "claude" } else { full };

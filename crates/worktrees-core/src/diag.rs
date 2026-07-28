@@ -83,10 +83,17 @@ pub enum Code {
     /// A key `.worktrees.toml` does not understand; ignored, same forward-compat
     /// discipline as `store.rs`'s `#[serde(flatten)] extra`.
     UnknownKey,
-    /// A key that parses today but is not honored yet (`[project] prefix`, §12).
-    DeferredKey,
-    /// `.worktree-prefix` and `[project] prefix` disagree.
+    /// `.worktree-prefix` and `[project] prefix` disagree. Not an error: §5 fixes
+    /// the order (the legacy file wins), so the tool knows what to do — the user
+    /// is the one who cannot tell by reading the repo.
     PrefixMismatch,
+    /// A place's LIVE tmux session is not named what the current prefix would
+    /// render. ⚠ Not in §7's slug list: it exists because `[project] prefix`
+    /// makes the session name config-dependent, so a repo can rename every
+    /// session by committing a file. The sessions are still found (by pane cwd,
+    /// see `ops::live_session`) — this is the finding that stops that adoption
+    /// from being invisible magic.
+    SessionDrift,
     /// An invariant this tool is supposed to guarantee did not hold. ⚠ Not in
     /// §7's slug list either: it exists so an internal inconsistency is REPORTED
     /// rather than turned into a silent skip, which is the failure class the
@@ -205,8 +212,8 @@ mod tests {
             (Code::ComposeDrift, "compose-drift"),
             (Code::CopyStale, "copy-stale"),
             (Code::UnknownKey, "unknown-key"),
-            (Code::DeferredKey, "deferred-key"),
             (Code::PrefixMismatch, "prefix-mismatch"),
+            (Code::SessionDrift, "session-drift"),
             (Code::Internal, "internal"),
         ] {
             assert_eq!(serde_json::to_string(&c).unwrap(), format!("\"{s}\""));

@@ -172,9 +172,11 @@ pub struct Suggestion {
     pub rejected: Vec<Rejected>,
     pub compose: Option<String>,
     pub ports: Option<PortsSuggestion>,
-    /// Contents of `.worktree-prefix`. Emitted COMMENTED OUT — §12 defers
-    /// `[project] prefix` to v3, and an uncommented one would parse to a
-    /// `deferred-key` warning on every command from here on.
+    /// Contents of `.worktree-prefix`, folded into a live `[project] prefix`.
+    /// Emitting it is safe precisely because it is a TRANSCRIPTION: the legacy
+    /// file outranks the config key (§5), so the two agree and no session is
+    /// renamed by writing this. Deleting the file afterwards is the migration,
+    /// and it is a separate, deliberate act.
     pub prefix: Option<String>,
     /// Places that are already missing at least one suggested file.
     pub stale_places: Vec<String>,
@@ -265,15 +267,19 @@ fn split_declarable(candidates: Vec<Candidate>) -> (Vec<Candidate>, Vec<Rejected
     let (mut files, mut rejected) = (Vec::new(), Vec::new());
     let mut seen: Vec<(String, String)> = Vec::new(); // (case-folded, first path)
     for c in candidates {
-        if let Err(e) = projcfg::RelPath::parse(&c.rel) {
-            rejected.push(Rejected { rel: c.rel, why: e.message });
-            continue;
-        }
+        let rel = match projcfg::RelPath::parse(&c.rel) {
+            Ok(r) => r,
+            Err(e) => {
+                rejected.push(Rejected { rel: c.rel, why: e.message });
+                continue;
+            }
+        };
         // The case-only-duplicate rule is list-level — it needs the other
-        // entries, so it cannot live inside `RelPath::parse`. Same fold as
-        // `projcfg`'s (`to_lowercase`), and same caveat: it is a lowercase
-        // mapping, not Unicode case folding.
-        let fold = c.rel.to_lowercase();
+        // entries, so it cannot live inside `RelPath::parse`. `fold_key` is
+        // `projcfg`'s OWN fold, called rather than re-implemented: if the two
+        // ever diverged, `detect` and `check_file_list` would disagree about
+        // what a duplicate is and the re-parse guard in `cmd_init` would fire.
+        let fold = rel.fold_key();
         if let Some((_, first)) = seen.iter().find(|(k, _)| *k == fold) {
             rejected.push(Rejected {
                 why: format!(
@@ -449,14 +455,15 @@ pub fn render(s: &Suggestion) -> String {
     if let Some(prefix) = &s.prefix {
         o.push_str(
             "\n# ── prefix ────────────────────────────────────────────────────────────────\n\
-             # This repo has a .worktree-prefix file, which `[project] prefix` will\n\
-             # subsume. It is COMMENTED OUT on purpose: the key is parsed but not yet\n\
-             # honored, because the prefix is the tmux session identity — changing it\n\
-             # renames every live session, and `close` would report \"nothing to close\"\n\
-             # for a session that is very much alive. Keep using .worktree-prefix.\n",
+             # Names this repo's tmux sessions: <prefix>-<slug>. Transcribed from the\n\
+             # .worktree-prefix file this repo already has, which STILL WINS over this\n\
+             # key — so writing it renames nothing today. Delete .worktree-prefix when\n\
+             # you want this to be the one source; sessions already running keep their\n\
+             # old names (the tool finds them by directory, and `worktrees doctor`\n\
+             # lists them) until they are closed and reopened.\n",
         );
-        o.push_str("#\n# [project]\n");
-        o.push_str(&format!("# prefix = {}\n", toml_string(prefix)));
+        o.push_str("[project]\n");
+        o.push_str(&format!("prefix = {}\n", toml_string(prefix)));
     }
 
     o
@@ -1109,16 +1116,16 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_prefix_file_is_folded_in_but_stays_commented_out() {
+    fn a_worktree_prefix_file_is_folded_into_a_live_project_section() {
         let s = detect(&Facts { prefix_file: Some("cdv".into()), ..Facts::default() });
         assert_eq!(s.prefix.as_deref(), Some("cdv"));
         assert!(!s.is_empty());
         let out = render(&s);
-        assert!(out.contains("# [project]\n# prefix = \"cdv\"\n"), "{out}");
-        // §12 defers it: an UNCOMMENTED [project] prefix warns on every command,
-        // so the round-trip must produce zero findings.
+        assert!(out.contains("\n[project]\nprefix = \"cdv\"\n"), "{out}");
+        // Emitted LIVE, and it must parse clean — this is a transcription, and
+        // the legacy file still outranks it (§5), so writing it renames nothing.
         let (cfg, findings) = projcfg::parse(&out).unwrap();
-        assert_eq!(cfg, Default::default());
+        assert_eq!(cfg.project.prefix.as_deref(), Some("cdv"));
         assert!(findings.is_empty(), "{findings:?}");
     }
 
@@ -1177,6 +1184,7 @@ mod tests {
                         assert_eq!(got.mode, projcfg::Mode::Link, "link is the default (§3)");
                     }
                     assert_eq!(cfg.compose.is_some(), s.compose.is_some(), "{text}");
+                    assert_eq!(cfg.project.prefix.as_deref(), s.prefix.as_deref(), "{text}");
                     if let Some(c) = &cfg.compose {
                         assert_eq!(c.project, "{prefix}-wt-{slug}");
                     }
