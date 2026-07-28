@@ -30,3 +30,10 @@ close-out ritual (.claude/skills/close-out).
 - **Eyeball busy dot in the real app** — verified via mock harness +
   design; not yet observed in the Tauri app against a live claude session.
   _From: [2026-07-27 busy-dots session](docs/sessions/2026-07-27-busy-dots-nav-home/summary.md)_
+
+- **Better desktop-app README gif** — current `docs/media/desktop-flow.gif`
+  is driven against the mock harness, so the embedded terminal shows the
+  "mock terminal — design harness" banner. Re-cut from the real Tauri app
+  (live tmux + AI CLI in the pane); consider trimming the flow and resting on
+  the overview rather than the terminal. Recorder: `app/scripts/record-readme.{sh,py}`.
+  _From: 2026-07-27 readme-media session_
