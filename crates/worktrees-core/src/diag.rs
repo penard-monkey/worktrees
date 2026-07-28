@@ -72,6 +72,13 @@ pub enum Code {
     /// conflict nor a missing slot. Info, never Error: the overwhelmingly likely
     /// binder is this place's OWN running stack, which is the healthy state.
     PortBusy,
+    /// The `COMPOSE_PROJECT_NAME` a place RECORDS differs from what `[compose]
+    /// project` would render today. ⚠ Not in §7's slug list, and not in the spec
+    /// at all: the recorded name is what the RUNNING containers are named, so
+    /// `provision` keeps it (only `--reallocate` may move it) — which means the
+    /// disagreement has to be visible somewhere, or `rm` quietly downs a project
+    /// nobody started while the real stack keeps the ports.
+    ComposeDrift,
     // §5 — config policy
     /// A key `.worktrees.toml` does not understand; ignored, same forward-compat
     /// discipline as `store.rs`'s `#[serde(flatten)] extra`.
@@ -195,6 +202,7 @@ mod tests {
             (Code::SlotConflict, "slot-conflict"),
             (Code::NoSlot, "no-slot"),
             (Code::PortBusy, "port-busy"),
+            (Code::ComposeDrift, "compose-drift"),
             (Code::CopyStale, "copy-stale"),
             (Code::UnknownKey, "unknown-key"),
             (Code::DeferredKey, "deferred-key"),

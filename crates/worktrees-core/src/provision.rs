@@ -34,7 +34,10 @@
 //!
 //! ⚠ **A hand-edited `.worktree.env` wins.** Allocation never rewrites an
 //! existing `WORKTREE_SLOT` without `--reallocate`: it is the file the running
-//! stack sources, and the tool disagreeing with it would be the tool lying.
+//! stack sources, and the tool disagreeing with it would be the tool lying. The
+//! same holds for `COMPOSE_PROJECT_NAME` — it names the containers that are
+//! actually up, so a `[compose] project` template that changed since does not
+//! move it; `doctor` reports the drift (`Code::ComposeDrift`) instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -91,7 +94,14 @@ pub fn parse_env(text: &str) -> EnvFile {
     let mut out = EnvFile::default();
     for line in text.lines() {
         let l = line.trim();
-        let l = l.strip_prefix("export ").map(str::trim_start).unwrap_or(l);
+        // `export` is a WORD, so any blank may follow it — a tab is what a
+        // heredoc-indented script writes, and it must not read as `export\tFOO`
+        // being a key.
+        let l = l
+            .strip_prefix("export")
+            .filter(|r| r.starts_with(' ') || r.starts_with('\t'))
+            .map(str::trim_start)
+            .unwrap_or(l);
         if l.is_empty() || l.starts_with('#') {
             continue;
         }
@@ -112,10 +122,18 @@ pub fn parse_env(text: &str) -> EnvFile {
 
 /// `"x"` / `'x'` → `x`; an unquoted value ends at the first whitespace, because
 /// `FOO=bar # note` assigns `bar` in every POSIX shell.
+///
+/// A quoted value ends at its CLOSING quote, not at end of line: `FOO="bar" #
+/// note` assigns `bar` too, and keeping the quotes here would hand `"bar"` to
+/// something that then compares it against a name. An unterminated quote is junk;
+/// take it as far as it goes rather than invent a value.
 fn shell_value(v: &str) -> String {
     for q in ['"', '\''] {
-        if let Some(inner) = v.strip_prefix(q).and_then(|s| s.strip_suffix(q)) {
-            return inner.to_string();
+        if let Some(rest) = v.strip_prefix(q) {
+            return match rest.split_once(q) {
+                Some((inner, _)) => inner.to_string(),
+                None => rest.to_string(),
+            };
         }
     }
     v.split_whitespace().next().unwrap_or("").to_string()
@@ -364,19 +382,35 @@ fn real(p: &Path) -> PathBuf {
 /// change.
 pub struct SlotLock {
     dir: PathBuf,
+    /// Our own stamp, re-checked at [`Drop`]. A lock is not a directory that
+    /// exists, it is a directory whose `pid` is OURS.
+    pid: i32,
 }
 
 impl SlotLock {
     pub fn acquire(main_root: &Path) -> Result<SlotLock, String> {
         let dir = main_root.join(LOCK_DIR);
         let pid_file = dir.join("pid");
+        let me = std::process::id() as i32;
         let mut pidless = 0u32;
         let mut holder: Option<i32> = None;
         for _ in 0..LOCK_ROUNDS {
             match fs::create_dir(&dir) {
                 Ok(()) => {
-                    let _ = fs::write(&pid_file, format!("{}\n", std::process::id()));
-                    return Ok(SlotLock { dir });
+                    // `create_dir` and the stamp are two syscalls, and the gap
+                    // between them is exactly the window a waiter evicts on
+                    // (LOCK_PIDLESS_ROUNDS below). So the stamp is NOT
+                    // fire-and-forget: if it did not land — the write failed, or
+                    // someone evicted us mid-handshake — we do not hold this
+                    // lock, and returning one anyway puts two scans on the same
+                    // slot map (§1.1). Retry instead; the pidless path reclaims
+                    // whatever we left behind, and it waits before doing so
+                    // precisely so it cannot rip a lock out of a racing acquirer.
+                    if stamp(&pid_file, me) {
+                        return Ok(SlotLock { dir, pid: me });
+                    }
+                    pidless = 0;
+                    std::thread::sleep(std::time::Duration::from_millis(LOCK_BACKOFF_MS));
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     match read_pid(&pid_file) {
@@ -422,11 +456,26 @@ impl SlotLock {
 
 impl Drop for SlotLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.dir.join("pid"));
+        let pid_file = self.dir.join("pid");
+        // Ownership-checked, not unconditional: if the stamp is no longer ours we
+        // were evicted, the directory belongs to whoever holds it NOW, and
+        // removing it would drop a lock in the middle of someone else's scan —
+        // letting a third process in and handing out a slot twice (§1.1).
+        if read_pid(&pid_file) != Some(self.pid) {
+            return;
+        }
+        let _ = fs::remove_file(&pid_file);
         // `remove_dir`, never `remove_dir_all`: this must not become a recursive
         // delete rooted at a path a config could influence.
         let _ = fs::remove_dir(&self.dir);
     }
+}
+
+/// Write our pid and read it back. `false` = the stamp did not take (the write
+/// failed, or a waiter evicted us inside the `mkdir`→write window), which is
+/// indistinguishable from never having held the lock and is treated as such.
+fn stamp(pid_file: &Path, me: i32) -> bool {
+    fs::write(pid_file, format!("{me}\n")).is_ok() && read_pid(pid_file) == Some(me)
 }
 
 fn read_pid(pid_file: &Path) -> Option<i32> {
@@ -456,13 +505,32 @@ pub fn compose_project_name(template: &str, prefix: &str, slug: &str) -> String 
     sanitize_prefix(&template.replace("{prefix}", prefix).replace("{slug}", slug))
 }
 
+/// The sanitized `COMPOSE_PROJECT_NAME` a place RECORDS, or `None`.
+///
+/// ⚠ §5 applies to this value exactly as it applies to the template. A
+/// `.worktree.env` can be **committed** — `info/exclude` does nothing for a file
+/// the clone already tracks — so what it says is repo-supplied text on its way to
+/// a `docker -p` argv, and it goes through `sanitize_prefix` before it can get
+/// there. A name that sanitizes to nothing is not a name.
+pub fn recorded_compose_project(wt: &Path) -> Option<String> {
+    read_env(wt).and_then(|(_, e)| e.compose_project).and_then(|n| sane_project(&n))
+}
+
+fn sane_project(name: &str) -> Option<String> {
+    let s = sanitize_prefix(name);
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 /// The project name for a place: what its `.worktree.env` says if it has one,
 /// else the template. Reading the file first matters at teardown — the running
 /// containers are named after whatever the stack was STARTED with, and the
 /// template may have changed since.
 pub fn compose_project_for(wt: &Path, compose: &Compose, prefix: &str, slug: &str) -> String {
-    read_env(wt)
-        .and_then(|(_, e)| e.compose_project)
+    recorded_compose_project(wt)
         .unwrap_or_else(|| compose_project_name(&compose.project, prefix, slug))
 }
 
@@ -548,16 +616,31 @@ impl fmt::Display for ProvisionError {
 /// Idempotent: `new`, `relink` and `provision` all land on the same file.
 pub fn provision(req: &Request, cfg: &ProjectConfig) -> Result<Outcome, ProvisionError> {
     let Some(ports) = cfg.ports.as_ref() else { return Ok(Outcome::NoPorts) };
-    let compose = cfg
-        .compose
-        .as_ref()
-        .map(|c| compose_project_name(&c.project, req.prefix, req.slug));
-    let existing = read_env(req.wt);
 
     // `git worktree add` happened long before this; only the scan and the write
     // are inside the lock (§6).
     let _lock = SlotLock::acquire(req.main_root).map_err(ProvisionError::Lock)?;
+    // This place's own file is read INSIDE the lock like the sibling scan is
+    // (§6 step 3): the decision it feeds — "which slot does this place already
+    // hold" — is the same decision the lock exists to serialize, and reading it
+    // outside would mean deciding from a snapshot another provision may already
+    // have moved.
+    let existing = read_env(req.wt);
     let scan = scan(req.main_root, req.wt_root);
+
+    // The compose name follows §6's slot rule, for the same reason: the RECORDED
+    // name is what the running containers are named, so re-rendering it from a
+    // template that changed since would leave `rm` downing a project nobody
+    // started while the real stack keeps the ports. Only --reallocate moves it;
+    // `doctor` reports the drift (Code::ComposeDrift).
+    let compose = cfg.compose.as_ref().map(|c| {
+        let recorded = if req.reallocate {
+            None
+        } else {
+            existing.as_ref().and_then(|(_, e)| e.compose_project.as_deref()).and_then(sane_project)
+        };
+        recorded.unwrap_or_else(|| compose_project_name(&c.project, req.prefix, req.slug))
+    });
 
     let slot = match existing.as_ref().and_then(|(_, e)| e.slot) {
         // §6 step 3 — already holds a slot. Adoption, not allocation: this is
@@ -755,6 +838,17 @@ mod tests {
         assert_eq!(parse_env("WORKTREE_SLOT=1\nWORKTREE_SLOT=oops\n").slot, Some(1));
         // an empty compose name is not a name
         assert_eq!(parse_env("COMPOSE_PROJECT_NAME=\n").compose_project, None);
+        // `export` is a WORD — a tab after it is what an indented heredoc wrote
+        assert_eq!(parse_env("export\tWORKTREE_SLOT=5\n").slot, Some(5));
+        // …and a key that merely starts with those six letters is not an export
+        assert_eq!(parse_env("exportWORKTREE_SLOT=5\n").slot, None);
+        // a quoted value ends at its CLOSING quote: the quotes must not survive
+        // into a name something later compares, or hands to `docker -p`
+        assert_eq!(
+            parse_env("COMPOSE_PROJECT_NAME=\"p-wt-x\"   # the stack\n").compose_project.as_deref(),
+            Some("p-wt-x")
+        );
+        assert_eq!(parse_env("export\tWORKTREE_SLOT='6' # six\n").slot, Some(6));
     }
 
     // ── [compose] naming ─────────────────────────────────────────────────────
@@ -767,6 +861,10 @@ mod tests {
         assert_eq!(compose_project_name("static", "cdv", "x"), "static");
         // the sanitizer is what makes the value safe to emit UNQUOTED
         assert!(is_shell_word(&compose_project_name("{slug}", "p", "a b;rm -rf /")));
+        // a name that sanitizes to nothing is not a name (belt for the parser's
+        // own empty-value guard: `recorded` must never be Some(""))
+        assert_eq!(sane_project(""), None);
+        assert_eq!(sane_project("A B").as_deref(), Some("a-b"));
     }
 
     // ── the real thing, on a real (git-free) tmpdir ──────────────────────────
@@ -905,6 +1003,90 @@ mod tests {
         assert_eq!(t.run_cfg("a", false, &ProjectConfig::default()), Ok(Outcome::NoPorts));
         assert!(!t.wt("a").join(ENV_FILE).exists());
         assert!(!t.0.join(LOCK_DIR).exists(), "and the lock is never even taken");
+    }
+
+    #[test]
+    fn fs_a_hostile_recorded_compose_name_is_sanitized_before_it_can_reach_docker() {
+        // §5: `.worktree.env` can be COMMITTED by the clone — `info/exclude` does
+        // nothing for a file git already tracks — so what it records is
+        // repo-supplied text on its way to a `docker -p` argv.
+        let t = Tmp::new("cevil");
+        let wt = t.wt("a");
+        fs::write(
+            wt.join(ENV_FILE),
+            "WORKTREE_SLOT=1\nCOMPOSE_PROJECT_NAME=\"Evil Name; rm -rf /\" # hi\n",
+        )
+        .unwrap();
+        let cfg = t.cfg();
+        let compose = cfg.compose.as_ref().unwrap();
+        let sane = "evil-name--rm--rf--";
+        assert_eq!(compose_project_for(&wt, compose, "proj", "a"), sane);
+        assert!(is_shell_word(&compose_project_for(&wt, compose, "proj", "a")));
+        // …and the name provision then records is the sanitized one, so the two
+        // paths cannot disagree about which containers `rm` tears down
+        assert_eq!(t.run_cfg("a", false, &cfg), Ok(Outcome::Updated { slot: 1 }));
+        let text = fs::read_to_string(wt.join(ENV_FILE)).unwrap();
+        assert!(text.contains(&format!("COMPOSE_PROJECT_NAME={sane}\n")), "{text}");
+        assert_eq!(compose_project_for(&wt, compose, "proj", "a"), sane);
+    }
+
+    #[test]
+    fn fs_the_recorded_compose_name_survives_a_template_change_until_reallocate() {
+        let t = Tmp::new("cname");
+        assert_eq!(t.run("a", false), Ok(Outcome::Allocated { slot: 1 }));
+        // Whatever is running now is named `proj-wt-a`. The template changes…
+        let mut cfg = t.cfg();
+        cfg.compose.as_mut().unwrap().project = "{prefix}-new-{slug}".into();
+        // …and provision leaves the recorded name alone — not one byte rewritten,
+        // exactly like a hand-edited WORKTREE_SLOT.
+        assert_eq!(t.run_cfg("a", false, &cfg), Ok(Outcome::Unchanged { slot: 1 }));
+        let text = fs::read_to_string(t.wt("a").join(ENV_FILE)).unwrap();
+        assert!(text.contains("COMPOSE_PROJECT_NAME=proj-wt-a\n"), "{text}");
+        // teardown therefore still finds the containers it started
+        assert_eq!(
+            compose_project_for(&t.wt("a"), cfg.compose.as_ref().unwrap(), "proj", "a"),
+            "proj-wt-a"
+        );
+        // --reallocate is the only thing that moves it, same as the slot
+        assert_eq!(t.run_cfg("a", true, &cfg), Ok(Outcome::Updated { slot: 1 }));
+        let text = fs::read_to_string(t.wt("a").join(ENV_FILE)).unwrap();
+        assert!(text.contains("COMPOSE_PROJECT_NAME=proj-new-a\n"), "{text}");
+    }
+
+    #[test]
+    fn fs_a_lock_we_could_not_stamp_is_never_returned_as_held() {
+        let t = Tmp::new("stamp");
+        let me = std::process::id() as i32;
+        // a write that cannot land (ENOENT, ENOSPC, …) is a LOST acquisition —
+        // discarding that error would leave a legitimate holder looking pidless
+        // and evicted 45ms later
+        assert!(!stamp(&t.0.join("nope").join("pid"), me));
+        // a write that "succeeds" but reads back as something else is
+        // indistinguishable from being evicted inside the mkdir→write window
+        assert!(!stamp(Path::new("/dev/null"), me));
+        // and the stamp is the only door to Ok: a returned lock always carries a
+        // pid we verified on disk
+        let l = SlotLock::acquire(&t.0).unwrap();
+        assert_eq!(read_pid(&t.0.join(LOCK_DIR).join("pid")), Some(me));
+        drop(l);
+    }
+
+    #[test]
+    fn fs_an_evicted_holder_does_not_release_the_new_holders_lock() {
+        let t = Tmp::new("evict");
+        let pid_file = t.0.join(LOCK_DIR).join("pid");
+        let l = SlotLock::acquire(&t.0).unwrap();
+        // Simulate the eviction: a waiter read the lock as pidless, removed it
+        // and took it. The directory is now SOMEONE ELSE'S.
+        fs::write(&pid_file, "999999\n").unwrap();
+        drop(l);
+        assert!(t.0.join(LOCK_DIR).exists(), "an evicted holder must not release someone else's lock");
+        assert_eq!(read_pid(&pid_file), Some(999999), "and must not touch their stamp");
+        // a holder that still owns its stamp releases normally
+        fs::remove_file(&pid_file).unwrap();
+        fs::remove_dir(t.0.join(LOCK_DIR)).unwrap();
+        drop(SlotLock::acquire(&t.0).unwrap());
+        assert!(!t.0.join(LOCK_DIR).exists());
     }
 
     #[test]

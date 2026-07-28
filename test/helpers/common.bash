@@ -155,26 +155,34 @@ EOF
 
 remove_fake_tmux() { rm -f "$SHIMS/tmux"; }
 
-# Make tmux UNFINDABLE, portably. Removing the shim is not enough: a real tmux
-# on the runner (ubuntu: /usr/bin/tmux) would then be picked up, and launching
-# a REAL server on a fresh runner daemonizes with bats' FDs held open — the
-# suite hangs forever. Build a PATH of symlinks to exactly the tools the CLI +
-# harness need, plus every shim except tmux.
-install_no_tmux_path() {
-  NO_TMUX_BIN="$BATS_TEST_TMPDIR/no-tmux-bin"; mkdir -p "$NO_TMUX_BIN"
-  local t p
+# Make the named commands UNFINDABLE, portably. Removing a shim is NOT enough:
+# $SHIMS is prepended to the real PATH, so `rm -f "$SHIMS/x"` just uncovers the
+# developer's/runner's own x. For tmux that means a REAL server daemonizing with
+# bats' FDs held open (the suite hangs forever); for docker it means a real
+# `compose down -v` against a real daemon — and the test silently stops testing
+# the missing-binary path. Build a PATH of symlinks to exactly the tools the CLI
+# + harness need (the materialization and teardown paths shell out to git), plus
+# every shim except the named ones.
+install_path_without() {
+  local hide=" $* " t p
+  PRUNED_BIN="$BATS_TEST_TMPDIR/pruned-bin"; rm -rf "$PRUNED_BIN"; mkdir -p "$PRUNED_BIN"
   for t in bash sh git grep sed awk tr cut head tail sort date stat basename \
            dirname rm mv mkdir ln cat uname env mktemp; do
+    case "$hide" in *" $t "*) continue ;; esac
     p="$(command -v "$t" 2>/dev/null)" || continue
-    ln -sf "$p" "$NO_TMUX_BIN/$t"
+    ln -sf "$p" "$PRUNED_BIN/$t"
   done
   for p in "$SHIMS"/*; do
     [ -f "$p" ] || continue
-    t="$(basename "$p")"; [ "$t" = tmux ] && continue
-    ln -sf "$p" "$NO_TMUX_BIN/$t"
+    t="$(basename "$p")"
+    case "$hide" in *" $t "*) continue ;; esac
+    ln -sf "$p" "$PRUNED_BIN/$t"
   done
-  export PATH="$NO_TMUX_BIN"
+  export PATH="$PRUNED_BIN"
 }
+
+install_no_tmux_path()   { install_path_without tmux; }
+install_no_docker_path() { install_path_without docker; }
 
 # Assertion sugar over the shim state.
 tmux_session_exists() { [ -f "$TMUX_STATE/$1" ]; }

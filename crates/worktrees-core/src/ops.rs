@@ -1154,6 +1154,7 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             findings.extend(plan.report().findings);
         }
         findings.extend(port_findings(p, &cfg, &targets));
+        findings.extend(compose_findings(p, &cfg, &targets));
     }
 
     if strict {
@@ -1250,6 +1251,39 @@ fn port_findings(p: &Project, cfg: &ProjectConfig, targets: &[String]) -> Vec<Fi
                     .at_place(slug.clone()),
                 );
             }
+        }
+    }
+    out
+}
+
+/// The compose half of §6's "never move a name under a running stack" rule.
+///
+/// `provision` keeps the `COMPOSE_PROJECT_NAME` a place was started under, so a
+/// changed `[compose] project` template leaves the file and the config
+/// disagreeing — and that disagreement decides which containers `rm` tears down.
+/// A Warn, not an Error: nothing is broken, and `--reallocate` is a deliberate
+/// act the user may simply not have taken yet.
+fn compose_findings(p: &Project, cfg: &ProjectConfig, targets: &[String]) -> Vec<Finding> {
+    let Some(compose) = cfg.compose.as_ref() else { return Vec::new() };
+    let mut out = Vec::new();
+    for dir in targets {
+        let slug = basename(dir);
+        let Some(recorded) = provision::recorded_compose_project(Path::new(dir)) else { continue };
+        let want = provision::compose_project_name(&compose.project, &p.prefix, &slug);
+        if recorded != want {
+            out.push(
+                Finding::warn(
+                    Code::ComposeDrift,
+                    format!(
+                        "{ENV_FILE} records COMPOSE_PROJECT_NAME={recorded}, but [compose] project \
+                         now renders {want} — the recorded name is kept (it is what any running \
+                         containers are called). Fix: stop that stack and run: worktrees provision \
+                         {slug} --reallocate"
+                    ),
+                )
+                .at_place(slug.clone())
+                .at_path(ENV_FILE),
+            );
         }
     }
     out

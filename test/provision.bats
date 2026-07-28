@@ -238,11 +238,84 @@ write_ports_config() {   # $1 = max_slots (default 5)
   ( cd "$REPO" && git add -A && git commit -qm compose && git push -q origin main )
   write_project_config '[compose]' 'file = "docker-compose.worktree.yml"' 'project = "p-{slug}"'
   run_wt new feat-x --no-tmux
-  rm -f "$SHIMS/docker"
+
+  # `rm -f "$SHIMS/docker"` would NOT do it: $SHIMS is prepended to the real
+  # PATH, so removing the shim just uncovers the developer's own docker and this
+  # test would quietly run `compose down -v` against their daemon while still
+  # passing (removal proceeds either way). Same technique as install_no_tmux_path.
+  install_no_docker_path
+  run command -v docker
+  [ "$status" -ne 0 ]                       # genuinely unfindable, not just unshimmed
 
   run_wt rm feat-x -y
   [ "$status" -eq 0 ]
   [ ! -d "$(wt feat-x)" ]
+  # the intended branch really was taken: nothing was executed, and it was said
+  [ ! -e "$BATS_TEST_TMPDIR/docker.log" ]
+  [[ "$output" == *"compose teardown skipped"* ]]
+  [[ "$output" == *"docker not available"* ]]
+}
+
+@test "rm: a hostile COMPOSE_PROJECT_NAME is sanitized before it reaches docker -p" {
+  # §5: `.worktree.env` can be COMMITTED by a clone — info/exclude does nothing
+  # for a file git already tracks — so the recorded name is repo-supplied text on
+  # its way to an argv, and it goes through sanitize_prefix like the template.
+  printf 'services: {}\n' > "$REPO/docker-compose.worktree.yml"
+  ( cd "$REPO" && git add -A && git commit -qm compose && git push -q origin main )
+  write_project_config '[ports]' 'base = { API = 39001 }' '' \
+                       '[compose]' 'file = "docker-compose.worktree.yml"' \
+                       'project = "{prefix}-wt-{slug}"'
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+  printf 'WORKTREE_SLOT=1\nCOMPOSE_PROJECT_NAME="Evil Name; rm -rf /" # committed\n' \
+    > "$(env_f feat-x)"
+
+  run_wt rm feat-x -y
+  [ "$status" -eq 0 ]
+  grep -q -- '-p evil-name--rm--rf-- down -v --remove-orphans' "$BATS_TEST_TMPDIR/docker.log"
+  ! grep -q 'Evil Name' "$BATS_TEST_TMPDIR/docker.log"
+  ! grep -q ';' "$BATS_TEST_TMPDIR/docker.log"
+}
+
+@test "provision: the recorded COMPOSE_PROJECT_NAME survives a template change, and doctor says so" {
+  printf 'services: {}\n' > "$REPO/docker-compose.worktree.yml"
+  ( cd "$REPO" && git add -A && git commit -qm compose && git push -q origin main )
+  write_project_config '[ports]' 'base = { API = 39001 }' '' \
+                       '[compose]' 'file = "docker-compose.worktree.yml"' \
+                       'project = "{prefix}-wt-{slug}"'
+  run_wt new feat-x --no-tmux
+  grep -qFx 'COMPOSE_PROJECT_NAME=repo-wt-feat-x' "$(env_f feat-x)"
+
+  # The template changes under a place whose stack is already named the old way.
+  write_project_config '[ports]' 'base = { API = 39001 }' '' \
+                       '[compose]' 'file = "docker-compose.worktree.yml"' \
+                       'project = "{prefix}-new-{slug}"'
+  run_wt provision feat-x
+  [ "$status" -eq 0 ]
+  grep -qFx 'COMPOSE_PROJECT_NAME=repo-wt-feat-x' "$(env_f feat-x)"   # kept, not re-rendered
+
+  # …and the drift is REPORTED, or `rm` would down a project nobody started. A
+  # Warn, so exit stays 0 — nothing is broken, the user just has not reallocated.
+  run_wt doctor feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"repo-wt-feat-x"* ]]
+  [[ "$output" == *"repo-new-feat-x"* ]]
+  run_wt doctor --json
+  [[ "$output" == *'"code":"compose-drift"'* ]]
+
+  # only --reallocate moves it, and then doctor has nothing to say
+  run_wt provision feat-x --reallocate
+  [ "$status" -eq 0 ]
+  grep -qFx 'COMPOSE_PROJECT_NAME=repo-new-feat-x' "$(env_f feat-x)"
+  run_wt doctor feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"compose-drift"* ]]
+  [[ "$output" != *"repo-wt-feat-x"* ]]
+
+  # teardown uses the name the file records, whatever the template now says
+  run_wt rm feat-x -y
+  [ "$status" -eq 0 ]
+  grep -q -- '-p repo-new-feat-x down -v' "$BATS_TEST_TMPDIR/docker.log"
 }
 
 # ── usage + absent config (§2.4) ─────────────────────────────────────────────
