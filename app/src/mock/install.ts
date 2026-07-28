@@ -6,7 +6,7 @@
 // commands resolve to null + a console.warn, so new commands never hard-crash the
 // harness during a redesign.
 
-import { initialWorkspace, type Place, type Workspace } from "./fixtures";
+import { initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 
 let ws: Workspace = initialWorkspace();
 
@@ -171,7 +171,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
               branch: "main", detached: false, dirty: false, dirty_files: 0,
               ahead: 0, behind: 0, last_commit_subject: "initial commit",
               last_commit_epoch: now() - 86400,
-              tmux_session: { name: `${name}-main`, up: false },
+              tmux_session: { name: sessionName(name, "(main)"), up: false },
               claude_session_present: false, declared: null, lifecycle_effective: "closed",
             }],
           },
@@ -214,7 +214,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           slug, path: `${args.repo}/.worktrees/${slug}`, is_main: false, registered: true,
           branch: args.branch, detached: false, dirty: false, dirty_files: 0,
           ahead: 0, behind: 0, last_commit_subject: "wip", last_commit_epoch: now(),
-          tmux_session: { name: `${pv.snapshot.prefix}-${slug}`, up: true },
+          tmux_session: { name: sessionName(pv.snapshot.prefix, slug), up: true },
           claude_session_present: true,
           declared: { last_opened_epoch: now() }, lifecycle_effective: "active",
         });
@@ -243,8 +243,17 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // So core stops with EXIT_NEEDS_CONFIRM (4) and names it; `yes` is the
       // user's word, collected by the frontend's two-click arm. A canonical
       // name is never a question.
-      const canonical = `${pv.snapshot.prefix}-${args.slug}`;
+      const canonical = sessionName(pv.snapshot.prefix, args.slug as string);
       const live = pl.tmux_session.name;
+      // `session` is the name the frontend's arm displayed. Consent is bound to
+      // it: if it is not what is live now, core kills nothing and asks again
+      // naming the session that IS there.
+      if (args.session && args.session !== live) {
+        return {
+          ok: false, code: 4, needs_confirm: live,
+          output: `${args.session} is no longer the session in ${pl.path} — ${live} is.`,
+        };
+      }
       if (live !== canonical && !args.yes) {
         return {
           ok: false, code: 4, needs_confirm: live,

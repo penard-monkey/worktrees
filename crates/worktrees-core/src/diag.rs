@@ -24,6 +24,11 @@ pub const EXIT_FINDINGS: i32 = 2;
 /// `WORKTREES_NO_PROMPT=1`). Distinct from `0` (which includes a human who
 /// answered "no" — an answer is not an error) and from `1` (nothing broke).
 ///
+/// Also returned when an answer ARRIVED but was about something else: `close
+/// --session <name>` names the session the caller's prompt showed, and if that
+/// is not what resolves at execution time the consent does not transfer — the
+/// caller is sent back to ask again about the session that is actually there.
+///
 /// `3` is skipped: it is `WtError::not_found`'s code, so the codes stay a single
 /// flat namespace across both channels — `0` clean / `1` usage-or-guard / `2`
 /// findings / `3` target not found / `4` needs confirmation.

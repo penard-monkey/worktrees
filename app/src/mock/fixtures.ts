@@ -35,6 +35,11 @@ export type Workspace = { projects: ProjectView[] };
 const NOW = 1784332800; // ~2026-07-21
 const DAY = 86400;
 
+/** The canonical tmux session name for a place — `Project::session_name`
+ *  (project.rs), including the `.` → `-` replacement tmux needs. Anything that
+ *  builds the name by hand drifts the moment a fixture slug has a dot in it. */
+export const sessionName = (prefix: string, slug: string) => `${prefix}-${slug}`.replace(/\./g, "-");
+
 type Opt = Partial<Place> & { slug: string; branch: string | null };
 function place(prefix: string, root: string, o: Opt): Place {
   const isMain = o.is_main ?? false;
@@ -52,7 +57,7 @@ function place(prefix: string, root: string, o: Opt): Place {
     behind: o.behind ?? 0,
     last_commit_subject: o.last_commit_subject ?? "wip",
     last_commit_epoch: o.last_commit_epoch ?? NOW - DAY,
-    tmux_session: o.tmux_session ?? { name: `${prefix}-${o.slug}`, up: false },
+    tmux_session: o.tmux_session ?? { name: sessionName(prefix, o.slug), up: false },
     claude_session_present: o.claude_session_present ?? false,
     declared: o.declared ?? null,
     lifecycle_effective: o.lifecycle_effective ?? "closed",

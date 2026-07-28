@@ -97,6 +97,12 @@ button { cursor: pointer; }
   box-shadow: var(--shadow-float);
   animation: pop var(--dur-slow) var(--ease);
 }
+/* same float, not an error: something happened that the user must be told about
+   (the session an armed kill named was replaced) but nothing broke */
+.err.notice {
+  background: color-mix(in srgb, var(--warn) 14%, var(--bg-panel));
+  color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
 
 .nav-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: var(--s2); }
 .add-footer {

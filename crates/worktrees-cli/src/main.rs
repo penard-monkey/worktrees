@@ -16,6 +16,7 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
   worktrees open <name>                 reopen a worktree's tmux session
   worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
+                                        (-y to kill an adopted session; --session <s> binds that answer)
   worktrees ls [--json]                 list worktrees + state (--json = machine-readable)
   worktrees rm <name> [name...]         tear one (or more) down
   worktrees relink [<name>|--all]       re-apply .worktrees.toml's files (--force to overwrite)

@@ -460,17 +460,37 @@ fn ai_is_claude() -> bool {
 /// under a previous prefix) and returns `EXIT_NEEDS_CONFIRM`. Passing `-y`
 /// unconditionally, as `remove_place` does, would restore exactly the
 /// promptless adopted-kill that confirmation exists to prevent.
+///
+/// `session` is the name the arm DISPLAYED — the frontend sends back the one it
+/// asked about, and core kills only that. The arm is armed at one moment and
+/// clicked at another; without the name, `yes` would authorize whatever a fresh
+/// resolution finds at click time, which can be a different session entirely.
 #[tauri::command]
-async fn close_place(repo: String, slug: String, yes: bool) -> Result<CmdResult, String> {
+async fn close_place(repo: String, slug: String, yes: bool, session: Option<String>) -> Result<CmdResult, String> {
     let slug_log = slug.clone();
     let mut args = vec![slug.clone()];
     if yes {
         args.push("-y".into());
     }
-    let mut r = run_op(&format!("close {slug_log} yes={yes}"), &repo, |p, ui| ops::cmd_close(p, ui, &args))?;
+    let expect = session.filter(|s| !s.is_empty());
+    // The consented session goes in the log line too: when a kill is questioned
+    // later, the record must say WHICH session the user was asked about.
+    let op = match &expect {
+        Some(s) => format!("close {slug_log} yes={yes} session={s}"),
+        None => format!("close {slug_log} yes={yes}"),
+    };
+    if let Some(s) = expect {
+        args.push("--session".into());
+        args.push(s);
+    }
+    let mut r = run_op(&op, &repo, |p, ui| ops::cmd_close(p, ui, &args))?;
     if r.code == worktrees_core::diag::EXIT_NEEDS_CONFIRM {
         // Not a failure — a question. Resolve the session core balked at the
-        // same way core did, so the UI can name it verbatim.
+        // same way core did, so the UI can name it verbatim. This is a SECOND
+        // resolution and can differ from core's (the session may have exited in
+        // between) — harmless now that the answer comes back name-bound: the
+        // name shown is the name core is held to, and `None` means there is
+        // nothing left to ask about (the frontend treats it as "already gone").
         r.needs_confirm = Project::discover(Path::new(&repo)).ok().and_then(|p| ops::place_session(&p, &slug));
     }
     Ok(r)

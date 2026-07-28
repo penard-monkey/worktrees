@@ -569,12 +569,28 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut names: Vec<String> = Vec::new();
     let mut yes = false;
+    let mut expect: Option<String> = None;
+    let mut want_val = false;
     for a in args {
+        if want_val {
+            if a.starts_with('-') {
+                ui.error(&format!("--session needs a value (got '{a}')"));
+                return 1;
+            }
+            expect = Some(a.clone());
+            want_val = false;
+            continue;
+        }
         match a.as_str() {
             // Same convention as `rm`: `CaptureUi::confirm` always answers no, so
             // a programmatic caller (the app, a script) that means it passes `-y`
             // rather than being silently skipped.
             "-y" | "--yes" => yes = true,
+            // The session the caller was SHOWN when it collected the user's word.
+            // See close_one: consent is bound to this name, not to whatever is
+            // live by the time the answer comes back.
+            "--session" => want_val = true,
+            s if s.starts_with("--session=") => expect = Some(s["--session=".len()..].to_string()),
             s if s.starts_with('-') => {
                 ui.error(&format!("Unknown flag: {s}"));
                 return 1;
@@ -582,8 +598,19 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s => names.push(s.to_string()),
         }
     }
+    if want_val {
+        ui.error("--session needs a value");
+        return 1;
+    }
     if names.is_empty() {
         ui.error("close needs a worktree (slug or branch), or 'main'. See: worktrees ls");
+        return 1;
+    }
+    // One name per session name: `--session` answers for ONE place, and spreading
+    // it over several would mean the same consent standing in for sessions the
+    // user never saw — the exact thing it exists to prevent.
+    if expect.is_some() && names.len() > 1 {
+        ui.error("--session answers for ONE worktree — pass a single name.");
         return 1;
     }
     if !tmux::have_tmux() {
@@ -595,9 +622,9 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         // A hard failure OUTRANKS a needs-confirmation stop: across several
         // names the caller must see "something broke" (1) rather than "ask the
         // user" (EXIT_NEEDS_CONFIRM), which is the code every existing caller
-        // already understands.
-        if let Err(code) = close_one(p, ui, n, yes) {
-            rc = if rc == 1 { 1 } else { code };
+        // already understands. `worse_rc` is that ranking, written down once.
+        if let Err(code) = close_one(p, ui, n, yes, expect.as_deref()) {
+            rc = worse_rc(rc, code);
         }
     }
     rc
@@ -612,7 +639,14 @@ pub fn place_session(p: &Project, slug: &str) -> Option<String> {
     live_session(p, slug, &p.place_dir(slug), None)
 }
 
-fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool) -> Result<(), i32> {
+/// `expect` is the session the CALLER already showed the user — the arm label in
+/// the app, and the only session its click consented to kill. It is checked
+/// against what resolves HERE, because those are two different moments: the app's
+/// confirm is a round-trip (and its ctx-menu arm can sit open), so between the
+/// question and the answer the named session can exit and another one can adopt
+/// the place by pane cwd. Without the binding, `-y` would kill whatever is live
+/// at execution time under a consent collected for something else.
+fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option<&str>) -> Result<(), i32> {
     let s = slugify(name);
     if name != "(main)" && (s.is_empty() || s == "." || s == "..") {
         ui.error(&format!("Invalid worktree name '{name}'."));
@@ -648,6 +682,24 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool) -> Result<(), 
         ui.info(&format!("no live session for '{slug}' ({canonical}) — nothing to close."));
         return Ok(());
     };
+    // The consent is bound to a NAME. If what is living here now is not the
+    // session the caller named in its own prompt, nothing dies: the answer was
+    // about a session that is gone, and killing the newcomer would take a whole
+    // session nobody was ever asked about. The caller gets a FRESH
+    // needs-confirmation (not a failure, not a silent no-op) so it can re-ask
+    // naming what is actually there.
+    if let Some(want) = expect.filter(|w| *w != session) {
+        ui.warn(&format!(
+            "{} is no longer the session in {} — {} is.",
+            fmt::yellow(want),
+            fmt::cyan(&dir),
+            fmt::yellow(&session)
+        ));
+        ui.warn(&format!(
+            "Nothing was killed: you confirmed {want}, not {session}. Confirm again to kill {session}."
+        ));
+        return Err(crate::diag::EXIT_NEEDS_CONFIRM);
+    }
     // An ADOPTED session is one this tool did not name, found only by pane cwd —
     // so it may just as well be a personal session with ONE pane cwd'd here (or
     // in a nested unrelated repo under this dir), and `kill-session` takes the
@@ -657,6 +709,12 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool) -> Result<(), 
     //
     // A CANONICAL-name close still asks nothing: that name is one only this tool
     // writes, so there is no doubt about whose session it is.
+    //
+    // `-y` ALONE still skips this entirely — `worktrees close -y feat-x` is a
+    // person (or a script) saying "don't ask" in the same breath as the command,
+    // with no gap between the intent and the kill for the world to change in.
+    // The gap is what `--session` closes, and it is the app — whose consent
+    // travels back over a round-trip — that must pass one.
     if session != canonical && !yes {
         ui.warn(&format!(
             "tmux {} was not opened under this repo's name ({}) — it was adopted because a pane is cwd'd in {}.",
@@ -975,13 +1033,17 @@ pub fn cmd_relink(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 /// happened to walk `.worktrees/`: places [A → 1, B → 2] exits 2, rename the dirs
 /// and the same run exits 1. A hard failure OUTRANKS findings, because `1` means
 /// the operation did not happen while `2` means it happened and something needs
-/// attention. Any other nonzero is treated as a hard failure — an unrecognized
-/// code is not something to downgrade.
+/// attention. `EXIT_NEEDS_CONFIRM` sits below both (`close`'s loop): the op did
+/// not happen, but it stopped to ASK — a caller with a real breakage in the same
+/// run must see that instead. Any other nonzero is treated as a hard failure — an
+/// unrecognized code is not something to downgrade. The ladder is spelled out so
+/// a future code cannot be silently mis-ranked by an ad-hoc comparison.
 fn worse_rc(acc: i32, one: i32) -> i32 {
     let rank = |rc: i32| match rc {
         0 => 0,
-        crate::diag::EXIT_FINDINGS => 1,
-        _ => 2,
+        crate::diag::EXIT_NEEDS_CONFIRM => 1,
+        crate::diag::EXIT_FINDINGS => 2,
+        _ => 3,
     };
     if rank(one) > rank(acc) {
         one
@@ -1755,5 +1817,18 @@ mod tests {
         // an unrecognized nonzero is a hard failure, never downgraded to findings
         assert_eq!(worse_rc(2, 7), 7);
         assert_eq!(worse_rc(7, 2), 7);
+    }
+
+    #[test]
+    fn worse_rc_ranks_a_needs_confirmation_stop_below_everything_nonzero() {
+        // `close a b` where one name breaks (1) and the other stops to ask (4):
+        // the caller must see the breakage whichever order they were walked in.
+        let ask = crate::diag::EXIT_NEEDS_CONFIRM;
+        assert_eq!(worse_rc(worse_rc(0, ask), 1), 1);
+        assert_eq!(worse_rc(worse_rc(0, 1), ask), 1);
+        assert_eq!(worse_rc(worse_rc(0, ask), 2), 2);
+        // …but it still outranks a clean neighbour: the question must survive.
+        assert_eq!(worse_rc(worse_rc(0, 0), ask), ask);
+        assert_eq!(worse_rc(worse_rc(0, ask), 0), ask);
     }
 }

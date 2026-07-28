@@ -54,12 +54,20 @@ type ProjectHealth = { slugs: Set<string>; issues: number; error: string | null 
 
 // Arm keys for the topbar Close (bare control) and the ctx-menu "Close session"
 // (popover). Namespaced so they never collide with the remove arms sharing
-// `confirmRm`; `closectx|` deliberately does NOT match `isBareArm` — the menu's
-// own dismissal clears it.
+// `confirmRm`. The menu's own dismissal clears `closectx|` too, but it is not
+// the only thing that may — see isBareArm.
 const closeKey = (repo: string, slug: string) => `close|${repo}|${slug}`;
 const closeCtxKey = (repo: string, slug: string) => `closectx|${repo}|${slug}`;
-/** Arms on a naked control: nothing dismisses them, so they time out instead. */
-const isBareArm = (k: string | null) => !!k && (k.startsWith("hdr|") || k.startsWith("close|"));
+/** Arms that TIME OUT rather than waiting to be dismissed. The header ✕ has no
+ *  popover to dismiss it at all. Both close arms are here for a second reason:
+ *  an armed kill of a WHOLE tmux session must not outlive the moment it was
+ *  offered, and "the menu is still open" is not a moment — it has no upper
+ *  bound, and the session the label names can be replaced under it (core
+ *  refuses the mismatch, but the stale offer is still a lie). */
+const isBareArm = (k: string | null) =>
+  !!k && (k.startsWith("hdr|") || k.startsWith("close|") || k.startsWith("closectx|"));
+/** core's `diag::EXIT_NEEDS_CONFIRM` — "I stopped to ask", never a failure. */
+const EXIT_NEEDS_CONFIRM = 4;
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order: Home (clear
 // selection → briefing), then the rail's lens entries. Module scope = stable.
@@ -457,6 +465,11 @@ function App() {
   // dismissal path already clears and this can never re-arm anything by itself
   // (it is only ever read while confirmRm holds the matching close key).
   const [closeSess, setCloseSess] = useState("");
+  // Same float as `err`, other colour: something the user must be TOLD but that
+  // nothing failed at (an armed kill that hit a session which had already been
+  // replaced). A red banner for a question is what this whole path exists to
+  // stop, so it does not share the error register.
+  const [notice, setNotice] = useState("");
   const [menu, setMenu] = useState<"life" | "more" | null>(null);
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -761,10 +774,14 @@ function App() {
   const runCmd = async (name: string, args: Record<string, unknown>): Promise<CmdResult | null> => {
     try {
       setErr("");
+      setNotice("");
       const r = await invoke<CmdResult>(name, args);
-      // `needs_confirm` is not-ok but not a failure: the op stopped to ask. The
-      // caller arms a second click; a red banner would be a lie.
-      if (!r.ok && !r.needs_confirm) setErr(r.output || `${name} failed (exit ${r.code})`);
+      // EXIT_NEEDS_CONFIRM is not-ok but not a failure: the op stopped to ASK.
+      // The caller arms a second click; a red banner would be a lie. That holds
+      // even without a `needs_confirm` name — the session died while core was
+      // asking about it, so the question is moot, not broken (the refresh below
+      // shows the place dormant, and doClose says so).
+      if (!r.ok && r.code !== EXIT_NEEDS_CONFIRM) setErr(r.output || `${name} failed (exit ${r.code})`);
       await refresh();
       return r;
     } catch (e) {
@@ -802,15 +819,20 @@ function App() {
     setConfirmRm(null);
     removeProject(root);
   };
-  // Auto-disarm the BARE arms — the ones on a naked control with no popover to
-  // dismiss them: the project-header ✕ ("hdr|") and the topbar Close ("close|").
-  // Popover arms ("proj|", "ctx|", "closectx|", `repo|slug`) are cleared by
-  // their own close paths.
+  // Auto-disarm the TIMED arms: the project-header ✕ ("hdr|") and both Close
+  // arms ("close|" bare, "closectx|" in the menu). The first two have no popover
+  // to dismiss them at all; the ctx one does, but a menu can sit open for hours
+  // and an armed whole-session kill must expire like any other offer. The
+  // remaining popover arms ("proj|", `repo|slug`) are cleared by their own close
+  // paths.
+  // `closeSess` is a dep so a re-arm that names a DIFFERENT session (the one
+  // that took the place while the first arm sat) gets a full window of its own
+  // rather than the remainder of the window raised for the session that is gone.
   useEffect(() => {
     if (!isBareArm(confirmRm)) return;
     const t = setTimeout(() => setConfirmRm(null), 4000);
     return () => clearTimeout(t);
-  }, [confirmRm]);
+  }, [confirmRm, closeSess]);
   // Clear any bare arm when the selection changes (a switch of focus means the
   // destructive intent is stale).
   useEffect(() => {
@@ -855,13 +877,25 @@ function App() {
   // needs_confirm instead of killing, and we arm a second click — the same
   // shape as the remove confirms, sharing `confirmRm` so every dismissal path
   // disarms it. `armed` is the user's word, forwarded as `yes`.
+  //
+  // The armed click sends BACK the session the arm displayed: consent is bound
+  // to that name, and core kills nothing else. Between arming and clicking the
+  // named session can exit and another can adopt the place — then core answers
+  // with a fresh needs_confirm naming the newcomer, which we re-arm and SAY, so
+  // the click reads as "the session changed" rather than as a dud.
   const doClose = async (repo: string, slug: string, key: string, armed: boolean) => {
-    const r = await runCmd("close_place", { repo, slug, yes: armed });
+    const expect = armed ? closeSess : "";
+    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null });
     if (r?.needs_confirm) {
+      if (expect && r.needs_confirm !== expect)
+        setNotice(`${expect} is gone — ${r.needs_confirm} is in this place now. Nothing was killed.`);
       setCloseSess(r.needs_confirm);
       setConfirmRm(key); // arm; any open menu stays open
       return false;
     }
+    // Code 4 with no session to name: it died while core was asking about it.
+    // Nothing to close any more — the refresh runCmd already did shows that.
+    if (r?.code === EXIT_NEEDS_CONFIRM) setNotice(`${expect || "That session"} is already gone — nothing to close.`);
     setConfirmRm((c) => (c === key ? null : c));
     return true;
   };
@@ -1586,6 +1620,7 @@ function App() {
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
       {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
+      {!err && notice && <div className="err err-float notice" title="dismiss" onClick={() => setNotice("")}>{notice}</div>}
 
       {sortOpen && <div className="menu-catch" onClick={() => setSortOpen(false)} />}
 
