@@ -431,10 +431,12 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
                 ai_cmd = format!("{ai_cmd} {}", worktrees_core::config::resolve_ai_resume_arg());
             }
             // Propagate launch's rc: a failed new-session must reach the UI
-            // banner / app.log, not silently report success.
-            ops::launch(p, ui, &p.main_root, &session, "", &ai_cmd, false)
+            // banner / app.log, not silently report success. Single-pane
+            // (spare_shell=false): Claude gets full width; the scratch shell
+            // lives in the dock's Terminal tab.
+            ops::launch(p, ui, &p.main_root, &session, "", &ai_cmd, false, false)
         } else {
-            let mut args = vec![slug, "--no-attach".into()];
+            let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
             if resume {
                 args.push("-r".into());
             }
@@ -467,6 +469,7 @@ fn ai_is_claude() -> bool {
 /// resolution finds at click time, which can be a different session entirely.
 #[tauri::command]
 async fn close_place(repo: String, slug: String, yes: bool, session: Option<String>) -> Result<CmdResult, String> {
+    // core cmd_close sweeps this place's dock shell sidecars itself (on the kill path).
     let slug_log = slug.clone();
     let mut args = vec![slug.clone()];
     if yes {
@@ -1376,6 +1379,243 @@ async fn open_terminal(cmd: String, session: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── file browser (right dock, Files tab) ─────────────────────────────────────
+// Browse + view + edit the worktree's files. Every path is validated to live
+// UNDER a registered project root (worktrees nest under their main root), so the
+// UI can never read/write arbitrary files. Unlike git/tmux we DON'T shell these
+// FS reads out — they carry no repo semantics — but the listing calls
+// `git check-ignore` so the tree respects .gitignore (best-effort: no git / not
+// a repo → show everything).
+
+#[derive(Serialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+}
+
+#[derive(Serialize)]
+struct FileContent {
+    content: String,
+    truncated: bool,
+    binary: bool,
+    /// mtime (ms since epoch) — the dock echoes it back on save as a
+    /// compare-and-swap token so a stale buffer can't clobber a newer edit.
+    mtime: u64,
+}
+
+/// File mtime in ms since the epoch (0 if unavailable) — a cheap change token.
+fn file_mtime_ms(p: &Path) -> u64 {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Canonicalize `path` and require it under some registered project root.
+/// canonicalize() also means the path must EXIST — we only ever browse/edit
+/// files the tree surfaced, never create arbitrary ones.
+fn guard_under_projects(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
+    let canon = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
+    for r in read_projects(app) {
+        if let Ok(rc) = std::fs::canonicalize(&r) {
+            if canon == rc || canon.starts_with(&rc) {
+                return Ok(canon);
+            }
+        }
+    }
+    Err(format!("path outside workspace: {path}"))
+}
+
+/// Immediate children of `path` (one level; the tree lazy-expands). Dirs first,
+/// then case-insensitive by name. `.git` and gitignored entries are dropped.
+#[tauri::command]
+async fn list_dir(app: AppHandle, path: String) -> Result<Vec<FsEntry>, String> {
+    let dir = guard_under_projects(&app, &path)?;
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let mut entries: Vec<FsEntry> = Vec::new();
+    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let e = e.map_err(|e| e.to_string())?;
+        let name = e.file_name().to_string_lossy().to_string();
+        if name == ".git" {
+            continue;
+        }
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        entries.push(FsEntry { name, path: e.path().to_string_lossy().to_string(), is_dir });
+    }
+    // Drop gitignored entries in one `git check-ignore --stdin` batch (NUL-safe).
+    let ignored = git_check_ignore(&dir, entries.iter().map(|e| e.path.as_str()));
+    entries.retain(|e| !ignored.contains(&e.path));
+    entries.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(entries)
+}
+
+/// Paths git would ignore (best-effort). `-z` in/out keeps it robust to spaces
+/// and newlines in filenames. Empty set on any git failure → nothing filtered.
+fn git_check_ignore<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) -> std::collections::HashSet<String> {
+    use std::process::{Command, Stdio};
+    let mut stdin_buf = Vec::new();
+    for p in paths {
+        stdin_buf.extend_from_slice(p.as_bytes());
+        stdin_buf.push(0);
+    }
+    if stdin_buf.is_empty() {
+        return Default::default();
+    }
+    let child = Command::new("git")
+        .args(["-C", &dir.to_string_lossy(), "check-ignore", "--stdin", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => return Default::default(),
+    };
+    // Write stdin on its own thread while the parent drains stdout below — a big
+    // directory's path list can exceed the pipe buffer, and writing all of it
+    // before reading would deadlock (git blocks on stdout, we block on stdin).
+    if let Some(mut si) = child.stdin.take() {
+        thread::spawn(move || {
+            let _ = si.write_all(&stdin_buf);
+            // drop closes the pipe → git sees EOF
+        });
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(_) => return Default::default(),
+    };
+    out.stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .collect()
+}
+
+/// File contents for the viewer. Capped (default 1 MiB) and binary-guarded
+/// (a NUL byte in the read slice → `binary: true`, empty content). The frontend
+/// shows a "binary / open in editor" placeholder instead of garbage.
+#[tauri::command]
+async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Result<FileContent, String> {
+    let f = guard_under_projects(&app, &path)?;
+    if !f.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    let cap = max_bytes.unwrap_or(1_000_000);
+    // Bounded read: `take(cap+1)` never allocates more than the cap even for a
+    // multi-GB file the user clicks by accident (video, core dump, tarball).
+    let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let truncated = bytes.len() as u64 > cap;
+    let slice = &bytes[..bytes.len().min(cap as usize)];
+    let mtime = file_mtime_ms(&f);
+    if slice.contains(&0) {
+        return Ok(FileContent { content: String::new(), truncated, binary: true, mtime });
+    }
+    Ok(FileContent { content: String::from_utf8_lossy(slice).to_string(), truncated, binary: false, mtime })
+}
+
+/// Save an edit. The file must already exist (guard canonicalizes) — the dock
+/// edits files it surfaced, it doesn't create new ones. `expected_mtime` is a
+/// compare-and-swap guard: if the file changed on disk since the dock read it
+/// (Claude edited it in another pane), the save is refused rather than silently
+/// clobbering. The write is atomic (temp file + rename) so a crash mid-save
+/// can't leave a half-written file, and preserves the file's mode bits.
+#[tauri::command]
+async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<(), String> {
+    let f = guard_under_projects(&app, &path)?;
+    if !f.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    if let Some(exp) = expected_mtime {
+        if file_mtime_ms(&f) != exp {
+            return Err("file changed on disk since you opened it — reload to see the latest".into());
+        }
+    }
+    let dir = f.parent().ok_or("no parent directory")?;
+    let base = f.file_name().and_then(|n| n.to_str()).unwrap_or("edit");
+    let tmp = dir.join(format!(".{base}.wt-tmp"));
+    std::fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
+    if let Ok(meta) = std::fs::metadata(&f) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions()); // keep the exec bit etc.
+    }
+    std::fs::rename(&tmp, &f).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
+// ── dock terminal: scratch-shell sidecar sessions ────────────────────────────
+// The single-pane place session (Claude only) pairs with one or more SIDECAR
+// tmux sessions for the dock's Terminal tab — bare keep-alive shells cwd'd in
+// the worktree, one per shell tab: `<session>~term`, `<session>~term~2`, … Each
+// is persistent + `tmux attach`-able like any place session, and excluded from
+// worktree adoption (tmux::session_in) so none can masquerade as the AI
+// session. Torn down with the place — core cmd_close/cmd_rm sweep them.
+
+/// A place's CANONICAL session name + worktree cwd, both derived backend-side
+/// from `repo` + `slug`. The dock never supplies a session name or path — that
+/// keeps the webview from naming/killing arbitrary tmux sessions or opening a
+/// shell outside the workspace, and keeps sidecar names STABLE (a place's
+/// canonical name doesn't change when it briefly runs under an adopted session).
+fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), String> {
+    let p = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
+    Ok((p.session_name(slug), p.place_dir(slug)))
+}
+
+/// Ensure the dock's scratch-shell sidecar for a place + 1-based tab `index`
+/// exists (creating it cwd'd in the worktree) and return its tmux name.
+/// Idempotent — reused across dock opens/reboots.
+#[tauri::command]
+async fn open_shell_session(repo: String, slug: String, index: u32) -> Result<String, String> {
+    if !worktrees_core::tmux::have_tmux() {
+        return Err("tmux not found".into());
+    }
+    let (session, cwd) = place_session_cwd(&repo, &slug)?;
+    let shell = worktrees_core::tmux::shell_sidecar_name(&session, index);
+    if !worktrees_core::tmux::session_exists(&shell) {
+        if let Err(e) = worktrees_core::tmux::new_session(&shell, &cwd, "exec \"${SHELL:-/bin/sh}\"") {
+            // Lost a create race (React StrictMode double-mounts the effect; rapid
+            // tab flips) → the session now exists; treat that as success, not an
+            // error banner. Any other failure is real.
+            if !worktrees_core::tmux::session_exists(&shell) {
+                applog("error", &format!("open_shell_session {shell}: {e}"));
+                return Err(e);
+            }
+        }
+        worktrees_core::tmux::tune_session(&shell);
+    }
+    Ok(shell)
+}
+
+/// The 1-based indices of a place's live shell sidecars — the dock restores its
+/// Terminal tabs from tmux (self-healing across app restarts, no extra state).
+#[tauri::command]
+async fn list_shell_sessions(repo: String, slug: String) -> Result<Vec<u32>, String> {
+    let (session, _) = place_session_cwd(&repo, &slug)?;
+    let mut ids: Vec<u32> = worktrees_core::tmux::session_names()
+        .iter()
+        .filter_map(|n| worktrees_core::tmux::shell_sidecar_index(&session, n))
+        .collect();
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+/// End one shell tab (`<session>~term[~index]`). Best-effort; missing = no-op.
+#[tauri::command]
+async fn close_shell_session(repo: String, slug: String, index: u32) -> Result<(), String> {
+    let (session, _) = place_session_cwd(&repo, &slug)?;
+    worktrees_core::tmux::kill_session(&worktrees_core::tmux::shell_sidecar_name(&session, index));
+    Ok(())
+}
+
 /// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
 #[tauri::command]
 async fn remove_place(
@@ -1392,7 +1632,9 @@ async fn remove_place(
     if force {
         args.push("--force".into());
     }
-    run_op(&format!("rm {slug_log}"), &repo, |p, ui| ops::cmd_rm(p, ui, &args))
+    // cmd_rm sweeps this place's dock shell sidecars itself (core, only once the
+    // removal proceeds past its dirty/confirm guards — a refused rm keeps them).
+    run_op(&format!("rm {slug_log}"), &repo, move |p, ui| ops::cmd_rm(p, ui, &args))
 }
 
 // ── PTY host: attach to a live tmux session ─────────────────────────────────
@@ -1658,6 +1900,12 @@ pub fn run() {
             get_changelog,
             open_editor,
             open_terminal,
+            list_dir,
+            read_file,
+            write_file,
+            open_shell_session,
+            list_shell_sessions,
+            close_shell_session,
             settings_info,
             get_settings,
             set_settings,

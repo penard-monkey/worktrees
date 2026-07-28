@@ -35,6 +35,9 @@ export type Settings = {
   density: "comfortable" | "compact";
   nav_width: number; // 220–460
   nav_collapsed: boolean; // rail-only mode (nav hidden)
+  dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
+  dock_width: number; // 240–680
+  dock_tab: "files" | "terminal"; // last-used dock tab
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
   ai_auto_resume: boolean; // single-click Enter resumes an existing Claude conversation (Claude only)
@@ -73,6 +76,9 @@ export const DEFAULTS: Settings = {
   density: "comfortable",
   nav_width: 300,
   nav_collapsed: false,
+  dock_open: false,
+  dock_width: 360,
+  dock_tab: "files",
   editor_cmd: "code",
   terminal_cmd: "",
   ai_auto_resume: true,
@@ -100,6 +106,7 @@ export type UpdateInfo = {
 export const clampRem = (v: number) => Math.max(13, Math.min(18, v));
 export const clampTerm = (v: number) => Math.max(10, Math.min(20, v));
 export const clampNav = (v: number) => Math.max(220, Math.min(460, v));
+export const clampDock = (v: number) => Math.max(240, Math.min(680, v));
 
 /** Write the visual settings to the DOM as CSS vars / data-attrs. Cheap; safe to call often. */
 export function applySettings(s: Settings) {
@@ -108,6 +115,7 @@ export function applySettings(s: Settings) {
   root.style.setProperty("--term-family", s.term_family);
   root.style.setProperty("--term-size", `${clampTerm(s.term_size)}px`);
   root.style.setProperty("--nav-w", `${clampNav(s.nav_width)}px`);
+  root.style.setProperty("--dock-w", `${clampDock(s.dock_width)}px`);
   root.dataset.theme = resolveTheme(s);
   root.dataset.density = s.density;
 }

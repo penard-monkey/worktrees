@@ -5,7 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-28
+
 ### Added
+- Right dock (⌘J, or the panel button in a place's toolbar): a collapsible,
+  resizable side panel with two tabs. **Files** browses the worktree as a lazy
+  tree (honouring .gitignore) — click any file to view it, and edit it inline
+  with ⌘S to save (binary and very large files stay read-only; "Editor" still
+  opens your external editor). **Terminal** runs one or more live shells
+  alongside Claude — add tabs with ＋ or ⌘⇧T, close them individually, or close
+  them all. Each shell is its own tmux session, so they survive app restarts,
+  are `tmux attach`-able from a bare terminal, and the open tabs are restored
+  from the live sessions next time. The dock's width and last-used tab persist.
 - **Per-project setup (`.worktrees.toml`).** A repo can now declare, in a
   committed file, the untracked things every worktree of it needs: which
   gitignored files to link (or copy) from the main checkout, a port map so two
@@ -35,6 +46,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and Relink / Provision buttons. Places that have drifted get a ⚑ in the nav.
   A project that qualifies for a config but doesn't have one gets a dismissible
   suggestion.
+
+### Changed
+- The app now opens a place's tmux session as a single pane (Claude only) so it
+  gets the full width — the scratch shell that used to share the split moved to
+  the new dock's Terminal tab. The `worktrees` CLI is unchanged: `new` still
+  splits a second pane for the dependency install.
 
 ## [0.3.2] - 2026-07-28
 

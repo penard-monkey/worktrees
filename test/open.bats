@@ -31,6 +31,22 @@ session_count() {
   [[ "$(tmux_pane0_cmd repo-feat-x)" == *fake-ai* ]]
 }
 
+@test "open (default) keeps the spare shell as pane 1" {
+  make_worktree feat-sp
+  run_wt open feat-sp
+  [ "$status" -eq 0 ]
+  [ -n "$(tmux_pane1_cmd repo-feat-sp)" ]   # split-window ran → pane 1 exists
+}
+
+@test "open --no-spare: single pane, no spare shell (the app's path)" {
+  make_worktree feat-ns
+  run_wt open feat-ns --no-spare
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-ns
+  [[ "$(tmux_pane0_cmd repo-feat-ns)" == *fake-ai* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-ns)" ]   # no split-window → no pane 1
+}
+
 @test "open by BRANCH resolves the differently-named holder worktree" {
   make_worktree feat/foo --name topic
   local repo_phys; repo_phys="$REPO"   # already physical (make_repo)

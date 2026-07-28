@@ -555,6 +555,107 @@ button { cursor: pointer; }
 }
 .te-title { color: var(--txt-dim); font-size: var(--fs-body); }
 
+/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ── */
+.dock {
+  position: relative;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--bg-tree);
+  border-left: 1px solid var(--line);
+}
+.dock-resizer {
+  position: absolute; top: 0; left: -2px; width: 4px; height: 100%;
+  cursor: col-resize; z-index: 5;
+}
+.dock-resizer:hover { background: var(--line-strong); }
+
+.dock-tabs {
+  display: flex; align-items: center; gap: var(--s1);
+  padding: var(--s2); border-bottom: 1px solid var(--line);
+}
+.dock-tab {
+  background: transparent; border: 0; color: var(--txt-dim);
+  padding: var(--s1) var(--s2); border-radius: var(--r-sm); font-size: var(--fs-label);
+  transition: color var(--dur-fast), background var(--dur-fast);
+}
+.dock-tab:hover { color: var(--txt-hi); background: var(--bg-elev); }
+.dock-tab.on { color: var(--accent); background: var(--bg-elev); }
+.dock-spacer { flex: 1; }
+
+.dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.dock-body .term-host { border-radius: 0; }
+
+/* Terminal tab: several shells behind a tab strip */
+.termtabs { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.termtab-strip {
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+  padding: var(--s1) var(--s2); border-bottom: 1px solid var(--line);
+}
+.termtab {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: transparent; color: var(--txt-dim); font-size: var(--fs-meta);
+}
+.termtab.on { color: var(--accent); background: var(--bg-elev); border-color: var(--line-strong); }
+.termtab-label { background: transparent; border: 0; color: inherit; padding: 2px var(--s2); font: inherit; }
+.termtab-x {
+  background: transparent; border: 0; color: var(--txt-mute);
+  padding: 2px 5px 2px 0; font-size: var(--fs-micro); line-height: 1;
+}
+.termtab-x:hover { color: var(--danger); }
+.termtab-add {
+  background: transparent; border: 0; color: var(--txt-dim);
+  padding: 2px var(--s2); border-radius: var(--r-sm); font-size: var(--fs-label);
+}
+.termtab-add:hover { color: var(--txt-hi); background: var(--bg-elev); }
+
+/* Files tab: tree on top, viewer below */
+.dock-files { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.dock-tree {
+  flex: 0 0 40%; min-height: 64px; overflow: auto;
+  border-bottom: 1px solid var(--line); padding: var(--s1) 0;
+}
+
+.filetree { font-size: var(--fs-label); }
+.tree-row {
+  display: flex; align-items: center; gap: var(--s1); width: 100%;
+  background: transparent; border: 0; text-align: left; color: var(--txt);
+  padding: 3px var(--s2); white-space: nowrap; overflow: hidden;
+}
+.tree-row:hover { background: var(--bg-elev); }
+.tree-row.sel { background: var(--bg-elev); color: var(--accent); }
+.tree-row.dir { color: var(--txt-dim); }
+.tree-caret { width: 10px; flex: none; color: var(--txt-mute); font-size: var(--fs-meta); }
+.tree-name { overflow: hidden; text-overflow: ellipsis; }
+.tree-note { padding: var(--s2) var(--s3); color: var(--txt-mute); font-size: var(--fs-meta); }
+.err-note { color: var(--danger); white-space: pre-wrap; word-break: break-word; }
+
+/* Files tab: viewer / editor */
+.viewer { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.viewer-h {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s1) var(--s2); border-bottom: 1px solid var(--line); font-size: var(--fs-meta);
+}
+.viewer-path { color: var(--txt-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-tag {
+  color: var(--dirty); font-size: var(--fs-micro);
+  border: 1px solid color-mix(in srgb, var(--dirty) 40%, transparent);
+  border-radius: var(--r-sm); padding: 0 4px;
+}
+.viewer-tag.conflict {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+.viewer-hint { align-self: center; margin-top: var(--s4); }
+.viewer-text {
+  flex: 1; min-height: 0; resize: none; width: 100%;
+  background: var(--bg-abyss); color: var(--txt); border: 0; outline: none;
+  padding: var(--s2) var(--s3);
+  font-family: var(--term-family); font-size: var(--term-size); line-height: 1.5;
+  white-space: pre; tab-size: 2;
+}
+.viewer-text[readonly] { color: var(--txt-dim); }
+.linklike { background: 0; border: 0; color: var(--accent); text-decoration: underline; padding: 0; font: inherit; }
+
 /* status bar */
 .statusbar {
   display: flex; align-items: center; gap: var(--s3);
