@@ -28,6 +28,23 @@ close-out ritual (.claude/skills/close-out).
   v0.3.0 + v0.3.1.)
   _From: [2026-07-27 settings session](docs/sessions/2026-07-27-settings-and-audits/summary.md)_
 
+- **Per-project settings (`.worktrees.toml`)** — design decided, nothing built;
+  build slot is **after v0.3.2**. Full spec: `docs/proposals/project-settings.md`.
+  v1 = `[[file]]` link/copy + `[ports]`/`.worktree.env` + `[compose]` namespacing
+  and teardown + `relink`/`provision`/`doctor`. Generic by design — each section
+  stands alone; `casa-del-valle-monorepo` is the first consumer, not the spec.
+  Decided: no repo-supplied argv ever (no `[hooks]`, and `DESIGN.md:225-228`'s
+  `[infra] up/stop/down` is reversed — the tool assembles the compose argv from
+  data); TOML for both human-authored config files; port slot derived from
+  `<wt>/.worktree.env`, never stored in `.worktrees.places.json`.
+  ⚠ Carries a live hazard: two cdv worktrees created by this tool have no
+  `.worktree.env`, and that repo's `deploy-local.sh` treats its absence as
+  "not a worktree" → global `pkill -9` that kills the main checkout's stack.
+  Prereqs that must land with it: `.worktree.env` in `ensure_excluded` (else
+  `switch`/`rm` refuse forever and the GUI can't pass `--force`), and severity
+  in `CaptureUi` (warnings are currently discarded at capture).
+  _From: 2026-07-27 project-settings design session_
+
 - **Global summon hotkey (v0.3.2)** — OS-level chord (tauri global-shortcut
   plugin) that fronts the window and drops straight into the ⌘K switcher —
   summon → fuzzy-jump → attach in one motion. Prerequisite (the switcher) now

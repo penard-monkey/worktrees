@@ -93,7 +93,9 @@ worktrees provision <slug|branch>            # NEW: (re)link/copy env + (re)allo
 worktrees up   <slug|branch> [--provision]   # NEW: export slot env, run declared infra.up from the worktree dir
 worktrees down <slug|branch> [--keep-volumes]# NEW: --keep-volumes → infra.stop; else infra.down (destroys volumes)
 
-# Exit codes: 0 ok · 1 guard/usage · 3 target-not-found (UI distinguishes "gone" from "broke")
+# Exit codes: 0 ok · 1 guard/usage · 2 doctor findings · 3 target-not-found (UI
+#   distinguishes "gone" from "broke") · 4 needs-confirmation (a destructive
+#   prompt a non-interactive caller could not answer — see diag.rs)
 ```
 
 Dispatch additions (append to the `case` ~line 670): `status|st`, `paths`, `up`, `down`,

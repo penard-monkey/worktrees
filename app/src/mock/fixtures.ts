@@ -35,6 +35,11 @@ export type Workspace = { projects: ProjectView[] };
 const NOW = 1784332800; // ~2026-07-21
 const DAY = 86400;
 
+/** The canonical tmux session name for a place — `Project::session_name`
+ *  (project.rs), including the `.` → `-` replacement tmux needs. Anything that
+ *  builds the name by hand drifts the moment a fixture slug has a dot in it. */
+export const sessionName = (prefix: string, slug: string) => `${prefix}-${slug}`.replace(/\./g, "-");
+
 type Opt = Partial<Place> & { slug: string; branch: string | null };
 function place(prefix: string, root: string, o: Opt): Place {
   const isMain = o.is_main ?? false;
@@ -52,7 +57,7 @@ function place(prefix: string, root: string, o: Opt): Place {
     behind: o.behind ?? 0,
     last_commit_subject: o.last_commit_subject ?? "wip",
     last_commit_epoch: o.last_commit_epoch ?? NOW - DAY,
-    tmux_session: o.tmux_session ?? { name: `${prefix}-${o.slug}`, up: false },
+    tmux_session: o.tmux_session ?? { name: sessionName(prefix, o.slug), up: false },
     claude_session_present: o.claude_session_present ?? false,
     declared: o.declared ?? null,
     lifecycle_effective: o.lifecycle_effective ?? "closed",
@@ -65,7 +70,7 @@ function cdv(): ProjectView {
   const places: Place[] = [
     place(P, root, {
       slug: "(main)", branch: "main", is_main: true,
-      tmux_session: { name: `${P}-main`, up: true }, ahead: 0, behind: 0,
+      tmux_session: { name: `${P}-(main)`, up: true }, ahead: 0, behind: 0,
       last_commit_subject: "chore: bump deps", lifecycle_effective: "active",
     }),
     place(P, root, {
@@ -85,7 +90,11 @@ function cdv(): ProjectView {
     place(P, root, {
       slug: "kitchen-sink", branch: null, detached: true,
       dirty: true, dirty_files: 12, ahead: 3, behind: 4,
-      tmux_session: { name: `${P}-kitchen-sink`, up: true }, claude_session_present: true,
+      // ADOPTED session: the name is not `<prefix>-<slug>`, so this tool did not
+      // write it — a session left under a previous prefix (proposal §5), or one
+      // started by hand. Closing it needs the user's word; the fixture exists so
+      // that two-click arm is drivable headlessly.
+      tmux_session: { name: "dev-kitchen-sink", up: true }, claude_session_present: true,
       last_commit_subject: "detached experiment", declared: { last_opened_epoch: NOW - 1200 },
       lifecycle_effective: "active",
     }),
@@ -120,7 +129,7 @@ function worktreesRepo(): ProjectView {
   const places: Place[] = [
     place(P, root, {
       slug: "(main)", branch: "main", is_main: true, ahead: 0, behind: 0,
-      tmux_session: { name: `${P}-main`, up: false }, last_commit_subject: "docs: readme",
+      tmux_session: { name: `${P}-(main)`, up: false }, last_commit_subject: "docs: readme",
       lifecycle_effective: "closed",
     }),
     place(P, root, {

@@ -317,6 +317,19 @@ struct CmdResult {
     /// this instead of re-deriving and guessing wrong. `None` for every other op.
     #[serde(skip_serializing_if = "Option::is_none")]
     slug: Option<String>,
+    /// For `close_place` only: core stopped short (`diag::EXIT_NEEDS_CONFIRM`)
+    /// because killing this place's session needs the user's word — it was
+    /// ADOPTED, so `kill-session` takes a whole session the user did not start
+    /// through this tool. The value is the session that would die, passed
+    /// STRUCTURALLY so the frontend names it in its own confirm without parsing
+    /// core's prose. `None` for every other op and outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    needs_confirm: Option<String>,
+    /// Messages the op emitted at warn/error severity. `output` flattens every
+    /// severity into one blob and the UI only shows it when the op FAILED, so a
+    /// warning on a successful op used to vanish — which is the failure mode
+    /// `doctor` exists to end (proposal §7).
+    warnings: Vec<String>,
 }
 
 fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F) -> Result<CmdResult, String> {
@@ -326,12 +339,19 @@ fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F
     })?;
     let mut ui = CaptureUi::default();
     let code = f(&project, &mut ui);
+    let warnings = ui.warnings();
     if code == 0 {
         applog("info", &format!("{op} ok repo={repo}"));
+        // A SUCCESSFUL op can still warn (a declared file absent from main, a
+        // drifted copy). Log it separately — otherwise the only record of it is
+        // an `output` string the UI never renders on success.
+        if !warnings.is_empty() {
+            applog("warn", &format!("{op} warnings repo={repo}: {}", warnings.join(" | ")));
+        }
     } else {
         applog("warn", &format!("{op} rc={code} repo={repo}: {}", ui.lines.join(" | ")));
     }
-    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n"), slug: None })
+    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n"), slug: None, needs_confirm: None, warnings })
 }
 
 /// Create a worktree (`new`). `--no-attach`: the session is created (pane 0 AI,
@@ -433,9 +453,47 @@ fn ai_is_claude() -> bool {
 }
 
 /// End a place's tmux session — the worktree stays (right-click "Close session").
+///
+/// `yes` is the user's word, collected by the frontend's two-click arm. Without
+/// it core refuses to kill an ADOPTED session (one found by pane cwd, not by
+/// this tool's name — a whole tmux session someone started by hand, or one left
+/// under a previous prefix) and returns `EXIT_NEEDS_CONFIRM`. Passing `-y`
+/// unconditionally, as `remove_place` does, would restore exactly the
+/// promptless adopted-kill that confirmation exists to prevent.
+///
+/// `session` is the name the arm DISPLAYED — the frontend sends back the one it
+/// asked about, and core kills only that. The arm is armed at one moment and
+/// clicked at another; without the name, `yes` would authorize whatever a fresh
+/// resolution finds at click time, which can be a different session entirely.
 #[tauri::command]
-async fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
-    run_op(&format!("close {slug}"), &repo, move |p, ui| ops::cmd_close(p, ui, &[slug]))
+async fn close_place(repo: String, slug: String, yes: bool, session: Option<String>) -> Result<CmdResult, String> {
+    let slug_log = slug.clone();
+    let mut args = vec![slug.clone()];
+    if yes {
+        args.push("-y".into());
+    }
+    let expect = session.filter(|s| !s.is_empty());
+    // The consented session goes in the log line too: when a kill is questioned
+    // later, the record must say WHICH session the user was asked about.
+    let op = match &expect {
+        Some(s) => format!("close {slug_log} yes={yes} session={s}"),
+        None => format!("close {slug_log} yes={yes}"),
+    };
+    if let Some(s) = expect {
+        args.push("--session".into());
+        args.push(s);
+    }
+    let mut r = run_op(&op, &repo, |p, ui| ops::cmd_close(p, ui, &args))?;
+    if r.code == worktrees_core::diag::EXIT_NEEDS_CONFIRM {
+        // Not a failure — a question. Resolve the session core balked at the
+        // same way core did, so the UI can name it verbatim. This is a SECOND
+        // resolution and can differ from core's (the session may have exited in
+        // between) — harmless now that the answer comes back name-bound: the
+        // name shown is the name core is held to, and `None` means there is
+        // nothing left to ask about (the frontend treats it as "already gone").
+        r.needs_confirm = Project::discover(Path::new(&repo)).ok().and_then(|p| ops::place_session(&p, &slug));
+    }
+    Ok(r)
 }
 
 // ── update check (Settings → Version) ────────────────────────────────────────
@@ -755,6 +813,8 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
             code: f.status.code().unwrap_or(-1),
             output: format!("installer download failed\n{}", String::from_utf8_lossy(&f.stderr)),
             slug: None,
+            needs_confirm: None,
+            warnings: Vec::new(),
         });
     }
 
@@ -787,6 +847,8 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
         code: out.status.code().unwrap_or(-1),
         output: text,
         slug: None,
+        needs_confirm: None,
+        warnings: Vec::new(),
     })
 }
 
@@ -821,6 +883,334 @@ async fn get_ai_config() -> Result<AiConfig, String> {
         path: path.to_string_lossy().into_owned(),
         exists: path.exists(),
     })
+}
+
+// ── per-project config surface (the Project sheet, proposal §10) ─────────────
+// Read-only config view + the four verbs (doctor / relink / provision / init).
+//
+// Everything here is ON DEMAND. `doctor` in particular must NEVER be wired into
+// the 3s poll thread: `places:changed` already triggers a full `list_workspace`
+// (up to 16 concurrent git calls per project), and a per-place filesystem probe
+// on top of that would put the project config on exactly the hot path §8 keeps
+// it off. The frontend runs it when the sheet opens, after a repair, and on a
+// slow (~5 min) timer.
+
+#[derive(Serialize)]
+struct ProjectFileView {
+    path: String,
+    /// `"link"` | `"copy"` — the per-entry mode (§3).
+    mode: String,
+}
+
+#[derive(Serialize)]
+struct ProjectPortsView {
+    stride: u32,
+    max_slots: u32,
+    /// `(NAME, base_port)`, in the config's own (BTreeMap-sorted) order.
+    base: Vec<(String, u32)>,
+}
+
+#[derive(Serialize)]
+struct ProjectComposeView {
+    /// The `-f` list in DOCKER's order (a later file overrides an earlier one).
+    /// A LIST because `projcfg::Compose` is one: `down -v` only removes volumes
+    /// declared in the files it is handed, so the base compose file has to travel
+    /// with the worktree override. `file = "…"` is still the one-element form.
+    files: Vec<String>,
+    /// The `{prefix}`/`{slug}` template, unexpanded — this is the declaration.
+    project: String,
+}
+
+/// The direct analogue of `get_ai_config`: read-only visibility of a config the
+/// app does not (yet) edit. Never a `CmdResult` — the sheet renders structure.
+#[derive(Serialize)]
+struct ProjectConfigView {
+    /// Absolute path of `.worktrees.toml` — where it IS, or where it would go.
+    path: String,
+    exists: bool,
+    files: Vec<ProjectFileView>,
+    ports: Option<ProjectPortsView>,
+    compose: Option<ProjectComposeView>,
+    /// A fatal parse/validation failure, rendered as its `file:line: message`.
+    /// This is the most important thing the sheet can say when set: it is *why*
+    /// every op in the repo is refusing.
+    error: Option<String>,
+    /// Non-fatal parse findings, already rendered as `file:line: message`. Today
+    /// that is exactly `projcfg`'s `unknown-key` family — an unknown key, an
+    /// unknown table, or a wrong-shaped `[project]`. (Prefix disagreement is a
+    /// `doctor` finding, not a parse one: it needs the repo, not the file.)
+    warnings: Vec<String>,
+}
+
+#[tauri::command]
+async fn project_config_read(repo: String) -> Result<ProjectConfigView, String> {
+    let p = Project::discover(Path::new(&repo)).map_err(|e| {
+        applog("error", &format!("project_config_read repo={repo}: discover failed: {}", e.msg));
+        e.msg
+    })?;
+    let main = Path::new(&p.main_root);
+    let path = main.join(worktrees_core::projcfg::CONFIG_FILE);
+    let mut view = ProjectConfigView {
+        path: path.to_string_lossy().into_owned(),
+        exists: path.exists(),
+        files: Vec::new(),
+        ports: None,
+        compose: None,
+        error: None,
+        warnings: Vec::new(),
+    };
+    match worktrees_core::projcfg::load(main) {
+        Ok((Some(cfg), findings)) => {
+            view.files = cfg
+                .files
+                .iter()
+                .map(|f| ProjectFileView {
+                    path: f.path.as_str().to_string(),
+                    mode: match f.mode {
+                        worktrees_core::projcfg::Mode::Link => "link",
+                        worktrees_core::projcfg::Mode::Copy => "copy",
+                    }
+                    .to_string(),
+                })
+                .collect();
+            view.ports = cfg.ports.as_ref().map(|x| ProjectPortsView {
+                stride: x.stride,
+                max_slots: x.max_slots,
+                base: x.base.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            });
+            view.compose = cfg.compose.as_ref().map(|c| ProjectComposeView {
+                files: c.files.iter().map(|f| f.as_str().to_string()).collect(),
+                project: c.project.clone(),
+            });
+            view.warnings = findings.iter().map(|f| f.message.clone()).collect();
+        }
+        // No config is a healthy repo, not a broken one (§2.4).
+        Ok((None, _)) => {}
+        Err(e) => {
+            applog("warn", &format!("project_config_read repo={repo}: {e}"));
+            view.error = Some(e.to_string());
+        }
+    }
+    Ok(view)
+}
+
+/// `doctor`'s TYPED report — badges need structure, so this is deliberately not
+/// a `CmdResult` (§10). `findings` is `diag::Finding` verbatim, so the app's
+/// vocabulary of severities and codes is the CLI's by construction.
+#[derive(Serialize)]
+struct DoctorReport {
+    /// `0` clean · `1` a guard only the user can fix (bad worktree name, an
+    /// unreadable config) · `2` findings present.
+    code: i32,
+    schema_version: u32,
+    findings: Vec<worktrees_core::diag::Finding>,
+    /// Set when the run produced no report at all (`code == 1`): the guard
+    /// message, already in app.log. Never swallowed.
+    error: Option<String>,
+}
+
+/// Report drift for one place, or for every place in the project (`slug: None`).
+///
+/// Runs the REAL `cmd_doctor` in `--json` mode and parses the line it emits,
+/// rather than re-assembling findings here: the CLI and the app must never
+/// disagree about what "drift" means.
+#[tauri::command]
+async fn doctor(repo: String, slug: Option<String>) -> Result<DoctorReport, String> {
+    let project = Project::discover(Path::new(&repo)).map_err(|e| {
+        applog("error", &format!("doctor repo={repo}: discover failed: {}", e.msg));
+        e.msg
+    })?;
+    let mut args: Vec<String> = Vec::new();
+    if let Some(s) = slug.filter(|s| !s.trim().is_empty()) {
+        args.push(s);
+    }
+    args.push("--json".into());
+    let mut ui = CaptureUi::default();
+    let code = ops::cmd_doctor(&project, &mut ui, &args);
+    let parsed = ui
+        .lines
+        .iter()
+        .rev()
+        .find_map(|l| serde_json::from_str::<worktrees_core::diag::Report>(l).ok());
+    match parsed {
+        Some(r) => {
+            if !r.findings.is_empty() {
+                applog("info", &format!("doctor rc={code} repo={repo}: {} finding(s)", r.findings.len()));
+            }
+            Ok(DoctorReport { code, schema_version: r.schema_version, findings: r.findings, error: None })
+        }
+        None => {
+            // rc 1 before the report was emitted (a usage guard, or a config that
+            // does not parse). The lines ARE the diagnosis.
+            let msg = ui.lines.join("\n");
+            applog("warn", &format!("doctor rc={code} repo={repo}: {msg}"));
+            Ok(DoctorReport {
+                code,
+                schema_version: worktrees_core::diag::SCHEMA_VERSION,
+                findings: Vec::new(),
+                error: Some(if msg.is_empty() { format!("doctor exited {code}") } else { msg }),
+            })
+        }
+    }
+}
+
+/// Re-apply the file plan (`relink [<wt>|--all] [--force]`). `force` is the
+/// documented escape hatch for a shadowing regular file — core writes a `.bak`
+/// alongside before it touches one (§7), so the drifted content is never the
+/// only casualty.
+#[tauri::command]
+async fn relink(repo: String, slug: Option<String>, force: bool) -> Result<CmdResult, String> {
+    let target = slug.filter(|s| !s.trim().is_empty());
+    let mut args: Vec<String> = vec![target.clone().unwrap_or_else(|| "--all".into())];
+    if force {
+        args.push("--force".into());
+    }
+    let label = target.as_deref().unwrap_or("--all").to_string();
+    run_op(&format!("relink {label}"), &repo, |p, ui| ops::cmd_relink(p, ui, &args))
+}
+
+/// Allocate/repair port slots (`provision [<wt>|--all]`). `--reallocate` is
+/// deliberately NOT exposed: §6 makes moving a slot under a running stack a
+/// refuse-by-default, and a GUI button is the last place that decision belongs.
+#[tauri::command]
+async fn provision(repo: String, slug: Option<String>) -> Result<CmdResult, String> {
+    let target = slug.filter(|s| !s.trim().is_empty());
+    let args: Vec<String> = vec![target.clone().unwrap_or_else(|| "--all".into())];
+    let label = target.as_deref().unwrap_or("--all").to_string();
+    run_op(&format!("provision {label}"), &repo, |p, ui| ops::cmd_provision(p, ui, &args))
+}
+
+#[derive(Serialize)]
+struct SuggestedFile {
+    path: String,
+    /// The class that fails SILENTLY (§1.2) — flagged louder in the UI.
+    credential: bool,
+}
+
+/// What `worktrees init` would suggest, WITHOUT writing anything.
+#[derive(Serialize)]
+struct InitSuggestion {
+    /// Where `.worktrees.toml` would be written.
+    path: String,
+    /// A config is already there (then `qualifies` is irrelevant — nothing is
+    /// suggested over an existing file).
+    exists: bool,
+    /// Anything at all to configure.
+    qualifies: bool,
+    files: Vec<SuggestedFile>,
+    credentials: usize,
+    ports: bool,
+    compose: bool,
+    /// Existing worktrees already missing at least one suggested file.
+    stale_places: Vec<String>,
+    /// A walk bound was hit, so the suggestion may be incomplete.
+    truncated: bool,
+    /// The rendered file, comments and all — the sheet shows it before writing.
+    toml: String,
+    /// §9's dismissal key: a repo that later gains a credential file gets a NEW
+    /// hash and correctly re-suggests, which a boolean "dismissed" could never do.
+    /// Hashed from a CANONICAL PROJECTION of the suggestion, not from `toml` —
+    /// see `suggestion_key` for which differences are deliberately invisible here.
+    hash: String,
+}
+
+/// A 64-bit string mixer, FNV-1a **in shape only**: the multiplier below is
+/// `0x1000_0000_01b3`, which is NOT the FNV-64 prime (`0x100_0000_01b3`). It is
+/// deliberately byte-for-byte the same mixer as `init.rs`'s `fnv1a`, so the CLI's
+/// once-only marker and the app's dismissal key can never disagree about what
+/// "the same suggestion" means. Renamed off `fnv1a_hex` because claiming FNV
+/// while using a different constant is how the next reader gets misled.
+///
+/// Not a security boundary — it only answers "is this the suggestion I already
+/// declined?". If core's constant is ever corrected, correct this one in the same
+/// change (both are pre-release, so no stored marker survives either way).
+fn digest_hex(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// The dismissal key's INPUT: a canonical projection of the suggestion, not the
+/// rendered TOML.
+///
+/// Hashing the rendered file made the key sensitive to things that are not a
+/// change in what is being suggested. `init::walk` picks the `[compose] file`
+/// from a `read_dir`-ordered candidate list, and truncates its hit list at
+/// `MAX_HITS`/`MAX_ENTRIES` before sorting — so on a repo with two compose files
+/// (or one big enough to truncate) the same checkout can render two different
+/// TOMLs. A flapping key resurrects a banner the user already dismissed.
+///
+/// So: sort the file list, reduce compose to the boolean that actually drives the
+/// suggestion, and drop the port numbers (they come from the same heuristic scan).
+/// What survives is exactly §9's contract — "a repo that later gains a credential
+/// file re-suggests" — and nothing else.
+///
+/// ⚠ This cannot fix the remaining case: when the walk truncates, the SET of files
+/// can differ between runs, and no projection of a wrong set is stable. That fix
+/// belongs in `worktrees_core::init::walk` (sort each `read_dir` before the
+/// bound is applied).
+fn suggestion_key(s: &InitSuggestion) -> String {
+    let mut lines: Vec<String> = s
+        .files
+        .iter()
+        .map(|f| format!("file\t{}\t{}", if f.credential { "cred" } else { "plain" }, f.path))
+        .collect();
+    lines.sort();
+    lines.push(format!("ports\t{}", s.ports));
+    lines.push(format!("compose\t{}", s.compose));
+    lines.push(format!("truncated\t{}", s.truncated));
+    digest_hex(&lines.join("\n"))
+}
+
+#[tauri::command]
+async fn init_suggest(repo: String) -> Result<InitSuggestion, String> {
+    use worktrees_core::init;
+    let p = Project::discover(Path::new(&repo)).map_err(|e| {
+        applog("error", &format!("init_suggest repo={repo}: discover failed: {}", e.msg));
+        e.msg
+    })?;
+    let main = Path::new(&p.main_root);
+    let path = main.join(worktrees_core::projcfg::CONFIG_FILE);
+    let facts = init::probe(main, Path::new(p.wt_root_dir()));
+    let sug = init::detect(&facts);
+    let qualifies = !sug.is_empty();
+    let toml = if qualifies { init::render(&sug) } else { String::new() };
+    let mut view = InitSuggestion {
+        path: path.to_string_lossy().into_owned(),
+        exists: path.exists(),
+        qualifies,
+        files: sug
+            .files
+            .iter()
+            .map(|c| SuggestedFile { path: c.rel.clone(), credential: c.kind == init::Kind::Credential })
+            .collect(),
+        credentials: sug.credentials(),
+        ports: sug.ports.is_some(),
+        compose: sug.compose.is_some(),
+        stale_places: sug.stale_places.clone(),
+        truncated: sug.truncated,
+        hash: String::new(),
+        toml,
+    };
+    // Derived from the projection, never from `view.toml` — see `suggestion_key`.
+    view.hash = suggestion_key(&view);
+    Ok(view)
+}
+
+/// Write the suggested `.worktrees.toml`.
+///
+/// `-y` carries the consent: `CaptureUi::confirm` always answers NO (a
+/// programmatic caller must never have a config appear under it), so without the
+/// flag this command could only ever print. The SHEET confirms first — that is
+/// where the human says yes. NOT `--force`: an existing config is still refused,
+/// loudly, exactly as on the CLI.
+#[tauri::command]
+async fn init_write(repo: String) -> Result<CmdResult, String> {
+    let args: Vec<String> = vec!["-y".into()];
+    run_op("init", &repo, |p, ui| ops::cmd_init(p, ui, &args))
 }
 
 // ── diagnostics (Settings → Logs → Copy diagnostics) ─────────────────────────
@@ -1255,6 +1645,12 @@ pub fn run() {
             check_update,
             update_cli,
             get_ai_config,
+            project_config_read,
+            doctor,
+            relink,
+            provision,
+            init_suggest,
+            init_write,
             diagnostics,
             log_info,
             log_event,

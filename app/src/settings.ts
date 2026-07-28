@@ -48,6 +48,19 @@ export type Settings = {
   sort_dir: "asc" | "desc";
   manual_order: Record<string, string[]>; // repo root -> slug order (Manual sort)
   last_seen_version: string; // release-notes gate: "" = fresh install (record silently)
+  // §9's init nudge, dismissed per project root. The VALUE is the suggestion's
+  // content hash, never a boolean: a repo that later gains a credential file
+  // produces a new hash and correctly re-suggests — the file that appears after
+  // you dismissed the banner is precisely the one nobody links.
+  //
+  // ⚠ Two independent dismissal stores exist for this one concept, and that is
+  // ACCEPTED rather than accidental (§9 asked for an explicit decision): the CLI
+  // keeps its own marker under $XDG_STATE_HOME/worktrees/init-hints/ because
+  // ui-state.json lives in the app's config dir and is invisible to it. They
+  // gate different surfaces (a `new` hint line vs. this nav banner), they use
+  // the same re-suggest rule, and unifying them would mean the CLI reading an
+  // app-owned file — a worse dependency than a duplicated boolean-shaped fact.
+  init_dismissed: Record<string, string>;
 };
 
 export const DEFAULTS: Settings = {
@@ -73,6 +86,7 @@ export const DEFAULTS: Settings = {
   sort_dir: "desc",
   manual_order: {},
   last_seen_version: "",
+  init_dismissed: {},
 };
 
 /** check_update result — versions the Settings "Version" section renders. */
