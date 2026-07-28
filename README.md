@@ -23,6 +23,36 @@ worktrees rm feat-checkout           # tear the place down when it's done
 
 Works in **any** git repo. No config required.
 
+## Desktop app
+
+Same engine, a native window. The macOS app (Tauri) links the identical Rust
+core in-process — no daemon, no subprocess — so everything the CLI knows, the
+app shows live: every place grouped by how active it is, ahead/behind and dirty
+state per branch, and a tmux-attached terminal for each session right in the
+window. Create a place, drop into its session, switch branches, tear it down —
+without leaving the app.
+
+<p align="center">
+  <img src="docs/media/desktop-flow.gif" width="820" alt="Creating a place and opening its session in the worktrees desktop app">
+</p>
+
+<p align="center"><sub><i>New → list → open — driven headlessly against the built-in mock harness. The real app embeds a live tmux terminal running your AI CLI.</i></sub></p>
+
+Every place, grouped by how active it is, with a home panel to resume where you left off:
+
+<p align="center">
+  <img src="docs/media/desktop-overview.png" width="820" alt="worktrees desktop app — workspace overview">
+</p>
+
+Open a place to see its branch state, notes, and embedded terminal:
+
+<p align="center">
+  <img src="docs/media/desktop-session.png" width="820" alt="worktrees desktop app — a place with its embedded terminal">
+</p>
+
+Install it alongside the CLI on macOS (`WORKTREES_INSTALL_APP=1`, or answer the
+installer prompt; from a clone, `make install-app`) — see [Install](#install).
+
 ## Install
 
 Fresh machine (installs the latest release to `~/.local/bin`):
