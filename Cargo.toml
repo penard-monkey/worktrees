@@ -14,5 +14,8 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# Parse-only: `worktrees init` hand-templates its output (the file's value is its
+# explanatory comments), so the serializer is deliberately left out.
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 clap = { version = "4", features = ["derive"] }
 worktrees-core = { path = "crates/worktrees-core" }

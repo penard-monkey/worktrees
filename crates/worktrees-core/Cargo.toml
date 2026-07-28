@@ -8,5 +8,11 @@ description = "Engine for the worktrees CLI + app: git-worktree-as-place, shelli
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 # Deliberately NO git2/gix (we shell out to `git` for a 1:1 port + the stale-dir
 # trap), NO clap (that's the CLI), NO portable-pty (that's app-only).
+# `toml` IS admitted: a pure-data parser in the same trust class as serde_json
+# (no execution, no process, no network), parse-only so it can't emit either, and
+# already in Cargo.lock via tauri-utils/tauri-plugin-fs — it ships in the app
+# today. It buys `serde_spanned` line numbers, which are the whole reason
+# `.worktrees.toml` diagnostics can say `file:line:` instead of shrugging.

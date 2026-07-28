@@ -1,8 +1,14 @@
 //! Config + naming resolution, faithful to the bash CLI.
-//! Precedence: flag > env > user config (`~/.config/worktrees/config`,
-//! respecting `$XDG_CONFIG_HOME`) > default. The config is parsed as data,
-//! never executed.
+//! Precedence: flag > env > user config > default. The config is parsed as
+//! data, never executed.
+//!
+//! The user config is TWO files in `~/.config/worktrees` (respecting
+//! `$XDG_CONFIG_HOME`): `config.toml` first, then the original kv `config` as a
+//! permanent silent fallback — every install predating TOML keeps working, and
+//! nobody is asked to migrate. Proposal §8 splits the formats on *who writes
+//! them*: human files are TOML, machine files are JSON.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// tmux/name-safe prefix: lowercase, then every byte not in `[a-z0-9_-]` → `-`
@@ -51,7 +57,8 @@ fn find_inline_comment(s: &str) -> Option<usize> {
     (1..b.len()).find(|&i| b[i] == b'#' && (b[i - 1] == b' ' || b[i - 1] == b'\t')).map(|i| i - 1)
 }
 
-pub fn config_path() -> PathBuf {
+/// `$XDG_CONFIG_HOME/worktrees` (or `~/.config/worktrees`).
+fn config_dir() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .filter(|s| !s.is_empty())
@@ -59,7 +66,46 @@ pub fn config_path() -> PathBuf {
             let home = std::env::var("HOME").unwrap_or_default();
             format!("{home}/.config")
         });
-    PathBuf::from(base).join("worktrees").join("config")
+    PathBuf::from(base).join("worktrees")
+}
+
+/// The original kv config. Still read, forever — see the module docstring.
+pub fn config_path() -> PathBuf {
+    config_dir().join("config")
+}
+
+/// The TOML user config, which wins over `config_path()` key by key.
+pub fn config_toml_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
+/// One top-level string key from `config.toml`, or `None`.
+///
+/// Lenient on purpose, unlike `.worktrees.toml`: this file is the USER's, the
+/// resolvers below have no error channel (they return a `String`), and a typo
+/// here must never lock someone out of their own tool — the kv `config` still
+/// answers. Non-string values are `None` (the three keys are all strings).
+pub fn cfg_toml_get(path: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let table: BTreeMap<String, toml::Value> = toml::from_str(&text).ok()?;
+    table.get(key)?.as_str().map(|s| s.to_string())
+}
+
+/// The user tier of the precedence chain: `config.toml` wins over the kv
+/// `config` when both define a key. Pure form for testing (`*_from` convention).
+pub fn user_cfg_from(toml_val: Option<&str>, kv_val: Option<&str>) -> Option<String> {
+    toml_val
+        .filter(|s| !s.is_empty())
+        .or(kv_val.filter(|s| !s.is_empty()))
+        .map(|s| s.to_string())
+}
+
+/// Live user-config lookup for one key (`ai_cmd`, `ai_resume_arg`, `prefix`).
+pub fn user_cfg(key: &str) -> Option<String> {
+    user_cfg_from(
+        cfg_toml_get(&config_toml_path(), key).as_deref(),
+        cfg_get(&config_path(), key).as_deref(),
+    )
 }
 
 /// AI pane command: flag > `$WORKTREES_AI_CMD` > `$WORKTREES_CLAUDE_CMD` (deprecated)
@@ -96,13 +142,13 @@ pub fn resolve_ai_resume_arg_from(env: Option<&str>, cfg: Option<&str>) -> Strin
 pub fn resolve_ai_cmd(flag: Option<&str>) -> String {
     let env_ai = std::env::var("WORKTREES_AI_CMD").ok();
     let env_claude = std::env::var("WORKTREES_CLAUDE_CMD").ok();
-    let cfg = cfg_get(&config_path(), "ai_cmd");
+    let cfg = user_cfg("ai_cmd");
     resolve_ai_cmd_from(flag, env_ai.as_deref(), env_claude.as_deref(), cfg.as_deref())
 }
 
 pub fn resolve_ai_resume_arg() -> String {
     let env = std::env::var("WORKTREES_AI_RESUME_ARG").ok();
-    let cfg = cfg_get(&config_path(), "ai_resume_arg");
+    let cfg = user_cfg("ai_resume_arg");
     resolve_ai_resume_arg_from(env.as_deref(), cfg.as_deref())
 }
 
@@ -151,5 +197,36 @@ mod tests {
         assert_eq!(resolve_ai_resume_arg_from(Some("resume"), Some("--cont")), "resume");
         assert_eq!(resolve_ai_resume_arg_from(None, Some("--cont")), "--cont");
         assert_eq!(resolve_ai_resume_arg_from(None, None), "-r");
+    }
+
+    #[test]
+    fn config_toml_wins_but_the_kv_file_stays_a_fallback() {
+        assert_eq!(user_cfg_from(Some("codex"), Some("claude")).as_deref(), Some("codex"));
+        assert_eq!(user_cfg_from(None, Some("claude")).as_deref(), Some("claude"));
+        assert_eq!(user_cfg_from(Some("codex"), None).as_deref(), Some("codex"));
+        assert_eq!(user_cfg_from(None, None), None);
+        // an empty value is not a value, in either tier
+        assert_eq!(user_cfg_from(Some(""), Some("claude")).as_deref(), Some("claude"));
+        assert_eq!(user_cfg_from(Some(""), Some("")), None);
+    }
+
+    #[test]
+    fn cfg_toml_reads_top_level_strings_and_shrugs_at_anything_else() {
+        let dir = std::env::temp_dir().join(format!("wtcfgtoml-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+
+        std::fs::write(&p, "# note\nai_cmd = \"codex\"\nprefix = \"teamx\"\nai_auto = true\n").unwrap();
+        assert_eq!(cfg_toml_get(&p, "ai_cmd").as_deref(), Some("codex"));
+        assert_eq!(cfg_toml_get(&p, "prefix").as_deref(), Some("teamx"));
+        assert_eq!(cfg_toml_get(&p, "ai_auto"), None, "non-string values are not config values");
+        assert_eq!(cfg_toml_get(&p, "missing"), None);
+
+        // a broken file falls through to the kv config rather than erroring out
+        std::fs::write(&p, "ai_cmd = \n").unwrap();
+        assert_eq!(cfg_toml_get(&p, "ai_cmd"), None);
+        assert_eq!(cfg_toml_get(&dir.join("absent.toml"), "ai_cmd"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -6,10 +6,12 @@
 //! declared store, and rendering. See MIGRATION.md.
 
 pub mod config;
+pub mod diag;
 pub mod error;
 pub mod git;
 pub mod model;
 pub mod ops;
+pub mod projcfg;
 pub mod project;
 pub mod render;
 pub mod store;
