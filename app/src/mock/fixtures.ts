@@ -65,7 +65,7 @@ function cdv(): ProjectView {
   const places: Place[] = [
     place(P, root, {
       slug: "(main)", branch: "main", is_main: true,
-      tmux_session: { name: `${P}-main`, up: true }, ahead: 0, behind: 0,
+      tmux_session: { name: `${P}-(main)`, up: true }, ahead: 0, behind: 0,
       last_commit_subject: "chore: bump deps", lifecycle_effective: "active",
     }),
     place(P, root, {
@@ -85,7 +85,11 @@ function cdv(): ProjectView {
     place(P, root, {
       slug: "kitchen-sink", branch: null, detached: true,
       dirty: true, dirty_files: 12, ahead: 3, behind: 4,
-      tmux_session: { name: `${P}-kitchen-sink`, up: true }, claude_session_present: true,
+      // ADOPTED session: the name is not `<prefix>-<slug>`, so this tool did not
+      // write it — a session left under a previous prefix (proposal §5), or one
+      // started by hand. Closing it needs the user's word; the fixture exists so
+      // that two-click arm is drivable headlessly.
+      tmux_session: { name: "dev-kitchen-sink", up: true }, claude_session_present: true,
       last_commit_subject: "detached experiment", declared: { last_opened_epoch: NOW - 1200 },
       lifecycle_effective: "active",
     }),
@@ -120,7 +124,7 @@ function worktreesRepo(): ProjectView {
   const places: Place[] = [
     place(P, root, {
       slug: "(main)", branch: "main", is_main: true, ahead: 0, behind: 0,
-      tmux_session: { name: `${P}-main`, up: false }, last_commit_subject: "docs: readme",
+      tmux_session: { name: `${P}-(main)`, up: false }, last_commit_subject: "docs: readme",
       lifecycle_effective: "closed",
     }),
     place(P, root, {

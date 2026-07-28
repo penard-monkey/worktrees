@@ -24,6 +24,15 @@ pub trait Ui {
     fn plain(&mut self, msg: &str);
     /// `read -r -p "<prompt>"`: true only for exactly `y`/`Y`; EOF → false.
     fn confirm(&mut self, prompt: &str) -> bool;
+    /// Whether `confirm` can actually ASK. `false` means every call is a
+    /// hard-coded decline, so "no" from such a Ui is not the user's answer — it
+    /// is "nobody was there". An op with a DESTRUCTIVE prompt uses this to stop
+    /// and say so (`diag::EXIT_NEEDS_CONFIRM`) instead of silently skipping,
+    /// which from a GUI reads as a button that does nothing. Only ops that opt
+    /// in consult it; every other prompt keeps its plain decline-on-no.
+    fn can_confirm(&self) -> bool {
+        true
+    }
 }
 
 /// The CLI's terminal UI — byte-parity with the bash helpers.
@@ -60,6 +69,13 @@ impl Ui for CliUi {
                 a == "y" || a == "Y"
             }
         }
+    }
+    /// `WORKTREES_NO_PROMPT=1` is a caller declaring it cannot answer — a script,
+    /// CI, a hook. Deliberately NOT derived from isatty: a piped `n` and an EOF
+    /// are both real answers from a real invocation, and the bats suite feeds
+    /// every prompt through a pipe or `/dev/null`.
+    fn can_confirm(&self) -> bool {
+        std::env::var("WORKTREES_NO_PROMPT").ok().as_deref() != Some("1")
     }
 }
 
@@ -116,6 +132,12 @@ impl Ui for CaptureUi {
         self.push(Severity::Info, msg);
     }
     fn confirm(&mut self, _prompt: &str) -> bool {
+        false
+    }
+    /// The whole point of this Ui: there is no one at the other end. Ops that
+    /// guard a destructive prompt report `EXIT_NEEDS_CONFIRM` rather than taking
+    /// the decline above as consent to do nothing.
+    fn can_confirm(&self) -> bool {
         false
     }
 }

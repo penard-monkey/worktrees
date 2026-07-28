@@ -34,7 +34,7 @@ common_setup() {
   # XDG_STATE_HOME for the same reason as XDG_CONFIG_HOME: `init`'s once-only
   # hint marker lives under it, and a developer who exports it would have the
   # suite writing into (and reading back) their real state dir between runs.
-  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX XDG_CONFIG_HOME XDG_STATE_HOME || true
+  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME || true
 
   make_repo
 }

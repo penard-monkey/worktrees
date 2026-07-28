@@ -41,13 +41,25 @@ type Place = {
 type Snapshot = { repo: string; prefix: string; places: Place[] };
 type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 type Workspace = { projects: ProjectView[] };
-type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
+/** `needs_confirm` (close only): core stopped because killing this session needs
+ *  the user's word, and the string is the session that would die. Not a failure
+ *  — a question, so it must never reach the error banner. */
+type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; needs_confirm?: string | null; warnings?: string[] };
 type Lens = "places" | "recent" | "attention";
 /** Last known `doctor` state for one project root. `slugs` decorates rows,
  * `issues` is the project-level count (placeless findings included, so it equals
  * the sheet's Health badge), `error` means the last run did not produce a report
  * at all — in which case the other two are the last measurement, not this one. */
 type ProjectHealth = { slugs: Set<string>; issues: number; error: string | null };
+
+// Arm keys for the topbar Close (bare control) and the ctx-menu "Close session"
+// (popover). Namespaced so they never collide with the remove arms sharing
+// `confirmRm`; `closectx|` deliberately does NOT match `isBareArm` — the menu's
+// own dismissal clears it.
+const closeKey = (repo: string, slug: string) => `close|${repo}|${slug}`;
+const closeCtxKey = (repo: string, slug: string) => `closectx|${repo}|${slug}`;
+/** Arms on a naked control: nothing dismisses them, so they time out instead. */
+const isBareArm = (k: string | null) => !!k && (k.startsWith("hdr|") || k.startsWith("close|"));
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order: Home (clear
 // selection → briefing), then the rail's lens entries. Module scope = stable.
@@ -439,6 +451,12 @@ function App() {
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [switchTo, setSwitchTo] = useState("");
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
+  // The armed Close needs one fact more than `confirmRm` can carry: WHICH tmux
+  // session would die, as the BACKEND named it. It rides alongside the arm
+  // rather than replacing it, so `confirmRm` stays the single register every
+  // dismissal path already clears and this can never re-arm anything by itself
+  // (it is only ever read while confirmRm holds the matching close key).
+  const [closeSess, setCloseSess] = useState("");
   const [menu, setMenu] = useState<"life" | "more" | null>(null);
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -744,7 +762,9 @@ function App() {
     try {
       setErr("");
       const r = await invoke<CmdResult>(name, args);
-      if (!r.ok) setErr(r.output || `${name} failed (exit ${r.code})`);
+      // `needs_confirm` is not-ok but not a failure: the op stopped to ask. The
+      // caller arms a second click; a red banner would be a lie.
+      if (!r.ok && !r.needs_confirm) setErr(r.output || `${name} failed (exit ${r.code})`);
       await refresh();
       return r;
     } catch (e) {
@@ -782,17 +802,19 @@ function App() {
     setConfirmRm(null);
     removeProject(root);
   };
-  // Auto-disarm the header-✕ confirm (no popover-close to clear it otherwise).
+  // Auto-disarm the BARE arms — the ones on a naked control with no popover to
+  // dismiss them: the project-header ✕ ("hdr|") and the topbar Close ("close|").
+  // Popover arms ("proj|", "ctx|", "closectx|", `repo|slug`) are cleared by
+  // their own close paths.
   useEffect(() => {
-    if (!confirmRm?.startsWith("hdr|")) return;
+    if (!isBareArm(confirmRm)) return;
     const t = setTimeout(() => setConfirmRm(null), 4000);
     return () => clearTimeout(t);
   }, [confirmRm]);
-  // Clear any header-✕ arm when the selection changes (a switch of focus means
-  // the destructive intent is stale). Popover arms are cleared by their own
-  // close paths; this covers the header ✕ which has none.
+  // Clear any bare arm when the selection changes (a switch of focus means the
+  // destructive intent is stale).
   useEffect(() => {
-    setConfirmRm((c) => (c?.startsWith("hdr|") ? null : c));
+    setConfirmRm((c) => (isBareArm(c) ? null : c));
   }, [sel]);
 
   // Every ctx-menu dismissal goes through here: an armed confirmRm must NEVER
@@ -826,10 +848,33 @@ function App() {
     })();
   };
 
+  // ── close ──
+  // One click when the session is this tool's own (canonical name — no doubt
+  // whose it is). When core reports the session was ADOPTED (found by pane cwd:
+  // started by hand, or left behind by a prefix change) it answers
+  // needs_confirm instead of killing, and we arm a second click — the same
+  // shape as the remove confirms, sharing `confirmRm` so every dismissal path
+  // disarms it. `armed` is the user's word, forwarded as `yes`.
+  const doClose = async (repo: string, slug: string, key: string, armed: boolean) => {
+    const r = await runCmd("close_place", { repo, slug, yes: armed });
+    if (r?.needs_confirm) {
+      setCloseSess(r.needs_confirm);
+      setConfirmRm(key); // arm; any open menu stays open
+      return false;
+    }
+    setConfirmRm((c) => (c === key ? null : c));
+    return true;
+  };
+  // Topbar Close (bare control, "close|" key — auto-disarms, see isBareArm).
+  const closeTopbar = (repo: string, slug: string, armed: boolean) =>
+    doClose(repo, slug, closeKey(repo, slug), armed);
   // ── context-menu verbs ──
-  const closeSession = (repo: string, slug: string) => {
-    closeCtx();
-    runCmd("close_place", { repo, slug });
+  // ctx-menu "Close session": same two-click arm, popover key. On the arming
+  // click the menu STAYS open (removeProjectCtx's shape); it closes once the
+  // session is actually gone.
+  const closeSession = async (repo: string, slug: string) => {
+    const key = closeCtxKey(repo, slug);
+    if (await doClose(repo, slug, key, confirmRm === key)) closeCtx();
   };
   const copyText = (text: string) => {
     closeCtx();
@@ -1421,8 +1466,14 @@ function App() {
                 {selected.tmux_session.up ? (
                   <>
                     <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
-                    <button className="ctrl" title="end the tmux session — the worktree stays"
-                      onClick={() => runCmd("close_place", { repo: sel.repo, slug: sel.slug })}>Close</button>
+                    {confirmRm === closeKey(sel.repo, sel.slug) ? (
+                      <button className="ctrl danger armed"
+                        title={`${closeSess} was adopted, not opened under this repo's name — killing it takes the WHOLE session, every window and pane in it`}
+                        onClick={() => closeTopbar(sel.repo, sel.slug, true)}>Kill {closeSess} — whole session?</button>
+                    ) : (
+                      <button className="ctrl" title="end the tmux session — the worktree stays"
+                        onClick={() => closeTopbar(sel.repo, sel.slug, false)}>Close</button>
+                    )}
                   </>
                 ) : (
                   <button className="enter-btn" onClick={() => enterPlace(sel.repo, selected)}>Enter ▸</button>
@@ -1597,7 +1648,13 @@ function App() {
           )}
           {ctxPlace.tmux_session.up && (
             <>
-              <button className="pop-item" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>Close session</button>
+              {confirmRm === closeCtxKey(ctx.repo, ctxPlace.slug) ? (
+                <button className="pop-item danger armed" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>
+                  Kill {closeSess} — whole session?
+                </button>
+              ) : (
+                <button className="pop-item" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>Close session</button>
+              )}
               <button className="pop-item" onClick={() => copyText(`tmux attach -t ${shq(ctxPlace.tmux_session.name)}`)}>Copy attach command</button>
               {settings.terminal_cmd.trim() && (
                 <button className="pop-item" onClick={() => {

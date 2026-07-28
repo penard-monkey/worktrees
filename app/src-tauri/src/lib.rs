@@ -317,6 +317,14 @@ struct CmdResult {
     /// this instead of re-deriving and guessing wrong. `None` for every other op.
     #[serde(skip_serializing_if = "Option::is_none")]
     slug: Option<String>,
+    /// For `close_place` only: core stopped short (`diag::EXIT_NEEDS_CONFIRM`)
+    /// because killing this place's session needs the user's word — it was
+    /// ADOPTED, so `kill-session` takes a whole session the user did not start
+    /// through this tool. The value is the session that would die, passed
+    /// STRUCTURALLY so the frontend names it in its own confirm without parsing
+    /// core's prose. `None` for every other op and outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    needs_confirm: Option<String>,
     /// Messages the op emitted at warn/error severity. `output` flattens every
     /// severity into one blob and the UI only shows it when the op FAILED, so a
     /// warning on a successful op used to vanish — which is the failure mode
@@ -343,7 +351,7 @@ fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F
     } else {
         applog("warn", &format!("{op} rc={code} repo={repo}: {}", ui.lines.join(" | ")));
     }
-    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n"), slug: None, warnings })
+    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n"), slug: None, needs_confirm: None, warnings })
 }
 
 /// Create a worktree (`new`). `--no-attach`: the session is created (pane 0 AI,
@@ -445,9 +453,27 @@ fn ai_is_claude() -> bool {
 }
 
 /// End a place's tmux session — the worktree stays (right-click "Close session").
+///
+/// `yes` is the user's word, collected by the frontend's two-click arm. Without
+/// it core refuses to kill an ADOPTED session (one found by pane cwd, not by
+/// this tool's name — a whole tmux session someone started by hand, or one left
+/// under a previous prefix) and returns `EXIT_NEEDS_CONFIRM`. Passing `-y`
+/// unconditionally, as `remove_place` does, would restore exactly the
+/// promptless adopted-kill that confirmation exists to prevent.
 #[tauri::command]
-async fn close_place(repo: String, slug: String) -> Result<CmdResult, String> {
-    run_op(&format!("close {slug}"), &repo, move |p, ui| ops::cmd_close(p, ui, &[slug]))
+async fn close_place(repo: String, slug: String, yes: bool) -> Result<CmdResult, String> {
+    let slug_log = slug.clone();
+    let mut args = vec![slug.clone()];
+    if yes {
+        args.push("-y".into());
+    }
+    let mut r = run_op(&format!("close {slug_log} yes={yes}"), &repo, |p, ui| ops::cmd_close(p, ui, &args))?;
+    if r.code == worktrees_core::diag::EXIT_NEEDS_CONFIRM {
+        // Not a failure — a question. Resolve the session core balked at the
+        // same way core did, so the UI can name it verbatim.
+        r.needs_confirm = Project::discover(Path::new(&repo)).ok().and_then(|p| ops::place_session(&p, &slug));
+    }
+    Ok(r)
 }
 
 // ── update check (Settings → Version) ────────────────────────────────────────
@@ -767,6 +793,7 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
             code: f.status.code().unwrap_or(-1),
             output: format!("installer download failed\n{}", String::from_utf8_lossy(&f.stderr)),
             slug: None,
+            needs_confirm: None,
             warnings: Vec::new(),
         });
     }
@@ -800,6 +827,7 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
         code: out.status.code().unwrap_or(-1),
         output: text,
         slug: None,
+        needs_confirm: None,
         warnings: Vec::new(),
     })
 }

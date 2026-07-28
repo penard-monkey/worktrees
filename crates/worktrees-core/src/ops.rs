@@ -592,11 +592,24 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let mut rc = 0;
     for n in &names {
-        if close_one(p, ui, n, yes).is_err() {
-            rc = 1;
+        // A hard failure OUTRANKS a needs-confirmation stop: across several
+        // names the caller must see "something broke" (1) rather than "ask the
+        // user" (EXIT_NEEDS_CONFIRM), which is the code every existing caller
+        // already understands.
+        if let Err(code) = close_one(p, ui, n, yes) {
+            rc = if rc == 1 { 1 } else { code };
         }
     }
     rc
+}
+
+/// The session a `close` would act on for `slug`: the canonical name when it is
+/// live, else whatever session was ADOPTED by pane cwd, else `None` (dormant).
+/// Public because the app has to NAME that session in its own confirmation UI,
+/// and digging the name back out of `cmd_close`'s prose would put an English
+/// sentence on the wire between core and the frontend.
+pub fn place_session(p: &Project, slug: &str) -> Option<String> {
+    live_session(p, slug, &p.place_dir(slug), None)
 }
 
 fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool) -> Result<(), i32> {
@@ -652,6 +665,14 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool) -> Result<(), 
             fmt::cyan(&dir)
         ));
         ui.plain("Closing it kills the WHOLE session — every window and pane in it, not just that one.");
+        // A Ui that cannot ask has not said no — nobody was asked. Reporting the
+        // decline as success is what made the app's Close button a no-op: it got
+        // "Skipped … left running" and exit 0, and showed neither. The caller
+        // gets a code it can act on, and re-runs with `-y` once it has the word.
+        if !ui.can_confirm() {
+            ui.warn(&format!("Skipped {slug} — {session} left running; confirm to kill it."));
+            return Err(crate::diag::EXIT_NEEDS_CONFIRM);
+        }
         if !ui.confirm(&format!("Kill {session}? [y/N] ")) {
             ui.info(&format!("Skipped {slug} — {session} left running."));
             return Ok(());

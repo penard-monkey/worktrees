@@ -19,6 +19,16 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// CI can tell "doctor broke" from "doctor found problems".
 pub const EXIT_FINDINGS: i32 = 2;
 
+/// The op stopped short because it had a DESTRUCTIVE question and the caller
+/// cannot answer one (`Ui::can_confirm` is false — the app's `CaptureUi`, or
+/// `WORKTREES_NO_PROMPT=1`). Distinct from `0` (which includes a human who
+/// answered "no" — an answer is not an error) and from `1` (nothing broke).
+///
+/// `3` is skipped: it is `WtError::not_found`'s code, so the codes stay a single
+/// flat namespace across both channels — `0` clean / `1` usage-or-guard / `2`
+/// findings / `3` target not found / `4` needs confirmation.
+pub const EXIT_NEEDS_CONFIRM: i32 = 4;
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {

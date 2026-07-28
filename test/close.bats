@@ -247,6 +247,70 @@ adopt_session() {   # $1 = slug, $2 = session name to adopt
   ! tmux_session_exists my-personal-session
 }
 
+# A caller that CANNOT answer (the app's CaptureUi; WORKTREES_NO_PROMPT=1 is the
+# shell's way to say the same thing) has not declined — nobody was asked. Taking
+# its forced "no" as success is what made the app's Close button a silent no-op,
+# so those callers get exit 4 (diag::EXIT_NEEDS_CONFIRM) and re-run with -y once
+# they have the word. A human answering "n" still exits 0: that is an answer.
+@test "close: a caller that cannot answer gets exit 4, not a silent skip" {
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+  export WORKTREES_NO_PROMPT=1
+
+  run_wt close feat-x
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"scratch-session"* ]]              # the session is NAMED
+  [[ "$output" == *"kills the WHOLE session"* ]]
+  [[ "$output" == *"confirm to kill it"* ]]
+  [[ "$output" != *"Kill scratch-session?"* ]]        # never prompts — it can't
+  tmux_session_exists scratch-session
+  ! grep -q "kill-session" "$TMUX_LOG"
+
+  # …and -y is the second click: same caller, now carrying consent.
+  run_wt close -y feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"closed adopted tmux scratch-session"* ]]
+  ! tmux_session_exists scratch-session
+  [ -d "$REPO/.worktrees/feat-x" ]
+}
+
+@test "close: exit 4 is only for the adopted case — canonical and dormant stay 0" {
+  mk_wt feat-x
+  export WORKTREES_NO_PROMPT=1
+  run_wt close feat-x           # canonical name: never a question
+  [ "$status" -eq 0 ]
+  ! tmux_session_exists repo-feat-x
+
+  run_wt close feat-x           # nothing live
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to close"* ]]
+}
+
+@test "close: a real failure outranks a needs-confirmation stop" {
+  # Both in one run: 'nope' errors (1) and feat-x wants confirmation (4). The
+  # caller must see the breakage, not the question.
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+  export WORKTREES_NO_PROMPT=1
+
+  run_wt close feat-x nope
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No worktree 'nope'"* ]]
+  tmux_session_exists scratch-session
+}
+
+@test "close: WORKTREES_NO_PROMPT does not change an interactive decline" {
+  # The env var marks a caller that cannot answer; a piped answer is still an
+  # answer, so without the var 'n' stays a plain exit 0.
+  mk_wt feat-x
+  adopt_session feat-x scratch-session
+
+  wt_answer n close feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Skipped feat-x"* ]]
+  tmux_session_exists scratch-session
+}
+
 @test "close: does not touch the declared store" {
   mk_wt feat-x
   # a populated declared store must survive a close untouched

@@ -234,11 +234,30 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return { ok: true, code: 0, output: `Opened ${args.slug}` };
     }
     case "close_place": {
+      const pv = findProject(args.repo);
+      const pl = pv?.snapshot?.places.find((p) => p.slug === args.slug);
+      if (!pv?.snapshot || !pl) return { ok: false, code: 1, output: `No worktree '${args.slug}'` };
+      // Mirror ops::close_one. A session whose name this tool did NOT write was
+      // adopted by pane cwd — someone's own session, or one left under a
+      // previous prefix — and kill-session takes the whole thing, every window.
+      // So core stops with EXIT_NEEDS_CONFIRM (4) and names it; `yes` is the
+      // user's word, collected by the frontend's two-click arm. A canonical
+      // name is never a question.
+      const canonical = `${pv.snapshot.prefix}-${args.slug}`;
+      const live = pl.tmux_session.name;
+      if (live !== canonical && !args.yes) {
+        return {
+          ok: false, code: 4, needs_confirm: live,
+          output: `tmux ${live} was not opened under this repo's name (${canonical}) — adopted because a pane is cwd'd in ${pl.path}.`,
+        };
+      }
       editPlace(args.repo, args.slug, (p) => {
-        p.tmux_session.up = false;
+        // The adopted session is gone, so the name falls back to canonical —
+        // what core's snapshot reports for a place with nothing live.
+        p.tmux_session = { name: canonical, up: false };
         reconcile(p);
       });
-      return { ok: true, code: 0, output: `closed tmux ${args.slug} — worktree kept.` };
+      return { ok: true, code: 0, output: `closed tmux ${live} — worktree kept.` };
     }
     case "github_url":
       return `https://github.com/demo/${(args.repo as string).split("/").pop()}/tree/mock-branch`;

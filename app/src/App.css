@@ -424,10 +424,11 @@ button { cursor: pointer; }
 }
 .shortcut-row span { color: var(--txt-dim); }
 
-/* destructive small button (Settings → Data → Reset), matches .pop-item.danger */
-.ctrl.sm.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); }
-.ctrl.sm.danger:hover { border-color: var(--danger); }
-.ctrl.sm.danger.armed {
+/* destructive .ctrl (Settings → Data → Reset; the topbar's armed Close), matches
+   .pop-item.danger. Not .sm-scoped: the armed Close is a full-size topbar ctrl. */
+.ctrl.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); }
+.ctrl.danger:hover { border-color: var(--danger); }
+.ctrl.danger.armed {
   color: var(--danger); font-weight: var(--fw-bold);
   background: color-mix(in srgb, var(--danger) 18%, transparent);
   border-color: var(--danger);
