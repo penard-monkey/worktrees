@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-28
+
 ### Added
 - Quick switcher: press ⌘K anywhere — even with the terminal focused — to
   fuzzy-jump to any place across every project. Type to filter (matches slug,
