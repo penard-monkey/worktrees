@@ -46,6 +46,19 @@ make_repo() {   # $REPO with one commit pushed to bare $ORIGIN
   REPO="$(cd "$REPO" && pwd -P)"
 }
 
+# .worktrees.toml (the COMMITTED project config) at the repo root. Lines are
+# passed verbatim, like write_config in misc.bats — these tests assert on the
+# tool's reaction to hostile/awkward configs, so the text must stay literal.
+write_project_config() { printf '%s\n' "$@" > "$REPO/.worktrees.toml"; }
+
+# A repo whose credentials are gitignored (the shape [[file]] exists for): the
+# ignore rules are COMMITTED so worktree checkouts inherit them, and the secret
+# itself lives only in main.
+make_secret_repo() {
+  printf '%s\n' "$@" > "$REPO/.gitignore"
+  ( cd "$REPO" && git add -A && git commit -qm gitignore && git push -q origin main )
+}
+
 make_remote_branch() {   # branch that exists ONLY on origin → exercises fetch+track
   git -C "$REPO" push -q origin "main:refs/heads/$1"
   git -C "$REPO" update-ref -d "refs/remotes/origin/$1" 2>/dev/null || true

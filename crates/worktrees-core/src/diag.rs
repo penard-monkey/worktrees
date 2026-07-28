@@ -36,6 +36,17 @@ pub enum Code {
     // §7 — file/link drift
     /// A declared source file is absent from the main checkout.
     MissingSource,
+    /// A declared file is not materialized in this place at all. ⚠ NOT in §7's
+    /// slug list, and it has to be: "the worktree is simply missing the file" is
+    /// the exact silent failure §1.2 describes, and none of the listed slugs
+    /// names it (`missing-source` is about MAIN, not about the place).
+    NotLinked,
+    /// A Layer B (§4) violation: the source's parent, or the source itself,
+    /// resolves outside the main checkout; the source is not a regular file or is
+    /// over the copy cap; or a destination ancestor is a symlink we did not
+    /// create. ⚠ Also not in §7's slug list — which has no code for "the config
+    /// pointed somewhere it may not point", the whole point of Layer B.
+    UnsafePath,
     /// A real file sits where a declared link belongs — report, never overwrite.
     Shadowed,
     /// A link exists but its target is gone.
@@ -160,6 +171,8 @@ mod tests {
         );
         for (c, s) in [
             (Code::MissingSource, "missing-source"),
+            (Code::NotLinked, "not-linked"),
+            (Code::UnsafePath, "unsafe-path"),
             (Code::Shadowed, "shadowed"),
             (Code::DanglingLink, "dangling-link"),
             (Code::WrongMode, "wrong-mode"),

@@ -9,6 +9,7 @@ pub mod config;
 pub mod diag;
 pub mod error;
 pub mod git;
+pub mod materialize;
 pub mod model;
 pub mod ops;
 pub mod projcfg;

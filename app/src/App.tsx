@@ -37,7 +37,7 @@ type Place = {
 type Snapshot = { repo: string; prefix: string; places: Place[] };
 type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 type Workspace = { projects: ProjectView[] };
-type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null };
+type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
 type Lens = "places" | "recent" | "attention";
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order: Home (clear

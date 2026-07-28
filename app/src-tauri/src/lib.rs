@@ -317,6 +317,11 @@ struct CmdResult {
     /// this instead of re-deriving and guessing wrong. `None` for every other op.
     #[serde(skip_serializing_if = "Option::is_none")]
     slug: Option<String>,
+    /// Messages the op emitted at warn/error severity. `output` flattens every
+    /// severity into one blob and the UI only shows it when the op FAILED, so a
+    /// warning on a successful op used to vanish — which is the failure mode
+    /// `doctor` exists to end (proposal §7).
+    warnings: Vec<String>,
 }
 
 fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F) -> Result<CmdResult, String> {
@@ -326,12 +331,19 @@ fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F
     })?;
     let mut ui = CaptureUi::default();
     let code = f(&project, &mut ui);
+    let warnings = ui.warnings();
     if code == 0 {
         applog("info", &format!("{op} ok repo={repo}"));
+        // A SUCCESSFUL op can still warn (a declared file absent from main, a
+        // drifted copy). Log it separately — otherwise the only record of it is
+        // an `output` string the UI never renders on success.
+        if !warnings.is_empty() {
+            applog("warn", &format!("{op} warnings repo={repo}: {}", warnings.join(" | ")));
+        }
     } else {
         applog("warn", &format!("{op} rc={code} repo={repo}: {}", ui.lines.join(" | ")));
     }
-    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n"), slug: None })
+    Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n"), slug: None, warnings })
 }
 
 /// Create a worktree (`new`). `--no-attach`: the session is created (pane 0 AI,
@@ -755,6 +767,7 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
             code: f.status.code().unwrap_or(-1),
             output: format!("installer download failed\n{}", String::from_utf8_lossy(&f.stderr)),
             slug: None,
+            warnings: Vec::new(),
         });
     }
 
@@ -787,6 +800,7 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
         code: out.status.code().unwrap_or(-1),
         output: text,
         slug: None,
+        warnings: Vec::new(),
     })
 }
 

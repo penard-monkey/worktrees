@@ -3,6 +3,7 @@
 //! messages, auto-answers). Message formatting here is a parity target — it
 //! mirrors bash `info`/`warn`/`error`/`header` and the `read -r -p` prompts.
 
+use crate::diag::Severity;
 use crate::render::{CYAN, GREEN, NC, RED, YELLOW};
 use std::io::Write;
 
@@ -55,28 +56,53 @@ impl Ui for CliUi {
 /// printing. Confirms are declined — callers run non-interactive ops (`-y`),
 /// and any unexpected prompt safely aborts rather than proceeding. The collected
 /// lines are plain text (ops pass plain messages; ANSI is a CliUi concern).
+///
+/// ⚠ `lines` used to be the ONLY record, which erased severity at capture: a
+/// warning on a SUCCESSFUL op (`code == 0`) vanished entirely, because the app's
+/// `run_op` only surfaces output on failure. A `doctor` whose warnings the app
+/// drops does not solve a silent-failure bug (proposal §7), so every message is
+/// now recorded with the severity it was emitted at. `lines` stays a plain
+/// `Vec<String>` in the same order for every existing caller.
 #[derive(Default)]
 pub struct CaptureUi {
     pub lines: Vec<String>,
+    /// `(severity, message)` for the SAME messages, same order as `lines`.
+    pub events: Vec<(Severity, String)>,
     pub errored: bool,
+}
+
+impl CaptureUi {
+    fn push(&mut self, sev: Severity, msg: &str) {
+        self.lines.push(msg.to_string());
+        self.events.push((sev, msg.to_string()));
+    }
+    /// Messages emitted at `Warn` or above — what a caller must show even when
+    /// the op returned 0.
+    pub fn warnings(&self) -> Vec<String> {
+        self.events
+            .iter()
+            .filter(|(s, _)| *s >= Severity::Warn)
+            .map(|(_, m)| m.clone())
+            .collect()
+    }
 }
 
 impl Ui for CaptureUi {
     fn info(&mut self, msg: &str) {
-        self.lines.push(msg.to_string());
+        self.push(Severity::Info, msg);
     }
     fn warn(&mut self, msg: &str) {
-        self.lines.push(msg.to_string());
+        self.push(Severity::Warn, msg);
     }
     fn error(&mut self, msg: &str) {
         self.errored = true;
-        self.lines.push(msg.to_string());
+        self.push(Severity::Error, msg);
     }
     fn header(&mut self, msg: &str) {
-        self.lines.push(msg.to_string());
+        self.push(Severity::Info, msg);
     }
     fn plain(&mut self, msg: &str) {
-        self.lines.push(msg.to_string());
+        self.push(Severity::Info, msg);
     }
     fn confirm(&mut self, _prompt: &str) -> bool {
         false

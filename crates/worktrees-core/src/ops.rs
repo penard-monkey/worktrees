@@ -5,7 +5,10 @@
 
 use std::path::Path;
 
+use crate::diag::{Code, Finding, Report, Severity};
 use crate::git;
+use crate::materialize;
+use crate::projcfg::{self, ProjectConfig};
 use crate::tmux;
 use crate::ui::{fmt, Ui};
 use crate::Project;
@@ -280,6 +283,21 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
 
+    // Materialize the declared files here — after the worktree exists, BEFORE
+    // install detection and therefore before `launch` starts pane 1 (§8). The
+    // ordering is not optional: pane 1 runs the install command, and `pnpm
+    // install` racing `.env` into existence is exactly the silent-failure class
+    // this fixes. A failure is a loud guard like the session one below: report,
+    // keep the worktree, propagate the rc — never roll back.
+    let mat_rc = match load_project_config(p, ui) {
+        Err(code) => code,
+        Ok(None) => 0,
+        Ok(Some((cfg, findings))) => {
+            report_findings(ui, &findings);
+            materialize_place(p, ui, &cfg, &wt, false)
+        }
+    };
+
     let install_cmd = if do_install && !already { detect_install_cmd(&wt) } else { String::new() };
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
     if resume && !ai_cmd.is_empty() {
@@ -292,12 +310,17 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         if !install_cmd.is_empty() {
             ui.info(&format!("then: {install_cmd}"));
         }
-        return 0;
+        return mat_rc;
     }
     // The worktree already exists at this point — a failed session is a partial
     // success the user MUST see (loud-guard). Propagate launch's rc so cmd_new
     // returns nonzero. (Fake shims always succeed → bats success path unchanged.)
-    launch(p, ui, &wt, &session, &install_cmd, &ai_cmd, do_attach)
+    let rc = launch(p, ui, &wt, &session, &install_cmd, &ai_cmd, do_attach);
+    if rc != 0 {
+        rc
+    } else {
+        mat_rc
+    }
 }
 
 fn detect_install_cmd(dir: &str) -> String {
@@ -651,4 +674,275 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
     }
     let _ = &mut branch;
     Ok(())
+}
+
+// ── relink / doctor — the `[[file]]` surface (proposal §7) ───────────────────
+// Both go through materialize's probe → plan → (apply | report). ONE code path:
+// `relink` applies the plan, `doctor` reads the same plan as a report, and
+// `cmd_new` runs it once at creation. Anything that diverges here is a bug.
+
+/// Read `<main_root>/.worktrees.toml`. `Ok(None)` = no config, which is the
+/// byte-identical-behavior guarantee (§2.4): every caller does nothing at all.
+/// `Err(1)` = present but invalid — a guard failure, already reported, because
+/// partial application is how you get a half-provisioned worktree (§4).
+fn load_project_config(p: &Project, ui: &mut dyn Ui) -> Result<Option<(ProjectConfig, Vec<Finding>)>, i32> {
+    match projcfg::load(Path::new(&p.main_root)) {
+        Ok((Some(cfg), findings)) => Ok(Some((cfg, findings))),
+        Ok((None, _)) => Ok(None),
+        Err(e) => {
+            ui.error(&e.to_string());
+            Err(1)
+        }
+    }
+}
+
+fn report_findings(ui: &mut dyn Ui, findings: &[Finding]) {
+    for f in findings {
+        match f.severity {
+            Severity::Error => ui.error(&f.message),
+            Severity::Warn => ui.warn(&f.message),
+            Severity::Info => ui.info(&f.message),
+        }
+    }
+}
+
+/// probe → plan → apply for ONE place. The only place ops touches the filesystem
+/// for declared files.
+fn materialize_place(p: &Project, ui: &mut dyn Ui, cfg: &ProjectConfig, wt: &str, force: bool) -> i32 {
+    let (main, wt) = (Path::new(&p.main_root), Path::new(wt));
+    let facts = materialize::probe(cfg, main, wt);
+    let plan = materialize::plan(cfg, main, wt, &facts, force);
+    materialize::apply(&plan, ui)
+}
+
+/// Sorted, REGISTERED worktree dirs under `.worktrees/` — `--all`'s target list.
+/// Read here rather than on `Project`: the config deliberately does not live on
+/// the hot discovery path (§8). Stale (unregistered) dirs are skipped: writing a
+/// credential into one is not "repairing a worktree", it is littering.
+fn place_dirs(p: &Project) -> Vec<String> {
+    let mut dirs: Vec<String> = match std::fs::read_dir(p.wt_root_dir()) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| format!("{}/{}", p.wt_root_dir(), e.file_name().to_string_lossy()))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    dirs.retain(|d| p.is_registered(d));
+    dirs.sort();
+    dirs
+}
+
+/// Resolve a user-supplied name like `open`/`close` do: the slug DIR wins, then
+/// the branch's holder worktree. The main checkout is refused — it is the SOURCE
+/// of every declared file, so materializing into it would link a file to itself.
+fn resolve_place(p: &Project, ui: &mut dyn Ui, name: &str) -> Result<String, i32> {
+    let slug = slugify(name);
+    if slug.is_empty() || slug == "." || slug == ".." {
+        ui.error(&format!("Invalid worktree name '{name}'."));
+        return Err(1);
+    }
+    if name == "(main)" || (name == "main" && !Path::new(&format!("{}/{slug}", p.wt_root_dir())).is_dir()) {
+        ui.error("The main checkout is the SOURCE of the declared files — nothing to materialize there.");
+        return Err(1);
+    }
+    let dir = format!("{}/{slug}", p.wt_root_dir());
+    let dir = if Path::new(&dir).is_dir() {
+        dir
+    } else {
+        match p.wt_for_branch(strip_origin(name)) {
+            Some(holder) => holder,
+            None => {
+                ui.error(&format!("No worktree '{slug}' under .worktrees/. See: worktrees ls"));
+                return Err(1);
+            }
+        }
+    };
+    // Same registration gate as `switch` (ops.rs:386): a stale dir is not a
+    // place, and materializing into one would write credentials nowhere useful.
+    if !p.is_registered(&dir) {
+        ui.error(&format!("'{slug}' exists but is not a registered worktree — refusing. Clean it up: worktrees rm {slug}"));
+        return Err(1);
+    }
+    Ok(dir)
+}
+
+// ── relink ───────────────────────────────────────────────────────────────────
+/// Re-apply the file plan to existing worktrees. Without this, any config change
+/// strands every worktree that already exists — which is the bug §1.2 describes.
+pub fn cmd_relink(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let (mut all, mut force) = (false, false);
+    let mut names: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--all" => all = true,
+            "--force" => force = true,
+            s if s.starts_with('-') => {
+                ui.error(&format!("Unknown flag: {s}"));
+                return 1;
+            }
+            s => names.push(s.to_string()),
+        }
+    }
+    if all && !names.is_empty() {
+        ui.error("relink takes either <worktree> or --all, not both.");
+        return 1;
+    }
+    if !all && names.is_empty() {
+        ui.error("relink needs a worktree (slug or branch), or --all. See: worktrees ls");
+        return 1;
+    }
+
+    // Targets resolve BEFORE the config loads: a bad worktree name is a usage
+    // guard, and it must report as one whether or not the repo has a config.
+    let targets: Vec<String> = if all {
+        place_dirs(p)
+    } else {
+        let mut out = Vec::with_capacity(names.len());
+        for n in &names {
+            match resolve_place(p, ui, n) {
+                Ok(d) => out.push(d),
+                Err(code) => return code,
+            }
+        }
+        out
+    };
+
+    let Some((cfg, findings)) = (match load_project_config(p, ui) {
+        Ok(c) => c,
+        Err(code) => return code,
+    }) else {
+        ui.info("No .worktrees.toml in this repo — nothing to materialize.");
+        return 0;
+    };
+    report_findings(ui, &findings);
+    if cfg.files.is_empty() {
+        ui.info(".worktrees.toml declares no [[file]] entries — nothing to materialize.");
+        return 0;
+    }
+    if targets.is_empty() {
+        ui.info("No worktrees (.worktrees/ is empty).");
+        return 0;
+    }
+
+    let mut rc = 0;
+    for dir in &targets {
+        ui.header(&format!("Relinking {}", basename(dir)));
+        let one = materialize_place(p, ui, &cfg, dir, force);
+        if one != 0 {
+            rc = one;
+        }
+    }
+    rc
+}
+
+// ── doctor ───────────────────────────────────────────────────────────────────
+/// Report drift. Ships WITH relink, not after: creation is deliberately
+/// non-transactional, "materialized" is not a state anything records, and a
+/// feature whose own failure mode is silent does not fix a silent-failure bug
+/// (§7). Exit: 0 clean · 1 usage/guard · 2 findings present.
+pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let (mut json, mut strict, mut config_only) = (false, false, false);
+    let mut names: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--json" => json = true,
+            "--strict" => strict = true,
+            "--config-only" => config_only = true,
+            s if s.starts_with('-') => {
+                ui.error(&format!("Unknown flag: {s}"));
+                return 1;
+            }
+            s => names.push(s.to_string()),
+        }
+    }
+    if names.len() > 1 {
+        ui.error("doctor takes at most one worktree.");
+        return 1;
+    }
+    if config_only && !names.is_empty() {
+        ui.error("--config-only checks the repo's config against git — it takes no worktree.");
+        return 1;
+    }
+    // Same env override as `ls --json` (main.rs:64-73), so a JSON-mode caller
+    // sets it once for every command.
+    let json = json || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
+
+    // Same ordering rule as relink: a named place that does not exist is a usage
+    // guard (exit 1), decided before the config is even read.
+    let targets = if config_only {
+        Vec::new()
+    } else {
+        match names.first() {
+            Some(n) => match resolve_place(p, ui, n) {
+                Ok(d) => vec![d],
+                Err(code) => return code,
+            },
+            None => place_dirs(p),
+        }
+    };
+
+    let cfg = match load_project_config(p, ui) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let Some((cfg, mut findings)) = cfg else {
+        // No config is a healthy repo, not a broken one.
+        if json {
+            emit_report(ui, &Report::default());
+        } else {
+            ui.info("No .worktrees.toml in this repo — nothing to check.");
+        }
+        return 0;
+    };
+
+    if config_only {
+        // The CI mode: no filesystem state, so it works on a bare clone where
+        // every declared (gitignored) source is absent by definition.
+        findings.extend(materialize::config_only(&cfg, Path::new(&p.main_root)));
+    } else {
+        let main = Path::new(&p.main_root);
+        for dir in &targets {
+            let wt = Path::new(dir);
+            let facts = materialize::probe(&cfg, main, wt);
+            let plan = materialize::plan(&cfg, main, wt, &facts, false);
+            findings.extend(plan.report().findings);
+        }
+    }
+
+    if strict {
+        // `--strict` is the only thing that lets a copy the source has moved past
+        // fail a run; drift itself stays Info forever (§7).
+        for f in &mut findings {
+            if f.code == Code::CopyStale && f.severity == Severity::Warn {
+                f.severity = Severity::Error;
+            }
+        }
+    }
+
+    let report = Report::new(findings);
+    if json {
+        emit_report(ui, &report);
+    } else if report.is_empty() {
+        ui.info("clean — every declared file is materialized.");
+    } else {
+        for f in &report.findings {
+            let line = match &f.place {
+                Some(place) => format!("{place}: {}", f.message),
+                None => f.message.clone(),
+            };
+            match f.severity {
+                Severity::Error => ui.error(&line),
+                Severity::Warn => ui.warn(&line),
+                Severity::Info => ui.info(&line),
+            }
+        }
+    }
+    report.exit_code()
+}
+
+/// `doctor --json` follows the `ls --json` template: one compact line with its
+/// own `schema_version`, every nullable field an explicit `null`.
+fn emit_report(ui: &mut dyn Ui, report: &Report) {
+    ui.plain(&serde_json::to_string(report).unwrap_or_default());
 }
