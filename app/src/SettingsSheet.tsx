@@ -445,6 +445,7 @@ export function SettingsSheet({
             <div className="shortcuts">
               {[
                 ["⌘B", "Toggle the nav"],
+                ["⌘K", "Quick switcher"],
                 ["⌘,", "Open Settings"],
                 ["⌘1", "Home (briefing)"],
                 ["⌘2", "Places"],

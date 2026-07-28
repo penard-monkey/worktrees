@@ -537,6 +537,35 @@ button { cursor: pointer; }
 
 /* ── settings slide-over ── */
 .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 100; display: flex; justify-content: flex-end; }
+
+/* ── ⌘K quick switcher ── centered variant of the scrim, panel near the top-third.
+   z-index above the settings sheet (100); never open at the same time in practice. */
+.scrim-center { z-index: 110; justify-content: center; align-items: flex-start; padding-top: 14vh; }
+.qs-panel {
+  width: min(560px, 92%); max-height: 60vh; display: flex; flex-direction: column;
+  background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-float); overflow: hidden; animation: pop var(--dur-slow) var(--ease);
+}
+.qs-input {
+  background: var(--bg-input); border: 0; border-bottom: 1px solid var(--line);
+  padding: var(--s3) var(--s4); font-size: var(--fs-title); color: var(--txt-hi);
+  outline: none; font-family: var(--font-ui);
+}
+.qs-input::placeholder { color: var(--txt-mute); }
+.qs-list { overflow-y: auto; padding: var(--s1); }
+.qs-empty { padding: var(--s4); color: var(--txt-mute); font-size: var(--fs-body); text-align: center; }
+.qs-row {
+  display: flex; align-items: center; gap: var(--s2); padding: var(--row-pad-v) var(--s3);
+  border-radius: var(--r-sm); cursor: pointer; min-width: 0;
+}
+.qs-row.hi { background: var(--bg-elev); }
+.qs-slug { font-size: var(--fs-row); color: var(--txt-hi); font-weight: var(--fw-med); white-space: nowrap; }
+.qs-proj { font-size: var(--fs-meta); color: var(--txt-dim); white-space: nowrap; }
+.qs-branch {
+  font-size: var(--fs-label); color: var(--branch); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0;
+}
+.qs-row .life { margin-left: auto; flex: none; }
 .settings-sheet {
   width: min(380px, 92%); height: 100%; background: var(--bg-tree);
   border-left: 1px solid var(--line); box-shadow: var(--shadow-float);

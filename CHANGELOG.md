@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- Quick switcher: press ⌘K anywhere — even with the terminal focused — to
+  fuzzy-jump to any place across every project. Type to filter (matches slug,
+  branch, project, or note), arrow keys to move, Enter to jump, Esc to close;
+  open it with no query and it lists your most recent places. Works with the
+  nav collapsed, and each row shows the same working/needs-input dot as the nav.
+
 ## [0.3.1] - 2026-07-27
 
 ### Fixed
