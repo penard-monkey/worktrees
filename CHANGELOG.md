@@ -3,6 +3,25 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Removing a place from the app always failed with `invalid args 'delBranch' for
+  command 'remove_place'` and never reached the CLI. The frontend passed the flag
+  as `del_branch`, but Tauri renames Rust snake_case parameters to camelCase
+  across the IPC boundary. The mock harness now rejects the wrong spelling the
+  same way the real backend does — it previously ignored the flag entirely, which
+  is why the bug survived headless testing.
+- The "Not configured" banner no longer sticks for the rest of the session once a
+  `.worktrees.toml` appears from outside the app (a merge, a pull, or the CLI's
+  `init`). The suggestion probe rides the same five-minute sweep as doctor instead
+  of running once per project at startup.
+
+### Added
+- `.nvmrc` (22.13.0 — the floor pnpm 11 requires). `make install-app` checks the
+  active Node against it up front rather than letting pnpm fail with its own
+  version error minutes into the cargo build.
+
 ## [0.6.0] - 2026-08-01
 
 ### Added

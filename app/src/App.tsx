@@ -1132,16 +1132,27 @@ function App() {
   useEffect(() => {
     okRoots.current = new Set((ws?.projects ?? []).filter((pv) => pv.ok).map((pv) => pv.root));
   }, [ws]);
-  // Which roots have already had their once-per-project init probe (below).
-  // Declared here because the sweep effect prunes it alongside the two maps.
-  const suggestedFor = useRef<Set<string>>(new Set());
+  // Probes for the `.worktrees.toml` suggestion behind the "Not configured"
+  // banner. Also called directly after the sheet writes a config, so the banner
+  // retires immediately instead of at the next sweep.
+  const probeSuggest = useCallback(async (root: string) => {
+    try {
+      const s = await invoke<InitSuggestion | null>("init_suggest", { repo: root });
+      // Store unconditionally. Do NOT skip on an unchanged `hash` to save the
+      // re-render: `suggestion_key` covers files/ports/compose/truncated and
+      // deliberately NOT `exists` (it keys the DISMISSAL, so writing the config
+      // must not re-suggest). A config appearing therefore keeps the same hash
+      // while flipping `exists` — the one update the banner depends on.
+      if (s) setSuggest((m) => ({ ...m, [root]: s }));
+    } catch (e) {
+      invoke("log_event", { level: "warn", msg: `init_suggest ${root}: ${String(e)}` }).catch(() => {});
+    }
+  }, []);
   useEffect(() => {
     const roots = rootsKey ? rootsKey.split("\n") : [];
-    // A removed project must not keep its drift decoration, its suggestion, or
-    // its once-only probe marker alive for the rest of the session — re-adding it
-    // would then show stale findings and never re-probe.
+    // A removed project must not keep its drift decoration or its suggestion
+    // alive for the rest of the session — re-adding it would show stale findings.
     const live = new Set(roots);
-    for (const r of suggestedFor.current) if (!live.has(r)) suggestedFor.current.delete(r);
     const prune = <T,>(m: Record<string, T>) =>
       Object.keys(m).every((k) => live.has(k))
         ? m
@@ -1149,28 +1160,20 @@ function App() {
     setHealth((m) => prune(m));
     setSuggest((m) => prune(m));
     if (roots.length === 0) return;
-    const sweep = () => roots.filter((r) => okRoots.current.has(r)).forEach((r) => sweepDoctor(r));
+    // The init probe rides the doctor sweep rather than running once per root:
+    // `.worktrees.toml` can appear from OUTSIDE the app (a merge, a pull, the
+    // CLI's `init`), and a once-only probe leaves "Not configured" on screen for
+    // the rest of the session after it does. Same cost class as doctor, same
+    // 5-minute cadence, and it skips not-ok roots for free.
+    const sweep = () =>
+      roots.filter((r) => okRoots.current.has(r)).forEach((r) => {
+        sweepDoctor(r);
+        probeSuggest(r);
+      });
     sweep();
     const t = setInterval(sweep, 5 * 60_000); // slow timer, not the poll
     return () => clearInterval(t);
-  }, [rootsKey, sweepDoctor]);
-  // The suggestion is stable for a given checkout, so probe each project once;
-  // `probeSuggest` re-runs it after a config is written (the banner retires).
-  const probeSuggest = useCallback(async (root: string) => {
-    try {
-      const s = await invoke<InitSuggestion | null>("init_suggest", { repo: root });
-      if (s) setSuggest((m) => ({ ...m, [root]: s }));
-    } catch (e) {
-      invoke("log_event", { level: "warn", msg: `init_suggest ${root}: ${String(e)}` }).catch(() => {});
-    }
-  }, []);
-  useEffect(() => {
-    for (const root of rootsKey ? rootsKey.split("\n") : []) {
-      if (suggestedFor.current.has(root)) continue;
-      suggestedFor.current.add(root);
-      probeSuggest(root);
-    }
-  }, [rootsKey, probeSuggest]);
+  }, [rootsKey, sweepDoctor, probeSuggest]);
 
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
@@ -1573,7 +1576,8 @@ function App() {
   // remove still succeeds — del_branch is safe by construction.
   const confirmRemovePlaceCtx = async (repo: string, slug: string, delBranch: boolean) => {
     closeCtx();
-    if ((await runCmd("remove_place", { repo, slug, del_branch: delBranch, force: false }))?.ok) {
+    // Arg keys are camelCase: Tauri renames Rust snake_case params over IPC.
+    if ((await runCmd("remove_place", { repo, slug, delBranch, force: false }))?.ok) {
       if (sel?.repo === repo && sel?.slug === slug) setSel(null);
     }
   };
@@ -1651,7 +1655,7 @@ function App() {
   const confirmRemove = async (delBranch: boolean) => {
     if (!sel) return;
     closeMenu();
-    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, del_branch: delBranch, force: false }))?.ok) setSel(null);
+    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, delBranch, force: false }))?.ok) setSel(null);
   };
 
   const toggleProject = (root: string) => {
