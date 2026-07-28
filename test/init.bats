@@ -217,6 +217,30 @@ YAML
   tmux_session_exists teamx-feat-x
 }
 
+@test "init: the transcribed prefix is what the RESOLVER reads, not the raw line" {
+  # `init` trimmed only the ends while the resolver strips ALL whitespace, so a
+  # file saying `team x` produced `prefix = "team x"` — a config init's own
+  # doctor flagged as a mismatch on the very next command, contradicting the
+  # line init had just printed about nothing being renamed.
+  printf 'team x\n' > "$REPO/.worktree-prefix"
+  run_wt init -y
+  [ "$status" -eq 0 ]
+  grep -q '^prefix = "teamx"$' "$REPO/.worktrees.toml"
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"[project] prefix says"* ]]
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists teamx-feat-x
+}
+
+@test "init: a whitespace-only .worktree-prefix is not transcribed at all" {
+  printf '  \n' > "$REPO/.worktree-prefix"
+  run_wt init -y
+  [ "$status" -eq 0 ]
+  [ ! -e "$REPO/.worktrees.toml" ] || ! grep -q '^\[project\]$' "$REPO/.worktrees.toml"
+}
+
 @test "init: existing worktrees that predate the config are named for relink" {
   run_wt new feat-x --no-tmux
   [ "$status" -eq 0 ]

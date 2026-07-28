@@ -96,6 +96,14 @@ impl PaneList {
         Some(PaneList { panes })
     }
 
+    /// Does a session named EXACTLY `name` exist, per this snapshot? The
+    /// prefetched answer to `session_exists`, for a caller that has to ask once
+    /// per place: every live session has at least one pane, so `list-panes -a`
+    /// names them all and one shell-out replaces N `list-sessions` calls.
+    pub fn has_session(&self, name: &str) -> bool {
+        self.panes.iter().any(|(s, _, _)| s == name)
+    }
+
     /// Same selection as `worktree_session_excluding` but over the prefetched panes: a
     /// pane cwd'd in `wt` (exact or a subdir), preferring one whose command
     /// looks like the AI CLI (`ai_word`) or `node`, else the first match.
@@ -185,6 +193,17 @@ mod tests {
         PaneList {
             panes: rows.iter().map(|(s, p, c)| (s.to_string(), p.to_string(), c.to_string())).collect(),
         }
+    }
+
+    #[test]
+    fn has_session_answers_exactly_like_session_exists() {
+        // Exact match, never a prefix one — `api` must not answer for `api-fix`,
+        // the same guard `session_exists` exists for.
+        let list = pl(&[("api-fix", "/wt/a", "zsh"), ("main", "/repo", "zsh")]);
+        assert!(list.has_session("api-fix"));
+        assert!(list.has_session("main"));
+        assert!(!list.has_session("api"));
+        assert!(!list.has_session(""));
     }
 
     #[test]

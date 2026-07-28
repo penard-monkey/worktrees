@@ -67,6 +67,13 @@ pub enum Code {
     /// file's absence as "not a worktree" and takes the branch that `pkill -9`s
     /// the main checkout's stack. It is an Error for that reason alone.
     NoSlot,
+    /// A place's `.worktree.env` has a slot but does not declare every port
+    /// `[ports].base` names. ⚠ Not in §7's slug list: the slot checks answer
+    /// "does this place have a unique slot?", and a file written before a port
+    /// joined the map passes both while the service it forgot binds MAIN's port
+    /// (§1.1's hazard, arriving by drift rather than by absence). Warn, not
+    /// Error: the file is real and the remedy is one `provision` away.
+    MissingPort,
     /// A port this place's slot owns is bound by something else. ⚠ Not in §7's
     /// slug list; the port checks need a third code because "busy" is neither a
     /// conflict nor a missing slot. Info, never Error: the overwhelmingly likely
@@ -208,6 +215,7 @@ mod tests {
             (Code::NotGitignored, "not-gitignored"),
             (Code::SlotConflict, "slot-conflict"),
             (Code::NoSlot, "no-slot"),
+            (Code::MissingPort, "missing-port"),
             (Code::PortBusy, "port-busy"),
             (Code::ComposeDrift, "compose-drift"),
             (Code::CopyStale, "copy-stale"),

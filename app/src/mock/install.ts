@@ -48,7 +48,7 @@ type MockCfg = {
   exists: boolean;
   files: { path: string; mode: string }[];
   ports: { stride: number; max_slots: number; base: [string, number][] } | null;
-  compose: { file: string; project: string } | null;
+  compose: { files: string[]; project: string } | null;
   error: string | null;
   warnings: string[];
 };
@@ -66,7 +66,9 @@ const mockConfigs: Record<string, MockCfg> = {
       max_slots: 50,
       base: [["API", 3001], ["BACKOFFICE", 3000], ["LS", 4566], ["PG", 5432], ["WEBSITE", 3002]],
     },
-    compose: { file: "docker-compose.worktree.yml", project: "{prefix}-wt-{slug}" },
+    // Two files, in docker's order: the base declares the named volumes, the
+    // worktree override goes last (projcfg::Compose::files).
+    compose: { files: ["docker-compose.yml", "docker-compose.worktree.yml"], project: "{prefix}-wt-{slug}" },
     error: null,
     warnings: ["future_thing = 1 — unknown key, ignored"],
   },
@@ -96,8 +98,12 @@ let mockFileFindings: Record<string, MockFinding[]> = {
       message: "apps/mobile/google-services.json is not linked here — the Android build will have no FCM sender id",
     },
     {
+      // Verbatim from materialize::plan_one — including the fix text, which is
+      // what makes it obvious whether the app can act on this finding at all.
       severity: "warn", code: "copy-stale", place: "billing-refactor", path: "apps/backoffice/.env.local",
-      message: "apps/backoffice/.env.local differs from main and main is newer",
+      message:
+        "copy `apps/backoffice/.env.local` differs from main and main is NEWER — " +
+        "re-seed with: worktrees relink billing-refactor --force",
     },
   ],
 };
@@ -344,6 +350,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       });
     case "doctor": {
       const root = args.repo as string;
+      // The guard exit, modelled: cmd_doctor returns 1 BEFORE emitting any JSON
+      // when the config does not parse, so the app gets `findings: []` with an
+      // error — which is "nothing was measured", not "nothing is wrong". Any
+      // consumer that reads findings without checking this is broken, and the
+      // harness is where that shows up.
+      const cfgErr = mockConfigs[root]?.error;
+      if (cfgErr) {
+        return { code: 1, schema_version: 1, findings: [], error: cfgErr };
+      }
       const all = [...(mockFileFindings[root] ?? []), ...(mockPortFindings[root] ?? [])];
       const findings = args.slug ? all.filter((f) => f.place === args.slug) : all;
       return {
@@ -354,18 +369,36 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       };
     }
     case "relink": {
-      // Stateful: the file findings clear, so the badge AND the nav drift glyph
-      // both go away on the next doctor — the transition the sheet exists for.
+      // Stateful, and faithful to materialize::plan_one — which is the WHOLE
+      // point of the harness. A plain relink NEVER touches an existing regular
+      // file: a `copy-stale` and a `shadowed` both SURVIVE it, the run still
+      // exits 0, and the warning rides out in `warnings` (run_op splits the Warn
+      // lines out). Only `--force` moves the file aside as .bak and rewrites it.
+      //
+      // A mock that cleared the stale copy on a plain relink would demo a repair
+      // the real backend does not perform — the badge would clear here and
+      // persist against the real thing.
       const root = args.repo as string;
+      const force = !!args.force;
       const before = mockFileFindings[root] ?? [];
-      mockFileFindings = { ...mockFileFindings, [root]: [] };
+      const survives = (f: MockFinding) => !force && (f.code === "copy-stale" || f.code === "shadowed");
+      const kept = before.filter(survives);
+      const repaired = before.filter((f) => !survives(f));
+      mockFileFindings = { ...mockFileFindings, [root]: kept };
+      const lines = [
+        `═══ Relinking messaging ═══`,
+        ...repaired.map((f) =>
+          f.code === "copy-stale" || f.code === "shadowed"
+            ? `▸ re-copied ${f.path ?? ""} (previous content kept as ${(f.path ?? "file").split("/").pop()}.bak)`
+            : `▸ linked ${f.path ?? ""} -> ${root}/${f.path ?? ""}`,
+        ),
+        ...kept.map((f) => `! ${f.message}`),
+      ];
       return {
-        ok: true, code: 0, warnings: [],
-        output:
-          `═══ Relinking messaging ═══\n` +
-          before.map((f) => `▸ ${f.place}: repaired ${f.path ?? ""}`).join("\n") +
-          (before.length ? "\n" : "") +
-          `▸ ${before.length} entr${before.length === 1 ? "y" : "ies"} materialized, 0 shadowed`,
+        ok: true, code: 0,
+        // Warn-severity lines only, exactly like CaptureUi::warnings().
+        warnings: kept.filter((f) => f.severity === "warn").map((f) => f.message),
+        output: lines.join("\n"),
       };
     }
     case "provision": {
@@ -504,4 +537,41 @@ setInterval(() => {
   emitEvent("sessions:busy", ACTIVITY_CYCLE[actIdx]);
 }, 5000);
 
-console.info("[mock] Tauri backend mocked — design harness active");
+// Harness-only controls for states a user cannot reach by clicking. An
+// unreadable `.worktrees.toml` is the highest-consequence state in the Project
+// sheet (doctor stops running, every op refuses) and there is no button that
+// produces it — so drive it from the console / Playwright:
+//
+//   __mock.breakConfig(root?)   // config stops parsing; doctor exits on a guard
+//   __mock.fixConfig(root?)     // back to parsing
+//
+// `root` defaults to the cdv fixture. Returns the root it touched. Both fire a
+// places:changed so the nav re-pulls immediately instead of waiting on the sweep.
+const healthyConfigs: Record<string, MockCfg> = {};
+(window as any).__mock = {
+  breakConfig(root: string = CDV_ROOT, msg?: string) {
+    const cfg = mockConfigs[root];
+    if (!cfg) return null;
+    healthyConfigs[root] ??= clone(cfg);
+    // projcfg::load returning Err leaves ProjectConfigView with NOTHING but the
+    // error (lib.rs) — a config that doesn't parse has no files, no ports and no
+    // compose to report, only the reason. Modelling it as "structure + an error"
+    // would let the sheet look half-fine.
+    mockConfigs[root] = {
+      path: cfg.path,
+      exists: true,
+      files: [], ports: null, compose: null, warnings: [],
+      error: msg ?? ".worktrees.toml:7: expected `=` after key `path` — the file does not parse",
+    };
+    emitEvent("places:changed", {});
+    return root;
+  },
+  fixConfig(root: string = CDV_ROOT) {
+    if (!healthyConfigs[root]) return null;
+    mockConfigs[root] = clone(healthyConfigs[root]);
+    emitEvent("places:changed", {});
+    return root;
+  },
+};
+
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig)");

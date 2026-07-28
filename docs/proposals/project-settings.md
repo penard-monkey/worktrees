@@ -110,9 +110,16 @@ base = { BACKOFFICE = 3000, API = 3001, WEBSITE = 3002, WO_MOCK = 3010,
          META_MOCK = 3011, PG = 5432, LS = 4566 }
 
 # Optional. Only if the project namespaces a docker-compose stack per worktree.
+# Every file listed is passed to docker in order (a later one overrides an
+# earlier one). The BASE file belongs here too: teardown's `down -v` removes only
+# the volumes declared in the files it is given, and named volumes
+# (postgres_data, …) live in the base while the override declares none.
 [compose]
-file = "docker-compose.worktree.yml"
+files = ["docker-compose.yml", "docker-compose.worktree.yml"]
 project = "{prefix}-wt-{slug}"
+
+# `file = "docker-compose.worktree.yml"` stays valid as the one-element
+# shorthand — every config written before the list form keeps working.
 ```
 
 ### Why one `[[file]]` list instead of `[link]`/`[copy]` tables
@@ -327,7 +334,7 @@ The project rung exists **only for allow-listed keys**.
 |---|---|
 | `[[file]] path` / `mode` | `ai_cmd`, `ai_resume_arg` |
 | `[ports] stride` / `max_slots` / `base` | any install-command override |
-| `[compose] file` | `post_create` |
+| `[compose] files` (or the one-file `file`) | `post_create` |
 | `[compose] project` — a template with a **closed** placeholder set (`{prefix}`, `{slug}`), pushed through `sanitize_prefix` before it reaches `docker -p`. Not a free string. | `[infra] up/stop/down` |
 | `[project] prefix` | |
 

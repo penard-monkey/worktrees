@@ -154,11 +154,17 @@ pub fn resolve_prefix_from(
     cfg: Option<&str>,
     fallback: &str,
 ) -> String {
+    // Whitespace-only is ABSENT, in every tier — the same rule the legacy file
+    // tier has always applied (`project::prefix_file` strips whitespace and then
+    // filters empty). Only checking `is_empty` let `[project] prefix = "   "`
+    // win its rung and sanitize to `---`, so a repo could rename every session
+    // to `----<slug>` with three spaces nobody can see in a diff.
+    let present = |s: &&str| !s.trim().is_empty();
     let raw = env
-        .filter(|s| !s.is_empty())
-        .or(prefix_file.filter(|s| !s.is_empty()))
-        .or(project.filter(|s| !s.is_empty()))
-        .or(cfg.filter(|s| !s.is_empty()))
+        .filter(present)
+        .or(prefix_file.filter(present))
+        .or(project.filter(present))
+        .or(cfg.filter(present))
         .unwrap_or(fallback);
     sanitize_prefix(raw)
 }
@@ -240,6 +246,20 @@ mod tests {
         // an empty value is not a value, in every tier
         assert_eq!(r(Some(""), Some(""), Some(""), Some("")), "reponame");
         assert_eq!(r(Some(""), None, Some("projp"), None), "projp");
+    }
+
+    #[test]
+    fn a_whitespace_only_prefix_is_absent_in_every_tier() {
+        // The file tier has always read it this way (`project::prefix_file`
+        // strips whitespace, then filters empty). The other tiers filtered only
+        // `is_empty`, so `[project] prefix = "   "` won its rung and sanitized to
+        // `---` — sessions named `----feat-x` from three invisible characters.
+        let r = |e, f, p, c| resolve_prefix_from(e, f, p, c, "reponame");
+        assert_eq!(r(None, None, Some("   "), None), "reponame");
+        assert_eq!(r(Some(" \t "), None, None, None), "reponame");
+        assert_eq!(r(None, Some("\t"), None, Some("cfgp")), "cfgp");
+        // …and a blank rung is SKIPPED, not fatal: the next one still answers
+        assert_eq!(r(Some("  "), None, Some("projp"), None), "projp");
     }
 
     #[test]

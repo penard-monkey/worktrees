@@ -37,6 +37,10 @@ pub const PREFIX_FILE: &str = ".worktree-prefix";
 /// stack per worktree" (§9).
 const WORKTREE_COMPOSE: &[&str] = &["docker-compose.worktree.yml", "docker-compose.worktree.yaml"];
 
+/// The file docker itself reads by default — the base a worktree override
+/// layers over, and where a project's named volumes actually live (§3).
+const BASE_COMPOSE: &[&str] = &["docker-compose.yml", "docker-compose.yaml"];
+
 // ── walk bounds ──────────────────────────────────────────────────────────────
 // A monorepo is large and `init` must not take 30 seconds — and the passive nudge
 // (§9) runs this on `new`, which is a hot path. So the walk is bounded four ways
@@ -132,7 +136,9 @@ pub struct Facts {
     /// guessed (`git check-ignore` and `git ls-files`, one call each).
     pub files: Vec<Candidate>,
     pub compose: Vec<ComposeFacts>,
-    /// First line of `.worktree-prefix`, if the repo has one.
+    /// `.worktree-prefix` as the RESOLVER reads it (`project::prefix_file`) —
+    /// not as this module would like to: `init` must emit what the tool would
+    /// actually resolve, or it writes a config its own `doctor` flags.
     pub prefix_file: Option<String>,
     pub places: Vec<PlaceFacts>,
     /// A walk bound was hit, so `files`/`compose` may be incomplete. Reported,
@@ -170,7 +176,10 @@ pub struct Suggestion {
     pub files: Vec<Candidate>,
     /// Found on disk, not declarable. See [`Rejected`].
     pub rejected: Vec<Rejected>,
-    pub compose: Option<String>,
+    /// The `[compose]` file list, in docker's order (base first, override last).
+    /// A LIST because `down -v` removes only the volumes declared in the files
+    /// docker is handed, and the named volumes live in the base file (§3).
+    pub compose: Option<Vec<String>>,
     pub ports: Option<PortsSuggestion>,
     /// Contents of `.worktree-prefix`, folded into a live `[project] prefix`.
     /// Emitting it is safe precisely because it is a TRANSCRIPTION: the legacy
@@ -213,7 +222,15 @@ pub fn detect(f: &Facts) -> Suggestion {
     candidates.dedup_by(|a, b| a.rel == b.rel);
     let (files, rejected) = split_declarable(candidates);
 
-    let compose = f.compose.iter().find(|c| c.is_override).map(|c| c.rel.clone());
+    // Only a per-worktree OVERRIDE suggests `[compose]` — but it is declared
+    // together with the canonical base file beside it, because teardown passes
+    // every declared file and `down -v` removes only the volumes those files
+    // declare. The override alone leaks every named volume the base owns.
+    let compose = f.compose.iter().find(|c| c.is_override).map(|ovr| {
+        let mut files: Vec<String> = base_compose_beside(&f.compose, &ovr.rel).into_iter().collect();
+        files.push(ovr.rel.clone());
+        files
+    });
 
     // `[ports]` is suggested by EITHER docker signal: the worktree override (the
     // project already namespaces a stack, so it wants slots), or any compose file
@@ -252,6 +269,23 @@ pub fn detect(f: &Facts) -> Suggestion {
         stale_places: f.places.iter().filter(|p| p.missing > 0).map(|p| p.slug.clone()).collect(),
         truncated: f.truncated,
     }
+}
+
+/// The canonical base file sitting beside an override: the name docker itself
+/// defaults to, in the SAME directory.
+///
+/// Deliberately narrow. Every extra `-f` merges another stack into the teardown,
+/// so guessing (`docker-compose.prod.yml`? `docker-compose.override.yml`?) is
+/// worse than saying nothing — a human adds those, and the emitted comment says
+/// so. `docker-compose.yml` is the one file whose role is not a guess.
+fn base_compose_beside(all: &[ComposeFacts], override_rel: &str) -> Option<String> {
+    let dir_of = |rel: &str| rel.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+    let dir = dir_of(override_rel);
+    all.iter()
+        .find(|c| {
+            !c.is_override && BASE_COMPOSE.contains(&basename(&c.rel)) && dir_of(&c.rel) == dir
+        })
+        .map(|c| c.rel.clone())
 }
 
 /// Layer A (§4), applied at DETECT time rather than discovered at write time.
@@ -439,16 +473,28 @@ pub fn render(s: &Suggestion) -> String {
         }
     }
 
-    if let Some(file) = &s.compose {
+    if let Some(files) = &s.compose {
         o.push_str(
             "\n# ── compose ───────────────────────────────────────────────────────────────\n\
              # Only because this repo already has a per-worktree compose file. The tool\n\
-             # assembles the argv itself — `docker compose -f <file> -p <project> …` —\n\
+             # assembles the argv itself — `docker compose -f <file>… -p <project> …` —\n\
              # so this section is data, never a command. {prefix} and {slug} are the\n\
-             # only placeholders. The stack is torn down when the worktree is removed.\n",
+             # only placeholders. The stack is torn down when the worktree is removed.\n\
+             # Every file listed is passed, in order (a later one overrides an earlier\n\
+             # one): teardown's `down -v` removes only the volumes the files it is given\n\
+             # declare, so a base file holding named volumes belongs here too. Add any\n\
+             # other compose file this stack is started with.\n",
         );
         o.push_str("[compose]\n");
-        o.push_str(&format!("file = {}\n", toml_string(file)));
+        match files.as_slice() {
+            // One file keeps the `file = "…"` shorthand — the shape every config
+            // written before this was a list already uses.
+            [one] => o.push_str(&format!("file = {}\n", toml_string(one))),
+            many => {
+                let list: Vec<String> = many.iter().map(|f| toml_string(f)).collect();
+                o.push_str(&format!("files = [{}]\n", list.join(", ")));
+            }
+        }
         o.push_str("project = \"{prefix}-wt-{slug}\"\n");
     }
 
@@ -522,10 +568,12 @@ pub fn probe(main_root: &Path, wt_root: &Path) -> Facts {
         })
         .collect();
 
-    let prefix_file = fs::read_to_string(main_root.join(PREFIX_FILE))
-        .ok()
-        .and_then(|c| c.lines().next().map(|l| l.trim().to_string()))
-        .filter(|s| !s.is_empty());
+    // The resolver's own reader, not a local trim. `project::prefix_file` strips
+    // whitespace and treats a whitespace-only file as absent; transcribing the
+    // raw line instead emitted `prefix = "team x"` for a file that resolves to
+    // `teamx`, so `init` wrote a config `doctor` flagged as a mismatch on the
+    // very next command — while its own output promised nothing was renamed.
+    let prefix_file = crate::project::prefix_file(&main_root.to_string_lossy());
 
     let places = probe_places(wt_root, &files);
 
@@ -1058,10 +1106,54 @@ mod tests {
             ..Facts::default()
         };
         let s = detect(&f);
-        assert_eq!(s.compose.as_deref(), Some("docker-compose.worktree.yml"));
+        assert_eq!(s.compose, Some(vec!["docker-compose.worktree.yml".to_string()]));
         let p = s.ports.unwrap();
         assert_eq!(p.base, vec![("API".into(), 3000), ("PG".into(), 5432)]);
         assert_eq!(p.commented, None);
+    }
+
+    #[test]
+    fn the_base_compose_beside_an_override_is_declared_with_it() {
+        // THE volume leak: `down -v` removes only the volumes declared in the
+        // files docker is handed, and a real project's named volumes live in the
+        // base file while the override declares none. Base FIRST — docker's
+        // order, so the override still wins.
+        let f = Facts {
+            compose: vec![
+                compose("docker-compose.yml", &[("pg", 5432)]),
+                compose("docker-compose.worktree.yml", &[("api", 3000)]),
+            ],
+            ..Facts::default()
+        };
+        let s = detect(&f);
+        assert_eq!(
+            s.compose,
+            Some(vec!["docker-compose.yml".to_string(), "docker-compose.worktree.yml".to_string()])
+        );
+        let out = render(&s);
+        assert!(
+            out.contains("files = [\"docker-compose.yml\", \"docker-compose.worktree.yml\"]"),
+            "{out}"
+        );
+        let (cfg, findings) = projcfg::parse(&out).unwrap();
+        let parsed = cfg.compose.unwrap();
+        let files: Vec<&str> = parsed.files.iter().map(|f| f.as_str()).collect();
+        assert_eq!(files, vec!["docker-compose.yml", "docker-compose.worktree.yml"]);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        // Only the canonical base, and only beside the override: a stack file
+        // this tool cannot place is a human's call, never an extra `-f`.
+        let f = Facts {
+            compose: vec![
+                compose("docker-compose.prod.yml", &[]),
+                compose("infra/docker-compose.yml", &[]),
+                compose("docker-compose.worktree.yml", &[("api", 3000)]),
+            ],
+            ..Facts::default()
+        };
+        assert_eq!(detect(&f).compose, Some(vec!["docker-compose.worktree.yml".to_string()]));
+        // …and one file keeps the `file = "…"` shorthand
+        assert!(render(&detect(&f)).contains("file = \"docker-compose.worktree.yml\""));
     }
 
     #[test]
@@ -1161,7 +1253,16 @@ mod tests {
         // Every combination of sections. THIS is the test that stops the emitter
         // and `projcfg::parse` from drifting.
         let files = vec![vec![], vec![env(".env")], vec![env(".env"), cred("apps/mobile/google-services.json")]];
-        let composes = vec![vec![], vec![compose("docker-compose.worktree.yml", &[("api", 3000), ("pg", 5432)])]];
+        let composes = vec![
+            vec![],
+            vec![compose("docker-compose.worktree.yml", &[("api", 3000), ("pg", 5432)])],
+            // base + override ⇒ the `files = [...]` form, which must round-trip
+            // exactly like the `file = "..."` shorthand
+            vec![
+                compose("docker-compose.yml", &[("pg", 5432)]),
+                compose("docker-compose.worktree.yml", &[("api", 3000), ("pg", 5432)]),
+            ],
+        ];
         let prefixes = vec![None, Some("cdv".to_string())];
         let mut seen_live_ports = false;
         for fs_ in &files {
@@ -1183,7 +1284,15 @@ mod tests {
                         assert_eq!(got.path.as_str(), want.rel);
                         assert_eq!(got.mode, projcfg::Mode::Link, "link is the default (§3)");
                     }
-                    assert_eq!(cfg.compose.is_some(), s.compose.is_some(), "{text}");
+                    assert_eq!(
+                        cfg.compose.as_ref().map(|c| c
+                            .files
+                            .iter()
+                            .map(|f| f.as_str().to_string())
+                            .collect::<Vec<_>>()),
+                        s.compose,
+                        "the emitted file list must survive the parser verbatim: {text}"
+                    );
                     assert_eq!(cfg.project.prefix.as_deref(), s.prefix.as_deref(), "{text}");
                     if let Some(c) = &cfg.compose {
                         assert_eq!(c.project, "{prefix}-wt-{slug}");

@@ -17,7 +17,8 @@ type CmdResult = { ok: boolean; code: number; output: string; slug?: string | nu
 
 export type ProjectFileView = { path: string; mode: string };
 export type ProjectPortsView = { stride: number; max_slots: number; base: [string, number][] };
-export type ProjectComposeView = { file: string; project: string };
+/** `files` is docker's `-f` list, in docker's order — see lib.rs. */
+export type ProjectComposeView = { files: string[]; project: string };
 export type ProjectConfigView = {
   path: string;
   exists: boolean;
@@ -65,10 +66,31 @@ export function driftedSlugs(r: DoctorReport | null | undefined): Set<string> {
   return out;
 }
 
-/** Findings not attached to a place (config-level: unknown key, slot conflict
- * reported project-wide, …) plus the per-place ones — counted for the badge. */
-const actionable = (r: DoctorReport | null) =>
-  (r?.findings ?? []).filter((f) => f.severity !== "info").length;
+/** Every actionable finding — the per-place ones PLUS the ones attached to no
+ * place (an `unknown-key` warn, a project-wide slot conflict). This is the ONE
+ * count in the app: the sheet's Health badge and the project context menu both
+ * use it, so they can no longer disagree by the width of a placeless finding.
+ * The nav GLYPH is necessarily narrower (it decorates a row, so it can only show
+ * findings that name a row) — that asymmetry is real, and the two are labelled
+ * differently because of it. */
+export function issueCount(r: DoctorReport | null | undefined): number {
+  return (r?.findings ?? []).filter((f) => f.severity !== "info").length;
+}
+
+/** A report that did not RUN — `cmd_doctor` exited on a guard (an unreadable
+ * `.worktrees.toml`, a bad worktree name) before it could emit any JSON, so
+ * `findings: []` here means "nothing was measured", never "nothing is wrong".
+ * Every consumer has to branch on this BEFORE it reads `findings`. */
+export function reportFailed(r: DoctorReport | null | undefined): boolean {
+  return !r || r.error !== null || r.code === 1;
+}
+
+/** What `relink --force` would rewrite: a copy that differs from main, and a real
+ * file shadowing a declared link. Core backs each one up to `.bak`/`.bak.2`
+ * before it touches it (§7) — but the displaced content may be the only copy, so
+ * the button that calls this is armed, counted, and never the default. */
+const forcible = (r: DoctorReport | null) =>
+  (r?.findings ?? []).filter((f) => f.code === "copy-stale" || f.code === "shadowed");
 
 // Module scope with props (CLAUDE.md): a component defined inside App() gets a
 // fresh identity every render, remounting its DOM and dropping input focus.
@@ -95,10 +117,15 @@ export function ProjectSheet({
   const [cfg, setCfg] = useState<ProjectConfigView | null>(null);
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [checking, setChecking] = useState(false);
-  const [running, setRunning] = useState<"" | "relink" | "provision" | "init">("");
+  const [running, setRunning] = useState<"" | "relink" | "force" | "provision" | "init">("");
   const [log, setLog] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [showToml, setShowToml] = useState(false);
+  // Arm-then-confirm for the one destructive control in this sheet (`--force`),
+  // same two-click shape as .pop-item.danger / .ctrl.sm.danger elsewhere. It is
+  // disarmed by every state change below — an armed button surviving a re-check
+  // would fire against findings it was never aimed at.
+  const [armed, setArmed] = useState(false);
 
   // Errors are NEVER swallowed: they surface in this sheet's own error area AND
   // land in app.log (ProjectSheet has no fail() — same shape as SettingsSheet).
@@ -111,6 +138,7 @@ export function ProjectSheet({
   // action below — see the hazard note on `run`.
   const refresh = useCallback(async () => {
     setChecking(true);
+    setArmed(false);
     try {
       // The mock harness returns null for an unmocked command, so every typed
       // invoke here has to tolerate null rather than assume a shape.
@@ -136,6 +164,7 @@ export function ProjectSheet({
     setLog("");
     setErr(null);
     setShowToml(false);
+    setArmed(false);
     refresh();
   }, [open, refresh]);
 
@@ -150,16 +179,22 @@ export function ProjectSheet({
   // SettingsSheet INCLUDING the hazard it already solved: state is re-read in
   // `finally` BEFORE the buttons come back, because a stale-enabled button in
   // the re-check window would re-run the whole repair on a click.
-  const run = async (kind: "relink" | "provision" | "init", cmdline: string, cmd: string, args: Record<string, unknown>) => {
+  const run = async (kind: "relink" | "force" | "provision" | "init", cmdline: string, cmd: string, args: Record<string, unknown>) => {
     if (running) return;
     setRunning(kind);
+    setArmed(false);
     setErr(null);
     setLog(`$ worktrees ${cmdline}\n`);
     try {
       const r = await invoke<CmdResult | null>(cmd, args);
       const out = r?.output?.trim() ? r.output : "(no output)";
       const tail = r?.ok ? "\n✓ done" : `\n✗ exit ${r?.code ?? "?"}`;
-      const warn = r?.warnings?.length ? "\n" + r.warnings.map((w) => `! ${w}`).join("\n") : "";
+      // `warnings` is the Warn subset of the SAME lines `output` already carries
+      // (CaptureUi::push writes both), so echo only what the output missed —
+      // otherwise every stale-copy warning prints twice. Still never swallowed:
+      // a warning absent from output is appended exactly as before.
+      const missed = (r?.warnings ?? []).filter((w) => !out.includes(w));
+      const warn = missed.length ? "\n" + missed.map((w) => `! ${w}`).join("\n") : "";
       setLog((l) => l + out + warn + tail);
       if (kind === "init" && r?.ok) onConfigWritten(root);
     } catch (e) {
@@ -183,9 +218,18 @@ export function ProjectSheet({
 
   if (!open) return null;
 
-  const issues = actionable(report);
+  // A report that failed to RUN is not a report of zero problems. Every read of
+  // `report.findings` below is gated on this.
+  const broken = report !== null && reportFailed(report);
+  const issues = broken ? 0 : issueCount(report);
   const busy = running !== "";
   const canSuggest = !!suggestion?.qualifies && !cfg?.exists;
+  // Force is offered only when something force would actually repair is present
+  // at warn/error. The COUNT includes the info-level drifted copies, because
+  // `--force` re-seeds those too — the confirm must name what it will rewrite,
+  // not what it was triggered by.
+  const forceable = broken ? [] : forcible(report);
+  const offerForce = forceable.some((f) => f.severity !== "info");
 
   return (
     <div className="scrim" onClick={onClose}>
@@ -211,7 +255,7 @@ export function ProjectSheet({
                   <div className="ver-row">
                     files <b>{cfg.files.length}</b>
                     {cfg.ports ? <> · ports <b>{cfg.ports.base.length}</b> (stride {cfg.ports.stride}, ≤{cfg.ports.max_slots} slots)</> : null}
-                    {cfg.compose ? <> · compose <b>{cfg.compose.file}</b></> : null}
+                    {cfg.compose ? <> · compose <b>{cfg.compose.files.join(" + ")}</b></> : null}
                   </div>
                   {cfg.files.map((f) => (
                     <div className="ver-row dx-file" key={f.path}>
@@ -241,10 +285,26 @@ export function ProjectSheet({
           <section className="setting">
             <label>
               Health
+              {broken ? <span className="upd-tag warn">unchecked</span> : null}
               {issues > 0 ? <span className="upd-tag warn">{issues} {issues === 1 ? "issue" : "issues"}</span> : null}
             </label>
             {report === null ? (
               <div className="hint">doctor hasn't run yet.</div>
+            ) : broken ? (
+              // The guard message itself is in the `err` pre at the bottom of the
+              // section; this says what its ABSENCE of findings means, which is
+              // the thing that used to read as "✓ clean".
+              <div className="dx-list">
+                <div className="dx-row">
+                  <span className="dx-sev error">✗</span>
+                  <span className="dx-msg">
+                    doctor could not run here — nothing was checked. Until the config parses,
+                    every command in this project refuses, and the drift shown in the nav is
+                    whatever was last measured.
+                    <span className="dx-code">unchecked</span>
+                  </span>
+                </div>
+              </div>
             ) : report.findings.length === 0 ? (
               <div className="hint">✓ clean — every declared file is materialized.</div>
             ) : (
@@ -263,20 +323,50 @@ export function ProjectSheet({
               </div>
             )}
             <div className="ver-actions">
-              <button className="ctrl sm" disabled={busy || !cfg?.exists}
+              {/* An unreadable config makes both of these refuse in core anyway —
+                  offering them would just print the parse error twice. */}
+              <button className="ctrl sm" disabled={busy || !cfg?.exists || !!cfg?.error}
                 onClick={() => run("relink", "relink --all", "relink", { repo: root, slug: null, force: false })}>
                 {running === "relink" ? "Relinking…" : "Relink files"}
               </button>
-              <button className="ctrl sm" disabled={busy || !cfg?.ports}
+              <button className="ctrl sm" disabled={busy || !cfg?.ports || !!cfg?.error}
                 onClick={() => run("provision", "provision --all", "provision", { repo: root, slug: null })}>
                 {running === "provision" ? "Provisioning…" : "Provision ports"}
               </button>
+              {offerForce && (
+                <button
+                  className={"ctrl sm danger" + (armed ? " armed" : "")}
+                  disabled={busy}
+                  title="re-seed declared copies from main and move a shadowing file aside as .bak"
+                  onClick={() => {
+                    if (!armed) { setArmed(true); return; }
+                    run("force", "relink --all --force", "relink", { repo: root, slug: null, force: true });
+                  }}
+                >
+                  {running === "force"
+                    ? "Re-seeding…"
+                    : armed
+                      ? `Overwrite ${forceable.length} file${forceable.length === 1 ? "" : "s"}?`
+                      : "Re-seed from main…"}
+                </button>
+              )}
             </div>
             <div className="hint">
               Relink re-applies the file plan to every worktree; a real file that shadows a declared
-              link is reported, never overwritten. Provision allocates or adopts a port slot and
-              writes .worktree.env.
+              link, and a copy that has drifted, are reported and left ALONE. Provision allocates or
+              adopts a port slot and writes .worktree.env.
             </div>
+            {offerForce && (
+              // Without this the warn is un-repairable from the app: the plain
+              // Relink above takes no action on it by design, and the finding's
+              // own fix text names a flag only the CLI had.
+              <div className="hint">
+                Re-seed is the <b>--force</b> pass, and it is the only way to clear a stale copy: it
+                rewrites every declared copy from main and moves a shadowing file aside first, as
+                .bak (then .bak.2, never overwriting a backup). The content it displaces may be the
+                only copy of it.
+              </div>
+            )}
             {log && <pre className="update-log">{log}</pre>}
             {err && <pre className="update-log">{err}</pre>}
           </section>

@@ -864,7 +864,11 @@ struct ProjectPortsView {
 
 #[derive(Serialize)]
 struct ProjectComposeView {
-    file: String,
+    /// The `-f` list in DOCKER's order (a later file overrides an earlier one).
+    /// A LIST because `projcfg::Compose` is one: `down -v` only removes volumes
+    /// declared in the files it is handed, so the base compose file has to travel
+    /// with the worktree override. `file = "…"` is still the one-element form.
+    files: Vec<String>,
     /// The `{prefix}`/`{slug}` template, unexpanded — this is the declaration.
     project: String,
 }
@@ -883,7 +887,10 @@ struct ProjectConfigView {
     /// This is the most important thing the sheet can say when set: it is *why*
     /// every op in the repo is refusing.
     error: Option<String>,
-    /// Non-fatal parse findings (unknown key, deferred key, prefix mismatch).
+    /// Non-fatal parse findings, already rendered as `file:line: message`. Today
+    /// that is exactly `projcfg`'s `unknown-key` family — an unknown key, an
+    /// unknown table, or a wrong-shaped `[project]`. (Prefix disagreement is a
+    /// `doctor` finding, not a parse one: it needs the repo, not the file.)
     warnings: Vec<String>,
 }
 
@@ -924,7 +931,7 @@ async fn project_config_read(repo: String) -> Result<ProjectConfigView, String> 
                 base: x.base.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             });
             view.compose = cfg.compose.as_ref().map(|c| ProjectComposeView {
-                file: c.file.as_str().to_string(),
+                files: c.files.iter().map(|f| f.as_str().to_string()).collect(),
                 project: c.project.clone(),
             });
             view.warnings = findings.iter().map(|f| f.message.clone()).collect();
@@ -1052,21 +1059,62 @@ struct InitSuggestion {
     truncated: bool,
     /// The rendered file, comments and all — the sheet shows it before writing.
     toml: String,
-    /// Content hash of that rendered file. §9's dismissal key: a repo that later
-    /// gains a credential file gets a NEW hash and correctly re-suggests, which a
-    /// boolean "dismissed" could never do.
+    /// §9's dismissal key: a repo that later gains a credential file gets a NEW
+    /// hash and correctly re-suggests, which a boolean "dismissed" could never do.
+    /// Hashed from a CANONICAL PROJECTION of the suggestion, not from `toml` —
+    /// see `suggestion_key` for which differences are deliberately invisible here.
     hash: String,
 }
 
-/// FNV-1a, matching `init.rs`'s own marker hash. Not a security boundary — it
-/// only answers "is this the same suggestion I already declined?".
-fn fnv1a_hex(s: &str) -> String {
+/// A 64-bit string mixer, FNV-1a **in shape only**: the multiplier below is
+/// `0x1000_0000_01b3`, which is NOT the FNV-64 prime (`0x100_0000_01b3`). It is
+/// deliberately byte-for-byte the same mixer as `init.rs`'s `fnv1a`, so the CLI's
+/// once-only marker and the app's dismissal key can never disagree about what
+/// "the same suggestion" means. Renamed off `fnv1a_hex` because claiming FNV
+/// while using a different constant is how the next reader gets misled.
+///
+/// Not a security boundary — it only answers "is this the suggestion I already
+/// declined?". If core's constant is ever corrected, correct this one in the same
+/// change (both are pre-release, so no stored marker survives either way).
+fn digest_hex(s: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.as_bytes() {
         h ^= u64::from(*b);
         h = h.wrapping_mul(0x1000_0000_01b3);
     }
     format!("{h:016x}")
+}
+
+/// The dismissal key's INPUT: a canonical projection of the suggestion, not the
+/// rendered TOML.
+///
+/// Hashing the rendered file made the key sensitive to things that are not a
+/// change in what is being suggested. `init::walk` picks the `[compose] file`
+/// from a `read_dir`-ordered candidate list, and truncates its hit list at
+/// `MAX_HITS`/`MAX_ENTRIES` before sorting — so on a repo with two compose files
+/// (or one big enough to truncate) the same checkout can render two different
+/// TOMLs. A flapping key resurrects a banner the user already dismissed.
+///
+/// So: sort the file list, reduce compose to the boolean that actually drives the
+/// suggestion, and drop the port numbers (they come from the same heuristic scan).
+/// What survives is exactly §9's contract — "a repo that later gains a credential
+/// file re-suggests" — and nothing else.
+///
+/// ⚠ This cannot fix the remaining case: when the walk truncates, the SET of files
+/// can differ between runs, and no projection of a wrong set is stable. That fix
+/// belongs in `worktrees_core::init::walk` (sort each `read_dir` before the
+/// bound is applied).
+fn suggestion_key(s: &InitSuggestion) -> String {
+    let mut lines: Vec<String> = s
+        .files
+        .iter()
+        .map(|f| format!("file\t{}\t{}", if f.credential { "cred" } else { "plain" }, f.path))
+        .collect();
+    lines.sort();
+    lines.push(format!("ports\t{}", s.ports));
+    lines.push(format!("compose\t{}", s.compose));
+    lines.push(format!("truncated\t{}", s.truncated));
+    digest_hex(&lines.join("\n"))
 }
 
 #[tauri::command]
@@ -1082,7 +1130,7 @@ async fn init_suggest(repo: String) -> Result<InitSuggestion, String> {
     let sug = init::detect(&facts);
     let qualifies = !sug.is_empty();
     let toml = if qualifies { init::render(&sug) } else { String::new() };
-    Ok(InitSuggestion {
+    let mut view = InitSuggestion {
         path: path.to_string_lossy().into_owned(),
         exists: path.exists(),
         qualifies,
@@ -1096,9 +1144,12 @@ async fn init_suggest(repo: String) -> Result<InitSuggestion, String> {
         compose: sug.compose.is_some(),
         stale_places: sug.stale_places.clone(),
         truncated: sug.truncated,
-        hash: fnv1a_hex(&toml),
+        hash: String::new(),
         toml,
-    })
+    };
+    // Derived from the projection, never from `view.toml` — see `suggestion_key`.
+    view.hash = suggestion_key(&view);
+    Ok(view)
 }
 
 /// Write the suggested `.worktrees.toml`.

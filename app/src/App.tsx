@@ -5,7 +5,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
-import { driftedSlugs, InitBanner, ProjectSheet, type DoctorReport, type InitSuggestion } from "./ProjectSheet";
+import {
+  driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
+  type DoctorReport, type InitSuggestion,
+} from "./ProjectSheet";
 import { applySettings, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
@@ -40,6 +43,11 @@ type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: 
 type Workspace = { projects: ProjectView[] };
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
 type Lens = "places" | "recent" | "attention";
+/** Last known `doctor` state for one project root. `slugs` decorates rows,
+ * `issues` is the project-level count (placeless findings included, so it equals
+ * the sheet's Health badge), `error` means the last run did not produce a report
+ * at all — in which case the other two are the last measurement, not this one. */
+type ProjectHealth = { slugs: Set<string>; issues: number; error: string | null };
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order: Home (clear
 // selection → briefing), then the rail's lens entries. Module scope = stable.
@@ -445,12 +453,19 @@ function App() {
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
   const [projSheet, setProjSheet] = useState<string | null>(null);
-  // Project-config drift, per project root → the slugs doctor blames. Structurally
-  // identical to busyPaths/waitingPaths (the house pattern for row decoration that
-  // is NOT in the snapshot) — deliberately outside `Place`, because `Place.stack`
-  // is reserved for the infra phase and putting drift on the hot path would mean
-  // a filesystem probe inside every 3s poll.
-  const [drift, setDrift] = useState<Record<string, Set<string>>>({});
+  // Per-project doctor state. Structurally identical to busyPaths/waitingPaths
+  // (the house pattern for row decoration that is NOT in the snapshot) —
+  // deliberately outside `Place`, because `Place.stack` is reserved for the infra
+  // phase and putting drift on the hot path would mean a filesystem probe inside
+  // every 3s poll.
+  //
+  // `slugs` decorates ROWS (place-attached findings only). `issues` is the
+  // project-level count and includes placeless findings, so it matches the
+  // sheet's Health badge exactly. `error` is set when doctor could not run at
+  // all — and when that happens `slugs`/`issues` are LEFT AS THEY WERE (see
+  // takeReport): an unreadable config is the most broken a project gets, and the
+  // one thing it must not do is quietly undecorate everything.
+  const [health, setHealth] = useState<Record<string, ProjectHealth>>({});
   // What `worktrees init` would suggest per project (§9's nudge). Probed ONCE per
   // project — it walks the checkout, so it is not poll-path work either.
   const [suggest, setSuggest] = useState<Record<string, InitSuggestion>>({});
@@ -507,8 +522,29 @@ function App() {
   // a full list_workspace (up to 16 concurrent git calls per project); doctor on
   // top of that would put the config on the hot path §8 keeps it off. So: once on
   // load, on sheet open, after a repair, and on a slow timer.
+  //
+  // ⚠ The failure branch is the whole point. `cmd_doctor` exits on a guard (an
+  // unreadable .worktrees.toml) BEFORE it emits any JSON, so the report arrives
+  // as `code: 1, findings: [], error: "…"`. Taking that at face value would clear
+  // every glyph in the project — the most-broken state decorating nothing, which
+  // is the exact inversion of the signal. So a failed run keeps the last measured
+  // decoration and adds an `error`; only a run that actually produced a report
+  // may retire a glyph.
   const takeReport = useCallback((root: string, r: DoctorReport | null) => {
-    setDrift((d) => ({ ...d, [root]: driftedSlugs(r) }));
+    setHealth((h) => {
+      const prev = h[root];
+      if (reportFailed(r)) {
+        return {
+          ...h,
+          [root]: {
+            slugs: prev?.slugs ?? new Set<string>(),
+            issues: prev?.issues ?? 0,
+            error: r?.error ?? "doctor produced no report",
+          },
+        };
+      }
+      return { ...h, [root]: { slugs: driftedSlugs(r), issues: issueCount(r), error: null } };
+    });
   }, []);
   // A BACKGROUND doctor failure is logged, never banner'd — the user didn't ask
   // for it, and a repo that can't be probed is already visible as a broken node.
@@ -520,14 +556,39 @@ function App() {
       invoke("log_event", { level: "warn", msg: `doctor ${root}: ${String(e)}` }).catch(() => {});
     }
   }, [takeReport]);
+  // The sweep's identity key: EVERY project root, sorted. It deliberately does
+  // NOT carry `pv.ok` or the nav's ordering. A project that flips ok under git
+  // contention, or a manual re-order, would otherwise re-run the immediate sweep
+  // for all roots and restart the 5-minute timer on every flip. Only adding or
+  // removing a project may do that.
   const rootsKey = useMemo(
-    () => (ws?.projects ?? []).filter((pv) => pv.ok).map((pv) => pv.root).join("\n"),
+    () => (ws?.projects ?? []).map((pv) => pv.root).sort().join("\n"),
     [ws],
   );
+  // …so ok-ness is read at sweep TIME instead, through a ref. A root that is not
+  // a readable repo right now is skipped rather than logged every 5 minutes.
+  const okRoots = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    okRoots.current = new Set((ws?.projects ?? []).filter((pv) => pv.ok).map((pv) => pv.root));
+  }, [ws]);
+  // Which roots have already had their once-per-project init probe (below).
+  // Declared here because the sweep effect prunes it alongside the two maps.
+  const suggestedFor = useRef<Set<string>>(new Set());
   useEffect(() => {
     const roots = rootsKey ? rootsKey.split("\n") : [];
+    // A removed project must not keep its drift decoration, its suggestion, or
+    // its once-only probe marker alive for the rest of the session — re-adding it
+    // would then show stale findings and never re-probe.
+    const live = new Set(roots);
+    for (const r of suggestedFor.current) if (!live.has(r)) suggestedFor.current.delete(r);
+    const prune = <T,>(m: Record<string, T>) =>
+      Object.keys(m).every((k) => live.has(k))
+        ? m
+        : Object.fromEntries(Object.entries(m).filter(([k]) => live.has(k)));
+    setHealth((m) => prune(m));
+    setSuggest((m) => prune(m));
     if (roots.length === 0) return;
-    const sweep = () => roots.forEach((r) => sweepDoctor(r));
+    const sweep = () => roots.filter((r) => okRoots.current.has(r)).forEach((r) => sweepDoctor(r));
     sweep();
     const t = setInterval(sweep, 5 * 60_000); // slow timer, not the poll
     return () => clearInterval(t);
@@ -542,7 +603,6 @@ function App() {
       invoke("log_event", { level: "warn", msg: `init_suggest ${root}: ${String(e)}` }).catch(() => {});
     }
   }, []);
-  const suggestedFor = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const root of rootsKey ? rootsKey.split("\n") : []) {
       if (suggestedFor.current.has(root)) continue;
@@ -1115,7 +1175,7 @@ function App() {
           {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
         </span>
         <span className="glyphs">
-          {glyphs(p, drift[repo]?.has(p.slug)).map((g, i) => (
+          {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
           <span className="row-age">{ago(recencyOf(p))}</span>
@@ -1157,6 +1217,17 @@ function App() {
             : <span className="rollup broken" title="repo gone">⊘</span>}
           <span className="pname" title={pv.root} onClick={() => toggleProject(pv.root)}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
+          {/* An unreadable .worktrees.toml is a PROJECT-level fact — no row can
+              carry it, and the row glyphs are deliberately frozen at their last
+              measurement while doctor can't run. Without this the nav's only
+              honest state for "the config broke" would be silence. */}
+          {pv.ok && health[pv.root]?.error ? (
+            <button
+              className="mini pbroken"
+              title={`config unreadable — doctor could not run here:\n${health[pv.root]!.error}`}
+              onClick={() => setProjSheet(pv.root)}
+            >⚑</button>
+          ) : null}
           <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}>＋</button>
           <button
             className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
@@ -1598,12 +1669,24 @@ function App() {
             {pv?.ok && (
               <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("fetch_origin", { root: ctx.root })); }}>Fetch origin</button>
             )}
-            {pv?.ok && (
-              <button className="pop-item" onClick={() => { closeCtx(); setProjSheet(ctx.root); }}>
-                Project settings…
-                {(drift[ctx.root]?.size ?? 0) > 0 ? <span className="upd-tag warn">{drift[ctx.root].size}</span> : null}
-              </button>
-            )}
+            {pv?.ok && (() => {
+              // The badge is the SHEET's count (issueCount), not the row-glyph set:
+              // those two answer different questions, and a placeless finding used
+              // to make them disagree with no way to tell which was lying. When the
+              // last run couldn't produce a report at all, the count is not a fact
+              // — say so instead of showing a number.
+              const h = health[ctx.root];
+              return (
+                <button className="pop-item" onClick={() => { closeCtx(); setProjSheet(ctx.root); }}>
+                  Project settings…
+                  {h?.error
+                    ? <span className="upd-tag warn" title={h.error}>unchecked</span>
+                    : (h?.issues ?? 0) > 0
+                      ? <span className="upd-tag warn" title="findings from the last doctor run">{h!.issues}</span>
+                      : null}
+                </button>
+              );
+            })()}
             <div className="ctx-sep" />
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
             <button className="pop-item" onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>

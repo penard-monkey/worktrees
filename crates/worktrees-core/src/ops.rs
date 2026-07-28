@@ -53,13 +53,28 @@ fn indent(s: &str) -> String {
 /// `slug == "(main)"` must exclude `.worktrees/` — worktree dirs nest under the
 /// main root, so without it main would adopt (and `close`/`rm` would kill) a
 /// worktree's session. Same exclusion `launch` and `place_json` apply.
-fn live_session(p: &Project, slug: &str, wt: &str) -> Option<String> {
+///
+/// `panes` is an optional PREFETCHED `list-panes -a`. Sweeps that ask about many
+/// places (`doctor`) pass one and pay a single tmux shell-out for the whole run
+/// instead of up to three per place; one-shot callers (`close`, `rm`) pass
+/// `None` and it fetches. One function either way, because a finding that
+/// resolved sessions by a different rule than `close` could name a session
+/// `close` would fail to find.
+fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList>) -> Option<String> {
     let canonical = p.session_name(slug);
-    if tmux::session_exists(&canonical) {
+    let exists = match panes {
+        Some(pl) => pl.has_session(&canonical),
+        None => tmux::session_exists(&canonical),
+    };
+    if exists {
         return Some(canonical);
     }
     let exclude = if slug == "(main)" { Some(p.wt_root_dir()) } else { None };
-    tmux::worktree_session_excluding(wt, &crate::project::adopt_ai_word(), exclude)
+    let ai_word = crate::project::adopt_ai_word();
+    match panes {
+        Some(pl) => pl.session_in(wt, &ai_word, exclude),
+        None => tmux::worktree_session_excluding(wt, &ai_word, exclude),
+    }
 }
 
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
@@ -553,8 +568,13 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 /// stay. The inverse of `open` — the place goes dormant, ready to re-enter.
 pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut names: Vec<String> = Vec::new();
+    let mut yes = false;
     for a in args {
         match a.as_str() {
+            // Same convention as `rm`: `CaptureUi::confirm` always answers no, so
+            // a programmatic caller (the app, a script) that means it passes `-y`
+            // rather than being silently skipped.
+            "-y" | "--yes" => yes = true,
             s if s.starts_with('-') => {
                 ui.error(&format!("Unknown flag: {s}"));
                 return 1;
@@ -572,14 +592,14 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let mut rc = 0;
     for n in &names {
-        if close_one(p, ui, n).is_err() {
+        if close_one(p, ui, n, yes).is_err() {
             rc = 1;
         }
     }
     rc
 }
 
-fn close_one(p: &Project, ui: &mut dyn Ui, name: &str) -> Result<(), i32> {
+fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool) -> Result<(), i32> {
     let s = slugify(name);
     if name != "(main)" && (s.is_empty() || s == "." || s == "..") {
         ui.error(&format!("Invalid worktree name '{name}'."));
@@ -610,10 +630,33 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str) -> Result<(), i32> {
     // session — including one left under a PREVIOUS prefix (§5) — becomes
     // unclosable. Unlike before, `(main)` adopts too: it is a place whose
     // canonical name a prefix change moves like any other.
-    let Some(session) = live_session(p, &slug, &p.place_dir(&slug)) else {
+    let dir = p.place_dir(&slug);
+    let Some(session) = live_session(p, &slug, &dir, None) else {
         ui.info(&format!("no live session for '{slug}' ({canonical}) — nothing to close."));
         return Ok(());
     };
+    // An ADOPTED session is one this tool did not name, found only by pane cwd —
+    // so it may just as well be a personal session with ONE pane cwd'd here (or
+    // in a nested unrelated repo under this dir), and `kill-session` takes the
+    // WHOLE session with every window in it. `rm` resolves and names the session
+    // before its prompt for exactly this reason; `close` was the odd one out and
+    // killed first, printing "closed adopted tmux X" afterwards.
+    //
+    // A CANONICAL-name close still asks nothing: that name is one only this tool
+    // writes, so there is no doubt about whose session it is.
+    if session != canonical && !yes {
+        ui.warn(&format!(
+            "tmux {} was not opened under this repo's name ({}) — it was adopted because a pane is cwd'd in {}.",
+            fmt::yellow(&session),
+            fmt::cyan(&canonical),
+            fmt::cyan(&dir)
+        ));
+        ui.plain("Closing it kills the WHOLE session — every window and pane in it, not just that one.");
+        if !ui.confirm(&format!("Kill {session}? [y/N] ")) {
+            ui.info(&format!("Skipped {slug} — {session} left running."));
+            return Ok(());
+        }
+    }
     tmux::kill_session(&session);
     match (session == canonical, slug.as_str()) {
         (true, "(main)") => ui.info(&format!("closed tmux {session} — checkout untouched.")),
@@ -692,7 +735,7 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
     // actually die, and after a prefix change (§5) that is not always the
     // canonical name. Falls back to the canonical name for display when nothing
     // is running, which is what the line meant all along.
-    let live = live_session(p, &slug, &path);
+    let live = live_session(p, &slug, &path, None);
     let session = live.clone().unwrap_or_else(|| p.session_name(&slug));
 
     if !dirty.is_empty() && !force {
@@ -1096,20 +1139,29 @@ fn compose_down(p: &Project, ui: &mut dyn Ui, slug: &str, wt: &str) {
     };
     let Some(compose) = cfg.compose.as_ref() else { return };
     let wt_path = Path::new(wt);
-    let file = wt_path.join(compose.file.as_str());
-    // Layer B, once more: only a real file that resolves INSIDE this worktree is
-    // handed to docker. A symlinked ancestor could otherwise point the compose
-    // file (and its bind mounts) anywhere.
-    let inside = match (std::fs::canonicalize(&file), std::fs::canonicalize(wt_path)) {
-        (Ok(f), Ok(root)) => f.starts_with(&root) && f.is_file(),
-        _ => false,
-    };
-    if !inside {
-        ui.warn(&format!(
-            "[compose] file `{}` is missing here — skipping teardown (containers may be left running)",
-            compose.file.as_str()
-        ));
-        return;
+    // Layer B, once more, on EVERY declared file: only a real file that resolves
+    // INSIDE this worktree is handed to docker. A symlinked ancestor could
+    // otherwise point a compose file (and its bind mounts) anywhere.
+    //
+    // All-or-nothing, and in the declared order: docker itself fails on a missing
+    // `-f`, and a teardown that silently dropped one file would run `down -v`
+    // against a subset — which is the volume-leak this list exists to fix.
+    let root = std::fs::canonicalize(wt_path).ok();
+    let mut files = Vec::with_capacity(compose.files.len());
+    for rel in &compose.files {
+        let file = wt_path.join(rel.as_str());
+        let inside = match (std::fs::canonicalize(&file), root.as_ref()) {
+            (Ok(f), Some(root)) => f.starts_with(root) && f.is_file(),
+            _ => false,
+        };
+        if !inside {
+            ui.warn(&format!(
+                "[compose] file `{}` is missing here — skipping teardown (containers may be left running)",
+                rel.as_str()
+            ));
+            return;
+        }
+        files.push(file);
     }
     // The place's OWN file first: the running containers are named after what the
     // stack was STARTED with, and the template may have changed since.
@@ -1119,7 +1171,7 @@ fn compose_down(p: &Project, ui: &mut dyn Ui, slug: &str, wt: &str) {
         return;
     }
     ui.info(&format!("docker compose -p {project} down -v --remove-orphans"));
-    match provision::compose_down(&file, &project) {
+    match provision::compose_down(&files, &project) {
         Ok(()) => ui.info(&format!("compose stack '{project}' is down")),
         Err(e) => ui.warn(&format!("compose teardown skipped: {e}")),
     }
@@ -1203,7 +1255,18 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         findings.extend(port_findings(p, &cfg, &targets));
         findings.extend(compose_findings(p, &cfg, &targets));
-        findings.extend(session_findings(p, &targets));
+        // The session scan covers MAIN too, unlike the file and port checks:
+        // main declares no files and takes no slot, but its session is named
+        // from the same prefix and drifts exactly the same way — and `close
+        // main` finds (and kills) an old-named session, so `doctor` never
+        // mentioning it is the gap. Only on a whole-project run: a named place
+        // is a question about that place.
+        let mut scanned: Vec<(String, String)> =
+            targets.iter().map(|d| (basename(d), d.clone())).collect();
+        if names.is_empty() {
+            scanned.insert(0, ("(main)".to_string(), p.main_root.clone()));
+        }
+        findings.extend(session_findings(p, &scanned));
     }
 
     if strict {
@@ -1257,13 +1320,23 @@ fn prefix_findings(p: &Project, cfg: &ProjectConfig) -> Vec<Finding> {
     if want == got {
         return Vec::new();
     }
+    // WHICH one is in effect is a question about `p.prefix`, not about these two
+    // strings: `$WORKTREES_PREFIX` outranks both project sources (§5). Saying
+    // "the file wins" while every session is named from the env value sends the
+    // reader hunting a bug that is not there.
+    let env = std::env::var("WORKTREES_PREFIX").ok().filter(|s| !s.trim().is_empty());
+    let winner = match &env {
+        Some(v) => format!("$WORKTREES_PREFIX (`{v}`) outranks both"),
+        None => format!("{} wins", init::PREFIX_FILE),
+    };
     vec![Finding::warn(
         Code::PrefixMismatch,
         format!(
-            "{} says `{want}` but [project] prefix says `{got}` — the file wins, so sessions are \
-             named `{want}-<slug>`. Delete {} to switch to the config (then: worktrees doctor, \
+            "{} says `{want}` but [project] prefix says `{got}` — {winner}, so sessions are \
+             named `{}-<slug>`. Delete {} to switch to the config (then: worktrees doctor, \
              to see which sessions are still running under the old name).",
             init::PREFIX_FILE,
+            p.prefix,
             init::PREFIX_FILE
         ),
     )
@@ -1274,15 +1347,27 @@ fn prefix_findings(p: &Project, cfg: &ProjectConfig) -> Vec<Finding> {
 /// named what the current prefix renders.
 ///
 /// Resolved through `live_session` — the same function `close` and `rm` use — so
-/// this finding cannot claim a session those two would fail to find. That costs
-/// a couple of tmux calls per place, which is fine: `doctor` is on demand and
-/// §10 keeps it off the app's 3s poll for exactly this reason.
-fn session_findings(p: &Project, targets: &[String]) -> Vec<Finding> {
+/// this finding cannot claim a session those two would fail to find.
+///
+/// The pane list is fetched ONCE for the whole scan (`ls` prefetches for the
+/// same reason): per place `live_session` is up to three tmux subprocesses, and
+/// a project with fifteen places paid forty-five of them for a read-only report.
+///
+/// `places` is `(slug, dir)` rather than dirs, because `(main)` is in this scan
+/// and its slug is not `basename(dir)`.
+fn session_findings(p: &Project, places: &[(String, String)]) -> Vec<Finding> {
+    let panes = tmux::PaneList::fetch();
     let mut out = Vec::new();
-    for dir in targets {
-        let slug = basename(dir);
+    for (slug, dir) in places {
+        let slug = slug.clone();
         let canonical = p.session_name(&slug);
-        let Some(live) = live_session(p, &slug, dir).filter(|s| *s != canonical) else { continue };
+        let Some(live) = live_session(p, &slug, dir, panes.as_ref()).filter(|s| *s != canonical)
+        else {
+            continue;
+        };
+        // `(main)` is the app's slug for the checkout; the CLI spells it `main`,
+        // and the parens would not survive a shell anyway.
+        let arg = if slug == "(main)" { "main" } else { slug.as_str() };
         out.push(
             Finding::warn(
                 Code::SessionDrift,
@@ -1290,7 +1375,7 @@ fn session_findings(p: &Project, targets: &[String]) -> Vec<Finding> {
                     "live tmux session is `{live}`, but this repo's prefix now renders \
                      `{canonical}` — the running session is still found (by pane cwd), and the \
                      new name applies the next time it is opened. Rename it now with: \
-                     worktrees close {slug} && worktrees open {slug}"
+                     worktrees close {arg} && worktrees open {arg}"
                 ),
             )
             .at_place(slug),
@@ -1335,6 +1420,36 @@ fn port_findings(p: &Project, cfg: &ProjectConfig, targets: &[String]) -> Vec<Fi
             );
             continue;
         };
+        // A slot that is present and unique still says nothing about whether the
+        // file names every port. The `.worktree.env` files a project accumulated
+        // BEFORE a service joined `[ports].base` lack that variable entirely —
+        // and a consumer that reads an unset `WEBSITE_PORT` falls back to the
+        // default, which is MAIN's port (§1.1 by drift instead of by absence).
+        // Warn, not Error: the file is real, and `provision` rewrites it in place
+        // keeping the slot it already has.
+        let declared = env.as_ref().map(|(_, e)| &e.keys);
+        let missing: Vec<String> = ports
+            .base
+            .keys()
+            .map(|n| format!("{n}_PORT"))
+            .filter(|v| !declared.is_some_and(|keys| keys.contains(v)))
+            .collect();
+        if !missing.is_empty() {
+            out.push(
+                Finding::warn(
+                    Code::MissingPort,
+                    format!(
+                        "`{ENV_FILE}` here declares slot {slot} but not {} — anything reading \
+                         {} falls back to its default, which is the MAIN checkout's port. \
+                         Fix (the slot is kept): worktrees provision {slug}",
+                        missing.join(", "),
+                        if missing.len() == 1 { "it" } else { "them" }
+                    ),
+                )
+                .at_place(slug.clone())
+                .at_path(ENV_FILE),
+            );
+        }
         if let Some(other) = scan.other_claimant(slot, wt) {
             out.push(
                 Finding::error(

@@ -435,7 +435,13 @@ fn resolve_prefix(main_root: &str) -> String {
     )
 }
 
-/// First line of `<main_root>/.worktree-prefix`, whitespace stripped.
+/// First line of `<main_root>/.worktree-prefix`, whitespace stripped; a file
+/// that holds only whitespace is ABSENT, not a prefix of `""`.
+///
+/// The one reader of that file, on purpose: `init` transcribes it into
+/// `[project] prefix` through THIS function (`init::probe`), so the config it
+/// writes says what the resolver would produce rather than what the bytes look
+/// like — `doctor` comparing the two must not find a mismatch `init` created.
 pub(crate) fn prefix_file(main_root: &str) -> Option<String> {
     std::fs::read_to_string(format!("{main_root}/{}", crate::init::PREFIX_FILE))
         .ok()

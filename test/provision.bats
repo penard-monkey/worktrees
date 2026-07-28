@@ -233,6 +233,74 @@ write_ports_config() {   # $1 = max_slots (default 5)
   grep -q -- "-f $REPO/.worktrees/feat-x/docker-compose.worktree.yml" "$BATS_TEST_TMPDIR/docker.log"
 }
 
+@test "rm: EVERY declared compose file is passed, in order — volumes live in the BASE file" {
+  # THE leak: `down -v` removes only the volumes declared in the files docker is
+  # handed. A real project declares `postgres_data` in docker-compose.yml and
+  # nothing in the worktree override, so passing the override alone left
+  # <project>_postgres_data behind on every rm.
+  printf 'services: {}\nvolumes: {postgres_data: {}}\n' > "$REPO/docker-compose.yml"
+  printf 'services: {}\n' > "$REPO/docker-compose.worktree.yml"
+  ( cd "$REPO" && git add -A && git commit -qm compose && git push -q origin main )
+  write_project_config '[compose]' \
+                       'files = ["docker-compose.yml", "docker-compose.worktree.yml"]' \
+                       'project = "p-{slug}"'
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+
+  run_wt rm feat-x -y
+  [ "$status" -eq 0 ]
+  # order is semantic to docker (a later -f overrides an earlier one)
+  grep -q -- "-f $(wt feat-x)/docker-compose.yml -f $(wt feat-x)/docker-compose.worktree.yml -p p-feat-x down -v --remove-orphans" \
+    "$BATS_TEST_TMPDIR/docker.log"
+}
+
+@test "rm: one missing file in the list skips the teardown rather than tearing down a subset" {
+  # All-or-nothing: docker fails on a missing -f anyway, and a silently dropped
+  # file is exactly the partial `down -v` this list exists to prevent.
+  printf 'services: {}\n' > "$REPO/docker-compose.worktree.yml"
+  ( cd "$REPO" && git add -A && git commit -qm compose && git push -q origin main )
+  write_project_config '[compose]' \
+                       'files = ["docker-compose.yml", "docker-compose.worktree.yml"]' \
+                       'project = "p-{slug}"'
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+
+  run_wt rm feat-x -y
+  [ "$status" -eq 0 ]                       # removal still proceeds
+  [[ "$output" == *"docker-compose.yml\` is missing here"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/docker.log" ]   # nothing ran at all
+  [ ! -d "$(wt feat-x)" ]
+}
+
+@test "doctor: a .worktree.env that predates a declared port is a finding, not clean" {
+  # 11 of 15 worktrees in the audited consumer repo look exactly like this: a
+  # file the old script wrote before WEBSITE joined the map. The slot is present
+  # and unique, so every other check passes — and the site binds MAIN's 3002.
+  write_project_config '[ports]' 'max_slots = 5' 'stride = 100' \
+                       'base = { API = 39001, WEBSITE = 39251 }'
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+  grep -v '^WEBSITE_PORT=' "$(env_f feat-x)" > "$BATS_TEST_TMPDIR/env"
+  cp "$BATS_TEST_TMPDIR/env" "$(env_f feat-x)"
+
+  run_wt doctor feat-x
+  [ "$status" -eq 0 ]                       # a Warn: the file is real, provision fixes it
+  [[ "$output" == *"WEBSITE_PORT"* ]]
+  [[ "$output" == *"MAIN checkout's port"* ]]
+  [[ "$output" != *"clean"* ]]
+  run_wt doctor --json
+  [[ "$output" == *'"code":"missing-port"'* ]]
+
+  # provision repairs it in place, keeping the slot the stack is running on
+  run_wt provision feat-x
+  [ "$status" -eq 0 ]
+  [ "$(slot feat-x)" = 1 ]
+  grep -qFx 'WEBSITE_PORT=39351' "$(env_f feat-x)"
+  run_wt doctor feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+}
+
 @test "rm: a missing docker is a warning, and the removal still happens" {
   printf 'services: {}\n' > "$REPO/docker-compose.worktree.yml"
   ( cd "$REPO" && git add -A && git commit -qm compose && git push -q origin main )

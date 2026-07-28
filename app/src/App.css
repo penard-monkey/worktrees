@@ -150,6 +150,11 @@ button { cursor: pointer; }
 }
 .project-h:hover .mini { opacity: 1; }
 .mini:hover { color: var(--txt-hi); background: var(--bg-elev); }
+/* the project-level "doctor could not run here" flag: a standing signal, so it
+   must survive .mini's hover-only opacity. --warn is the drift colour already
+   (.g-drift), and exists in all six theme blocks — no new token. */
+.mini.pbroken { opacity: 1; color: var(--warn); }
+.mini.pbroken:hover { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
 /* armed: stays visible past hover, reads as destructive (two-click remove) */
 .mini.armed {
   opacity: 1; color: var(--danger); font-weight: var(--fw-bold);

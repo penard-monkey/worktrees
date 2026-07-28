@@ -170,6 +170,34 @@ write_config() {
   tmux_session_exists teamx-feat-b
 }
 
+@test "a whitespace-only prefix is ABSENT in every tier, not a prefix of dashes" {
+  # `[project] prefix = "   "` used to win its rung and sanitize to `---`, so a
+  # repo renamed every session to `----<slug>` with three invisible characters.
+  # The legacy file tier always read it the other way; now they agree.
+  write_project_config '[project]' 'prefix = "   "'
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-x
+  [ ! -f "$TMUX_STATE/----feat-x" ]
+
+  printf '   \n' > "$REPO/.worktree-prefix"
+  run_wt new feat-y --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-y
+}
+
+@test "WORKTREES_NO_PROJECT_CONFIG=1 turns off [project] prefix too (§5's audit switch)" {
+  # The prefix is resolved on EVERY invocation, so this is the path where the
+  # promised off-switch matters most: with it set, the cloned repo's config
+  # cannot name a single tmux session.
+  write_project_config '[project]' 'prefix = "teamx"'
+  export WORKTREES_NO_PROJECT_CONFIG=1
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-x           # basename(main_root), as if the file were absent
+  [ ! -f "$TMUX_STATE/teamx-feat-x" ]
+}
+
 @test "a hostile [project] prefix is sanitized before it names anything" {
   # The config arrives with a git clone (§4). sanitize_prefix is the whole
   # reason a project may set this key at all.
@@ -197,7 +225,11 @@ write_config() {
 
   write_project_config '[project]' 'prefix = "teamx"'
 
-  run_wt close feat-x
+  # -y because the session no longer answers to the canonical name, so closing
+  # it is an ADOPTED close and those confirm first (a stray pane is enough to
+  # adopt someone's personal session). The point of this test is that the old
+  # session is still FOUND, not that it dies unasked.
+  run_wt close -y feat-x
   [ "$status" -eq 0 ]
   [[ "$output" == *"closed adopted tmux repo-feat-x"* ]]
   [[ "$output" != *"nothing to close"* ]]
@@ -278,6 +310,53 @@ write_config() {
   run_wt doctor
   [ "$status" -eq 0 ]
   [[ "$output" != *"[project] prefix says"* ]]
+}
+
+@test "doctor: the prefix warning names the REAL winner when \$WORKTREES_PREFIX is set" {
+  # The finding used to say "the file wins" without consulting the resolver, so
+  # it named a prefix that no session was using — sending the reader after a bug
+  # that is not there. $WORKTREES_PREFIX outranks both project sources (§5).
+  echo "legacy" > "$REPO/.worktree-prefix"
+  write_project_config '[project]' 'prefix = "teamx"'
+  export WORKTREES_PREFIX=zzz
+
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'WORKTREES_PREFIX'* ]]
+  [[ "$output" == *'zzz-<slug>'* ]]
+  [[ "$output" != *'legacy-<slug>'* ]]
+  # and the session really is named that way, which is the whole point
+  run_wt new feat-x --no-install --no-attach
+  tmux_session_exists zzz-feat-x
+}
+
+@test "doctor: session drift on the MAIN checkout is reported like anywhere else" {
+  # Main was invisible to the scan (its targets came from .worktrees/), so
+  # `close main` would find and kill an old-named session doctor never mentioned.
+  printf 'cwd=%s\ncmd0=bash\n' "$REPO" > "$TMUX_STATE/repo-(main)"
+  write_project_config '[project]' 'prefix = "teamx"'
+
+  run_wt doctor
+  [ "$status" -eq 0 ]                       # a Warn — nothing is broken
+  [[ "$output" == *"repo-(main)"* ]]
+  [[ "$output" == *"teamx-(main)"* ]]
+  [[ "$output" == *"worktrees close main"* ]]   # the CLI spelling, not the (main) slug
+
+  # a place-scoped run is a question about that place, so main stays out of it
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  run_wt doctor feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"(main)"* ]]
+
+  # …and the whole scan costs ONE `list-panes -a`, not three tmux subprocesses
+  # per place: this sweep grew a place for main, and it must not have grown a
+  # per-place fetch with it.
+  : > "$TMUX_LOG"
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'list-panes' "$TMUX_LOG")" -eq 1 ]
+  ! grep -q 'list-sessions' "$TMUX_LOG"
 }
 
 # ── AI command precedence chain ──────────────────────────────────────────────

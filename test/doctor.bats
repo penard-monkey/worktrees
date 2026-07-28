@@ -143,6 +143,37 @@ wt() { echo "$REPO/.worktrees/$1"; }
   [ "$output" = '{"schema_version":1,"findings":[]}' ]
 }
 
+@test "WORKTREES_NO_PROJECT_CONFIG=1 ignores .worktrees.toml wholesale (§5's audit switch)" {
+  # "I am auditing an untrusted clone." The file must behave as if it were not
+  # there — not "mostly", and not only for the ops that read it explicitly.
+  write_project_config '[[file]]' 'path = ".env"'
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+  rm "$(wt feat-x)/.env"
+  run_wt doctor
+  [ "$status" -eq 2 ]                       # the finding is real without the switch
+
+  export WORKTREES_NO_PROJECT_CONFIG=1
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No .worktrees.toml"* ]]
+  run_wt relink feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to materialize"* ]]
+  run_wt provision feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No .worktrees.toml"* ]]
+  # and `new` materializes nothing — the switch is not a doctor flag
+  run_wt new feat-y --no-tmux
+  [ "$status" -eq 0 ]
+  [ ! -e "$REPO/.worktrees/feat-y/.env" ]
+
+  # …and only `1` counts: the config is back the moment it is anything else
+  export WORKTREES_NO_PROJECT_CONFIG=0
+  run_wt doctor
+  [ "$status" -eq 2 ]
+}
+
 @test "doctor: usage guards" {
   run_wt doctor --bogus
   [ "$status" -eq 1 ]

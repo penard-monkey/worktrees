@@ -223,7 +223,16 @@ pub struct Ports {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compose {
-    pub file: RelPath,
+    /// The `-f` list, in DOCKER's order: a later file overrides an earlier one,
+    /// so the per-worktree override goes last.
+    ///
+    /// A LIST, not one path, because `docker compose down -v` removes only the
+    /// volumes declared in the files it is HANDED — and a real project declares
+    /// its named volumes in the BASE `docker-compose.yml` while the worktree
+    /// override declares none. Passing the override alone leaks
+    /// `<project>_postgres_data` on every `rm`. `file = "…"` stays valid as the
+    /// one-element shorthand, so nothing already written breaks.
+    pub files: Vec<RelPath>,
     /// A template over the CLOSED placeholder set `{prefix}` / `{slug}` (§5).
     /// Validated here, expanded later — this module never touches a `Project`.
     pub project: String,
@@ -280,7 +289,14 @@ fn default_max_slots() -> u32 {
 
 #[derive(Deserialize)]
 struct RawCompose {
-    file: Spanned<RelPath>,
+    /// The one-file shorthand: `file = "x"` ≡ `files = ["x"]`. Both `Option`
+    /// because exactly one of the two must appear, and "neither" and "both" are
+    /// errors this module words itself rather than letting serde say
+    /// "missing field `file`" about a file that names `files`.
+    #[serde(default)]
+    file: Option<Spanned<RelPath>>,
+    #[serde(default)]
+    files: Option<Spanned<Vec<RelPath>>>,
     project: Spanned<String>,
 }
 
@@ -336,9 +352,10 @@ pub fn parse(text: &str) -> Result<(ProjectConfig, Vec<Finding>), CfgError> {
     let compose = match raw.compose {
         Some(c) => {
             let line = line_of(text, c.project.span().start);
+            let files = compose_files(text, c.file, c.files, line)?;
             let project = c.project.into_inner();
             check_project_template(&project).map_err(|e| e.with_line(line))?;
-            Some(Compose { file: c.file.into_inner(), project })
+            Some(Compose { files, project })
         }
         None => None,
     };
@@ -346,9 +363,31 @@ pub fn parse(text: &str) -> Result<(ProjectConfig, Vec<Finding>), CfgError> {
     Ok((ProjectConfig { files, ports, compose, project }, findings))
 }
 
+/// §5's audit switch: `WORKTREES_NO_PROJECT_CONFIG=1` disables the project rung
+/// wholesale — "I am auditing an untrusted clone". Pure form for testing;
+/// exactly `1` counts, like `WORKTREES_JSON` (ops.rs).
+pub fn disabled_from(val: Option<&str>) -> bool {
+    val == Some("1")
+}
+
+/// Live form. Read in `load` — the ONE impure entry point every consumer goes
+/// through (prefix resolution, materialize, ports, compose, doctor) — so the
+/// switch cannot be honored in some paths and forgotten in others.
+pub fn disabled() -> bool {
+    disabled_from(std::env::var("WORKTREES_NO_PROJECT_CONFIG").ok().as_deref())
+}
+
 /// Read `<main_root>/.worktrees.toml`. `Ok((None, vec![]))` when it is absent —
 /// the byte-identical-behavior guarantee (§2.4) lives on this line.
 pub fn load(main_root: &Path) -> Result<(Option<ProjectConfig>, Vec<Finding>), CfgError> {
+    // The off-switch reuses the ABSENT path rather than adding a third state:
+    // "ignored" and "not there" have to be the same behavior, or the switch is
+    // one more code path that can be wrong. It is checked here and not at each
+    // call site because `project_prefix` now reads a cloned repo's config on
+    // every invocation, which is exactly where §5 promises this applies.
+    if disabled() {
+        return Ok((None, Vec::new()));
+    }
     let path = main_root.join(CONFIG_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -421,7 +460,7 @@ fn survey(
                 survey_keys(text, t, "ports", &["stride", "max_slots", "base"], findings)?;
             }
             ("compose", DeValue::Table(t)) => {
-                survey_keys(text, t, "compose", &["file", "project"], findings)?;
+                survey_keys(text, t, "compose", &["file", "files", "project"], findings)?;
             }
             ("project", DeValue::Table(t)) => survey_project(text, t, project, findings)?,
             // `project` is the one known key with NO field in `RawConfig`, so
@@ -543,6 +582,41 @@ fn check_file_list(text: &str, raw: Vec<RawFile>) -> Result<Vec<FileEntry>, CfgE
         out.push(FileEntry { path, mode: f.mode });
     }
     Ok(out)
+}
+
+/// `[compose] file` / `files` → the ordered `-f` list. Exactly one of the two
+/// keys must appear; every entry has already been through Layer A (`RelPath`),
+/// and Layer B re-checks each one against the worktree at teardown.
+///
+/// Order is preserved because it is semantic to docker (later overrides
+/// earlier), so this never sorts or dedupes.
+fn compose_files(
+    text: &str,
+    file: Option<Spanned<RelPath>>,
+    files: Option<Spanned<Vec<RelPath>>>,
+    section_line: u32,
+) -> Result<Vec<RelPath>, CfgError> {
+    match (file, files) {
+        (Some(_), Some(list)) => Err(CfgError::at(
+            line_of(text, list.span().start),
+            "[compose] takes either `file` or `files`, not both",
+        )),
+        (Some(one), None) => Ok(vec![one.into_inner()]),
+        (None, Some(list)) => {
+            let line = line_of(text, list.span().start);
+            let v = list.into_inner();
+            if v.is_empty() {
+                // `docker compose -p x down` with no `-f` reads the CWD's compose
+                // file, which is not this worktree's and not what anyone declared.
+                return Err(CfgError::at(line, "[compose] files is empty — declare at least one file"));
+            }
+            Ok(v)
+        }
+        (None, None) => Err(CfgError::at(
+            section_line,
+            "[compose] declares no compose file — set `file = \"…\"` or `files = [\"…\"]`",
+        )),
+    }
 }
 
 /// `[compose] project` is a template over a CLOSED placeholder set (§5), not a
@@ -775,14 +849,58 @@ mod tests {
 
     // ── [compose] ────────────────────────────────────────────────────────────
 
+    fn compose_rels(text: &str) -> Vec<String> {
+        parse(text).unwrap().0.compose.unwrap().files.iter().map(|f| f.as_str().to_string()).collect()
+    }
+
     #[test]
     fn compose_file_gets_the_same_layer_a_rules() {
         for bad in ["/etc/passwd", "~/x.yml", "$X.yml", "../x.yml", ".git/x", ".worktrees/x.yml"] {
-            let t = format!("[compose]\nfile = \"{bad}\"\nproject = \"p\"\n");
-            assert!(parse(&t).is_err(), "[compose] file = {bad} must be rejected");
+            for key in ["file = \"{bad}\"", "files = [\"{bad}\"]"] {
+                let t = format!("[compose]\n{}\nproject = \"p\"\n", key.replace("{bad}", bad));
+                assert!(parse(&t).is_err(), "[compose] {key} = {bad} must be rejected");
+            }
         }
-        let (c, _) = parse("[compose]\nfile = \"docker-compose.worktree.yml\"\nproject = \"p\"\n").unwrap();
-        assert_eq!(c.compose.unwrap().file.as_str(), "docker-compose.worktree.yml");
+        // EVERY entry of the list, not just the first — a base file is the same
+        // hostile input as an override.
+        let t = "[compose]\nfiles = [\"docker-compose.yml\", \"../escape.yml\"]\nproject = \"p\"\n";
+        assert!(parse(t).is_err(), "a later entry is validated too");
+        assert_eq!(
+            compose_rels("[compose]\nfile = \"docker-compose.worktree.yml\"\nproject = \"p\"\n"),
+            vec!["docker-compose.worktree.yml".to_string()],
+            "`file` is the one-element shorthand"
+        );
+    }
+
+    #[test]
+    fn compose_files_is_a_list_in_dockers_order() {
+        // THE bug this shape exists for: `down -v` removes only the volumes
+        // declared in the files it is handed, and the named volumes live in the
+        // BASE file. Order is semantic (later `-f` wins), so it is preserved.
+        assert_eq!(
+            compose_rels(
+                "[compose]\nfiles = [\"docker-compose.yml\", \"docker-compose.worktree.yml\"]\nproject = \"p\"\n"
+            ),
+            vec!["docker-compose.yml".to_string(), "docker-compose.worktree.yml".to_string()]
+        );
+        // reversed input stays reversed — nothing sorts this
+        assert_eq!(
+            compose_rels("[compose]\nfiles = [\"b.yml\", \"a.yml\"]\nproject = \"p\"\n"),
+            vec!["b.yml".to_string(), "a.yml".to_string()]
+        );
+    }
+
+    #[test]
+    fn compose_needs_exactly_one_of_file_and_files() {
+        let e = parse("[compose]\nproject = \"p\"\n").unwrap_err();
+        assert!(e.to_string().contains("declares no compose file"), "{e}");
+        let e = parse("[compose]\nfiles = []\nproject = \"p\"\n").unwrap_err();
+        assert!(e.to_string().contains("files is empty"), "{e}");
+        let e = parse("[compose]\nfile = \"a.yml\"\nfiles = [\"b.yml\"]\nproject = \"p\"\n").unwrap_err();
+        assert!(e.to_string().contains("either `file` or `files`"), "{e}");
+        // and `files` is a KNOWN key: declaring it must not also warn
+        let (_, findings) = parse("[compose]\nfiles = [\"a.yml\"]\nproject = \"p\"\n").unwrap();
+        assert!(findings.is_empty(), "{findings:?}");
     }
 
     #[test]
@@ -1018,7 +1136,7 @@ max_slots = 50
 base = { BACKOFFICE = 3000, API = 3001, WEBSITE = 3002, WO_MOCK = 3010, META_MOCK = 3011, PG = 5432, LS = 4566 }
 
 [compose]
-file = "docker-compose.worktree.yml"
+files = ["docker-compose.yml", "docker-compose.worktree.yml"]
 project = "{prefix}-wt-{slug}"
 
 [project]
@@ -1054,12 +1172,26 @@ prefix = "cdv"
                     ],
                 )),
                 compose: Some(Compose {
-                    file: RelPath::parse("docker-compose.worktree.yml").unwrap(),
+                    files: vec![
+                        RelPath::parse("docker-compose.yml").unwrap(),
+                        RelPath::parse("docker-compose.worktree.yml").unwrap(),
+                    ],
                     project: "{prefix}-wt-{slug}".into(),
                 }),
                 project: ProjectSection { prefix: Some("cdv".into()) },
             }
         );
+    }
+
+    #[test]
+    fn the_no_project_config_switch_is_exactly_one() {
+        // §5's audit switch. Exactly `1`, like every other WORKTREES_* toggle —
+        // an env var someone exported as `0` or `false` must not silently disable
+        // the config they are relying on.
+        assert!(disabled_from(Some("1")));
+        for off in [None, Some(""), Some("0"), Some("true"), Some("yes"), Some(" 1")] {
+            assert!(!disabled_from(off), "{off:?}");
+        }
     }
 
     #[test]

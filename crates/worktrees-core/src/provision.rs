@@ -81,6 +81,12 @@ const HEADER: &str = "\
 pub struct EnvFile {
     pub slot: Option<u32>,
     pub compose_project: Option<String>,
+    /// Every NAME the file assigns, whatever its value. Not "everything else
+    /// parsed" — just the key set, and only because `doctor` has to answer "does
+    /// this file declare every port `[ports].base` names?". A file written before
+    /// a port joined the map has a slot, is unique, and still leaves that service
+    /// bound on main's port (§6); without the key set that is invisible.
+    pub keys: BTreeSet<String>,
 }
 
 /// Parse an EXISTING `.worktree.env` tolerantly. PURE.
@@ -107,6 +113,7 @@ pub fn parse_env(text: &str) -> EnvFile {
         }
         let Some((key, val)) = l.split_once('=') else { continue };
         let val = shell_value(val.trim());
+        out.keys.insert(key.trim().to_string());
         match key.trim() {
             "WORKTREE_SLOT" => {
                 if let Ok(n) = val.parse::<u32>() {
@@ -534,17 +541,23 @@ pub fn compose_project_for(wt: &Path, compose: &Compose, prefix: &str, slug: &st
         .unwrap_or_else(|| compose_project_name(&compose.project, prefix, slug))
 }
 
-/// `docker compose -f <file> -p <project> down -v --remove-orphans`.
+/// `docker compose -f <file>… -p <project> down -v --remove-orphans`.
 ///
-/// The argv is assembled HERE, from a validated path and a sanitized name — the
+/// The argv is assembled HERE, from validated paths and a sanitized name — the
 /// §5 line that must not be crossed is a command *string* coming from the repo,
 /// and there is none. Output is captured rather than inherited so a teardown
 /// cannot reformat the CLI's own output.
-pub fn compose_down(file: &Path, project: &str) -> Result<(), String> {
-    let out = Command::new("docker")
-        .arg("compose")
-        .arg("-f")
-        .arg(file)
+///
+/// EVERY declared file is passed, in order: `down -v` removes only the volumes
+/// declared in the files it is given, so dropping the base file leaks every
+/// named volume the override does not repeat.
+pub fn compose_down(files: &[PathBuf], project: &str) -> Result<(), String> {
+    let mut cmd = Command::new("docker");
+    cmd.arg("compose");
+    for f in files {
+        cmd.arg("-f").arg(f);
+    }
+    let out = cmd
         .arg("-p")
         .arg(project)
         .args(["down", "-v", "--remove-orphans"])
@@ -824,10 +837,26 @@ mod tests {
         let e = parse_env(text);
         assert_eq!(e.slot, Some(7));
         assert_eq!(e.compose_project.as_deref(), Some("cdv-wt-prod-reviews"));
+        // the key set is what `doctor` checks a declared port against, so it
+        // covers the same lenient shapes the values do
+        assert!(e.keys.contains("WORKTREE_SLOT"), "{:?}", e.keys);
+        assert!(e.keys.contains("BACKOFFICE_PORT"), "{:?}", e.keys);
+        assert!(e.keys.contains("DATABASE_URL"), "{:?}", e.keys);
+        assert!(!e.keys.contains("# worktree env"), "a comment is not a key: {:?}", e.keys);
 
         // our own output round-trips
         let ours = render_env(4, &ports(100, 50, &[("API", 3001)]), Some("p-wt-x")).unwrap();
-        assert_eq!(parse_env(&ours), EnvFile { slot: Some(4), compose_project: Some("p-wt-x".into()) });
+        assert_eq!(
+            parse_env(&ours),
+            EnvFile {
+                slot: Some(4),
+                compose_project: Some("p-wt-x".into()),
+                keys: ["WORKTREE_SLOT", "COMPOSE_PROJECT_NAME", "API_PORT"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            }
+        );
 
         // junk never panics and never invents a slot
         assert_eq!(parse_env("").slot, None);
@@ -898,7 +927,7 @@ mod tests {
                 files: Vec::new(),
                 ports: Some(ports(100, 3, &[("API", self.1), ("PG", self.1 + 500)])),
                 compose: Some(Compose {
-                    file: RelPath::parse("docker-compose.worktree.yml").unwrap(),
+                    files: vec![RelPath::parse("docker-compose.worktree.yml").unwrap()],
                     project: "{prefix}-wt-{slug}".into(),
                 }),
                 project: Default::default(),
