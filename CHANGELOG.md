@@ -5,8 +5,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
-## [0.3.2] - 2026-07-28
-
 ### Added
 - **Per-project setup (`.worktrees.toml`).** A repo can now declare, in a
   committed file, the untracked things every worktree of it needs: which
@@ -37,6 +35,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and Relink / Provision buttons. Places that have drifted get a ⚑ in the nav.
   A project that qualifies for a config but doesn't have one gets a dismissible
   suggestion.
+
+## [0.3.2] - 2026-07-28
+
+### Added
 - Quick switcher: press ⌘K anywhere — even with the terminal focused — to
   fuzzy-jump to any place across every project. Type to filter (matches slug,
   branch, project, or note), arrow keys to move, Enter to jump, Esc to close;
