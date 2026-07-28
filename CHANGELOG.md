@@ -6,11 +6,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Right dock (⌘J, or the panel button in a place's toolbar): a collapsible,
+  resizable side panel with two tabs. **Files** browses the worktree as a lazy
+  tree (honouring .gitignore) — click any file to view it, and edit it inline
+  with ⌘S to save (binary and very large files stay read-only; "Editor" still
+  opens your external editor). **Terminal** runs one or more live shells
+  alongside Claude — add tabs with ＋ or ⌘⇧T, close them individually, or close
+  them all. Each shell is its own tmux session, so they survive app restarts,
+  are `tmux attach`-able from a bare terminal, and the open tabs are restored
+  from the live sessions next time. The dock's width and last-used tab persist.
 - Quick switcher: press ⌘K anywhere — even with the terminal focused — to
   fuzzy-jump to any place across every project. Type to filter (matches slug,
   branch, project, or note), arrow keys to move, Enter to jump, Esc to close;
   open it with no query and it lists your most recent places. Works with the
   nav collapsed, and each row shows the same working/needs-input dot as the nav.
+
+### Changed
+- The app now opens a place's tmux session as a single pane (Claude only) so it
+  gets the full width — the scratch shell that used to share the split moved to
+  the new dock's Terminal tab. The `worktrees` CLI is unchanged: `new` still
+  splits a second pane for the dependency install.
 
 ## [0.3.1] - 2026-07-27
 

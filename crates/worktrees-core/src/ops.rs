@@ -28,7 +28,7 @@ fn indent(s: &str) -> String {
 // Returns 0 on success (session live / adopted / attached), 1 when tmux refuses
 // to create the session (the reason is surfaced via ui.error — the app shows it
 // and the CLI exits nonzero, instead of the old silent "Session ready" lie).
-pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_cmd: &str, ai_cmd: &str, do_attach: bool) -> i32 {
+pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_cmd: &str, ai_cmd: &str, do_attach: bool, spare_shell: bool) -> i32 {
     let keep = "exec \"${SHELL:-/bin/sh}\"";
     let ai_word_full = ai_cmd.split_whitespace().next().unwrap_or("");
     let ai_word = {
@@ -54,6 +54,11 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         } else {
             keep.to_string()
         };
+        // The spare shell is a SECOND pane next to pane0 (AI). The CLI keeps it
+        // (it's where deps install; `new` always splits). The app opens
+        // single-pane (`spare_shell=false`) so Claude gets full width — its
+        // scratch shell lives in the right dock's Terminal tab instead. An
+        // install_cmd is only ever passed WITH the spare shell.
         let pane1 = if !install_cmd.is_empty() {
             format!("{install_cmd} && echo '✓ deps ready'; {keep}")
         } else {
@@ -62,8 +67,10 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         match tmux::new_session(&session, wt, &pane0) {
             Ok(pid) => {
                 tmux::tune_session(&session);
-                tmux::split_window(&pid, wt, &pane1);
-                tmux::select_pane(&pid);
+                if spare_shell {
+                    tmux::split_window(&pid, wt, &pane1);
+                    tmux::select_pane(&pid);
+                }
             }
             Err(reason) => {
                 // Loud-guard: a failed new-session must NOT read as "ready". The
@@ -297,7 +304,8 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // The worktree already exists at this point — a failed session is a partial
     // success the user MUST see (loud-guard). Propagate launch's rc so cmd_new
     // returns nonzero. (Fake shims always succeed → bats success path unchanged.)
-    launch(p, ui, &wt, &session, &install_cmd, &ai_cmd, do_attach)
+    // `new` always keeps the spare shell (pane 1) — that's where deps install.
+    launch(p, ui, &wt, &session, &install_cmd, &ai_cmd, do_attach, true)
 }
 
 fn detect_install_cmd(dir: &str) -> String {
@@ -397,6 +405,10 @@ pub fn cmd_switch(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 // ── open ─────────────────────────────────────────────────────────────────────
 pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut name, mut ai_flag, mut resume, mut do_attach) = (String::new(), None::<String>, false, true);
+    // Default keeps the CLI's spare shell (pane 1). The app passes --no-spare so
+    // its embedded view is single-pane (Claude full-width); the scratch shell
+    // moves to the dock's Terminal tab.
+    let mut spare_shell = true;
     let mut expect = false;
     for a in args {
         if expect {
@@ -410,6 +422,7 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         match a.as_str() {
             "--no-attach" => do_attach = false,
+            "--no-spare" => spare_shell = false,
             "-r" | "--resume" => resume = true,
             "--ai" => expect = true,
             s if s.starts_with("--ai=") => ai_flag = Some(s["--ai=".len()..].to_string()),
@@ -459,7 +472,7 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if resume && !ai_cmd.is_empty() {
         ai_cmd = format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg());
     }
-    launch(p, ui, &wt, &session, "", &ai_cmd, do_attach)
+    launch(p, ui, &wt, &session, "", &ai_cmd, do_attach, spare_shell)
 }
 
 // ── close ────────────────────────────────────────────────────────────────────

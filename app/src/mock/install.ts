@@ -34,6 +34,31 @@ function reconcile(pl: Place) {
 let dialogCount = 0;
 let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
 
+// ── virtual FS for the dock's Files tab ──────────────────────────────────────
+// Deterministic + lazily materialized from whatever worktree path the tree
+// asks for, so ANY fixture place works headlessly. Dirs seed their children on
+// first listing; files seed content so read/write round-trips.
+type MockEntry = { name: string; path: string; is_dir: boolean };
+const fsChildren = new Map<string, MockEntry[]>();
+const fsFiles = new Map<string, { content: string; binary: boolean }>();
+
+function seedDir(dir: string) {
+  if (fsChildren.has(dir)) return fsChildren.get(dir)!;
+  const base = dir.split("/").pop() || dir;
+  const mk = (name: string, is_dir: boolean): MockEntry => ({ name, path: `${dir}/${name}`, is_dir });
+  let entries: MockEntry[];
+  if (base === "src") entries = [mk("App.tsx", false), mk("main.rs", false), mk("lib.rs", false)];
+  else if (base === "crates") entries = [mk("worktrees-core", true), mk("worktrees-cli", true)];
+  else entries = [mk("src", true), mk("crates", true), mk("README.md", false), mk("Cargo.toml", false), mk(".gitignore", false)];
+  fsChildren.set(dir, entries);
+  for (const e of entries) {
+    if (!e.is_dir && !fsFiles.has(e.path)) {
+      fsFiles.set(e.path, { content: `// ${e.name}\n// mock content — ${e.path}\n\nfn main() {\n    println!("hello from the harness");\n}\n`, binary: false });
+    }
+  }
+  return entries;
+}
+
 type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
   switch (cmd) {
@@ -207,6 +232,30 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "term_write":
     case "term_resize":
     case "term_close":
+      return null;
+
+    // ── dock Files tab (virtual FS) + Terminal sidecar ──
+    case "list_dir":
+      return seedDir(args.path as string);
+    case "read_file": {
+      const f = fsFiles.get(args.path as string);
+      return f
+        ? { content: f.content, truncated: false, binary: f.binary }
+        : { content: `// ${args.path}\n`, truncated: false, binary: false };
+    }
+    case "write_file": {
+      const path = args.path as string;
+      const prev = fsFiles.get(path);
+      fsFiles.set(path, { content: args.content as string, binary: prev?.binary ?? false });
+      return null;
+    }
+    case "open_shell_session": {
+      const i = (args.index as number) ?? 1;
+      return i <= 1 ? `${args.session}-term` : `${args.session}-term-${i}`; // → term_open
+    }
+    case "list_shell_sessions":
+      return []; // harness has no live tmux — the dock defaults to one shell tab
+    case "close_shell_session":
       return null;
 
     // update check — stateful: update_cli bumps the fake CLI so the badge-clear

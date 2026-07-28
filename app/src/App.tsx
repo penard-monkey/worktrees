@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
-import { applySettings, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, clampDock, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -412,6 +412,234 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
   );
 }
 
+// ── right dock: file browser + editable viewer + embedded terminal ───────────
+// All at MODULE scope (stable identity — components defined inside App() remount
+// every render and would lose tree-expansion / textarea focus).
+
+type FsEntry = { name: string; path: string; is_dir: boolean };
+
+// One lazy directory node: fetches its children the first time it's expanded and
+// caches them. Files bubble a click up via onOpen; dirs toggle.
+function TreeNode({ entry, depth, openPath, onOpen }: {
+  entry: FsEntry; depth: number; openPath: string | null; onOpen: (path: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [kids, setKids] = useState<FsEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const toggle = async () => {
+    if (!entry.is_dir) { onOpen(entry.path); return; }
+    const next = !open;
+    setOpen(next);
+    if (next && kids === null && !loading) {
+      setLoading(true);
+      try { setKids(await invoke<FsEntry[]>("list_dir", { path: entry.path })); }
+      catch { setKids([]); }
+      finally { setLoading(false); }
+    }
+  };
+
+  const isSel = !entry.is_dir && openPath === entry.path;
+  return (
+    <div className="tree-node">
+      <button
+        className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "")}
+        style={{ paddingLeft: `calc(var(--s2) + ${depth} * var(--s3))` }}
+        onClick={toggle}
+        title={entry.name}
+      >
+        <span className="tree-caret">{entry.is_dir ? (open ? "▾" : "▸") : ""}</span>
+        <span className="tree-name">{entry.name}</span>
+      </button>
+      {entry.is_dir && open && (
+        <div className="tree-kids">
+          {loading && <div className="tree-note">…</div>}
+          {kids && kids.length === 0 && !loading && <div className="tree-note">empty</div>}
+          {kids?.map((k) => (
+            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath} onOpen={onOpen} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Files tab tree. `root` = the place's worktree path; remount per place via key.
+function FileTree({ root, openPath, onOpen }: { root: string; openPath: string | null; onOpen: (path: string) => void }) {
+  const [entries, setEntries] = useState<FsEntry[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setEntries(null); setErr(null);
+    invoke<FsEntry[]>("list_dir", { path: root })
+      .then((e) => { if (alive) setEntries(e); })
+      .catch((e) => { if (alive) setErr(String(e)); });
+    return () => { alive = false; };
+  }, [root]);
+  if (err) return <div className="tree-note err-note">{err}</div>;
+  if (!entries) return <div className="tree-note">loading…</div>;
+  if (!entries.length) return <div className="tree-note">empty worktree</div>;
+  return (
+    <div className="filetree">
+      {entries.map((e) => <TreeNode key={e.path} entry={e} depth={0} openPath={openPath} onOpen={onOpen} />)}
+    </div>
+  );
+}
+
+// Editable viewer. Reads on path change; plain textarea (no editor lib). ⌘S /
+// Save writes back. Binary + truncated files are read-only (partial saves would
+// corrupt), with an "Open in editor" escape hatch.
+function FileViewer({ path, onOpenEditor, onError }: {
+  path: string; onOpenEditor: (path: string) => void; onError: (e: unknown) => void;
+}) {
+  const [orig, setOrig] = useState("");
+  const [text, setText] = useState("");
+  const [meta, setMeta] = useState<{ binary: boolean; truncated: boolean } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true); setMeta(null);
+    invoke<{ content: string; truncated: boolean; binary: boolean }>("read_file", { path })
+      .then((r) => { if (!alive) return; setOrig(r.content); setText(r.content); setMeta({ binary: r.binary, truncated: r.truncated }); })
+      .catch((e) => { if (alive) onError(e); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [path]);
+
+  const dirty = text !== orig;
+  const canEdit = !!meta && !meta.binary && !meta.truncated;
+
+  const save = async () => {
+    if (!dirty || saving || !canEdit) return;
+    setSaving(true);
+    try { await invoke("write_file", { path, content: text }); setOrig(text); }
+    catch (e) { onError(e); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="viewer">
+      <div className="viewer-h">
+        <span className="viewer-path" title={path}>{basename(path)}{dirty ? " ●" : ""}</span>
+        {meta?.truncated && <span className="viewer-tag">truncated</span>}
+        <span className="dock-spacer" />
+        {canEdit && <button className="ctrl sm" disabled={!dirty || saving} onClick={save}>{saving ? "Saving…" : "Save"}</button>}
+        <button className="ctrl sm" onClick={() => onOpenEditor(path)}>Editor</button>
+      </div>
+      {loading ? (
+        <div className="tree-note">loading…</div>
+      ) : meta?.binary ? (
+        <div className="tree-note">binary file — <button className="linklike" onClick={() => onOpenEditor(path)}>open in editor</button></div>
+      ) : (
+        <textarea
+          className="viewer-text"
+          value={text}
+          spellCheck={false}
+          readOnly={!canEdit}
+          onChange={(e) => setText(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// One embedded shell: ensures the place's sidecar for tab `index` exists, then
+// attaches. tmux owns the shell (persistent, `tmux attach`-able); we just attach.
+function DockTerminal({ placeSession, cwd, index, termVersion, focusToken, onError }: {
+  placeSession: string; cwd: string; index: number; termVersion: number; focusToken: number; onError: (e: unknown) => void;
+}) {
+  const [shell, setShell] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setShell(null);
+    invoke<string>("open_shell_session", { session: placeSession, cwd, index })
+      .then((s) => { if (alive) setShell(s); })
+      .catch((e) => { if (alive) onError(e); });
+    return () => { alive = false; };
+  }, [placeSession, cwd, index]);
+  if (!shell) return <div className="tree-note">starting shell…</div>;
+  return <TerminalPane session={shell} termVersion={termVersion} focusToken={focusToken} />;
+}
+
+// Terminal tab: several shells per place. Tabs are restored from the live tmux
+// sidecars (self-healing across restarts) and default to one. Only the active
+// shell is mounted (tmux keeps the rest warm). `addToken` bumps → add a tab
+// (⌘⇧T from the global handler); ignored on first mount.
+function TerminalTabs({ placeSession, cwd, termVersion, focusToken, addToken, onError }: {
+  placeSession: string; cwd: string; termVersion: number; focusToken: number; addToken: number; onError: (e: unknown) => void;
+}) {
+  const [ids, setIds] = useState<number[] | null>(null); // null = restoring
+  const [active, setActive] = useState<number | null>(null);
+  const idsRef = useRef<number[]>([]);
+  idsRef.current = ids ?? [];
+
+  useEffect(() => {
+    let alive = true;
+    setIds(null); setActive(null);
+    invoke<number[]>("list_shell_sessions", { session: placeSession })
+      .then((existing) => {
+        if (!alive) return;
+        const list = existing.length ? existing : [1];
+        setIds(list); setActive(list[0]);
+      })
+      .catch((e) => { if (!alive) return; setIds([1]); setActive(1); onError(e); });
+    return () => { alive = false; };
+  }, [placeSession]);
+
+  const addTab = useCallback(() => {
+    const cur = idsRef.current;
+    const next = (cur.length ? Math.max(...cur) : 0) + 1;
+    setIds([...cur, next]);
+    setActive(next);
+  }, []);
+
+  // ⌘⇧T → add a tab. Skip the initial token value so mounting doesn't add one.
+  const firstTok = useRef(true);
+  useEffect(() => {
+    if (firstTok.current) { firstTok.current = false; return; }
+    addTab();
+  }, [addToken, addTab]);
+
+  const closeTab = (id: number) => {
+    invoke("close_shell_session", { session: placeSession, index: id }).catch(onError);
+    const remaining = idsRef.current.filter((x) => x !== id);
+    setIds(remaining);
+    if (active === id) setActive(remaining.length ? remaining[remaining.length - 1] : null);
+  };
+
+  if (ids === null) return <div className="tree-note">…</div>;
+
+  return (
+    <div className="termtabs">
+      <div className="termtab-strip">
+        {ids.map((id) => (
+          <span key={id} className={"termtab" + (active === id ? " on" : "")}>
+            <button className="termtab-label" onClick={() => setActive(id)}>sh {id}</button>
+            <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}>✕</button>
+          </span>
+        ))}
+        <button className="termtab-add" title="new terminal (⌘⇧T)" onClick={addTab}>＋</button>
+      </div>
+      {active != null ? (
+        <DockTerminal key={placeSession + ":" + active} placeSession={placeSession} cwd={cwd}
+          index={active} termVersion={termVersion} focusToken={focusToken} onError={onError} />
+      ) : (
+        <div className="term-empty">
+          <div className="term-empty-card">
+            <div className="te-title">No shells</div>
+            <button className="enter-btn" onClick={addTab}>＋ new terminal</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
@@ -443,6 +671,11 @@ function App() {
   const appStale = !!(upd?.latest && vnewer(upd.latest, upd.app_version));
   const updateAvail = cliStale || cliMissing || appStale;
   const searchRef = useRef<HTMLInputElement | null>(null);
+  // right dock: which file the Files tab is viewing (null = none). Reset per place.
+  const [dockFile, setDockFile] = useState<string | null>(null);
+  useEffect(() => { setDockFile(null); }, [sel?.repo, sel?.slug]);
+  // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
+  const [newTermToken, setNewTermToken] = useState(0);
 
   // every surfaced error also lands in the app log (Settings → Logs)
   const fail = useCallback((e: unknown) => {
@@ -871,6 +1104,17 @@ function App() {
       return next;
     });
   }, []);
+  // right dock (Files / Terminal) — only renders with a place selected, but the
+  // preference persists globally (stable useCallback: safe in the keydown effect).
+  const toggleDock = useCallback(() => {
+    setSettings((prev) => {
+      const next = { ...prev, dock_open: !prev.dock_open };
+      applySettings(next);
+      if (hydrated.current) saveSettings(next);
+      else preHydration.current.dock_open = next.dock_open;
+      return next;
+    });
+  }, []);
   // keyboard lens select (⌘2..N): unlike changeLens, re-selecting the active lens
   // must NOT toggle/collapse the nav — a keyboard chord always REVEALS the view.
   const selectLens = useCallback((l: Lens) => {
@@ -890,6 +1134,14 @@ function App() {
   keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // ⌘⇧T — new dock terminal. Handled BEFORE the meta-only guard (it needs
+      // shift). No-op unless the dock's Terminal tab is mounted (it ignores the
+      // token otherwise), so it's safe to fire unconditionally.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        setNewTermToken((v) => v + 1);
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
       const k = e.key.toLowerCase();
       // ⌘K — quick switcher. A meta chord fires PAST the embedded terminal (like
@@ -908,6 +1160,11 @@ function App() {
         if (e.ctrlKey && !e.metaKey && e.target instanceof Element && e.target.closest(".term-host")) return;
         e.preventDefault();
         toggleNav();
+      } else if (e.metaKey && k === "j") {
+        // ⌘J — toggle the right dock (Files / Terminal). Meta chord fires past
+        // the embedded terminal, like ⌘B.
+        e.preventDefault();
+        toggleDock();
       } else if (e.metaKey && e.key === ",") {
         // ⌘, opens Settings (macOS convention) — a meta chord is safe past the
         // term-host (its passthrough concerns are ctrl-only). Esc already closes.
@@ -931,7 +1188,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleNav, fail, settings.nav_collapsed]);
+  }, [toggleNav, toggleDock, fail, settings.nav_collapsed]);
 
   // lens click: collapsed → expand into that lens; active lens again → collapse (VS Code style)
   const changeLens = (l: Lens) => {
@@ -993,6 +1250,17 @@ function App() {
     const startX = e.clientX;
     const startW = settings.nav_width;
     const move = (ev: MouseEvent) => updateSettings({ nav_width: clampNav(startW + (ev.clientX - startX)) });
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  // ── dock resizer (drag the dock's LEFT edge — moving left GROWS it) ──
+  const onDockResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = settings.dock_width;
+    const move = (ev: MouseEvent) => updateSettings({ dock_width: clampDock(startW - (ev.clientX - startX)) });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -1148,11 +1416,17 @@ function App() {
     { key: "attention" as Lens, icon: "⚠", title: "Attention — dirty / ahead-behind / broken" },
   ];
 
+  // Dock only makes sense with a place selected (Files/Terminal need a worktree).
+  const dockShown = settings.dock_open && !!selected && !!sel;
+  const gridCols = [
+    "var(--rail-w)",
+    settings.nav_collapsed ? null : `${settings.nav_width}px`,
+    "1fr",
+    dockShown ? `${settings.dock_width}px` : null,
+  ].filter(Boolean).join(" ");
+
   return (
-    <div
-      className="app"
-      style={{ gridTemplateColumns: settings.nav_collapsed ? `var(--rail-w) 1fr` : `var(--rail-w) ${settings.nav_width}px 1fr` }}
-    >
+    <div className="app" style={{ gridTemplateColumns: gridCols }}>
       {/* ── activity rail ── */}
       <nav className="rail">
         {RAIL.map((r) => (
@@ -1249,6 +1523,11 @@ function App() {
               </div>
 
               <div className="controls">
+                <button
+                  className={"icon-btn" + (settings.dock_open ? " on" : "")}
+                  title={settings.dock_open ? "hide files & terminal (⌘J)" : "files & terminal (⌘J)"}
+                  onClick={toggleDock}
+                >▧</button>
                 {selected.tmux_session.up ? (
                   <>
                     <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
@@ -1363,6 +1642,37 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ── */}
+      {dockShown && selected && sel && (
+        <aside className="dock">
+          <div className="dock-resizer" onMouseDown={onDockResize} />
+          <div className="dock-tabs">
+            <button className={"dock-tab" + (settings.dock_tab === "files" ? " on" : "")}
+              onClick={() => updateSettings({ dock_tab: "files" })}>Files</button>
+            <button className={"dock-tab" + (settings.dock_tab === "terminal" ? " on" : "")}
+              onClick={() => updateSettings({ dock_tab: "terminal" })}>Terminal</button>
+            <span className="dock-spacer" />
+            <button className="icon-btn" title="hide dock (⌘J)" onClick={toggleDock}>✕</button>
+          </div>
+          <div className="dock-body">
+            {settings.dock_tab === "files" ? (
+              <div className="dock-files">
+                <div className="dock-tree">
+                  <FileTree key={selected.path} root={selected.path} openPath={dockFile} onOpen={setDockFile} />
+                </div>
+                {dockFile
+                  ? <FileViewer key={dockFile} path={dockFile} onOpenEditor={editIn} onError={fail} />
+                  : <div className="tree-note viewer-hint">select a file to view</div>}
+              </div>
+            ) : (
+              <TerminalTabs key={selected.tmux_session.name + "-terms"}
+                placeSession={selected.tmux_session.name} cwd={selected.path}
+                termVersion={termVersion} focusToken={termFocus} addToken={newTermToken} onError={fail} />
+            )}
+          </div>
+        </aside>
+      )}
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
       {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
