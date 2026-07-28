@@ -65,8 +65,12 @@ wt() { echo "$REPO/.worktrees/$1"; }
   rm "$REPO/.env"
   write_project_config '[[file]]' 'path = ".env"'
   run_wt doctor feat-x
-  # missing source (warn) + not materialized here (error) — both must be said
+  # `plan` returns EARLY on a missing source, so this is the ONLY finding for the
+  # entry — there is no "not materialized here" error alongside it, and a warning
+  # on its own never fails the run.
+  [ "$status" -eq 0 ]
   [[ "$output" == *"absent from the main checkout"* ]]
+  [[ "$output" != *"declared but not materialized"* ]]
 }
 
 @test "doctor --strict: promotes a stale copy to a failure" {

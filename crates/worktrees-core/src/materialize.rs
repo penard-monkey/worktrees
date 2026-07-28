@@ -45,6 +45,11 @@ use crate::ui::Ui;
 /// of `[[file]]` is credentials, and an 8 MiB credential is a mistake.
 pub const MAX_COPY_BYTES: u64 = 8 * 1024 * 1024;
 
+/// How far `.bak`, `.bak.2`, … is searched before `--force` refuses (see
+/// [`free_backup`]). A worktree with a hundred stacked backups of one declared
+/// file is a person who needs to look at the directory, not a deeper suffix.
+const MAX_BACKUPS: u32 = 100;
+
 // ── facts ────────────────────────────────────────────────────────────────────
 
 /// Everything `plan` is allowed to know. Built by `probe` from the filesystem —
@@ -371,7 +376,22 @@ pub fn plan(cfg: &ProjectConfig, main_root: &Path, wt: &Path, f: &FsFacts, force
     let mut out = Plan::default();
     for entry in &cfg.files {
         let rel = entry.path.as_str();
-        let Some(facts) = f.find(rel) else { continue };
+        let Some(facts) = f.find(rel) else {
+            // NOT impossible-by-construction: `probe` builds one `EntryFacts` per
+            // config entry, but `plan` takes the two as separate arguments and a
+            // caller can hand it a mismatched pair. A silent `continue` here is
+            // internally the exact bug this module exists to delete (§1.2), so it
+            // is a loud finding — the declared file really is unmaterialized.
+            out.findings.push(
+                Finding::error(
+                    Code::Internal,
+                    format!("internal: no probed facts for declared file `{rel}` — nothing was materialized for it (this is a bug in worktrees)"),
+                )
+                .at_place(place.clone())
+                .at_path(rel.to_string()),
+            );
+            continue;
+        };
         plan_one(&mut out, &place, main_root, rel, entry.mode, facts, f.main_real.as_deref(), force);
     }
     out
@@ -394,6 +414,14 @@ fn plan_one(
 
     // B8 first: a path that is not gitignored must not be materialized at all,
     // because `git add -A` in this worktree would then commit the credential.
+    //
+    // ⚠ B8 outranks the missing-source warning below, and it is per-WORKTREE:
+    // `.gitignore` is a tracked file, so a path can be ignored on one branch and
+    // not on another. An entry that is BOTH absent from main and un-ignored here
+    // therefore reports `not-gitignored` in this place and `missing-source` in a
+    // place on another branch. That difference is real, not a bug: in THIS
+    // worktree `git add -A` genuinely would commit the file the moment it
+    // appears, and that is the finding worth acting on first.
     if !e.gitignored {
         out.findings.push(finding(
             Severity::Error,
@@ -601,9 +629,46 @@ fn inside(main: &Path, p: &Path) -> bool {
     p == main || p.starts_with(main)
 }
 
+/// The name `--force` ADVERTISES in messages and carries in the plan. The name
+/// actually written is [`free_backup`]'s, decided at apply time — `plan` is pure
+/// and may not stat anything.
 fn backup_path(dst: &Path) -> PathBuf {
     let name = file_name(dst);
     dst.with_file_name(format!("{name}.bak"))
+}
+
+/// First free name in `<dst>.bak`, `<dst>.bak.2`, `<dst>.bak.3`, …
+///
+/// `rename(2)` CLOBBERS an existing destination, so a bare `rename(dst, .bak)`
+/// keeps "moved aside, never lost" true for exactly one `--force`: force once,
+/// let a new local file appear, force again, and the first backup is gone with no
+/// output. §7's whole rationale is that the content being displaced may be the
+/// only copy of it, so no backup is ever overwritten.
+///
+/// Test-then-rename, deliberately: §4's adversary model is the REPO's contents,
+/// not a local process racing us inside our own worktree, and the atomic form
+/// (`renameat2(RENAME_NOREPLACE)`) is Linux-only. Losing the race costs one
+/// clobbered backup; the alternative costs portability.
+fn free_backup(nominal: &Path) -> io::Result<PathBuf> {
+    if fs::symlink_metadata(nominal).is_err() {
+        return Ok(nominal.to_path_buf());
+    }
+    let base = file_name(nominal);
+    for n in 2..=MAX_BACKUPS {
+        let cand = nominal.with_file_name(format!("{base}.{n}"));
+        if fs::symlink_metadata(&cand).is_err() {
+            return Ok(cand);
+        }
+    }
+    // Refusing beats clobbering: the point of the whole function is that none of
+    // these files may be destroyed silently.
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "{} and {MAX_BACKUPS} numbered backups beside it all exist — refusing to overwrite one (clean some up)",
+            nominal.display()
+        ),
+    ))
 }
 
 fn file_name(p: &Path) -> String {
@@ -662,10 +727,13 @@ fn run_action(a: &Action) -> io::Result<String> {
             Ok(format!("relinked {} (was -> {})", a.rel, old.display()))
         }
         ActionKind::LinkForce { backup } => {
-            // rename, never remove: the shadowing file may be the only copy.
-            fs::rename(&a.dst, backup)?;
+            // rename, never remove: the shadowing file may be the only copy — and
+            // never ONTO an existing backup either, which is a rename away from
+            // the same loss (`free_backup`).
+            let backup = free_backup(backup)?;
+            fs::rename(&a.dst, &backup)?;
             link_atomic(&a.src, &a.dst)?;
-            Ok(format!("linked {} (shadowing file kept as {})", a.rel, file_name(backup)))
+            Ok(format!("linked {} (shadowing file kept as {})", a.rel, file_name(&backup)))
         }
         ActionKind::CopyCreate => {
             copy_atomic(&a.src, &a.dst)?;
@@ -677,9 +745,10 @@ fn run_action(a: &Action) -> io::Result<String> {
             Ok(format!("copied {} (replacing a symlink — mode is `copy`)", a.rel))
         }
         ActionKind::CopyForce { backup } => {
-            fs::rename(&a.dst, backup)?;
+            let backup = free_backup(backup)?;
+            fs::rename(&a.dst, &backup)?;
             copy_atomic(&a.src, &a.dst)?;
-            Ok(format!("re-copied {} (previous content kept as {})", a.rel, file_name(backup)))
+            Ok(format!("re-copied {} (previous content kept as {})", a.rel, file_name(&backup)))
         }
     }
 }
@@ -724,7 +793,6 @@ fn link_atomic(src: &Path, dst: &Path) -> io::Result<()> {
 /// `File::open` FIRST, then regular-file-ness on the OPEN fd's metadata — not a
 /// second lstat (§4 TOCTOU). Then tmp-in-the-same-dir + rename, as for links.
 fn copy_atomic(src: &Path, dst: &Path) -> io::Result<()> {
-    use io::Read;
     let mut f = fs::File::open(src)?;
     let md = f.metadata()?;
     if !md.is_file() {
@@ -733,8 +801,7 @@ fn copy_atomic(src: &Path, dst: &Path) -> io::Result<()> {
     if md.len() > MAX_COPY_BYTES {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "source is over the 8 MiB copy cap"));
     }
-    let mut buf = Vec::with_capacity(md.len() as usize);
-    f.read_to_end(&mut buf)?;
+    let buf = read_capped(&mut f, MAX_COPY_BYTES)?;
     let tmp = tmp_beside(dst)?;
     let _ = fs::remove_file(&tmp);
     fs::write(&tmp, &buf)?;
@@ -745,6 +812,23 @@ fn copy_atomic(src: &Path, dst: &Path) -> io::Result<()> {
             Err(e)
         }
     }
+}
+
+/// `take(cap + 1)`, never a bare `read_to_end`: the size check above is true of
+/// the fd at `fstat` time only, and a source that GROWS between the stat and the
+/// read would otherwise be slurped whole into memory. The one extra byte is what
+/// separates "exactly at the cap" from "over it".
+fn read_capped(f: &mut fs::File, cap: u64) -> io::Result<Vec<u8>> {
+    use io::Read;
+    let mut buf = Vec::new();
+    f.take(cap + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source grew past the copy cap while it was being read",
+        ));
+    }
+    Ok(buf)
 }
 
 /// A temp name in the destination's OWN directory, so `rename` stays atomic
@@ -1131,6 +1215,18 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_entry_with_no_probed_facts_is_a_loud_internal_finding_not_a_skip() {
+        // Facts for `.env` only — `y.env` has none. The old `continue` here dropped
+        // it without a word, which is the failure class this module deletes.
+        let f = facts(".env", good_src(".env"), DstState::Absent);
+        let p = run(&[(".env", Mode::Link), ("y.env", Mode::Link)], &f, false);
+        assert_eq!(codes(&p), vec![(Severity::Error, Code::Internal)]);
+        assert!(p.findings[0].message.contains("y.env"), "{}", p.findings[0].message);
+        assert_eq!(p.actions.len(), 1, "the entry that DID have facts is still planned");
+        assert_eq!(p.report().exit_code(), 2);
+    }
+
+    #[test]
     fn an_empty_config_plans_nothing() {
         let p = plan(&ProjectConfig::default(), Path::new(MAIN), Path::new(WT), &FsFacts::default(), false);
         assert!(p.actions.is_empty() && p.findings.is_empty());
@@ -1329,6 +1425,72 @@ mod tests {
         assert_eq!(rc, 0);
         assert_eq!(fs::read_to_string(&dst).unwrap(), "SEED");
         assert_eq!(fs::read_to_string(t.wt().join("x.env.bak")).unwrap(), "REWRITTEN BY deploy-local.sh");
+    }
+
+    #[test]
+    fn fs_a_second_force_never_clobbers_the_first_backup() {
+        // "renamed, never lost" used to hold for exactly ONE --force: the second
+        // rename landed on `.bak` and took the first drifted file with it.
+        let t = Tmp::new("backups");
+        fs::write(t.main().join("x.env"), "SEED").unwrap();
+        let c = cfg(&[("x.env", Mode::Copy)]);
+        let dst = t.wt().join("x.env");
+
+        fs::write(&dst, "FIRST LOCAL").unwrap();
+        let (rc, lines) = apply_here(&c, &t.main(), &t.wt(), true);
+        assert_eq!(rc, 0);
+        assert!(lines.iter().any(|l| l.contains("kept as x.env.bak")), "{lines:?}");
+
+        fs::write(&dst, "SECOND LOCAL").unwrap();
+        let (rc, lines) = apply_here(&c, &t.main(), &t.wt(), true);
+        assert_eq!(rc, 0);
+        // both survive, and the message names the one actually written
+        assert_eq!(fs::read_to_string(t.wt().join("x.env.bak")).unwrap(), "FIRST LOCAL");
+        assert_eq!(fs::read_to_string(t.wt().join("x.env.bak.2")).unwrap(), "SECOND LOCAL");
+        assert!(lines.iter().any(|l| l.contains("kept as x.env.bak.2")), "{lines:?}");
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "SEED");
+
+        // the link side takes the same path
+        let t = Tmp::new("backups-link");
+        fs::write(t.main().join(".env"), "MAIN").unwrap();
+        let c = cfg(&[(".env", Mode::Link)]);
+        for content in ["FIRST", "SECOND", "THIRD"] {
+            let _ = fs::remove_file(t.wt().join(".env"));
+            fs::write(t.wt().join(".env"), content).unwrap();
+            assert_eq!(apply_here(&c, &t.main(), &t.wt(), true).0, 0);
+        }
+        assert_eq!(fs::read_to_string(t.wt().join(".env.bak")).unwrap(), "FIRST");
+        assert_eq!(fs::read_to_string(t.wt().join(".env.bak.2")).unwrap(), "SECOND");
+        assert_eq!(fs::read_to_string(t.wt().join(".env.bak.3")).unwrap(), "THIRD");
+    }
+
+    #[test]
+    fn free_backup_refuses_rather_than_clobbering_once_the_suffixes_run_out() {
+        let t = Tmp::new("exhausted");
+        let nominal = t.wt().join(".env.bak");
+        fs::write(&nominal, "0").unwrap();
+        for n in 2..=MAX_BACKUPS {
+            fs::write(t.wt().join(format!(".env.bak.{n}")), "x").unwrap();
+        }
+        let e = free_backup(&nominal).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&nominal).unwrap(), "0", "nothing was touched");
+    }
+
+    #[test]
+    fn read_capped_refuses_a_source_that_outgrew_its_fstat() {
+        // The cap is a parameter so the grow-after-stat path is testable without
+        // an 8 MiB fixture: `read_capped` cannot tell "grew" from "was always
+        // bigger", and neither case may be read whole.
+        let t = Tmp::new("capped");
+        let p = t.main().join("x.env");
+        fs::write(&p, "0123456789").unwrap();
+
+        let mut f = fs::File::open(&p).unwrap();
+        assert_eq!(read_capped(&mut f, 10).unwrap(), b"0123456789");
+        let mut f = fs::File::open(&p).unwrap();
+        let e = read_capped(&mut f, 4).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

@@ -132,6 +132,46 @@ wt() { echo "$REPO/.worktrees/$1"; }
   [[ "$output" == *".worktrees.toml:2: absolute path not allowed"* ]]
 }
 
+# ── `new`'s exit-code wiring (§8: report, keep the worktree, never roll back) ─
+
+@test "new: a declared file absent from main warns and still exits 0" {
+  rm "$REPO/.env"
+  write_project_config '[[file]]' 'path = ".env"'
+
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]                     # a warning never fails the run
+  [[ "$output" == *"absent from the main checkout"* ]]
+  [ -d "$(wt feat-x)" ]
+  [ ! -e "$(wt feat-x)/.env" ]
+}
+
+@test "new: a declared path that is not gitignored exits 2 and KEEPS the worktree" {
+  printf 'PLAIN=1\n' > "$REPO/not-ignored.env"
+  write_project_config '[[file]]' 'path = "not-ignored.env"'
+
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 2 ]                     # Error findings, not a hard failure
+  [[ "$output" == *"not gitignored"* ]]
+  # loud guard: the worktree exists and stays registered, and nothing was linked
+  [ -d "$(wt feat-x)" ]
+  run git -C "$REPO" worktree list
+  [[ "$output" == *"feat-x"* ]]
+  [ ! -e "$(wt feat-x)/not-ignored.env" ]
+}
+
+@test "new: an invalid .worktrees.toml refuses BEFORE the worktree is created" {
+  # §1.1 — a parse failure is knowable ahead of every side effect, so `new`
+  # refuses rather than leaving a created-but-unprovisioned worktree behind.
+  write_project_config '[[file]]' 'path = "/etc/passwd"'
+
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 1 ]
+  [[ "$output" == *".worktrees.toml:2: absolute path not allowed"* ]]
+  [ ! -e "$(wt feat-x)" ]
+  run git -C "$REPO" worktree list
+  [[ "$output" != *"feat-x"* ]]
+}
+
 @test "relink: usage guards" {
   run_wt relink
   [ "$status" -eq 1 ]

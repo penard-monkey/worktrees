@@ -80,6 +80,11 @@ pub enum Code {
     DeferredKey,
     /// `.worktree-prefix` and `[project] prefix` disagree.
     PrefixMismatch,
+    /// An invariant this tool is supposed to guarantee did not hold. ⚠ Not in
+    /// §7's slug list either: it exists so an internal inconsistency is REPORTED
+    /// rather than turned into a silent skip, which is the failure class the
+    /// whole feature is a fix for (§1.2).
+    Internal,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -194,6 +199,7 @@ mod tests {
             (Code::UnknownKey, "unknown-key"),
             (Code::DeferredKey, "deferred-key"),
             (Code::PrefixMismatch, "prefix-mismatch"),
+            (Code::Internal, "internal"),
         ] {
             assert_eq!(serde_json::to_string(&c).unwrap(), format!("\"{s}\""));
         }

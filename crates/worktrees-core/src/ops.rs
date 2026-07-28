@@ -226,6 +226,21 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
 
+    // §1.1 — either the tool fully provisions a project it recognizes, or it
+    // refuses to create there. A config that does not PARSE is knowable before any
+    // side effect (unlike a materialization failure, which needs the worktree to
+    // exist), so it is refused here, ahead of `ensure_excluded` — the first thing
+    // below that touches anything. Parsed once and reused: the apply step further
+    // down takes this value rather than re-reading the file (§8's ordering for
+    // that step is unchanged — it still runs after the git create block).
+    let project_cfg = match load_project_config(p, ui) {
+        Ok(c) => c,
+        Err(code) => {
+            ui.error("Refusing to create a worktree this repo's config cannot provision — fix .worktrees.toml first.");
+            return code;
+        }
+    };
+
     let session = p.session_name(&slug);
     p.ensure_excluded();
 
@@ -293,18 +308,15 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // treats its absence as "not a worktree" (§1.1). A failure is a loud guard
     // like the session one below: report, keep the worktree, propagate the rc —
     // never roll back.
-    let mat_rc = match load_project_config(p, ui) {
-        Err(code) => code,
-        Ok(None) => 0,
-        Ok(Some((cfg, findings))) => {
+    let mat_rc = match project_cfg {
+        None => 0,
+        Some((cfg, findings)) => {
             report_findings(ui, &findings);
             let files = materialize_place(p, ui, &cfg, &wt, false);
             let ports = provision_place(p, ui, &cfg, &wt, &slug, false);
-            if files != 0 {
-                files
-            } else {
-                ports
-            }
+            // Same precedence as the `--all` loops: a hard failure outranks
+            // findings, whichever of the two steps produced it.
+            worse_rc(files, ports)
         }
     };
 
@@ -844,12 +856,30 @@ pub fn cmd_relink(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut rc = 0;
     for dir in &targets {
         ui.header(&format!("Relinking {}", basename(dir)));
-        let one = materialize_place(p, ui, &cfg, dir, force);
-        if one != 0 {
-            rc = one;
-        }
+        rc = worse_rc(rc, materialize_place(p, ui, &cfg, dir, force));
     }
     rc
+}
+
+/// Fold one multi-target loop's per-place exit codes into the process's.
+///
+/// Last-nonzero-wins would make the reported CLASS depend on the order `--all`
+/// happened to walk `.worktrees/`: places [A → 1, B → 2] exits 2, rename the dirs
+/// and the same run exits 1. A hard failure OUTRANKS findings, because `1` means
+/// the operation did not happen while `2` means it happened and something needs
+/// attention. Any other nonzero is treated as a hard failure — an unrecognized
+/// code is not something to downgrade.
+fn worse_rc(acc: i32, one: i32) -> i32 {
+    let rank = |rc: i32| match rc {
+        0 => 0,
+        crate::diag::EXIT_FINDINGS => 1,
+        _ => 2,
+    };
+    if rank(one) > rank(acc) {
+        one
+    } else {
+        acc
+    }
 }
 
 // ── provision — ports + .worktree.env (proposal §6) ──────────────────────────
@@ -994,10 +1024,7 @@ pub fn cmd_provision(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     for dir in &targets {
         let slug = basename(dir);
         ui.header(&format!("Provisioning {slug}"));
-        let one = provision_place(p, ui, &cfg, dir, &slug, reallocate);
-        if one != 0 {
-            rc = one;
-        }
+        rc = worse_rc(rc, provision_place(p, ui, &cfg, dir, &slug, reallocate));
     }
     rc
 }
@@ -1232,4 +1259,24 @@ fn port_findings(p: &Project, cfg: &ProjectConfig, targets: &[String]) -> Vec<Fi
 /// own `schema_version`, every nullable field an explicit `null`.
 fn emit_report(ui: &mut dyn Ui, report: &Report) {
     ui.plain(&serde_json::to_string(report).unwrap_or_default());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worse_rc_is_order_independent_and_ranks_a_hard_failure_above_findings() {
+        // THE bug: last-nonzero-wins made [1, 2] exit 2 and [2, 1] exit 1, so the
+        // class depended on how `--all` sorted the directory.
+        assert_eq!(worse_rc(worse_rc(0, 1), 2), 1);
+        assert_eq!(worse_rc(worse_rc(0, 2), 1), 1);
+        // clean stays clean; findings survive a clean neighbour
+        assert_eq!(worse_rc(0, 0), 0);
+        assert_eq!(worse_rc(worse_rc(0, 0), 2), 2);
+        assert_eq!(worse_rc(worse_rc(0, 2), 0), 2);
+        // an unrecognized nonzero is a hard failure, never downgraded to findings
+        assert_eq!(worse_rc(2, 7), 7);
+        assert_eq!(worse_rc(7, 2), 7);
+    }
 }
