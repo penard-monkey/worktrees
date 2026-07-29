@@ -116,8 +116,8 @@ function glyphs(p: Place, drift?: boolean) {
   const g: { cls: string; text: string; title: string }[] = [];
   if (drift) g.push({ cls: "g-drift", text: "⚑", title: "config drift — right-click the project → Project settings…" });
   if (p.dirty) g.push({ cls: "g-dirty", text: `●${p.dirty_files ?? ""}`, title: `${p.dirty_files ?? "dirty"} uncommitted` });
-  if (p.ahead) g.push({ cls: "g-ahead", text: `↑${p.ahead}`, title: `${p.ahead} ahead` });
-  if (p.behind) g.push({ cls: "g-behind", text: `↓${p.behind}`, title: `${p.behind} behind` });
+  if (p.ahead) g.push({ cls: "g-ahead", text: `↑${p.ahead}`, title: `${p.ahead} ahead of the base branch` });
+  if (p.behind) g.push({ cls: "g-behind", text: `↓${p.behind}`, title: `${p.behind} behind the base branch` });
   if (p.detached) g.push({ cls: "g-det", text: "⑂", title: "detached HEAD" });
   const MAX = 4;
   if (g.length > MAX) return [...g.slice(0, MAX), { cls: "g-more", text: `+${g.length - MAX}`, title: "more" }];
@@ -2028,7 +2028,7 @@ function App() {
                   <span className="status-cluster">
                     {selected.tmux_session.up && <span className="s ok" title="tmux live"><span className="status-dot on" /> live</span>}
                     {selected.dirty && <span className="s dirty">● {selected.dirty_files ?? ""}</span>}
-                    {(selected.ahead || selected.behind) && <span className="s ab">↑{selected.ahead ?? 0} ↓{selected.behind ?? 0}</span>}
+                    {(selected.ahead || selected.behind) && <span className="s ab" title="vs the base branch">↑{selected.ahead ?? 0} ↓{selected.behind ?? 0}</span>}
                     <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
                   </span>
                 )}
