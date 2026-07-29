@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
@@ -209,7 +210,7 @@ export function SettingsSheet({
       <aside className="settings-sheet" onClick={(e) => e.stopPropagation()}>
         <header className="settings-h">
           <b>Settings</b>
-          <button className="icon-btn" title="close (Esc)" onClick={onClose}>✕</button>
+          <button className="icon-btn" title="close (Esc)" onClick={onClose}><Icons.X /></button>
         </header>
 
         <div className="settings-body">
@@ -341,7 +342,7 @@ export function SettingsSheet({
               />
               Restore last place on launch
             </label>
-            <div className="hint">Reopens the most recently used place, ready but not started — press Enter ▸ to attach.</div>
+            <div className="hint">Reopens the most recently used place, ready but not started — press Enter to attach.</div>
           </section>
 
           <section className="setting">
@@ -416,7 +417,7 @@ export function SettingsSheet({
                 </label>
               ))}
             </div>
-            <div className="hint">Pinned and (main) always show. Sort order lives in the nav header (⇅).</div>
+            <div className="hint">Pinned and (main) always show. Sort order lives in the nav header.</div>
           </section>
 
           <section className="setting">

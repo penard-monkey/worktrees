@@ -9,6 +9,18 @@ body { font-family: var(--font-ui); background: var(--bg-abyss); color: var(--tx
 button, input, select { font-family: inherit; color: inherit; }
 button { cursor: pointer; }
 
+/* ── icons ──
+ * Inline SVG replaced the Unicode chrome glyphs (see icons.tsx). An <svg> is
+ * inline by default, so it sits on the text baseline and drags the parent's
+ * height around by its descender space — every icon holder is a flex/grid box
+ * instead. `.with-icon` is for buttons that pair a glyph WITH a label. */
+.with-icon { display: inline-flex; align-items: center; gap: 5px; }
+.icon-btn, .mini, .termtab-x, .termtab-add, .ctrl.icon-only {
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.caret, .tree-caret { display: flex; align-items: center; justify-content: center; }
+.pop-item .check { display: flex; align-items: center; flex: none; }
+
 .app {
   display: grid;
   grid-template-columns: var(--rail-w) var(--nav-w) minmax(0, 1fr);

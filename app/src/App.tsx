@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import * as Icons from "./icons";
 import { TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
 import {
@@ -91,19 +92,9 @@ const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
 const hasAttention = (p: Place) => !!p.dirty || !!p.ahead || !!p.behind;
 
-// nav icons — inline SVG so they inherit currentColor per theme
-const FolderIcon = () => (
-  <svg className="picon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-    strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M1.75 4.25c0-.83.67-1.5 1.5-1.5h2.9l1.6 1.7h5c.83 0 1.5.67 1.5 1.5v6c0 .83-.67 1.5-1.5 1.5H3.25c-.83 0-1.5-.67-1.5-1.5v-7.7Z" />
-  </svg>
-);
-const HomeIcon = () => (
-  <svg className="picon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-    strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M2.5 6.7 8 2.2l5.5 4.5V13a1 1 0 0 1-1 1H9.8v-3.8H6.2V14H3.5a1 1 0 0 1-1-1V6.7Z" />
-  </svg>
-);
+// nav icons live in ./icons now — inline SVG, inheriting currentColor per theme
+const FolderIcon = Icons.Folder16;
+const HomeIcon = Icons.Home;
 
 function ago(epoch?: number): string {
   if (!epoch) return "";
@@ -276,7 +267,7 @@ function NewPlaceForm({ project, initialBase, onCreate, onCancel }: {
     <div className="newform nav-newform">
       <div className="newform-h">
         New worktree · <b>{basename(project)}</b>
-        <button className="mini" title="cancel (Esc)" onClick={onCancel}>✕</button>
+        <button className="mini" title="cancel (Esc)" onClick={onCancel}><Icons.X size={13} /></button>
       </div>
       <input placeholder="branch (e.g. feat/x)" value={branch} autoFocus
         onChange={(e) => setBranch(e.currentTarget.value)} onKeyDown={onKey} />
@@ -486,7 +477,7 @@ function TreeNode({ entry, depth, openPath, onOpen, onError }: {
         onClick={toggle}
         title={entry.name}
       >
-        <span className="tree-caret">{entry.is_dir ? (open ? "▾" : "▸") : ""}</span>
+        <span className="tree-caret">{entry.is_dir && (open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />)}</span>
         <span className="tree-name">{entry.name}</span>
       </button>
       {entry.is_dir && open && (
@@ -703,10 +694,10 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
         {ids.map((id) => (
           <span key={id} className={"termtab" + (active === id ? " on" : "")}>
             <button className="termtab-label" onClick={() => setActive(id)}>sh {id}</button>
-            <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}>✕</button>
+            <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}><Icons.X size={11} /></button>
           </span>
         ))}
-        <button className="termtab-add" title="new terminal (⌘⇧T)" onClick={addTab}>＋</button>
+        <button className="termtab-add" title="new terminal (⌘⇧T)" onClick={addTab}><Icons.Plus size={13} /></button>
       </div>
       {active != null ? (
         <DockTerminal key={repo + "|" + slug + ":" + active} repo={repo} slug={slug}
@@ -715,7 +706,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
         <div className="term-empty">
           <div className="term-empty-card">
             <div className="te-title">No shells</div>
-            <button className="enter-btn" onClick={addTab}>＋ new terminal</button>
+            <button className="enter-btn with-icon" onClick={addTab}><Icons.Plus size={13} /> new terminal</button>
           </div>
         </div>
       )}
@@ -1647,7 +1638,7 @@ function App() {
 
   const GroupHeader = ({ gkey, label, count, open, onToggle }: { gkey: string; label: string; count: number; open: boolean; onToggle: () => void }) => (
     <div className="group-h" key={gkey} onClick={onToggle}>
-      <span className="caret">{open ? "▾" : "▸"}</span>
+      <span className="caret">{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
       {label}
       <span className="count">{count}</span>
     </div>
@@ -1672,7 +1663,7 @@ function App() {
     return (
       <div className="project">
         <div className="project-h" onContextMenu={(e) => projectCtx(e, pv.root)}>
-          <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? "▾" : "▸"}</span>
+          <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
           {pv.ok
             ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : undefined}><FolderIcon /></span>
             : <span className="rollup broken" title="repo gone">⊘</span>}
@@ -1689,13 +1680,13 @@ function App() {
               onClick={() => setProjSheet(pv.root)}
             >⚑</button>
           ) : null}
-          <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}>＋</button>
+          <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}><Icons.Plus size={13} /></button>
           <button
             className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
             title={confirmRm === `hdr|${pv.root}` ? "click again to remove from workspace" : "remove project"}
             onClick={() => removeProjectHdr(pv.root)}
           >
-            {confirmRm === `hdr|${pv.root}` ? "remove?" : "✕"}
+            {confirmRm === `hdr|${pv.root}` ? "remove?" : <Icons.X size={13} />}
           </button>
         </div>
 
@@ -1773,9 +1764,9 @@ function App() {
   );
 
   const RAIL = [
-    { key: "places" as Lens, icon: "▤", title: "Places — the full tree" },
-    { key: "recent" as Lens, icon: "◷", title: "Recent — resurface dormant places" },
-    { key: "attention" as Lens, icon: "⚠", title: "Attention — dirty / ahead-behind / broken" },
+    { key: "places" as Lens, icon: <Icons.ListTree size={17} />, title: "Places — the full tree" },
+    { key: "recent" as Lens, icon: <Icons.History size={17} />, title: "Recent — resurface dormant places" },
+    { key: "attention" as Lens, icon: <Icons.TriangleAlert size={17} />, title: "Attention — dirty / ahead-behind / broken" },
   ];
 
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
@@ -1804,10 +1795,10 @@ function App() {
         ))}
         <div className="rail-spacer" />
         <button className="rail-icon" title={settings.nav_collapsed ? `show nav — ${lens} (⌘B)` : "hide nav (⌘B)"} onClick={toggleNav}>
-          {settings.nav_collapsed ? "»" : "«"}
+          {settings.nav_collapsed ? <Icons.PanelLeftOpen size={17} /> : <Icons.PanelLeftClose size={17} />}
         </button>
-        <button className="rail-icon" title="add project" onClick={addProject}>＋</button>
-        <button className={"rail-icon" + (updateAvail ? " upd" : "")} title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}>⚙</button>
+        <button className="rail-icon" title="add project" onClick={addProject}><Icons.FolderPlus size={17} /></button>
+        <button className={"rail-icon" + (updateAvail ? " upd" : "")} title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── nav (kept mounted while collapsed so form drafts / scroll survive ⌘B) ── */}
@@ -1818,14 +1809,14 @@ function App() {
         <div className="nav-head">
           <span className="nav-title">{lens === "places" ? "PLACES" : lens === "recent" ? "RECENT" : "ATTENTION"}</span>
           <div className="menu-wrap">
-            <button className={"icon-btn" + (settings.sort_mode !== "recent" ? " on" : "")} title="sort places" onClick={() => setSortOpen(!sortOpen)}>⇅</button>
+            <button className={"icon-btn" + (settings.sort_mode !== "recent" ? " on" : "")} title="sort places" onClick={() => setSortOpen(!sortOpen)}><Icons.ArrowUpDown /></button>
             {sortOpen && (
               <div className="popover sortpop">
                 <div className="pop-hint">sort places</div>
                 {([["recent", "Last used"], ["alpha", "A–Z"], ["manual", "Manual (drag rows)"]] as const).map(([m, label]) => (
                   <button key={m} className="pop-item"
                     onClick={() => updateSettings({ sort_mode: m, sort_dir: m === "alpha" ? "asc" : "desc" })}>
-                    <span className="check">{settings.sort_mode === m ? "✓" : ""}</span>{label}
+                    <span className="check">{settings.sort_mode === m && <Icons.Check size={12} />}</span>{label}
                   </button>
                 ))}
                 <div className="ctx-sep" />
@@ -1836,7 +1827,7 @@ function App() {
               </div>
             )}
           </div>
-          <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}>⌕</button>
+          <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}><Icons.Search /></button>
         </div>
         <input ref={searchRef} className="search" placeholder="filter places…" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} />
         {newFor && (
@@ -1849,7 +1840,7 @@ function App() {
           />
         )}
         <div className="nav-scroll">
-          {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Click ＋ to add one.</div>}
+          {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}
           {lens === "places" && ws?.projects.map((pv) => <ProjectNode key={pv.root} pv={pv} />)}
           {lens === "recent" && <FlatLens items={recentItems} />}
           {lens === "attention" && (
@@ -1861,7 +1852,7 @@ function App() {
             </>
           )}
         </div>
-        <button className="add-footer" onClick={addProject}>＋ Add project</button>
+        <button className="add-footer with-icon" onClick={addProject}><Icons.Plus size={13} /> Add project</button>
         <div className="nav-resizer" onMouseDown={onResize} />
       </aside>
 
@@ -1895,7 +1886,7 @@ function App() {
                   disabled={!dockFits}
                   title={!dockFits ? "window too narrow for files & terminal" : settings.dock_open ? "hide files & terminal (⌘J)" : "files & terminal (⌘J)"}
                   onClick={toggleDock}
-                >▧</button>
+                >{settings.dock_open ? <Icons.PanelRightClose /> : <Icons.PanelRightOpen />}</button>
                 {selected.tmux_session.up ? (
                   <>
                     <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
@@ -1909,19 +1900,23 @@ function App() {
                     )}
                   </>
                 ) : (
-                  <button className="enter-btn" onClick={() => enterPlace(sel.repo, selected)}>Enter ▸</button>
+                  <button className="enter-btn with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /></button>
                 )}
                 <button className={"icon-btn" + (selected.declared?.pinned ? " on" : "")} title={selected.declared?.pinned ? "unpin" : "pin"}
-                  onClick={() => mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on: !selected.declared?.pinned }))}>★</button>
+                  onClick={() => mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on: !selected.declared?.pinned }))}>
+                  <Icons.Pin filled={!!selected.declared?.pinned} />
+                </button>
 
                 <div className="menu-wrap">
-                  <button className="ctrl" onClick={() => (menu === "life" ? closeMenu() : (setConfirmRm(null), setMenu("life")))}>Lifecycle ▾</button>
+                  <button className="ctrl with-icon" onClick={() => (menu === "life" ? closeMenu() : (setConfirmRm(null), setMenu("life")))}>
+                    Lifecycle <Icons.ChevronDown size={13} />
+                  </button>
                   {menu === "life" && (
                     <div className="popover right">
                       <div className="pop-hint">active / idle are derived</div>
                       {SETTABLE.map((s) => (
                         <button key={s.value} className="pop-item" onClick={() => { mutate(invoke("set_lifecycle", { repo: sel.repo, slug: sel.slug, label: s.value })); closeMenu(); }}>
-                          <span className="check">{selected.declared?.lifecycle === s.value ? "✓" : ""}</span>{s.label}
+                          <span className="check">{selected.declared?.lifecycle === s.value && <Icons.Check size={12} />}</span>{s.label}
                         </button>
                       ))}
                     </div>
@@ -1930,7 +1925,7 @@ function App() {
 
                 {!selected.is_main && (
                   <div className="menu-wrap">
-                    <button className="ctrl" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}>⋯</button>
+                    <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
                     {menu === "more" && (
                       <div className="popover right">
                         <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
@@ -1959,7 +1954,7 @@ function App() {
               <div className="term-empty">
                 <div className="term-empty-card">
                   <div className="te-title">No live session for <b>{selected.slug}</b></div>
-                  <button className="enter-btn big" onClick={() => enterPlace(sel.repo, selected)}>Enter ▸ to start</button>
+                  <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
                 </div>
               </div>
             )}
@@ -1968,7 +1963,7 @@ function App() {
               <div className="switch-wrap">
                 {!selected.is_main && (
                   <>
-                    <span className="sb-label">⎇</span>
+                    <span className="sb-label"><Icons.GitBranch size={13} /></span>
                     <input className="switchto" placeholder="switch branch…" value={switchTo}
                       onChange={(e) => setSwitchTo(e.currentTarget.value)}
                       onKeyDown={(e) => e.key === "Enter" && doSwitch()} />
@@ -1991,14 +1986,14 @@ function App() {
                 <div className="home-tag">a place for every work stream</div>
               </div>
             </div>
-            <button className="enter-btn big home-open" onClick={addProject}>＋ Open a project</button>
+            <button className="enter-btn big home-open with-icon" onClick={addProject}><Icons.Plus size={15} /> Open a project</button>
             <div className="chips">
               <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
               <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
             </div>
             <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
             <div className="resume">
-              {resume.length === 0 && <div className="empty small">No places yet — ＋ open a project.</div>}
+              {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
               {resume.map(({ pv, p }) => (
                 <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
                   <span
@@ -2009,7 +2004,7 @@ function App() {
                   <span className="rr-proj">{basename(pv.root)}</span>
                   <span className="rr-life">{p.lifecycle_effective}</span>
                   <span className="rr-age">{ago(p.declared?.last_opened_epoch)}</span>
-                  <button className="enter-btn sm">Enter ▸</button>
+                  <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
                 </div>
               ))}
             </div>
@@ -2027,7 +2022,7 @@ function App() {
             <button className={"dock-tab" + (settings.dock_tab === "terminal" ? " on" : "")}
               onClick={() => updateSettings({ dock_tab: "terminal" })}>Terminal</button>
             <span className="dock-spacer" />
-            <button className="icon-btn" title="hide dock (⌘J)" onClick={toggleDock}>✕</button>
+            <button className="icon-btn" title="hide dock (⌘J)" onClick={toggleDock}><Icons.X /></button>
           </div>
           <div className="dock-body">
             {settings.dock_tab === "files" ? (
@@ -2089,7 +2084,7 @@ function App() {
             <header className="settings-h">
               <b>{whatsNew.manual ? "Release notes" : `What's new — v${whatsNew.version}`}</b>
               <button className="icon-btn" title="close"
-                onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}>✕</button>
+                onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}><Icons.X size={13} /></button>
             </header>
             <div className="settings-body">
               <ReleaseNotes notes={whatsNew.notes} />
@@ -2103,7 +2098,7 @@ function App() {
       {ctx?.kind === "place" && ctxPlace && (
         <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
           <div className="pop-hint">{ctxPlace.is_main ? "◆ main" : ctxPlace.slug}</div>
-          <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace)}>Enter ▸</button>
+          <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace)}>Enter <Icons.ChevronRight size={12} /></button>
           {!ctxPlace.tmux_session.up && ctxPlace.claude_session_present && (
             settings.ai_auto_resume ? (
               <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: true })}>Open fresh (skip resume)</button>
