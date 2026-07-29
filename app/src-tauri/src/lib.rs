@@ -1599,19 +1599,28 @@ fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), String>
     Ok((p.session_name(slug), p.place_dir(slug)))
 }
 
-/// The 1-based indices of a place's live dock shells. The dock restores its
-/// Terminal tabs from this; shells don't outlive the app (see `Shells`), so
-/// after a restart it's empty and the dock opens a fresh one.
+/// A place's dock shells, with liveness. The dock restores its Terminal tabs
+/// from this; shells don't outlive the app (see `Shells`), so after a restart
+/// it's empty and the dock opens a fresh one. `dead` matters because the
+/// `shell:exit` event is transient — a shell that exits while the dock is
+/// closed has no listener, and without this flag the reopened dock would render
+/// the corpse as a live tab (replayed scrollback, EIO on the first keypress).
+#[derive(Serialize)]
+struct ShellTab {
+    index: u32,
+    dead: bool,
+}
+
 #[tauri::command]
-async fn list_shell_sessions(repo: String, slug: String, shells: State<'_, Shells>) -> Result<Vec<u32>, String> {
-    let map = shells.0.lock().unwrap();
-    let mut ids: Vec<u32> = map
-        .keys()
-        .filter(|(r, s, _)| r == &repo && s == &slug)
-        .map(|(_, _, i)| *i)
+async fn list_shell_sessions(repo: String, slug: String, shells: State<'_, Shells>) -> Result<Vec<ShellTab>, String> {
+    let mut map = shells.0.lock().unwrap();
+    let mut tabs: Vec<ShellTab> = map
+        .iter_mut()
+        .filter(|((r, s, _), _)| r == &repo && s == &slug)
+        .map(|((_, _, i), sh)| ShellTab { index: *i, dead: matches!(sh.child.try_wait(), Ok(Some(_))) })
         .collect();
-    ids.sort_unstable();
-    Ok(ids)
+    tabs.sort_unstable_by_key(|t| t.index);
+    Ok(tabs)
 }
 
 /// End one shell tab — kills the process, unlike `shell_detach`.
@@ -1784,6 +1793,13 @@ struct Shell {
     ring: Arc<Mutex<VecDeque<u8>>>,
     /// The attached webview channel, if any. `None` = running unwatched.
     sink: Arc<Mutex<Option<Channel<InvokeResponseBody>>>>,
+    /// Attach generation. Detach names the attach it is undoing, because a
+    /// STALE detach must be a no-op: under React StrictMode the same pane
+    /// mounts, unmounts, and mounts again — and unmount №1's detach can arrive
+    /// AFTER mount №2's attach installed its channel. Keyed detach alone would
+    /// clear the new sink and freeze a live pane (the tmux design was immune:
+    /// every attach had its own id).
+    gen: u64,
 }
 
 /// (repo, slug, 1-based tab index) — the webview never names a shell, same rule
@@ -1817,8 +1833,16 @@ fn kill_place_shells(shells: &Shells, repo: &str, slug: &str) {
 }
 
 /// Start (or re-attach to) the dock shell for `index` and stream it to
-/// `on_bytes`. Idempotent: a second call for a live shell just swaps the sink
-/// and replays — which is exactly what a tab flip or a dock re-open does.
+/// `on_bytes`; returns the attach generation `shell_detach` must present.
+/// Idempotent: a second call for a live shell just swaps the sink and replays —
+/// which is exactly what a tab flip or a dock re-open does.
+///
+/// The registry lock is held for the WHOLE body, spawn included. Two calls for
+/// the same key can be in flight at once (StrictMode double-mounts the pane's
+/// effect), and the old check-unlock-spawn-insert shape let both see an empty
+/// slot: two shells spawned, the second insert winning, the first leaked as an
+/// orphan no sweep could see. The spawn is a few ms and there's one webview —
+/// serializing every shell command through it is the cheap correct answer.
 #[tauri::command]
 async fn shell_open(
     app: AppHandle,
@@ -1829,31 +1853,31 @@ async fn shell_open(
     rows: u16,
     on_bytes: Channel<InvokeResponseBody>,
     shells: State<'_, Shells>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let key: ShellKey = (repo.clone(), slug.clone(), index);
-    {
-        let map = shells.0.lock().unwrap();
-        if let Some(sh) = map.get(&key) {
-            // ring THEN sink, the same order the reader takes them — otherwise a
-            // write landing mid-replay is either sent twice or dropped
-            let ring = sh.ring.lock().unwrap();
-            let mut sink = sh.sink.lock().unwrap();
-            let snapshot: Vec<u8> = ring.iter().copied().collect();
-            if !snapshot.is_empty() {
-                let _ = on_bytes.send(InvokeResponseBody::Raw(snapshot));
-            }
-            *sink = Some(on_bytes);
-            drop(sink);
-            drop(ring);
-            let _ = sh.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-            return Ok(());
+    let mut map = shells.0.lock().unwrap();
+    if let Some(sh) = map.get_mut(&key) {
+        // ring THEN sink, the same order the reader takes them — otherwise a
+        // write landing mid-replay is either sent twice or dropped
+        let ring = sh.ring.lock().unwrap();
+        let mut sink = sh.sink.lock().unwrap();
+        let snapshot: Vec<u8> = ring.iter().copied().collect();
+        if !snapshot.is_empty() {
+            let _ = on_bytes.send(InvokeResponseBody::Raw(snapshot));
         }
+        *sink = Some(on_bytes);
+        drop(sink);
+        drop(ring);
+        let _ = sh.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        sh.gen += 1;
+        return Ok(sh.gen);
     }
 
     let (session, cwd) = place_session_cwd(&repo, &slug)?;
     // One-time cleanup for anyone upgrading: their `<session>~term*` sidecars
     // are orphans now — nothing will ever attach them again. Cheap and
-    // idempotent, and only reached when this place has no shell yet.
+    // idempotent, and only reached when this place has no shell yet. (Runs
+    // under the registry lock — a tmux round-trip, but only on first open.)
     if worktrees_core::tmux::have_tmux() {
         worktrees_core::tmux::kill_shell_sidecars(&session);
     }
@@ -1918,12 +1942,8 @@ async fn shell_open(
         }
     });
 
-    shells
-        .0
-        .lock()
-        .unwrap()
-        .insert(key, Shell { master: pair.master, writer, child, stop, ring, sink });
-    Ok(())
+    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1 });
+    Ok(1)
 }
 
 #[tauri::command]
@@ -1944,12 +1964,16 @@ async fn shell_resize(repo: String, slug: String, index: u32, cols: u16, rows: u
 }
 
 /// Stop streaming; the shell keeps running. This is the unmount path — a tab
-/// flip or ⌘J must not kill what you left building.
+/// flip or ⌘J must not kill what you left building. `gen` names the attach
+/// being undone: a detach that lost the race to a newer attach is a no-op
+/// instead of clearing the newcomer's sink (see `Shell::gen`).
 #[tauri::command]
-async fn shell_detach(repo: String, slug: String, index: u32, shells: State<'_, Shells>) -> Result<(), String> {
+async fn shell_detach(repo: String, slug: String, index: u32, gen: u64, shells: State<'_, Shells>) -> Result<(), String> {
     let map = shells.0.lock().unwrap();
     if let Some(sh) = map.get(&(repo, slug, index)) {
-        *sh.sink.lock().unwrap() = None;
+        if sh.gen == gen {
+            *sh.sink.lock().unwrap() = None;
+        }
     }
     Ok(())
 }

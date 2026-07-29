@@ -619,6 +619,10 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
 }) {
   const [ids, setIds] = useState<number[] | null>(null); // null = restoring
   const [active, setActive] = useState<number | null>(null);
+  // exited-but-kept tabs (see the shell:exit listener below) — declared here so
+  // the restore can seed it: the exit EVENT is transient and a shell that died
+  // while the dock was closed had no listener, so liveness rides on the restore
+  const [dead, setDead] = useState<number[]>([]);
   const idsRef = useRef<number[]>([]);
   idsRef.current = ids ?? [];
   const restoringRef = useRef(true);
@@ -627,11 +631,12 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   useEffect(() => {
     let alive = true;
     restoringRef.current = true;
-    setIds(null); setActive(null);
-    invoke<number[]>("list_shell_sessions", { repo, slug })
+    setIds(null); setActive(null); setDead([]);
+    invoke<{ index: number; dead: boolean }[]>("list_shell_sessions", { repo, slug })
       .then((existing) => {
         if (!alive) return;
-        const list = existing.length ? existing : (sessionUp ? [1] : []);
+        const list = existing.length ? existing.map((t) => t.index) : (sessionUp ? [1] : []);
+        setDead(existing.filter((t) => t.dead).map((t) => t.index));
         setIds(list); setActive(list[0] ?? null); restoringRef.current = false;
       })
       .catch((e) => {
@@ -655,8 +660,8 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
 
   // A shell that exits on its own (you typed `exit`, or it died) keeps its tab
   // and says so — a tab that silently vanished would look like a bug, and the
-  // scrollback is often the thing you wanted to read.
-  const [dead, setDead] = useState<number[]>([]);
+  // scrollback is often the thing you wanted to read. (`dead` state lives above,
+  // next to `ids`, because the restore seeds it too.)
   useEffect(() => {
     const un = listen<{ repo: string; slug: string; index: number }>("shell:exit", (e) => {
       if (e.payload.repo !== repo || e.payload.slug !== slug) return;

@@ -62,12 +62,20 @@ const tmuxTransport = (session: string): Transport => {
   };
 };
 
-const shellTransport = (repo: string, slug: string, index: number): Transport => ({
-  open: (cols, rows, onBytes) => invoke("shell_open", { repo, slug, index, cols, rows, onBytes }),
-  write: (data) => { invoke("shell_write", { repo, slug, index, data }); },
-  resize: (cols, rows) => { invoke("shell_resize", { repo, slug, index, cols, rows }); },
-  close: () => { invoke("shell_detach", { repo, slug, index }); },
-});
+const shellTransport = (repo: string, slug: string, index: number): Transport => {
+  // The attach generation from shell_open. Detach presents it so a STALE
+  // detach (StrictMode: unmount №1 resolving after mount №2 attached) is a
+  // backend no-op instead of clearing the new attach's stream.
+  let gen: number | null = null;
+  return {
+    async open(cols, rows, onBytes) {
+      gen = await invoke<number>("shell_open", { repo, slug, index, cols, rows, onBytes });
+    },
+    write: (data) => { invoke("shell_write", { repo, slug, index, data }); },
+    resize: (cols, rows) => { invoke("shell_resize", { repo, slug, index, cols, rows }); },
+    close: () => { if (gen != null) invoke("shell_detach", { repo, slug, index, gen }); gen = null; },
+  };
+};
 
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
 function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number) {

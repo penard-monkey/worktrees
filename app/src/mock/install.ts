@@ -154,6 +154,10 @@ const fsChildren = new Map<string, MockEntry[]>();
 const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number }>();
 // dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
 const shellSidecars = new Map<string, Set<number>>();
+// exited-but-kept shells (mirrors the real registry's try_wait liveness) — the
+// restore path must see them dead, not just the transient shell:exit event
+const deadShells = new Map<string, Set<number>>();
+let shellGen = 0; // attach generation counter (real backend: per-shell)
 const sidecarKey = (repo: string, slug: string) => `${repo}|${slug}`;
 
 function seedDir(dir: string) {
@@ -425,16 +429,22 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       setTimeout(() => {
         try { ch?.onmessage?.(new TextEncoder().encode(banner).buffer); } catch { /* ignore */ }
       }, 40);
-      return null;
+      deadShells.get(sidecarKey(args.repo, args.slug))?.delete(i); // reattach of a restarted tab
+      return ++shellGen; // attach generation — see shell_detach in lib.rs
     }
     case "shell_write":
     case "shell_resize":
     case "shell_detach": // detach keeps the shell alive — nothing to model
       return null;
-    case "list_shell_sessions":
-      return [...(shellSidecars.get(sidecarKey(args.repo, args.slug)) ?? new Set<number>())].sort((a, b) => a - b);
+    case "list_shell_sessions": {
+      const deadSet = deadShells.get(sidecarKey(args.repo, args.slug)) ?? new Set<number>();
+      return [...(shellSidecars.get(sidecarKey(args.repo, args.slug)) ?? new Set<number>())]
+        .sort((a, b) => a - b)
+        .map((index) => ({ index, dead: deadSet.has(index) }));
+    }
     case "close_shell_session": {
       shellSidecars.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
+      deadShells.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
       return null;
     }
 
@@ -671,6 +681,8 @@ const healthyConfigs: Record<string, MockCfg> = {};
    * "process exited / Restart shell" state headlessly, since the mock has no
    * real PTY to die. */
   exitShell(repo: string, slug: string, index = 1) {
+    const set = deadShells.get(sidecarKey(repo, slug)) ?? new Set<number>();
+    set.add(index); deadShells.set(sidecarKey(repo, slug), set);
     emitEvent("shell:exit", { repo, slug, index });
     return { repo, slug, index };
   },
