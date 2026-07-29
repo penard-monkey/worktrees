@@ -4,11 +4,19 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import "@xterm/xterm/css/xterm.css";
 
-// Embeds a live tmux session. Rust attaches (never owns a shell); this component
-// renders the byte stream and forwards keystrokes + resizes. Font comes from the
-// independent --term-* CSS vars (Settings), so UI zoom never disturbs the grid.
-// Colors come from the active [data-theme]'s --term-*/--ansi-* vars (tokens.css)
-// so the terminal repaints with the rest of the app on a theme switch.
+// Two kinds of embedded terminal, one renderer.
+//
+//   TerminalPane — the place's canonical tmux session. Rust ATTACHES; tmux owns
+//     the shell, the panes and the scrollback, and unmounting detaches. This is
+//     where Claude runs, so it survives quitting the app.
+//   ShellPane    — a dock scratch shell. Rust OWNS the PTY (no tmux), so
+//     unmounting must DETACH, never kill: a tab flip or ⌘J can't be allowed to
+//     take down a running build. The backend replays a ring buffer on re-attach.
+//
+// Font comes from the independent --term-* CSS vars (Settings), so UI zoom never
+// disturbs the grid. Colors come from the active [data-theme]'s --term-*/--ansi-*
+// vars (tokens.css) so the terminal repaints with the rest of the app on a theme
+// switch.
 const ANSI = [
   "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
   "brightBlack", "brightRed", "brightGreen", "brightYellow",
@@ -32,11 +40,49 @@ function termOptions() {
   return { family, size, theme };
 }
 
-export function TerminalPane({ session, termVersion = 0, focusToken = 0 }: { session: string; termVersion?: number; focusToken?: number }) {
+/** How one pane talks to its backend. `close` is the unmount path and means
+ * "stop streaming" for BOTH kinds — detach the tmux client, or drop the sink on
+ * an owned shell. Neither ends the thing on the other side. */
+type Transport = {
+  open(cols: number, rows: number, onBytes: Channel<ArrayBuffer>): Promise<void>;
+  write(data: number[]): void;
+  resize(cols: number, rows: number): void;
+  close(): void;
+};
+
+const tmuxTransport = (session: string): Transport => {
+  let id: number | null = null;
+  return {
+    async open(cols, rows, onBytes) {
+      id = await invoke<number>("term_open", { session, cols, rows, onBytes });
+    },
+    write: (data) => { if (id != null) invoke("term_write", { id, data }); },
+    resize: (cols, rows) => { if (id != null) invoke("term_resize", { id, cols, rows }); },
+    close: () => { if (id != null) invoke("term_close", { id }); id = null; },
+  };
+};
+
+const shellTransport = (repo: string, slug: string, index: number): Transport => {
+  // The attach generation from shell_open. Detach presents it so a STALE
+  // detach (StrictMode: unmount №1 resolving after mount №2 attached) is a
+  // backend no-op instead of clearing the new attach's stream.
+  let gen: number | null = null;
+  return {
+    async open(cols, rows, onBytes) {
+      gen = await invoke<number>("shell_open", { repo, slug, index, cols, rows, onBytes });
+    },
+    write: (data) => { invoke("shell_write", { repo, slug, index, data }); },
+    resize: (cols, rows) => { invoke("shell_resize", { repo, slug, index, cols, rows }); },
+    close: () => { if (gen != null) invoke("shell_detach", { repo, slug, index, gen }); gen = null; },
+  };
+};
+
+/** The xterm instance + wiring. `key` re-creates everything when it changes. */
+function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const idRef = useRef<number | null>(null);
+  const txRef = useRef<Transport | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -44,12 +90,7 @@ export function TerminalPane({ session, termVersion = 0, focusToken = 0 }: { ses
     let disposed = false;
 
     const { family, size, theme } = termOptions();
-    const term = new Terminal({
-      fontFamily: family,
-      fontSize: size,
-      cursorBlink: true,
-      theme,
-    });
+    const term = new Terminal({ fontFamily: family, fontSize: size, cursorBlink: true, theme });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
@@ -58,23 +99,23 @@ export function TerminalPane({ session, termVersion = 0, focusToken = 0 }: { ses
     termRef.current = term;
     fitRef.current = fit;
 
+    const tx = makeTransport();
+    txRef.current = tx;
+
     const onBytes = new Channel<ArrayBuffer>();
     onBytes.onmessage = (msg) => term.write(new Uint8Array(msg));
 
     (async () => {
       try {
-        const id = await invoke<number>("term_open", { session, cols: term.cols, rows: term.rows, onBytes });
+        await tx.open(term.cols, term.rows, onBytes);
         if (disposed) {
-          await invoke("term_close", { id });
+          tx.close();
           return;
         }
-        idRef.current = id;
-        term.onData((data) => {
-          invoke("term_write", { id, data: Array.from(new TextEncoder().encode(data)) });
-        });
+        term.onData((data) => tx.write(Array.from(new TextEncoder().encode(data))));
         term.focus();
       } catch (e) {
-        term.writeln(`\r\n\x1b[31m[worktrees] attach failed: ${e}\x1b[0m\r\n`);
+        term.writeln(`\r\n\x1b[31m[worktrees] ${e}\x1b[0m\r\n`);
       }
     })();
 
@@ -84,20 +125,22 @@ export function TerminalPane({ session, termVersion = 0, focusToken = 0 }: { ses
       } catch {
         /* host detached mid-resize */
       }
-      if (idRef.current != null) invoke("term_resize", { id: idRef.current, cols: term.cols, rows: term.rows });
+      tx.resize(term.cols, term.rows);
     });
     ro.observe(host);
 
     return () => {
       disposed = true;
       ro.disconnect();
-      if (idRef.current != null) invoke("term_close", { id: idRef.current }); // detach, not kill
+      tx.close(); // detach, not kill — for either backend
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
-      idRef.current = null;
+      txRef.current = null;
     };
-  }, [session]);
+    // makeTransport is re-created every render; `key` is the real identity
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
   // Re-grab keyboard focus when the user re-enters the place (clicking any
   // chrome — rows, pin, popovers — moves focus there and nothing else returns
@@ -120,8 +163,25 @@ export function TerminalPane({ session, termVersion = 0, focusToken = 0 }: { ses
     } catch {
       /* ignore */
     }
-    if (idRef.current != null) invoke("term_resize", { id: idRef.current, cols: term.cols, rows: term.rows });
+    txRef.current?.resize(term.cols, term.rows);
   }, [termVersion]);
 
+  return hostRef;
+}
+
+export function TerminalPane({ session, termVersion = 0, focusToken = 0 }: { session: string; termVersion?: number; focusToken?: number }) {
+  const hostRef = useTerm(() => tmuxTransport(session), session, termVersion, focusToken);
+  return <div ref={hostRef} className="term-host" />;
+}
+
+export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0 }: {
+  repo: string; slug: string; index: number; termVersion?: number; focusToken?: number;
+}) {
+  const hostRef = useTerm(
+    () => shellTransport(repo, slug, index),
+    `${repo}|${slug}|${index}`,
+    termVersion,
+    focusToken,
+  );
   return <div ref={hostRef} className="term-host" />;
 }

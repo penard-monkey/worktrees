@@ -33,10 +33,10 @@ export type Settings = {
   theme_light: ThemeId; // the pair "system" flips between
   theme_dark: ThemeId;
   density: "comfortable" | "compact";
-  nav_width: number; // 220–460
+  nav_width: number; // 220–460, further capped by the viewport (see fitLayout)
   nav_collapsed: boolean; // rail-only mode (nav hidden)
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
-  dock_width: number; // 240–680
+  dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal"; // last-used dock tab
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
@@ -105,17 +105,77 @@ export type UpdateInfo = {
 
 export const clampRem = (v: number) => Math.max(13, Math.min(18, v));
 export const clampTerm = (v: number) => Math.max(10, Math.min(20, v));
-export const clampNav = (v: number) => Math.max(220, Math.min(460, v));
-export const clampDock = (v: number) => Math.max(240, Math.min(680, v));
 
-/** Write the visual settings to the DOM as CSS vars / data-attrs. Cheap; safe to call often. */
+// ── column geometry ─────────────────────────────────────────────────────────
+// The window is rail + nav + main + dock + rail. Only `main` is elastic, so
+// both panels need a ceiling derived from the CURRENT viewport — a flat cap either
+// strands space on a big screen (the old dock cap of 680 left ~470px unusable
+// when fullscreen) or overflows a small one, which is what made the topbar's
+// flex children pile on top of each other.
+export const RAIL_W = 44; // keep in sync with --rail-w (tokens.css)
+// Both rails are permanent columns — the left one picks the lens, the right one
+// picks the dock tab — so the elastic center is short two of them, always.
+export const RAILS_W = RAIL_W * 2;
+export const MAIN_MIN = 420; // center-pane floor: below it the topbar can't lay out
+export const NAV_MIN = 220;
+export const NAV_MAX = 460;
+export const DOCK_MIN = 240;
+
+/** Usable width for the columns. clientWidth, not innerWidth: innerWidth counts
+ * the scrollbar gutter, which silently eats MAIN_MIN's reserve (~15px) in a
+ * browser harness. Single definition — App tracks it in state via this too. */
+export const viewportWidth = () =>
+  typeof document === "undefined" ? 1440 : document.documentElement.clientWidth || window.innerWidth;
+const viewport = viewportWidth;
+
+/** Widest the nav may be while `dockW` of dock is on screen. */
+export const navCeiling = (dockW = 0, w = viewport()) =>
+  Math.max(NAV_MIN, Math.min(NAV_MAX, w - RAILS_W - MAIN_MIN - dockW));
+/** Widest the dock may be while `navW` of nav is on screen. */
+export const dockCeiling = (navW = 0, w = viewport()) =>
+  Math.max(DOCK_MIN, w - RAILS_W - navW - MAIN_MIN);
+
+export const clampNav = (v: number, dockW = 0, w = viewport()) =>
+  Math.max(NAV_MIN, Math.min(navCeiling(dockW, w), v));
+export const clampDock = (v: number, navW = 0, w = viewport()) =>
+  Math.max(DOCK_MIN, Math.min(dockCeiling(navW, w), v));
+
+/** What the columns actually render as right now. Preferences in `Settings` are
+ * INTENT and are never rewritten by fitting — a window that gets too narrow
+ * hides the dock, and growing it back brings the dock back, because `dock_open`
+ * still says "open". Degrade order: shrink the dock, then drop it, then let the
+ * nav take its own (already viewport-capped) width. */
+export type Fit = { navShown: boolean; navW: number; dockShown: boolean; dockW: number; mainW: number; tight: boolean };
+
+/** Below this the topbar can't hold the status badges AND a readable slug, so
+ * the badges retire — they're duplicated in the nav row and the status bar. */
+export const MAIN_TIGHT = 560;
+
+export function fitLayout(s: Settings, dockEligible: boolean, w = viewport()): Fit {
+  const navShown = !s.nav_collapsed;
+  let dockShown = s.dock_open && dockEligible;
+  // reserve the dock's floor while sizing the nav, so the two can't both win
+  let navW = navShown ? clampNav(s.nav_width, dockShown ? DOCK_MIN : 0, w) : 0;
+  let dockW = dockShown ? clampDock(s.dock_width, navW, w) : 0;
+  if (dockShown && w - RAILS_W - navW - dockW < MAIN_MIN) {
+    // both floors together don't fit (possible at the 900px minWidth) — the
+    // dock yields, and the nav reclaims the width it lent to the reservation
+    dockShown = false;
+    dockW = 0;
+    navW = navShown ? clampNav(s.nav_width, 0, w) : 0;
+  }
+  const mainW = w - RAILS_W - navW - dockW;
+  return { navShown, navW, dockShown, dockW, mainW, tight: mainW < MAIN_TIGHT };
+}
+
+/** Write the visual settings to the DOM as CSS vars / data-attrs. Cheap; safe to call often.
+ * Column widths are NOT written here — they depend on the viewport and on
+ * whether a place is selected, so App owns them (see the fitLayout effect). */
 export function applySettings(s: Settings) {
   const root = document.documentElement;
   root.style.setProperty("--ui-rem", `${clampRem(s.ui_rem)}px`);
   root.style.setProperty("--term-family", s.term_family);
   root.style.setProperty("--term-size", `${clampTerm(s.term_size)}px`);
-  root.style.setProperty("--nav-w", `${clampNav(s.nav_width)}px`);
-  root.style.setProperty("--dock-w", `${clampDock(s.dock_width)}px`);
   root.dataset.theme = resolveTheme(s);
   root.dataset.density = s.density;
 }

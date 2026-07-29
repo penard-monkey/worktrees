@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 
 // Right-side slide-over for ONE project — SettingsSheet's twin (proposal §10).
@@ -236,7 +237,7 @@ export function ProjectSheet({
       <aside className="settings-sheet project-sheet" onClick={(e) => e.stopPropagation()}>
         <header className="settings-h">
           <b>Project · {basename(root)}</b>
-          <button className="icon-btn" title="close (Esc)" onClick={onClose}>✕</button>
+          <button className="icon-btn" title="close (Esc)" onClick={onClose}><Icons.X /></button>
         </header>
 
         <div className="settings-body">
@@ -430,7 +431,7 @@ export function InitBanner({ suggestion, onOpen, onDismiss }: {
       <div className="init-banner-h">
         <span className="init-banner-i">⚑</span>
         Not configured
-        <button className="mini" title="dismiss (until this project changes)" onClick={onDismiss}>✕</button>
+        <button className="mini" title="dismiss (until this project changes)" onClick={onDismiss}><Icons.X size={13} /></button>
       </div>
       <p>
         {n > 0

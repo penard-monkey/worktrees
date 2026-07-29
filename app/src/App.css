@@ -2,16 +2,32 @@
  * so the Settings UI-font slider (--ui-rem) scales the whole app and a light theme
  * is a future [data-theme] map. No hardcoded hex here. */
 
-html, body, #root { height: 100%; margin: 0; }
+/* An app shell never scrolls at the document level — the columns own their own
+ * overflow. Without this, a sub-pixel artifact anywhere (a rail's active bar
+ * sitting a half-pixel proud, a 1fr track rounding up) shows up as a real
+ * horizontal scrollbar across the whole window. */
+html, body, #root { height: 100%; margin: 0; overflow: hidden; }
 * { box-sizing: border-box; }
 body { font-family: var(--font-ui); background: var(--bg-abyss); color: var(--txt); }
 
 button, input, select { font-family: inherit; color: inherit; }
 button { cursor: pointer; }
 
+/* ── icons ──
+ * Inline SVG replaced the Unicode chrome glyphs (see icons.tsx). An <svg> is
+ * inline by default, so it sits on the text baseline and drags the parent's
+ * height around by its descender space — every icon holder is a flex/grid box
+ * instead. `.with-icon` is for buttons that pair a glyph WITH a label. */
+.with-icon { display: inline-flex; align-items: center; gap: 5px; }
+.icon-btn, .mini, .termtab-x, .termtab-add, .ctrl.icon-only {
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.caret, .tree-caret { display: flex; align-items: center; justify-content: center; }
+.pop-item .check { display: flex; align-items: center; flex: none; }
+
 .app {
   display: grid;
-  grid-template-columns: var(--rail-w) var(--nav-w) 1fr;
+  grid-template-columns: var(--rail-w) var(--nav-w) minmax(0, 1fr);
   height: 100%;
   background: var(--bg-abyss);
   color: var(--txt);
@@ -40,6 +56,15 @@ button { cursor: pointer; }
 }
 /* nav collapsed: the last lens stays faintly marked so re-expand is predictable */
 .rail-icon.remembered { color: var(--txt); }
+.rail-icon:disabled { color: var(--txt-mute); opacity: 0.4; cursor: default; }
+.rail-icon:disabled:hover { background: transparent; color: var(--txt-mute); }
+
+/* right rail — the dock's Files/Terminal picker. Mirrors the left rail down to
+   the active bar, which flips to the outer (window) edge. */
+.rail-right { border-right: 0; border-left: 1px solid var(--line); }
+/* -5, not the left rail's -6: the bar would sit a half-pixel past the rail's
+   content box and widen the document. Optically identical. */
+.rail-right .rail-icon.active::before { left: auto; right: -5px; }
 
 /* ── nav ── */
 .nav {
@@ -282,19 +307,29 @@ button { cursor: pointer; }
 /* ── main ── */
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-abyss); }
 
-/* top bar */
+/* top bar
+ * Shrink order is identity → branch → slug; the controls never yield, because a
+ * squeezed window that hides Enter/Lifecycle is worse than a truncated name.
+ * Without the min-width:0 chain, flex refuses to shrink these below their
+ * content and the children paint on top of each other. */
 .topbar {
-  display: flex; align-items: center; gap: var(--s3);
+  display: flex; align-items: center; gap: var(--s3); flex-wrap: nowrap; min-width: 0;
   padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel);
 }
-.identity { display: flex; align-items: center; gap: var(--s3); min-width: 0; }
-.topbar .slug { font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi); }
+.identity { display: flex; align-items: center; gap: var(--s3); flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.topbar .slug {
+  flex: 0 1 auto; min-width: 5ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi);
+}
 .topbar .branch {
+  flex: 0 1 auto; min-width: 0; max-width: 45%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-label); color: var(--branch);
   background: var(--bg-elev); padding: 1px var(--s2); border-radius: var(--r-sm);
 }
 .topbar .branch.hi { color: var(--branch-hi); }
-.status-cluster { display: flex; align-items: center; gap: var(--s3); font-size: var(--fs-meta); }
+.status-cluster { display: flex; align-items: center; gap: var(--s3); flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: var(--fs-meta); }
 .status-cluster .s { display: inline-flex; align-items: center; gap: 3px; }
 .status-cluster .ok { color: var(--ok); }
 .status-cluster .dirty { color: var(--dirty); }
@@ -308,7 +343,8 @@ button { cursor: pointer; }
 .life.saved { color: var(--pin); background: color-mix(in srgb, var(--pin) 12%, transparent); }
 .life.archived, .life.abandoned { color: var(--txt-mute); }
 
-.controls { margin-left: auto; display: flex; align-items: center; gap: var(--s2); }
+.controls { margin-left: auto; display: flex; align-items: center; gap: var(--s2); flex: 0 0 auto; }
+.icon-btn:disabled { opacity: 0.35; cursor: default; background: transparent; color: var(--txt-mute); }
 .enter-btn {
   background: var(--accent); color: var(--accent-ink); border: 0; border-radius: var(--r-sm);
   padding: var(--s2) var(--s3); font-size: var(--fs-label); font-weight: var(--fw-bold);
@@ -572,13 +608,12 @@ button { cursor: pointer; }
   display: flex; align-items: center; gap: var(--s1);
   padding: var(--s2); border-bottom: 1px solid var(--line);
 }
-.dock-tab {
-  background: transparent; border: 0; color: var(--txt-dim);
-  padding: var(--s1) var(--s2); border-radius: var(--r-sm); font-size: var(--fs-label);
-  transition: color var(--dur-fast), background var(--dur-fast);
+/* panel title, not a control strip — the right rail owns tab + collapse */
+.dock-title {
+  padding: var(--s1) var(--s2); color: var(--txt-dim);
+  font-size: var(--fs-meta); letter-spacing: 0.08em; text-transform: uppercase;
+  font-weight: var(--fw-bold);
 }
-.dock-tab:hover { color: var(--txt-hi); background: var(--bg-elev); }
-.dock-tab.on { color: var(--accent); background: var(--bg-elev); }
 .dock-spacer { flex: 1; }
 
 .dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -596,6 +631,9 @@ button { cursor: pointer; }
   background: transparent; color: var(--txt-dim); font-size: var(--fs-meta);
 }
 .termtab.on { color: var(--accent); background: var(--bg-elev); border-color: var(--line-strong); }
+/* the shell exited on its own — the tab stays so the scrollback does */
+.termtab.dead { color: var(--txt-mute); border-style: dashed; }
+.termtab.dead.on { color: var(--txt-dim); }
 .termtab-label { background: transparent; border: 0; color: inherit; padding: 2px var(--s2); font: inherit; }
 .termtab-x {
   background: transparent; border: 0; color: var(--txt-mute);
@@ -658,18 +696,46 @@ button { cursor: pointer; }
 
 /* status bar */
 .statusbar {
-  display: flex; align-items: center; gap: var(--s3);
+  display: flex; align-items: center; gap: var(--s3); min-width: 0;
   padding: var(--s2) var(--s3); border-top: 1px solid var(--line); background: var(--bg-panel);
   font-size: var(--fs-meta); color: var(--txt-dim);
 }
-.switch-wrap { display: flex; align-items: center; gap: var(--s2); flex: 1; }
-.sb-label { color: var(--txt-dim); }
+.switch-wrap { display: flex; align-items: center; gap: var(--s2); flex: 1 1 auto; min-width: 0; }
+.sb-label { color: var(--txt-dim); flex: none; }
 .switchto {
+  flex: 0 1 200px; min-width: 0;
   background: var(--bg-input); color: var(--txt); border: 1px solid var(--line);
-  border-radius: var(--r-sm); padding: 3px var(--s2); font-size: var(--fs-meta); width: 200px; outline: none;
+  border-radius: var(--r-sm); padding: 3px var(--s2); font-size: var(--fs-meta); outline: none;
 }
 .switchto:focus { border-color: var(--line-strong); }
-.sb-facts { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+/* branch combobox — opens UPWARD; the status bar is the last row of the window */
+.combo { position: relative; flex: 0 1 240px; min-width: 0; display: flex; }
+.combo .switchto { flex: 1 1 auto; }
+.combo-pop {
+  position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 50;
+  min-width: 240px; max-width: 380px; max-height: 300px; overflow-y: auto;
+  background: var(--bg-panel); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-float); padding: var(--s1);
+  animation: pop var(--dur-slow) var(--ease);
+}
+.combo-item {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border: 0; color: var(--txt); border-radius: var(--r-sm);
+  padding: var(--s1) var(--s2); font-size: var(--fs-label);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.combo-item.hi { background: var(--bg-elev); color: var(--txt-hi); }
+/* the DWIM create path, visually distinct from picking something that exists */
+.combo-item.create { color: var(--txt-dim); }
+.combo-item.create b { color: var(--branch-hi); font-weight: var(--fw-med); }
+.combo-note { padding: var(--s1) var(--s2); color: var(--txt-mute); font-size: var(--fs-meta); }
+/* the tmux facts truncate rather than shove the switcher out of the bar */
+.sb-facts {
+  margin-left: auto; flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .sb-facts .ok { color: var(--ok); }
 .sb-facts .off { color: var(--txt-mute); }
 

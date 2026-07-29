@@ -3,13 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { TerminalPane } from "./TerminalPane";
+import * as Icons from "./icons";
+import { ShellPane, TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
-import { applySettings, clampDock, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, clampDock, clampNav, DEFAULTS, fitLayout, loadSettings, saveSettings, viewportWidth, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -91,19 +92,9 @@ const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
 const hasAttention = (p: Place) => !!p.dirty || !!p.ahead || !!p.behind;
 
-// nav icons — inline SVG so they inherit currentColor per theme
-const FolderIcon = () => (
-  <svg className="picon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-    strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M1.75 4.25c0-.83.67-1.5 1.5-1.5h2.9l1.6 1.7h5c.83 0 1.5.67 1.5 1.5v6c0 .83-.67 1.5-1.5 1.5H3.25c-.83 0-1.5-.67-1.5-1.5v-7.7Z" />
-  </svg>
-);
-const HomeIcon = () => (
-  <svg className="picon-svg" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-    strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M2.5 6.7 8 2.2l5.5 4.5V13a1 1 0 0 1-1 1H9.8v-3.8H6.2V14H3.5a1 1 0 0 1-1-1V6.7Z" />
-  </svg>
-);
+// nav icons live in ./icons now — inline SVG, inheriting currentColor per theme
+const FolderIcon = Icons.Folder16;
+const HomeIcon = Icons.Home;
 
 function ago(epoch?: number): string {
   if (!epoch) return "";
@@ -276,7 +267,7 @@ function NewPlaceForm({ project, initialBase, onCreate, onCancel }: {
     <div className="newform nav-newform">
       <div className="newform-h">
         New worktree · <b>{basename(project)}</b>
-        <button className="mini" title="cancel (Esc)" onClick={onCancel}>✕</button>
+        <button className="mini" title="cancel (Esc)" onClick={onCancel}><Icons.X size={13} /></button>
       </div>
       <input placeholder="branch (e.g. feat/x)" value={branch} autoFocus
         onChange={(e) => setBranch(e.currentTarget.value)} onKeyDown={onKey} />
@@ -486,7 +477,7 @@ function TreeNode({ entry, depth, openPath, onOpen, onError }: {
         onClick={toggle}
         title={entry.name}
       >
-        <span className="tree-caret">{entry.is_dir ? (open ? "▾" : "▸") : ""}</span>
+        <span className="tree-caret">{entry.is_dir && (open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />)}</span>
         <span className="tree-name">{entry.name}</span>
       </button>
       {entry.is_dir && open && (
@@ -612,47 +603,40 @@ function FileViewer({ path, reloadToken, onOpenEditor, onError }: {
   );
 }
 
-// One embedded shell: ensures the place's sidecar for tab `index` exists, then
-// attaches. The backend derives the session name + cwd from repo+slug (the
-// webview never names a session), so it stays stable across session up/down.
-function DockTerminal({ repo, slug, index, termVersion, focusToken, onError }: {
-  repo: string; slug: string; index: number; termVersion: number; focusToken: number; onError: (e: unknown) => void;
-}) {
-  const [shell, setShell] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setShell(null);
-    invoke<string>("open_shell_session", { repo, slug, index })
-      .then((s) => { if (alive) setShell(s); })
-      .catch((e) => { if (alive) onError(e); });
-    return () => { alive = false; };
-  }, [repo, slug, index]);
-  if (!shell) return <div className="tree-note">starting shell…</div>;
-  return <TerminalPane session={shell} termVersion={termVersion} focusToken={focusToken} />;
-}
+// A dock shell is just a ShellPane now — the backend spawns-or-reattaches on
+// open, keyed by repo+slug+index (the webview never names one), so there's no
+// separate "create the session first" round trip to wait on.
 
-// Terminal tab: several shells per place. Tabs are restored from the live tmux
-// sidecars (self-healing across restarts); a live place defaults to one shell, a
-// closed place to none. Only the active shell is mounted (tmux keeps the rest
-// warm). `addToken` bumps → add a tab (⌘⇧T from the global handler).
+// Terminal tab: several shells per place. Tabs are restored from the shells the
+// backend still has running — within a session that survives dock closes and
+// place switches, but NOT an app restart (the PTYs are ours, nothing outlives
+// the process). A live place defaults to one shell, a closed place to none.
+// Only the active shell is mounted; the rest keep running detached, and their
+// output is replayed from the backend's ring buffer when you flip back.
+// `addToken` bumps → add a tab (⌘⇧T from the global handler).
 function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, onError }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number; onError: (e: unknown) => void;
 }) {
   const [ids, setIds] = useState<number[] | null>(null); // null = restoring
   const [active, setActive] = useState<number | null>(null);
+  // exited-but-kept tabs (see the shell:exit listener below) — declared here so
+  // the restore can seed it: the exit EVENT is transient and a shell that died
+  // while the dock was closed had no listener, so liveness rides on the restore
+  const [dead, setDead] = useState<number[]>([]);
   const idsRef = useRef<number[]>([]);
   idsRef.current = ids ?? [];
   const restoringRef = useRef(true);
 
-  // Restore tabs from live tmux on mount / place change.
+  // Restore tabs from the live shell registry on mount / place change.
   useEffect(() => {
     let alive = true;
     restoringRef.current = true;
-    setIds(null); setActive(null);
-    invoke<number[]>("list_shell_sessions", { repo, slug })
+    setIds(null); setActive(null); setDead([]);
+    invoke<{ index: number; dead: boolean }[]>("list_shell_sessions", { repo, slug })
       .then((existing) => {
         if (!alive) return;
-        const list = existing.length ? existing : (sessionUp ? [1] : []);
+        const list = existing.length ? existing.map((t) => t.index) : (sessionUp ? [1] : []);
+        setDead(existing.filter((t) => t.dead).map((t) => t.index));
         setIds(list); setActive(list[0] ?? null); restoringRef.current = false;
       })
       .catch((e) => {
@@ -665,13 +649,33 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo, slug]);
 
-  // When the place's session goes DOWN (topbar Close swept its sidecars), clear
-  // the tabs so the dock reflects reality instead of resurrecting dead shells.
+  // When the place's session goes DOWN, Close swept its dock shells too (same
+  // rule as the tmux era: scratch shells die with the place) — clear the tabs so
+  // the dock reflects reality instead of resurrecting dead ones.
   const prevUp = useRef(sessionUp);
   useEffect(() => {
     if (prevUp.current && !sessionUp) { setIds([]); setActive(null); }
     prevUp.current = sessionUp;
   }, [sessionUp]);
+
+  // A shell that exits on its own (you typed `exit`, or it died) keeps its tab
+  // and says so — a tab that silently vanished would look like a bug, and the
+  // scrollback is often the thing you wanted to read. (`dead` state lives above,
+  // next to `ids`, because the restore seeds it too.)
+  useEffect(() => {
+    const un = listen<{ repo: string; slug: string; index: number }>("shell:exit", (e) => {
+      if (e.payload.repo !== repo || e.payload.slug !== slug) return;
+      setDead((d) => (d.includes(e.payload.index) ? d : [...d, e.payload.index]));
+    });
+    return () => { un.then((f) => f()); };
+  }, [repo, slug]);
+
+  const restartTab = (id: number) => {
+    invoke("close_shell_session", { repo, slug, index: id }).catch(onError);
+    setDead((d) => d.filter((x) => x !== id));
+    setRestartToken((t) => t + 1); // remount the pane → shell_open spawns afresh
+  };
+  const [restartToken, setRestartToken] = useState(0);
 
   const addTab = useCallback(() => {
     if (restoringRef.current) return; // don't add a tab the restore is about to overwrite
@@ -701,22 +705,149 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     <div className="termtabs">
       <div className="termtab-strip">
         {ids.map((id) => (
-          <span key={id} className={"termtab" + (active === id ? " on" : "")}>
-            <button className="termtab-label" onClick={() => setActive(id)}>sh {id}</button>
-            <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}>✕</button>
+          <span key={id} className={"termtab" + (active === id ? " on" : "") + (dead.includes(id) ? " dead" : "")}>
+            <button className="termtab-label" title={dead.includes(id) ? "process exited" : undefined}
+              onClick={() => setActive(id)}>sh {id}</button>
+            <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}><Icons.X size={11} /></button>
           </span>
         ))}
-        <button className="termtab-add" title="new terminal (⌘⇧T)" onClick={addTab}>＋</button>
+        <button className="termtab-add" title="new terminal (⌘⇧T)" onClick={addTab}><Icons.Plus size={13} /></button>
       </div>
       {active != null ? (
-        <DockTerminal key={repo + "|" + slug + ":" + active} repo={repo} slug={slug}
-          index={active} termVersion={termVersion} focusToken={focusToken} onError={onError} />
+        dead.includes(active) ? (
+          <div className="term-empty">
+            <div className="term-empty-card">
+              <div className="te-title">sh {active} — process exited</div>
+              <button className="enter-btn" onClick={() => restartTab(active)}>Restart shell</button>
+            </div>
+          </div>
+        ) : (
+          <ShellPane key={repo + "|" + slug + ":" + active + ":" + restartToken} repo={repo} slug={slug}
+            index={active} termVersion={termVersion} focusToken={focusToken} />
+        )
       ) : (
         <div className="term-empty">
           <div className="term-empty-card">
             <div className="te-title">No shells</div>
-            <button className="enter-btn" onClick={addTab}>＋ new terminal</button>
+            <button className="enter-btn with-icon" onClick={addTab}><Icons.Plus size={13} /> new terminal</button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Status-bar branch switcher. A combobox, NOT a <select>: `switch` is DWIM —
+// local branch → switch, remote-only → track it, anything else → create it off
+// the default base — so a picker that only offered existing branches would
+// delete the create path. Typing stays first-class; the list just means you no
+// longer have to remember the name.
+//
+// Module scope with props, per CLAUDE.md: it holds local state and input focus,
+// both of which a component defined inside App() would lose on every render.
+type BranchList = { branches: string[]; current: string; default_base: string };
+
+function BranchSwitcher({ repo, slug, onSwitch, onError }: {
+  repo: string; slug: string;
+  onSwitch: (branch: string) => Promise<boolean>;
+  onError: (e: unknown) => void;
+}) {
+  const [text, setText] = useState("");
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<BranchList | null>(null);
+  const [hi, setHi] = useState(0);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  // Reset when the place changes — a half-typed branch belongs to the place it
+  // was typed in.
+  useEffect(() => { setText(""); setOpen(false); setData(null); }, [repo, slug]);
+
+  // Lazy: one `git for-each-ref` when the switcher is first used, not on every
+  // place selection.
+  const load = () => {
+    if (data) return;
+    invoke<BranchList>("list_branches", { repo, slug })
+      .then(setData)
+      .catch(onError);
+  };
+
+  const q = text.trim();
+  const matches = (data?.branches ?? [])
+    .filter((b) => b !== data?.current && b.toLowerCase().includes(q.toLowerCase()))
+    .slice(0, 50);
+  const exact = matches.some((b) => b === q);
+  const creating = q.length > 0 && !exact;
+  // the create row is last, so ↓ from the top walks real branches first
+  const options: { branch: string; create: boolean }[] = [
+    ...matches.map((b) => ({ branch: b, create: false })),
+    ...(creating ? [{ branch: q, create: true }] : []),
+  ];
+
+  const submit = async (branch: string) => {
+    const b = branch.trim();
+    if (!b) return;
+    setOpen(false);
+    if (await onSwitch(b)) setText("");
+  };
+
+  // click-away — the popover floats over the terminal, so it must not linger
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) { setOpen(true); load(); return; }
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      setHi((i) => (options.length ? (i + d + options.length) % options.length : 0));
+      return;
+    }
+    if (e.key === "Escape" && open) { e.preventDefault(); setOpen(false); return; }
+    if (e.key === "Enter") {
+      // A highlighted row wins; otherwise the raw text does, so Enter still
+      // works exactly as it did before the list existed.
+      submit(open && options[hi] ? options[hi].branch : text);
+    }
+  };
+
+  return (
+    <div className="combo" ref={boxRef}>
+      <input
+        className="switchto"
+        placeholder="switch branch…"
+        value={text}
+        onFocus={() => { setOpen(true); load(); }}
+        onChange={(e) => { setText(e.currentTarget.value); setHi(0); setOpen(true); load(); }}
+        onKeyDown={onKey}
+      />
+      {open && (
+        <div className="combo-pop">
+          {data === null && <div className="combo-note">loading branches…</div>}
+          {data !== null && options.length === 0 && (
+            <div className="combo-note">{data.branches.length ? "no branch matches" : "no other branches"}</div>
+          )}
+          {options.map((o, i) => (
+            <button
+              key={(o.create ? "new:" : "b:") + o.branch}
+              className={"combo-item" + (i === hi ? " hi" : "") + (o.create ? " create" : "")}
+              // mousedown, not click: the input's blur would tear the row out
+              // from under the click
+              onMouseDown={(e) => { e.preventDefault(); submit(o.branch); }}
+              onMouseEnter={() => setHi(i)}
+            >
+              {o.create ? (
+                <>create <b>{o.branch}</b> off {data?.default_base}</>
+              ) : (
+                o.branch
+              )}
+            </button>
+          ))}
         </div>
       )}
     </div>
@@ -732,7 +863,6 @@ function App() {
   const [newFor, setNewFor] = useState<string | null>(null);
   const [newBase, setNewBase] = useState("");
   const [ctx, setCtx] = useState<Ctx | null>(null);
-  const [switchTo, setSwitchTo] = useState("");
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
   // The armed Close needs one fact more than `confirmRm` can carry: WHICH tmux
   // session would die, as the BACKEND named it. It rides alongside the arm
@@ -1046,6 +1176,35 @@ function App() {
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
 
+  // ── column fitting ──
+  // Track the viewport so the side panels re-fit on every resize (and on a
+  // restore into a window smaller than the one the widths were saved from —
+  // that mismatch is what produced the overlapping topbar after a restart).
+  const [vw, setVw] = useState(viewportWidth);
+  useEffect(() => {
+    let raf = 0;
+    const onWinResize = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setVw(viewportWidth()));
+    };
+    window.addEventListener("resize", onWinResize);
+    return () => { window.removeEventListener("resize", onWinResize); cancelAnimationFrame(raf); };
+  }, []);
+
+  // Dock only makes sense with a place selected (Files/Terminal need a worktree).
+  const dockEligible = !!selected && !!sel;
+  const fit = fitLayout(settings, dockEligible, vw);
+  const dockShown = fit.dockShown;
+  // Would the dock fit if it were open? Drives the toggle's disabled state, so a
+  // ⌘J that can't visibly do anything is at least honest about why.
+  const dockFits = fitLayout({ ...settings, dock_open: true }, dockEligible, vw).dockShown;
+
+  useLayoutEffect(() => {
+    const root = document.documentElement.style;
+    root.setProperty("--nav-w", `${fit.navW}px`);
+    root.setProperty("--dock-w", `${fit.dockW}px`);
+  }, [fit.navW, fit.dockW]);
+
   // ctx target derived live from ws (a refresh while the menu is open must not go stale)
   const ctxPlace: Place | null =
     ctx?.kind === "place"
@@ -1358,11 +1517,12 @@ function App() {
       setNewBase("");
     }
   };
-  const doSwitch = async () => {
-    if (!sel) return;
-    const b = switchTo.trim();
-    if (!b) return;
-    if ((await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null }))?.ok) setSwitchTo("");
+  // The switcher owns its own text now; this just runs the op and reports.
+  const doSwitch = async (branch: string) => {
+    if (!sel) return false;
+    const b = branch.trim();
+    if (!b) return false;
+    return !!(await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null }))?.ok;
   };
   // Topbar ⋯ remove — same armed two-button pair as the ctx menu (arm key
   // `repo|slug`). Unarmed click arms; the armed state renders "Confirm remove"
@@ -1398,6 +1558,14 @@ function App() {
       return next;
     });
   }, []);
+  // Right rail → dock tab. Clicking the ACTIVE tab collapses the dock (VS Code's
+  // model), which is why the topbar no longer carries its own dock toggle.
+  const pickDockTab = (tab: Settings["dock_tab"]) =>
+    updateSettings(
+      settings.dock_open && settings.dock_tab === tab
+        ? { dock_open: false }
+        : { dock_tab: tab, dock_open: true },
+    );
   // right dock (Files / Terminal) — only renders with a place selected, but the
   // preference persists globally (stable useCallback: safe in the keydown effect).
   const toggleDock = useCallback(() => {
@@ -1540,11 +1708,17 @@ function App() {
   }, [ws, settings.restore_last, resume, sel]);
 
   // ── nav resizer (drag the nav's right edge) ──
+  // Both resizers clamp against the LIVE viewport, so a drag can never push the
+  // center pane under its floor. `window.innerWidth` is read inside the move
+  // handler rather than closed over — the window can be resized mid-drag.
   const onResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startW = settings.nav_width;
-    const move = (ev: MouseEvent) => updateSettings({ nav_width: clampNav(startW + (ev.clientX - startX)) });
+    const move = (ev: MouseEvent) =>
+      updateSettings({
+        nav_width: clampNav(startW + (ev.clientX - startX), dockShown ? settings.dock_width : 0, window.innerWidth),
+      });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -1555,7 +1729,10 @@ function App() {
     e.preventDefault();
     const startX = e.clientX;
     const startW = settings.dock_width;
-    const move = (ev: MouseEvent) => updateSettings({ dock_width: clampDock(startW - (ev.clientX - startX)) });
+    const move = (ev: MouseEvent) =>
+      updateSettings({
+        dock_width: clampDock(startW - (ev.clientX - startX), fit.navShown ? fit.navW : 0, window.innerWidth),
+      });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -1610,7 +1787,7 @@ function App() {
 
   const GroupHeader = ({ gkey, label, count, open, onToggle }: { gkey: string; label: string; count: number; open: boolean; onToggle: () => void }) => (
     <div className="group-h" key={gkey} onClick={onToggle}>
-      <span className="caret">{open ? "▾" : "▸"}</span>
+      <span className="caret">{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
       {label}
       <span className="count">{count}</span>
     </div>
@@ -1635,7 +1812,7 @@ function App() {
     return (
       <div className="project">
         <div className="project-h" onContextMenu={(e) => projectCtx(e, pv.root)}>
-          <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? "▾" : "▸"}</span>
+          <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
           {pv.ok
             ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : undefined}><FolderIcon /></span>
             : <span className="rollup broken" title="repo gone">⊘</span>}
@@ -1652,13 +1829,13 @@ function App() {
               onClick={() => setProjSheet(pv.root)}
             >⚑</button>
           ) : null}
-          <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}>＋</button>
+          <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}><Icons.Plus size={13} /></button>
           <button
             className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
             title={confirmRm === `hdr|${pv.root}` ? "click again to remove from workspace" : "remove project"}
             onClick={() => removeProjectHdr(pv.root)}
           >
-            {confirmRm === `hdr|${pv.root}` ? "remove?" : "✕"}
+            {confirmRm === `hdr|${pv.root}` ? "remove?" : <Icons.X size={13} />}
           </button>
         </div>
 
@@ -1736,18 +1913,24 @@ function App() {
   );
 
   const RAIL = [
-    { key: "places" as Lens, icon: "▤", title: "Places — the full tree" },
-    { key: "recent" as Lens, icon: "◷", title: "Recent — resurface dormant places" },
-    { key: "attention" as Lens, icon: "⚠", title: "Attention — dirty / ahead-behind / broken" },
+    { key: "places" as Lens, icon: <Icons.ListTree size={17} />, title: "Places — the full tree" },
+    { key: "recent" as Lens, icon: <Icons.History size={17} />, title: "Recent — resurface dormant places" },
+    { key: "attention" as Lens, icon: <Icons.TriangleAlert size={17} />, title: "Attention — dirty / ahead-behind / broken" },
+  ];
+  const DOCK_RAIL = [
+    { key: "files" as Settings["dock_tab"], icon: <Icons.Folder size={17} />, title: "Files" },
+    { key: "terminal" as Settings["dock_tab"], icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
   ];
 
-  // Dock only makes sense with a place selected (Files/Terminal need a worktree).
-  const dockShown = settings.dock_open && !!selected && !!sel;
+  // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
+  // shrink below the center pane's content and pushes the fixed columns off the
+  // window instead of letting anything ellipsise.
   const gridCols = [
     "var(--rail-w)",
-    settings.nav_collapsed ? null : `${settings.nav_width}px`,
-    "1fr",
-    dockShown ? `${clampDock(settings.dock_width)}px` : null,
+    fit.navShown ? `${fit.navW}px` : null,
+    "minmax(0, 1fr)",
+    dockShown ? `${fit.dockW}px` : null,
+    "var(--rail-w)", // right rail — permanent, like the left one
   ].filter(Boolean).join(" ");
 
   return (
@@ -1766,28 +1949,28 @@ function App() {
         ))}
         <div className="rail-spacer" />
         <button className="rail-icon" title={settings.nav_collapsed ? `show nav — ${lens} (⌘B)` : "hide nav (⌘B)"} onClick={toggleNav}>
-          {settings.nav_collapsed ? "»" : "«"}
+          {settings.nav_collapsed ? <Icons.PanelLeftOpen size={17} /> : <Icons.PanelLeftClose size={17} />}
         </button>
-        <button className="rail-icon" title="add project" onClick={addProject}>＋</button>
-        <button className={"rail-icon" + (updateAvail ? " upd" : "")} title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}>⚙</button>
+        <button className="rail-icon" title="add project" onClick={addProject}><Icons.FolderPlus size={17} /></button>
+        <button className={"rail-icon" + (updateAvail ? " upd" : "")} title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── nav (kept mounted while collapsed so form drafts / scroll survive ⌘B) ── */}
-      <aside className={"nav" + (settings.nav_collapsed ? " hidden" : "")}>
+      <aside className={"nav" + (fit.navShown ? "" : " hidden")}>
         <button className={"home-item" + (sel ? "" : " on")} onClick={() => { setSel(null); setMenu(null); closeCtx(); }}>
           <HomeIcon /> Home
         </button>
         <div className="nav-head">
           <span className="nav-title">{lens === "places" ? "PLACES" : lens === "recent" ? "RECENT" : "ATTENTION"}</span>
           <div className="menu-wrap">
-            <button className={"icon-btn" + (settings.sort_mode !== "recent" ? " on" : "")} title="sort places" onClick={() => setSortOpen(!sortOpen)}>⇅</button>
+            <button className={"icon-btn" + (settings.sort_mode !== "recent" ? " on" : "")} title="sort places" onClick={() => setSortOpen(!sortOpen)}><Icons.ArrowUpDown /></button>
             {sortOpen && (
               <div className="popover sortpop">
                 <div className="pop-hint">sort places</div>
                 {([["recent", "Last used"], ["alpha", "A–Z"], ["manual", "Manual (drag rows)"]] as const).map(([m, label]) => (
                   <button key={m} className="pop-item"
                     onClick={() => updateSettings({ sort_mode: m, sort_dir: m === "alpha" ? "asc" : "desc" })}>
-                    <span className="check">{settings.sort_mode === m ? "✓" : ""}</span>{label}
+                    <span className="check">{settings.sort_mode === m && <Icons.Check size={12} />}</span>{label}
                   </button>
                 ))}
                 <div className="ctx-sep" />
@@ -1798,7 +1981,7 @@ function App() {
               </div>
             )}
           </div>
-          <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}>⌕</button>
+          <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}><Icons.Search /></button>
         </div>
         <input ref={searchRef} className="search" placeholder="filter places…" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} />
         {newFor && (
@@ -1811,7 +1994,7 @@ function App() {
           />
         )}
         <div className="nav-scroll">
-          {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Click ＋ to add one.</div>}
+          {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}
           {lens === "places" && ws?.projects.map((pv) => <ProjectNode key={pv.root} pv={pv} />)}
           {lens === "recent" && <FlatLens items={recentItems} />}
           {lens === "attention" && (
@@ -1823,7 +2006,7 @@ function App() {
             </>
           )}
         </div>
-        <button className="add-footer" onClick={addProject}>＋ Add project</button>
+        <button className="add-footer with-icon" onClick={addProject}><Icons.Plus size={13} /> Add project</button>
         <div className="nav-resizer" onMouseDown={onResize} />
       </aside>
 
@@ -1839,20 +2022,21 @@ function App() {
                     {!selected.is_main && selected.branch !== selected.slug ? "↗ " : ""}{selected.branch}
                   </span>
                 )}
-                <span className="status-cluster">
-                  {selected.tmux_session.up && <span className="s ok" title="tmux live"><span className="status-dot on" /> live</span>}
-                  {selected.dirty && <span className="s dirty">● {selected.dirty_files ?? ""}</span>}
-                  {(selected.ahead || selected.behind) && <span className="s ab">↑{selected.ahead ?? 0} ↓{selected.behind ?? 0}</span>}
-                  <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
-                </span>
+                {/* squeezed window: the badges go, not the name — every fact
+                    here is also in the nav row and the status bar */}
+                {!fit.tight && (
+                  <span className="status-cluster">
+                    {selected.tmux_session.up && <span className="s ok" title="tmux live"><span className="status-dot on" /> live</span>}
+                    {selected.dirty && <span className="s dirty">● {selected.dirty_files ?? ""}</span>}
+                    {(selected.ahead || selected.behind) && <span className="s ab">↑{selected.ahead ?? 0} ↓{selected.behind ?? 0}</span>}
+                    <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
+                  </span>
+                )}
               </div>
 
               <div className="controls">
-                <button
-                  className={"icon-btn" + (settings.dock_open ? " on" : "")}
-                  title={settings.dock_open ? "hide files & terminal (⌘J)" : "files & terminal (⌘J)"}
-                  onClick={toggleDock}
-                >▧</button>
+                {/* the dock toggle moved to the right rail — it lives next to
+                    the thing it opens, and no longer collides with the lens ▤ */}
                 {selected.tmux_session.up ? (
                   <>
                     <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
@@ -1866,19 +2050,23 @@ function App() {
                     )}
                   </>
                 ) : (
-                  <button className="enter-btn" onClick={() => enterPlace(sel.repo, selected)}>Enter ▸</button>
+                  <button className="enter-btn with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /></button>
                 )}
                 <button className={"icon-btn" + (selected.declared?.pinned ? " on" : "")} title={selected.declared?.pinned ? "unpin" : "pin"}
-                  onClick={() => mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on: !selected.declared?.pinned }))}>★</button>
+                  onClick={() => mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on: !selected.declared?.pinned }))}>
+                  <Icons.Pin filled={!!selected.declared?.pinned} />
+                </button>
 
                 <div className="menu-wrap">
-                  <button className="ctrl" onClick={() => (menu === "life" ? closeMenu() : (setConfirmRm(null), setMenu("life")))}>Lifecycle ▾</button>
+                  <button className="ctrl with-icon" onClick={() => (menu === "life" ? closeMenu() : (setConfirmRm(null), setMenu("life")))}>
+                    Lifecycle <Icons.ChevronDown size={13} />
+                  </button>
                   {menu === "life" && (
                     <div className="popover right">
                       <div className="pop-hint">active / idle are derived</div>
                       {SETTABLE.map((s) => (
                         <button key={s.value} className="pop-item" onClick={() => { mutate(invoke("set_lifecycle", { repo: sel.repo, slug: sel.slug, label: s.value })); closeMenu(); }}>
-                          <span className="check">{selected.declared?.lifecycle === s.value ? "✓" : ""}</span>{s.label}
+                          <span className="check">{selected.declared?.lifecycle === s.value && <Icons.Check size={12} />}</span>{s.label}
                         </button>
                       ))}
                     </div>
@@ -1887,7 +2075,7 @@ function App() {
 
                 {!selected.is_main && (
                   <div className="menu-wrap">
-                    <button className="ctrl" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}>⋯</button>
+                    <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
                     {menu === "more" && (
                       <div className="popover right">
                         <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
@@ -1916,7 +2104,7 @@ function App() {
               <div className="term-empty">
                 <div className="term-empty-card">
                   <div className="te-title">No live session for <b>{selected.slug}</b></div>
-                  <button className="enter-btn big" onClick={() => enterPlace(sel.repo, selected)}>Enter ▸ to start</button>
+                  <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
                 </div>
               </div>
             )}
@@ -1925,11 +2113,9 @@ function App() {
               <div className="switch-wrap">
                 {!selected.is_main && (
                   <>
-                    <span className="sb-label">⎇</span>
-                    <input className="switchto" placeholder="switch branch…" value={switchTo}
-                      onChange={(e) => setSwitchTo(e.currentTarget.value)}
-                      onKeyDown={(e) => e.key === "Enter" && doSwitch()} />
-                    <button className="ctrl sm" onClick={doSwitch} disabled={!switchTo.trim()}>Switch</button>
+                    <span className="sb-label" title={`on ${selected.branch ?? "?"}`}><Icons.GitBranch size={13} /></span>
+                    <BranchSwitcher key={sel.repo + "|" + sel.slug} repo={sel.repo} slug={sel.slug}
+                      onSwitch={doSwitch} onError={fail} />
                   </>
                 )}
               </div>
@@ -1948,14 +2134,14 @@ function App() {
                 <div className="home-tag">a place for every work stream</div>
               </div>
             </div>
-            <button className="enter-btn big home-open" onClick={addProject}>＋ Open a project</button>
+            <button className="enter-btn big home-open with-icon" onClick={addProject}><Icons.Plus size={15} /> Open a project</button>
             <div className="chips">
               <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
               <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
             </div>
             <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
             <div className="resume">
-              {resume.length === 0 && <div className="empty small">No places yet — ＋ open a project.</div>}
+              {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
               {resume.map(({ pv, p }) => (
                 <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
                   <span
@@ -1966,7 +2152,7 @@ function App() {
                   <span className="rr-proj">{basename(pv.root)}</span>
                   <span className="rr-life">{p.lifecycle_effective}</span>
                   <span className="rr-age">{ago(p.declared?.last_opened_epoch)}</span>
-                  <button className="enter-btn sm">Enter ▸</button>
+                  <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
                 </div>
               ))}
             </div>
@@ -1978,13 +2164,11 @@ function App() {
       {dockShown && selected && sel && (
         <aside className="dock">
           <div className="dock-resizer" onMouseDown={onDockResize} />
+          {/* the rail owns tab selection AND collapse, so this is a title, not
+              a control strip */}
           <div className="dock-tabs">
-            <button className={"dock-tab" + (settings.dock_tab === "files" ? " on" : "")}
-              onClick={() => updateSettings({ dock_tab: "files" })}>Files</button>
-            <button className={"dock-tab" + (settings.dock_tab === "terminal" ? " on" : "")}
-              onClick={() => updateSettings({ dock_tab: "terminal" })}>Terminal</button>
+            <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
             <span className="dock-spacer" />
-            <button className="icon-btn" title="hide dock (⌘J)" onClick={toggleDock}>✕</button>
           </div>
           <div className="dock-body">
             {settings.dock_tab === "files" ? (
@@ -2004,6 +2188,27 @@ function App() {
           </div>
         </aside>
       )}
+
+      {/* ── right rail: mirrors the left one. Permanent, so the dock always has
+          a visible affordance; the active icon collapses the dock. Disabled
+          with no place selected — Files/Terminal both need a worktree. */}
+      <nav className="rail rail-right">
+        {DOCK_RAIL.map((d) => {
+          const on = dockShown && settings.dock_tab === d.key;
+          const why = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
+          return (
+            <button
+              key={d.key}
+              className={"rail-icon" + (on ? " active" : "")}
+              disabled={!!why}
+              title={why ? `${d.title} — ${why}` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
+              onClick={() => pickDockTab(d.key)}
+            >
+              {d.icon}
+            </button>
+          );
+        })}
+      </nav>
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
       {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
@@ -2046,7 +2251,7 @@ function App() {
             <header className="settings-h">
               <b>{whatsNew.manual ? "Release notes" : `What's new — v${whatsNew.version}`}</b>
               <button className="icon-btn" title="close"
-                onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}>✕</button>
+                onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}><Icons.X size={13} /></button>
             </header>
             <div className="settings-body">
               <ReleaseNotes notes={whatsNew.notes} />
@@ -2060,7 +2265,7 @@ function App() {
       {ctx?.kind === "place" && ctxPlace && (
         <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
           <div className="pop-hint">{ctxPlace.is_main ? "◆ main" : ctxPlace.slug}</div>
-          <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace)}>Enter ▸</button>
+          <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace)}>Enter <Icons.ChevronRight size={12} /></button>
           {!ctxPlace.tmux_session.up && ctxPlace.claude_session_present && (
             settings.ai_auto_resume ? (
               <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: true })}>Open fresh (skip resume)</button>

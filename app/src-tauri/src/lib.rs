@@ -2,10 +2,11 @@
 // subprocess, no WORKTREES_BIN). Two jobs of its own:
 //   1. state    — core computes derived `ls`; core::store owns the declared sidecar;
 //                 the app merges them + reconciles lifecycle_effective for the UI.
-//   2. PTY host — attaches to a live tmux session (never owns a shell).
+//   2. PTY host — attaches to a live tmux session for the place's canonical
+//                 shell, and OWNS the dock's scratch shells outright (no tmux).
 // See DESIGN.md / MIGRATION.md.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -406,6 +407,24 @@ async fn switch_place(
     run_op(&format!("switch {slug_log}"), &repo, |p, ui| ops::cmd_switch(p, ui, &args))
 }
 
+/// Branches the status-bar switcher offers, plus the base a NEW branch would be
+/// cut from. `switch` is DWIM (local → switch, remote-only → track, otherwise
+/// create), so the control is a combobox and not a `<select>`: picking from the
+/// list and typing a name that doesn't exist yet are both first-class.
+#[derive(Serialize)]
+struct BranchList {
+    branches: Vec<String>,
+    current: String,
+    default_base: String,
+}
+
+#[tauri::command]
+async fn list_branches(repo: String, slug: String) -> Result<BranchList, String> {
+    let p = Project::discover(Path::new(&repo)).map_err(|e| e.msg)?;
+    let current = p.wt_branch(&p.place_dir(&slug));
+    Ok(BranchList { branches: p.branch_names(), current, default_base: p.default_base() })
+}
+
 /// Enter a place: ensure its tmux session exists (create if down) WITHOUT attaching
 /// — the app embeds it via its own PTY. Worktrees go through `open` (reuses the
 /// existing launch path); the main checkout is launched directly since `open` only
@@ -468,8 +487,16 @@ fn ai_is_claude() -> bool {
 /// clicked at another; without the name, `yes` would authorize whatever a fresh
 /// resolution finds at click time, which can be a different session entirely.
 #[tauri::command]
-async fn close_place(repo: String, slug: String, yes: bool, session: Option<String>) -> Result<CmdResult, String> {
-    // core cmd_close sweeps this place's dock shell sidecars itself (on the kill path).
+async fn close_place(
+    repo: String,
+    slug: String,
+    yes: bool,
+    session: Option<String>,
+    shells: State<'_, Shells>,
+) -> Result<CmdResult, String> {
+    // core cmd_close sweeps this place's tmux-era sidecars; the owned dock
+    // shells are app state, so they're swept here — same rule as before, the
+    // dock's scratch shells die with the place.
     let slug_log = slug.clone();
     let mut args = vec![slug.clone()];
     if yes {
@@ -495,6 +522,8 @@ async fn close_place(repo: String, slug: String, yes: bool, session: Option<Stri
         // name shown is the name core is held to, and `None` means there is
         // nothing left to ask about (the frontend treats it as "already gone").
         r.needs_confirm = Project::discover(Path::new(&repo)).ok().and_then(|p| ops::place_session(&p, &slug));
+    } else if r.ok {
+        kill_place_shells(&shells, &repo, &slug);
     }
     Ok(r)
 }
@@ -1570,49 +1599,34 @@ fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), String>
     Ok((p.session_name(slug), p.place_dir(slug)))
 }
 
-/// Ensure the dock's scratch-shell sidecar for a place + 1-based tab `index`
-/// exists (creating it cwd'd in the worktree) and return its tmux name.
-/// Idempotent — reused across dock opens/reboots.
-#[tauri::command]
-async fn open_shell_session(repo: String, slug: String, index: u32) -> Result<String, String> {
-    if !worktrees_core::tmux::have_tmux() {
-        return Err("tmux not found".into());
-    }
-    let (session, cwd) = place_session_cwd(&repo, &slug)?;
-    let shell = worktrees_core::tmux::shell_sidecar_name(&session, index);
-    if !worktrees_core::tmux::session_exists(&shell) {
-        if let Err(e) = worktrees_core::tmux::new_session(&shell, &cwd, "exec \"${SHELL:-/bin/sh}\"") {
-            // Lost a create race (React StrictMode double-mounts the effect; rapid
-            // tab flips) → the session now exists; treat that as success, not an
-            // error banner. Any other failure is real.
-            if !worktrees_core::tmux::session_exists(&shell) {
-                applog("error", &format!("open_shell_session {shell}: {e}"));
-                return Err(e);
-            }
-        }
-        worktrees_core::tmux::tune_session(&shell);
-    }
-    Ok(shell)
+/// A place's dock shells, with liveness. The dock restores its Terminal tabs
+/// from this; shells don't outlive the app (see `Shells`), so after a restart
+/// it's empty and the dock opens a fresh one. `dead` matters because the
+/// `shell:exit` event is transient — a shell that exits while the dock is
+/// closed has no listener, and without this flag the reopened dock would render
+/// the corpse as a live tab (replayed scrollback, EIO on the first keypress).
+#[derive(Serialize)]
+struct ShellTab {
+    index: u32,
+    dead: bool,
 }
 
-/// The 1-based indices of a place's live shell sidecars — the dock restores its
-/// Terminal tabs from tmux (self-healing across app restarts, no extra state).
 #[tauri::command]
-async fn list_shell_sessions(repo: String, slug: String) -> Result<Vec<u32>, String> {
-    let (session, _) = place_session_cwd(&repo, &slug)?;
-    let mut ids: Vec<u32> = worktrees_core::tmux::session_names()
-        .iter()
-        .filter_map(|n| worktrees_core::tmux::shell_sidecar_index(&session, n))
+async fn list_shell_sessions(repo: String, slug: String, shells: State<'_, Shells>) -> Result<Vec<ShellTab>, String> {
+    let mut map = shells.0.lock().unwrap();
+    let mut tabs: Vec<ShellTab> = map
+        .iter_mut()
+        .filter(|((r, s, _), _)| r == &repo && s == &slug)
+        .map(|((_, _, i), sh)| ShellTab { index: *i, dead: matches!(sh.child.try_wait(), Ok(Some(_))) })
         .collect();
-    ids.sort_unstable();
-    Ok(ids)
+    tabs.sort_unstable_by_key(|t| t.index);
+    Ok(tabs)
 }
 
-/// End one shell tab (`<session>~term[~index]`). Best-effort; missing = no-op.
+/// End one shell tab — kills the process, unlike `shell_detach`.
 #[tauri::command]
-async fn close_shell_session(repo: String, slug: String, index: u32) -> Result<(), String> {
-    let (session, _) = place_session_cwd(&repo, &slug)?;
-    worktrees_core::tmux::kill_session(&worktrees_core::tmux::shell_sidecar_name(&session, index));
+async fn close_shell_session(repo: String, slug: String, index: u32, shells: State<'_, Shells>) -> Result<(), String> {
+    kill_shell(&shells, &(repo, slug, index));
     Ok(())
 }
 
@@ -1623,8 +1637,10 @@ async fn remove_place(
     slug: String,
     del_branch: bool,
     force: bool,
+    shells: State<'_, Shells>,
 ) -> Result<CmdResult, String> {
     let slug_log = slug.clone();
+    let slug_sweep = slug.clone();
     let mut args: Vec<String> = vec![slug, "-y".into()];
     if del_branch {
         args.push("--branch".into());
@@ -1634,7 +1650,11 @@ async fn remove_place(
     }
     // cmd_rm sweeps this place's dock shell sidecars itself (core, only once the
     // removal proceeds past its dirty/confirm guards — a refused rm keeps them).
-    run_op(&format!("rm {slug_log}"), &repo, move |p, ui| ops::cmd_rm(p, ui, &args))
+    let r = run_op(&format!("rm {slug_log}"), &repo, move |p, ui| ops::cmd_rm(p, ui, &args))?;
+    if r.ok {
+        kill_place_shells(&shells, &repo, &slug_sweep);
+    }
+    Ok(r)
 }
 
 // ── PTY host: attach to a live tmux session ─────────────────────────────────
@@ -1746,6 +1766,218 @@ async fn term_close(id: u32, terms: State<'_, Terminals>) -> Result<(), String> 
     Ok(())
 }
 
+// ── dock shells: PTYs this app OWNS ─────────────────────────────────────────
+// The place's canonical session stays tmux (Claude lives there; it must survive
+// quit and stay `tmux attach`-able from a bare terminal). The dock's scratch
+// shells do NOT: they used to be `<session>~term[~n]` tmux sidecars that a
+// second process then attached, which meant tmux swallowed C-b, scrollback went
+// through copy-mode, a co-attached client could clamp the size (the whole
+// `tune_session` + aggressive-resize dance), and the tab was simply dead when
+// tmux wasn't installed. One owned PTY per tab fixes all four.
+//
+// What tmux WAS providing for free is survival across a detach — the dock
+// closing, a tab flip, a place switch — so the registry keeps the process alive
+// independently of the webview, and a ring buffer replays what was missed. Only
+// quitting the app (or closing the tab) ends a shell.
+
+/// Replay window per shell. Enough for a build log's tail; small enough that a
+/// dozen idle tabs don't add up to anything.
+const SHELL_RING: usize = 256 * 1024;
+
+struct Shell {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    stop: Arc<AtomicBool>,
+    /// Everything the shell has written, capped. Replayed on re-attach.
+    ring: Arc<Mutex<VecDeque<u8>>>,
+    /// The attached webview channel, if any. `None` = running unwatched.
+    sink: Arc<Mutex<Option<Channel<InvokeResponseBody>>>>,
+    /// Attach generation. Detach names the attach it is undoing, because a
+    /// STALE detach must be a no-op: under React StrictMode the same pane
+    /// mounts, unmounts, and mounts again — and unmount №1's detach can arrive
+    /// AFTER mount №2's attach installed its channel. Keyed detach alone would
+    /// clear the new sink and freeze a live pane (the tmux design was immune:
+    /// every attach had its own id).
+    gen: u64,
+}
+
+/// (repo, slug, 1-based tab index) — the webview never names a shell, same rule
+/// as the tmux sessions.
+type ShellKey = (String, String, u32);
+
+#[derive(Default)]
+struct Shells(Mutex<HashMap<ShellKey, Shell>>);
+
+fn kill_shell(shells: &Shells, key: &ShellKey) {
+    if let Some(mut sh) = shells.0.lock().unwrap().remove(key) {
+        sh.stop.store(true, Ordering::Relaxed);
+        let _ = sh.child.kill();
+    }
+}
+
+/// Every dock shell of one place. Called when the place is closed or removed —
+/// core's `kill_shell_sidecars` handles the tmux era, but it can't see this map.
+fn kill_place_shells(shells: &Shells, repo: &str, slug: &str) {
+    let keys: Vec<ShellKey> = shells
+        .0
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|(r, s, _)| r == repo && s == slug)
+        .cloned()
+        .collect();
+    for k in &keys {
+        kill_shell(shells, k);
+    }
+}
+
+/// Start (or re-attach to) the dock shell for `index` and stream it to
+/// `on_bytes`; returns the attach generation `shell_detach` must present.
+/// Idempotent: a second call for a live shell just swaps the sink and replays —
+/// which is exactly what a tab flip or a dock re-open does.
+///
+/// The registry lock is held for the WHOLE body, spawn included. Two calls for
+/// the same key can be in flight at once (StrictMode double-mounts the pane's
+/// effect), and the old check-unlock-spawn-insert shape let both see an empty
+/// slot: two shells spawned, the second insert winning, the first leaked as an
+/// orphan no sweep could see. The spawn is a few ms and there's one webview —
+/// serializing every shell command through it is the cheap correct answer.
+#[tauri::command]
+async fn shell_open(
+    app: AppHandle,
+    repo: String,
+    slug: String,
+    index: u32,
+    cols: u16,
+    rows: u16,
+    on_bytes: Channel<InvokeResponseBody>,
+    shells: State<'_, Shells>,
+) -> Result<u64, String> {
+    let key: ShellKey = (repo.clone(), slug.clone(), index);
+    let mut map = shells.0.lock().unwrap();
+    if let Some(sh) = map.get_mut(&key) {
+        // ring THEN sink, the same order the reader takes them — otherwise a
+        // write landing mid-replay is either sent twice or dropped
+        let ring = sh.ring.lock().unwrap();
+        let mut sink = sh.sink.lock().unwrap();
+        let snapshot: Vec<u8> = ring.iter().copied().collect();
+        if !snapshot.is_empty() {
+            let _ = on_bytes.send(InvokeResponseBody::Raw(snapshot));
+        }
+        *sink = Some(on_bytes);
+        drop(sink);
+        drop(ring);
+        let _ = sh.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        sh.gen += 1;
+        return Ok(sh.gen);
+    }
+
+    let (session, cwd) = place_session_cwd(&repo, &slug)?;
+    // One-time cleanup for anyone upgrading: their `<session>~term*` sidecars
+    // are orphans now — nothing will ever attach them again. Cheap and
+    // idempotent, and only reached when this place has no shell yet. (Runs
+    // under the registry lock — a tmux round-trip, but only on first open.)
+    if worktrees_core::tmux::have_tmux() {
+        worktrees_core::tmux::kill_shell_sidecars(&session);
+    }
+
+    let pair = native_pty_system()
+        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| e.to_string())?;
+
+    // A LOGIN shell, like Terminal.app: it sources the user's profile, so the
+    // shell has the real PATH even though this process was launched by launchd
+    // with a bare one (fixup_gui_path covers our own shell-outs, not this).
+    let shell_bin = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let mut cmd = CommandBuilder::new(&shell_bin);
+    cmd.arg("-l");
+    cmd.cwd(&cwd);
+    cmd.env("TERM", "xterm-256color");
+
+    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+        applog("error", &format!("shell_open {slug}#{index}: spawn {shell_bin} failed: {e}"));
+        e.to_string()
+    })?;
+    drop(pair.slave);
+
+    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+
+    let ring = Arc::new(Mutex::new(VecDeque::<u8>::with_capacity(8192)));
+    let sink = Arc::new(Mutex::new(Some(on_bytes)));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let (r_ring, r_sink, r_stop) = (ring.clone(), sink.clone(), stop.clone());
+    let exit_key = key.clone();
+    thread::spawn(move || {
+        let mut buf = [0u8; 16384];
+        loop {
+            if r_stop.load(Ordering::Relaxed) {
+                return; // closed deliberately — no exit event
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = &buf[..n];
+                    let mut ring = r_ring.lock().unwrap();
+                    ring.extend(chunk.iter().copied());
+                    let overflow = ring.len().saturating_sub(SHELL_RING);
+                    ring.drain(..overflow);
+                    // held together with the ring (see the re-attach comment)
+                    if let Some(ch) = r_sink.lock().unwrap().as_ref() {
+                        if ch.send(InvokeResponseBody::Raw(chunk.to_vec())).is_err() {
+                            break; // webview gone
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        // The shell itself exited (`exit`, or it died). The tab stays — the
+        // frontend offers a restart rather than silently vanishing.
+        if !r_stop.load(Ordering::Relaxed) {
+            let (repo, slug, index) = exit_key;
+            let _ = app.emit("shell:exit", serde_json::json!({ "repo": repo, "slug": slug, "index": index }));
+        }
+    });
+
+    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1 });
+    Ok(1)
+}
+
+#[tauri::command]
+async fn shell_write(repo: String, slug: String, index: u32, data: Vec<u8>, shells: State<'_, Shells>) -> Result<(), String> {
+    let mut map = shells.0.lock().unwrap();
+    let sh = map.get_mut(&(repo, slug, index)).ok_or("no such shell")?;
+    sh.writer.write_all(&data).map_err(|e| e.to_string())?;
+    sh.writer.flush().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn shell_resize(repo: String, slug: String, index: u32, cols: u16, rows: u16, shells: State<'_, Shells>) -> Result<(), String> {
+    let map = shells.0.lock().unwrap();
+    let sh = map.get(&(repo, slug, index)).ok_or("no such shell")?;
+    sh.master
+        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| e.to_string())
+}
+
+/// Stop streaming; the shell keeps running. This is the unmount path — a tab
+/// flip or ⌘J must not kill what you left building. `gen` names the attach
+/// being undone: a detach that lost the race to a newer attach is a no-op
+/// instead of clearing the newcomer's sink (see `Shell::gen`).
+#[tauri::command]
+async fn shell_detach(repo: String, slug: String, index: u32, gen: u64, shells: State<'_, Shells>) -> Result<(), String> {
+    let map = shells.0.lock().unwrap();
+    if let Some(sh) = map.get(&(repo, slug, index)) {
+        if sh.gen == gen {
+            *sh.sink.lock().unwrap() = None;
+        }
+    }
+    Ok(())
+}
+
 /// GUI-launched apps inherit launchd's bare PATH (/usr/bin:/bin:…) — no
 /// homebrew, no ~/.local/bin — so the engine's tmux/git shell-outs fail even
 /// though they work in every terminal (tmux is homebrew-installed: every place
@@ -1813,6 +2045,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(Terminals::default())
+        .manage(Shells::default())
         .setup(|app| {
             // Live-refresh, change-gated. The tmux session set is a cheap
             // fingerprint that shifts whenever a place is opened/closed (even from a
@@ -1878,6 +2111,7 @@ pub fn run() {
             touch_place,
             new_place,
             switch_place,
+            list_branches,
             remove_place,
             open_place,
             close_place,
@@ -1903,9 +2137,12 @@ pub fn run() {
             list_dir,
             read_file,
             write_file,
-            open_shell_session,
             list_shell_sessions,
             close_shell_session,
+            shell_open,
+            shell_write,
+            shell_resize,
+            shell_detach,
             settings_info,
             get_settings,
             set_settings,
@@ -1914,6 +2151,18 @@ pub fn run() {
             term_resize,
             term_close
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        // Owned dock shells die with the app — they have no tmux server holding
+        // them up, so without this the PTY children outlive the window as
+        // orphaned logins.
+        .run(|handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                let shells = handle.state::<Shells>();
+                let keys: Vec<ShellKey> = shells.0.lock().unwrap().keys().cloned().collect();
+                for k in &keys {
+                    kill_shell(&shells, k);
+                }
+            }
+        });
 }
