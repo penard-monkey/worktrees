@@ -106,3 +106,17 @@ close-out ritual (.claude/skills/close-out).
   (live tmux + AI CLI in the pane); consider trimming the flow and resting on
   the overview rather than the terminal. Recorder: `app/scripts/record-readme.{sh,py}`.
   _From: 2026-07-27 readme-media session_
+
+- **Dock file viewer: syntax highlighting.** The editable viewer is a plain
+  mono `<textarea>` (deliberately — the project bans UI libraries). If in-app
+  editing becomes a real workflow rather than a quick peek, revisit: a light
+  highlighter for read mode, or CodeMirror for edit mode (which would be the
+  first real UI-lib dependency — a decision, not a default).
+  _From: [2026-07-28 right-dock session](docs/sessions/2026-07-28-right-dock/summary.md)_
+
+- **Dock shell sidecar lifecycle edges** (both benign, documented, not fixed):
+  (1) a sidecar killed *outside* the app (bare `tmux kill-session`) while its
+  tab persists → clicking the tab recreates it; (2) a place whose AI session is
+  down while sidecars linger and is never closed keeps them until `rm`. Only
+  worth touching if sidecar leaks show up in practice.
+  _From: [2026-07-28 right-dock session](docs/sessions/2026-07-28-right-dock/summary.md)_
