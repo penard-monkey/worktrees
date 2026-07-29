@@ -407,6 +407,24 @@ async fn switch_place(
     run_op(&format!("switch {slug_log}"), &repo, |p, ui| ops::cmd_switch(p, ui, &args))
 }
 
+/// Branches the status-bar switcher offers, plus the base a NEW branch would be
+/// cut from. `switch` is DWIM (local → switch, remote-only → track, otherwise
+/// create), so the control is a combobox and not a `<select>`: picking from the
+/// list and typing a name that doesn't exist yet are both first-class.
+#[derive(Serialize)]
+struct BranchList {
+    branches: Vec<String>,
+    current: String,
+    default_base: String,
+}
+
+#[tauri::command]
+async fn list_branches(repo: String, slug: String) -> Result<BranchList, String> {
+    let p = Project::discover(Path::new(&repo)).map_err(|e| e.msg)?;
+    let current = p.wt_branch(&p.place_dir(&slug));
+    Ok(BranchList { branches: p.branch_names(), current, default_base: p.default_base() })
+}
+
 /// Enter a place: ensure its tmux session exists (create if down) WITHOUT attaching
 /// — the app embeds it via its own PTY. Worktrees go through `open` (reuses the
 /// existing launch path); the main checkout is launched directly since `open` only
@@ -2069,6 +2087,7 @@ pub fn run() {
             touch_place,
             new_place,
             switch_place,
+            list_branches,
             remove_place,
             open_place,
             close_place,

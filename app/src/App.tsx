@@ -732,6 +732,123 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   );
 }
 
+// Status-bar branch switcher. A combobox, NOT a <select>: `switch` is DWIM —
+// local branch → switch, remote-only → track it, anything else → create it off
+// the default base — so a picker that only offered existing branches would
+// delete the create path. Typing stays first-class; the list just means you no
+// longer have to remember the name.
+//
+// Module scope with props, per CLAUDE.md: it holds local state and input focus,
+// both of which a component defined inside App() would lose on every render.
+type BranchList = { branches: string[]; current: string; default_base: string };
+
+function BranchSwitcher({ repo, slug, onSwitch, onError }: {
+  repo: string; slug: string;
+  onSwitch: (branch: string) => Promise<boolean>;
+  onError: (e: unknown) => void;
+}) {
+  const [text, setText] = useState("");
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<BranchList | null>(null);
+  const [hi, setHi] = useState(0);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  // Reset when the place changes — a half-typed branch belongs to the place it
+  // was typed in.
+  useEffect(() => { setText(""); setOpen(false); setData(null); }, [repo, slug]);
+
+  // Lazy: one `git for-each-ref` when the switcher is first used, not on every
+  // place selection.
+  const load = () => {
+    if (data) return;
+    invoke<BranchList>("list_branches", { repo, slug })
+      .then(setData)
+      .catch(onError);
+  };
+
+  const q = text.trim();
+  const matches = (data?.branches ?? [])
+    .filter((b) => b !== data?.current && b.toLowerCase().includes(q.toLowerCase()))
+    .slice(0, 50);
+  const exact = matches.some((b) => b === q);
+  const creating = q.length > 0 && !exact;
+  // the create row is last, so ↓ from the top walks real branches first
+  const options: { branch: string; create: boolean }[] = [
+    ...matches.map((b) => ({ branch: b, create: false })),
+    ...(creating ? [{ branch: q, create: true }] : []),
+  ];
+
+  const submit = async (branch: string) => {
+    const b = branch.trim();
+    if (!b) return;
+    setOpen(false);
+    if (await onSwitch(b)) setText("");
+  };
+
+  // click-away — the popover floats over the terminal, so it must not linger
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) { setOpen(true); load(); return; }
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      setHi((i) => (options.length ? (i + d + options.length) % options.length : 0));
+      return;
+    }
+    if (e.key === "Escape" && open) { e.preventDefault(); setOpen(false); return; }
+    if (e.key === "Enter") {
+      // A highlighted row wins; otherwise the raw text does, so Enter still
+      // works exactly as it did before the list existed.
+      submit(open && options[hi] ? options[hi].branch : text);
+    }
+  };
+
+  return (
+    <div className="combo" ref={boxRef}>
+      <input
+        className="switchto"
+        placeholder="switch branch…"
+        value={text}
+        onFocus={() => { setOpen(true); load(); }}
+        onChange={(e) => { setText(e.currentTarget.value); setHi(0); setOpen(true); load(); }}
+        onKeyDown={onKey}
+      />
+      {open && (
+        <div className="combo-pop">
+          {data === null && <div className="combo-note">loading branches…</div>}
+          {data !== null && options.length === 0 && (
+            <div className="combo-note">{data.branches.length ? "no branch matches" : "no other branches"}</div>
+          )}
+          {options.map((o, i) => (
+            <button
+              key={(o.create ? "new:" : "b:") + o.branch}
+              className={"combo-item" + (i === hi ? " hi" : "") + (o.create ? " create" : "")}
+              // mousedown, not click: the input's blur would tear the row out
+              // from under the click
+              onMouseDown={(e) => { e.preventDefault(); submit(o.branch); }}
+              onMouseEnter={() => setHi(i)}
+            >
+              {o.create ? (
+                <>create <b>{o.branch}</b> off {data?.default_base}</>
+              ) : (
+                o.branch
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
@@ -741,7 +858,6 @@ function App() {
   const [newFor, setNewFor] = useState<string | null>(null);
   const [newBase, setNewBase] = useState("");
   const [ctx, setCtx] = useState<Ctx | null>(null);
-  const [switchTo, setSwitchTo] = useState("");
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
   // The armed Close needs one fact more than `confirmRm` can carry: WHICH tmux
   // session would die, as the BACKEND named it. It rides alongside the arm
@@ -1396,11 +1512,12 @@ function App() {
       setNewBase("");
     }
   };
-  const doSwitch = async () => {
-    if (!sel) return;
-    const b = switchTo.trim();
-    if (!b) return;
-    if ((await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null }))?.ok) setSwitchTo("");
+  // The switcher owns its own text now; this just runs the op and reports.
+  const doSwitch = async (branch: string) => {
+    if (!sel) return false;
+    const b = branch.trim();
+    if (!b) return false;
+    return !!(await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null }))?.ok;
   };
   // Topbar ⋯ remove — same armed two-button pair as the ctx menu (arm key
   // `repo|slug`). Unarmed click arms; the armed state renders "Confirm remove"
@@ -1991,11 +2108,9 @@ function App() {
               <div className="switch-wrap">
                 {!selected.is_main && (
                   <>
-                    <span className="sb-label"><Icons.GitBranch size={13} /></span>
-                    <input className="switchto" placeholder="switch branch…" value={switchTo}
-                      onChange={(e) => setSwitchTo(e.currentTarget.value)}
-                      onKeyDown={(e) => e.key === "Enter" && doSwitch()} />
-                    <button className="ctrl sm" onClick={doSwitch} disabled={!switchTo.trim()}>Switch</button>
+                    <span className="sb-label" title={`on ${selected.branch ?? "?"}`}><Icons.GitBranch size={13} /></span>
+                    <BranchSwitcher key={sel.repo + "|" + sel.slug} repo={sel.repo} slug={sel.slug}
+                      onSwitch={doSwitch} onError={fail} />
                   </>
                 )}
               </div>

@@ -708,6 +708,28 @@ button { cursor: pointer; }
   border-radius: var(--r-sm); padding: 3px var(--s2); font-size: var(--fs-meta); outline: none;
 }
 .switchto:focus { border-color: var(--line-strong); }
+
+/* branch combobox — opens UPWARD; the status bar is the last row of the window */
+.combo { position: relative; flex: 0 1 240px; min-width: 0; display: flex; }
+.combo .switchto { flex: 1 1 auto; }
+.combo-pop {
+  position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 50;
+  min-width: 240px; max-width: 380px; max-height: 300px; overflow-y: auto;
+  background: var(--bg-panel); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-float); padding: var(--s1);
+  animation: pop var(--dur-slow) var(--ease);
+}
+.combo-item {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border: 0; color: var(--txt); border-radius: var(--r-sm);
+  padding: var(--s1) var(--s2); font-size: var(--fs-label);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.combo-item.hi { background: var(--bg-elev); color: var(--txt-hi); }
+/* the DWIM create path, visually distinct from picking something that exists */
+.combo-item.create { color: var(--txt-dim); }
+.combo-item.create b { color: var(--branch-hi); font-weight: var(--fw-med); }
+.combo-note { padding: var(--s1) var(--s2); color: var(--txt-mute); font-size: var(--fs-meta); }
 /* the tmux facts truncate rather than shove the switcher out of the bar */
 .sb-facts {
   margin-left: auto; flex: 0 1 auto; min-width: 0;

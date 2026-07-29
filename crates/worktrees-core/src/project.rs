@@ -322,6 +322,41 @@ impl Project {
         self.registrations().contains(dir)
     }
 
+    /// Branch names a place could switch to: every local head, plus every
+    /// `origin/*` that has no local counterpart (switching to one of those makes
+    /// git track it — see `do_switch`). Sorted, deduped, remotes stripped of the
+    /// `origin/` prefix because that is the name `switch` takes.
+    ///
+    /// A branch already checked out in another worktree is still listed: git
+    /// refuses the switch with its own, better message, and hiding the name
+    /// would just look like the branch doesn't exist.
+    pub fn branch_names(&self) -> Vec<String> {
+        let local = git::git_out(
+            &self.main_root,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        )
+        .unwrap_or_default();
+        let mut names: Vec<String> = local.lines().filter(|l| !l.is_empty()).map(String::from).collect();
+        let seen: std::collections::HashSet<String> = names.iter().cloned().collect();
+
+        let remote = git::git_out(
+            &self.main_root,
+            &["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"],
+        )
+        .unwrap_or_default();
+        for line in remote.lines() {
+            // `origin/HEAD` is a symref to the default branch, not a branch
+            let Some(short) = line.strip_prefix("origin/") else { continue };
+            if short.is_empty() || short == "HEAD" || seen.contains(short) {
+                continue;
+            }
+            names.push(short.to_string());
+        }
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
     /// Dir of the `.worktrees/` worktree currently ON `refs/heads/<branch>`.
     pub fn wt_for_branch(&self, branch: &str) -> Option<String> {
         let out = git::git_out(&self.main_root, &["worktree", "list", "--porcelain"])?;

@@ -336,6 +336,21 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "switch_place":
       editPlace(args.repo, args.slug, (p) => { p.branch = args.branch; });
       return { ok: true, code: 0, output: `Switched ${args.slug} → ${args.branch}` };
+    // Branch names the status-bar combobox offers. Real backend unions local
+    // heads with origin-only ones; here a fixed set plus whatever branches the
+    // fixture places are actually on, so switching around stays coherent.
+    case "list_branches": {
+      const pv = findProject(args.repo);
+      const onPlaces = (pv?.snapshot?.places ?? []).map((p) => p.branch).filter(Boolean) as string[];
+      const branches = [...new Set([
+        "main", "develop", "release/2026.07",
+        "feat/messaging-sse", "feat/billing-v2", "feat/ui-redesign",
+        "fix/backoffice-bug-fixes", "chore/deps-bump",
+        ...onPlaces,
+      ])].sort();
+      const cur = pv?.snapshot?.places.find((p) => p.slug === args.slug)?.branch ?? "main";
+      return { branches, current: cur, default_base: "main" };
+    }
     case "remove_place": {
       // Mirror the real backend (ops.rs remove_one): refuse a DIRTY worktree
       // unless --force, WITHOUT deleting. This finally makes the error-banner
