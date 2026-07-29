@@ -376,7 +376,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "term_close":
       return null;
 
-    // ── dock Files tab (virtual FS) + Terminal sidecars ──
+    // ── dock Files tab (virtual FS) + Terminal shells ──
     case "list_dir":
       return seedDir(args.path as string);
     case "read_file": {
@@ -395,15 +395,27 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       fsFiles.set(path, { content: args.content as string, binary: prev?.binary ?? false, mtime: Date.now() });
       return null;
     }
-    case "open_shell_session": {
-      // backend derives the name from repo+slug; the mock just needs a stable,
-      // plausible session name + to track which tabs exist for restore.
+    // Dock shells are PTYs the backend OWNS (no tmux). The mock models the
+    // registry the same way — spawn-or-reattach keyed by repo+slug+index — so a
+    // tab flip re-renders the banner exactly where the real one replays its ring.
+    case "shell_open": {
       const i = (args.index as number) ?? 1;
       const set = shellSidecars.get(sidecarKey(args.repo, args.slug)) ?? new Set<number>();
       set.add(i); shellSidecars.set(sidecarKey(args.repo, args.slug), set);
-      const base = `${String(args.slug).replace(/\./g, "-")}~term`;
-      return i <= 1 ? base : `${base}~${i}`; // → term_open
+      const banner =
+        "\x1b[38;5;110m worktrees \x1b[0m mock shell — design harness\r\n" +
+        "\x1b[90m(a real login shell only in the Tauri app)\x1b[0m\r\n\r\n" +
+        `\x1b[32m➜\x1b[0m  \x1b[36m${args.slug} sh ${i}\x1b[0m $ \x1b[5m▌\x1b[0m\r\n`;
+      const ch = args.onBytes;
+      setTimeout(() => {
+        try { ch?.onmessage?.(new TextEncoder().encode(banner).buffer); } catch { /* ignore */ }
+      }, 40);
+      return null;
     }
+    case "shell_write":
+    case "shell_resize":
+    case "shell_detach": // detach keeps the shell alive — nothing to model
+      return null;
     case "list_shell_sessions":
       return [...(shellSidecars.get(sidecarKey(args.repo, args.slug)) ?? new Set<number>())].sort((a, b) => a - b);
     case "close_shell_session": {
@@ -640,6 +652,13 @@ setInterval(() => {
 // places:changed so the nav re-pulls immediately instead of waiting on the sweep.
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
+  /** Fire the backend's shell:exit — the only way to reach the dock's
+   * "process exited / Restart shell" state headlessly, since the mock has no
+   * real PTY to die. */
+  exitShell(repo: string, slug: string, index = 1) {
+    emitEvent("shell:exit", { repo, slug, index });
+    return { repo, slug, index };
+  },
   breakConfig(root: string = CDV_ROOT, msg?: string) {
     const cfg = mockConfigs[root];
     if (!cfg) return null;
@@ -665,4 +684,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell)");

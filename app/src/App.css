@@ -631,6 +631,9 @@ button { cursor: pointer; }
   background: transparent; color: var(--txt-dim); font-size: var(--fs-meta);
 }
 .termtab.on { color: var(--accent); background: var(--bg-elev); border-color: var(--line-strong); }
+/* the shell exited on its own — the tab stays so the scrollback does */
+.termtab.dead { color: var(--txt-mute); border-style: dashed; }
+.termtab.dead.on { color: var(--txt-dim); }
 .termtab-label { background: transparent; border: 0; color: inherit; padding: 2px var(--s2); font: inherit; }
 .termtab-x {
   background: transparent; border: 0; color: var(--txt-mute);

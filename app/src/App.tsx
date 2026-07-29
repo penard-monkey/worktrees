@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
-import { TerminalPane } from "./TerminalPane";
+import { ShellPane, TerminalPane } from "./TerminalPane";
 import { SettingsSheet } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
@@ -603,29 +603,17 @@ function FileViewer({ path, reloadToken, onOpenEditor, onError }: {
   );
 }
 
-// One embedded shell: ensures the place's sidecar for tab `index` exists, then
-// attaches. The backend derives the session name + cwd from repo+slug (the
-// webview never names a session), so it stays stable across session up/down.
-function DockTerminal({ repo, slug, index, termVersion, focusToken, onError }: {
-  repo: string; slug: string; index: number; termVersion: number; focusToken: number; onError: (e: unknown) => void;
-}) {
-  const [shell, setShell] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setShell(null);
-    invoke<string>("open_shell_session", { repo, slug, index })
-      .then((s) => { if (alive) setShell(s); })
-      .catch((e) => { if (alive) onError(e); });
-    return () => { alive = false; };
-  }, [repo, slug, index]);
-  if (!shell) return <div className="tree-note">starting shell…</div>;
-  return <TerminalPane session={shell} termVersion={termVersion} focusToken={focusToken} />;
-}
+// A dock shell is just a ShellPane now — the backend spawns-or-reattaches on
+// open, keyed by repo+slug+index (the webview never names one), so there's no
+// separate "create the session first" round trip to wait on.
 
-// Terminal tab: several shells per place. Tabs are restored from the live tmux
-// sidecars (self-healing across restarts); a live place defaults to one shell, a
-// closed place to none. Only the active shell is mounted (tmux keeps the rest
-// warm). `addToken` bumps → add a tab (⌘⇧T from the global handler).
+// Terminal tab: several shells per place. Tabs are restored from the shells the
+// backend still has running — within a session that survives dock closes and
+// place switches, but NOT an app restart (the PTYs are ours, nothing outlives
+// the process). A live place defaults to one shell, a closed place to none.
+// Only the active shell is mounted; the rest keep running detached, and their
+// output is replayed from the backend's ring buffer when you flip back.
+// `addToken` bumps → add a tab (⌘⇧T from the global handler).
 function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, onError }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number; onError: (e: unknown) => void;
 }) {
@@ -635,7 +623,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   idsRef.current = ids ?? [];
   const restoringRef = useRef(true);
 
-  // Restore tabs from live tmux on mount / place change.
+  // Restore tabs from the live shell registry on mount / place change.
   useEffect(() => {
     let alive = true;
     restoringRef.current = true;
@@ -656,13 +644,33 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo, slug]);
 
-  // When the place's session goes DOWN (topbar Close swept its sidecars), clear
-  // the tabs so the dock reflects reality instead of resurrecting dead shells.
+  // When the place's session goes DOWN, Close swept its dock shells too (same
+  // rule as the tmux era: scratch shells die with the place) — clear the tabs so
+  // the dock reflects reality instead of resurrecting dead ones.
   const prevUp = useRef(sessionUp);
   useEffect(() => {
     if (prevUp.current && !sessionUp) { setIds([]); setActive(null); }
     prevUp.current = sessionUp;
   }, [sessionUp]);
+
+  // A shell that exits on its own (you typed `exit`, or it died) keeps its tab
+  // and says so — a tab that silently vanished would look like a bug, and the
+  // scrollback is often the thing you wanted to read.
+  const [dead, setDead] = useState<number[]>([]);
+  useEffect(() => {
+    const un = listen<{ repo: string; slug: string; index: number }>("shell:exit", (e) => {
+      if (e.payload.repo !== repo || e.payload.slug !== slug) return;
+      setDead((d) => (d.includes(e.payload.index) ? d : [...d, e.payload.index]));
+    });
+    return () => { un.then((f) => f()); };
+  }, [repo, slug]);
+
+  const restartTab = (id: number) => {
+    invoke("close_shell_session", { repo, slug, index: id }).catch(onError);
+    setDead((d) => d.filter((x) => x !== id));
+    setRestartToken((t) => t + 1); // remount the pane → shell_open spawns afresh
+  };
+  const [restartToken, setRestartToken] = useState(0);
 
   const addTab = useCallback(() => {
     if (restoringRef.current) return; // don't add a tab the restore is about to overwrite
@@ -692,16 +700,26 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     <div className="termtabs">
       <div className="termtab-strip">
         {ids.map((id) => (
-          <span key={id} className={"termtab" + (active === id ? " on" : "")}>
-            <button className="termtab-label" onClick={() => setActive(id)}>sh {id}</button>
+          <span key={id} className={"termtab" + (active === id ? " on" : "") + (dead.includes(id) ? " dead" : "")}>
+            <button className="termtab-label" title={dead.includes(id) ? "process exited" : undefined}
+              onClick={() => setActive(id)}>sh {id}</button>
             <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}><Icons.X size={11} /></button>
           </span>
         ))}
         <button className="termtab-add" title="new terminal (⌘⇧T)" onClick={addTab}><Icons.Plus size={13} /></button>
       </div>
       {active != null ? (
-        <DockTerminal key={repo + "|" + slug + ":" + active} repo={repo} slug={slug}
-          index={active} termVersion={termVersion} focusToken={focusToken} onError={onError} />
+        dead.includes(active) ? (
+          <div className="term-empty">
+            <div className="term-empty-card">
+              <div className="te-title">sh {active} — process exited</div>
+              <button className="enter-btn" onClick={() => restartTab(active)}>Restart shell</button>
+            </div>
+          </div>
+        ) : (
+          <ShellPane key={repo + "|" + slug + ":" + active + ":" + restartToken} repo={repo} slug={slug}
+            index={active} termVersion={termVersion} focusToken={focusToken} />
+        )
       ) : (
         <div className="term-empty">
           <div className="term-empty-card">
