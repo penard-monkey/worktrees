@@ -5,6 +5,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **Right activity rail.** The dock's Files/Terminal picker now lives in its own
+  rail on the right edge, mirroring the lens rail on the left. Clicking the
+  active icon collapses the dock, so the toolbar's panel button is gone. The
+  rail is always there — with no place selected its icons explain why they're
+  unavailable rather than disappearing.
+- **Branch switcher offers the repo's branches.** The status-bar field became a
+  combobox: filter as you type, ↑/↓ and Enter to pick, and a `create <name> off
+  <base>` row when what you typed doesn't exist yet. Remote-only branches are
+  listed too (picking one tracks it). Typing a name and pressing Enter still
+  works exactly as before.
+
+### Changed
+- **Dock shells no longer run under tmux.** Each Terminal tab is now a login
+  shell this app owns directly, which means C-b reaches your shell instead of
+  tmux, scrollback works with the mouse wheel instead of copy-mode, and the tab
+  works even without tmux installed. Shells survive closing the dock, flipping
+  tabs and switching places — their output is replayed when you come back — but
+  they no longer survive quitting the app, and they are no longer
+  `tmux attach`-able from a bare terminal. A shell that exits keeps its tab and
+  offers a restart. The place's own session is unchanged: still tmux, still
+  durable, still attachable. Leftover `~term` sessions from previous versions
+  are cleaned up automatically.
+- **Icons are a real set.** The chrome's Unicode glyphs (which picked a
+  different font each, so weights and sizes disagreed) are now inline SVG. The
+  two panel toggles say which panel they act on, and the dock toggle is no
+  longer visually identical to the Places lens.
+
+### Fixed
+- The dock was capped at 680px, stranding most of a fullscreen window; its width
+  now scales with the window. Side panels also re-fit when the window resizes, so
+  a window restored smaller than the one your widths were saved from no longer
+  overlaps its own toolbar — the dock steps aside and returns when there's room.
+
 ## [0.4.0] - 2026-07-28
 
 ### Added
