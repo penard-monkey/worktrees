@@ -1053,11 +1053,12 @@ function App() {
   }, []);
 
   // Dock only makes sense with a place selected (Files/Terminal need a worktree).
-  const fit = fitLayout(settings, !!selected && !!sel, vw);
+  const dockEligible = !!selected && !!sel;
+  const fit = fitLayout(settings, dockEligible, vw);
   const dockShown = fit.dockShown;
   // Would the dock fit if it were open? Drives the toggle's disabled state, so a
   // ⌘J that can't visibly do anything is at least honest about why.
-  const dockFits = fitLayout({ ...settings, dock_open: true }, !!selected && !!sel, vw).dockShown;
+  const dockFits = fitLayout({ ...settings, dock_open: true }, dockEligible, vw).dockShown;
 
   useLayoutEffect(() => {
     const root = document.documentElement.style;
@@ -1417,6 +1418,14 @@ function App() {
       return next;
     });
   }, []);
+  // Right rail → dock tab. Clicking the ACTIVE tab collapses the dock (VS Code's
+  // model), which is why the topbar no longer carries its own dock toggle.
+  const pickDockTab = (tab: Settings["dock_tab"]) =>
+    updateSettings(
+      settings.dock_open && settings.dock_tab === tab
+        ? { dock_open: false }
+        : { dock_tab: tab, dock_open: true },
+    );
   // right dock (Files / Terminal) — only renders with a place selected, but the
   // preference persists globally (stable useCallback: safe in the keydown effect).
   const toggleDock = useCallback(() => {
@@ -1768,6 +1777,10 @@ function App() {
     { key: "recent" as Lens, icon: <Icons.History size={17} />, title: "Recent — resurface dormant places" },
     { key: "attention" as Lens, icon: <Icons.TriangleAlert size={17} />, title: "Attention — dirty / ahead-behind / broken" },
   ];
+  const DOCK_RAIL = [
+    { key: "files" as Settings["dock_tab"], icon: <Icons.Folder size={17} />, title: "Files" },
+    { key: "terminal" as Settings["dock_tab"], icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
+  ];
 
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
   // shrink below the center pane's content and pushes the fixed columns off the
@@ -1777,6 +1790,7 @@ function App() {
     fit.navShown ? `${fit.navW}px` : null,
     "minmax(0, 1fr)",
     dockShown ? `${fit.dockW}px` : null,
+    "var(--rail-w)", // right rail — permanent, like the left one
   ].filter(Boolean).join(" ");
 
   return (
@@ -1881,12 +1895,8 @@ function App() {
               </div>
 
               <div className="controls">
-                <button
-                  className={"icon-btn" + (settings.dock_open ? " on" : "")}
-                  disabled={!dockFits}
-                  title={!dockFits ? "window too narrow for files & terminal" : settings.dock_open ? "hide files & terminal (⌘J)" : "files & terminal (⌘J)"}
-                  onClick={toggleDock}
-                >{settings.dock_open ? <Icons.PanelRightClose /> : <Icons.PanelRightOpen />}</button>
+                {/* the dock toggle moved to the right rail — it lives next to
+                    the thing it opens, and no longer collides with the lens ▤ */}
                 {selected.tmux_session.up ? (
                   <>
                     <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
@@ -2016,13 +2026,11 @@ function App() {
       {dockShown && selected && sel && (
         <aside className="dock">
           <div className="dock-resizer" onMouseDown={onDockResize} />
+          {/* the rail owns tab selection AND collapse, so this is a title, not
+              a control strip */}
           <div className="dock-tabs">
-            <button className={"dock-tab" + (settings.dock_tab === "files" ? " on" : "")}
-              onClick={() => updateSettings({ dock_tab: "files" })}>Files</button>
-            <button className={"dock-tab" + (settings.dock_tab === "terminal" ? " on" : "")}
-              onClick={() => updateSettings({ dock_tab: "terminal" })}>Terminal</button>
+            <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
             <span className="dock-spacer" />
-            <button className="icon-btn" title="hide dock (⌘J)" onClick={toggleDock}><Icons.X /></button>
           </div>
           <div className="dock-body">
             {settings.dock_tab === "files" ? (
@@ -2042,6 +2050,27 @@ function App() {
           </div>
         </aside>
       )}
+
+      {/* ── right rail: mirrors the left one. Permanent, so the dock always has
+          a visible affordance; the active icon collapses the dock. Disabled
+          with no place selected — Files/Terminal both need a worktree. */}
+      <nav className="rail rail-right">
+        {DOCK_RAIL.map((d) => {
+          const on = dockShown && settings.dock_tab === d.key;
+          const why = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
+          return (
+            <button
+              key={d.key}
+              className={"rail-icon" + (on ? " active" : "")}
+              disabled={!!why}
+              title={why ? `${d.title} — ${why}` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
+              onClick={() => pickDockTab(d.key)}
+            >
+              {d.icon}
+            </button>
+          );
+        })}
+      </nav>
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
       {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}

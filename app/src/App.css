@@ -2,7 +2,11 @@
  * so the Settings UI-font slider (--ui-rem) scales the whole app and a light theme
  * is a future [data-theme] map. No hardcoded hex here. */
 
-html, body, #root { height: 100%; margin: 0; }
+/* An app shell never scrolls at the document level — the columns own their own
+ * overflow. Without this, a sub-pixel artifact anywhere (a rail's active bar
+ * sitting a half-pixel proud, a 1fr track rounding up) shows up as a real
+ * horizontal scrollbar across the whole window. */
+html, body, #root { height: 100%; margin: 0; overflow: hidden; }
 * { box-sizing: border-box; }
 body { font-family: var(--font-ui); background: var(--bg-abyss); color: var(--txt); }
 
@@ -52,6 +56,15 @@ button { cursor: pointer; }
 }
 /* nav collapsed: the last lens stays faintly marked so re-expand is predictable */
 .rail-icon.remembered { color: var(--txt); }
+.rail-icon:disabled { color: var(--txt-mute); opacity: 0.4; cursor: default; }
+.rail-icon:disabled:hover { background: transparent; color: var(--txt-mute); }
+
+/* right rail — the dock's Files/Terminal picker. Mirrors the left rail down to
+   the active bar, which flips to the outer (window) edge. */
+.rail-right { border-right: 0; border-left: 1px solid var(--line); }
+/* -5, not the left rail's -6: the bar would sit a half-pixel past the rail's
+   content box and widen the document. Optically identical. */
+.rail-right .rail-icon.active::before { left: auto; right: -5px; }
 
 /* ── nav ── */
 .nav {
@@ -595,13 +608,12 @@ button { cursor: pointer; }
   display: flex; align-items: center; gap: var(--s1);
   padding: var(--s2); border-bottom: 1px solid var(--line);
 }
-.dock-tab {
-  background: transparent; border: 0; color: var(--txt-dim);
-  padding: var(--s1) var(--s2); border-radius: var(--r-sm); font-size: var(--fs-label);
-  transition: color var(--dur-fast), background var(--dur-fast);
+/* panel title, not a control strip — the right rail owns tab + collapse */
+.dock-title {
+  padding: var(--s1) var(--s2); color: var(--txt-dim);
+  font-size: var(--fs-meta); letter-spacing: 0.08em; text-transform: uppercase;
+  font-weight: var(--fw-bold);
 }
-.dock-tab:hover { color: var(--txt-hi); background: var(--bg-elev); }
-.dock-tab.on { color: var(--accent); background: var(--bg-elev); }
 .dock-spacer { flex: 1; }
 
 .dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
