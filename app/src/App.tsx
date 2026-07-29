@@ -9,7 +9,7 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
-import { applySettings, clampDock, clampNav, DEFAULTS, loadSettings, saveSettings, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, clampDock, clampNav, DEFAULTS, fitLayout, loadSettings, saveSettings, viewportWidth, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -1046,6 +1046,34 @@ function App() {
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
 
+  // ── column fitting ──
+  // Track the viewport so the side panels re-fit on every resize (and on a
+  // restore into a window smaller than the one the widths were saved from —
+  // that mismatch is what produced the overlapping topbar after a restart).
+  const [vw, setVw] = useState(viewportWidth);
+  useEffect(() => {
+    let raf = 0;
+    const onWinResize = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setVw(viewportWidth()));
+    };
+    window.addEventListener("resize", onWinResize);
+    return () => { window.removeEventListener("resize", onWinResize); cancelAnimationFrame(raf); };
+  }, []);
+
+  // Dock only makes sense with a place selected (Files/Terminal need a worktree).
+  const fit = fitLayout(settings, !!selected && !!sel, vw);
+  const dockShown = fit.dockShown;
+  // Would the dock fit if it were open? Drives the toggle's disabled state, so a
+  // ⌘J that can't visibly do anything is at least honest about why.
+  const dockFits = fitLayout({ ...settings, dock_open: true }, !!selected && !!sel, vw).dockShown;
+
+  useLayoutEffect(() => {
+    const root = document.documentElement.style;
+    root.setProperty("--nav-w", `${fit.navW}px`);
+    root.setProperty("--dock-w", `${fit.dockW}px`);
+  }, [fit.navW, fit.dockW]);
+
   // ctx target derived live from ws (a refresh while the menu is open must not go stale)
   const ctxPlace: Place | null =
     ctx?.kind === "place"
@@ -1540,11 +1568,17 @@ function App() {
   }, [ws, settings.restore_last, resume, sel]);
 
   // ── nav resizer (drag the nav's right edge) ──
+  // Both resizers clamp against the LIVE viewport, so a drag can never push the
+  // center pane under its floor. `window.innerWidth` is read inside the move
+  // handler rather than closed over — the window can be resized mid-drag.
   const onResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startW = settings.nav_width;
-    const move = (ev: MouseEvent) => updateSettings({ nav_width: clampNav(startW + (ev.clientX - startX)) });
+    const move = (ev: MouseEvent) =>
+      updateSettings({
+        nav_width: clampNav(startW + (ev.clientX - startX), dockShown ? settings.dock_width : 0, window.innerWidth),
+      });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -1555,7 +1589,10 @@ function App() {
     e.preventDefault();
     const startX = e.clientX;
     const startW = settings.dock_width;
-    const move = (ev: MouseEvent) => updateSettings({ dock_width: clampDock(startW - (ev.clientX - startX)) });
+    const move = (ev: MouseEvent) =>
+      updateSettings({
+        dock_width: clampDock(startW - (ev.clientX - startX), fit.navShown ? fit.navW : 0, window.innerWidth),
+      });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -1741,13 +1778,14 @@ function App() {
     { key: "attention" as Lens, icon: "⚠", title: "Attention — dirty / ahead-behind / broken" },
   ];
 
-  // Dock only makes sense with a place selected (Files/Terminal need a worktree).
-  const dockShown = settings.dock_open && !!selected && !!sel;
+  // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
+  // shrink below the center pane's content and pushes the fixed columns off the
+  // window instead of letting anything ellipsise.
   const gridCols = [
     "var(--rail-w)",
-    settings.nav_collapsed ? null : `${settings.nav_width}px`,
-    "1fr",
-    dockShown ? `${clampDock(settings.dock_width)}px` : null,
+    fit.navShown ? `${fit.navW}px` : null,
+    "minmax(0, 1fr)",
+    dockShown ? `${fit.dockW}px` : null,
   ].filter(Boolean).join(" ");
 
   return (
@@ -1773,7 +1811,7 @@ function App() {
       </nav>
 
       {/* ── nav (kept mounted while collapsed so form drafts / scroll survive ⌘B) ── */}
-      <aside className={"nav" + (settings.nav_collapsed ? " hidden" : "")}>
+      <aside className={"nav" + (fit.navShown ? "" : " hidden")}>
         <button className={"home-item" + (sel ? "" : " on")} onClick={() => { setSel(null); setMenu(null); closeCtx(); }}>
           <HomeIcon /> Home
         </button>
@@ -1839,18 +1877,23 @@ function App() {
                     {!selected.is_main && selected.branch !== selected.slug ? "↗ " : ""}{selected.branch}
                   </span>
                 )}
-                <span className="status-cluster">
-                  {selected.tmux_session.up && <span className="s ok" title="tmux live"><span className="status-dot on" /> live</span>}
-                  {selected.dirty && <span className="s dirty">● {selected.dirty_files ?? ""}</span>}
-                  {(selected.ahead || selected.behind) && <span className="s ab">↑{selected.ahead ?? 0} ↓{selected.behind ?? 0}</span>}
-                  <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
-                </span>
+                {/* squeezed window: the badges go, not the name — every fact
+                    here is also in the nav row and the status bar */}
+                {!fit.tight && (
+                  <span className="status-cluster">
+                    {selected.tmux_session.up && <span className="s ok" title="tmux live"><span className="status-dot on" /> live</span>}
+                    {selected.dirty && <span className="s dirty">● {selected.dirty_files ?? ""}</span>}
+                    {(selected.ahead || selected.behind) && <span className="s ab">↑{selected.ahead ?? 0} ↓{selected.behind ?? 0}</span>}
+                    <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
+                  </span>
+                )}
               </div>
 
               <div className="controls">
                 <button
                   className={"icon-btn" + (settings.dock_open ? " on" : "")}
-                  title={settings.dock_open ? "hide files & terminal (⌘J)" : "files & terminal (⌘J)"}
+                  disabled={!dockFits}
+                  title={!dockFits ? "window too narrow for files & terminal" : settings.dock_open ? "hide files & terminal (⌘J)" : "files & terminal (⌘J)"}
                   onClick={toggleDock}
                 >▧</button>
                 {selected.tmux_session.up ? (

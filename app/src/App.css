@@ -11,7 +11,7 @@ button { cursor: pointer; }
 
 .app {
   display: grid;
-  grid-template-columns: var(--rail-w) var(--nav-w) 1fr;
+  grid-template-columns: var(--rail-w) var(--nav-w) minmax(0, 1fr);
   height: 100%;
   background: var(--bg-abyss);
   color: var(--txt);
@@ -282,19 +282,29 @@ button { cursor: pointer; }
 /* ── main ── */
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-abyss); }
 
-/* top bar */
+/* top bar
+ * Shrink order is identity → branch → slug; the controls never yield, because a
+ * squeezed window that hides Enter/Lifecycle is worse than a truncated name.
+ * Without the min-width:0 chain, flex refuses to shrink these below their
+ * content and the children paint on top of each other. */
 .topbar {
-  display: flex; align-items: center; gap: var(--s3);
+  display: flex; align-items: center; gap: var(--s3); flex-wrap: nowrap; min-width: 0;
   padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel);
 }
-.identity { display: flex; align-items: center; gap: var(--s3); min-width: 0; }
-.topbar .slug { font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi); }
+.identity { display: flex; align-items: center; gap: var(--s3); flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.topbar .slug {
+  flex: 0 1 auto; min-width: 5ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi);
+}
 .topbar .branch {
+  flex: 0 1 auto; min-width: 0; max-width: 45%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-label); color: var(--branch);
   background: var(--bg-elev); padding: 1px var(--s2); border-radius: var(--r-sm);
 }
 .topbar .branch.hi { color: var(--branch-hi); }
-.status-cluster { display: flex; align-items: center; gap: var(--s3); font-size: var(--fs-meta); }
+.status-cluster { display: flex; align-items: center; gap: var(--s3); flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: var(--fs-meta); }
 .status-cluster .s { display: inline-flex; align-items: center; gap: 3px; }
 .status-cluster .ok { color: var(--ok); }
 .status-cluster .dirty { color: var(--dirty); }
@@ -308,7 +318,8 @@ button { cursor: pointer; }
 .life.saved { color: var(--pin); background: color-mix(in srgb, var(--pin) 12%, transparent); }
 .life.archived, .life.abandoned { color: var(--txt-mute); }
 
-.controls { margin-left: auto; display: flex; align-items: center; gap: var(--s2); }
+.controls { margin-left: auto; display: flex; align-items: center; gap: var(--s2); flex: 0 0 auto; }
+.icon-btn:disabled { opacity: 0.35; cursor: default; background: transparent; color: var(--txt-mute); }
 .enter-btn {
   background: var(--accent); color: var(--accent-ink); border: 0; border-radius: var(--r-sm);
   padding: var(--s2) var(--s3); font-size: var(--fs-label); font-weight: var(--fw-bold);
@@ -658,18 +669,24 @@ button { cursor: pointer; }
 
 /* status bar */
 .statusbar {
-  display: flex; align-items: center; gap: var(--s3);
+  display: flex; align-items: center; gap: var(--s3); min-width: 0;
   padding: var(--s2) var(--s3); border-top: 1px solid var(--line); background: var(--bg-panel);
   font-size: var(--fs-meta); color: var(--txt-dim);
 }
-.switch-wrap { display: flex; align-items: center; gap: var(--s2); flex: 1; }
-.sb-label { color: var(--txt-dim); }
+.switch-wrap { display: flex; align-items: center; gap: var(--s2); flex: 1 1 auto; min-width: 0; }
+.sb-label { color: var(--txt-dim); flex: none; }
 .switchto {
+  flex: 0 1 200px; min-width: 0;
   background: var(--bg-input); color: var(--txt); border: 1px solid var(--line);
-  border-radius: var(--r-sm); padding: 3px var(--s2); font-size: var(--fs-meta); width: 200px; outline: none;
+  border-radius: var(--r-sm); padding: 3px var(--s2); font-size: var(--fs-meta); outline: none;
 }
 .switchto:focus { border-color: var(--line-strong); }
-.sb-facts { margin-left: auto; font-variant-numeric: tabular-nums; }
+/* the tmux facts truncate rather than shove the switcher out of the bar */
+.sb-facts {
+  margin-left: auto; flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .sb-facts .ok { color: var(--ok); }
 .sb-facts .off { color: var(--txt-mute); }
 
