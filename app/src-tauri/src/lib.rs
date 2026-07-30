@@ -1983,8 +1983,17 @@ async fn shell_detach(repo: String, slug: String, index: u32, gen: u64, shells: 
 /// though they work in every terminal (tmux is homebrew-installed: every place
 /// looks dead and Enter errors). Resolve the user's real PATH from their login
 /// shell once at startup (marker-wrapped so chatty profiles can't corrupt it;
-/// deadline-guarded so a hung profile can't block launch), falling back to
-/// appending the usual install dirs.
+/// deadline-guarded so a hung profile can't block launch).
+///
+/// The usual install dirs are ALWAYS appended, not just when the probe fails:
+/// a login shell whose profile never runs `brew shellenv` reports a PATH with no
+/// /opt/homebrew/bin in it, and a brew-installed tmux would stay invisible even
+/// though the probe "worked". Order is shell PATH → standard dirs → the original
+/// PATH as a safety net, so the user's own resolution still wins; duplicate
+/// entries are harmless.
+///
+/// Re-entrant on purpose: `tmux_check(refresh = true)` calls it again to pick up
+/// a tmux installed after launch.
 fn fixup_gui_path() {
     let current = std::env::var("PATH").unwrap_or_default();
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
@@ -2000,14 +2009,36 @@ fn fixup_gui_path() {
                 .map(|p| p.trim().to_string())
         })
         .filter(|p| !p.is_empty());
+    let home = std::env::var("HOME").unwrap_or_default();
+    let std_dirs = format!("{home}/.local/bin:{home}/bin:/opt/homebrew/bin:/usr/local/bin");
+    // dups harmless; `current` kept as the final safety net
     let path = match from_shell {
-        Some(p) => format!("{p}:{current}"), // dups harmless; current kept as safety net
-        None => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            format!("{home}/.local/bin:{home}/bin:/opt/homebrew/bin:/usr/local/bin:{current}")
-        }
+        Some(p) => format!("{p}:{std_dirs}:{current}"),
+        None => format!("{std_dirs}:{current}"),
     };
     std::env::set_var("PATH", path);
+}
+
+/// Is tmux reachable right now? `refresh = true` re-resolves the GUI PATH first,
+/// so a tmux installed AFTER the app launched is picked up without a restart
+/// (startup resolves PATH exactly once). Async is not optional here: the
+/// login-shell probe inside `fixup_gui_path` is deadline-guarded at 5s, and a
+/// sync handler would spend all of it frozen on the main thread.
+#[tauri::command]
+async fn tmux_check(refresh: bool) -> Result<bool, String> {
+    if !refresh {
+        return Ok(worktrees_core::tmux::have_tmux());
+    }
+    let before = worktrees_core::tmux::have_tmux();
+    fixup_gui_path();
+    let after = worktrees_core::tmux::have_tmux();
+    if after && !before {
+        applog(
+            "info",
+            &format!("tmux_check: tmux found after PATH refresh; PATH={}", std::env::var("PATH").unwrap_or_default()),
+        );
+    }
+    Ok(after)
 }
 
 /// Same launchd-bare-env problem as PATH, but for locale: GUI-launched apps
@@ -2128,6 +2159,7 @@ pub fn run() {
             init_suggest,
             init_write,
             diagnostics,
+            tmux_check,
             log_info,
             log_event,
             log_tail,

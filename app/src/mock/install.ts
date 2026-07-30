@@ -33,6 +33,10 @@ function reconcile(pl: Place) {
 
 let dialogCount = 0;
 let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
+// tmux is there unless the harness is asked to take it away (?notmux); see the
+// tmux_check case for the two shapes.
+const mockTmuxStuck = location.search.includes("notmux=stuck");
+let mockTmux = !location.search.includes("notmux");
 const MOCK_SETTINGS_KEY = "wt-mock-ui-state"; // sessionStorage: see get_settings
 
 // ── project config / doctor / init (the Project sheet) ──────────────────────
@@ -336,6 +340,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return { dir: "/Users/demo/Library/Logs/net.casadelvalle.worktrees", file: "/Users/demo/Library/Logs/net.casadelvalle.worktrees/app.log" };
     case "log_tail":
       return "2026-07-25 20:00:01Z [info] startup v0.2.1 PATH=/usr/bin:...\n2026-07-25 20:00:09Z [info] open messaging fresh=false ok repo=/Users/demo/workspace/cdv\n2026-07-25 20:01:12Z [warn] close api rc=1 repo=/Users/demo/workspace/cdv: no live session";
+
+    // tmux presence → the missing-tmux banner. STATEFUL like mockCliVersion, so
+    // the whole flow is exercisable headlessly: `?notmux` starts without tmux and
+    // a Re-check (refresh:true, i.e. the backend re-resolving PATH) FINDS it —
+    // banner retires, places refresh. `?notmux=stuck` never finds it, which is
+    // the only way to see the "still not found" feedback.
+    case "tmux_check":
+      if (args.refresh && !mockTmuxStuck) mockTmux = true;
+      return mockTmux;
 
     case "switch_place":
       editPlace(args.repo, args.slug, (p) => { p.branch = args.branch; });

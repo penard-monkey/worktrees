@@ -854,6 +854,34 @@ function BranchSwitcher({ repo, slug, onSwitch, onError }: {
   );
 }
 
+// tmux is missing: every place's session is unreachable, and nothing in the UI
+// said so — it just looked like everything was dead. Module scope (not inside
+// App) so the "checking…" state survives App's re-renders.
+function TmuxBanner({ onRecheck }: { onRecheck: () => Promise<boolean> }) {
+  const [busy, setBusy] = useState(false);
+  const [stillMissing, setStillMissing] = useState(false);
+  const recheck = async () => {
+    setBusy(true);
+    setStillMissing(false);
+    const ok = await onRecheck();
+    setBusy(false);
+    // `ok` retires the whole banner from App — only the miss needs saying here.
+    if (!ok) setStillMissing(true);
+  };
+  return (
+    <div className="tmux-banner">
+      <Icons.TriangleAlert size={14} />
+      <span className="tmux-banner-txt">
+        tmux is not installed — sessions need it. macOS: <code>brew install tmux</code>
+      </span>
+      {stillMissing && <span className="tmux-banner-miss">still not found</span>}
+      <button className="tmux-banner-btn" disabled={busy} onClick={recheck}>
+        {busy ? "Checking…" : "Re-check"}
+      </button>
+    </div>
+  );
+}
+
 function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
@@ -951,6 +979,29 @@ function App() {
     }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
+
+  // ── tmux presence ──
+  // Optimistic default: assume present until the probe says otherwise, so the
+  // banner never flashes on a machine that has tmux. Re-check re-resolves the
+  // GUI PATH backend-side (it is resolved once at startup), which is the only
+  // way a tmux installed while the app was open becomes visible without a
+  // restart — so a successful one also re-pulls the workspace, otherwise every
+  // place would keep showing the dead session it was last polled with.
+  const [tmuxOk, setTmuxOk] = useState(true);
+  useEffect(() => {
+    invoke<boolean>("tmux_check", { refresh: false }).then(setTmuxOk).catch(fail);
+  }, [fail]);
+  const recheckTmux = useCallback(async () => {
+    try {
+      const ok = await invoke<boolean>("tmux_check", { refresh: true });
+      setTmuxOk(ok);
+      if (ok) { refresh(); setPlacesToken((v) => v + 1); }
+      return ok;
+    } catch (e) {
+      fail(e);
+      return false;
+    }
+  }, [fail, refresh]);
 
   // live refresh: backend emits "places:changed" (poll/fs-watch) → re-pull
   useEffect(() => {
@@ -2012,6 +2063,7 @@ function App() {
 
       {/* ── main ── */}
       <main className="main">
+        {!tmuxOk && <TmuxBanner onRecheck={recheckTmux} />}
         {selected && sel ? (
           <>
             <header className="topbar">

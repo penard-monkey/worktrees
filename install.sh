@@ -15,6 +15,11 @@
 #   install.sh --with-app                same as WORKTREES_INSTALL_APP=1
 #   install.sh --uninstall               remove the installed binary (only that)
 #
+# Requirements: curl, git >= 2.23 and tmux. tmux is NOT optional — a place is a
+# tmux session, so the installer stops if it is missing: on macOS it offers to
+# run `brew install tmux` (when a terminal is attached to ask on); on Linux it
+# prints your distribution's install command and exits without running anything.
+#
 # Desktop app (macOS): with a terminal attached the installer OFFERS to install
 # worktrees.app to /Applications (checksum-verified, then the quarantine attr is
 # stripped — the bundle is unsigned; you explicitly chose to install it).
@@ -41,6 +46,54 @@ detect_triple() {  # Rust target triple for this host, or "" if unknown
     Linux/aarch64|Linux/arm64)  echo aarch64-unknown-linux-gnu ;;
     *)                          echo "" ;;
   esac
+}
+
+# Called ONLY when tmux is absent. tmux is a hard requirement (a place IS a tmux
+# session: 'open' needs it, 'new' degrades), so this never returns unless tmux is
+# on PATH afterwards — every other branch exits 1.
+require_tmux() {
+  local ans="" mgr=""
+  if [ "$(uname -s)" = Darwin ]; then
+    if ! command -v brew >/dev/null 2>&1; then
+      echo "ERROR: tmux is required and Homebrew is missing." >&2
+      echo "       Install Homebrew first: https://brew.sh — then 'brew install tmux' and re-run this installer." >&2
+      exit 1
+    fi
+    # curl|bash: stdin is the script itself — ask on the controlling terminal.
+    # ([ -r /dev/tty ] passes even with NO controlling tty; actually open it.)
+    if ! { : < /dev/tty && : > /dev/tty; } 2>/dev/null; then
+      echo "ERROR: tmux is required (and there is no terminal to ask on)." >&2
+      echo "       Run 'brew install tmux', then re-run this installer." >&2
+      exit 1
+    fi
+    printf '\ntmux is required. Install it via Homebrew now? [Y/n] ' > /dev/tty
+    IFS= read -r ans < /dev/tty || ans=""
+    case "$ans" in
+      n|N|no|NO|No)
+        echo "ERROR: tmux is required." >&2
+        echo "       Run 'brew install tmux', then re-run this installer." >&2
+        exit 1
+        ;;
+    esac
+    brew install tmux || { echo "ERROR: 'brew install tmux' failed — install tmux, then re-run this installer." >&2; exit 1; }
+    if ! command -v tmux >/dev/null 2>&1; then
+      echo "ERROR: tmux is still not on PATH after 'brew install tmux'." >&2
+      echo "       Make sure brew's bin dir is on your PATH (eval \"\$(brew shellenv)\"), then re-run this installer." >&2
+      exit 1
+    fi
+    return 0
+  fi
+
+  # Linux: never run a package manager on the user's behalf — name the command.
+  if command -v apt-get >/dev/null 2>&1; then mgr="sudo apt-get install tmux"
+  elif command -v dnf >/dev/null 2>&1; then mgr="sudo dnf install tmux"
+  elif command -v pacman >/dev/null 2>&1; then mgr="sudo pacman -S tmux"
+  elif command -v zypper >/dev/null 2>&1; then mgr="sudo zypper install tmux"
+  else mgr="install tmux with your distribution's package manager"
+  fi
+  echo "ERROR: tmux is required. Install it: $mgr" >&2
+  echo "       Then re-run this installer." >&2
+  exit 1
 }
 
 install_app() {  # $1 version  $2 release download url  $3 tmp dir
@@ -113,7 +166,7 @@ main() {
       0.*|1.[0-8]|1.[0-8].*) echo "WARNING: tmux $tmux_ver is older than 1.9 — sessions may fail; upgrade tmux" >&2 ;;
     esac
   else
-    echo "NOTE: tmux not found — 'new' will degrade to --no-tmux, 'open' needs tmux. macOS: brew install tmux · debian: apt install tmux" >&2
+    require_tmux
   fi
 
   # Existing clone-managed symlink? Don't fight `make install`.
