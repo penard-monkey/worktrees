@@ -163,6 +163,9 @@ impl Project {
         // without shelling out per place — the app polls this every ~3s.
         let panes = tmux::PaneList::fetch();
         let ai_word = adopt_ai_word();
+        // Resolved once per snapshot, not per place — it's a couple of git
+        // ref lookups and every place divergence-checks against the same ref.
+        let base_ref = self.base_ref();
         // Build every place's snapshot in parallel — each place shells out to git
         // (status/divergence/log), and summed serially this froze the app on big
         // repos. Main first, then worktrees; recency-sort the worktrees afterwards
@@ -170,7 +173,7 @@ impl Project {
         let tasks: Vec<(String, bool)> = std::iter::once((self.main_root.clone(), true))
             .chain(self.worktree_dirs().into_iter().map(|d| (d, false)))
             .collect();
-        let mut computed = self.place_json_par(&tasks, &reg, panes.as_ref(), &ai_word);
+        let mut computed = self.place_json_par(&tasks, &reg, panes.as_ref(), &ai_word, &base_ref);
         let main = computed.remove(0);
         computed.sort_by(|a, b| recency_key(b).cmp(&recency_key(a))); // stable desc, glob-order ties
         let mut places = Vec::with_capacity(computed.len() + 1);
@@ -191,7 +194,7 @@ impl Project {
         format!("{}\n", serde_json::to_string(&self.ls()).unwrap_or_default())
     }
 
-    fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str) -> Place {
+    fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str) -> Place {
         let slug = if is_main { "(main)".to_string() } else { basename(dir) };
         let canonical = self.session_name(&slug);
         // Canonical name first (exact match). If it's down, adopt any session
@@ -256,7 +259,15 @@ impl Project {
         };
         let upstream = git::git_out(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
             .filter(|s| !s.is_empty());
-        let (behind, ahead) = match git::git_out(dir, &["rev-list", "--left-right", "--count", "@{u}...HEAD"]) {
+        // Divergence vs the repo's BASE branch, not @{u}. Work flows through
+        // worktrees toward main, and that's the question ↑↓ answers on sight:
+        // "how far from main". Upstream told a different story — a branch that
+        // just merged origin/main in showed ↑hundreds (the merged commits are
+        // unpushed) exactly when the user had brought it in sync. It also lit
+        // no arrows at all on branches with no upstream, which is most local
+        // branches. (main) degenerates to the classic pull counter, since its
+        // base ref IS origin/main. The `upstream` field stays informational.
+        let (behind, ahead) = match git::git_out(dir, &["rev-list", "--left-right", "--count", &format!("{base_ref}...HEAD")]) {
             Some(ab) if !ab.is_empty() => {
                 let mut it = ab.split_whitespace();
                 (it.next().and_then(|x| x.parse().ok()), it.next().and_then(|x| x.parse().ok()))
@@ -286,7 +297,7 @@ impl Project {
     /// (status / divergence / last-commit); running them concurrently turns a
     /// sum-of-latencies into ~max. `LANES` caps concurrent git processes so a repo
     /// with many worktrees can't thrash. Order is preserved (caller keeps main first).
-    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str) -> Vec<Place> {
+    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str) -> Vec<Place> {
         const LANES: usize = 16;
         let mut out = Vec::with_capacity(tasks.len());
         for chunk in tasks.chunks(LANES) {
@@ -295,7 +306,7 @@ impl Project {
                     .iter()
                     .map(|(dir, is_main)| {
                         let is_main = *is_main;
-                        s.spawn(move || self.place_json(dir, is_main, reg, panes, ai_word))
+                        s.spawn(move || self.place_json(dir, is_main, reg, panes, ai_word, base_ref))
                     })
                     .collect();
                 for h in handles {
@@ -405,6 +416,19 @@ impl Project {
             }
         }
         git::git_out(&self.main_root, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|| "main".into())
+    }
+
+    /// The ref every place's ↑↓ divergence is measured against: the remote's
+    /// view of the default base when a fetch has brought one (origin/main moves
+    /// on fetch — exactly what "am I behind?" should track), else the local
+    /// base branch (no-remote repos).
+    pub fn base_ref(&self) -> String {
+        let base = self.default_base();
+        if git::git_ok(&self.main_root, &["show-ref", "--verify", "-q", &format!("refs/remotes/origin/{base}")]) {
+            format!("origin/{base}")
+        } else {
+            base
+        }
     }
 
     /// Branch of worktree `dir`; `(detached)` on a detached HEAD.

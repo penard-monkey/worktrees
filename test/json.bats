@@ -74,16 +74,20 @@ assert_valid_json() { printf '%s' "$output" | python3 -m json.tool >/dev/null; }
   [ "$(field feat-z 'p["lifecycle_effective"]')" = "active" ]
 }
 
-@test "ls --json: branch with no upstream → ahead/behind/upstream all null" {
+# ↑↓ semantics: divergence is measured vs the BASE branch (origin/main here),
+# NOT @{u}. Rationale in project.rs: work flows through worktrees toward main,
+# and @{u} lit ↑hundreds on a branch that had just merged main in (the merged
+# commits are unpushed to ITS remote) — precisely when the user was in sync.
+@test "ls --json: no upstream → upstream null but ahead/behind still measured (vs base)" {
   run_wt new feat-x --no-tmux
   # force no-upstream regardless of git's autoSetupMerge default
   git -C "$REPO/.worktrees/feat-x" branch --unset-upstream 2>/dev/null || true
   run_wt ls --json
   [ "$status" -eq 0 ]
   assert_valid_json
-  [ "$(field feat-x 'p["ahead"]')" = "None" ]
-  [ "$(field feat-x 'p["behind"]')" = "None" ]
   [ "$(field feat-x 'p["upstream"]')" = "None" ]
+  [ "$(field feat-x 'p["ahead"]')" = "0" ]
+  [ "$(field feat-x 'p["behind"]')" = "0" ]
 }
 
 @test "ls --json: tracked branch → integer ahead/behind and upstream string" {
@@ -95,6 +99,23 @@ assert_valid_json() { printf '%s' "$output" | python3 -m json.tool >/dev/null; }
   [ "$(field feat-x 'type(p["ahead"]).__name__')" = "int" ]
   [ "$(field feat-x 'type(p["behind"]).__name__')" = "int" ]
   [ "$(field feat-x 'p["upstream"]')" = "origin/main" ]
+}
+
+@test "ls --json: divergence tracks the base, not @{u} — merged-in main reads in sync" {
+  run_wt new feat-x --no-tmux
+  # the screenshot scenario: the branch has its OWN pushed upstream…
+  git -C "$REPO/.worktrees/feat-x" push -qu origin feat-x
+  # …then origin/main gains a commit the branch doesn't have
+  ( cd "$REPO" && echo x > newfile && git add -A && git commit -qm advance && git push -q origin main )
+  run_wt ls --json
+  [ "$(field feat-x 'p["behind"]')" = "1" ]
+  [ "$(field feat-x 'p["ahead"]')" = "0" ]
+  # updating the branch from main must read as in sync — under @{u} (origin/feat-x)
+  # this very merge showed as ↑2 with the arrows claiming divergence
+  git -C "$REPO/.worktrees/feat-x" merge -q --no-edit origin/main
+  run_wt ls --json
+  [ "$(field feat-x 'p["behind"]')" = "0" ]
+  [ "$(field feat-x 'p["ahead"]')" = "0" ]
 }
 
 @test "ls --json: detached HEAD → branch null, detached true" {
