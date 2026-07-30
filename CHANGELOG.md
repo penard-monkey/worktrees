@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **The app says when tmux is missing.** A banner above the top bar names the
+  problem (`brew install tmux` on macOS) instead of leaving every place looking
+  dead for no stated reason. Its `Re-check` button re-resolves the app's PATH,
+  so a tmux installed while the app was open is picked up without a restart —
+  the places refresh and sessions light up on the spot.
+
+### Changed
+- **The installer now requires tmux.** A place *is* a tmux session, so
+  installing without it produced a half-working tool. `install.sh` stops when
+  tmux is absent: on macOS it offers to run `brew install tmux` (with a terminal
+  attached to ask on), and on Linux it prints your distribution's exact install
+  command. The CLI's own runtime behaviour is unchanged — `new` still degrades
+  to `--no-tmux` if tmux disappears later.
+
+### Fixed
+- The app's PATH fixup now always appends the standard install dirs
+  (`~/.local/bin`, `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) after the
+  login shell's PATH, not only when the shell probe fails. A profile that never
+  runs `brew shellenv` used to hide a brew-installed tmux from the GUI app.
+
 ## [0.5.0] - 2026-07-29
 
 ### Added

@@ -307,6 +307,36 @@ button { cursor: pointer; }
 /* ── main ── */
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-abyss); }
 
+/* tmux missing: a standing condition, not a toast — it sits above the top bar
+   until tmux is actually there. Amber (the "needs a human" colour), one line,
+   never taller than the top bar it displaces. */
+.tmux-banner {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: var(--s2); min-width: 0;
+  padding: var(--s2) var(--s3);
+  background: color-mix(in srgb, var(--warn) 14%, var(--bg-panel));
+  color: var(--warn);
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  font-size: var(--fs-meta);
+}
+.tmux-banner-txt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmux-banner-txt code {
+  background: var(--bg-elev); color: var(--txt-hi);
+  padding: 1px var(--s1); border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+}
+.tmux-banner-miss { flex: 0 0 auto; color: var(--txt-dim); }
+.tmux-banner-btn {
+  flex: 0 0 auto;
+  padding: 2px var(--s2);
+  background: var(--bg-elev); color: var(--txt);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  font-size: var(--fs-meta);
+  transition: color var(--dur-fast), background var(--dur-fast);
+}
+.tmux-banner-btn:hover:not(:disabled) { color: var(--txt-hi); background: var(--bg-panel); }
+.tmux-banner-btn:disabled { opacity: 0.6; }
+
 /* top bar
  * Shrink order is identity → branch → slug; the controls never yield, because a
  * squeezed window that hides Enter/Lifecycle is worse than a truncated name.
