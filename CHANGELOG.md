@@ -5,15 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
-### Fixed
-- The nav's ↑/↓ arrows now measure against the repo's base branch (origin/main)
-  instead of the branch's own upstream. Updating a branch from main now reads as
-  in sync; previously a pushed branch that merged main in showed hundreds
-  "ahead" (the merged commits counted as unpushed), and branches with no
-  upstream showed no arrows at all. The (main) row still works as a pull
-  counter.
-- Manual sort ("drag rows") actually drags now — Tauri's native drag-drop
-  handler was intercepting HTML5 drag-and-drop in the app window.
+## [0.5.0] - 2026-07-29
 
 ### Added
 - **Right activity rail.** The dock's Files/Terminal picker now lives in its own
@@ -48,6 +40,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   now scales with the window. Side panels also re-fit when the window resizes, so
   a window restored smaller than the one your widths were saved from no longer
   overlaps its own toolbar — the dock steps aside and returns when there's room.
+- The nav's ↑/↓ arrows now measure against the repo's base branch (origin/main)
+  instead of the branch's own upstream. Updating a branch from main now reads as
+  in sync; previously a pushed branch that merged main in showed hundreds
+  "ahead" (the merged commits counted as unpushed), and branches with no
+  upstream showed no arrows at all. The (main) row still works as a pull
+  counter.
+- Manual sort ("drag rows") actually drags now — Tauri's native drag-drop
+  handler was intercepting HTML5 drag-and-drop in the app window.
 
 ## [0.4.0] - 2026-07-28
 
