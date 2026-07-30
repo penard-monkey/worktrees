@@ -120,3 +120,12 @@ close-out ritual (.claude/skills/close-out).
   down while sidecars linger and is never closed keeps them until `rm`. Only
   worth touching if sidecar leaks show up in practice.
   _From: [2026-07-28 right-dock session](docs/sessions/2026-07-28-right-dock/summary.md)_
+
+- **tmux gate: manual `[Y/n]` run + PATH hygiene.** The installer's
+  interactive macOS brew prompt (install.sh `require_tmux`) has never been
+  exercised on a real tty — one live run on a tmux-less mac. Separately,
+  every banner Re-check re-prepends the std-dirs block to PATH
+  (`fixup_gui_path` is re-entrant now; dups harmless but unbounded) — add a
+  dedupe pass, and while there reconsider runtime `std::env::set_var` vs
+  handing a computed PATH to spawns (POSIX getenv race, accepted for now).
+  _From: [2026-07-30 tmux-gate session](docs/sessions/2026-07-30-tmux-gate/summary.md)_
