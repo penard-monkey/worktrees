@@ -10,6 +10,21 @@ import { clampNav, clampRem, clampTerm, THEMES } from "./settings";
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
 
+// Sheet categories. One is shown at a time (see .settings-split) — the flat
+// 12-section pile made every setting equally hard to find. Purely presentational:
+// no section's markup or onChange contract changed when they were bucketed.
+const CATS = [
+  { id: "appearance", label: "Appearance" },
+  { id: "terminal", label: "Terminal" },
+  { id: "navigation", label: "Navigation" },
+  { id: "commands", label: "Commands" },
+  { id: "behavior", label: "Behavior" },
+  { id: "updates", label: "Updates" },
+  { id: "data", label: "Data & Logs" },
+  { id: "shortcuts", label: "Shortcuts" },
+] as const;
+type CatId = (typeof CATS)[number]["id"];
+
 // Right-side slide-over. Presentational: App owns the Settings state and does the
 // apply-live + persist + terminal-refit on each change. Esc / scrim closes.
 // The Version section owns its own update-run state (log/progress) locally.
@@ -38,6 +53,11 @@ export function SettingsSheet({
   onShowNotes: () => void;
   onReset: () => void;
 }) {
+  // Selected category — local, deliberately NOT persisted: the sheet always
+  // opens on Appearance so "where was I" never depends on last session.
+  const [cat, setCat] = useState<CatId>("appearance");
+  useEffect(() => { if (open) setCat("appearance"); }, [open]);
+
   const [updating, setUpdating] = useState(false);
   const [updateLog, setUpdateLog] = useState("");
   const [checkState, setCheckState] = useState<"" | "checking" | "done">("");
@@ -213,16 +233,22 @@ export function SettingsSheet({
           <button className="icon-btn" title="close (Esc)" onClick={onClose}><Icons.X /></button>
         </header>
 
-        <div className="settings-body">
-          <section className="setting">
-            <label>UI font size <span className="val">{settings.ui_rem}px</span></label>
-            <input
-              type="range" min={13} max={18} step={1} value={settings.ui_rem}
-              onChange={(e) => onChange({ ui_rem: clampRem(+e.currentTarget.value) })}
-            />
-            <div className="preview">The quick brown fox jumps</div>
-          </section>
+        <div className="settings-split">
+        <nav className="settings-cats">
+          {CATS.map((c) => (
+            <button
+              key={c.id}
+              className={"settings-cat" + (cat === c.id ? " on" : "")}
+              onClick={() => setCat(c.id)}
+            >
+              {c.label}
+              {c.id === "updates" && actionable ? <span className="upd-tag">upd</span> : null}
+            </button>
+          ))}
+        </nav>
 
+        <div className="settings-body">
+          {cat === "terminal" && <>
           <section className="setting">
             <label>Terminal font</label>
             <input
@@ -235,7 +261,9 @@ export function SettingsSheet({
               onChange={(e) => onChange({ term_size: clampTerm(+e.currentTarget.value) })}
             />
           </section>
+          </>}
 
+          {cat === "commands" && <>
           <section className="setting">
             <label>Commands</label>
             <label className="sub">Editor command</label>
@@ -269,6 +297,17 @@ export function SettingsSheet({
               <button className="ctrl sm" onClick={revealAiConfig} disabled={!aiConfig}>Reveal config file</button>
             </div>
             <div className="hint">Shared with the CLI (~/.config/worktrees/config). Shell env vars (WORKTREES_AI_CMD) don't reach the GUI.</div>
+          </section>
+          </>}
+
+          {cat === "appearance" && <>
+          <section className="setting">
+            <label>UI font size <span className="val">{settings.ui_rem}px</span></label>
+            <input
+              type="range" min={13} max={18} step={1} value={settings.ui_rem}
+              onChange={(e) => onChange({ ui_rem: clampRem(+e.currentTarget.value) })}
+            />
+            <div className="preview">The quick brown fox jumps</div>
           </section>
 
           <section className="setting">
@@ -316,6 +355,21 @@ export function SettingsSheet({
               ))}
             </div>
           </section>
+          </>}
+
+          {cat === "behavior" && <>
+          <section className="setting">
+            <label>Startup</label>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.restore_last}
+                onChange={(e) => onChange({ restore_last: e.currentTarget.checked })}
+              />
+              Restore last place on launch
+            </label>
+            <div className="hint">Reopens the most recently used place, ready but not started — press Enter to attach.</div>
+          </section>
 
           <section className="setting">
             <label>Git</label>
@@ -331,20 +385,9 @@ export function SettingsSheet({
             </select>
             <div className="hint">Keeps ahead/behind counts fresh. Fetches each project's origin in the background.</div>
           </section>
+          </>}
 
-          <section className="setting">
-            <label>Startup</label>
-            <label className="tier-toggle setting-check">
-              <input
-                type="checkbox"
-                checked={settings.restore_last}
-                onChange={(e) => onChange({ restore_last: e.currentTarget.checked })}
-              />
-              Restore last place on launch
-            </label>
-            <div className="hint">Reopens the most recently used place, ready but not started — press Enter to attach.</div>
-          </section>
-
+          {cat === "updates" && <>
           <section className="setting">
             <label>Version{actionable ? <span className="upd-tag">{cliMissing ? "cli not installed" : "update available"}</span> : null}</label>
             <label className="tier-toggle setting-check">
@@ -395,6 +438,16 @@ export function SettingsSheet({
             )}
             {updateLog && <pre className="update-log">{updateLog}</pre>}
           </section>
+          </>}
+
+          {cat === "navigation" && <>
+          <section className="setting">
+            <label>Nav width <span className="val">{settings.nav_width}px</span></label>
+            <input
+              type="range" min={220} max={460} step={10} value={settings.nav_width}
+              onChange={(e) => onChange({ nav_width: clampNav(+e.currentTarget.value) })}
+            />
+          </section>
 
           <section className="setting">
             <label>Nav tiers</label>
@@ -421,6 +474,21 @@ export function SettingsSheet({
           </section>
 
           <section className="setting">
+            <label>Tree guide lines</label>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.nav_guides}
+                onChange={(e) => onChange({ nav_guides: e.currentTarget.checked })}
+              />
+              Draw the vertical guides
+            </label>
+            <div className="hint">The 1px rails that connect a project to its places. Off leaves the indentation alone.</div>
+          </section>
+          </>}
+
+          {cat === "data" && <>
+          <section className="setting">
             <label>Logs</label>
             <div className="ver-rows">
               <div className="ver-row"><span className="ver-path" title={logPath}>{logPath || "…"}</span></div>
@@ -430,17 +498,26 @@ export function SettingsSheet({
               <button className="ctrl sm" onClick={viewLogTail}>{logTail ? "Refresh tail" : "View tail"}</button>
               <button className="ctrl sm" onClick={copyDiagnostics}>{diagCopied ? "Copied ✓" : "Copy diagnostics"}</button>
             </div>
-            {logTail && <pre className="update-log">{logTail}</pre>}
+            {logTail && <pre className="update-log log-tail">{logTail}</pre>}
           </section>
 
           <section className="setting">
-            <label>Nav width <span className="val">{settings.nav_width}px</span></label>
-            <input
-              type="range" min={220} max={460} step={10} value={settings.nav_width}
-              onChange={(e) => onChange({ nav_width: clampNav(+e.currentTarget.value) })}
-            />
+            <label>Data</label>
+            <div className="ver-rows">
+              <div className="ver-row"><span className="ver-path" title={settingsPath}>{settingsPath || "…"}</span></div>
+            </div>
+            <div className="ver-actions">
+              <button className="ctrl sm" onClick={revealSettings}>Reveal settings file</button>
+              <button className={"ctrl sm danger" + (resetArmed ? " armed" : "")} onClick={doReset}>
+                {resetArmed ? "Confirm reset?" : "Reset to defaults"}
+              </button>
+            </div>
+            {resetArmed && <div className="hint">Restores every setting to its default (theme, fonts, nav, sort, tiers).</div>}
+            {dataErr && <pre className="update-log">{dataErr}</pre>}
           </section>
+          </>}
 
+          {cat === "shortcuts" && <>
           <section className="setting">
             <label>Shortcuts</label>
             <div className="shortcuts">
@@ -462,21 +539,8 @@ export function SettingsSheet({
               ))}
             </div>
           </section>
-
-          <section className="setting">
-            <label>Data</label>
-            <div className="ver-rows">
-              <div className="ver-row"><span className="ver-path" title={settingsPath}>{settingsPath || "…"}</span></div>
-            </div>
-            <div className="ver-actions">
-              <button className="ctrl sm" onClick={revealSettings}>Reveal settings file</button>
-              <button className={"ctrl sm danger" + (resetArmed ? " armed" : "")} onClick={doReset}>
-                {resetArmed ? "Confirm reset?" : "Reset to defaults"}
-              </button>
-            </div>
-            {resetArmed && <div className="hint">Restores every setting to its default (theme, fonts, nav, sort, tiers).</div>}
-            {dataErr && <pre className="update-log">{dataErr}</pre>}
-          </section>
+          </>}
+        </div>
         </div>
       </aside>
     </div>
