@@ -114,12 +114,22 @@ close-out ritual (.claude/skills/close-out).
   first real UI-lib dependency — a decision, not a default).
   _From: [2026-07-28 right-dock session](docs/sessions/2026-07-28-right-dock/summary.md)_
 
-- **Dock shell sidecar lifecycle edges** (both benign, documented, not fixed):
-  (1) a sidecar killed *outside* the app (bare `tmux kill-session`) while its
-  tab persists → clicking the tab recreates it; (2) a place whose AI session is
-  down while sidecars linger and is never closed keeps them until `rm`. Only
-  worth touching if sidecar leaks show up in practice.
-  _From: [2026-07-28 right-dock session](docs/sessions/2026-07-28-right-dock/summary.md)_
+- **Smoke the v0.5.0 dock + drag in the real app** — neither is verifiable in
+  the mock harness: (1) manual sort drag (fix was `dragDropEnabled:false`;
+  WKWebView-only behavior), (2) owned dock shells — replay after tab
+  flip / ⌘J, detach-not-kill mid-command, exit → Restart, no orphan `zsh -l`
+  after app quit (`ps` check). The tmux-sidecar lifecycle-edges item from the
+  2026-07-28 session is superseded: sidecars were replaced wholesale by owned
+  PTYs in v0.5.0.
+  _From: [2026-07-29 right-panel session](docs/sessions/2026-07-29-right-panel/summary.md)_
+
+- **Right-panel review nits** (deliberately left): `--nav-w`/`--dock-w` CSS vars
+  still written by App's layout effect but nothing consumes them (grid uses
+  inline px) — delete the effect or re-point the static `.app` rule;
+  `place_session_cwd` doc comment still explains sidecar-name stability;
+  combobox Enter with a highlight index stale after a filter shrink falls back
+  to raw text (acceptable, but a bounds-clamp on `hi` is one line).
+  _From: [2026-07-29 right-panel session](docs/sessions/2026-07-29-right-panel/summary.md)_
 
 - **tmux gate: manual `[Y/n]` run + PATH hygiene.** The installer's
   interactive macOS brew prompt (install.sh `require_tmux`) has never been
