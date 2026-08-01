@@ -3,9 +3,16 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] - 2026-08-01
 
 ### Added
+- **Terminal tabs can be named.** Double-click a dock terminal tab to rename it
+  (Enter saves, Esc cancels). Names belong to the place and survive quitting the
+  app — the shell itself doesn't, so a named tab comes back as a fresh shell
+  under the same name. Closing a tab forgets its name.
+- **The nav's tree guide lines are optional.** Settings → Navigation → "Tree
+  guide lines" turns the 1px rails connecting a project to its places off;
+  indentation still carries the depth.
 - **The app says when tmux is missing.** A banner above the top bar names the
   problem (`brew install tmux` on macOS) instead of leaving every place looking
   dead for no stated reason. Its `Re-check` button re-resolves the app's PATH,
@@ -13,6 +20,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the places refresh and sessions light up on the spot.
 
 ### Changed
+- **Settings has categories now.** The sheet's single 12-section scroll became
+  eight categories behind a category rail (Appearance, Terminal, Navigation,
+  Commands, Behavior, Updates, Data & Logs, Shortcuts), and the sheet is wider.
+  Every setting kept its behaviour — it just has an address now. The Updates
+  category shows the update badge on its rail entry.
+- The Logs tail pane in Settings is substantially taller — 200 lines of tail in
+  a pane that showed eight of them was a reading slit, not a log view.
 - **The installer now requires tmux.** A place *is* a tmux session, so
   installing without it produced a half-working tool. `install.sh` stops when
   tmux is absent: on macOS it offers to run `brew install tmux` (with a terminal
