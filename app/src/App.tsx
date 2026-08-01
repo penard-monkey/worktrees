@@ -614,8 +614,37 @@ function FileViewer({ path, reloadToken, onOpenEditor, onError }: {
 // Only the active shell is mounted; the rest keep running detached, and their
 // output is replayed from the backend's ring buffer when you flip back.
 // `addToken` bumps → add a tab (⌘⇧T from the global handler).
-function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, onError }: {
-  repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number; onError: (e: unknown) => void;
+//
+// Inline tab-rename box. Module scope with props, per CLAUDE.md: defined inside
+// TerminalTabs it would get a new identity on every render and lose focus after
+// the first keystroke. Enter / blur commit, Esc cancels; keys are stopped from
+// reaching the global shortcut handler (Esc there closes sheets).
+function TermTabRename({ initial, onCommit, onCancel }: {
+  initial: string; onCommit: (name: string) => void; onCancel: () => void;
+}) {
+  const [text, setText] = useState(initial);
+  const ref = useRef<HTMLInputElement | null>(null);
+  const settled = useRef(false); // Esc unmounts → don't let a trailing blur commit
+  useEffect(() => { ref.current?.focus(); ref.current?.select(); }, []);
+  const commit = () => { if (settled.current) return; settled.current = true; onCommit(text.trim()); };
+  return (
+    <input
+      ref={ref} className="termtab-rename" value={text} spellCheck={false}
+      onChange={(e) => setText(e.currentTarget.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") { e.preventDefault(); commit(); }
+        else if (e.key === "Escape") { e.preventDefault(); settled.current = true; onCancel(); }
+      }}
+    />
+  );
+}
+
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, names, onRename, onError }: {
+  repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
+  names: Record<number, string>; onRename: (index: number, name: string | null) => void;
+  onError: (e: unknown) => void;
 }) {
   const [ids, setIds] = useState<number[] | null>(null); // null = restoring
   const [active, setActive] = useState<number | null>(null);
@@ -626,16 +655,29 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   const idsRef = useRef<number[]>([]);
   idsRef.current = ids ?? [];
   const restoringRef = useRef(true);
+  // names is read by the restore, which must NOT re-run on every rename
+  const namesRef = useRef(names);
+  namesRef.current = names;
+  const [editing, setEditing] = useState<number | null>(null);
+  const labelOf = (id: number) => names[id] || `sh ${id}`;
 
-  // Restore tabs from the live shell registry on mount / place change.
+  // Restore tabs from the live shell registry on mount / place change, UNIONed
+  // with the tabs the user named for this place. Names outlive the process (they
+  // live in ui-state.json) while shells don't, so a named tab comes back as a
+  // tab: activating it mounts ShellPane, which spawns a fresh shell. The union
+  // is gated on a live session — a closed place still shows nothing.
   useEffect(() => {
     let alive = true;
     restoringRef.current = true;
-    setIds(null); setActive(null); setDead([]);
+    setIds(null); setActive(null); setDead([]); setEditing(null);
     invoke<{ index: number; dead: boolean }[]>("list_shell_sessions", { repo, slug })
       .then((existing) => {
         if (!alive) return;
-        const list = existing.length ? existing.map((t) => t.index) : (sessionUp ? [1] : []);
+        const named = sessionUp
+          ? Object.keys(namesRef.current).map(Number).filter((n) => Number.isInteger(n) && n > 0)
+          : [];
+        const union = [...new Set([...existing.map((t) => t.index), ...named])].sort((a, b) => a - b);
+        const list = union.length ? union : (sessionUp ? [1] : []);
         setDead(existing.filter((t) => t.dead).map((t) => t.index));
         setIds(list); setActive(list[0] ?? null); restoringRef.current = false;
       })
@@ -694,6 +736,8 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
 
   const closeTab = (id: number) => {
     invoke("close_shell_session", { repo, slug, index: id }).catch(onError);
+    onRename(id, null); // an explicitly closed tab drops its name — otherwise it
+                        // would be seeded straight back on the next restore
     const remaining = idsRef.current.filter((x) => x !== id);
     setIds(remaining);
     if (active === id) setActive(remaining.length ? remaining[remaining.length - 1] : null);
@@ -706,8 +750,16 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
       <div className="termtab-strip">
         {ids.map((id) => (
           <span key={id} className={"termtab" + (active === id ? " on" : "") + (dead.includes(id) ? " dead" : "")}>
-            <button className="termtab-label" title={dead.includes(id) ? "process exited" : undefined}
-              onClick={() => setActive(id)}>sh {id}</button>
+            {editing === id ? (
+              <TermTabRename
+                initial={labelOf(id)}
+                onCommit={(name) => { onRename(id, name && name !== `sh ${id}` ? name : null); setEditing(null); }}
+                onCancel={() => setEditing(null)}
+              />
+            ) : (
+              <button className="termtab-label" title={dead.includes(id) ? "process exited" : "double-click to rename"}
+                onClick={() => setActive(id)} onDoubleClick={() => setEditing(id)}>{labelOf(id)}</button>
+            )}
             <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}><Icons.X size={11} /></button>
           </span>
         ))}
@@ -717,7 +769,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
         dead.includes(active) ? (
           <div className="term-empty">
             <div className="term-empty-card">
-              <div className="te-title">sh {active} — process exited</div>
+              <div className="te-title">{labelOf(active)} — process exited</div>
               <button className="enter-btn" onClick={() => restartTab(active)}>Restart shell</button>
             </div>
           </div>
@@ -1210,6 +1262,20 @@ function App() {
     if (patch.term_family !== undefined || patch.term_size !== undefined || patch.theme !== undefined ||
         patch.theme_light !== undefined || patch.theme_dark !== undefined)
       setTermVersion((v) => v + 1);
+  };
+
+  // Dock terminal tab names live in ui-state.json under `repo|slug` → index →
+  // name (name === null deletes). Empty buckets are pruned so a place you never
+  // named leaves no trace in the settings file.
+  const renameTermTab = (repo: string, slug: string, index: number, name: string | null) => {
+    const key = repo + "|" + slug;
+    const all = { ...(settings.term_tab_names ?? {}) };
+    const bucket = { ...(all[key] ?? {}) };
+    if (name) bucket[index] = name;
+    else delete bucket[index];
+    if (Object.keys(bucket).length) all[key] = bucket;
+    else delete all[key];
+    updateSettings({ term_tab_names: all });
   };
 
   // theme "system": re-apply when macOS appearance flips
@@ -2235,7 +2301,10 @@ function App() {
             ) : (
               <TerminalTabs key={sel.repo + "|" + sel.slug}
                 repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
-                termVersion={termVersion} focusToken={termFocus} addToken={newTermToken} onError={fail} />
+                termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
+                names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
+                onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
+                onError={fail} />
             )}
           </div>
         </aside>

@@ -34,10 +34,16 @@ export type Settings = {
   theme_dark: ThemeId;
   density: "comfortable" | "compact";
   nav_width: number; // 220–460, further capped by the viewport (see fitLayout)
+  nav_guides: boolean; // draw the tree plumb lines in the nav (data-guides on <html>)
   nav_collapsed: boolean; // rail-only mode (nav hidden)
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal"; // last-used dock tab
+  // Dock terminal tab names: `repo|slug` → tab index → user-chosen label.
+  // Only the NAME persists across restarts, never the shell: a named tab with no
+  // live shell is seeded back into the strip and spawns a fresh shell when you
+  // activate it. Closing a tab explicitly drops its name.
+  term_tab_names: Record<string, Record<number, string>>;
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
   ai_auto_resume: boolean; // single-click Enter resumes an existing Claude conversation (Claude only)
@@ -75,10 +81,12 @@ export const DEFAULTS: Settings = {
   theme_dark: "tokyo-night",
   density: "comfortable",
   nav_width: 300,
+  nav_guides: true,
   nav_collapsed: false,
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
+  term_tab_names: {},
   editor_cmd: "code",
   terminal_cmd: "",
   ai_auto_resume: true,
@@ -178,6 +186,7 @@ export function applySettings(s: Settings) {
   root.style.setProperty("--term-size", `${clampTerm(s.term_size)}px`);
   root.dataset.theme = resolveTheme(s);
   root.dataset.density = s.density;
+  root.dataset.guides = s.nav_guides ? "on" : "off";
 }
 
 // Pre-theme installs persisted theme:"dark"; unknown ids (downgrades) reset too.

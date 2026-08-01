@@ -259,6 +259,13 @@ button { cursor: pointer; }
   background: var(--guide-hot); pointer-events: none;
 }
 .kids > .places:has(.row.sel)::after { background: var(--guide-sel); }
+/* Settings → Navigation → "Tree guide lines" off: depth still reads from the
+   indent, the rails just stop being drawn. One override, all rails + the tick. */
+html[data-guides="off"] .kids::before,
+html[data-guides="off"] .kids-d::before,
+html[data-guides="off"] .group > .places::before,
+html[data-guides="off"] .subgroup > .places::before,
+html[data-guides="off"] .kids > .places::after { display: none; }
 /* dormant recession: darker = deader (full-bleed — rail x-math needs left edge at 0) */
 .group.dormant { background: var(--bg-abyss); border-radius: var(--r-md); }
 
@@ -466,6 +473,9 @@ button { cursor: pointer; }
   font-family: var(--term-family); font-size: var(--fs-micro); color: var(--txt);
   white-space: pre-wrap; word-break: break-all;
 }
+/* the Logs tail is the thing you actually READ (200 lines) — the update-run log
+   next to it is a progress trace and stays short. */
+.update-log.log-tail { max-height: 40vh; }
 
 /* sort popover + manual-drag affordances + tier toggles + what's-new */
 .sortpop { min-width: 180px; }
@@ -665,6 +675,12 @@ button { cursor: pointer; }
 .termtab.dead { color: var(--txt-mute); border-style: dashed; }
 .termtab.dead.on { color: var(--txt-dim); }
 .termtab-label { background: transparent; border: 0; color: inherit; padding: 2px var(--s2); font: inherit; }
+/* double-click the label → this box, sized to sit inside the tab chrome */
+.termtab-rename {
+  width: 9ch; min-width: 0; margin: 1px var(--s1); padding: 1px var(--s1);
+  background: var(--bg-input); border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  color: var(--txt-hi); font: inherit; outline: none;
+}
 .termtab-x {
   background: transparent; border: 0; color: var(--txt-mute);
   padding: 2px 5px 2px 0; font-size: var(--fs-micro); line-height: 1;
@@ -831,13 +847,37 @@ button { cursor: pointer; }
 }
 .qs-row .life { margin-left: auto; flex: none; }
 .settings-sheet {
-  width: min(380px, 92%); height: 100%; background: var(--bg-tree);
+  width: min(560px, 92%); height: 100%; background: var(--bg-tree);
   border-left: 1px solid var(--line); box-shadow: var(--shadow-float);
   display: flex; flex-direction: column; animation: pop var(--dur-slow) var(--ease);
 }
 .settings-h { display: flex; align-items: center; padding: var(--s4); border-bottom: 1px solid var(--line); }
 .settings-h b { flex: 1; font-size: var(--fs-title); color: var(--txt-hi); }
-.settings-body { padding: var(--s4); overflow-y: auto; display: flex; flex-direction: column; gap: var(--s5); }
+/* Category rail + single-category pane. One category is shown at a time (not
+   scroll-to): the sheet used to be 12 sections in one column, which made every
+   setting equally hard to find. */
+.settings-split { flex: 1; min-height: 0; display: flex; }
+.settings-cats {
+  flex: 0 0 140px; min-width: 0; padding: var(--s3) var(--s2);
+  border-right: 1px solid var(--line); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.settings-cat {
+  display: flex; align-items: center; gap: var(--s2); text-align: left;
+  padding: var(--row-pad-v) var(--s3); border: 0; border-radius: var(--r-md);
+  background: transparent; color: var(--txt-dim); font-size: var(--fs-label);
+  font-weight: var(--fw-med); cursor: pointer; white-space: nowrap;
+}
+.settings-cat:hover { background: var(--bg-elev); color: var(--txt-hi); }
+.settings-cat.on { background: var(--bg-elev); color: var(--accent); }
+.settings-cat .upd-tag {
+  margin-left: auto; padding: 0 4px; letter-spacing: 0;
+}
+/* overflow-x hidden: the log / settings paths are long and single-line, and a
+   horizontal scrollbar under the whole pane to reach text the title tooltip
+   already gives you is a bad trade. */
+.settings-body { flex: 1; min-width: 0; padding: var(--s4); overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: var(--s5); }
+.ver-row { min-width: 0; overflow: hidden; }
 .setting { display: flex; flex-direction: column; gap: var(--s2); }
 .setting > label { font-size: var(--fs-label); color: var(--txt); font-weight: var(--fw-med); }
 .setting > label.sub { color: var(--txt-dim); font-weight: var(--fw-body); margin-top: var(--s2); }
