@@ -438,7 +438,7 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
         // AI actually being Claude — appending -r to an arbitrary ai_cmd breaks it.
         let resume = !fresh.unwrap_or(false)
             && ai_is_claude()
-            && worktrees_core::project::claude_session_present(&p.place_dir(&slug));
+            && p.claude_session_present(&p.place_dir(&slug));
         if slug == "(main)" {
             if !worktrees_core::tmux::have_tmux() {
                 ui.error("tmux not found");
@@ -453,7 +453,7 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
             // banner / app.log, not silently report success. Single-pane
             // (spare_shell=false): Claude gets full width; the scratch shell
             // lives in the dock's Terminal tab.
-            ops::launch(p, ui, &p.main_root, &session, "", &ai_cmd, false, false)
+            ops::launch(p, ui, &p.main_root, &session, "", &ops::ai_launch_for(p, &ai_cmd), false, false)
         } else {
             let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
             if resume {
@@ -467,10 +467,9 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
 /// Auto-resume only applies when the AI pane actually runs Claude Code (same
 /// first-word/basename derivation as ops::launch).
 fn ai_is_claude() -> bool {
-    let cmd = worktrees_core::config::resolve_ai_cmd(None);
-    let word = cmd.split_whitespace().next().unwrap_or("");
-    let base = word.rsplit('/').next().unwrap_or(word);
-    base == "claude"
+    // Same single derivation core uses for tmux adoption — see
+    // `profile::ai_word_of`. Re-deriving it here is how the three copies drifted.
+    worktrees_core::profile::ai_word_of(&worktrees_core::config::resolve_ai_cmd(None)) == "claude"
 }
 
 /// End a place's tmux session — the worktree stays (right-click "Close session").
@@ -709,35 +708,40 @@ fn pid_alive(pid: i32) -> bool {
 fn claude_activity() -> (Vec<String>, Vec<String>) {
     let mut busy = Vec::new();
     let mut waiting = Vec::new();
-    let home = std::env::var("HOME").unwrap_or_default();
-    if home.is_empty() {
-        return (busy, waiting);
-    }
-    let dir = Path::new(&home).join(".claude/sessions");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return (busy, waiting), // dir missing/unreadable → no dots
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
+    // Scan EVERY config root, not just `~/.claude`: a profiled session writes its
+    // probes under the profile's own dir, so a $HOME-only scan would leave the
+    // busy/waiting dots permanently dark for profiled places — a silent
+    // degradation with nothing in the log to explain it.
+    //
+    // Union is safe because each probe carries its own `cwd` and `pid`, so it is
+    // self-describing: we never need to know which profile a place is bound to,
+    // and a place whose profile changed mid-session still lights up.
+    for root in worktrees_core::profile::claude_config_dirs_all() {
+        let entries = match std::fs::read_dir(root.join("sessions")) {
+            Ok(e) => e,
+            Err(_) => continue, // dir missing/unreadable → no dots from this root
         };
-        let probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
-            Ok(p) => p,          // missing pid/cwd/status → parse fails → skip
-            Err(_) => continue,
-        };
-        if probe.cwd.is_empty() || !pid_alive(probe.pid) {
-            continue; // dead pid (or crashed-session stale file) → no dot
-        }
-        match probe.status.as_str() {
-            "busy" => busy.push(probe.cwd),
-            "waiting" => waiting.push(probe.cwd),
-            _ => {} // idle / shell / anything else → no dot
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
+                Ok(p) => p,          // missing pid/cwd/status → parse fails → skip
+                Err(_) => continue,
+            };
+            if probe.cwd.is_empty() || !pid_alive(probe.pid) {
+                continue; // dead pid (or crashed-session stale file) → no dot
+            }
+            match probe.status.as_str() {
+                "busy" => busy.push(probe.cwd),
+                "waiting" => waiting.push(probe.cwd),
+                _ => {} // idle / shell / anything else → no dot
+            }
         }
     }
     (busy, waiting)

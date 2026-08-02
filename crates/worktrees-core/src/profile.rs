@@ -274,6 +274,48 @@ pub fn resolve_profile_id(repo_root: &str) -> Option<String> {
     )
 }
 
+// ── where claude keeps its state ─────────────────────────────────────────────
+
+/// The claude config root in effect for a repo: its bound profile's directory,
+/// or the user's own `~/.claude`.
+///
+/// Everything that PROBES claude's on-disk state must go through this. Two such
+/// probes are `$HOME`-anchored today and would silently stop working the moment
+/// a profile swaps the config dir, with no error surfaced anywhere:
+///
+/// - `project::claude_session_present` — drives the app's auto-resume (`-r`).
+///   Wrong root → the app decides there is no history → every profiled session
+///   starts cold and the user loses their conversation.
+/// - the app's `claude_activity` scan — drives the busy/waiting dots.
+///   Wrong root → the dots simply never light for profiled places.
+pub fn claude_config_dir_for_repo(repo_root: &str) -> PathBuf {
+    resolve_profile_id(repo_root)
+        .and_then(|id| profile_dir(&id))
+        .unwrap_or_else(default_claude_dir)
+}
+
+/// `~/.claude` — the unprofiled default.
+pub fn default_claude_dir() -> PathBuf {
+    PathBuf::from(home()).join(".claude")
+}
+
+/// Every config root that might hold a live session probe: the user's own, plus
+/// one per declared profile.
+///
+/// The activity scan reads probe files that each carry their own `cwd` and `pid`,
+/// so the union is self-describing — we do not need to know which profile a given
+/// place uses, and a place whose profile changed mid-session still lights up.
+/// Directories that do not exist are harmless; the caller skips them.
+pub fn claude_config_dirs_all() -> Vec<PathBuf> {
+    let mut out = vec![default_claude_dir()];
+    for id in read_lenient().profiles.keys() {
+        if let Some(d) = profile_dir(id) {
+            out.push(d);
+        }
+    }
+    out
+}
+
 // ── the launch shape ─────────────────────────────────────────────────────────
 
 /// What the AI pane actually launches, resolved once and carried as a struct.
@@ -637,6 +679,28 @@ mod tests {
             match_word: "claude".into(),
         };
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");
+    }
+
+    #[test]
+    fn the_unprofiled_claude_root_is_the_users_own() {
+        // With no profile bound, every probe must keep looking exactly where it
+        // looks today — this is the "changed nothing" half of Phase 4.
+        let d = default_claude_dir();
+        assert!(d.ends_with(".claude"), "{d:?}");
+        // …and the union always contains it, so an unprofiled session's activity
+        // dots survive the scan being widened.
+        assert!(claude_config_dirs_all().contains(&d));
+    }
+
+    #[test]
+    fn claude_config_dirs_are_all_distinct_roots() {
+        // A duplicate root would double-count probes and light two places from
+        // one session.
+        let all = claude_config_dirs_all();
+        let mut sorted = all.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), all.len(), "duplicate roots in {all:?}");
     }
 
     #[test]

@@ -66,6 +66,19 @@ impl Project {
         format!("{}-{}", self.prefix, slug).replace('.', "-")
     }
 
+    /// The claude config dir in effect for THIS repo — the bound profile's, or
+    /// `~/.claude`. Every probe of claude's on-disk state goes through here;
+    /// see `profile::claude_config_dir_for_repo` for why that matters.
+    pub fn claude_config_root(&self) -> PathBuf {
+        crate::profile::claude_config_dir_for_repo(&self.main_root)
+    }
+
+    /// True if `dir` already has a Claude Code conversation under this repo's
+    /// effective config root — the app's auto-resume test.
+    pub fn claude_session_present(&self, dir: &str) -> bool {
+        claude_session_present_in(&self.claude_config_root(), dir)
+    }
+
     fn registrations(&self) -> HashSet<String> {
         git::git_out(&self.main_root, &["worktree", "list", "--porcelain"])
             .map(|s| {
@@ -163,6 +176,10 @@ impl Project {
         // without shelling out per place — the app polls this every ~3s.
         let panes = tmux::PaneList::fetch();
         let ai_word = adopt_ai_word();
+        // Which claude config dir this repo's places actually use — `~/.claude`,
+        // or the bound profile's dir. Resolved once per snapshot alongside
+        // `ai_word` (it reads profiles.json) rather than per place.
+        let claude_root = self.claude_config_root();
         // Resolved once per snapshot, not per place — it's a couple of git
         // ref lookups and every place divergence-checks against the same ref.
         let base_ref = self.base_ref();
@@ -173,7 +190,7 @@ impl Project {
         let tasks: Vec<(String, bool)> = std::iter::once((self.main_root.clone(), true))
             .chain(self.worktree_dirs().into_iter().map(|d| (d, false)))
             .collect();
-        let mut computed = self.place_json_par(&tasks, &reg, panes.as_ref(), &ai_word, &base_ref);
+        let mut computed = self.place_json_par(&tasks, &reg, panes.as_ref(), &ai_word, &base_ref, &claude_root);
         let main = computed.remove(0);
         computed.sort_by(|a, b| recency_key(b).cmp(&recency_key(a))); // stable desc, glob-order ties
         let mut places = Vec::with_capacity(computed.len() + 1);
@@ -194,7 +211,7 @@ impl Project {
         format!("{}\n", serde_json::to_string(&self.ls()).unwrap_or_default())
     }
 
-    fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str) -> Place {
+    fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Place {
         let slug = if is_main { "(main)".to_string() } else { basename(dir) };
         let canonical = self.session_name(&slug);
         // Canonical name first (exact match). If it's down, adopt any session
@@ -212,7 +229,7 @@ impl Project {
         } else {
             (canonical, false)
         };
-        let cdir = claude_dir_for(dir);
+        let cdir = claude_dir_in(claude_root, dir);
         let cpresent = claude_has_session(&cdir);
         let bepoch = self.clock.stat_birth(dir);
         let created = self.clock.fmt_date(bepoch);
@@ -297,7 +314,7 @@ impl Project {
     /// (status / divergence / last-commit); running them concurrently turns a
     /// sum-of-latencies into ~max. `LANES` caps concurrent git processes so a repo
     /// with many worktrees can't thrash. Order is preserved (caller keeps main first).
-    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str) -> Vec<Place> {
+    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Vec<Place> {
         const LANES: usize = 16;
         let mut out = Vec::with_capacity(tasks.len());
         for chunk in tasks.chunks(LANES) {
@@ -306,7 +323,7 @@ impl Project {
                     .iter()
                     .map(|(dir, is_main)| {
                         let is_main = *is_main;
-                        s.spawn(move || self.place_json(dir, is_main, reg, panes, ai_word, base_ref))
+                        s.spawn(move || self.place_json(dir, is_main, reg, panes, ai_word, base_ref, claude_root))
                     })
                     .collect();
                 for h in handles {
@@ -508,15 +525,16 @@ pub(crate) fn prefix_file(main_root: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// The AI-command word used to PREFER an adopted session's AI pane — same
-/// derivation as `ops::launch` (first word of the resolved ai_cmd, basename,
-/// default `claude`). Computed once per snapshot here; `ops` calls it too, so
-/// the two adoption paths cannot drift.
+/// The AI-command word used to PREFER an adopted session's AI pane.
+///
+/// The derivation itself lives in `profile::ai_word_of` — it used to be
+/// copy-pasted here, in `ops::launch` and in the app, and `tmux::session_in`
+/// SUBSTRING-matches the result against `pane_current_command`. One shared
+/// function is what keeps a profiled launch (which prefixes env onto the shell
+/// line) from quietly turning the match word into `CLAUDE_CONFIG_DIR=…` and
+/// degrading adoption to "first pane in the worktree".
 pub(crate) fn adopt_ai_word() -> String {
-    let ai_cmd = crate::config::resolve_ai_cmd(None);
-    let full = ai_cmd.split_whitespace().next().unwrap_or("");
-    let word = if full.is_empty() { "claude" } else { full };
-    basename(word)
+    crate::profile::ai_word_of(&crate::config::resolve_ai_cmd(None))
 }
 
 fn detect_install_cmd(dir: &str) -> Option<String> {
@@ -535,18 +553,21 @@ fn detect_install_cmd(dir: &str) -> Option<String> {
 }
 
 /// True if a Claude Code conversation history already exists for this working
-/// dir — drives the app's auto-resume (`-r`). Same detection as the per-place
-/// `claude_session_present` field.
-pub fn claude_session_present(dir: &str) -> bool {
-    claude_has_session(&claude_dir_for(dir))
+/// dir UNDER `claude_root` — drives the app's auto-resume (`-r`). Same detection
+/// as the per-place `claude_session_present` field.
+///
+/// `claude_root` is the config dir actually in effect (`~/.claude`, or the bound
+/// profile's dir). Passing the wrong one is a silent failure: the app decides
+/// there is no history, launches cold, and the user's conversation appears lost.
+pub fn claude_session_present_in(claude_root: &Path, dir: &str) -> bool {
+    claude_has_session(&claude_dir_in(claude_root, dir))
 }
 
-fn claude_dir_for(dir: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
+fn claude_dir_in(claude_root: &Path, dir: &str) -> String {
     // Claude Code names a project dir by replacing EVERY non-alphanumeric char
     // with '-' (not just '/' and '.') — match it or paths with '_' etc. miss.
     let mangled: String = dir.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    format!("{home}/.claude/projects/{mangled}")
+    claude_root.join("projects").join(mangled).to_string_lossy().into_owned()
 }
 
 fn claude_has_session(cdir: &str) -> bool {

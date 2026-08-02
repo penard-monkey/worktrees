@@ -77,17 +77,37 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
     }
 }
 
+/// THE seam where a profile turns a bare `ai_cmd` into the real launch shape.
+///
+/// One function, called by every launch path (`new`, `open`, and the app's
+/// direct main-checkout launch), so the CLI and the app cannot diverge on which
+/// profile a place gets — a `worktrees open` from a bare terminal must produce
+/// the same session the app would, or an unprofiled CLI session gets silently
+/// ADOPTED by the app and displayed as though it were profiled.
+///
+/// Phase 4 is deliberately behaviour-preserving: it returns the plain launch and
+/// leaves the env/flag composition to the claude adapter. What it establishes is
+/// that `env` and `match_word` travel BESIDE the command instead of being parsed
+/// back out of it.
+pub fn ai_launch_for(_p: &Project, ai_cmd: &str) -> crate::profile::AiLaunch {
+    crate::profile::AiLaunch::plain(ai_cmd)
+}
+
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
 // Returns 0 on success (session live / adopted / attached), 1 when tmux refuses
 // to create the session (the reason is surfaced via ui.error — the app shows it
 // and the CLI exits nonzero, instead of the old silent "Session ready" lie).
-pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_cmd: &str, ai_cmd: &str, do_attach: bool, spare_shell: bool) -> i32 {
+pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_cmd: &str, ai: &crate::profile::AiLaunch, do_attach: bool, spare_shell: bool) -> i32 {
     let keep = "exec \"${SHELL:-/bin/sh}\"";
-    let ai_word_full = ai_cmd.split_whitespace().next().unwrap_or("");
-    let ai_word = {
-        let b = if ai_word_full.is_empty() { "claude" } else { ai_word_full };
-        basename(b)
-    };
+    // The word tmux adoption matches on. It comes from the RESOLVED PROGRAM, not
+    // from the string we are about to build: a profiled launch prefixes
+    // `CLAUDE_CONFIG_DIR=… ` onto that string, and deriving the word from it
+    // would yield `CLAUDE_CONFIG_DIR=…`. `session_in` substring-matches this
+    // against `pane_current_command`, so getting it wrong does not error — it
+    // silently downgrades adoption to "first pane in the worktree" and switches
+    // the app's auto-resume off.
+    let ai_word = ai.match_word.clone();
+    let ai_cmd = ai.cmd.as_str();
     let mut session = session_in.to_string();
     if !tmux::session_exists(&session) {
         // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
@@ -102,8 +122,15 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         ui.warn(&format!("tmux session '{session}' already in this worktree — attaching."));
     } else {
         ui.header(&format!("Opening tmux session '{session}'"));
+        // Env assignments go INSIDE the -ic string, ahead of the command, rather
+        // than through `tmux new-session -e`: env baked into the process survives
+        // detach, reattach and a tmux server restart by definition, and the bats
+        // fake-tmux shim parses argv positionally with no `-e` case. Assignments
+        // first also keeps the program itself as pane0's foreground process, so
+        // `pane_current_command` stays `claude`.
         let pane0 = if !ai_cmd.is_empty() {
-            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&format!("{ai_cmd}; {keep}")))
+            let prefix = ai.shell_prefix();
+            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&format!("{prefix}{ai_cmd}; {keep}")))
         } else {
             keep.to_string()
         };
@@ -401,7 +428,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // success the user MUST see (loud-guard). Propagate launch's rc so cmd_new
     // returns nonzero. (Fake shims always succeed → bats success path unchanged.)
     // `new` always keeps the spare shell (pane 1) — that's where deps install.
-    let rc = launch(p, ui, &wt, &session, &install_cmd, &ai_cmd, do_attach, true);
+    let rc = launch(p, ui, &wt, &session, &install_cmd, &ai_launch_for(p, &ai_cmd), do_attach, true);
     if rc != 0 {
         rc
     } else {
@@ -573,7 +600,7 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if resume && !ai_cmd.is_empty() {
         ai_cmd = format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg());
     }
-    launch(p, ui, &wt, &session, "", &ai_cmd, do_attach, spare_shell)
+    launch(p, ui, &wt, &session, "", &ai_launch_for(p, &ai_cmd), do_attach, spare_shell)
 }
 
 // ── close ────────────────────────────────────────────────────────────────────
