@@ -13,6 +13,7 @@ pub mod init;
 pub mod materialize;
 pub mod model;
 pub mod ops;
+pub mod profile;
 pub mod projcfg;
 pub mod project;
 pub mod provision;
