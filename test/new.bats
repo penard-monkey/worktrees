@@ -301,6 +301,30 @@ setup() {
   [[ "$(tmux_pane1_cmd repo-feat-ni)" != *install* ]]
 }
 
+@test "new (default) splits a spare shell into pane 1" {
+  run_wt new feat-sp
+  [ "$status" -eq 0 ]
+  [ -n "$(tmux_pane1_cmd repo-feat-sp)" ]   # split-window ran → pane 1 exists
+  grep -q 'split-window' "$TMUX_LOG"
+}
+
+@test "new --no-spare: single pane, no split-window (the app's path)" {
+  run_wt new feat-ns --no-spare
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-ns
+  [[ "$(tmux_pane0_cmd repo-feat-ns)" == *fake-ai* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-ns)" ]   # no pane 1
+  ! grep -q 'split-window' "$TMUX_LOG"
+}
+
+@test "new --no-spare: a detected install is hinted, never silently dropped" {
+  add_lockfile pnpm-lock.yaml
+  run_wt new feat-nsi --no-spare
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"then: pnpm install"* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-nsi)" ]
+}
+
 @test "new: --no-attach → session ready detached, no attach/switch-client" {
   run_wt new feat-na --no-attach
   [ "$status" -eq 0 ]

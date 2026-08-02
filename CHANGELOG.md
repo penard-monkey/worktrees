@@ -35,6 +35,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   to `--no-tmux` if tmux disappears later.
 
 ### Fixed
+- **Creating a place from the app now opens a single pane, like reopening one.**
+  New places came up with the AI pane squeezed next to a spare shell, while
+  reopening the same place gave Claude the full width — the same place looked
+  different depending on how you got there. `new` learned `--no-spare` (which
+  the app passes) so both paths agree. Dependencies are no longer auto-installed
+  in that second pane; install them in the dock's Terminal tab — the command
+  that would have run is printed for you. The CLI is unchanged: a bare
+  `worktrees new` still splits the spare shell and installs deps there.
 - The app's PATH fixup now always appends the standard install dirs
   (`~/.local/bin`, `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) after the
   login shell's PATH, not only when the shell probe fails. A profile that never

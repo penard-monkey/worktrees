@@ -152,7 +152,7 @@ Flags:
 
 | Command | Flags |
 |---|---|
-| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) |
+| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--no-spare` (single pane — no spare shell, and for `new` no auto-install) |
 | `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |

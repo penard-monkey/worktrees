@@ -382,6 +382,10 @@ async fn new_place(
         args.push(n);
     }
     args.push("--no-attach".into());
+    // Single-pane like `open_place` below: Claude gets the full width and the
+    // scratch shell lives in the dock's Terminal tab (which is also where deps
+    // get installed — `--no-spare` suppresses the auto-install pane).
+    args.push("--no-spare".into());
     let mut r = run_op(&format!("new {branch_log}"), &repo, |p, ui| ops::cmd_new(p, ui, &args))?;
     if r.ok {
         r.slug = resolved_slug;
