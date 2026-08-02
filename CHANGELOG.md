@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-01
+
+### Added
+- **Claude plan usage in the nav footer.** Three hairline bars mirror Claude
+  Code's `/usage` panel: the 5-hour session window, the weekly all-models
+  window, and any model-scoped weekly bucket (e.g. "Fable"), colored by the
+  severity Anthropic reports (normal / warning / exceeded), with reset times in
+  the tooltip. Data comes from the same endpoint the `/usage` panel uses,
+  authenticated with the Claude Code login already in the macOS Keychain — the
+  first fetch may show one Keychain prompt. If that's unavailable the app falls
+  back to the statusline snapshot in `~/.claude/widgets/rate_limits.json`
+  (rendered dimmed), and with no source at all the widget simply stays hidden.
+- `.nvmrc` (22.13.0 — the floor pnpm 11 requires). `make install-app` checks the
+  active Node against it up front rather than letting pnpm fail with its own
+  version error minutes into the cargo build.
+
 ### Fixed
 - Removing a place from the app always failed with `invalid args 'delBranch' for
   command 'remove_place'` and never reached the CLI. The frontend passed the flag
@@ -16,11 +32,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `.worktrees.toml` appears from outside the app (a merge, a pull, or the CLI's
   `init`). The suggestion probe rides the same five-minute sweep as doctor instead
   of running once per project at startup.
-
-### Added
-- `.nvmrc` (22.13.0 — the floor pnpm 11 requires). `make install-app` checks the
-  active Node against it up front rather than letting pnpm fail with its own
-  version error minutes into the cargo build.
 
 ## [0.6.0] - 2026-08-01
 
