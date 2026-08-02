@@ -130,6 +130,39 @@ button { cursor: pointer; }
 }
 
 .nav-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: var(--s2); }
+
+/* Claude plan usage — ambient, so it reads as chrome: micro type, hairline
+   bars, no heading. Colors follow the endpoint's own `severity`. */
+.usage {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: var(--s2) var(--s3);
+  border-top: 1px solid var(--line);
+}
+/* statusline snapshot: a local file only as fresh as the last Claude session */
+.usage.stale { opacity: 0.55; }
+.usage-row {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--fs-micro); color: var(--txt-dim);
+}
+.usage-label {
+  flex: 0 0 auto; max-width: 6em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.usage-bar {
+  flex: 1; min-width: 0; height: 3px; overflow: hidden;
+  background: var(--line); border-radius: var(--r-full);
+}
+.usage-bar > i {
+  display: block; height: 100%; border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 65%, transparent);
+  transition: width var(--dur-slow) var(--ease);
+}
+.usage-row.warn > .usage-bar > i { background: var(--warn); }
+.usage-row.over > .usage-bar > i { background: var(--danger); }
+.usage-pct { flex: 0 0 auto; min-width: 2.6em; text-align: right; font-variant-numeric: tabular-nums; }
+.usage-row.warn > .usage-pct { color: var(--warn); }
+.usage-row.over > .usage-pct { color: var(--danger); }
+
 .add-footer {
   margin: 0; padding: var(--s2) var(--s3); text-align: left;
   background: var(--bg-tree); color: var(--txt-dim); border: 0; border-top: 1px solid var(--line);

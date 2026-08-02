@@ -934,6 +934,80 @@ function TmuxBanner({ onRecheck }: { onRecheck: () => Promise<boolean> }) {
   );
 }
 
+// ── Claude plan usage (nav footer) ──────────────────────────────────────────
+// The same bars as Claude Code's /usage panel: 5h session window, weekly
+// all-models, plus any model-scoped weekly bucket ("Fable"). Backend
+// (`claude_usage`) never errors on missing data — it answers
+// source: "unavailable" and we render nothing, so a machine without Claude Code
+// credentials just has a plain nav.
+//
+// Module scope with props, per CLAUDE.md: it owns poll state, which a component
+// declared inside App() would throw away (and re-fetch) on every render.
+type UsageLimit = {
+  kind: string;
+  label: string;
+  percent: number;
+  severity: string;
+  resets_at: number | null;
+};
+type UsageInfo = { source: string; fetched_at: number; limits: UsageLimit[] };
+
+// 180s — the endpoint is undocumented and has rate-limited hard before; the
+// backend also caps real fetches at one per 120s.
+const USAGE_POLL_MS = 180_000;
+
+/** "5h" / "7d" for the two standard windows; model buckets keep their name. */
+function usageTick(l: UsageLimit): string {
+  if (l.kind === "session") return "5h";
+  if (l.kind === "weekly_all") return "7d";
+  return l.label;
+}
+
+function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
+  const [info, setInfo] = useState<UsageInfo | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const pull = () => {
+      invoke<UsageInfo>("claude_usage")
+        .then((u) => { if (alive) setInfo(u); })
+        .catch((e) => { if (alive) onError(e); });
+    };
+    pull();
+    const id = setInterval(pull, USAGE_POLL_MS);
+    // coming back to the window is exactly when a stale bar is most visible
+    window.addEventListener("focus", pull);
+    return () => {
+      alive = false;
+      clearInterval(id);
+      window.removeEventListener("focus", pull);
+    };
+  }, [onError]);
+
+  if (!info || info.source === "unavailable" || info.limits.length === 0) return null;
+  // statusline = a local snapshot only as fresh as the last Claude Code session
+  const stale = info.source === "statusline";
+  return (
+    <div
+      className={"usage" + (stale ? " stale" : "")}
+      title={stale ? `Claude usage — statusline snapshot from ${new Date(info.fetched_at * 1000).toLocaleString()}` : undefined}
+    >
+      {info.limits.map((l) => {
+        const pct = Math.max(0, Math.min(100, Math.round(l.percent)));
+        const tone = l.severity === "normal" ? "" : l.severity === "warning" ? " warn" : " over";
+        const resets = l.resets_at ? `, resets ${new Date(l.resets_at * 1000).toLocaleString()}` : "";
+        return (
+          <div className={"usage-row" + tone} key={l.kind + "|" + l.label} title={`${l.label} — ${pct}% used${resets}`}>
+            <span className="usage-label">{usageTick(l)}</span>
+            <span className="usage-bar"><i style={{ width: `${pct}%` }} /></span>
+            <span className="usage-pct">{pct}%</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
@@ -2127,6 +2201,9 @@ function App() {
             </>
           )}
         </div>
+        {/* Claude plan usage — nav-only by design: no rail affordance, it rides
+            out ⌘B inside the hidden nav (and keeps polling, one call/180s). */}
+        <UsageWidget onError={fail} />
         <button className="add-footer with-icon" onClick={addProject}><Icons.Plus size={13} /> Add project</button>
         <div className="nav-resizer" onMouseDown={onResize} />
       </aside>

@@ -350,6 +350,34 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       if (args.refresh && !mockTmuxStuck) mockTmux = true;
       return mockTmux;
 
+    // Claude plan usage → the nav-footer bars. Mirrors the oauth shape from
+    // lib.rs: a Fable bucket at severity "warning" so the amber tier is
+    // exercisable, and `?usage=stale` / `?usage=off` for the two degraded
+    // sources (statusline snapshot → dimmed; unavailable → widget hidden).
+    case "claude_usage": {
+      const t = now();
+      if (location.search.includes("usage=off")) return { source: "unavailable", fetched_at: t, limits: [] };
+      if (location.search.includes("usage=stale")) {
+        return {
+          source: "statusline",
+          fetched_at: t - 3 * 3600, // file mtime: last statusline write
+          limits: [
+            { kind: "session", label: "Session", percent: 46, severity: "normal", resets_at: t + 41 * 60 },
+            { kind: "weekly_all", label: "Weekly", percent: 61, severity: "normal", resets_at: t + 2 * 86400 },
+          ],
+        };
+      }
+      return {
+        source: "oauth",
+        fetched_at: t,
+        limits: [
+          { kind: "session", label: "Session", percent: 35, severity: "normal", resets_at: t + 54 * 60 },
+          { kind: "weekly_all", label: "Weekly", percent: 59, severity: "normal", resets_at: t + 3 * 86400 },
+          { kind: "weekly_scoped", label: "Fable", percent: 80, severity: "warning", resets_at: t + 3 * 86400 },
+        ],
+      };
+    }
+
     case "switch_place":
       editPlace(args.repo, args.slug, (p) => { p.branch = args.branch; });
       return { ok: true, code: 0, output: `Switched ${args.slug} → ${args.branch}` };
