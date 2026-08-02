@@ -108,7 +108,8 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
             keep.to_string()
         };
         // The spare shell is a SECOND pane next to pane0 (AI). The CLI keeps it
-        // (it's where deps install; `new` always splits). The app opens
+        // (it's where deps install; `new` and `open` both split by default,
+        // unless `--no-spare`). The app opens
         // single-pane (`spare_shell=false`) so Claude gets full width — its
         // scratch shell lives in the right dock's Terminal tab instead. An
         // install_cmd is only ever passed WITH the spare shell.
@@ -208,6 +209,10 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
 pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut do_install, mut do_tmux, mut do_attach, mut do_fetch, mut resume) = (true, true, true, true, false);
     let (mut branch, mut base, mut name, mut ai_flag) = (String::new(), String::new(), None::<String>, None::<String>);
+    // Default keeps the CLI's spare shell (pane 1) — that's where deps install.
+    // The app passes --no-spare so its embedded view is single-pane (Claude
+    // full-width); deps install by hand in the dock's Terminal tab.
+    let mut spare_shell = true;
     let mut expect = "";
     for arg in args {
         if !expect.is_empty() {
@@ -227,6 +232,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             "--no-install" => do_install = false,
             "--no-tmux" => do_tmux = false,
             "--no-attach" => do_attach = false,
+            "--no-spare" => spare_shell = false,
             "--no-fetch" => do_fetch = false,
             "-r" | "--resume" => resume = true,
             "--name" => expect = "name",
@@ -400,8 +406,16 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // The worktree already exists at this point — a failed session is a partial
     // success the user MUST see (loud-guard). Propagate launch's rc so cmd_new
     // returns nonzero. (Fake shims always succeed → bats success path unchanged.)
-    // `new` always keeps the spare shell (pane 1) — that's where deps install.
-    let rc = launch(p, ui, &wt, &session, &install_cmd, &ai_cmd, do_attach, true);
+    // `new` keeps the spare shell (pane 1) unless --no-spare — that's where deps
+    // install, so suppressing it also suppresses the install command (launch's
+    // contract: an install_cmd only ever rides along WITH the spare shell). The
+    // detected command isn't lost silently — it's echoed as a hint, same as the
+    // --no-tmux branch above.
+    if !spare_shell && !install_cmd.is_empty() {
+        ui.info(&format!("then: {install_cmd}"));
+    }
+    let pane1_install = if spare_shell { install_cmd.as_str() } else { "" };
+    let rc = launch(p, ui, &wt, &session, pane1_install, &ai_cmd, do_attach, spare_shell);
     if rc != 0 {
         rc
     } else {
