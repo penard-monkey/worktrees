@@ -372,7 +372,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // Mirror the real backend (ops.rs remove_one): refuse a DIRTY worktree
       // unless --force, WITHOUT deleting. This finally makes the error-banner
       // path reachable headlessly (several fixtures are dirty:true).
-      console.info("[mock] remove_place:", args); // logs del_branch/force flags
+      console.info("[mock] remove_place:", args); // logs delBranch/force flags
+      // Tauri renames Rust snake_case params to camelCase over IPC and rejects
+      // anything else ("missing required key delBranch"). The mock deserializes
+      // nothing, so a snake_case caller used to sail through here and only blow
+      // up in the real app — mirror the strictness instead.
+      // Rejects with a bare STRING, not an Error — that is what a real invoke
+      // does, and `fail()` renders it verbatim (an Error would add "Error: ").
+      if (typeof args.delBranch !== "boolean")
+        throw "invalid args `delBranch` for command `remove_place`: command remove_place missing required key delBranch";
       const pv = findProject(args.repo);
       const pl = pv?.snapshot?.places.find((p) => p.slug === args.slug);
       if (pl?.dirty && !args.force) {
@@ -385,7 +393,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
             `Refusing to remove. Commit/stash, or pass --force.`,
         };
       }
-      // del_branch is state-invisible here (no branch objects modeled) — the
+      // delBranch is state-invisible here (no branch objects modeled) — the
       // place is removed either way; the flag is logged above.
       if (pv?.snapshot) pv.snapshot.places = pv.snapshot.places.filter((p) => p.slug !== args.slug);
       return { ok: true, code: 0, output: `Removed ${args.slug}` };

@@ -32,6 +32,12 @@ install-copy: build
 # aren't quarantined, so no signing needed). App updates = git pull + this.
 install-app:
 	@[ "$$(uname -s)" = Darwin ] || { echo "install-app is macOS-only"; exit 1; }
+	@# pnpm dies with its own version error AFTER you've waited for cargo; check
+	@# the active node against .nvmrc first and say what to run instead.
+	@command -v node >/dev/null || { echo "node not found on PATH — run: nvm use"; exit 1; }
+	@want=$$(cat $(CURDIR)/.nvmrc); have=$$(node -v | tr -d v); \
+	  [ "$$(printf '%s\n%s\n' "$$want" "$$have" | sort -V | head -1)" = "$$want" ] || \
+	  { echo "node $$have is older than .nvmrc ($$want) — run: nvm use"; exit 1; }
 	pnpm --dir app tauri build
 	rm -rf /Applications/worktrees.app
 	ditto "$(CURDIR)/target/release/bundle/macos/worktrees.app" /Applications/worktrees.app
