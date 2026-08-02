@@ -90,6 +90,12 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
 /// that `env` and `match_word` travel BESIDE the command instead of being parsed
 /// back out of it.
 pub fn ai_launch_for(_p: &Project, ai_cmd: &str) -> crate::profile::AiLaunch {
+    // Reads the same flag the PROBE side reads, so the two cannot get out of
+    // step: while this returns the plain launch, `claude_config_dir_for_repo`
+    // keeps pointing at `~/.claude`. One commit flips both.
+    if !crate::profile::launch_honors_profiles() {
+        return crate::profile::AiLaunch::plain(ai_cmd);
+    }
     crate::profile::AiLaunch::plain(ai_cmd)
 }
 
@@ -129,8 +135,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         // first also keeps the program itself as pane0's foreground process, so
         // `pane_current_command` stays `claude`.
         let pane0 = if !ai_cmd.is_empty() {
-            let prefix = ai.shell_prefix();
-            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&format!("{prefix}{ai_cmd}; {keep}")))
+            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&ai.pane0_body(keep)))
         } else {
             keep.to_string()
         };

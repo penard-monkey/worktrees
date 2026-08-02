@@ -143,10 +143,14 @@ pub fn resolve_ai_cmd_from(
 ///
 /// ⚠ Everything leaves through `sanitize_prefix`, and that is what makes a
 /// PROJECT-settable prefix safe at all: a cloned repo's string is reduced to
-/// `[a-z0-9_-]`, so it can carry no shell metacharacter, no path separator, no
-/// leading `-`, and no whitespace into a tmux session name or a `docker -p`
-/// argument. The allow-list in §5 rests on this one call — do not add a path
-/// that skips it.
+/// `[a-z0-9_-]`, so it can carry no shell metacharacter, no path separator and
+/// no whitespace into a tmux session name or a `docker -p` argument. The
+/// allow-list in §5 rests on this one call — do not add a path that skips it.
+///
+/// It does NOT strip a leading `-` (that character is inside the allow-list, and
+/// this function is a faithful port of bash's `tr -c 'a-z0-9_-' '-'` — the
+/// behaviour is long-standing and callers depend on it). `profile::sanitize_id`
+/// does strip one, because a profile id becomes a bare path component.
 pub fn resolve_prefix_from(
     env: Option<&str>,
     prefix_file: Option<&str>,

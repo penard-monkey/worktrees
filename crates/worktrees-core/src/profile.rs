@@ -38,6 +38,31 @@ use crate::sysclock::now_epoch;
 
 const PROFILES_FILE: &str = "profiles.json";
 
+/// The spelling that means "explicitly unprofiled" in every tier of the
+/// resolution chain. Named once so the sentinel and the reservation that keeps
+/// a real profile from claiming it cannot drift apart.
+pub const RESERVED_ID: &str = "none";
+
+/// Whether the LAUNCH side actually applies profiles yet.
+///
+/// This exists to keep the two halves of the seam from disagreeing. The probes
+/// (`claude_config_dir_for_repo`) and the launch (`ops::ai_launch_for`) must
+/// agree about where claude keeps its state, and they are implemented in
+/// different phases. If the probes honoured a profile binding while the launch
+/// still ran unprofiled, claude would write to `~/.claude` while the app looked
+/// in the profile dir — auto-resume would silently stop passing `-r` and the
+/// user's conversation would appear to vanish, with nothing in the log.
+///
+/// Both sides read this flag, so it flips in exactly one commit.
+const LAUNCH_HONORS_PROFILES: bool = false;
+
+/// Read by BOTH sides of the seam (`ops::ai_launch_for` and
+/// `claude_config_dir_for_repo`) so neither can honour profiles without the
+/// other.
+pub(crate) fn launch_honors_profiles() -> bool {
+    LAUNCH_HONORS_PROFILES
+}
+
 /// Serialize in-process writes (Tauri multi-window = one process), mirroring
 /// `store::WRITE_LOCK`.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -109,6 +134,13 @@ pub fn sanitize_id(s: &str) -> String {
             }
         })
         .collect();
+    // Strip LEADING dashes. Without this the paragraph above is a lie: `-` is in
+    // the allow-list, so a benign display name like "@Work" maps to `-work` — a
+    // path component that a later argument parser reads as an option. It has to
+    // happen here rather than at the call sites because `profile_dir` only
+    // accepts an id that round-trips through this function, so an id that keeps
+    // its dash would harden into a permanent directory + keychain identity.
+    let mapped = mapped.trim_start_matches('-').to_string();
     // `.` and `..` cannot survive the map above (both become dashes), but a
     // dash-only string is still a useless directory name — reject it outright so
     // callers get an empty string to test rather than a `--` dir.
@@ -130,7 +162,12 @@ pub fn new_id_from(name: &str, taken: &[String]) -> String {
             s
         }
     };
-    if !taken.iter().any(|t| t == &base) {
+    // `none` is the unprofiled sentinel, so a profile can never be allowed to
+    // own it — a profile named "None" would save and assign successfully and
+    // then resolve as "no profile" at every launch, with no error anywhere.
+    // Reserved HERE rather than by seeding callers' `taken` lists: this function
+    // is pure and every future caller would otherwise have to remember to do it.
+    if base != RESERVED_ID && !taken.iter().any(|t| t == &base) {
         return base;
     }
     // `-2`, `-3`, … rather than a hash: the id shows up as a directory name the
@@ -289,6 +326,13 @@ pub fn resolve_profile_id(repo_root: &str) -> Option<String> {
 /// - the app's `claude_activity` scan — drives the busy/waiting dots.
 ///   Wrong root → the dots simply never light for profiled places.
 pub fn claude_config_dir_for_repo(repo_root: &str) -> PathBuf {
+    // Gated so the probe side cannot get ahead of the launch side — see
+    // LAUNCH_HONORS_PROFILES. Until the adapter emits CLAUDE_CONFIG_DIR, claude
+    // is still writing to ~/.claude and that is where we must look, whatever
+    // profiles.json says.
+    if !LAUNCH_HONORS_PROFILES {
+        return default_claude_dir();
+    }
     resolve_profile_id(repo_root)
         .and_then(|id| profile_dir(&id))
         .unwrap_or_else(default_claude_dir)
@@ -307,10 +351,34 @@ pub fn default_claude_dir() -> PathBuf {
 /// place uses, and a place whose profile changed mid-session still lights up.
 /// Directories that do not exist are harmless; the caller skips them.
 pub fn claude_config_dirs_all() -> Vec<PathBuf> {
+    let mut out = claude_config_dirs_from(&read_lenient());
+    // Also every directory that EXISTS but is no longer declared. remove()
+    // deliberately leaves the materialized dir on disk (it holds the user's
+    // transcripts), so deleting a profile whose session is still running would
+    // otherwise drop that root from the union and put the busy/waiting dot out
+    // while the session is very much alive.
+    if let Ok(rd) = fs::read_dir(profiles_data_root()) {
+        for e in rd.flatten().filter(|e| e.path().is_dir()) {
+            let p = e.path();
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// The declared half of the union, pure so it can be tested without touching the
+/// developer's real `~/.config`.
+fn claude_config_dirs_from(ps: &Profiles) -> Vec<PathBuf> {
     let mut out = vec![default_claude_dir()];
-    for id in read_lenient().profiles.keys() {
+    for id in ps.profiles.keys() {
+        // A hand-edited id that does not round-trip yields None and is skipped
+        // rather than silently resolving to some other directory.
         if let Some(d) = profile_dir(id) {
-            out.push(d);
+            if !out.contains(&d) {
+                out.push(d);
+            }
         }
     }
     out
@@ -363,12 +431,26 @@ impl AiLaunch {
         AiLaunch { env: Vec::new(), cmd: ai_cmd.to_string(), match_word: ai_word_of(ai_cmd) }
     }
 
-    /// The single shell word list for pane0: `K='V' … cmd`. Values go through
-    /// `tmux::sq` at the call site; this only fixes the ORDER (assignments first,
-    /// then the command), which is what keeps `pane_current_command` equal to the
-    /// program rather than an assignment.
+    /// The env assignments as a shell prefix: `K='V' `, one per pair, in order.
+    ///
+    /// Values are single-quoted HERE by `shell_quote`, for the INNER shell that
+    /// `sh -ic` runs. The caller separately wraps the whole body in `tmux::sq`
+    /// for tmux's own parse — two nested layers, each quoting for a different
+    /// reader.
     pub fn shell_prefix(&self) -> String {
         self.env.iter().map(|(k, v)| format!("{k}={} ", shell_quote(v))).collect()
+    }
+
+    /// The body of pane0's `sh -ic` string: assignments, then the command, then
+    /// the keep-alive.
+    ///
+    /// This lives here, called by `ops::launch`, rather than being spelled out
+    /// inline at the call site — the assignments-before-command ORDER is the
+    /// entire point of this type, and inline it was pinned by no test at any
+    /// level (bats runs with an empty env, so reversing the order passed the
+    /// whole suite).
+    pub fn pane0_body(&self, keep: &str) -> String {
+        format!("{}{}; {}", self.shell_prefix(), self.cmd, keep)
     }
 }
 
@@ -455,7 +537,11 @@ where
     let _flock = DirLock::acquire(&path)?;
     let mut ps = read_strict(&path)?;
     let out = f(&mut ps)?;
-    ps.version = 1;
+    // Never DOWNGRADE: the flattened `extra` maps let an older build rewrite a
+    // newer file losslessly, but `version` is the one field it would clobber —
+    // and a future v2 migration reading `version: 1` off a v2-shaped file would
+    // mis-migrate it.
+    ps.version = ps.version.max(1);
     ps.updated_epoch = Some(now_epoch());
     write_atomic(&path, &ps)?;
     Ok(out)
@@ -470,6 +556,9 @@ pub fn save(mut p: Profile) -> Result<String, String> {
     }
     if clean != p.id {
         return Err(format!("profile id {:?} must be [a-z0-9_-]", p.id));
+    }
+    if p.id == RESERVED_ID {
+        return Err(format!("{RESERVED_ID:?} is reserved — it means \"no profile\""));
     }
     if p.name.trim().is_empty() {
         p.name = p.id.clone();
@@ -580,6 +669,11 @@ mod tests {
             );
             assert!(!got.contains('/'), "{hostile} kept a separator");
         }
+        // a LEADING dash never survives — "@Work" would otherwise mint "-work",
+        // a path component a later flag parser reads as an option
+        assert_eq!(sanitize_id("-work"), "work");
+        assert_eq!(sanitize_id("@Work"), "work");
+        assert_eq!(sanitize_id("--force"), "force");
         // dash-only is not a usable directory name
         assert_eq!(sanitize_id(".."), "");
         assert_eq!(sanitize_id("///"), "");
@@ -594,6 +688,18 @@ mod tests {
         assert!(profile_dir("").is_none());
         let ok = profile_dir("work").expect("a clean id resolves");
         assert!(ok.ends_with("profiles/work"));
+    }
+
+    #[test]
+    fn the_unprofiled_sentinel_cannot_be_claimed_by_a_real_profile() {
+        // A profile named "None" used to save, assign and even become the
+        // default — and then resolve as "no profile" at every launch, silently.
+        assert_eq!(new_id_from("None", &[]), "none-2");
+        assert_eq!(new_id_from("none", &[]), "none-2");
+        let p = Profile { id: RESERVED_ID.into(), name: "None".into(), ..Default::default() };
+        assert!(save(p).is_err(), "save() must refuse the reserved id");
+        // and the resolver still treats the spelling as an opt-out
+        assert_eq!(resolve_profile_id_from(Some(RESERVED_ID), None, None, &["a".into()]), None);
     }
 
     #[test]
@@ -659,6 +765,28 @@ mod tests {
     }
 
     #[test]
+    fn pane0_body_puts_assignments_before_the_command() {
+        let keep = "exec \"${SHELL:-/bin/sh}\"";
+        // unprofiled: byte-for-byte what the bats suite has always pinned
+        assert_eq!(
+            AiLaunch::plain("claude -r").pane0_body(keep),
+            "claude -r; exec \"${SHELL:-/bin/sh}\""
+        );
+        // profiled: assignments FIRST, or `pane_current_command` stops being
+        // `claude` and tmux adoption breaks. Reversing the order in ops.rs used
+        // to pass all 150 unit + 238 bats tests, because bats runs with no env.
+        let l = AiLaunch {
+            env: vec![("CLAUDE_CONFIG_DIR".into(), "/d/p/work".into())],
+            cmd: "claude -r".into(),
+            match_word: "claude".into(),
+        };
+        assert_eq!(
+            l.pane0_body(keep),
+            "CLAUDE_CONFIG_DIR='/d/p/work' claude -r; exec \"${SHELL:-/bin/sh}\""
+        );
+    }
+
+    #[test]
     fn plain_launch_is_todays_behaviour_exactly() {
         let l = AiLaunch::plain("claude");
         assert!(l.env.is_empty());
@@ -681,26 +809,51 @@ mod tests {
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");
     }
 
-    #[test]
-    fn the_unprofiled_claude_root_is_the_users_own() {
-        // With no profile bound, every probe must keep looking exactly where it
-        // looks today — this is the "changed nothing" half of Phase 4.
-        let d = default_claude_dir();
-        assert!(d.ends_with(".claude"), "{d:?}");
-        // …and the union always contains it, so an unprofiled session's activity
-        // dots survive the scan being widened.
-        assert!(claude_config_dirs_all().contains(&d));
+    fn profiles_with(ids: &[&str]) -> Profiles {
+        let mut ps = Profiles::default();
+        for id in ids {
+            ps.profiles.insert(
+                (*id).to_string(),
+                Profile { id: (*id).to_string(), name: (*id).to_string(), ..Default::default() },
+            );
+        }
+        ps
     }
 
     #[test]
-    fn claude_config_dirs_are_all_distinct_roots() {
-        // A duplicate root would double-count probes and light two places from
-        // one session.
-        let all = claude_config_dirs_all();
-        let mut sorted = all.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), all.len(), "duplicate roots in {all:?}");
+    fn probe_roots_cover_every_valid_profile_and_skip_the_rest() {
+        // Built against a CONSTRUCTED Profiles rather than read_lenient(), so the
+        // loop is actually exercised — on a machine with no profiles.json the
+        // old version of this test asserted nothing at all.
+        let ps = profiles_with(&["work", "oss", "Bad Id"]);
+        let roots = claude_config_dirs_from(&ps);
+        assert_eq!(roots[0], default_claude_dir(), "the user's own root comes first");
+        assert!(roots.iter().any(|r| r.ends_with("profiles/work")));
+        assert!(roots.iter().any(|r| r.ends_with("profiles/oss")));
+        // a hand-edited id that does not round-trip is SKIPPED, never coerced
+        // into some neighbouring directory
+        assert!(!roots.iter().any(|r| r.to_string_lossy().contains("Bad Id")));
+        assert!(!roots.iter().any(|r| r.ends_with("profiles/bad-id")));
+        assert_eq!(roots.len(), 3);
+        // duplicates would double-count probes and light two places from one session
+        let mut d = roots.clone();
+        d.sort();
+        d.dedup();
+        assert_eq!(d.len(), roots.len());
+    }
+
+    #[test]
+    fn probes_and_launch_flip_together() {
+        // THE invariant: while the launch side runs unprofiled, claude is still
+        // writing to ~/.claude, so every probe must look there no matter what
+        // profiles.json says. Getting this wrong loses auto-resume silently.
+        if !launch_honors_profiles() {
+            assert_eq!(
+                claude_config_dir_for_repo("/any/repo"),
+                default_claude_dir(),
+                "probes must not honour a profile binding before the launch does"
+            );
+        }
     }
 
     #[test]
