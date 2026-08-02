@@ -139,3 +139,9 @@ close-out ritual (.claude/skills/close-out).
   dedupe pass, and while there reconsider runtime `std::env::set_var` vs
   handing a computed PATH to spawns (POSIX getenv race, accepted for now).
   _From: [2026-07-30 tmux-gate session](docs/sessions/2026-07-30-tmux-gate/summary.md)_
+
+- **Verify single-pane "New" on a real mac.** PR #70 makes app-created
+  places single-pane (no auto-install; `then:` hint instead) — confirmed via
+  bats shims only; one real app "New" on a lockfile repo to confirm pane
+  layout + hint.
+  _From: [2026-08-01 single-pane-new session](docs/sessions/2026-08-01-single-pane-new/summary.md)_
