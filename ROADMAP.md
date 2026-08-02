@@ -145,3 +145,19 @@ close-out ritual (.claude/skills/close-out).
   bats shims only; one real app "New" on a lockfile repo to confirm pane
   layout + hint.
   _From: [2026-08-01 single-pane-new session](docs/sessions/2026-08-01-single-pane-new/summary.md)_
+
+- **Smoke-test the usage widget on a real launch.** v0.7.0's nav-footer
+  bars are verified against the endpoint via curl and in the mock harness,
+  but the built app's Keychain path (one-time prompt for "Claude
+  Code-credentials") hasn't been exercised end-to-end.
+  _From: [2026-08-02 usage-widget session](docs/sessions/2026-08-02-usage-widget/summary.md)_
+
+- **Usage credits in the widget.** The oauth/usage endpoint's `spend` object
+  carries extra-usage credits (balance, cap, severity); skipped in v0.7.0
+  because credits are disabled on this account. Add a fourth row when enabled.
+  _From: [2026-08-02 usage-widget session](docs/sessions/2026-08-02-usage-widget/summary.md)_
+
+- **Multi-harness usage rows.** Widget is Claude-only by design today; when
+  the app grows other harnesses, generalize to one provider per row group
+  (backend already isolates the Claude source behind a single command).
+  _From: [2026-08-02 usage-widget session](docs/sessions/2026-08-02-usage-widget/summary.md)_
