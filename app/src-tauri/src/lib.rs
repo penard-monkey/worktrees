@@ -754,6 +754,245 @@ struct ClaudeActivity {
     waiting: Vec<String>,
 }
 
+// ── Claude plan usage (nav footer widget) ────────────────────────────────────
+// Same bars Claude Code's /usage panel shows: the 5h session window, the weekly
+// all-models window, and any model-scoped weekly bucket (e.g. "Fable").
+//
+// Primary source is the OAuth usage endpoint the TUI itself calls — free GET, no
+// quota, but undocumented and unversioned, so EVERY step degrades instead of
+// failing: the authoritative field is `limits[]` and the rest of the payload is
+// full of experimental nulls we deliberately ignore. Token comes from the macOS
+// Keychain via `security` (shelled out — house style, and it keeps the secret out
+// of our address space longer than a lib would). Claude Code rotates the token
+// ~hourly, so a 401 buys exactly one retry with a freshly re-read token.
+//
+// Fallback is the statusline widget's local snapshot (`~/.claude/widgets/
+// rate_limits.json`, written by whatever statusline script the user runs) —
+// session + weekly only, no model bucket, and only as fresh as the last Claude
+// Code session, hence the file mtime as `fetched_at` and the dimmed UI.
+//
+// Missing data is NOT an error: `source: "unavailable"` with no limits just
+// hides the widget. The reason still lands in app.log.
+
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// Claude Code's own UA. Load-bearing: a foreign UA lands in a much more
+/// aggressive rate-limit bucket on this endpoint.
+const USAGE_UA: &str = "claude-code/2.1.220";
+/// Minimum gap between real fetches. The frontend polls at 180s; this is the
+/// floor that also covers window-focus pulls and a re-mount storm.
+const USAGE_TTL_SECS: i64 = 120;
+
+#[derive(Serialize, Clone)]
+struct UsageLimit {
+    kind: String,     // session | weekly_all | weekly_scoped
+    label: String,    // "Session" | "Weekly" | model display name ("Fable")
+    percent: f64,
+    severity: String, // normal | warning | … (rendered as a color tier)
+    resets_at: Option<i64>, // unix seconds
+}
+
+#[derive(Serialize, Clone)]
+struct UsageInfo {
+    source: String, // oauth | statusline | unavailable
+    fetched_at: i64,
+    limits: Vec<UsageLimit>,
+}
+
+/// Last SUCCESSFUL oauth answer, with the epoch it was fetched at (see TTL).
+static USAGE_CACHE: Mutex<Option<UsageInfo>> = Mutex::new(None);
+
+/// ISO-8601 (`2026-08-04T00:00:00Z`, `…+00:00`, optional fraction) → unix
+/// seconds. days_from_civil, the inverse of fmt_utc's civil_from_days — same
+/// reason: no chrono dep for two date conversions.
+fn parse_iso8601(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse::<i64>().ok() };
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, se) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if mo > 2 { mo - 3 } else { mo + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let mut epoch = days * 86_400 + h * 3600 + mi * 60 + se;
+    // trailing zone: `Z`, nothing, or ±HH:MM (after an optional .fraction)
+    let rest = s[19..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let sign = rest.chars().next().unwrap_or('Z');
+    if sign == '+' || sign == '-' {
+        let oh: i64 = rest.get(1..3)?.parse().ok()?;
+        let om: i64 = rest.get(4..6).and_then(|m| m.parse::<i64>().ok()).unwrap_or(0);
+        let off = oh * 3600 + om * 60;
+        epoch += if sign == '-' { off } else { -off };
+    }
+    Some(epoch)
+}
+
+/// The Claude Code OAuth access token, straight out of the login Keychain item.
+/// None on any failure (not macOS, item absent, locked keychain, shape changed).
+fn claude_oauth_token() -> Option<String> {
+    let mut cmd = std::process::Command::new("/usr/bin/security");
+    cmd.args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]);
+    let out = run_deadline(cmd, 6).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    v.get("claudeAiOauth")?.get("accessToken")?.as_str().map(String::from)
+}
+
+/// GET the usage endpoint → (http status, body). curl, not a HTTP crate: the app
+/// already shells out to curl for the release check and this keeps the dep tree
+/// (and the TLS stack) exactly where it is.
+fn usage_get(token: &str) -> Result<(u16, String), String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-s", "--max-time", "10", "-w", "\n%{http_code}"])
+        .arg("-H")
+        .arg(format!("Authorization: Bearer {token}"))
+        .arg("-H")
+        .arg("anthropic-beta: oauth-2025-04-20")
+        .arg("-H")
+        .arg(format!("User-Agent: {USAGE_UA}"))
+        .arg("-H")
+        .arg("Content-Type: application/json")
+        .arg(USAGE_URL);
+    let out = run_deadline(cmd, 15).map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("curl exited {}", out.status.code().unwrap_or(-1)));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    // -w appended "\n<code>" AFTER the body; the body itself may contain newlines.
+    let cut = text.rfind('\n').ok_or("curl produced no status line")?;
+    let code: u16 = text[cut + 1..].trim().parse().map_err(|_| "curl produced no status code".to_string())?;
+    Ok((code, text[..cut].to_string()))
+}
+
+/// `limits[]` → our rows. Unknown kinds and unparseable entries are SKIPPED, not
+/// fatal — the endpoint ships experimental buckets we've never seen. `None` only
+/// when there is no `limits` array at all (i.e. the shape moved under us).
+fn parse_usage_limits(body: &str) -> Option<Vec<UsageLimit>> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let arr = v.get("limits")?.as_array()?;
+    let mut out = Vec::new();
+    for e in arr {
+        let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or_default();
+        let label = match kind {
+            "session" => "Session".to_string(),
+            "weekly_all" => "Weekly".to_string(),
+            // the model bar (e.g. "Fable") — no name, no row
+            "weekly_scoped" => match e.pointer("/scope/model/display_name").and_then(|d| d.as_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            },
+            _ => continue,
+        };
+        let percent = match e.get("percent").and_then(|p| p.as_f64()) {
+            Some(p) => p,
+            None => continue,
+        };
+        out.push(UsageLimit {
+            kind: kind.to_string(),
+            label,
+            percent,
+            severity: e.get("severity").and_then(|s| s.as_str()).unwrap_or("normal").to_string(),
+            resets_at: e.get("resets_at").and_then(|r| r.as_str()).and_then(parse_iso8601),
+        });
+    }
+    Some(out)
+}
+
+fn usage_from_oauth(now: i64) -> Result<UsageInfo, String> {
+    let token = claude_oauth_token().ok_or("keychain: no Claude Code credentials")?;
+    let (mut code, mut body) = usage_get(&token)?;
+    if code == 401 {
+        // token rotated under us (Claude Code refreshes ~hourly) — re-read once
+        let fresh = claude_oauth_token().ok_or("keychain: re-read failed after 401")?;
+        let retry = usage_get(&fresh)?;
+        code = retry.0;
+        body = retry.1;
+    }
+    if code != 200 {
+        return Err(format!("usage endpoint http {code}"));
+    }
+    let limits = parse_usage_limits(&body).ok_or("usage response carries no `limits` array")?;
+    Ok(UsageInfo { source: "oauth".into(), fetched_at: now, limits })
+}
+
+/// The statusline widget's local snapshot: `{"five_hour":{"used_percentage":46,
+/// "resets_at":<epoch secs>}, "seven_day":{…}}`. No severity and no model bucket
+/// — the frontend dims the whole widget for this source.
+fn usage_from_statusline() -> Option<UsageInfo> {
+    let home = std::env::var("HOME").ok()?;
+    let path = Path::new(&home).join(".claude/widgets/rate_limits.json");
+    let fetched_at = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_else(sysclock::now_epoch);
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    let mut limits = Vec::new();
+    for (key, kind, label) in [("five_hour", "session", "Session"), ("seven_day", "weekly_all", "Weekly")] {
+        let bucket = match v.get(key) {
+            Some(b) => b,
+            None => continue,
+        };
+        let percent = match bucket.get("used_percentage").and_then(|p| p.as_f64()) {
+            Some(p) => p,
+            None => continue,
+        };
+        limits.push(UsageLimit {
+            kind: kind.into(),
+            label: label.into(),
+            percent,
+            severity: "normal".into(),
+            resets_at: bucket.get("resets_at").and_then(|r| r.as_i64()),
+        });
+    }
+    if limits.is_empty() {
+        return None;
+    }
+    Some(UsageInfo { source: "statusline".into(), fetched_at, limits })
+}
+
+/// Plan-usage bars for the nav footer. Never Errs on "no data" — the widget is
+/// ambient, and a banner for a background poll would be worse than a blank
+/// corner; the reason goes to app.log instead.
+#[tauri::command]
+async fn claude_usage() -> Result<UsageInfo, String> {
+    let now = sysclock::now_epoch();
+    {
+        let cache = USAGE_CACHE.lock().unwrap();
+        if let Some(c) = cache.as_ref() {
+            if now - c.fetched_at < USAGE_TTL_SECS {
+                return Ok(c.clone());
+            }
+        }
+    }
+    match usage_from_oauth(now) {
+        Ok(info) => {
+            *USAGE_CACHE.lock().unwrap() = Some(info.clone());
+            Ok(info)
+        }
+        Err(why) => {
+            applog("warn", &format!("claude_usage: oauth unavailable: {why}"));
+            match usage_from_statusline() {
+                Some(info) => Ok(info),
+                None => {
+                    applog("warn", "claude_usage: no statusline snapshot either — widget hidden");
+                    Ok(UsageInfo { source: "unavailable".into(), fetched_at: now, limits: Vec::new() })
+                }
+            }
+        }
+    }
+}
+
 /// Find the installed CLI: whatever `command -v` resolves in the USER'S login
 /// shell (zsh reads ~/.zprofile; plain sh would not — the app may be launched
 /// from Finder with a bare PATH), then the common install dirs. Chatty profiles
@@ -2164,6 +2403,7 @@ pub fn run() {
             init_write,
             diagnostics,
             tmux_check,
+            claude_usage,
             log_info,
             log_event,
             log_tail,
