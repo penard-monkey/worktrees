@@ -745,6 +745,17 @@ not orphan them (§5's ⚠). That also closed two pre-existing gaps: `rm` had no
 adoption at all and would have left a session in a deleted directory, and `close`
 excluded `(main)` while `launch` and `ls` did not.
 
+**v4 — undeclared drift.** ✅ BUILT. The gap v1–v3 all shared: every check is
+judged BY the config, so a config that stopped being true was invisible to all of
+them. Detection ran once, at `init` — the passive nudge is on `cmd_new`'s
+no-config branch and `init` refuses to re-run over an existing file, so a
+credential added the day after the config was written could not be seen by
+anything. `doctor` now asks the reverse question (`Code::Undeclared`, repo-scoped,
+Warn for a credential / Info for `.env*`, promoted by `--strict`), and
+`init --diff` emits the missing `[[file]]` stanzas as an appendable fragment.
+This is §1.2 again, displaced from "no config" to "stale config" — which is the
+steady state of any repo older than a month.
+
 ### Decisions taken during the build, not in the original design
 
 - **`init` emits anything it cannot confidently declare COMMENTED OUT with the

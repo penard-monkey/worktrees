@@ -394,3 +394,63 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" != *"worktrees init"* ]]
 }
+
+# ── --diff — the second look ─────────────────────────────────────────────────
+# Without it there is none: `init` refuses to run over an existing config, and
+# `--force` re-renders from scratch, destroying every hand-set mode = "copy".
+
+@test "init --diff: emits only what the config is missing, and writes nothing" {
+  mkdir -p "$REPO/apps/mobile"; printf '{}\n' > "$REPO/apps/mobile/google-services.json"
+  write_project_config '[[file]]' 'path = ".env"'
+  cp "$REPO/.worktrees.toml" "$BATS_TEST_TMPDIR/before"
+
+  wt_stdout_to "$BATS_TEST_TMPDIR/frag" init --diff
+  [ "$status" -eq 0 ]
+  # stdout is the appendable fragment and nothing else
+  /usr/bin/grep -q 'path = "apps/mobile/google-services.json"' "$BATS_TEST_TMPDIR/frag"
+  ! /usr/bin/grep -q 'path = ".env"' "$BATS_TEST_TMPDIR/frag"
+  ! /usr/bin/grep -q 'undeclared entr' "$BATS_TEST_TMPDIR/frag"
+  # the prose went to stderr
+  [[ "$output" == *"1 undeclared entry"* ]]
+  # and the config on disk is untouched
+  diff "$BATS_TEST_TMPDIR/before" "$REPO/.worktrees.toml"
+
+  # appending the fragment yields a config the tool itself accepts
+  cat "$BATS_TEST_TMPDIR/frag" >> "$REPO/.worktrees.toml"
+  run_wt doctor --config-only
+  [ "$status" -eq 0 ]
+  run_wt init --diff
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"declares every gitignored file found here"* ]]
+}
+
+@test "init --diff: with no config at all, prints the whole file" {
+  wt_stdout_to "$BATS_TEST_TMPDIR/out" init --diff
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No .worktrees.toml"* ]]
+  /usr/bin/grep -q 'path = ".env"' "$BATS_TEST_TMPDIR/out"
+  [ ! -e "$REPO/.worktrees.toml" ]
+}
+
+@test "init --diff: an undeclarable path is commented out, never dropped" {
+  # `$` anywhere makes projcfg reject the WHOLE config, so it cannot be emitted
+  # live — but a credential nobody knows about is the bug this flow fixes, and
+  # the fragment is the one output whose job is to surface it.
+  mkdir -p "$REPO/apps\$1"
+  printf 'S=1\n' > "$REPO/apps\$1/.env"
+  mkdir -p "$REPO/apps/mobile"; printf '{}\n' > "$REPO/apps/mobile/google-services.json"
+  write_project_config '[[file]]' 'path = ".env"'
+
+  wt_stdout_to "$BATS_TEST_TMPDIR/frag" init --diff
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"please report this"* ]]
+  [[ "$output" == *"cannot be declared"* ]]
+  /usr/bin/grep -q '^# path = "apps\$1/\.env"$' "$BATS_TEST_TMPDIR/frag"
+  /usr/bin/grep -q 'is not expanded' "$BATS_TEST_TMPDIR/frag"
+  # the live half beside it is still emitted for real
+  /usr/bin/grep -q '^path = "apps/mobile/google-services.json"$' "$BATS_TEST_TMPDIR/frag"
+  # …and the fragment still parses, which is what makes it safe to paste
+  cat "$BATS_TEST_TMPDIR/frag" >> "$REPO/.worktrees.toml"
+  run_wt doctor --config-only
+  [ "$status" -eq 0 ]
+}

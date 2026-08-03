@@ -1370,6 +1370,17 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         findings.extend(port_findings(p, &cfg, &targets));
         findings.extend(compose_findings(p, &cfg, &targets));
+        // Repo-scoped, and only on a whole-project run — same rule the session
+        // scan below follows: a named place is a question about that place, and
+        // "the config does not mention apps/api/.env" is not about any of them.
+        //
+        // Deliberately NOT in `--config-only`: that mode is config-vs-git with no
+        // filesystem state, and on the bare clone it is built for every gitignored
+        // file is absent by definition, so this check could only ever report
+        // nothing there.
+        if names.is_empty() {
+            findings.extend(undeclared_findings(p, &cfg));
+        }
         // The session scan covers MAIN too, unlike the file and port checks:
         // main declares no files and takes no slot, but its session is named
         // from the same prefix and drifts exactly the same way — and `close
@@ -1385,10 +1396,12 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
 
     if strict {
-        // `--strict` is the only thing that lets a copy the source has moved past
-        // fail a run; drift itself stays Info forever (§7).
+        // `--strict` is what lets a copy the source has moved past — or a
+        // credential the config never learned about — fail a run; both stay
+        // non-fatal by default, because drift is the expected steady state (§7)
+        // and promoting either would break every CI already pinned on exit 0.
         for f in &mut findings {
-            if f.code == Code::CopyStale && f.severity == Severity::Warn {
+            if matches!(f.code, Code::CopyStale | Code::Undeclared) && f.severity == Severity::Warn {
                 f.severity = Severity::Error;
             }
         }
@@ -1413,6 +1426,46 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
     report.exit_code()
+}
+
+/// Gitignored, untracked files in MAIN that no `[[file]]` entry declares.
+///
+/// The only check here that runs against the repo rather than against the
+/// config, and the reason is that every other one is judged BY the config: a
+/// `.worktrees.toml` that stopped being true is invisible to all of them.
+/// Detection otherwise happens exactly once, at `init` — see `Code::Undeclared`.
+///
+/// Repo-scoped (`place` stays `None`) so `doctor` on a project with fifteen
+/// worktrees says it once, not fifteen times.
+fn undeclared_findings(p: &Project, cfg: &ProjectConfig) -> Vec<Finding> {
+    let (files, truncated) = init::undeclared(Path::new(&p.main_root), cfg);
+    let mut out: Vec<Finding> = files
+        .into_iter()
+        .map(|c| {
+            // The same split `hint_init` uses, and for the same reason (§12): a
+            // missing `.env` breaks the build loudly on the next command, while a
+            // missing credential builds fine and dies on a device days later.
+            // Only the class that fails SILENTLY earns a warning.
+            let (severity, what) = match c.kind {
+                init::Kind::Credential => {
+                    (Severity::Warn, "a credential, and it fails SILENTLY when missing")
+                }
+                init::Kind::Env => (Severity::Info, "gitignored and tracked nowhere"),
+            };
+            let msg = format!(
+                "{} is {what} — no [[file]] entry declares it, so every worktree is missing it. \
+                 Add it:  worktrees init --diff",
+                c.rel
+            );
+            Finding::new(severity, Code::Undeclared, msg).at_path(c.rel)
+        })
+        .collect();
+    // §9's promise: a bound that was HIT is reported, never swallowed. An empty
+    // result from a truncated walk means "I did not look everywhere".
+    if truncated {
+        out.push(Finding::info(Code::Undeclared, TRUNCATED));
+    }
+    out
 }
 
 /// §5's prefix findings: the two project-scoped sources disagreeing, and — the
@@ -1638,14 +1691,21 @@ fn emit_report(ui: &mut dyn Ui, report: &Report) {
 
 // ── init — the suggestion flow (proposal §9) ─────────────────────────────────
 
-/// `worktrees init [--print] [-y] [--force]`.
+/// `worktrees init [--print] [--diff] [-y] [--force]`.
 ///
 /// Prints the `.worktrees.toml` this repo would get and asks. **Writes nothing
 /// without confirmation** — and `CaptureUi::confirm` always answers no, so a
 /// programmatic caller (the app, a script) safely declines rather than having a
 /// config appear under it.
+///
+/// `--diff` is the re-run: over an existing config it emits only the `[[file]]`
+/// stanzas that config is MISSING. Without it there is no second look at all —
+/// this command refuses to run over an existing file, and `--force` re-renders
+/// from scratch, which destroys every hand-written `mode = "copy"` and every
+/// comment explaining why. Never writing is the point: the fragment goes to
+/// stdout for a human to paste.
 pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
-    let (mut yes, mut force, mut print_only) = (false, false, false);
+    let (mut yes, mut force, mut print_only, mut diff) = (false, false, false, false);
     for a in args {
         match a.as_str() {
             "-y" | "--yes" => yes = true,
@@ -1656,11 +1716,16 @@ pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
                 yes = true;
             }
             "--print" | "--dry-run" => print_only = true,
+            "--diff" => diff = true,
             s => {
                 ui.error(&format!("Unknown flag: {s}"));
                 return 1;
             }
         }
+    }
+
+    if diff {
+        return init_diff(p, ui);
     }
 
     let existing = Path::new(&p.main_root).join(projcfg::CONFIG_FILE);
@@ -1742,6 +1807,71 @@ pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         ui.info("Allocate port slots:  worktrees provision --all");
     }
     ui.info("Commit it — this is project structure, like docker-compose.yml.");
+    0
+}
+
+/// `worktrees init --diff` — the second look the flow never had.
+///
+/// Stdout carries the appendable fragment and NOTHING else, on the same rule as
+/// `--print`: `worktrees init --diff >> .worktrees.toml` has to be a working
+/// move rather than a trap that captures a banner into the config. Every line of
+/// prose goes to stderr through `warn_aside`/`info`.
+///
+/// Writes nothing. `--force` is the only thing that rewrites this file, and it
+/// rewrites it wholesale; the entries here are the half a human must place —
+/// each one may need `mode = "copy"`, and nothing on disk knows which.
+fn init_diff(p: &Project, ui: &mut dyn Ui) -> i32 {
+    let cfg = match load_project_config(p, ui) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    // Nothing to diff AGAINST: the answer to "what is missing from your config"
+    // when there is no config is the whole config, which is what `--print` emits.
+    let Some((cfg, _)) = cfg else {
+        ui.warn_aside(&format!(
+            "No {} in this repo — printing the whole file instead of a diff.",
+            projcfg::CONFIG_FILE
+        ));
+        return cmd_init(p, ui, &["--print".to_string()]);
+    };
+
+    let (found, truncated) = init::undeclared(Path::new(&p.main_root), &cfg);
+    let (files, rejected) = init::declarable(found);
+    if files.is_empty() && rejected.is_empty() {
+        ui.info(&format!("{} declares every gitignored file found here.", projcfg::CONFIG_FILE));
+        if truncated {
+            ui.warn_aside(TRUNCATED);
+        }
+        return 0;
+    }
+
+    let text = init::render_undeclared(&files, &rejected);
+    // The same round-trip guard `cmd_init` applies to a whole file: a fragment
+    // this tool cannot itself read must never be handed to someone to paste.
+    if let Err(e) = projcfg::parse(&text) {
+        ui.error(&format!("internal: the generated fragment does not parse ({e}) — please report this"));
+        return 1;
+    }
+    for line in text.lines() {
+        ui.plain(line);
+    }
+    let n = files.len();
+    let noun = if n == 1 { "entry" } else { "entries" };
+    ui.warn_aside(&format!(
+        "{n} undeclared {noun}. Append to {}, set mode = \"copy\" on anything a script \
+         rewrites at runtime, then:  worktrees relink --all",
+        projcfg::CONFIG_FILE
+    ));
+    if !rejected.is_empty() {
+        ui.warn_aside(&format!(
+            "{} found file(s) cannot be declared — the config refuses the path. They are in the \
+             fragment, commented out, with the reason.",
+            rejected.len()
+        ));
+    }
+    if truncated {
+        ui.warn_aside(TRUNCATED);
+    }
     0
 }
 

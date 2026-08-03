@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **`doctor` now reports files the config never learned about.** Every other
+  check is judged *by* `.worktrees.toml`, so a config that stopped being true was
+  invisible to all of them: detection ran exactly once, at `init`, and the
+  passive hint on `new` only fires for repos that have no config at all. A
+  credential added the day after the config was written was therefore
+  undetectable, and every worktree silently lacked it. The new `undeclared`
+  finding asks the reverse question — what is gitignored, untracked, and named by
+  no `[[file]]` entry. Warn for a credential, Info for `.env*`; repo-scoped, so
+  it is said once and not once per worktree. It exits 0 by default (drift is the
+  steady state); `doctor --strict` promotes it, alongside `copy-stale`.
+- **`worktrees init --diff`** prints just the `[[file]]` stanzas an existing
+  config is missing, as an appendable fragment on stdout — the second look the
+  flow never had. `init` refuses to run over an existing config and `--force`
+  re-renders from scratch, which destroys every hand-set `mode = "copy"` and the
+  comment explaining why. This writes nothing: paths the parser refuses come out
+  commented with the reason, exactly as `init` emits them.
+
 ## [0.8.0] - 2026-08-03
 
 ### Added
