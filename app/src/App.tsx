@@ -1368,6 +1368,12 @@ function App() {
       // shows the place dormant, and doClose says so, through `notice`, which
       // nothing here touches once the run has started).
       if (!r.ok && r.code !== EXIT_NEEDS_CONFIRM) setErr(r.output || `${name} failed (exit ${r.code})`);
+      // Warnings on a SUCCESSFUL op used to go nowhere but app.log. That is fine
+      // for cosmetic notes and wrong for the ones that change what a session can
+      // do — an AI profile skipping a skill, or a launch that could not apply the
+      // profile at all. Silence there reads as "it worked", so a degraded session
+      // looked identical to a good one.
+      else if (r.warnings?.length) setNotice(r.warnings.join(" · "));
       return r;
     } catch (e) {
       fail(e);

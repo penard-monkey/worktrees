@@ -115,14 +115,32 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
             crate::profile::claude_launch(&plain, &prof, &m)
         }
         Err(e) => {
-            // Fall back to an unprofiled launch rather than leaving the user
-            // with no session at all — but say so loudly, because their rules
-            // and MCP set are NOT in effect.
-            ui.warn(&format!(
-                "profile '{}' could not be prepared ({e}) — launching WITHOUT it",
+            // FAIL CLOSED. Launching unprofiled claude here would be the worst
+            // outcome available: a profile is frequently RESTRICTIVE — it is how
+            // `--strict-mcp-config` removes a dangerous global server, and where
+            // settings deny tools — so "couldn't apply your profile" must never
+            // silently mean "ran without your restrictions". Every visible signal
+            // (a pane running claude, the activity dots) would have said the
+            // profile applied.
+            //
+            // It also keeps the probe/launch seam honest: an unprofiled fallback
+            // writes its conversation to ~/.claude while the probes keep reading
+            // the profile dir, so auto-resume would lose it — exactly the
+            // divergence `launch_honors_profiles` exists to prevent.
+            //
+            // The pane still opens, on a plain shell with the reason printed, so
+            // nothing is stranded and the user can run claude by hand if they
+            // want it anyway.
+            let msg = format!(
+                "worktrees: profile '{}' could not be prepared: {e}\\nNOT launching claude — your profile's rules and MCP settings are not in effect.\\nFix the profile (or unset it) and reopen; run `claude` here to start an unprofiled session anyway.",
                 prof.name
-            ));
-            plain
+            );
+            ui.error(&format!("profile '{}' could not be prepared ({e}) — claude not launched", prof.name));
+            crate::profile::AiLaunch {
+                env: Vec::new(),
+                cmd: format!("printf '%s\\n' {} >&2", crate::profile::shell_quote(&msg)),
+                match_word: plain.match_word,
+            }
         }
     }
 }

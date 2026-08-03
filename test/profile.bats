@@ -122,3 +122,26 @@ JSON
   [[ "$p0" != *"CLAUDE_CONFIG_DIR"* ]]
   [[ "$p0" == *claude* ]]
 }
+
+@test "a profile that cannot be prepared refuses to launch claude unprofiled" {
+  use_profile
+  # Make materialization fail: the data root is occupied by a FILE, so the
+  # profile dir cannot be created.
+  rm -rf "$XDG_DATA_HOME/worktrees/profiles"
+  mkdir -p "$XDG_DATA_HOME/worktrees"
+  : > "$XDG_DATA_HOME/worktrees/profiles"
+
+  run_wt new feat-x
+  local p0; p0="$(tmux_pane0_cmd repo-feat-x)"
+  # FAIL CLOSED: a restrictive profile silently not applying is worse than no
+  # claude at all, and an unprofiled fallback would also write its conversation
+  # to ~/.claude while the probes keep reading the profile dir.
+  # the pane RUNS printf, not claude (the message text mentions claude, so
+  # assert on what is executed rather than on the word appearing anywhere)
+  [[ "$p0" == *"printf"* ]]
+  [[ "$p0" != *"CLAUDE_CONFIG_DIR"* ]]
+  [[ "$p0" != *"--mcp-config"* ]]
+  [[ "$p0" != *"; claude"* && "$p0" != *"' claude"* ]]
+  [[ "$p0" == *"could not be prepared"* ]]
+  [[ "$p0" == *"NOT launching claude"* ]]
+}

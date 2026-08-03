@@ -686,9 +686,15 @@ pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str, repo_root
     // dialog. Separate mutex from the store's — materialization never calls
     // edit(), and sharing one would invite a deadlock the first time it did.
     static MAT_LOCK: Mutex<()> = Mutex::new(());
-    let _serial = MAT_LOCK.lock().map_err(|_| "materialize lock poisoned")?;
+    // Recover from poisoning rather than propagating it. The app is a long-lived
+    // process: one panic anywhere under this lock would otherwise turn EVERY
+    // later launch into a failed materialization until restart. The guarded
+    // state is on disk and already protected by the dir lock + atomic renames,
+    // so a poisoned flag tells us nothing useful about it.
+    let _serial = MAT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _flock = DirLock::at(dir.with_extension("lock"))?;
     let mut out = Materialized { dir: dir.clone(), ..Default::default() };
+    let user = read_user_claude_json(&paths.user_claude_json);
 
     // rules.md — delivered with --append-system-prompt-file. A CLAUDE.md here
     // would NOT do: the user's own ~/.claude/CLAUDE.md loads regardless of the
@@ -714,7 +720,7 @@ pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str, repo_root
     // exactly what a profile needs to be able to REMOVE.
     let mut servers = p.mcp_servers.clone();
     if p.inherit_global_mcp {
-        for (k, v) in global_mcp_servers(&paths.user_claude_json) {
+        for (k, v) in global_mcp_servers(&user) {
             // The profile's own definition wins a name collision — inheriting is
             // a convenience, not an override.
             servers.entry(k).or_insert(v);
@@ -744,7 +750,7 @@ pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str, repo_root
     out.mcp = Some(f);
 
     materialize_skills(paths, p, &mut out.warnings)?;
-    materialize_claude_json(paths, worktree, repo_root, &mut out.warnings)?;
+    materialize_claude_json(paths, &user, worktree, repo_root, &mut out.warnings)?;
     Ok(out)
 }
 
@@ -843,7 +849,7 @@ fn materialize_skills(paths: &MatPaths, p: &Profile, warnings: &mut Vec<String>)
 ///   here would make "don't inherit global MCPs" impossible.
 /// - `projects` — 40-odd other repos' history, and their `allowedTools`, which
 ///   would leak permission grants from unrelated repos into this profile.
-fn materialize_claude_json(paths: &MatPaths, worktree: &str, repo_root: &str, warnings: &mut Vec<String>) -> Result<(), String> {
+fn materialize_claude_json(paths: &MatPaths, user: &serde_json::Value, worktree: &str, repo_root: &str, warnings: &mut Vec<String>) -> Result<(), String> {
     let target = paths.dir.join(".claude.json");
     // Start from what is already there, so a profile's own accumulated state
     // (its `projects` entries, its own flags) survives re-materialization.
@@ -863,11 +869,7 @@ fn materialize_claude_json(paths: &MatPaths, worktree: &str, repo_root: &str, wa
             ));
         }
         // First materialization: seed from the user's real file.
-        let seed = fs::read(&paths.user_claude_json)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-        root = seed;
+        root = user.clone();
         if let Some(o) = root.as_object_mut() {
             o.remove("mcpServers");
             o.remove("projects");
@@ -914,8 +916,7 @@ fn materialize_claude_json(paths: &MatPaths, worktree: &str, repo_root: &str, wa
     // it pre-approves `@`-imports that reach OUTSIDE the repo, so a hostile
     // CLAUDE.md could pull `@~/.ssh/config` into the model's context with no
     // prompt. That question is claude's to ask, every time.
-    let already_trusted = user_trusts(&paths.user_claude_json, repo_root)
-        || user_trusts(&paths.user_claude_json, worktree);
+    let already_trusted = user_trusts_in(user, repo_root) || user_trusts_in(user, worktree);
     if already_trusted {
         let projects = obj.entry("projects").or_insert_with(|| serde_json::json!({}));
         if let Some(pm) = projects.as_object_mut() {
@@ -962,24 +963,28 @@ fn is_sensitive_key(k: &str) -> bool {
     matches!(lk.as_str(), "userid" | "machineid" | "anonymousid")
 }
 
-/// True if the user's OWN claude already trusts `dir`.
-fn user_trusts(user_claude_json: &Path, dir: &str) -> bool {
-    fs::read(user_claude_json)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.get("projects")?.get(dir)?.get("hasTrustDialogAccepted").cloned())
+/// True if the user's OWN claude already trusts `dir`, given their parsed file.
+fn user_trusts_in(user: &serde_json::Value, dir: &str) -> bool {
+    user.get("projects")
+        .and_then(|p| p.get(dir))
+        .and_then(|e| e.get("hasTrustDialogAccepted"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }
 
-/// The user's global `mcpServers`, for the inherit toggle.
-fn global_mcp_servers(user_claude_json: &Path) -> Map<String, serde_json::Value> {
-    fs::read(user_claude_json)
+/// The user's `~/.claude.json`, parsed once. It is ~135KB in practice and this
+/// runs on every launch, so the three separate read+parse passes it used to take
+/// (two trust checks + the MCP inherit) are collapsed into one.
+fn read_user_claude_json(path: &Path) -> serde_json::Value {
+    fs::read(path)
         .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.get("mcpServers").cloned())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The user's global `mcpServers`, for the inherit toggle.
+fn global_mcp_servers(user: &serde_json::Value) -> Map<String, serde_json::Value> {
+    user.get("mcpServers").and_then(|v| v.as_object().cloned()).unwrap_or_default()
 }
 
 /// Absolute path to a `worktrees` binary for the MCP stanza. Resolved fresh on
@@ -1070,13 +1075,20 @@ impl DirLock {
         if let Some(parent) = lock.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        for _ in 0..100 {
+        // The retry horizon MUST exceed the staleness horizon below, or a lock
+        // orphaned by a crash is unreclaimable for the difference: every launch
+        // in that window fails. 100 × 15ms was 1.5s against a 15s staleness
+        // threshold, so a SIGKILL mid-materialize broke launches for ~13.5s.
+        for _ in 0..400 {
             match fs::create_dir(&lock) {
                 Ok(_) => return Ok(DirLock(lock)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     let stale = fs::metadata(&lock)
                         .and_then(|m| m.modified())
-                        .map(|t| t.elapsed().map(|e| e.as_secs() > 15).unwrap_or(false))
+                        // Short, because the critical section is a handful of
+                        // file writes — not something that legitimately takes
+                        // seconds. Paired with the retry budget above.
+                        .map(|t| t.elapsed().map(|e| e.as_secs() > 3).unwrap_or(false))
                         .unwrap_or(false);
                     if stale {
                         let _ = fs::remove_dir_all(&lock);
@@ -1845,6 +1857,27 @@ mod tests {
         let body = l.pane0_body("KEEP");
         assert!(body.starts_with("CLAUDE_CONFIG_DIR="), "{body}");
         assert!(body.contains(" claude -r "), "{body}");
+    }
+
+    #[test]
+    fn a_profile_with_settings_passes_the_settings_flag() {
+        // The mirror of a_profile_with_no_rules_passes_no_rules_flag. Without
+        // this, deleting the --settings push entirely passed every test — and a
+        // profile's settings are where permission DENIES live.
+        let t = tmp("settings");
+        let paths = paths_in(&t.0);
+        let p = Profile {
+            id: "work".into(),
+            name: "W".into(),
+            settings: Some(serde_json::json!({ "permissions": { "deny": ["Bash(rm:*)"] } })),
+            ..Default::default()
+        };
+        let m = materialize_with(&paths, &p, "/w", "/repo").unwrap();
+        let f = m.settings.clone().expect("settings were declared → a file is written");
+        assert!(read(&f).contains("Bash(rm:*)"));
+        let l = claude_launch(&AiLaunch::plain("claude"), &p, &m);
+        assert!(l.cmd.contains("--settings "), "{}", l.cmd);
+        assert!(l.cmd.contains(&shell_quote(&f.to_string_lossy())), "{}", l.cmd);
     }
 
     #[test]
