@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-03
+
 ### Added
 - **The dock's Files tab reads documents properly.** Markdown renders (headings,
   nested and task lists, GFM tables, blockquotes, fenced code, links, relative
