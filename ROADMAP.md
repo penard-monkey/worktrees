@@ -107,12 +107,14 @@ close-out ritual (.claude/skills/close-out).
   the overview rather than the terminal. Recorder: `app/scripts/record-readme.{sh,py}`.
   _From: 2026-07-27 readme-media session_
 
-- **Dock file viewer: syntax highlighting.** The editable viewer is a plain
-  mono `<textarea>` (deliberately — the project bans UI libraries). If in-app
-  editing becomes a real workflow rather than a quick peek, revisit: a light
-  highlighter for read mode, or CodeMirror for edit mode (which would be the
-  first real UI-lib dependency — a decision, not a default).
-  _From: [2026-07-28 right-dock session](docs/sessions/2026-07-28-right-dock/summary.md)_
+- **Dock file viewer: in-app editing, if it is ever wanted again.** The viewer
+  is now read-only and renders markdown/code/images (2026-08-02 session); the
+  textarea and its save path are gone. Bringing editing back means CodeMirror or
+  equivalent — a real decision, not a default. The read-mode highlighter is
+  hand-rolled (`app/src/highlight.ts`) and deliberately approximate: it does not
+  parse, so exotic constructs can mis-colour. Known gaps: Rust char literals are
+  uncoloured (the same rule that keeps `&'a str` lifetimes correct), and `.m` is
+  assumed C-like rather than MATLAB.
 
 - **Smoke the v0.5.0 dock + drag in the real app** — neither is verifiable in
   the mock harness: (1) manual sort drag (fix was `dragDropEnabled:false`;

@@ -1674,6 +1674,21 @@ struct FileContent {
     /// mtime (ms since epoch) — the dock echoes it back on save as a
     /// compare-and-swap token so a stale buffer can't clobber a newer edit.
     mtime: u64,
+    /// Full size on disk (NOT the length of `content`, which is capped) — the
+    /// viewer header shows it, and it's the only honest number for a file that
+    /// came back truncated or binary.
+    size: u64,
+}
+
+/// An image (or any small blob) as base64, for the viewer's `data:` URI. Kept
+/// separate from `read_file` so the text path never pays for the encode.
+#[derive(Serialize)]
+struct FileBlob {
+    b64: String,
+    /// Bytes actually encoded (== `size` unless the cap truncated the read).
+    size: u64,
+    truncated: bool,
+    mtime: u64,
 }
 
 /// File mtime in ms since the epoch (0 if unavailable) — a cheap change token.
@@ -1779,7 +1794,11 @@ async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Resu
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
     }
-    let cap = max_bytes.unwrap_or(1_000_000);
+    // `max_bytes` is frontend-controlled: clamp it. An unclamped `cap + 1`
+    // overflows on u64::MAX — panicking in a debug build, and in release
+    // wrapping to 0, which would report a non-empty file as empty and NOT
+    // truncated. Saturating keeps the failure mode "reads everything".
+    let cap = max_bytes.unwrap_or(1_000_000).min(u64::MAX - 1);
     // Bounded read: `take(cap+1)` never allocates more than the cap even for a
     // multi-GB file the user clicks by accident (video, core dump, tarball).
     let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
@@ -1788,10 +1807,63 @@ async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Resu
     let truncated = bytes.len() as u64 > cap;
     let slice = &bytes[..bytes.len().min(cap as usize)];
     let mtime = file_mtime_ms(&f);
+    let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(bytes.len() as u64);
     if slice.contains(&0) {
-        return Ok(FileContent { content: String::new(), truncated, binary: true, mtime });
+        return Ok(FileContent { content: String::new(), truncated, binary: true, mtime, size });
     }
-    Ok(FileContent { content: String::from_utf8_lossy(slice).to_string(), truncated, binary: false, mtime })
+    Ok(FileContent {
+        content: String::from_utf8_lossy(slice).to_string(),
+        truncated,
+        binary: false,
+        mtime,
+        size,
+    })
+}
+
+/// Raw bytes as base64 — the viewer builds a `data:` URI from it to show an
+/// image inline. Same path guard as every other FS command. The cap is smaller
+/// than `read_file`'s (base64 inflates 4/3, and this crosses the IPC bridge as
+/// one string): a bigger image reports `truncated` and the viewer refuses to
+/// render a half-decoded file rather than showing a corrupt one.
+#[tauri::command]
+async fn read_file_base64(app: AppHandle, path: String, max_bytes: Option<u64>) -> Result<FileBlob, String> {
+    let f = guard_under_projects(&app, &path)?;
+    if !f.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    // 4 MiB: base64 inflates 4/3 and the result crosses the IPC bridge as one
+    // string, so a markdown doc full of images can hold several of these at
+    // once. Clamped for the same overflow reason as `read_file`.
+    let cap = max_bytes.unwrap_or(4_000_000).min(u64::MAX - 1);
+    let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let truncated = bytes.len() as u64 > cap;
+    if truncated {
+        bytes.truncate(cap as usize);
+    }
+    Ok(FileBlob {
+        b64: b64_encode(&bytes),
+        size: bytes.len() as u64,
+        truncated,
+        mtime: file_mtime_ms(&f),
+    })
+}
+
+/// Standard base64 (RFC 4648, padded). Hand-rolled: the app pulls in no base64
+/// crate for what is one table and a three-byte loop.
+fn b64_encode(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 /// Save an edit. The file must already exist (guard canonicalizes) — the dock
@@ -2412,6 +2484,7 @@ pub fn run() {
             open_terminal,
             list_dir,
             read_file,
+            read_file_base64,
             write_file,
             list_shell_sessions,
             close_shell_session,
