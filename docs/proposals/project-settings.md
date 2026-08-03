@@ -785,8 +785,10 @@ steady state of any repo older than a month.
   failed `open(2)`, and a broken one resolves to `None` rather than failing
   discovery, because `ls` must stay usable.
 
-**Never — `[hooks]`, `[infra] up/stop/down`.** §5. Record as an ADR so this does
-not get quietly re-added in six months.
+**Never — `[hooks]`, `[infra] up/stop/down`.** §5. Recorded as an ADR so this does
+not get quietly re-added in six months: `docs/adr/0001-no-repo-supplied-argv.md`.
+That ADR also carries the superseded markers into `DESIGN.md`, which still
+described `[infra]`, `up_cmd`, the `up`/`down` verbs and the trust prompt as live.
 
 ### Migration for cdv
 

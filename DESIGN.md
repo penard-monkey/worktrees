@@ -3,6 +3,14 @@
 > Status: design locked (2026-07-20), pending build. Produced by a 4-facet design +
 > adversarial-critique + synthesis workflow. See `findings.md` for how we got here
 > (fork evaluation → cherry-pick → build-own-UI decision) and `task_plan.md` for phases.
+>
+> ⚠ **One part of this document was REVERSED and never built: `[infra]
+> up/stop/down`, `[place].up_cmd`, the `worktrees up|down` verbs, the
+> `infra_up/stop/down` commands, and the first-run trust prompt.** A cloned repo
+> may not supply argv — see `docs/adr/0001-no-repo-supplied-argv.md`. What
+> shipped instead is declarative: `[[file]]`, `[ports]`, `[compose]`, with the
+> tool assembling every command line. Each affected section below is marked.
+> Everything else here is current.
 
 A Tauri desktop app that is a **place manager with a lifecycle**, where the existing
 bash CLI (`bin/worktrees`) stays the **engine**. The UI adds what the terminal can't:
@@ -89,6 +97,10 @@ worktrees status [<slug|branch>] [--json]    # NEW: one place (cwd's if no arg);
 worktrees paths [--json]                     # NEW: repo/main/wt roots + places-file path (UI bootstrap)
 
 # INFRA (new verbs; shell out to repo-declared commands, never assemble docker args)
+# ⚠ REVERSED — ADR 0001. `provision` shipped; `up`/`down` did NOT and will not:
+# both run a repo-authored string. The comment above has it exactly backwards —
+# the tool assembles the docker argv and never runs a string from the repo.
+# Teardown is `[compose]`-driven and happens on `rm`.
 worktrees provision <slug|branch>            # NEW: (re)link/copy env + (re)allocate port slot; no bring-up; idempotent
 worktrees up   <slug|branch> [--provision]   # NEW: export slot env, run declared infra.up from the worktree dir
 worktrees down <slug|branch> [--keep-volumes]# NEW: --keep-volumes → infra.stop; else infra.down (destroys volumes)
@@ -171,7 +183,9 @@ in `ensure_excluded`.
       "pinned": true,                  // sort-to-top; orthogonal to lifecycle
       "note": "auth refactor place",
       "last_opened_epoch": 1752700000,
-      "up_cmd": null,                  // per-place override of infra.up
+      "up_cmd": null,                  // ⚠ NOT SHIPPED (ADR 0001) — a per-place
+                                       // command string is the same boundary
+                                       // crossing as [infra], one scope down
       "created_by": "ui", "created_epoch": 1751328000 } } }
 ```
 Unknown keys PRESERVED on rewrite (forward-compat). Absent/unrecognized `lifecycle` →
@@ -216,6 +230,23 @@ while a session is live — DERIVE the effective label every read instead.
   `touch_place`) and debounces notes in the UI.
 
 ## Infra convention (CDV STACK_MODE → config-driven)
+
+> ⚠ **SUPERSEDED IN FULL — `docs/adr/0001-no-repo-supplied-argv.md`.** Every
+> command string in this section (`[infra] up`/`stop`/`down`) was reversed before
+> anything was built. A cloned repo may not write the tool's command line; the
+> distinction between "the repo selects among my commands" and "the repo writes
+> my command" is the whole boundary, and `sh -c` on a committed string crosses it.
+>
+> What shipped instead is `docs/proposals/project-settings.md`: `[[file]]`
+> (link/copy), `[ports]` (slot → `.worktree.env`), `[compose]` (a validated file
+> list + a `{prefix}`/`{slug}` template), with the tool assembling
+> `docker compose -f … -p … down -v` itself. `[hooks]`/`post_create` live in the
+> USER's `~/.config/worktrees/config.toml` — same power, opposite provenance.
+> `projcfg.rs`'s `USER_ONLY_KEYS` makes `[infra]` and `[hooks]` a hard parse
+> error, so the TOML below is not merely stale: it is refused on sight.
+>
+> The port and compose-file *shapes* here were substantially right and survive in
+> `[ports]`/`[compose]`; only the executable strings are gone.
 
 Three-tier resolution: (1) `.worktrees.toml` at repo root (committed, reviewed) → explicit;
 (2) auto-detect `docker-compose.worktree.yml` → synthesize EXACT CDV behavior;
@@ -325,7 +356,7 @@ set_lifecycle(slug, label); set_pin(slug, on); set_note(slug, note); touch_place
 new_place(branch, base?, name?) -> CmdResult
 switch_branch(slug, branch, base?) -> CmdResult
 remove_place(slug, del_branch, force) -> CmdResult
-infra_up(slug) -> CmdResult; infra_stop(slug); infra_down(slug)   // shell to CLI
+infra_up(slug) -> CmdResult; infra_stop(slug); infra_down(slug)   // ⚠ NOT SHIPPED — ADR 0001
 term_open(slug, cols, rows, on_bytes: Channel) -> TermId
 term_write(id, data); term_resize(id, cols, rows); term_close(id)  // detach, NEVER kill
 // live push: Rust emits "places:changed" from notify + poll → frontend re-pulls list_places()
@@ -341,8 +372,12 @@ Serde `Place` struct: every unknowable field `Option<T>` (CLI emits explicit nul
 - **Main pane:** xterm.js (FitAddon+WebglAddon) + infra strip (Start/Stop, port chips by
   `listening`, localhost links). One-click Open = `touch_place` + `worktrees open --no-attach`
   + `term_open` + `infra_up` if configured (active is DERIVED, never written).
-- **Trust prompt:** `infra.up/down` are repo-authored strings run via `sh -c` (same trust as
-  `make`/`npm run`) — show the command, confirm on first run for a not-previously-trusted repo.
+- **Trust prompt:** ⚠ **DELETED, not implemented — ADR 0001.** It was to guard
+  `infra.up/down` as "repo-authored strings run via `sh -c` (same trust as
+  `make`/`npm run`)". There is no repo-authored string left to guard. The prompt
+  was also the wrong shape: `worktrees new` on a **fresh clone** is the moment of
+  least knowledge, and a security modal raised from a background poll is a dialog
+  people click through.
 
 ### Persistence
 - `tauri-plugin-window-state` → geometry.
@@ -399,6 +434,8 @@ no-upstream → `ahead:null,behind:null`; stale dir → `registered:false`; `ls`
    probe off the hot path.
 6. **Slot race** under parallel opens — mkdir O_EXCL `.slots.lock` + PID-liveness (not flock).
 7. **RCE surface** — `infra.up/stop/down` run via `sh -c`; show command + first-run trust prompt.
+   ⚠ RESOLVED BY REMOVAL, not by the prompt — ADR 0001. The risk was real and the
+   mitigation was not; the feature went instead.
 
 ## Principle checklist (all upheld)
 1. **CLI stays the engine** — Rust only spawns `worktrees … --json` + `tmux attach` in a PTY;

@@ -78,6 +78,14 @@ CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
   build — every rebuild silently becomes "stable"; don't use it for that.
 - App: `make install-app` → /Applications (local builds skip Gatekeeper).
 
+## Decisions
+
+`docs/adr/` holds decisions that must survive being forgotten. Read them before
+adding config surface. **ADR 0001: a cloned repo never supplies argv** — no
+`[hooks]`, no `[infra] up/stop/down`, no per-place `up_cmd`. `projcfg.rs`'s
+`USER_ONLY_KEYS` makes them hard parse errors, and `DESIGN.md` still *describes*
+them (marked superseded) because it was written before the reversal.
+
 ## Planning docs
 
 `task_plan.md` / `findings.md` / `progress.md` are gitignored working memory —
