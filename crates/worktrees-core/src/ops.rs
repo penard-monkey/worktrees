@@ -89,14 +89,42 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
 /// leaves the env/flag composition to the claude adapter. What it establishes is
 /// that `env` and `match_word` travel BESIDE the command instead of being parsed
 /// back out of it.
-pub fn ai_launch_for(_p: &Project, ai_cmd: &str) -> crate::profile::AiLaunch {
+pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
+    let plain = crate::profile::AiLaunch::plain(ai_cmd);
     // Reads the same flag the PROBE side reads, so the two cannot get out of
-    // step: while this returns the plain launch, `claude_config_dir_for_repo`
-    // keeps pointing at `~/.claude`. One commit flips both.
+    // step — `claude_config_dir_for_repo` returns `~/.claude` while this is off.
     if !crate::profile::launch_honors_profiles() {
-        return crate::profile::AiLaunch::plain(ai_cmd);
+        return plain;
     }
-    crate::profile::AiLaunch::plain(ai_cmd)
+    // `ai_cmd = none` (plain shell), or a different AI tool. The profile model
+    // is tool-agnostic but the recipe is claude's; anything else launches
+    // exactly as it does today rather than being handed flags it never had.
+    if plain.cmd.is_empty() || plain.match_word != "claude" {
+        return plain;
+    }
+    let Some(prof) = crate::profile::resolve_profile(&p.main_root) else {
+        return plain;
+    };
+    match crate::profile::materialize(&prof, wt, &p.main_root) {
+        Ok(m) => {
+            // Never swallowed: a skipped skill or a missing worktrees binary
+            // changes what the session can do, so the user has to see it.
+            for w in &m.warnings {
+                ui.warn(&format!("profile '{}': {w}", prof.name));
+            }
+            crate::profile::claude_launch(&plain, &prof, &m)
+        }
+        Err(e) => {
+            // Fall back to an unprofiled launch rather than leaving the user
+            // with no session at all — but say so loudly, because their rules
+            // and MCP set are NOT in effect.
+            ui.warn(&format!(
+                "profile '{}' could not be prepared ({e}) — launching WITHOUT it",
+                prof.name
+            ));
+            plain
+        }
+    }
 }
 
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
@@ -433,7 +461,8 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // success the user MUST see (loud-guard). Propagate launch's rc so cmd_new
     // returns nonzero. (Fake shims always succeed → bats success path unchanged.)
     // `new` always keeps the spare shell (pane 1) — that's where deps install.
-    let rc = launch(p, ui, &wt, &session, &install_cmd, &ai_launch_for(p, &ai_cmd), do_attach, true);
+    let ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    let rc = launch(p, ui, &wt, &session, &install_cmd, &ai, do_attach, true);
     if rc != 0 {
         rc
     } else {
@@ -605,7 +634,8 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if resume && !ai_cmd.is_empty() {
         ai_cmd = format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg());
     }
-    launch(p, ui, &wt, &session, "", &ai_launch_for(p, &ai_cmd), do_attach, spare_shell)
+    let ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    launch(p, ui, &wt, &session, "", &ai, do_attach, spare_shell)
 }
 
 // ── close ────────────────────────────────────────────────────────────────────

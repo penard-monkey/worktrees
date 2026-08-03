@@ -54,7 +54,7 @@ pub const RESERVED_ID: &str = "none";
 /// user's conversation would appear to vanish, with nothing in the log.
 ///
 /// Both sides read this flag, so it flips in exactly one commit.
-const LAUNCH_HONORS_PROFILES: bool = false;
+const LAUNCH_HONORS_PROFILES: bool = true;
 
 /// Read by BOTH sides of the seam (`ops::ai_launch_for` and
 /// `claude_config_dir_for_repo`) so neither can honour profiles without the
@@ -312,6 +312,20 @@ pub fn resolve_profile_id_from(
     known.iter().find(|k| k.as_str() == picked).cloned()
 }
 
+/// The profile in effect for a repo, if any.
+pub fn resolve_profile(repo_root: &str) -> Option<Profile> {
+    let ps = read_lenient();
+    let env = std::env::var("WORKTREES_PROFILE").ok();
+    let known: Vec<String> = ps.profiles.keys().cloned().collect();
+    let id = resolve_profile_id_from(
+        env.as_deref(),
+        ps.assignments.get(repo_root).map(|s| s.as_str()),
+        ps.default_id.as_deref(),
+        &known,
+    )?;
+    ps.profiles.get(&id).cloned()
+}
+
 /// Live resolution for one repo root.
 pub fn resolve_profile_id(repo_root: &str) -> Option<String> {
     let ps = read_lenient();
@@ -422,6 +436,55 @@ pub struct AiLaunch {
     pub cmd: String,
     /// Basename of the real program, for adoption/session matching. `claude`.
     pub match_word: String,
+}
+
+/// Compose the profiled launch for claude: the config-dir swap plus the flags
+/// that carry the parts a swapped dir does not.
+///
+/// Flag ORDER matters. Everything the profile adds goes AFTER whatever `base`
+/// already holds, because `base.cmd` may already end in the resume arg (`-r`)
+/// and three bats assertions pin the ai word and resume arg as adjacent. Adding
+/// on the end keeps those true.
+///
+/// Every value interpolated here goes through `shell_quote`: these end up inside
+/// the `sh -ic` string, and `model` in particular is user-typed text.
+pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch {
+    let mut cmd = base.cmd.clone();
+    let mut push = |flag: &str, val: &Path| {
+        cmd.push(' ');
+        cmd.push_str(flag);
+        cmd.push(' ');
+        cmd.push_str(&shell_quote(&val.to_string_lossy()));
+    };
+
+    if let Some(rules) = &m.rules {
+        push("--append-system-prompt-file", rules);
+    }
+    if let Some(settings) = &m.settings {
+        // Passed explicitly rather than relying on `<config dir>/settings.json`
+        // being picked up: the flag is verified, the implicit path is inferred.
+        push("--settings", settings);
+    }
+    if let Some(mcp) = &m.mcp {
+        push("--mcp-config", mcp);
+        // THE flag that makes a profile able to REMOVE a noisy global server
+        // rather than only add to the set.
+        if !p.inherit_global_mcp {
+            cmd.push_str(" --strict-mcp-config");
+        }
+    }
+    if let Some(model) = p.model.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.push_str(" --model ");
+        cmd.push_str(&shell_quote(model));
+    }
+
+    AiLaunch {
+        env: vec![("CLAUDE_CONFIG_DIR".to_string(), m.dir.to_string_lossy().into_owned())],
+        cmd,
+        // Unchanged, and that is the whole point of the type: tmux adoption and
+        // the app's auto-resume gate match the PROGRAM, never this string.
+        match_word: base.match_word.clone(),
+    }
 }
 
 /// The one true `ai_word` derivation: first whitespace-separated word of the
@@ -1750,6 +1813,84 @@ mod tests {
         let out = materialize_with(&paths, &p, "/w", "/repo").unwrap();
         assert!(out.rules.is_none());
         assert!(!paths.dir.join("rules.md").exists(), "stale rules must not keep applying");
+    }
+
+    #[test]
+    fn the_profiled_launch_composes_env_and_flags_in_the_right_order() {
+        let t = tmp("adapter");
+        let paths = paths_in(&t.0);
+        let p = Profile {
+            id: "work".into(),
+            name: "Work".into(),
+            rules: "be terse".into(),
+            model: Some("opus".into()),
+            ..Default::default()
+        };
+        let m = materialize_with(&paths, &p, "/repo/wt", "/repo").unwrap();
+        // base already carries the resume arg, as cmd_open would build it
+        let base = AiLaunch::plain("claude -r");
+        let l = claude_launch(&base, &p, &m);
+
+        assert_eq!(l.match_word, "claude", "adoption still matches the program");
+        assert_eq!(l.env, vec![("CLAUDE_CONFIG_DIR".to_string(), paths.dir.to_string_lossy().into_owned())]);
+
+        // the resume arg stays adjacent to the ai word — three bats assertions
+        // pin that, so profile flags must land AFTER it
+        assert!(l.cmd.starts_with("claude -r "), "{}", l.cmd);
+        assert!(l.cmd.contains("--append-system-prompt-file "), "{}", l.cmd);
+        assert!(l.cmd.contains("--mcp-config "), "{}", l.cmd);
+        assert!(l.cmd.contains("--strict-mcp-config"), "not inheriting globals → strict: {}", l.cmd);
+        assert!(l.cmd.contains("--model 'opus'"), "{}", l.cmd);
+        // and the env assignment still precedes the program in the composed line
+        let body = l.pane0_body("KEEP");
+        assert!(body.starts_with("CLAUDE_CONFIG_DIR="), "{body}");
+        assert!(body.contains(" claude -r "), "{body}");
+    }
+
+    #[test]
+    fn inheriting_global_mcp_drops_the_strict_flag() {
+        // --strict-mcp-config is precisely what lets a profile REMOVE a global
+        // server; with inherit on, keeping it would defeat the toggle.
+        let t = tmp("strict");
+        let paths = paths_in(&t.0);
+        let mut p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        p.inherit_global_mcp = true;
+        let m = materialize_with(&paths, &p, "/w", "/repo").unwrap();
+        let l = claude_launch(&AiLaunch::plain("claude"), &p, &m);
+        assert!(l.cmd.contains("--mcp-config"));
+        assert!(!l.cmd.contains("--strict-mcp-config"), "{}", l.cmd);
+    }
+
+    #[test]
+    fn a_hostile_model_string_cannot_break_out_of_the_shell() {
+        let t = tmp("hostile");
+        let paths = paths_in(&t.0);
+        let p = Profile {
+            id: "work".into(),
+            name: "W".into(),
+            model: Some("x'; touch /tmp/PWNED; echo '".into()),
+            ..Default::default()
+        };
+        let m = materialize_with(&paths, &p, "/w", "/repo").unwrap();
+        let l = claude_launch(&AiLaunch::plain("claude"), &p, &m);
+        // `model` is user-typed text landing inside the `sh -ic` string; the
+        // quoting must neutralise it rather than trusting the field.
+        assert!(l.cmd.contains(r#"--model 'x'\''; touch /tmp/PWNED; echo '\'''"#), "{}", l.cmd);
+        assert!(!l.cmd.contains("; touch /tmp/PWNED; echo ';"), "unquoted: {}", l.cmd);
+    }
+
+    #[test]
+    fn a_profile_with_no_rules_passes_no_rules_flag() {
+        // Pointing --append-system-prompt-file at a file we did not write would
+        // fail the launch outright.
+        let t = tmp("norules");
+        let paths = paths_in(&t.0);
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        let m = materialize_with(&paths, &p, "/w", "/repo").unwrap();
+        assert!(m.rules.is_none());
+        let l = claude_launch(&AiLaunch::plain("claude"), &p, &m);
+        assert!(!l.cmd.contains("--append-system-prompt-file"), "{}", l.cmd);
+        assert!(!l.cmd.contains("--settings"), "no settings declared: {}", l.cmd);
     }
 
     #[test]

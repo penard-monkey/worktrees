@@ -453,7 +453,8 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
             // banner / app.log, not silently report success. Single-pane
             // (spare_shell=false): Claude gets full width; the scratch shell
             // lives in the dock's Terminal tab.
-            ops::launch(p, ui, &p.main_root, &session, "", &ops::ai_launch_for(p, &ai_cmd), false, false)
+            let ai = ops::ai_launch_for(p, ui, &p.main_root, &ai_cmd);
+            ops::launch(p, ui, &p.main_root, &session, "", &ai, false, false)
         } else {
             let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
             if resume {
