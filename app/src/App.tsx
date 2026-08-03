@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { ShellPane, TerminalPane } from "./TerminalPane";
+import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
@@ -439,169 +440,14 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
   );
 }
 
-// ── right dock: file browser + editable viewer + embedded terminal ───────────
-// All at MODULE scope (stable identity — components defined inside App() remount
-// every render and would lose tree-expansion / textarea focus).
+// ── right dock: files + embedded terminal ───────────────────────────────────
+// The Files tab (tree, viewers, split layout) lives in FilesPane.tsx. Both are
+// at MODULE scope — components defined inside App() remount every render.
 
-type FsEntry = { name: string; path: string; is_dir: boolean };
-
-// One lazy directory node: fetches its children the first time it's expanded and
-// caches them. Files bubble a click up via onOpen; dirs toggle.
-function TreeNode({ entry, depth, openPath, onOpen, onError }: {
-  entry: FsEntry; depth: number; openPath: string | null; onOpen: (path: string) => void; onError: (e: unknown) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [kids, setKids] = useState<FsEntry[] | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const toggle = async () => {
-    if (!entry.is_dir) { onOpen(entry.path); return; }
-    const next = !open;
-    setOpen(next);
-    if (next && kids === null && !loading) {
-      setLoading(true);
-      // Surface a failure (permissions, backend error) rather than showing it as
-      // an empty directory — a swallowed error reads as "it just didn't respond".
-      try { setKids(await invoke<FsEntry[]>("list_dir", { path: entry.path })); }
-      catch (e) { setKids([]); onError(e); }
-      finally { setLoading(false); }
-    }
-  };
-
-  const isSel = !entry.is_dir && openPath === entry.path;
-  return (
-    <div className="tree-node">
-      <button
-        className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "")}
-        style={{ paddingLeft: `calc(var(--s2) + ${depth} * var(--s3))` }}
-        onClick={toggle}
-        title={entry.name}
-      >
-        <span className="tree-caret">{entry.is_dir && (open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />)}</span>
-        <span className="tree-name">{entry.name}</span>
-      </button>
-      {entry.is_dir && open && (
-        <div className="tree-kids">
-          {loading && <div className="tree-note">…</div>}
-          {kids && kids.length === 0 && !loading && <div className="tree-note">empty</div>}
-          {kids?.map((k) => (
-            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath} onOpen={onOpen} onError={onError} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Files tab tree. `root` = the place's worktree path; remount per place via key.
-function FileTree({ root, openPath, onOpen, onError }: { root: string; openPath: string | null; onOpen: (path: string) => void; onError: (e: unknown) => void }) {
-  const [entries, setEntries] = useState<FsEntry[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setEntries(null); setErr(null);
-    invoke<FsEntry[]>("list_dir", { path: root })
-      .then((e) => { if (alive) setEntries(e); })
-      .catch((e) => { if (alive) setErr(String(e)); });
-    return () => { alive = false; };
-  }, [root]);
-  if (err) return <div className="tree-note err-note">{err}</div>;
-  if (!entries) return <div className="tree-note">loading…</div>;
-  if (!entries.length) return <div className="tree-note">empty worktree</div>;
-  return (
-    <div className="filetree">
-      {entries.map((e) => <TreeNode key={e.path} entry={e} depth={0} openPath={openPath} onOpen={onOpen} onError={onError} />)}
-    </div>
-  );
-}
-
-// Editable viewer. Reads on path change; plain textarea (no editor lib). ⌘S /
-// Save writes back. Binary + truncated files are read-only (partial saves would
-// corrupt), with an "Open in editor" escape hatch. Because Claude edits the same
-// tree in another pane, this guards against clobbering: it auto-reloads from disk
-// while the buffer is clean (`reloadToken` bumps on places:changed), and on save
-// passes the file's mtime as a compare-and-swap token — a diverged file is
-// refused, not overwritten.
-type FileRead = { content: string; truncated: boolean; binary: boolean; mtime: number };
-function FileViewer({ path, reloadToken, onOpenEditor, onError }: {
-  path: string; reloadToken: number; onOpenEditor: (path: string) => void; onError: (e: unknown) => void;
-}) {
-  const [orig, setOrig] = useState("");
-  const [text, setText] = useState("");
-  const [meta, setMeta] = useState<{ binary: boolean; truncated: boolean; mtime: number } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [conflict, setConflict] = useState(false);
-
-  const load = useCallback(() => {
-    let alive = true;
-    setLoading(true); setMeta(null); setConflict(false);
-    invoke<FileRead>("read_file", { path })
-      .then((r) => { if (!alive) return; setOrig(r.content); setText(r.content); setMeta({ binary: r.binary, truncated: r.truncated, mtime: r.mtime }); })
-      .catch((e) => { if (alive) onError(e); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
-  }, [path, onError]);
-
-  useEffect(() => load(), [load]); // (re)load on path change
-
-  const dirty = text !== orig;
-  const canEdit = !!meta && !meta.binary && !meta.truncated;
-
-  // Auto-refresh from disk when the tree changed elsewhere AND the buffer is
-  // clean — never nuke unsaved edits (the save-time CAS covers the dirty case).
-  const dirtyRef = useRef(false); dirtyRef.current = dirty;
-  const firstReload = useRef(true);
-  useEffect(() => {
-    if (firstReload.current) { firstReload.current = false; return; }
-    if (!dirtyRef.current) load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadToken]);
-
-  const save = async () => {
-    if (!dirty || saving || !canEdit) return;
-    setSaving(true);
-    try {
-      await invoke("write_file", { path, content: text, expectedMtime: meta?.mtime ?? null });
-      setOrig(text); setConflict(false);
-      const r = await invoke<FileRead>("read_file", { path }); // pick up the new mtime for the next CAS
-      setMeta((m) => (m ? { ...m, mtime: r.mtime } : m));
-    } catch (e) {
-      if (String(e).includes("changed on disk")) setConflict(true);
-      onError(e);
-    } finally { setSaving(false); }
-  };
-
-  return (
-    <div className="viewer">
-      <div className="viewer-h">
-        <span className="viewer-path" title={path}>{basename(path)}{dirty ? " ●" : ""}</span>
-        {meta?.truncated && <span className="viewer-tag">truncated</span>}
-        {conflict && <span className="viewer-tag conflict">changed on disk</span>}
-        <span className="dock-spacer" />
-        {conflict && <button className="ctrl sm" onClick={load}>Reload</button>}
-        {canEdit && <button className="ctrl sm" disabled={!dirty || saving} onClick={save}>{saving ? "Saving…" : "Save"}</button>}
-        <button className="ctrl sm" onClick={() => onOpenEditor(path)}>Editor</button>
-      </div>
-      {loading ? (
-        <div className="tree-note">loading…</div>
-      ) : meta?.binary ? (
-        <div className="tree-note">binary file — <button className="linklike" onClick={() => onOpenEditor(path)}>open in editor</button></div>
-      ) : (
-        <textarea
-          className="viewer-text"
-          value={text}
-          spellCheck={false}
-          readOnly={!canEdit}
-          onChange={(e) => setText(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); }
-          }}
-        />
-      )}
-    </div>
-  );
-}
+// Files-tab layout cycle for the dock header button.
+const NEXT_FILES_LAYOUT: Record<Settings["files_layout"], Settings["files_layout"]> = {
+  auto: "stack", stack: "split", split: "auto",
+};
 
 // A dock shell is just a ShellPane now — the backend spawns-or-reattaches on
 // open, keyed by repo+slug+index (the webview never names one), so there's no
@@ -1068,7 +914,16 @@ function App() {
   const searchRef = useRef<HTMLInputElement | null>(null);
   // right dock: which file the Files tab is viewing (null = none). Reset per place.
   const [dockFile, setDockFile] = useState<string | null>(null);
-  useEffect(() => { setDockFile(null); }, [sel?.repo, sel?.slug]);
+  // Reading mode (⌘⇧E): the open file takes over the main pane. Closed by a
+  // place switch or by the file going away — an overlay with nothing under it
+  // would hide the terminal for no reason.
+  const [reading, setReading] = useState(false);
+  useEffect(() => { setDockFile(null); setReading(false); }, [sel?.repo, sel?.slug]);
+  useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
+  // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
+  // make that a lie. Same for flipping the dock to the Terminal tab.
+  const filesDockShown = settings.dock_open && settings.dock_tab === "files";
+  useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
   // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
   const [newTermToken, setNewTermToken] = useState(0);
   // bumps on places:changed → the dock's file viewer re-reads from disk when clean.
@@ -1787,8 +1642,8 @@ function App() {
   }, []);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
-  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen });
-  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen };
+  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false });
+  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen, filesTabOpen: settings.dock_open && settings.dock_tab === "files" };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // ⌘⇧T — new dock terminal. Handled BEFORE the meta-only guard (it needs
@@ -1798,6 +1653,25 @@ function App() {
       if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "t") {
         e.preventDefault();
         if (!keyRef.current.switchOpen) setNewTermToken((v) => v + 1);
+        return;
+      }
+      // Esc leaves reading mode — but only when reading is the TOP surface.
+      // The settings sheet and the ⌘K palette are above it and own Escape
+      // first, or one keypress dismisses the thing you can't see.
+      if (e.key === "Escape" && keyRef.current.reading && !keyRef.current.settingsOpen && !keyRef.current.switchOpen) {
+        e.preventDefault();
+        setReading(false);
+        return;
+      }
+      // ⌘⇧E — reading mode: the dock's current file expands over the main pane.
+      // No-op with no file open, so the chord can't blank the terminal for
+      // nothing. Also shift-guarded, hence its place above the meta-only gate.
+      if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        // Only meaningful with the Files tab showing a file: opening a reader
+        // for a stale path behind a modal, or over the Terminal tab, is noise.
+        if (keyRef.current.switchOpen || keyRef.current.settingsOpen) return;
+        setReading((v) => (v ? false : keyRef.current.filesTabOpen && !!keyRef.current.dockFile));
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
@@ -2357,6 +2231,37 @@ function App() {
             </div>
           </div>
         )}
+
+        {/* ── reading mode (⌘⇧E): the dock's open file over the whole main
+            pane. The terminal stays MOUNTED underneath (hidden, not
+            unmounted) — unmounting would drop the xterm and its scrollback;
+            TerminalPane refits when it is revealed again. */}
+        {reading && dockFile && selected && (
+          // Spans the main pane AND the dock (stopping at the rails): an
+          // overlay confined to `main` gets NARROWER as the dock grows, which
+          // is the opposite of "expand".
+          <div
+            className="reading"
+            role="dialog"
+            aria-label="File reader"
+            style={{ left: 0, right: dockShown ? -fit.dockW : 0 }}
+          >
+            <FileView
+              key={dockFile}
+              path={dockFile}
+              reloadToken={placesToken}
+              onOpen={setDockFile}
+              onOpenEditor={editIn}
+              onError={fail}
+              wrap={settings.files_wrap}
+              onWrap={(v) => updateSettings({ files_wrap: v })}
+              mdSource={settings.files_md_source}
+              onMdSource={(v) => updateSettings({ files_md_source: v })}
+              expanded
+              onExpand={(v) => setReading(v)}
+            />
+          </div>
+        )}
       </main>
 
       {/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ── */}
@@ -2368,17 +2273,38 @@ function App() {
           <div className="dock-tabs">
             <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
             <span className="dock-spacer" />
+            {settings.dock_tab === "files" && (
+              <button
+                className="ctrl sm icon-only"
+                aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
+                title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
+                onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
+              >
+                {settings.files_layout === "auto" ? "A" : settings.files_layout === "stack" ? "▤" : "▥"}
+              </button>
+            )}
           </div>
           <div className="dock-body">
             {settings.dock_tab === "files" ? (
-              <div className="dock-files">
-                <div className="dock-tree">
-                  <FileTree key={selected.path} root={selected.path} openPath={dockFile} onOpen={setDockFile} onError={fail} />
-                </div>
-                {dockFile
-                  ? <FileViewer key={dockFile} path={dockFile} reloadToken={placesToken} onOpenEditor={editIn} onError={fail} />
-                  : <div className="tree-note viewer-hint">select a file to view</div>}
-              </div>
+              <FilesPane
+                root={selected.path}
+                openPath={dockFile}
+                dockW={fit.dockW}
+                layout={settings.files_layout}
+                splitPct={settings.files_split_pct}
+                stackPct={settings.files_stack_pct}
+                onSplitPct={(v, o) => updateSettings(o === "split" ? { files_split_pct: v } : { files_stack_pct: v })}
+                reloadToken={placesToken}
+                onOpen={setDockFile}
+                onOpenEditor={editIn}
+                onError={fail}
+                wrap={settings.files_wrap}
+                onWrap={(v) => updateSettings({ files_wrap: v })}
+                mdSource={settings.files_md_source}
+                onMdSource={(v) => updateSettings({ files_md_source: v })}
+                expanded={false}
+                onExpand={(v) => setReading(v)}
+              />
             ) : (
               <TerminalTabs key={sel.repo + "|" + sel.slug}
                 repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}

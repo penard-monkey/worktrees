@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **The dock's Files tab reads documents properly.** Markdown renders (headings,
+  nested and task lists, GFM tables, blockquotes, fenced code, links, relative
+  images) with a Preview/Source toggle; source files get syntax highlighting and
+  a line-number gutter; images show inline over a checkerboard with their
+  dimensions, byte size and a fit/1:1 toggle; PDFs, archives, fonts and media
+  get a named placeholder with "Open in editor" and "Reveal" instead of a bare
+  "binary file".
+- **The Files tab lays out to fit.** Past ~620px of dock width the tree moves
+  beside the content instead of above it; the divider drags and the ratio
+  persists. A header button cycles auto → stacked → side-by-side.
+- **Reading mode (⌘⇧E).** The open file expands over the main pane at a proper
+  reading measure; Esc or the Collapse button returns. The dock falls back to
+  showing just the tree while it is up.
+
+### Changed
+- **The dock's file viewer is read-only.** Editing was a plain `<textarea>` with
+  a save path; it is now a renderer, and edits go through "Open in editor". This
+  removes the save-conflict UI and any chance of the dock clobbering a file the
+  agent in the next pane is writing. (`write_file` remains in the backend.)
+
 ## [0.7.0] - 2026-08-01
 
 ### Added

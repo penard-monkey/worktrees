@@ -8,7 +8,7 @@ BINDIR ?= $(HOME)/.local/bin
 BATS   := ./test/lib/bats-core/bin/bats
 RELEASE_BIN := $(CURDIR)/target/release/worktrees
 
-.PHONY: build build-debug install install-copy install-app uninstall lint \
+.PHONY: build build-debug install install-copy install-app dev-app uninstall lint \
         test test-real-tmux check release
 
 build:
@@ -27,6 +27,15 @@ install-copy: build
 	mkdir -p $(BINDIR)
 	install -m 0755 $(RELEASE_BIN) $(BINDIR)/worktrees
 	@echo "installed (copy): $(BINDIR)/worktrees"
+
+# Development loop for the desktop app: builds the app crate and serves the
+# frontend on 1420 with hot reload. NOT an install — see install-app for that.
+dev-app:
+	@command -v node >/dev/null || { echo "node not found on PATH — run: nvm use"; exit 1; }
+	@want=$$(cat $(CURDIR)/.nvmrc); have=$$(node -v | tr -d v); \
+	  [ "$$(printf '%s\n%s\n' "$$want" "$$have" | sort -V | head -1)" = "$$want" ] || \
+	  { echo "node $$have is older than .nvmrc ($$want) — run: nvm use"; exit 1; }
+	pnpm --dir app tauri dev
 
 # Build the Tauri desktop app + install to /Applications (macOS; local builds
 # aren't quarantined, so no signing needed). App updates = git pull + this.

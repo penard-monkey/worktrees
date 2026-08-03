@@ -51,7 +51,11 @@ CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 - App log: `~/Library/Logs/net.casadelvalle.worktrees/app.log` (Settings →
   Logs). Persisted UI settings: `ui-state.json` in the app config dir.
 - Design tokens: `app/src/tokens.css` — everything scales off `--ui-rem`;
-  terminal font is independent (`--term-*`). No UI libraries, plain CSS.
+  terminal font is independent (`--term-*`). No UI libraries, plain CSS. "No UI
+  libraries" means no COMPONENT/design-system libraries and no editor — a pure
+  PARSER that emits data we render ourselves is allowed, and `marked` (lexer
+  only, for the dock's markdown) is the one instance. Syntax highlighting is
+  hand-rolled in `app/src/highlight.ts` for the same reason.
 - macOS FS is case-insensitive: `Settings.tsx` collided with `settings.ts`
   once (component is `SettingsSheet.tsx`). Watch new filenames.
 

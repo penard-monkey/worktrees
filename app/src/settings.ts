@@ -39,6 +39,15 @@ export type Settings = {
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal"; // last-used dock tab
+  // Files tab: how the tree and the viewer sit relative to each other.
+  // "auto" flips to side-by-side once the dock is at least SPLIT_AT wide — a
+  // narrow dock has no room for two columns, a wide one wastes half its width
+  // stacking. "stack"/"split" pin it.
+  files_layout: "auto" | "stack" | "split";
+  files_split_pct: number; // 15–85, the tree's WIDTH share when side-by-side
+  files_stack_pct: number; // 15–85, the tree's HEIGHT share when stacked
+  files_wrap: boolean; // wrap long lines in the source view
+  files_md_source: boolean; // markdown/SVG: show source instead of the render
   // Dock terminal tab names: `repo|slug` → tab index → user-chosen label.
   // Only the NAME persists across restarts, never the shell: a named tab with no
   // live shell is seeded back into the strip and spawns a fresh shell when you
@@ -86,6 +95,11 @@ export const DEFAULTS: Settings = {
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
+  files_layout: "auto",
+  files_split_pct: 32,
+  files_stack_pct: 40,
+  files_wrap: false,
+  files_md_source: false,
   term_tab_names: {},
   editor_cmd: "code",
   terminal_cmd: "",
