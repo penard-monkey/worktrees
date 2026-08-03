@@ -461,6 +461,305 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+// ── materialization ──────────────────────────────────────────────────────────
+//
+// Rendering a Profile into the directory claude is handed as CLAUDE_CONFIG_DIR.
+//
+// (Not to be confused with `materialize.rs`, which is about a worktree's
+// `[[file]]` links. This is about a profile's claude config.)
+//
+// The directory is STABLE for the life of the profile, never per-launch: claude
+// derives its keychain identity from this path, so a fresh directory per launch
+// would demand a fresh `/login` every time. Only the files inside are rewritten.
+//
+// Every file is written temp-then-rename, because claude HOT-WATCHES its config
+// dir: a plain truncating write would expose a half-file to a running session.
+
+/// `$XDG_DATA_HOME/worktrees/skills` — the worktrees-owned skill store. Phase 7
+/// owns installing into it; materialization only links out of it.
+pub fn skills_store_root() -> PathBuf {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{}/.local/share", home()));
+    PathBuf::from(base).join("worktrees").join("skills")
+}
+
+/// What a materialization produced, so the launch adapter knows which flags are
+/// worth passing (there is no point pointing `--mcp-config` at a file we did not
+/// write).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Materialized {
+    pub dir: PathBuf,
+    pub rules: Option<PathBuf>,
+    pub mcp: Option<PathBuf>,
+    pub settings: Option<PathBuf>,
+    /// Non-fatal problems worth surfacing in the UI/app log rather than failing
+    /// the launch over — a skill that vanished from the store, say.
+    pub warnings: Vec<String>,
+}
+
+fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = path.parent().ok_or("no parent dir")?;
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // Temp in the SAME directory so rename(2) is atomic (same filesystem), and
+    // named per-file so two concurrent materializations cannot collide.
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("f");
+    let tmp = dir.join(format!(".{name}.tmp"));
+    fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// Every filesystem location materialization touches, in one struct.
+///
+/// This exists so the whole thing is testable. The alternative — reading
+/// `$XDG_DATA_HOME`/`$HOME` inside each function — would force tests to mutate
+/// process-global env, which races under cargo's parallel test threads.
+#[derive(Debug, Clone)]
+pub struct MatPaths {
+    /// The profile's config dir (becomes `CLAUDE_CONFIG_DIR`).
+    pub dir: PathBuf,
+    /// The worktrees-owned skill store.
+    pub store: PathBuf,
+    /// The user's own `~/.claude` (source for inherited skills).
+    pub user_claude: PathBuf,
+    /// The user's own `~/.claude.json` (seed for onboarding flags + global MCP).
+    pub user_claude_json: PathBuf,
+}
+
+impl MatPaths {
+    /// The real locations for a profile id, or `None` if the id is not one we
+    /// would ever have minted.
+    pub fn for_profile(id: &str) -> Option<Self> {
+        Some(MatPaths {
+            dir: profile_dir(id)?,
+            store: skills_store_root(),
+            user_claude: default_claude_dir(),
+            user_claude_json: PathBuf::from(home()).join(".claude.json"),
+        })
+    }
+}
+
+/// Render `p` into its real directory, ready for a launch cwd'd in `worktree`.
+pub fn materialize(p: &Profile, worktree: &str) -> Result<Materialized, String> {
+    let paths = MatPaths::for_profile(&p.id).ok_or_else(|| format!("invalid profile id {:?}", p.id))?;
+    materialize_with(&paths, p, worktree)
+}
+
+/// The testable form: every location comes from `paths`.
+///
+/// `worktree` is needed for one thing only: the per-WORKTREE trust entry in
+/// `.claude.json`. Trust is keyed by absolute path, so it has to be added at
+/// launch time for the place being opened — a profile cannot pre-trust a
+/// worktree that does not exist yet.
+pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str) -> Result<Materialized, String> {
+    let dir = paths.dir.clone();
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let mut out = Materialized { dir: dir.clone(), ..Default::default() };
+
+    // rules.md — delivered with --append-system-prompt-file. A CLAUDE.md here
+    // would NOT do: the user's own ~/.claude/CLAUDE.md loads regardless of the
+    // swap (verified), so profile rules ADD to theirs and cannot replace them.
+    if !p.rules.trim().is_empty() {
+        let f = dir.join("rules.md");
+        write_atomic_bytes(&f, p.rules.as_bytes())?;
+        out.rules = Some(f);
+    } else {
+        let _ = fs::remove_file(dir.join("rules.md"));
+    }
+
+    // settings.json — this IS the user-scope settings file under the swap, since
+    // the whole config root relocated.
+    if let Some(s) = &p.settings {
+        let f = dir.join("settings.json");
+        write_atomic_bytes(&f, serde_json::to_string_pretty(s).map_err(|e| e.to_string())?.as_bytes())?;
+        out.settings = Some(f);
+    }
+
+    // mcp.json — passed with --mcp-config (+ --strict-mcp-config when not
+    // inheriting). Never written into .claude.json: user-scope mcpServers are
+    // exactly what a profile needs to be able to REMOVE.
+    let mut servers = p.mcp_servers.clone();
+    if p.inherit_global_mcp {
+        for (k, v) in global_mcp_servers(&paths.user_claude_json) {
+            // The profile's own definition wins a name collision — inheriting is
+            // a convenience, not an override.
+            servers.entry(k).or_insert(v);
+        }
+    }
+    if p.worktrees_mcp {
+        match worktrees_bin() {
+            Some(bin) => {
+                servers.insert(
+                    "worktrees".to_string(),
+                    serde_json::json!({
+                        "type": "stdio",
+                        "command": bin.to_string_lossy(),
+                        "args": ["mcp"],
+                    }),
+                );
+            }
+            // Resolved at materialize time, not baked in: the CLI may be
+            // installed, moved or absent independently of the app bundle.
+            None => out.warnings.push(
+                "profile asks for the worktrees MCP server but no `worktrees` binary was found — skipping it".into(),
+            ),
+        }
+    }
+    let f = dir.join("mcp.json");
+    write_atomic_bytes(&f, serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": servers })).map_err(|e| e.to_string())?.as_bytes())?;
+    out.mcp = Some(f);
+
+    materialize_skills(paths, p, &mut out.warnings)?;
+    materialize_claude_json(paths, worktree)?;
+    Ok(out)
+}
+
+/// `<dir>/skills/<name>` symlinks into the store (and optionally the user's own
+/// skills).
+///
+/// SYMLINKS, not copies, so editing a skill in the store reaches a RUNNING
+/// session — claude hot-watches the skills dir. The trade is that the app's
+/// "profile changed, restart" badge cannot speak for skills; it covers rules,
+/// settings, MCP and model only, and the UI must say so.
+fn materialize_skills(paths: &MatPaths, p: &Profile, warnings: &mut Vec<String>) -> Result<(), String> {
+    let skills = paths.dir.join("skills");
+    fs::create_dir_all(&skills).map_err(|e| e.to_string())?;
+
+    let mut wanted: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for name in &p.skills {
+        let src = paths.store.join(name);
+        if src.is_dir() {
+            wanted.insert(name.clone(), src);
+        } else {
+            warnings.push(format!("skill {name:?} is enabled but not in the store — skipping it"));
+        }
+    }
+    if p.inherit_global_skills {
+        if let Ok(rd) = fs::read_dir(paths.user_claude.join("skills")) {
+            for e in rd.flatten().filter(|e| e.path().is_dir()) {
+                let name = e.file_name().to_string_lossy().into_owned();
+                // A profile's own skill wins a name collision — inheriting must
+                // never silently shadow something the user enabled explicitly.
+                wanted.entry(name).or_insert_with(|| e.path());
+            }
+        }
+    }
+
+    // Drop links we no longer want. ONLY symlinks: if a real directory is
+    // sitting here (a user poking around, or a claude-written file) we leave it
+    // alone rather than deleting data we did not create.
+    if let Ok(rd) = fs::read_dir(&skills) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_link = fs::symlink_metadata(e.path()).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            if is_link && !wanted.contains_key(&name) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
+    for (name, src) in &wanted {
+        let dst = skills.join(name);
+        // Re-point an existing link rather than assuming it is current; the
+        // store entry may have moved between launches.
+        if fs::symlink_metadata(&dst).is_ok() {
+            if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                let _ = fs::remove_file(&dst);
+            } else {
+                warnings.push(format!("{} exists and is not a symlink — leaving it", dst.display()));
+                continue;
+            }
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(src, &dst).map_err(|e| format!("link {name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Seed `<dir>/.claude.json` from the user's real one.
+///
+/// COPIED WHOLESALE, then stripped — not assembled key by key. The real file has
+/// ~80 top-level keys and claude gates interactive dialogs on several of them;
+/// an early spike tried cherry-picking `hasCompletedOnboarding` + `theme` +
+/// trust and still hit an "Allow external CLAUDE.md file imports?" prompt nobody
+/// knew to seed, which parks a tmux pane on a dialog with nothing in the log.
+/// Copying inherits every such flag, including ones future versions add.
+///
+/// Two keys are removed:
+/// - `mcpServers` — the profile owns MCP via `--mcp-config`; leaving the user's
+///   here would make "don't inherit global MCPs" impossible.
+/// - `projects` — 40-odd other repos' history, and their `allowedTools`, which
+///   would leak permission grants from unrelated repos into this profile.
+fn materialize_claude_json(paths: &MatPaths, worktree: &str) -> Result<(), String> {
+    let target = paths.dir.join(".claude.json");
+    // Start from what is already there, so a profile's own accumulated state
+    // (its `projects` entries, its own flags) survives re-materialization.
+    let mut root: serde_json::Value = fs::read(&target)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    if !root.is_object() {
+        // First materialization: seed from the user's real file.
+        let seed = fs::read(&paths.user_claude_json)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        root = seed;
+        if let Some(o) = root.as_object_mut() {
+            o.remove("mcpServers");
+            o.remove("projects");
+        }
+    }
+    let obj = root.as_object_mut().ok_or("claude.json is not an object")?;
+
+    // Trust this worktree so the pane does not open on a confirmation dialog.
+    // Keyed by absolute path, so this recurs per place, not per profile.
+    let projects = obj.entry("projects").or_insert_with(|| serde_json::json!({}));
+    if let Some(pm) = projects.as_object_mut() {
+        let entry = pm.entry(worktree.to_string()).or_insert_with(|| serde_json::json!({}));
+        if let Some(em) = entry.as_object_mut() {
+            for k in [
+                "hasTrustDialogAccepted",
+                "hasCompletedProjectOnboarding",
+                "hasClaudeMdExternalIncludesApproved",
+                "hasClaudeMdExternalIncludesWarningShown",
+            ] {
+                em.insert(k.to_string(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+    write_atomic_bytes(&target, serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?.as_bytes())
+}
+
+/// The user's global `mcpServers`, for the inherit toggle.
+fn global_mcp_servers(user_claude_json: &Path) -> Map<String, serde_json::Value> {
+    fs::read(user_claude_json)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("mcpServers").cloned())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// Absolute path to a `worktrees` binary for the MCP stanza. Resolved fresh on
+/// every materialization — an absolute path baked into a profile goes stale the
+/// moment the binary moves or the profile is carried to another machine.
+fn worktrees_bin() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if exe.file_name().and_then(|s| s.to_str()) == Some("worktrees") {
+            return Some(exe);
+        }
+    }
+    // The app links core in-process, so current_exe() is the app bundle — fall
+    // back to whatever `worktrees` is on PATH.
+    std::env::var("PATH").ok().and_then(|path| {
+        path.split(':')
+            .map(|d| PathBuf::from(d).join("worktrees"))
+            .find(|c| c.is_file())
+    })
+}
+
 // ── storage ──────────────────────────────────────────────────────────────────
 
 /// For display and resolution: a missing or unparseable file is an EMPTY set of
@@ -854,6 +1153,213 @@ mod tests {
                 "probes must not honour a profile binding before the launch does"
             );
         }
+    }
+
+    // ── materialization ─────────────────────────────────────────────────────
+    // Real files in a real temp dir, via MatPaths — no env mutation, so these
+    // are safe under cargo's parallel test threads.
+
+    struct Tmp(PathBuf);
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn tmp(tag: &str) -> Tmp {
+        // thread id keeps parallel tests in the same process from colliding
+        let t = std::env::temp_dir().join(format!(
+            "wtprof-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&t);
+        fs::create_dir_all(&t).unwrap();
+        Tmp(t)
+    }
+    fn paths_in(root: &Path) -> MatPaths {
+        MatPaths {
+            dir: root.join("profile"),
+            store: root.join("store"),
+            user_claude: root.join("home/.claude"),
+            user_claude_json: root.join("home/.claude.json"),
+        }
+    }
+    fn read(p: &Path) -> String {
+        fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    }
+
+    #[test]
+    fn materialize_writes_rules_and_mcp_and_trusts_the_worktree() {
+        let t = tmp("basic");
+        let paths = paths_in(&t.0);
+        let p = Profile {
+            id: "work".into(),
+            name: "Work".into(),
+            rules: "be terse".into(),
+            ..Default::default()
+        };
+        let out = materialize_with(&paths, &p, "/repo/.worktrees/feat").unwrap();
+
+        assert_eq!(read(out.rules.as_ref().unwrap()), "be terse");
+        let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
+        assert!(mcp["mcpServers"].as_object().unwrap().is_empty());
+        assert!(out.settings.is_none(), "no settings declared → no file to point --settings at");
+
+        // the worktree is trusted, so the pane cannot open on a dialog
+        let cj: serde_json::Value = serde_json::from_str(&read(&paths.dir.join(".claude.json"))).unwrap();
+        let e = &cj["projects"]["/repo/.worktrees/feat"];
+        assert_eq!(e["hasTrustDialogAccepted"], serde_json::json!(true));
+        assert_eq!(e["hasClaudeMdExternalIncludesApproved"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn claude_json_is_seeded_wholesale_but_strips_mcp_and_other_repos() {
+        let t = tmp("seed");
+        let paths = paths_in(&t.0);
+        fs::create_dir_all(paths.user_claude_json.parent().unwrap()).unwrap();
+        fs::write(
+            &paths.user_claude_json,
+            serde_json::json!({
+                "hasCompletedOnboarding": true,
+                "theme": "dark",
+                "someFutureDialogFlag": true,
+                "mcpServers": { "global": { "command": "g" } },
+                "projects": { "/other/repo": { "allowedTools": ["Bash(rm:*)"] } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        materialize_with(&paths, &p, "/repo/wt").unwrap();
+        let cj: serde_json::Value = serde_json::from_str(&read(&paths.dir.join(".claude.json"))).unwrap();
+
+        // inherited wholesale — including a flag this code has never heard of,
+        // which is the entire point (cherry-picking left a dialog unseeded)
+        assert_eq!(cj["hasCompletedOnboarding"], serde_json::json!(true));
+        assert_eq!(cj["someFutureDialogFlag"], serde_json::json!(true));
+        // but NOT the user's MCP servers (the profile owns MCP)…
+        assert!(cj.get("mcpServers").is_none());
+        // …and NOT another repo's entry, which would leak its allowedTools grants
+        assert!(cj["projects"].get("/other/repo").is_none());
+        assert!(cj["projects"].get("/repo/wt").is_some());
+    }
+
+    #[test]
+    fn re_materializing_keeps_the_profiles_own_accumulated_state() {
+        // The dir is STABLE and claude writes into it. Re-materializing on the
+        // next launch must not wipe what claude recorded, or every relaunch
+        // would look like a first run.
+        let t = tmp("restate");
+        let paths = paths_in(&t.0);
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        materialize_with(&paths, &p, "/repo/a").unwrap();
+
+        let target = paths.dir.join(".claude.json");
+        let mut cj: serde_json::Value = serde_json::from_str(&read(&target)).unwrap();
+        cj["numStartups"] = serde_json::json!(7);
+        fs::write(&target, cj.to_string()).unwrap();
+
+        materialize_with(&paths, &p, "/repo/b").unwrap();
+        let after: serde_json::Value = serde_json::from_str(&read(&target)).unwrap();
+        assert_eq!(after["numStartups"], serde_json::json!(7), "claude's own state survived");
+        assert!(after["projects"].get("/repo/a").is_some(), "the first worktree stays trusted");
+        assert!(after["projects"].get("/repo/b").is_some(), "and the new one is added");
+    }
+
+    #[test]
+    fn global_mcp_is_merged_only_when_asked_and_never_shadows_the_profiles_own() {
+        let t = tmp("mcp");
+        let paths = paths_in(&t.0);
+        fs::create_dir_all(paths.user_claude_json.parent().unwrap()).unwrap();
+        fs::write(
+            &paths.user_claude_json,
+            serde_json::json!({ "mcpServers": {
+                "shared": { "command": "THEIRS" },
+                "globalonly": { "command": "g" }
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        p.mcp_servers.insert("shared".into(), serde_json::json!({ "command": "MINE" }));
+
+        // off: the profile's set is the whole set — this is what makes
+        // "remove a noisy global server" possible at all
+        let out = materialize_with(&paths, &p, "/w").unwrap();
+        let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
+        assert!(mcp["mcpServers"].get("globalonly").is_none());
+
+        // on: globals fill in, but the profile's own definition wins a collision
+        p.inherit_global_mcp = true;
+        let out = materialize_with(&paths, &p, "/w").unwrap();
+        let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
+        assert_eq!(mcp["mcpServers"]["globalonly"]["command"], serde_json::json!("g"));
+        assert_eq!(mcp["mcpServers"]["shared"]["command"], serde_json::json!("MINE"));
+    }
+
+    #[test]
+    fn skills_are_symlinked_and_stale_links_are_dropped() {
+        let t = tmp("skills");
+        let paths = paths_in(&t.0);
+        for n in ["alpha", "beta"] {
+            fs::create_dir_all(paths.store.join(n)).unwrap();
+        }
+        let mut p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        p.skills = vec!["alpha".into(), "beta".into()];
+        materialize_with(&paths, &p, "/w").unwrap();
+
+        let link = paths.dir.join("skills/alpha");
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "symlink, not a copy — editing a store skill must reach a RUNNING session");
+        assert_eq!(fs::read_link(&link).unwrap(), paths.store.join("alpha"));
+
+        // disabling one drops its link and leaves the other
+        p.skills = vec!["alpha".into()];
+        materialize_with(&paths, &p, "/w").unwrap();
+        assert!(fs::symlink_metadata(paths.dir.join("skills/beta")).is_err());
+        assert!(fs::symlink_metadata(paths.dir.join("skills/alpha")).is_ok());
+    }
+
+    #[test]
+    fn materialize_never_deletes_something_it_did_not_create() {
+        // A real directory under skills/ (a user poking around) must survive the
+        // stale-link sweep — we only remove symlinks.
+        let t = tmp("nodelete");
+        let paths = paths_in(&t.0);
+        fs::create_dir_all(paths.dir.join("skills/handmade")).unwrap();
+        fs::write(paths.dir.join("skills/handmade/SKILL.md"), "mine").unwrap();
+
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        materialize_with(&paths, &p, "/w").unwrap();
+        assert_eq!(read(&paths.dir.join("skills/handmade/SKILL.md")), "mine");
+    }
+
+    #[test]
+    fn a_missing_skill_warns_instead_of_failing_the_launch() {
+        let t = tmp("warn");
+        let paths = paths_in(&t.0);
+        let mut p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        p.skills = vec!["ghost".into()];
+        let out = materialize_with(&paths, &p, "/w").unwrap();
+        assert!(out.warnings.iter().any(|w| w.contains("ghost")), "{:?}", out.warnings);
+        // the launch still happens — a stale skill reference must not strand the
+        // user with no session
+        assert!(out.mcp.is_some());
+    }
+
+    #[test]
+    fn clearing_the_rules_removes_the_file_rather_than_leaving_a_stale_one() {
+        let t = tmp("rules");
+        let paths = paths_in(&t.0);
+        let mut p = Profile { id: "work".into(), name: "W".into(), rules: "old".into(), ..Default::default() };
+        materialize_with(&paths, &p, "/w").unwrap();
+        assert!(paths.dir.join("rules.md").exists());
+        p.rules = String::new();
+        let out = materialize_with(&paths, &p, "/w").unwrap();
+        assert!(out.rules.is_none());
+        assert!(!paths.dir.join("rules.md").exists(), "stale rules must not keep applying");
     }
 
     #[test]
