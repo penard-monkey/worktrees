@@ -107,11 +107,18 @@ pub fn profiles_data_root() -> PathBuf {
 /// `profiles.json` cannot aim this at `../../..`.
 pub fn profile_dir(id: &str) -> Option<PathBuf> {
     let clean = sanitize_id(id);
-    if clean.is_empty() || clean != id {
+    // Capped because this is a PERMANENT directory name and keychain identity:
+    // a pasted 10k-character display name would otherwise mint an id that only
+    // fails at create_dir_all with ENAMETOOLONG, long after it was recorded.
+    if clean.is_empty() || clean != id || clean.len() > MAX_ID_LEN {
         return None;
     }
     Some(profiles_data_root().join(clean))
 }
+
+/// Comfortably under every filesystem's NAME_MAX, and far longer than any name
+/// a human types.
+pub const MAX_ID_LEN: usize = 64;
 
 // ── ids ──────────────────────────────────────────────────────────────────────
 
@@ -155,7 +162,14 @@ pub fn sanitize_id(s: &str) -> String {
 /// exists. Pure so the collision rule is testable without touching disk.
 pub fn new_id_from(name: &str, taken: &[String]) -> String {
     let base = {
-        let s = sanitize_id(name);
+        let mut s = sanitize_id(name);
+        // Truncate BEFORE the collision suffix, so `-2` is never what pushes an
+        // id over the cap. Only here, never in sanitize_id: that function is a
+        // round-trip predicate for ids that already exist.
+        if s.len() > MAX_ID_LEN {
+            s.truncate(MAX_ID_LEN);
+            s = s.trim_end_matches('-').to_string();
+        }
         if s.is_empty() {
             "profile".to_string()
         } else {
@@ -438,7 +452,15 @@ impl AiLaunch {
     /// for tmux's own parse — two nested layers, each quoting for a different
     /// reader.
     pub fn shell_prefix(&self) -> String {
-        self.env.iter().map(|(k, v)| format!("{k}={} ", shell_quote(v))).collect()
+        self.env
+            .iter()
+            // Values are quoted; a KEY cannot be, since `K=v` is shell syntax.
+            // `env` is a pub field, so the day a phase adds profile-defined env
+            // vars a key of `X; evil #` would inject straight into the inner
+            // shell. Skipping is right: an unusable name is not a variable.
+            .filter(|(k, _)| is_env_name(k))
+            .map(|(k, v)| format!("{k}={} ", shell_quote(v)))
+            .collect()
     }
 
     /// The body of pane0's `sh -ic` string: assignments, then the command, then
@@ -454,10 +476,21 @@ impl AiLaunch {
     }
 }
 
+/// A shell-safe environment variable NAME.
+fn is_env_name(k: &str) -> bool {
+    !k.is_empty()
+        && k.chars().next().map(|c| c.is_ascii_uppercase() || c == '_').unwrap_or(false)
+        && k.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// Single-quote for POSIX sh: wrap in `'…'`, and end/re-open the quote around any
-/// embedded `'`. Same trick as `tmux::sq`, kept local so profile paths are quoted
-/// even when a caller forgets.
-fn shell_quote(s: &str) -> String {
+/// embedded `'`. Same trick as `tmux::sq`.
+///
+/// `pub(crate)` because the launch adapter appends profile-derived ARGUMENTS
+/// (`--model <model>`, `--append-system-prompt-file <path>`) to `AiLaunch.cmd`,
+/// and every one of them has to come through here — otherwise `model` is a
+/// plain injection into the inner shell.
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -485,6 +518,23 @@ pub fn skills_store_root() -> PathBuf {
     PathBuf::from(base).join("worktrees").join("skills")
 }
 
+/// A skill name is a PATH COMPONENT — `<dir>/skills/<name>` and
+/// `<store>/<name>` — so it needs the same scrutiny an id gets. It comes from
+/// the same hand-editable `profiles.json`, and without this a name of
+/// `"../victim"` plants a symlink outside the profile dir entirely (the stale
+/// sweep only reads `skills/`, so an escaped link is then orphaned forever).
+///
+/// Deliberately a REJECT, not a sanitize: a skill name must match a real store
+/// directory, so silently rewriting it would just fail to find the skill in a
+/// more confusing way.
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(|c| std::path::is_separator(c))
+        && !name.contains('\0')
+}
+
 /// What a materialization produced, so the launch adapter knows which flags are
 /// worth passing (there is no point pointing `--mcp-config` at a file we did not
 /// write).
@@ -502,10 +552,15 @@ pub struct Materialized {
 fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("no parent dir")?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    // Temp in the SAME directory so rename(2) is atomic (same filesystem), and
-    // named per-file so two concurrent materializations cannot collide.
+    // Temp in the SAME directory so rename(2) is atomic (same filesystem).
+    // The name carries pid + a counter as well as the target's name: two
+    // materializations of the SAME profile would otherwise pick the identical
+    // temp path, and one could rename the other's half-written file into place —
+    // exposing exactly the partial file this dance exists to prevent.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("f");
-    let tmp = dir.join(format!(".{name}.tmp"));
+    let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{}.{uniq}.tmp", std::process::id()));
     fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
     fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
@@ -525,6 +580,11 @@ pub struct MatPaths {
     pub user_claude: PathBuf,
     /// The user's own `~/.claude.json` (seed for onboarding flags + global MCP).
     pub user_claude_json: PathBuf,
+    /// The `worktrees` binary the MCP stanza should point at, resolved by the
+    /// caller. Injected rather than probed inside, so the stanza is testable —
+    /// `worktrees_bin()` reads `current_exe`/`PATH`, which is exactly the
+    /// process-global state this struct exists to keep out of the tests.
+    pub worktrees_bin: Option<PathBuf>,
 }
 
 impl MatPaths {
@@ -536,14 +596,15 @@ impl MatPaths {
             store: skills_store_root(),
             user_claude: default_claude_dir(),
             user_claude_json: PathBuf::from(home()).join(".claude.json"),
+            worktrees_bin: worktrees_bin(),
         })
     }
 }
 
 /// Render `p` into its real directory, ready for a launch cwd'd in `worktree`.
-pub fn materialize(p: &Profile, worktree: &str) -> Result<Materialized, String> {
+pub fn materialize(p: &Profile, worktree: &str, repo_root: &str) -> Result<Materialized, String> {
     let paths = MatPaths::for_profile(&p.id).ok_or_else(|| format!("invalid profile id {:?}", p.id))?;
-    materialize_with(&paths, p, worktree)
+    materialize_with(&paths, p, worktree, repo_root)
 }
 
 /// The testable form: every location comes from `paths`.
@@ -552,9 +613,18 @@ pub fn materialize(p: &Profile, worktree: &str) -> Result<Materialized, String> 
 /// `.claude.json`. Trust is keyed by absolute path, so it has to be added at
 /// launch time for the place being opened — a profile cannot pre-trust a
 /// worktree that does not exist yet.
-pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str) -> Result<Materialized, String> {
+pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str, repo_root: &str) -> Result<Materialized, String> {
     let dir = paths.dir.clone();
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    // Same discipline the declaration store uses, for the same reason. Two
+    // launches into the same profile (an app window and a `worktrees open`, or
+    // two app windows) both read-modify-write `.claude.json`; unlocked, one
+    // worktree's trust entry is silently dropped and that pane opens on a trust
+    // dialog. Separate mutex from the store's — materialization never calls
+    // edit(), and sharing one would invite a deadlock the first time it did.
+    static MAT_LOCK: Mutex<()> = Mutex::new(());
+    let _serial = MAT_LOCK.lock().map_err(|_| "materialize lock poisoned")?;
+    let _flock = DirLock::at(dir.with_extension("lock"))?;
     let mut out = Materialized { dir: dir.clone(), ..Default::default() };
 
     // rules.md — delivered with --append-system-prompt-file. A CLAUDE.md here
@@ -588,7 +658,7 @@ pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str) -> Result
         }
     }
     if p.worktrees_mcp {
-        match worktrees_bin() {
+        match paths.worktrees_bin.clone().filter(|b| b.is_absolute()) {
             Some(bin) => {
                 servers.insert(
                     "worktrees".to_string(),
@@ -611,7 +681,7 @@ pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str) -> Result
     out.mcp = Some(f);
 
     materialize_skills(paths, p, &mut out.warnings)?;
-    materialize_claude_json(paths, worktree)?;
+    materialize_claude_json(paths, worktree, repo_root, &mut out.warnings)?;
     Ok(out)
 }
 
@@ -628,6 +698,10 @@ fn materialize_skills(paths: &MatPaths, p: &Profile, warnings: &mut Vec<String>)
 
     let mut wanted: BTreeMap<String, PathBuf> = BTreeMap::new();
     for name in &p.skills {
+        if !valid_skill_name(name) {
+            warnings.push(format!("skill name {name:?} is not a plain directory name — refusing it"));
+            continue;
+        }
         let src = paths.store.join(name);
         if src.is_dir() {
             wanted.insert(name.clone(), src);
@@ -639,6 +713,11 @@ fn materialize_skills(paths: &MatPaths, p: &Profile, warnings: &mut Vec<String>)
         if let Ok(rd) = fs::read_dir(paths.user_claude.join("skills")) {
             for e in rd.flatten().filter(|e| e.path().is_dir()) {
                 let name = e.file_name().to_string_lossy().into_owned();
+                // read_dir names cannot contain a separator, but the check is
+                // cheap and keeps the invariant local to where it is relied on.
+                if !valid_skill_name(&name) {
+                    continue;
+                }
                 // A profile's own skill wins a name collision — inheriting must
                 // never silently shadow something the user enabled explicitly.
                 wanted.entry(name).or_insert_with(|| e.path());
@@ -670,8 +749,19 @@ fn materialize_skills(paths: &MatPaths, p: &Profile, warnings: &mut Vec<String>)
                 continue;
             }
         }
+        // Belt and braces over valid_skill_name: whatever the name was, the
+        // link must land directly inside this profile's skills dir.
+        if dst.parent() != Some(skills.as_path()) {
+            warnings.push(format!("refusing to link {name:?} outside {}", skills.display()));
+            continue;
+        }
         #[cfg(unix)]
         std::os::unix::fs::symlink(src, &dst).map_err(|e| format!("link {name}: {e}"))?;
+        #[cfg(not(unix))]
+        {
+            let _ = src;
+            warnings.push(format!("skill {name:?} not linked — symlinks unsupported on this platform"));
+        }
     }
     Ok(())
 }
@@ -690,7 +780,7 @@ fn materialize_skills(paths: &MatPaths, p: &Profile, warnings: &mut Vec<String>)
 ///   here would make "don't inherit global MCPs" impossible.
 /// - `projects` — 40-odd other repos' history, and their `allowedTools`, which
 ///   would leak permission grants from unrelated repos into this profile.
-fn materialize_claude_json(paths: &MatPaths, worktree: &str) -> Result<(), String> {
+fn materialize_claude_json(paths: &MatPaths, worktree: &str, repo_root: &str, warnings: &mut Vec<String>) -> Result<(), String> {
     let target = paths.dir.join(".claude.json");
     // Start from what is already there, so a profile's own accumulated state
     // (its `projects` entries, its own flags) survives re-materialization.
@@ -700,6 +790,15 @@ fn materialize_claude_json(paths: &MatPaths, worktree: &str) -> Result<(), Strin
         .unwrap_or(serde_json::Value::Null);
 
     if !root.is_object() {
+        if target.exists() {
+            // It existed but would not parse. Re-seeding is the right recovery,
+            // but the profile's accumulated state (trust entries, claude's own
+            // counters) is being discarded — say so rather than doing it mutely.
+            warnings.push(format!(
+                "{} was unreadable and has been re-seeded — this profile's trusted worktrees were reset",
+                target.display()
+            ));
+        }
         // First materialization: seed from the user's real file.
         let seed = fs::read(&paths.user_claude_json)
             .ok()
@@ -709,27 +808,105 @@ fn materialize_claude_json(paths: &MatPaths, worktree: &str) -> Result<(), Strin
         if let Some(o) = root.as_object_mut() {
             o.remove("mcpServers");
             o.remove("projects");
-        }
-    }
-    let obj = root.as_object_mut().ok_or("claude.json is not an object")?;
-
-    // Trust this worktree so the pane does not open on a confirmation dialog.
-    // Keyed by absolute path, so this recurs per place, not per profile.
-    let projects = obj.entry("projects").or_insert_with(|| serde_json::json!({}));
-    if let Some(pm) = projects.as_object_mut() {
-        let entry = pm.entry(worktree.to_string()).or_insert_with(|| serde_json::json!({}));
-        if let Some(em) = entry.as_object_mut() {
-            for k in [
-                "hasTrustDialogAccepted",
-                "hasCompletedProjectOnboarding",
-                "hasClaudeMdExternalIncludesApproved",
-                "hasClaudeMdExternalIncludesWarningShown",
-            ] {
-                em.insert(k.to_string(), serde_json::Value::Bool(true));
+            // The module header claims worktrees never copies credential
+            // material. A wholesale copy of a file whose key set another vendor
+            // owns can only ASSERT that; this sweep ENFORCES it, and names what
+            // it dropped (never the value) so a new key shape gets noticed
+            // rather than silently carried.
+            let dropped: Vec<String> = o
+                .keys()
+                .filter(|k| is_sensitive_key(k))
+                .cloned()
+                .collect();
+            for k in &dropped {
+                o.remove(k);
+            }
+            if !dropped.is_empty() {
+                warnings.push(format!("not copied into this profile: {}", dropped.join(", ")));
             }
         }
     }
-    write_atomic_bytes(&target, serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?.as_bytes())
+    // A user file that parses but is not an object (`[]`, `"x"`, `42`) must not
+    // fail the launch — it is a file we do not own, and the doctrine everywhere
+    // else here is degrade-and-warn rather than strand the user with no session.
+    if !root.is_object() {
+        warnings.push(format!(
+            "{} is not a JSON object — starting this profile's config from scratch",
+            paths.user_claude_json.display()
+        ));
+        root = serde_json::json!({});
+    }
+    let obj = root.as_object_mut().ok_or("claude config is not an object")?;
+
+    // Trust: MIRROR, never invent.
+    //
+    // The trust dialog is the only gate in front of a repo's own
+    // `.claude/settings.json` hooks, its `.mcp.json`, and its `CLAUDE.md`.
+    // Pre-accepting it for a worktree of a freshly cloned repo would make
+    // *enabling a profile* strictly weaker than running claude normally — the
+    // opposite of what a profile is for. So we only carry across a decision the
+    // user has already made in their own claude, for this repo.
+    //
+    // `hasClaudeMdExternalIncludesApproved` is NOT set under any circumstance:
+    // it pre-approves `@`-imports that reach OUTSIDE the repo, so a hostile
+    // CLAUDE.md could pull `@~/.ssh/config` into the model's context with no
+    // prompt. That question is claude's to ask, every time.
+    let already_trusted = user_trusts(&paths.user_claude_json, repo_root)
+        || user_trusts(&paths.user_claude_json, worktree);
+    if already_trusted {
+        let projects = obj.entry("projects").or_insert_with(|| serde_json::json!({}));
+        if let Some(pm) = projects.as_object_mut() {
+            let entry = pm.entry(worktree.to_string()).or_insert_with(|| serde_json::json!({}));
+            if let Some(em) = entry.as_object_mut() {
+                em.insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
+                em.insert("hasCompletedProjectOnboarding".into(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+    let bytes = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    write_atomic_bytes(&target, bytes.as_bytes())?;
+    // Tightened even though the sweep above should have removed anything
+    // sensitive: this is the one file seeded from a source we do not control,
+    // and `fs::write` would otherwise leave it at 0644 regardless of how
+    // restrictive the original was.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Keys never copied out of the user's `~/.claude.json`.
+///
+/// Two families: anything credential-shaped (the copy must not be able to
+/// smuggle a token into a profile dir, or later into an export), and the
+/// one-time acceptances of dangerous modes — inheriting those would let a
+/// profiled session skip a confirmation the user granted in a different context.
+fn is_sensitive_key(k: &str) -> bool {
+    let lk = k.to_ascii_lowercase();
+    // Substring match, so a key shape a future claude version introduces
+    // (`someNewApiToken`) is caught without anyone updating this list.
+    if ["key", "token", "secret", "credential", "oauth", "account", "bypasspermissions"]
+        .iter()
+        .any(|needle| lk.contains(needle))
+    {
+        return true;
+    }
+    // Stable identifiers. Not credentials, and harmless on this machine — but
+    // they are identity, they regenerate on their own, and they must not ride
+    // along into a profile someone later exports or shares.
+    matches!(lk.as_str(), "userid" | "machineid" | "anonymousid")
+}
+
+/// True if the user's OWN claude already trusts `dir`.
+fn user_trusts(user_claude_json: &Path, dir: &str) -> bool {
+    fs::read(user_claude_json)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("projects")?.get(dir)?.get("hasTrustDialogAccepted").cloned())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// The user's global `mcpServers`, for the inherit toggle.
@@ -755,8 +932,27 @@ fn worktrees_bin() -> Option<PathBuf> {
     // back to whatever `worktrees` is on PATH.
     std::env::var("PATH").ok().and_then(|path| {
         path.split(':')
+            // ABSOLUTE entries only. An empty PATH component (a trailing `:`,
+            // which fixup_gui_path can produce) makes `PathBuf::join` yield the
+            // RELATIVE path `worktrees` — resolved against the process cwd,
+            // which for `worktrees open` is the cloned repo. A repo shipping a
+            // file named `worktrees` would otherwise be written into mcp.json as
+            // a command for claude to spawn.
+            .filter(|d| d.starts_with('/'))
             .map(|d| PathBuf::from(d).join("worktrees"))
-            .find(|c| c.is_file())
+            .find(|c| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    c.metadata()
+                        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                        .unwrap_or(false)
+                }
+                #[cfg(not(unix))]
+                {
+                    c.is_file()
+                }
+            })
     })
 }
 
@@ -767,10 +963,25 @@ fn worktrees_bin() -> Option<PathBuf> {
 /// "unprofiled launches", not lock the user out of their own tool — the same
 /// leniency `config::cfg_toml_get` applies for the same reason.
 pub fn read_lenient() -> Profiles {
-    match fs::read(profiles_path()) {
+    let mut ps: Profiles = match fs::read(profiles_path()) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => Profiles::default(),
-    }
+    };
+    drop_incoherent(&mut ps);
+    ps
+}
+
+/// Drop declarations whose map key disagrees with their own `id`.
+///
+/// `save()` keeps the two in step, but a hand-edited or imported file need not:
+/// `profiles["safe"] = { "id": "work", … }` resolves as `safe` and then
+/// materializes into `profiles/work/` — which IS the `work` profile's keychain
+/// identity. One declaration would silently overwrite another logged-in
+/// profile's rules, MCP config and settings.
+fn drop_incoherent(ps: &mut Profiles) {
+    ps.profiles.retain(|key, p| key == &p.id && sanitize_id(key) == *key);
+    let known: Vec<String> = ps.profiles.keys().cloned().collect();
+    ps.assignments.retain(|_, id| id == RESERVED_ID || known.contains(id));
 }
 
 /// For writes: refuse to clobber a file we cannot parse, so a hand-edit typo
@@ -787,7 +998,15 @@ fn read_strict(path: &Path) -> Result<Profiles, String> {
 struct DirLock(PathBuf);
 impl DirLock {
     fn acquire(target: &Path) -> Result<Self, String> {
-        let lock = target.with_extension("json.lock");
+        Self::at(target.with_extension("json.lock"))
+    }
+
+    /// Lock at an explicit path — materialization locks a DIRECTORY, so it
+    /// cannot use the `with_extension` convention the JSON files use.
+    fn at(lock: PathBuf) -> Result<Self, String> {
+        if let Some(parent) = lock.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         for _ in 0..100 {
             match fs::create_dir(&lock) {
                 Ok(_) => return Ok(DirLock(lock)),
@@ -804,7 +1023,7 @@ impl DirLock {
                 Err(e) => return Err(format!("lock error: {e}")),
             }
         }
-        Err("could not acquire profiles-file lock".into())
+        Err("could not acquire profiles lock".into())
     }
 }
 impl Drop for DirLock {
@@ -1182,14 +1401,27 @@ mod tests {
             store: root.join("store"),
             user_claude: root.join("home/.claude"),
             user_claude_json: root.join("home/.claude.json"),
+            worktrees_bin: None,
         }
     }
+    /// Write a user `~/.claude.json`, optionally trusting some dirs.
+    fn user_json(paths: &MatPaths, extra: serde_json::Value, trusted: &[&str]) {
+        fs::create_dir_all(paths.user_claude_json.parent().unwrap()).unwrap();
+        let mut v = extra;
+        let projects: serde_json::Map<String, serde_json::Value> = trusted
+            .iter()
+            .map(|d| ((*d).to_string(), serde_json::json!({ "hasTrustDialogAccepted": true })))
+            .collect();
+        v["projects"] = serde_json::Value::Object(projects);
+        fs::write(&paths.user_claude_json, v.to_string()).unwrap();
+    }
+
     fn read(p: &Path) -> String {
         fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
     }
 
     #[test]
-    fn materialize_writes_rules_and_mcp_and_trusts_the_worktree() {
+    fn materialize_writes_rules_and_mcp() {
         let t = tmp("basic");
         let paths = paths_in(&t.0);
         let p = Profile {
@@ -1198,18 +1430,92 @@ mod tests {
             rules: "be terse".into(),
             ..Default::default()
         };
-        let out = materialize_with(&paths, &p, "/repo/.worktrees/feat").unwrap();
+        let out = materialize_with(&paths, &p, "/repo/.worktrees/feat", "/repo").unwrap();
 
         assert_eq!(read(out.rules.as_ref().unwrap()), "be terse");
         let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
         assert!(mcp["mcpServers"].as_object().unwrap().is_empty());
         assert!(out.settings.is_none(), "no settings declared → no file to point --settings at");
+    }
 
-        // the worktree is trusted, so the pane cannot open on a dialog
+    #[test]
+    fn trust_is_mirrored_from_the_user_never_invented() {
+        // Enabling a profile must never be WEAKER than running claude normally.
+        // The trust dialog is the only gate in front of a repo's own hooks,
+        // .mcp.json and CLAUDE.md, so a freshly cloned repo must still be asked
+        // about — we only carry across a decision the user already made.
+        let t = tmp("trust-no");
+        let paths = paths_in(&t.0);
+        user_json(&paths, serde_json::json!({}), &[]);
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        materialize_with(&paths, &p, "/repo/.worktrees/feat", "/repo").unwrap();
         let cj: serde_json::Value = serde_json::from_str(&read(&paths.dir.join(".claude.json"))).unwrap();
-        let e = &cj["projects"]["/repo/.worktrees/feat"];
-        assert_eq!(e["hasTrustDialogAccepted"], serde_json::json!(true));
-        assert_eq!(e["hasClaudeMdExternalIncludesApproved"], serde_json::json!(true));
+        assert!(
+            cj["projects"].get("/repo/.worktrees/feat").is_none(),
+            "an untrusted repo must not be silently pre-trusted"
+        );
+
+        // …but a repo the user already trusts carries over, so profiles do not
+        // re-ask about codebases they have already accepted.
+        let t2 = tmp("trust-yes");
+        let paths2 = paths_in(&t2.0);
+        user_json(&paths2, serde_json::json!({}), &["/repo"]);
+        materialize_with(&paths2, &p, "/repo/.worktrees/feat", "/repo").unwrap();
+        let cj2: serde_json::Value = serde_json::from_str(&read(&paths2.dir.join(".claude.json"))).unwrap();
+        assert_eq!(cj2["projects"]["/repo/.worktrees/feat"]["hasTrustDialogAccepted"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn external_claude_md_imports_are_never_pre_approved() {
+        // hasClaudeMdExternalIncludesApproved waves through `@`-imports that
+        // reach OUTSIDE the repo — a hostile CLAUDE.md could pull
+        // `@~/.ssh/config` into context with no prompt. Never set, not even for
+        // a repo the user fully trusts.
+        let t = tmp("imports");
+        let paths = paths_in(&t.0);
+        user_json(&paths, serde_json::json!({}), &["/repo"]);
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        materialize_with(&paths, &p, "/repo/wt", "/repo").unwrap();
+        let raw = read(&paths.dir.join(".claude.json"));
+        assert!(!raw.contains("hasClaudeMdExternalIncludesApproved"), "{raw}");
+        assert!(!raw.contains("hasClaudeMdExternalIncludesWarningShown"), "{raw}");
+    }
+
+    #[test]
+    fn credential_shaped_keys_are_never_copied_into_a_profile() {
+        // The module header claims worktrees never copies credential material.
+        // This is what makes that a guarantee rather than a hope, given the seed
+        // copies a file whose key set another vendor owns.
+        let t = tmp("creds");
+        let paths = paths_in(&t.0);
+        user_json(
+            &paths,
+            serde_json::json!({
+                "theme": "dark",
+                "primaryApiKey": "sk-ant-SECRET",
+                "customApiKeyResponses": { "approved": ["x"] },
+                "oauthAccount": { "emailAddress": "a@b.c" },
+                "userID": "uid",
+                "bypassPermissionsModeAccepted": true
+            }),
+            &[],
+        );
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        let out = materialize_with(&paths, &p, "/repo/wt", "/repo").unwrap();
+        let raw = read(&paths.dir.join(".claude.json"));
+        assert!(!raw.contains("SECRET"), "a token reached the profile dir: {raw}");
+        for k in ["primaryApiKey", "customApiKeyResponses", "oauthAccount", "userID", "bypassPermissionsModeAccepted"] {
+            assert!(!raw.contains(k), "{k} was copied: {raw}");
+        }
+        assert!(raw.contains("theme"), "ordinary keys still come across");
+        assert!(out.warnings.iter().any(|w| w.contains("not copied")), "{:?}", out.warnings);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(paths.dir.join(".claude.json")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "profile .claude.json must not be group/world readable");
+        }
     }
 
     #[test]
@@ -1231,7 +1537,7 @@ mod tests {
         .unwrap();
 
         let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
-        materialize_with(&paths, &p, "/repo/wt").unwrap();
+        materialize_with(&paths, &p, "/repo/wt", "/repo").unwrap();
         let cj: serde_json::Value = serde_json::from_str(&read(&paths.dir.join(".claude.json"))).unwrap();
 
         // inherited wholesale — including a flag this code has never heard of,
@@ -1241,8 +1547,7 @@ mod tests {
         // but NOT the user's MCP servers (the profile owns MCP)…
         assert!(cj.get("mcpServers").is_none());
         // …and NOT another repo's entry, which would leak its allowedTools grants
-        assert!(cj["projects"].get("/other/repo").is_none());
-        assert!(cj["projects"].get("/repo/wt").is_some());
+        assert!(cj.get("projects").map(|p| p.get("/other/repo").is_none()).unwrap_or(true));
     }
 
     #[test]
@@ -1252,15 +1557,16 @@ mod tests {
         // would look like a first run.
         let t = tmp("restate");
         let paths = paths_in(&t.0);
+        user_json(&paths, serde_json::json!({}), &["/repo"]);
         let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
-        materialize_with(&paths, &p, "/repo/a").unwrap();
+        materialize_with(&paths, &p, "/repo/a", "/repo").unwrap();
 
         let target = paths.dir.join(".claude.json");
         let mut cj: serde_json::Value = serde_json::from_str(&read(&target)).unwrap();
         cj["numStartups"] = serde_json::json!(7);
         fs::write(&target, cj.to_string()).unwrap();
 
-        materialize_with(&paths, &p, "/repo/b").unwrap();
+        materialize_with(&paths, &p, "/repo/b", "/repo").unwrap();
         let after: serde_json::Value = serde_json::from_str(&read(&target)).unwrap();
         assert_eq!(after["numStartups"], serde_json::json!(7), "claude's own state survived");
         assert!(after["projects"].get("/repo/a").is_some(), "the first worktree stays trusted");
@@ -1287,13 +1593,13 @@ mod tests {
 
         // off: the profile's set is the whole set — this is what makes
         // "remove a noisy global server" possible at all
-        let out = materialize_with(&paths, &p, "/w").unwrap();
+        let out = materialize_with(&paths, &p, "/w", "/repo").unwrap();
         let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
         assert!(mcp["mcpServers"].get("globalonly").is_none());
 
         // on: globals fill in, but the profile's own definition wins a collision
         p.inherit_global_mcp = true;
-        let out = materialize_with(&paths, &p, "/w").unwrap();
+        let out = materialize_with(&paths, &p, "/w", "/repo").unwrap();
         let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
         assert_eq!(mcp["mcpServers"]["globalonly"]["command"], serde_json::json!("g"));
         assert_eq!(mcp["mcpServers"]["shared"]["command"], serde_json::json!("MINE"));
@@ -1308,7 +1614,7 @@ mod tests {
         }
         let mut p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
         p.skills = vec!["alpha".into(), "beta".into()];
-        materialize_with(&paths, &p, "/w").unwrap();
+        materialize_with(&paths, &p, "/w", "/repo").unwrap();
 
         let link = paths.dir.join("skills/alpha");
         assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
@@ -1317,23 +1623,107 @@ mod tests {
 
         // disabling one drops its link and leaves the other
         p.skills = vec!["alpha".into()];
-        materialize_with(&paths, &p, "/w").unwrap();
+        materialize_with(&paths, &p, "/w", "/repo").unwrap();
         assert!(fs::symlink_metadata(paths.dir.join("skills/beta")).is_err());
         assert!(fs::symlink_metadata(paths.dir.join("skills/alpha")).is_ok());
     }
 
     #[test]
     fn materialize_never_deletes_something_it_did_not_create() {
-        // A real directory under skills/ (a user poking around) must survive the
-        // stale-link sweep — we only remove symlinks.
+        // The sweep must only ever remove SYMLINKS. A plain file is the case
+        // that actually exercises the guard: `remove_file` refuses a directory
+        // on unix anyway, so a directory-only fixture passes even with the
+        // is_symlink check deleted.
         let t = tmp("nodelete");
         let paths = paths_in(&t.0);
+        fs::create_dir_all(paths.dir.join("skills")).unwrap();
+        fs::write(paths.dir.join("skills/notes.txt"), "mine").unwrap();
         fs::create_dir_all(paths.dir.join("skills/handmade")).unwrap();
-        fs::write(paths.dir.join("skills/handmade/SKILL.md"), "mine").unwrap();
+        fs::write(paths.dir.join("skills/handmade/SKILL.md"), "also mine").unwrap();
 
         let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
-        materialize_with(&paths, &p, "/w").unwrap();
-        assert_eq!(read(&paths.dir.join("skills/handmade/SKILL.md")), "mine");
+        materialize_with(&paths, &p, "/w", "/repo").unwrap();
+        assert_eq!(read(&paths.dir.join("skills/notes.txt")), "mine");
+        assert_eq!(read(&paths.dir.join("skills/handmade/SKILL.md")), "also mine");
+    }
+
+    #[test]
+    fn a_skill_name_cannot_escape_the_skills_dir() {
+        // Skill names are path components read from the same hand-editable file
+        // as ids, and got none of the validation ids get. A "../" name used to
+        // plant a symlink outside the profile dir, where the stale sweep (which
+        // only reads skills/) could never reclaim it.
+        let t = tmp("escape");
+        let paths = paths_in(&t.0);
+        fs::create_dir_all(paths.store.join("real")).unwrap();
+        // a plausible traversal target that EXISTS, so `is_dir()` would pass
+        fs::create_dir_all(t.0.join("victim")).unwrap();
+
+        let mut p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        p.skills = vec!["../victim".into(), "a/b".into(), "..".into(), "".into(), "real".into()];
+        let out = materialize_with(&paths, &p, "/w", "/repo").unwrap();
+
+        // nothing landed outside skills/
+        assert!(fs::symlink_metadata(paths.dir.join("victim")).is_err());
+        assert!(fs::symlink_metadata(t.0.join("victim/real")).is_err());
+        let entries: Vec<String> = fs::read_dir(paths.dir.join("skills"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["real".to_string()], "only the legal name linked");
+        // and each rejection is reported rather than swallowed
+        assert_eq!(out.warnings.iter().filter(|w| w.contains("refusing")).count(), 4, "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn a_non_object_user_claude_json_degrades_instead_of_failing_the_launch() {
+        let t = tmp("weird");
+        let paths = paths_in(&t.0);
+        fs::create_dir_all(paths.user_claude_json.parent().unwrap()).unwrap();
+        fs::write(&paths.user_claude_json, "[1,2,3]").unwrap();
+
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        let out = materialize_with(&paths, &p, "/repo/wt", "/repo").expect("a weird user file must not strand the user");
+        assert!(out.warnings.iter().any(|w| w.contains("not a JSON object")), "{:?}", out.warnings);
+        // and the launch still produced a usable config
+        let cj: serde_json::Value = serde_json::from_str(&read(&paths.dir.join(".claude.json"))).unwrap();
+        assert!(cj.is_object());
+    }
+
+    #[test]
+    fn a_corrupt_profile_claude_json_is_reseeded_loudly() {
+        let t = tmp("corrupt");
+        let paths = paths_in(&t.0);
+        user_json(&paths, serde_json::json!({}), &["/repo"]);
+        let p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
+        materialize_with(&paths, &p, "/repo/a", "/repo").unwrap();
+        fs::write(paths.dir.join(".claude.json"), "{ truncated").unwrap();
+
+        let out = materialize_with(&paths, &p, "/repo/b", "/repo").unwrap();
+        assert!(out.warnings.iter().any(|w| w.contains("re-seeded")), "{:?}", out.warnings);
+        // recovery is real, not just a warning
+        let cj: serde_json::Value = serde_json::from_str(&read(&paths.dir.join(".claude.json"))).unwrap();
+        assert_eq!(cj["projects"]["/repo/b"]["hasTrustDialogAccepted"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn the_worktrees_mcp_stanza_points_at_the_resolved_binary() {
+        let t = tmp("wtmcp");
+        let mut paths = paths_in(&t.0);
+        paths.worktrees_bin = Some(PathBuf::from("/opt/bin/worktrees"));
+        let p = Profile { id: "work".into(), name: "W".into(), worktrees_mcp: true, ..Default::default() };
+        let out = materialize_with(&paths, &p, "/w", "/repo").unwrap();
+        let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
+        assert_eq!(mcp["mcpServers"]["worktrees"]["command"], serde_json::json!("/opt/bin/worktrees"));
+        assert_eq!(mcp["mcpServers"]["worktrees"]["args"], serde_json::json!(["mcp"]));
+
+        // unresolvable → warn and carry on, never a failed launch
+        paths.worktrees_bin = None;
+        let out = materialize_with(&paths, &p, "/w", "/repo").unwrap();
+        assert!(out.warnings.iter().any(|w| w.contains("no `worktrees` binary")), "{:?}", out.warnings);
+        let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
+        assert!(mcp["mcpServers"].get("worktrees").is_none());
     }
 
     #[test]
@@ -1342,7 +1732,7 @@ mod tests {
         let paths = paths_in(&t.0);
         let mut p = Profile { id: "work".into(), name: "W".into(), ..Default::default() };
         p.skills = vec!["ghost".into()];
-        let out = materialize_with(&paths, &p, "/w").unwrap();
+        let out = materialize_with(&paths, &p, "/w", "/repo").unwrap();
         assert!(out.warnings.iter().any(|w| w.contains("ghost")), "{:?}", out.warnings);
         // the launch still happens — a stale skill reference must not strand the
         // user with no session
@@ -1354,10 +1744,10 @@ mod tests {
         let t = tmp("rules");
         let paths = paths_in(&t.0);
         let mut p = Profile { id: "work".into(), name: "W".into(), rules: "old".into(), ..Default::default() };
-        materialize_with(&paths, &p, "/w").unwrap();
+        materialize_with(&paths, &p, "/w", "/repo").unwrap();
         assert!(paths.dir.join("rules.md").exists());
         p.rules = String::new();
-        let out = materialize_with(&paths, &p, "/w").unwrap();
+        let out = materialize_with(&paths, &p, "/w", "/repo").unwrap();
         assert!(out.rules.is_none());
         assert!(!paths.dir.join("rules.md").exists(), "stale rules must not keep applying");
     }
