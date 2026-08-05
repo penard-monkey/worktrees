@@ -33,6 +33,11 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 
 CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 
+**AI profiles have a manual gate too.** Everything claude-side (does the config
+swap apply, does session adoption still see `claude`, does auto-resume resume)
+is invisible to the bats suite — there is no fake claude. Re-run
+`docs/ai-profiles-manual-checks.md` whenever the `claude` binary is upgraded.
+
 ## Tauri app — hard-won rules
 
 - **Commands must be `async fn`** — sync handlers run on the main thread and

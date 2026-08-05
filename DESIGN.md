@@ -215,6 +215,82 @@ while a session is live — DERIVE the effective label every read instead.
 - UI never second-writes; it calls Rust setters (`set_lifecycle`, `set_pin`, `set_note`,
   `touch_place`) and debounces notes in the UI.
 
+
+## AI profiles (the third state category)
+
+The state split was DERIVED (live git/tmux, recomputed) vs DECLARED (per-repo
+`.worktrees.places.json`). AI profiles are a third thing: **user-global,
+app-managed**, and shared with the CLI.
+
+**Two locations, split on config-vs-data:**
+
+| Path | Holds | Why there |
+|---|---|---|
+| `~/.config/worktrees/profiles.json` | declarations | Core's config root already. The CLI resolves profiles too, so this cannot live in the app's config dir — `app_config_dir()` is a Tauri API and core has no `AppHandle`. |
+| `$XDG_DATA_HOME/worktrees/profiles/<id>/` | the materialized `CLAUDE_CONFIG_DIR` | claude writes transcripts and caches here without bound. That is data, not config; burying gigabytes in `~/.config` would ambush anyone backing up dotfiles. |
+| `~/.config/worktrees/skills.json` + `$XDG_DATA_HOME/worktrees/skills/` | the skill store | Same split, same reasons. |
+
+**The path is an identity.** claude derives its macOS keychain service name from
+the config-dir path (`Claude Code-credentials-<8hex>`), so a profile's saved
+sign-in is bound to `profile_dir(id)`. Consequences that are not obvious:
+
+- `id` is assigned once and never changes; `name` is what the user renames.
+- The directory is STABLE, not a per-launch snapshot — a fresh directory means a
+  fresh identity and a forced `/login`.
+- Each profile signs in once, in its own pane. **worktrees never handles a
+  credential**: no copying, no `security(1)`, no token in any file it writes.
+  That invariant is why the design is safe, and it is also why deleting a
+  profile cannot delete its keychain item — the UI names the leftover instead.
+
+**Resolution:** `$WORKTREES_PROFILE > assignments[repo] > default_id > none`.
+A project profile REPLACES the global default; the two do not merge. `none` is an
+explicit opt-out, and a dangling id degrades to an unprofiled launch rather than
+an error.
+
+**The launch.** `ops::ai_launch_for` is the single seam every launch path goes
+through — CLI and app cannot diverge on which profile a place gets.
+
+```
+CLAUDE_CONFIG_DIR='<dir>' claude [-r] \
+  --append-system-prompt-file '<dir>/rules.md' \
+  --settings '<dir>/settings.json' \
+  --mcp-config '<dir>/mcp.json' [--strict-mcp-config] [--model '<m>']
+```
+
+Env travels in `AiLaunch.env`, never glued onto the command string: `ai_word` is
+substring-matched against `pane_current_command` for session adoption, so an env
+prefix would silently degrade adoption and disable auto-resume.
+
+**Fail closed.** If a profile cannot be materialized, the pane opens on a plain
+shell with the reason printed — it does NOT launch unprofiled claude. Profiles
+are frequently restrictive (`--strict-mcp-config` removes a global MCP server;
+settings carry permission denies), so "could not apply your profile" must never
+silently mean "ran without your restrictions".
+
+### What a profile is NOT
+
+- **Not a sandbox against the repo.** A worktree's own committed
+  `.claude/settings.json` (hooks), `.mcp.json` and `CLAUDE.md` still load. A
+  profile controls the USER scope, not the project scope.
+- **Not able to suppress your global rules.** `~/.claude/CLAUDE.md` and its
+  `@`-imports load regardless of the config-dir swap (verified on claude
+  2.1.220). A profile ADDS rules; nothing removes the user's own.
+- **Not a trust boundary you get for free.** Trust is MIRRORED from the user's
+  own `~/.claude.json` for that repo, never invented — pre-accepting the trust
+  dialog for a freshly cloned repo would make enabling a profile strictly weaker
+  than running claude normally.
+
+### Staleness
+
+`Profile.updated_epoch` is bumped on every save. `ops::launch` stamps
+`profile_id`/`profile_epoch` into the place's declared state **only when it
+creates a session** (an attach reuses whatever the process already loaded). The
+badge compares the two.
+
+It covers rules, model, MCP and settings — **not skills**, which are symlinked
+into the profile dir and therefore already reach a running session, since claude
+hot-watches that directory.
+
 ## Infra convention (CDV STACK_MODE → config-driven)
 
 Three-tier resolution: (1) `.worktrees.toml` at repo root (committed, reviewed) → explicit;

@@ -3,6 +3,49 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **AI profiles.** Settings → AI profiles lets you define what a worktrees-launched
+  `claude` runs with — rules text, skills, MCP servers, model and settings — instead
+  of your global `~/.claude` setup. Your normal terminal `claude` is untouched. A
+  profile can be the global default or bound to one project (a project profile
+  replaces the default; the two do not merge), and `WORKTREES_PROFILE=none` opts a
+  launch out entirely. `worktrees open` from a terminal applies the same profile the
+  app would — the CLI and the app share one resolver, so they cannot drift.
+- **Each profile signs in once, on its own.** claude keys its saved sign-in to the
+  config directory it is given, so a profile's first launch shows
+  `Not logged in · Run /login` in the pane and stays signed in afterwards. worktrees
+  never copies, reads or stores a credential to make this work. The profile list
+  labels a never-launched profile "needs sign-in" so that first pane does not read
+  as broken.
+- **A skill store.** `worktrees skills add <dir|--git URL>` (and the same in the UI)
+  installs Claude skills that profiles can enable. Because an enabled skill's
+  description is loaded into every session before anything invokes it, installing one
+  is closer to running someone else's prompt than to copying a file — so anything it
+  asks for beyond reading files (`allowed-tools`, `hooks`, executables) is shown
+  before it lands, git installs are pinned to the reviewed commit and refuse to
+  install if the branch moved, and installing never runs anything from the source.
+- **`worktrees mcp`** — an MCP server over stdio, so a Claude session can drive the
+  worktree layer as tools instead of raw git. Read-only by default; worktree
+  mutations are opt-in per profile and removing a worktree additionally requires
+  explicit confirmation.
+- **A "restart to apply" badge** on a live session whose profile has been edited
+  since it started. It covers rules, model, MCP and settings — skill edits already
+  reach a running session, so it does not claim them.
+
+### Notes
+- A profile controls the USER scope, not the project scope: a repo's own committed
+  `.claude/settings.json`, `.mcp.json` and `CLAUDE.md` still load. Your global
+  `~/.claude/CLAUDE.md` also still loads — a profile ADDS rules, it cannot suppress
+  your own.
+- Binding a profile to a repo that already has Claude conversations starts a fresh
+  one, because history lives with the profile. Nothing is deleted; unbind and the
+  old conversation comes back. The picker says so before you choose.
+- If a profile cannot be prepared, the pane opens on a plain shell with the reason
+  rather than launching claude without it — profiles are often restrictive, and
+  "could not apply your profile" must never quietly mean "ran without it".
+
 ## [0.6.0] - 2026-08-01
 
 ### Added
