@@ -163,3 +163,33 @@ close-out ritual (.claude/skills/close-out).
   the app grows other harnesses, generalize to one provider per row group
   (backend already isolates the Claude source behind a single command).
   _From: [2026-08-02 usage-widget session](docs/sessions/2026-08-02-usage-widget/summary.md)_
+
+- **App button for `worktrees init --diff`.** `doctor` now emits an
+  `undeclared` finding when a gitignored file exists that `.worktrees.toml`
+  never learned about, and the app already renders it (`ProjectSheet.tsx` maps
+  all findings; `place: null` correctly marks no row). What's missing is the
+  action beside it — Relink and Provision have buttons, this doesn't.
+  _From: [2026-08-05 undeclared-drift session](docs/sessions/2026-08-05-undeclared-drift/summary.md)_
+
+- **`doctor --strict` is credential-only for `undeclared`.** By design: an
+  undeclared `.env*` is Info, so `--strict` (which promotes Warn→Error) never
+  fails on it, matching how `--strict` treats `copy-stale`. If a project wants
+  undeclared `.env*` to fail CI too, that knob does not exist yet.
+  _From: [2026-08-05 undeclared-drift session](docs/sessions/2026-08-05-undeclared-drift/summary.md)_
+
+- **Glob `path` inside `[[file]]` — evaluated and DECLINED, recorded so it is
+  not re-litigated.** It costs the two things that make the format work:
+  per-entry `mode` (link vs copy is load-bearing) and "declared but missing =
+  warning". cdv's real config is 6 stanzas. Reopen only for a repo where one
+  stanza per package is genuinely painful, and prefer extending `init --diff`
+  even then. Same session ruled out a `.gitignore`-style `.worktreeinclude`
+  file for the same reasons plus two more (security surface, and two-thirds of
+  `.worktrees.toml` isn't files).
+  _From: [2026-08-05 undeclared-drift session](docs/sessions/2026-08-05-undeclared-drift/summary.md)_
+
+- **cdv migration to `.worktrees.toml`.** Still the open item from the
+  project-settings proposal (§12): delete `scripts/worktrees.sh`'s stack-mode
+  block in one commit, transcribe `[ports] base` from cdv `main` (not the
+  proposal doc), and run `provision` against the two unprovisioned worktrees
+  before anyone runs `deploy-local.sh` in either.
+  _From: [docs/proposals/project-settings.md §12](docs/proposals/project-settings.md)_
