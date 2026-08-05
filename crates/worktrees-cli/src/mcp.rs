@@ -37,13 +37,31 @@
 //! - **stdout carries protocol only.** Anything human-facing goes to stderr, or
 //!   the transport is corrupt.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 
 use worktrees_core::{ops, store, ui::CaptureUi, Project};
 
+/// Pick the protocol version to answer `initialize` with: echo what the client
+/// asked for when we know it, else our newest. Free function so the test
+/// exercises THIS, rather than a copy of the rule.
+fn negotiate(asked: &str) -> &str {
+    if SUPPORTED.contains(&asked) {
+        asked
+    } else {
+        LATEST
+    }
+}
+
 /// Versions this server understands. We echo the client's choice when we know
 /// it, else answer with our newest — the handshake rule from the spec.
-const SUPPORTED: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+///
+/// Deliberately does NOT include 2024-11-05 or 2025-03-26. Those permit JSON-RPC
+/// BATCHES (an array of messages), which this reader does not parse — a batch
+/// would be classified as a notification and dropped, hanging a conforming
+/// client forever. Batching was removed in 2025-06-18, so advertising only
+/// 2025-06-18 and later makes the reader's shape and the negotiated contract
+/// agree.
+const SUPPORTED: &[&str] = &["2025-11-25", "2025-06-18"];
 const LATEST: &str = "2025-11-25";
 
 const EXIT_NEEDS_CONFIRM: i32 = 3;
@@ -77,7 +95,10 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
 
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
-    for line in stdin.lock().lines() {
+    // Bounded: `lines()` grows a String until it finds a newline, so a client
+    // that never sends one would drive allocation until the process dies.
+    const MAX_LINE: u64 = 8 * 1024 * 1024;
+    for line in std::io::BufReader::new(stdin.lock().take(MAX_LINE)).lines() {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
@@ -107,12 +128,17 @@ impl Server {
             Err(e) => return Some(err_obj(serde_json::Value::Null, -32700, &format!("parse error: {e}"))),
         };
         let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let method = msg.get("method").and_then(|m| m.as_str());
         let params = msg.get("params").cloned().unwrap_or(serde_json::json!({}));
 
         // No id = notification. Never answer one, even to complain.
         let Some(id) = id else { return None };
 
+        // A request with no `method` is malformed, which is -32600 — distinct
+        // from a method we simply do not implement.
+        let Some(method) = method else {
+            return Some(err_obj(id, -32600, "invalid request: no method"));
+        };
         let result = match method {
             "initialize" => Ok(self.initialize(&params)),
             "ping" => Ok(serde_json::json!({})),
@@ -130,7 +156,7 @@ impl Server {
 
     fn initialize(&self, params: &serde_json::Value) -> serde_json::Value {
         let asked = params.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or(LATEST);
-        let version = if SUPPORTED.contains(&asked) { asked } else { LATEST };
+        let version = negotiate(asked);
         serde_json::json!({
             "protocolVersion": version,
             "capabilities": { "tools": { "listChanged": false } },
@@ -273,8 +299,16 @@ impl Server {
     }
 
     fn call(&mut self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let a = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+        // These two ARE protocol errors — the request is malformed, as opposed to
+        // a tool that ran and failed (which is `isError: true` in a result).
+        let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
+            return Err("params.name is required and must be a string".into());
+        };
+        let a = match params.get("arguments") {
+            None | Some(serde_json::Value::Null) => serde_json::json!({}),
+            Some(v) if v.is_object() => v.clone(),
+            Some(_) => return Err("params.arguments must be an object".into()),
+        };
         let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         // A tool the server did not advertise must not be callable, or
@@ -294,7 +328,10 @@ impl Server {
                 Ok(text_ok(&serde_json::to_string_pretty(&ls).unwrap_or_default()))
             }
             "place_status" => {
-                let slug = s("slug");
+                let slug = match safe_arg(&s("slug"), "slug") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
                 let ls = self.project.ls();
                 match ls.places.iter().find(|p| p.slug == slug) {
                     Some(p) => Ok(text_ok(&serde_json::to_string_pretty(p).unwrap_or_default())),
@@ -303,37 +340,58 @@ impl Server {
             }
             "doctor" => Ok(self.run_op(|p, ui| ops::cmd_doctor(p, ui, &[]))),
             "set_note" => {
-                let (slug, note) = (s("slug"), s("note"));
+                let slug = match self.known_slug(&s("slug")) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                let note = s("note");
                 self.meta(&slug, |d| {
                     d.note = if note.is_empty() { None } else { Some(note.clone()) }
                 })
             }
             "set_pin" => {
-                let slug = s("slug");
-                let pinned = a.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+                let slug = match self.known_slug(&s("slug")) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                // Strict: a non-bool used to mean "unpin", so a typo silently did
+                // the opposite of what was asked.
+                let Some(pinned) = a.get("pinned").and_then(|v| v.as_bool()) else {
+                    return Ok(text_err("pinned must be true or false"));
+                };
                 self.meta(&slug, |d| d.pinned = Some(pinned))
             }
             "set_lifecycle" => {
-                let (slug, life) = (s("slug"), s("lifecycle"));
+                let slug = match self.known_slug(&s("slug")) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                let life = s("lifecycle");
                 if !["closed", "saved", "archived", "abandoned"].contains(&life.as_str()) {
                     return Ok(text_err(&format!("invalid lifecycle: {life}")));
                 }
                 self.meta(&slug, |d| d.lifecycle = Some(life.clone()))
             }
             "create_worktree" => {
-                let branch = s("branch");
-                if branch.is_empty() {
-                    return Ok(text_err("branch is required"));
-                }
-                let base = s("base");
+                let branch = match safe_arg(&s("branch"), "branch") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                let raw_base = s("base");
                 let mut args = vec![branch, "--no-attach".to_string()];
-                if !base.is_empty() {
-                    args.insert(1, base);
+                if !raw_base.trim().is_empty() {
+                    match safe_arg(&raw_base, "base") {
+                        Ok(b) => args.insert(1, b),
+                        Err(e) => return Ok(text_err(&e)),
+                    }
                 }
                 Ok(self.run_op(move |p, ui| ops::cmd_new(p, ui, &args)))
             }
             "close_session" => {
-                let slug = s("slug");
+                let slug = match self.known_slug(&s("slug")) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
                 let args = vec![slug];
                 Ok(self.run_op(move |p, ui| ops::cmd_close(p, ui, &args)))
             }
@@ -346,11 +404,28 @@ impl Server {
                          Ask the user before retrying — uncommitted work is lost.",
                     ));
                 }
-                let slug = s("slug");
+                let slug = match self.known_slug(&s("slug")) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
                 let args = vec![slug, "-y".to_string()];
                 Ok(self.run_op(move |p, ui| ops::cmd_rm(p, ui, &args)))
             }
             other => Ok(text_err(&format!("unknown tool: {other}"))),
+        }
+    }
+
+    /// A slug that is flag-safe AND names a place that actually exists.
+    ///
+    /// The existence check is not pedantry: `store::edit` creates the entry it is
+    /// given, so a typo used to leave a ghost record in the declared-state file
+    /// for a place that never existed.
+    fn known_slug(&self, slug: &str) -> Result<String, String> {
+        let slug = safe_arg(slug, "slug")?;
+        if self.project.ls().places.iter().any(|p| p.slug == slug) {
+            Ok(slug)
+        } else {
+            Err(format!("no such place: {slug}"))
         }
     }
 
@@ -384,6 +459,36 @@ impl Server {
             text_err(&format!("{body}\n(exit {rc})"))
         }
     }
+}
+
+/// Reject a model-supplied value that a core arg parser would read as a FLAG.
+///
+/// This is the boundary that matters. `ops::cmd_new` and friends parse their own
+/// argv: anything matching a flag pattern is consumed AS a flag and never fills
+/// a positional slot. So `base: "--ai=touch /tmp/x"` does not create a worktree
+/// based on a branch called that — it sets the AI command, which
+/// `ops::launch` interpolates into `sh -ic '<ai_cmd>; …'`. That is a shell
+/// command line, so a tool advertised as "create a worktree" became arbitrary
+/// code execution.
+///
+/// It has to be caught HERE: this is the only layer that knows these strings
+/// came from a model rather than from a person typing a command. `--` would be
+/// the tidier fix but core's parsers have no end-of-options case today.
+fn safe_arg(v: &str, what: &str) -> Result<String, String> {
+    let t = v.trim();
+    if t.is_empty() {
+        return Err(format!("{what} is required"));
+    }
+    if t.starts_with('-') {
+        return Err(format!(
+            "{what} may not begin with '-' (it would be read as a command-line flag)"
+        ));
+    }
+    // Belt and braces: a git ref cannot contain these, and neither can a slug.
+    if t.contains(['\n', '\r', '\0']) || t.contains("..") {
+        return Err(format!("{what} contains characters that are not allowed"));
+    }
+    Ok(t.to_string())
 }
 
 fn tool(
@@ -432,26 +537,38 @@ mod tests {
     /// The protocol-shaping helpers are testable without a repo; the tool bodies
     /// need one, and get exercised end to end from bats instead.
     #[test]
-    fn a_notification_is_never_answered() {
-        // JSON-RPC: a message with no id gets no reply. Answering one corrupts
-        // the stream, because the client is not expecting a frame.
-        let msg = serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert!(msg.get("id").is_none());
+    fn version_negotiation_echoes_a_known_version_else_falls_back() {
+        // Calls the real function, not a copy of the rule — the previous version
+        // of this test re-implemented negotiation locally and would have stayed
+        // green if `initialize` stopped consulting SUPPORTED at all.
+        assert_eq!(negotiate("2025-06-18"), "2025-06-18", "a known version is echoed back");
+        assert_eq!(negotiate("1999-01-01"), LATEST, "an unknown one falls back to ours");
+        assert_eq!(negotiate("2026-07-28"), LATEST, "a NEWER one falls back too");
+        assert!(SUPPORTED.contains(&LATEST));
     }
 
     #[test]
-    fn version_negotiation_echoes_a_known_version_else_falls_back() {
-        fn pick(asked: &str) -> &str {
-            if SUPPORTED.contains(&asked) {
-                asked
-            } else {
-                LATEST
-            }
+    fn batching_versions_are_not_advertised() {
+        // 2024-11-05 and 2025-03-26 permit JSON-RPC batches, which this reader
+        // does not parse: a batch is an array, `get("id")` returns None, and the
+        // whole thing would be dropped as a notification — hanging the client.
+        assert!(!SUPPORTED.contains(&"2024-11-05"));
+        assert!(!SUPPORTED.contains(&"2025-03-26"));
+    }
+
+    #[test]
+    fn a_model_supplied_value_cannot_become_a_command_line_flag() {
+        // THE finding this boundary exists for: core's arg parsers consume
+        // anything flag-shaped AS a flag, and `--ai=<cmd>` reaches
+        // `ops::launch`, which interpolates it into `sh -ic '<cmd>; …'`. A tool
+        // advertised as "create a worktree" was arbitrary code execution.
+        for bad in ["--ai=touch /tmp/x", "-r", "--name=..", "--no-tmux"] {
+            assert!(safe_arg(bad, "base").is_err(), "{bad:?} must be refused");
         }
-        assert_eq!(pick("2025-06-18"), "2025-06-18", "a version we know is echoed back");
-        assert_eq!(pick("2024-11-05"), "2024-11-05");
-        assert_eq!(pick("1999-01-01"), LATEST, "an unknown version falls back to ours");
-        assert!(SUPPORTED.contains(&LATEST));
+        for bad in ["", "   ", "a\nb", "x..y"] {
+            assert!(safe_arg(bad, "branch").is_err(), "{bad:?} must be refused");
+        }
+        assert_eq!(safe_arg(" feat-x ", "branch").unwrap(), "feat-x");
     }
 
     #[test]
