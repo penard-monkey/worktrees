@@ -1462,8 +1462,19 @@ fn undeclared_findings(p: &Project, cfg: &ProjectConfig) -> Vec<Finding> {
         .collect();
     // §9's promise: a bound that was HIT is reported, never swallowed. An empty
     // result from a truncated walk means "I did not look everywhere".
+    //
+    // Its own wording, NOT `init`'s `TRUNCATED`: that string ends "add anything
+    // it missed by hand", where "it" is the config `init` just printed — a
+    // referent that does not exist in a doctor report. It is also the one
+    // `undeclared` finding that is not about a file, so it says so: a `--json`
+    // consumer counting the code as a file count is off by one otherwise, and
+    // `path: null` is the only other thing distinguishing it.
     if truncated {
-        out.push(Finding::info(Code::Undeclared, TRUNCATED));
+        out.push(Finding::info(
+            Code::Undeclared,
+            "this scan stopped early (depth or size bound; hidden and vendor dirs are skipped), \
+             so it is not a complete answer — a file it never reached would not be listed above.",
+        ));
     }
     out
 }
@@ -1725,6 +1736,16 @@ pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
 
     if diff {
+        // Refused, not ignored — the same guard shape as `doctor --config-only
+        // <name>`. `--diff` writes nothing and already prints to stdout, so
+        // every one of these is incoherent with it; `--diff --force` in
+        // particular reads as "rewrite the config with the diff applied", and
+        // swallowing a destructive flag is the silent skip this codebase does
+        // not do.
+        if force || yes || print_only {
+            ui.error("--diff prints the entries your config is missing; it never writes, so --force, -y and --print do not apply.");
+            return 1;
+        }
         return init_diff(p, ui);
     }
 
@@ -1855,13 +1876,17 @@ fn init_diff(p: &Project, ui: &mut dyn Ui) -> i32 {
     for line in text.lines() {
         ui.plain(line);
     }
-    let n = files.len();
-    let noun = if n == 1 { "entry" } else { "entries" };
-    ui.warn_aside(&format!(
-        "{n} undeclared {noun}. Append to {}, set mode = \"copy\" on anything a script \
-         rewrites at runtime, then:  worktrees relink --all",
-        projcfg::CONFIG_FILE
-    ));
+    // Only when something is actually appendable. With every candidate rejected
+    // the fragment is all comments, and "0 undeclared entries. Append to…" both
+    // undercounts (the rejected paths ARE undeclared) and points at nothing.
+    if let n @ 1.. = files.len() {
+        let noun = if n == 1 { "entry" } else { "entries" };
+        ui.warn_aside(&format!(
+            "{n} undeclared {noun}. Append to {}, set mode = \"copy\" on anything a script \
+             rewrites at runtime, then:  worktrees relink --all",
+            projcfg::CONFIG_FILE
+        ));
+    }
     if !rejected.is_empty() {
         ui.warn_aside(&format!(
             "{} found file(s) cannot be declared — the config refuses the path. They are in the \

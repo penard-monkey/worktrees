@@ -424,6 +424,20 @@ YAML
   [[ "$output" == *"declares every gitignored file found here"* ]]
 }
 
+@test "init --diff: refuses the flags it would otherwise swallow" {
+  # --diff never writes, so --force/-y/--print are incoherent with it. The house
+  # rule is to refuse loudly (like `doctor --config-only <name>`), not to ignore
+  # a destructive flag — `init --diff --force` reads as "rewrite it for me".
+  write_project_config '[[file]]' 'path = ".env"'
+  cp "$REPO/.worktrees.toml" "$BATS_TEST_TMPDIR/before"
+  for f in --force -y --print; do
+    run_wt init --diff "$f"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"it never writes"* ]]
+    diff "$BATS_TEST_TMPDIR/before" "$REPO/.worktrees.toml"
+  done
+}
+
 @test "init --diff: with no config at all, prints the whole file" {
   wt_stdout_to "$BATS_TEST_TMPDIR/out" init --diff
   [ "$status" -eq 0 ]

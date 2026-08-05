@@ -86,7 +86,12 @@ pub enum Code {
     /// Repo-scoped: `place` is always `None`. Warn for a credential, Info for
     /// `.env*` — the same split `hint_init` uses (§12), because a missing `.env`
     /// breaks loudly on the next command while a missing `google-services.json`
-    /// builds fine and dies on a device days later. `--strict` promotes it.
+    /// builds fine and dies on a device days later.
+    ///
+    /// ⚠ `--strict` promotes only the WARN half, i.e. credentials. An undeclared
+    /// `.env*` is Info and can never fail a run — the same asymmetry `--strict`
+    /// already has with `CopyStale`, which it promotes from Warn and leaves alone
+    /// at Info. Do not read "`--strict` promotes undeclared" as covering `.env*`.
     Undeclared,
     // §6 — port slots
     /// Two places claim the same `WORKTREE_SLOT`.

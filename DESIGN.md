@@ -60,7 +60,8 @@ spin-up. It is NOT a fork and NOT a rewrite.
 1. **DERIVED state** (branch, dirty, ahead/behind, tmux-up, stack-up, ports,
    claude-session-present) is computed LIVE by the CLI on every `worktrees ls --json`
    — never cached, never stored. Same discipline `cmd_ls` already uses.
-2. **DECLARED state** (lifecycle label, pinned, notes, last_opened_epoch, custom up_cmd)
+2. **DECLARED state** (lifecycle label, pinned, notes, last_opened_epoch, and —
+   ⚠ never built, ADR 0001 — a custom `up_cmd`)
    lives in ONE plain JSON file per repo: `$MAIN_ROOT/.worktrees.places.json`, sibling
    to `.worktrees/` (NOT inside the ephemeral tree). Rust is the SOLE writer; the CLI
    READS it (grep/sed extractor, like `cfg_get`) and folds it into `ls --json`.
@@ -72,6 +73,9 @@ spin-up. It is NOT a fork and NOT a rewrite.
 5. **Infra** is config-driven: the CLI reads `.worktrees.toml`, allocates a port slot,
    and delegates actual bring-up to the repo's declared command. Rust shells to
    `worktrees up/down`, never to docker directly.
+   ⚠ HALF REVERSED — ADR 0001. The port slot is real (`[ports]` → `.worktree.env`).
+   "the repo's declared command" is not: there is no bring-up verb, and the tool
+   assembles the docker argv itself rather than shelling to a repo-authored string.
 
 ### Conflict resolutions baked in
 - **Lifecycle transitions live in Rust editing the JSON store — the CLI is READ-ONLY
@@ -144,7 +148,7 @@ Dispatch additions (append to the `case` ~line 670): `status|st`, `paths`, `up`,
                { "name": "pg", "port": 5732, "listening": true } ]
   },
   "declared": { "lifecycle_label": "saved", "pinned": true, "notes": "auth refactor place",
-                "last_opened_epoch": 1752700000, "up_cmd": null },
+                "last_opened_epoch": 1752700000, "up_cmd": null },   // up_cmd NOT SHIPPED — ADR 0001
   "lifecycle_effective": "saved"
 }
 ```
@@ -167,6 +171,10 @@ wrapper: `{schema_version, repo, prefix, places_file, places:[…]}`.
 5. **Stop-vs-down** is structured, not a flag on an opaque string: `.worktrees.toml`
    declares TWO commands, `infra.stop` (keep volumes) + `infra.down` (destroy). UI "Stop"
    = `--keep-volumes`; volume destruction only on place removal.
+   ⚠ NOT SHIPPED — ADR 0001. "Structured, not an opaque string" was the right
+   instinct taken one step too few: two command strings are still two strings the
+   repo writes. Teardown is `[compose]`-driven, argv assembled here, and it runs
+   on `rm` — there is no stop/down pair.
 6. `up`/`down`/`status` inherit stdout/stderr so Rust can tail progress; exit code is the contract.
 
 ## Declared-state store + lifecycle
@@ -201,6 +209,10 @@ Unknown keys PRESERVED on rewrite (forward-compat). Absent/unrecognized `lifecyc
 | Saved | declared sticky | explicit keep; `rm` refused without `--force` | keep everything |
 | Archived | declared sticky | done for now; infra stopped, **volumes kept**, dir/branch/node_modules kept | `down --keep-volumes` + `tmux kill-session` |
 | Abandoned | declared sticky | dead; infra + volumes destroyed, tombstone kept | `down` (destroys volumes) + `tmux kill-session` |
+
+⚠ The resource actions in the last column name `down`/`down --keep-volumes`, which
+were never built — ADR 0001. The lifecycle labels themselves shipped; only the
+infra half of each action did not.
 
 ### Reconciliation (pure function, ZERO writes) — computed once in the CLI
 ```

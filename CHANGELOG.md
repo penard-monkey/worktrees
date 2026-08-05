@@ -15,7 +15,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   finding asks the reverse question — what is gitignored, untracked, and named by
   no `[[file]]` entry. Warn for a credential, Info for `.env*`; repo-scoped, so
   it is said once and not once per worktree. It exits 0 by default (drift is the
-  steady state); `doctor --strict` promotes it, alongside `copy-stale`.
+  steady state); `doctor --strict` promotes the credential warning to a failure,
+  alongside `copy-stale`. An undeclared `.env*` stays Info and never fails a run
+  — the same asymmetry `--strict` already has with `copy-stale`.
 - **`worktrees init --diff`** prints just the `[[file]]` stanzas an existing
   config is missing, as an appendable fragment on stdout — the second look the
   flow never had. `init` refuses to run over an existing config and `--force`
