@@ -204,12 +204,18 @@ pub fn inspect(dir: &Path) -> Result<Inspection, String> {
 
     let mut capabilities = Vec::new();
     for (k, v) in &fm {
-        let lk = k.to_ascii_lowercase();
-        if lk == "allowed-tools" || lk == "allowed_tools" {
-            capabilities.push(format!("pre-authorises tools: {v}"));
-        }
-        if lk == "hooks" {
-            capabilities.push("declares hooks (can run commands on session events)".into());
+        match normalize_key(k).as_str() {
+            // The only two keys we understand well enough to call harmless.
+            "name" | "description" => {}
+            "allowed-tools" => capabilities.push(format!("pre-authorises tools: {v}")),
+            "hooks" => capabilities.push("declares hooks (can run commands on session events)".into()),
+            // ANYTHING ELSE is reported. This is the whole design: a deny-list of
+            // known-dangerous keys can always be spelled around — claude parses
+            // this block as real YAML, where `"allowed-tools":` is identical to
+            // the bare key, while a naive scanner sees a different string and
+            // reports nothing. An allow-list cannot hide a key; at worst it is
+            // noisy, and noise is the safe direction for a review gate.
+            other => capabilities.push(format!("declares frontmatter `{other}`: {v}")),
         }
     }
 
@@ -265,6 +271,12 @@ fn walk(
     for e in rd {
         let e = e.map_err(|e| e.to_string())?;
         let p = e.path();
+        // `.git` is skipped by the copy, so counting it here would reject a
+        // perfectly good skill directory that happens to be a repo (and the git
+        // install path inspects the clone root, which always has one).
+        if e.file_name() == ".git" {
+            continue;
+        }
         let meta = fs::symlink_metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         if meta.file_type().is_symlink() {
             return Err(format!(
@@ -279,6 +291,21 @@ fn walk(
         }
     }
     Ok(())
+}
+
+/// Normalize a frontmatter key the way a YAML reader would see it: unwrap
+/// surrounding quotes, fold case, and treat `_` and `-` as the same word break.
+///
+/// Without this, `"allowed-tools"` and `allowed_tools` and `Allowed-Tools` are
+/// three different strings to us and one key to claude.
+fn normalize_key(k: &str) -> String {
+    let t = k.trim();
+    let t = t
+        .strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .or_else(|| t.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+        .unwrap_or(t);
+    t.trim().to_ascii_lowercase().replace('_', "-")
 }
 
 /// `key: value` pairs from a leading `---` fenced block. Deliberately a tiny
@@ -467,7 +494,7 @@ fn stage_and_swap(src: &Path, dst: &Path) -> Result<(), String> {
 /// Split from the install so a caller can show the user what a URL actually
 /// contains, and the SKILL.md text they are about to hand the model, before
 /// anything lands in the store.
-pub fn fetch_git(url: &str, rev: &str, tmp: &Path) -> Result<(String, Vec<PathBuf>), String> {
+pub fn fetch_git(url: &str, rev: &str, tmp: &Path) -> Result<(String, PathBuf, Vec<PathBuf>), String> {
     if !crate::git::have_git() {
         return Err("git not found".into());
     }
@@ -476,8 +503,47 @@ pub fn fetch_git(url: &str, rev: &str, tmp: &Path) -> Result<(String, Vec<PathBu
     if url.starts_with('-') {
         return Err(format!("refusing a repository URL that looks like a flag: {url}"));
     }
-    fs::create_dir_all(tmp).map_err(|e| e.to_string())?;
-    let mut args: Vec<&str> = vec!["clone", "--depth", "1", "--no-tags", "--recurse-submodules=no"];
+    // `ext::<command>` is a git TRANSPORT HELPER: cloning it RUNS that command,
+    // before anything here inspects a single file. Whether it is permitted is
+    // decided by the user's own git config, which this module does not own — so
+    // screen the form as well as pinning the protocol allow-list below.
+    // Anchored to the transport-helper shape (`scheme::`) so a legitimate IPv6
+    // URL like `https://[::1]/r.git` is unaffected.
+    if let Some((scheme, _)) = url.split_once("::") {
+        if !scheme.is_empty()
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-')
+            && !scheme.contains('/')
+        {
+            return Err(format!(
+                "refusing {scheme}:: — git transport helpers execute a command as part of the clone"
+            ));
+        }
+    }
+    // Clone into a subdirectory of the caller's scratch dir. `create_dir` (not
+    // create_dir_all) so this fails rather than following a symlink someone
+    // planted; the parent is created permissively because the caller owns it —
+    // `cmd_add` makes it with `unique_temp_dir`, which is itself fail-if-exists.
+    fs::create_dir_all(tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let tmp = &tmp.join("clone");
+    fs::create_dir(tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let mut args: Vec<&str> = vec![
+        // Pin the protocols HERE rather than trusting the host's git config:
+        // `protocol.ext.allow = always` in a user's ~/.gitconfig would otherwise
+        // turn a clone into arbitrary command execution.
+        "-c", "protocol.ext.allow=never",
+        "-c", "protocol.allow=never",
+        "-c", "protocol.https.allow=always",
+        "-c", "protocol.ssh.allow=always",
+        "-c", "protocol.git.allow=always",
+        "-c", "protocol.file.allow=always",
+        "clone",
+        "--depth", "1",
+        "--no-tags",
+        // The correct spelling of the negation. `--recurse-submodules=no` is read
+        // as a PATHSPEC, so it never disabled anything — harmless only because a
+        // plain --depth 1 clone does not init submodules on its own.
+        "--no-recurse-submodules",
+    ];
     if !rev.trim().is_empty() {
         args.push("--branch");
         args.push(rev);
@@ -520,7 +586,28 @@ pub fn fetch_git(url: &str, rev: &str, tmp: &Path) -> Result<(String, Vec<PathBu
     if found.is_empty() {
         return Err("no SKILL.md found in that repository".into());
     }
-    Ok((sha, found))
+    Ok((sha, tmp.to_path_buf(), found))
+}
+
+/// A fresh directory under the system temp dir that did not exist a moment ago.
+///
+/// `create_dir` (not `create_dir_all`) so an attacker who pre-creates the path —
+/// as a symlink, say — loses the race instead of redirecting the clone.
+pub fn unique_temp_dir(tag: &str) -> Result<PathBuf, String> {
+    let base = std::env::temp_dir();
+    for attempt in 0..64u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let cand = base.join(format!("{tag}-{}-{nanos}-{attempt}", std::process::id()));
+        match fs::create_dir(&cand) {
+            Ok(()) => return Ok(cand),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", cand.display())),
+        }
+    }
+    Err("could not create a temporary directory".into())
 }
 
 /// `git clone` with the terminal prompt disabled, so a private URL fails fast
@@ -737,9 +824,15 @@ fn cmd_add(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
     };
 
     if let Some(url) = git {
-        let tmp = std::env::temp_dir().join(format!("wt-skill-{}-{}", std::process::id(), now_epoch()));
+        let tmp = match unique_temp_dir("wt-skill") {
+            Ok(d) => d,
+            Err(e) => {
+                ui.error(&e);
+                return 1;
+            }
+        };
         let out = (|| -> Result<i32, String> {
-            let (sha, found) = fetch_git(&url, &rev, &tmp)?;
+            let (sha, clone_root, found) = fetch_git(&url, &rev, &tmp)?;
             let chosen = match (&pick, found.len()) {
                 (Some(p), _) => found
                     .iter()
@@ -766,7 +859,7 @@ fn cmd_add(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
                 ui.info("Review it, then re-run with --yes to install.");
                 return Ok(2);
             }
-            let e = install_from_clone(&url, &rev, &sha, &tmp, &chosen)?;
+            let e = install_from_clone(&url, &rev, &sha, &clone_root, &chosen)?;
             report(ui, &e);
             ui.info(&format!("Pinned to {}", &sha[..sha.len().min(12)]));
             Ok(0)
@@ -781,7 +874,24 @@ fn cmd_add(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
         };
     }
 
-    let Some(dir) = args.iter().find(|a| !a.starts_with('-')) else {
+    // Skip flags AND the values they consume, so `add --rev main /path` does not
+    // resolve `dir` to "main".
+    let mut positional: Option<&String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--git" || a == "--rev" || a == "--pick" {
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        positional = Some(a);
+        break;
+    }
+    let Some(dir) = positional else {
         ui.error("usage: worktrees skills add <dir>   |   worktrees skills add --git <url>");
         return 2;
     };
@@ -852,6 +962,83 @@ mod tests {
             "{:?}",
             i.capabilities
         );
+    }
+
+    #[test]
+    fn a_capability_cannot_hide_behind_yaml_spelling() {
+        // THE finding this design exists to prevent. claude parses this block as
+        // real YAML, where `"allowed-tools":` is the same key as the bare form —
+        // a scanner that string-matches the bare form reports nothing, the --yes
+        // review gate never trips, and the skill pre-authorises tools silently.
+        let t = tmp("hide");
+        for (tag, front) in [
+            ("q1", "\"allowed-tools\": Bash(rm:*)\n"),
+            ("q2", "'allowed-tools': Bash(rm:*)\n"),
+            ("up", "Allowed-Tools: Bash(rm:*)\n"),
+            ("us", "allowed_tools: Bash(rm:*)\n"),
+        ] {
+            let d = skill(&t.0, tag, front);
+            let i = inspect(&d).unwrap();
+            assert!(
+                !i.capabilities.is_empty(),
+                "{tag}: a capability spelled {front:?} slipped past the gate"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_frontmatter_key_is_reported_rather_than_ignored() {
+        // Allow-list, not deny-list: we cannot enumerate every dangerous key a
+        // future claude will honour, so anything we do not positively recognise
+        // is surfaced for review.
+        let t = tmp("unknown");
+        let d = skill(&t.0, "odd", "some-future-capability: do-something\n");
+        let i = inspect(&d).unwrap();
+        assert!(
+            i.capabilities.iter().any(|c| c.contains("some-future-capability")),
+            "{:?}",
+            i.capabilities
+        );
+    }
+
+    #[test]
+    fn a_plain_skill_reports_no_capabilities() {
+        // The allow-list must not cry wolf on the ordinary case, or the gate
+        // becomes noise the user clicks through.
+        let t = tmp("plain");
+        let d = skill(&t.0, "plain", "");
+        assert!(inspect(&d).unwrap().capabilities.is_empty());
+    }
+
+    #[test]
+    fn git_transport_helper_urls_are_refused() {
+        // `ext::<cmd>` RUNS that command as part of the clone, before anything
+        // here inspects a file.
+        let t = tmp("ext");
+        for url in ["ext::touch /tmp/pwned", "ext::sh -c 'id'"] {
+            let d = t.0.join(format!("c{}", url.len()));
+            let e = fetch_git(url, "", &d).unwrap_err();
+            assert!(e.contains("transport helpers"), "{url} → {e}");
+        }
+        // …but a legitimate IPv6 URL is not collateral damage
+        let d = t.0.join("ipv6");
+        let e = fetch_git("https://[::1]/r.git", "", &d).unwrap_err();
+        assert!(!e.contains("transport helpers"), "{e}");
+    }
+
+    #[test]
+    fn inspect_ignores_dot_git_so_a_repo_shaped_skill_is_not_rejected() {
+        // copy_dir skips .git; if inspect counted it, a skill directory that is
+        // itself a repo (and every git-installed skill, whose clone root has one)
+        // could trip the file-count cap.
+        let t = tmp("dotgit");
+        let d = skill(&t.0, "repoish", "");
+        fs::create_dir_all(d.join(".git/objects")).unwrap();
+        for i in 0..50 {
+            fs::write(d.join(format!(".git/objects/o{i}")), "x").unwrap();
+        }
+        let i = inspect(&d).unwrap();
+        assert_eq!(i.files, 1, "only SKILL.md counts, not the repo plumbing");
     }
 
     #[test]
@@ -1048,16 +1235,23 @@ mod tests {
     }
 
     #[test]
-    fn staging_dirs_are_not_mistaken_for_skills() {
-        // The staging/backup dirs live inside the store root; list() reads the
-        // MANIFEST, so they can never show up as installed skills.
+    fn install_leaves_no_staging_or_backup_dirs_behind() {
+        // The previous version of this test asserted that staging dirs do not
+        // appear in `list`, which reads the MANIFEST and so could not have failed
+        // whatever the store contained. What actually matters is that a
+        // successful install cleans up after itself.
         let t = tmp("staging");
         let paths = store_in(&t.0);
         let src = skill(&t.0, "alpha", "");
         install_local_at(&paths, &src).unwrap();
-        fs::create_dir_all(paths.root.join(".staging-999-1")).unwrap();
-        let names: Vec<String> = list_at(&paths).into_iter().map(|e| e.name).collect();
-        assert_eq!(names, vec!["alpha".to_string()]);
+        install_local_at(&paths, &src).unwrap(); // replace → exercises the backup path
+        let leftovers: Vec<String> = fs::read_dir(&paths.root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".staging-") || n.starts_with(".old-"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
     }
 
     #[test]
