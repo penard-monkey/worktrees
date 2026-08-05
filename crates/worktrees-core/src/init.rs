@@ -596,8 +596,96 @@ pub fn probe(main_root: &Path, wt_root: &Path) -> Facts {
 /// The file half of `probe`, on its own — what the passive nudge on `new` runs.
 /// One bounded walk plus two `git` calls, and no file is opened.
 pub fn probe_files(main_root: &Path) -> Vec<Candidate> {
-    let (candidates, _, _) = walk(main_root);
-    keep_gitignored_untracked(main_root, candidates)
+    probe_files_bounded(main_root).0
+}
+
+/// [`probe_files`], keeping the walk's truncation flag. `doctor` needs it: this
+/// module's whole discipline is that a bound which was HIT is reported rather
+/// than silently returning half a repo, and "no undeclared files" printed after
+/// a truncated walk is precisely the false all-clear §1.2 is about.
+pub fn probe_files_bounded(main_root: &Path) -> (Vec<Candidate>, bool) {
+    let (candidates, _, truncated) = walk(main_root);
+    (keep_gitignored_untracked(main_root, candidates), truncated)
+}
+
+// ── undeclared drift ─────────────────────────────────────────────────────────
+//
+// The config is authored once and then never re-examined: `hint_init` lives on
+// `cmd_new`'s NO-CONFIG branch, `cmd_init` refuses to re-run over an existing
+// file, and every `materialize` check iterates CONFIG entries — so nothing in
+// the tool could see a credential that appeared after the config was written.
+// `doctor` asks the reverse question here: what is on disk that the config does
+// not name?
+//
+// Same probe/pure split as the rest of the module: `undeclared_in` is a pure set
+// difference a unit test builds from literals, `undeclared` is the one impure
+// wrapper.
+
+/// Candidates the config does not declare. PURE.
+///
+/// Folded through `RelPath::fold_key` on BOTH sides — `Foo/.env` declared and
+/// `foo/.env` on disk are one file on macOS, and reporting the second as
+/// undeclared would be a finding nobody can act on (adding it makes the config a
+/// case-only duplicate, which `check_file_list` then refuses).
+pub fn undeclared_in(candidates: Vec<Candidate>, cfg: &projcfg::ProjectConfig) -> Vec<Candidate> {
+    let declared: std::collections::BTreeSet<String> =
+        cfg.files.iter().map(|f| f.path.fold_key()).collect();
+    // `to_lowercase` is `fold_key`'s body; a `Candidate` is a raw walk string and
+    // has no `RelPath` to call it on. If that fold ever changes, this changes
+    // with it — see `RelPath::fold_key`'s note on why it is not real case folding.
+    candidates.into_iter().filter(|c| !declared.contains(&c.rel.to_lowercase())).collect()
+}
+
+/// [`undeclared_in`] over a live checkout. Returns the walk's truncation flag
+/// alongside, because an empty result from a truncated walk means "I did not
+/// look everywhere", not "there is nothing".
+pub fn undeclared(main_root: &Path, cfg: &projcfg::ProjectConfig) -> (Vec<Candidate>, bool) {
+    let (candidates, truncated) = probe_files_bounded(main_root);
+    (undeclared_in(candidates, cfg), truncated)
+}
+
+/// The `[[file]]` stanzas for a set of undeclared candidates, as a paste-ready
+/// TOML fragment — `worktrees init --diff`.
+///
+/// Not `render` with the sections stripped: this is an APPENDABLE fragment, so
+/// it carries no file header and no `[ports]`/`[compose]`/`[project]`, any of
+/// which would be a duplicate key in the config it is pasted into.
+///
+/// Rejected paths are emitted commented out with the parser's reason, exactly as
+/// `render` does — a credential nobody knows about is the bug this whole flow
+/// fixes, and dropping it here would re-create it in the one command whose job
+/// is to surface it.
+pub fn render_undeclared(files: &[Candidate], rejected: &[Rejected]) -> String {
+    let mut o = String::new();
+    o.push_str(
+        "# Undeclared — gitignored, untracked, and named by no [[file]] entry, so\n\
+         # every worktree is missing them. Append to .worktrees.toml.\n\
+         #\n\
+         # ⚠ Emitted as LINKS. Anything a script REWRITES at runtime needs\n\
+         # mode = \"copy\", or the worktree writes through its link into the main\n\
+         # checkout and through that into every other worktree.\n",
+    );
+    for c in files {
+        if c.kind == Kind::Credential {
+            o.push_str("\n# ⚠ Credential — when this is missing nothing fails, it is just dead.\n");
+        } else {
+            o.push('\n');
+        }
+        o.push_str("[[file]]\n");
+        o.push_str(&format!("path = {}\n", toml_string(&c.rel)));
+    }
+    for r in rejected {
+        o.push_str(&format!("#\n# {}\n", comment_line(&r.why)));
+        o.push_str("# [[file]]\n");
+        o.push_str(&format!("# path = {}\n", toml_string(&r.rel)));
+    }
+    o
+}
+
+/// `split_declarable` for callers outside this module (`cmd_init --diff`): the
+/// paths the parser accepts, and the ones it refuses with the reason.
+pub fn declarable(candidates: Vec<Candidate>) -> (Vec<Candidate>, Vec<Rejected>) {
+    split_declarable(candidates)
 }
 
 fn probe_places(wt_root: &Path, files: &[Candidate]) -> Vec<PlaceFacts> {
@@ -1563,5 +1651,85 @@ services:
         assert!(!hint_seen_in(&state, &repo_b, &d1), "keyed by repo, not global");
         record_hint_in(&state, &repo_a, &d2);
         assert!(hint_seen_in(&state, &repo_a, &d2));
+    }
+
+    // ── undeclared drift ─────────────────────────────────────────────────────
+
+    fn cfg_declaring(paths: &[&str]) -> projcfg::ProjectConfig {
+        let toml: String =
+            paths.iter().map(|p| format!("[[file]]\npath = \"{p}\"\n")).collect::<Vec<_>>().join("");
+        let (cfg, findings) = projcfg::parse(&toml).expect("test config parses");
+        assert!(findings.is_empty(), "test config is clean");
+        cfg
+    }
+
+    #[test]
+    fn undeclared_is_what_the_config_does_not_name() {
+        let cfg = cfg_declaring(&[".env", "apps/api/.env"]);
+        let found = undeclared_in(
+            vec![
+                env(".env"),
+                env("apps/api/.env"),
+                env("apps/web/.env.local"),
+                cred("apps/mobile/google-services.json"),
+            ],
+            &cfg,
+        );
+        let rels: Vec<&str> = found.iter().map(|c| c.rel.as_str()).collect();
+        assert_eq!(rels, ["apps/web/.env.local", "apps/mobile/google-services.json"]);
+        // The kind survives the filter — `doctor` splits severity on it.
+        assert_eq!(found[1].kind, Kind::Credential);
+    }
+
+    #[test]
+    fn a_config_declaring_everything_yields_nothing() {
+        let cfg = cfg_declaring(&[".env", "apps/mobile/google-services.json"]);
+        assert!(undeclared_in(vec![env(".env"), cred("apps/mobile/google-services.json")], &cfg)
+            .is_empty());
+    }
+
+    #[test]
+    fn an_empty_config_leaves_every_candidate_undeclared() {
+        let (cfg, _) = projcfg::parse("").expect("empty config parses");
+        assert_eq!(undeclared_in(vec![env(".env")], &cfg).len(), 1);
+    }
+
+    #[test]
+    fn the_declared_comparison_folds_case_the_way_the_parser_does() {
+        // `Apps/.env` declared and `apps/.env` on disk are ONE file on macOS.
+        // Reporting the second as undeclared would push the user into adding a
+        // case-only duplicate, which `check_file_list` then refuses — a finding
+        // whose only remedy is a config error.
+        let cfg = cfg_declaring(&["Apps/API/.env"]);
+        assert!(undeclared_in(vec![env("apps/api/.env")], &cfg).is_empty());
+    }
+
+    #[test]
+    fn the_rendered_fragment_is_appendable_and_parses_on_its_own() {
+        let files = vec![env(".env"), cred("apps/mobile/google-services.json")];
+        let text = render_undeclared(&files, &[]);
+        // No file header, no [ports]/[compose]/[project]: pasting any of those
+        // into an existing config is a duplicate key, not a diff.
+        assert!(!text.contains("[ports]"));
+        assert!(!text.contains("[compose]"));
+        assert!(!text.contains("[project]"));
+        assert!(text.contains("path = \".env\""));
+        assert!(text.contains("path = \"apps/mobile/google-services.json\""));
+        let (cfg, findings) = projcfg::parse(&text).expect("fragment parses standalone");
+        assert!(findings.is_empty(), "fragment is clean: {findings:?}");
+        assert_eq!(cfg.files.len(), 2);
+    }
+
+    #[test]
+    fn an_undeclarable_path_is_commented_out_with_its_reason_not_dropped() {
+        // Same rule `render` follows: a credential nobody knows about is the bug
+        // this flow fixes, so a path the parser refuses is still SAID.
+        let (files, rejected) = declarable(vec![env("../outside/.env"), env(".env")]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(rejected.len(), 1);
+        let text = render_undeclared(&files, &rejected);
+        assert!(text.contains("# path = \"../outside/.env\""));
+        let (cfg, _) = projcfg::parse(&text).expect("the live half still parses");
+        assert_eq!(cfg.files.len(), 1);
     }
 }

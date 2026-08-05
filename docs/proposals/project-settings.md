@@ -745,6 +745,17 @@ not orphan them (§5's ⚠). That also closed two pre-existing gaps: `rm` had no
 adoption at all and would have left a session in a deleted directory, and `close`
 excluded `(main)` while `launch` and `ls` did not.
 
+**v4 — undeclared drift.** ✅ BUILT. The gap v1–v3 all shared: every check is
+judged BY the config, so a config that stopped being true was invisible to all of
+them. Detection ran once, at `init` — the passive nudge is on `cmd_new`'s
+no-config branch and `init` refuses to re-run over an existing file, so a
+credential added the day after the config was written could not be seen by
+anything. `doctor` now asks the reverse question (`Code::Undeclared`, repo-scoped,
+Warn for a credential / Info for `.env*`, promoted by `--strict`), and
+`init --diff` emits the missing `[[file]]` stanzas as an appendable fragment.
+This is §1.2 again, displaced from "no config" to "stale config" — which is the
+steady state of any repo older than a month.
+
 ### Decisions taken during the build, not in the original design
 
 - **`init` emits anything it cannot confidently declare COMMENTED OUT with the
@@ -774,8 +785,10 @@ excluded `(main)` while `launch` and `ls` did not.
   failed `open(2)`, and a broken one resolves to `None` rather than failing
   discovery, because `ls` must stay usable.
 
-**Never — `[hooks]`, `[infra] up/stop/down`.** §5. Record as an ADR so this does
-not get quietly re-added in six months.
+**Never — `[hooks]`, `[infra] up/stop/down`.** §5. Recorded as an ADR so this does
+not get quietly re-added in six months: `docs/adr/0001-no-repo-supplied-argv.md`.
+That ADR also carries the superseded markers into `DESIGN.md`, which still
+described `[infra]`, `up_cmd`, the `up`/`down` verbs and the trust prompt as live.
 
 ### Migration for cdv
 
