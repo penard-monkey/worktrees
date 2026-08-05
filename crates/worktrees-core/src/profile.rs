@@ -86,6 +86,12 @@ fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
 
+/// The shared config root, for the skill store's manifest — it belongs beside
+/// `profiles.json` for the same reason (declarations are config, content is data).
+pub fn config_root_pub() -> PathBuf {
+    config_root()
+}
+
 /// `~/.config/worktrees/profiles.json`.
 pub fn profiles_path() -> PathBuf {
     config_root().join(PROFILES_FILE)

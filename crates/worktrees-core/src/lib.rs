@@ -18,6 +18,7 @@ pub mod projcfg;
 pub mod project;
 pub mod provision;
 pub mod render;
+pub mod skillstore;
 pub mod store;
 pub mod sysclock;
 pub mod tmux;

@@ -23,6 +23,7 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
   worktrees doctor [<name>]             report declared-file drift (--json --strict --config-only)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
+  worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";
 
@@ -42,6 +43,12 @@ fn run() -> i32 {
         Some("-V") | Some("--version") => {
             println!("worktrees {}", env!("CARGO_PKG_VERSION"));
             return 0;
+        }
+        // The skill store is USER-GLOBAL, so managing it must not require
+        // standing in a git repo — handled here, ahead of the guards below.
+        Some("skills") => {
+            let mut ui = CliUi;
+            return worktrees_core::skillstore::cmd_skills(&mut ui, args.get(1..).unwrap_or(&[]));
         }
         _ => {}
     }
