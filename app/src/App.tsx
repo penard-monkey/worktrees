@@ -36,6 +36,11 @@ type Place = {
   tmux_session: { name: string; up: boolean };
   last_commit_epoch?: number | null;
   claude_session_present: boolean;
+  /// The AI profile the LIVE session was started with, and whether that profile
+  /// has been edited since. Both come from the launch stamp, so a place with no
+  /// stamp simply has no badge.
+  profile_name?: string | null;
+  profile_stale?: boolean;
   declared: Declared;
   lifecycle_effective: string;
 };
@@ -2164,6 +2169,24 @@ function App() {
                 {selected.tmux_session.up ? (
                   <>
                     <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
+                    {/* Which profile this LIVE session is actually running, and
+                        whether it has drifted from the profile as edited since.
+                        Deliberately says "rules/model/MCP": skills are symlinked
+                        and reach a running session already, so claiming the badge
+                        covers them would be a lie. */}
+                    {selected.profile_name ? (
+                      <span
+                        className={"live-badge profile-badge" + (selected.profile_stale ? " stale" : "")}
+                        title={
+                          selected.profile_stale
+                            ? `This session started with an older version of “${selected.profile_name}”. Restart it to apply your rules/model/MCP edits (skill edits already apply).`
+                            : `AI profile: ${selected.profile_name}`
+                        }
+                      >
+                        {selected.profile_name}
+                        {selected.profile_stale ? " · restart to apply" : ""}
+                      </span>
+                    ) : null}
                     {confirmRm === closeKey(sel.repo, sel.slug) ? (
                       <button className="ctrl danger armed"
                         title={`${closeSess} was adopted, not opened under this repo's name — killing it takes the WHOLE session, every window and pane in it`}
@@ -2359,7 +2382,8 @@ function App() {
 
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
-        onShowNotes={showReleaseNotes} onReset={onReset} />
+        onShowNotes={showReleaseNotes} onReset={onReset}
+        repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)} />
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query

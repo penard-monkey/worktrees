@@ -433,6 +433,10 @@ fn claude_config_dirs_from(ps: &Profiles) -> Vec<PathBuf> {
 /// everything that needs to recognise the process reads `match_word`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AiLaunch {
+    /// The profile this launch applies, and its `updated_epoch` — stamped onto
+    /// the place's declared state when a session is actually created, so the UI
+    /// can tell a live session apart from the profile as edited since.
+    pub profile: Option<(String, i64)>,
     /// `KEY=VALUE` pairs, composed INSIDE the `sh -ic` string at launch. Not
     /// `tmux new-session -e`: env baked into the process survives detach,
     /// reattach and a tmux server restart by definition, and the bats fake-tmux
@@ -485,6 +489,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
     }
 
     AiLaunch {
+        profile: Some((p.id.clone(), p.updated_epoch)),
         env: vec![("CLAUDE_CONFIG_DIR".to_string(), m.dir.to_string_lossy().into_owned())],
         cmd,
         // Unchanged, and that is the whole point of the type: tmux adoption and
@@ -511,7 +516,12 @@ fn basename(p: &str) -> String {
 impl AiLaunch {
     /// An unprofiled launch — exactly today's behaviour.
     pub fn plain(ai_cmd: &str) -> Self {
-        AiLaunch { env: Vec::new(), cmd: ai_cmd.to_string(), match_word: ai_word_of(ai_cmd) }
+        AiLaunch {
+            profile: None,
+            env: Vec::new(),
+            cmd: ai_cmd.to_string(),
+            match_word: ai_word_of(ai_cmd),
+        }
     }
 
     /// The env assignments as a shell prefix: `K='V' `, one per pair, in order.
@@ -1030,6 +1040,110 @@ fn worktrees_bin() -> Option<PathBuf> {
     })
 }
 
+// ── what the UI needs to be honest ───────────────────────────────────────────
+//
+// Three questions the profile editor has to answer BEFORE the user commits to
+// something, because each has a consequence that is invisible afterwards.
+
+/// Has this profile ever actually run?
+///
+/// A profile's first launch shows `Not logged in · Run /login` in the pane,
+/// because claude's credential is keyed to the config-dir path and a fresh
+/// directory has none. That is by design, but it reads as broken — so the UI has
+/// to be able to say "this needs a one-time sign-in" in advance.
+///
+/// Detected by looking for state only claude writes. Materialization creates the
+/// directory plus `rules.md`, `settings.json`, `mcp.json`, `skills/` and
+/// `.claude.json`; anything else appearing means a session has been in there.
+pub fn ever_launched(id: &str) -> bool {
+    let Some(dir) = profile_dir(id) else { return false };
+    ["projects", "sessions", "history.jsonl", "statsig", "file-history"]
+        .iter()
+        .any(|m| dir.join(m).exists())
+}
+
+/// Would binding `repo_root` to a profile orphan an existing conversation?
+///
+/// Conversation history lives under the config dir, so the first profiled launch
+/// of a repo that already has unprofiled history starts COLD. The old
+/// conversation is not deleted — it stays under `~/.claude` and comes back if the
+/// profile is unbound — but "assign a profile" reading as "delete my
+/// conversation" is exactly the kind of surprise that has to be said out loud
+/// before the click, not explained afterwards.
+pub fn has_unprofiled_history(repo_root: &str) -> bool {
+    let projects = default_claude_dir().join("projects");
+    let Ok(rd) = fs::read_dir(&projects) else { return false };
+    // Claude mangles a project dir name by replacing every non-alphanumeric
+    // character; the same derivation `project::claude_dir_in` uses.
+    let mangled: String =
+        repo_root.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    rd.flatten().any(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        // Any place UNDER this repo counts, not just the main root.
+        name.starts_with(&mangled)
+            && fs::read_dir(e.path())
+                .map(|d| d.flatten().any(|f| f.file_name().to_string_lossy().ends_with(".jsonl")))
+                .unwrap_or(false)
+    })
+}
+
+/// A profile plus the facts the editor must show alongside it.
+#[derive(Serialize, Clone, Debug)]
+pub struct ProfileInfo {
+    #[serde(flatten)]
+    pub profile: Profile,
+    /// False → first launch will ask for a one-time `/login`.
+    pub ever_launched: bool,
+    /// Where its claude config dir is, for a reveal-in-Finder action.
+    pub dir: Option<String>,
+}
+
+/// Everything the profiles UI needs for one repo, in one call.
+#[derive(Serialize, Clone, Debug)]
+pub struct ProfilesInfo {
+    pub profiles: Vec<ProfileInfo>,
+    pub default_id: Option<String>,
+    /// The profile bound to this repo specifically, if any.
+    pub assigned_id: Option<String>,
+    /// What this repo's places will actually launch with, after the chain.
+    pub effective_id: Option<String>,
+    /// True when binding a profile here would start a cold conversation.
+    pub repo_has_unprofiled_history: bool,
+    /// Set when something outside the app is overriding the choice, so the UI
+    /// does not show a picker that has no effect.
+    pub env_override: Option<String>,
+}
+
+/// Gather it. `repo_root` may be empty for a global-only view.
+pub fn info_for(repo_root: &str) -> ProfilesInfo {
+    let ps = read_lenient();
+    let env = std::env::var("WORKTREES_PROFILE").ok().filter(|s| !s.is_empty());
+    let known: Vec<String> = ps.profiles.keys().cloned().collect();
+    let assigned = ps.assignments.get(repo_root).cloned();
+    let effective = resolve_profile_id_from(
+        env.as_deref(),
+        assigned.as_deref(),
+        ps.default_id.as_deref(),
+        &known,
+    );
+    ProfilesInfo {
+        profiles: ps
+            .profiles
+            .values()
+            .map(|p| ProfileInfo {
+                ever_launched: ever_launched(&p.id),
+                dir: profile_dir(&p.id).map(|d| d.to_string_lossy().into_owned()),
+                profile: p.clone(),
+            })
+            .collect(),
+        default_id: ps.default_id.clone(),
+        assigned_id: assigned,
+        effective_id: effective,
+        repo_has_unprofiled_history: !repo_root.is_empty() && has_unprofiled_history(repo_root),
+        env_override: env,
+    }
+}
+
 // ── storage ──────────────────────────────────────────────────────────────────
 
 /// For display and resolution: a missing or unparseable file is an EMPTY set of
@@ -1350,6 +1464,7 @@ mod tests {
         assert_eq!(ai_word_of(""), "claude");
 
         let l = AiLaunch {
+            profile: None,
             env: vec![("CLAUDE_CONFIG_DIR".into(), "/data/profiles/work".into())],
             cmd: "claude --append-system-prompt-file /data/profiles/work/rules.md".into(),
             match_word: ai_word_of("claude"),
@@ -1375,6 +1490,7 @@ mod tests {
         // `claude` and tmux adoption breaks. Reversing the order in ops.rs used
         // to pass all 150 unit + 238 bats tests, because bats runs with no env.
         let l = AiLaunch {
+            profile: None,
             env: vec![("CLAUDE_CONFIG_DIR".into(), "/d/p/work".into())],
             cmd: "claude -r".into(),
             match_word: "claude".into(),
@@ -1401,6 +1517,7 @@ mod tests {
     #[test]
     fn env_values_with_shell_metacharacters_are_quoted() {
         let l = AiLaunch {
+            profile: None,
             env: vec![("CLAUDE_CONFIG_DIR".into(), "/tmp/a dir/it's".into())],
             cmd: "claude".into(),
             match_word: "claude".into(),
@@ -1930,6 +2047,28 @@ mod tests {
         let l = claude_launch(&AiLaunch::plain("claude"), &p, &m);
         assert!(!l.cmd.contains("--append-system-prompt-file"), "{}", l.cmd);
         assert!(!l.cmd.contains("--settings"), "no settings declared: {}", l.cmd);
+    }
+
+    #[test]
+    fn info_reports_the_effective_choice_and_the_env_override() {
+        // The picker must not present a choice that has no effect: with
+        // WORKTREES_PROFILE set, the chain is already decided elsewhere.
+        let known = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            resolve_profile_id_from(Some("a"), Some("b"), None, &known).as_deref(),
+            Some("a"),
+            "env wins, so the UI must say so rather than showing b as effective"
+        );
+        assert_eq!(resolve_profile_id_from(None, Some("b"), Some("a"), &known).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn ever_launched_is_false_for_a_profile_that_only_exists_on_paper() {
+        // Drives the "needs a one-time sign-in" label. A never-launched profile
+        // shows `Not logged in` in the pane, which reads as broken unless the UI
+        // said so first.
+        assert!(!ever_launched("definitely-not-a-real-profile-id"));
+        assert!(!ever_launched("../escape"), "an invalid id is not 'launched'");
     }
 
     #[test]

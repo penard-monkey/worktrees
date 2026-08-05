@@ -56,6 +56,42 @@ type MockCfg = {
   error: string | null;
   warnings: string[];
 };
+
+// ── AI profiles + skill store ────────────────────────────────────────────────
+// Stateful, like mockConfigs: a write here is visible to the next read, so the
+// editor can be driven end-to-end headlessly (Playwright) without a backend.
+type MockProfile = {
+  id: string; name: string; rules?: string; skills?: string[];
+  inherit_global_skills?: boolean; inherit_global_mcp?: boolean; worktrees_mcp?: boolean;
+  model?: string | null; updated_epoch?: number;
+};
+const mockProfiles: Record<string, MockProfile> = {
+  work: { id: "work", name: "Work", rules: "Be succinct.", skills: ["demo-skill"], updated_epoch: 1000 },
+};
+let mockDefaultProfile: string | null = "work";
+const mockAssignments: Record<string, string> = {};
+// Which profiles have ever run — drives the "needs sign-in" tag. `work` has,
+// so the tag is only visible on a profile you create in the harness.
+const mockLaunched = new Set<string>(["work"]);
+type MockSkill = {
+  name: string; description: string; capabilities: string[];
+  source?: { kind: "local"; path: string } | { kind: "git"; url: string; rev: string; sha: string };
+};
+const mockSkills: Record<string, MockSkill> = {
+  "demo-skill": {
+    name: "demo-skill",
+    description: "A demo skill, installed from a folder.",
+    capabilities: [],
+    source: { kind: "local", path: "/tmp/demo-skill" },
+  },
+  "risky-skill": {
+    name: "risky-skill",
+    description: "Pre-authorises tools — the review case.",
+    capabilities: ["pre-authorises tools: Bash(rm:*)"],
+    source: { kind: "git", url: "https://example.com/skills.git", rev: "", sha: "abc123def456" },
+  },
+};
+
 const mockConfigs: Record<string, MockCfg> = {
   [CDV_ROOT]: {
     path: `${CDV_ROOT}/.worktrees.toml`,
@@ -628,6 +664,95 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "plugin:event|unlisten": {
       for (const s of Object.values(eventListeners)) s.delete(args.eventId);
       return null;
+    }
+
+    case "profiles_info": {
+      const repo = String(args?.repo ?? "");
+      const assigned = mockAssignments[repo] ?? null;
+      const effective = assigned ?? mockDefaultProfile;
+      return {
+        profiles: Object.values(mockProfiles).map((p) => ({
+          ...p,
+          ever_launched: mockLaunched.has(p.id),
+          dir: `/mock/data/worktrees/profiles/${p.id}`,
+        })),
+        default_id: mockDefaultProfile,
+        assigned_id: assigned,
+        effective_id: effective,
+        // Flips the cold-conversation warning on for one fixture repo, so the
+        // copy is reachable by clicking rather than only in theory.
+        repo_has_unprofiled_history: repo === CDV_ROOT,
+        env_override: null,
+      };
+    }
+    case "new_profile_id": {
+      const base = String(args?.name ?? "profile").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+/, "") || "profile";
+      let id = base;
+      for (let n = 2; mockProfiles[id] || id === "none"; n++) id = `${base}-${n}`;
+      return id;
+    }
+    case "save_profile": {
+      const p = args?.profile as MockProfile;
+      // Bump like the backend does — this is what the stale badge compares.
+      mockProfiles[p.id] = { ...p, updated_epoch: (mockProfiles[p.id]?.updated_epoch ?? 0) + 1 };
+      return p.id;
+    }
+    case "delete_profile": {
+      const id = String(args?.id ?? "");
+      const launched = mockLaunched.has(id);
+      delete mockProfiles[id];
+      if (mockDefaultProfile === id) mockDefaultProfile = null;
+      for (const k of Object.keys(mockAssignments)) if (mockAssignments[k] === id) delete mockAssignments[k];
+      return { dir: `/mock/data/worktrees/profiles/${id}`, keychain_hint: launched };
+    }
+    case "set_project_profile": {
+      const repo = String(args?.repo ?? "");
+      const id = args?.id as string | null;
+      if (id) mockAssignments[repo] = id;
+      else delete mockAssignments[repo];
+      return null;
+    }
+    case "set_default_profile":
+      mockDefaultProfile = (args?.id as string | null) ?? null;
+      return null;
+    case "skills_list":
+      return Object.values(mockSkills);
+    case "skill_inspect":
+      return { name: "demo-skill", description: "A demo skill.", capabilities: [], files: 1, bytes: 200, skill_md: "---\nname: demo-skill\n---\nbody\n" };
+    case "skill_install_local": {
+      const path = String(args?.path ?? "/tmp/added-skill");
+      const name = path.split("/").filter(Boolean).pop() || "added-skill";
+      mockSkills[name] = { name, description: "Installed from a folder.", capabilities: [], source: { kind: "local", path } };
+      return mockSkills[name];
+    }
+    case "skill_preview_git": {
+      // The review step: capabilities are shown BEFORE anything installs.
+      return {
+        url: String(args?.url ?? ""),
+        rev: "",
+        sha: "deadbeefcafe1234",
+        skills: [{
+          name: "fetched-skill",
+          description: "Fetched from a repository.",
+          capabilities: ["pre-authorises tools: Bash(rm:*)"],
+          skill_md: "---\nname: fetched-skill\ndescription: Fetched from a repository.\nallowed-tools: Bash(rm:*)\n---\nbody\n",
+        }],
+      };
+    }
+    case "skill_install_git": {
+      const name = String(args?.name ?? "fetched-skill");
+      mockSkills[name] = {
+        name, description: "Fetched from a repository.",
+        capabilities: ["pre-authorises tools: Bash(rm:*)"],
+        source: { kind: "git", url: String(args?.url ?? ""), rev: "", sha: String(args?.sha ?? "") },
+      };
+      return mockSkills[name];
+    }
+    case "skill_remove": {
+      const name = String(args?.name ?? "");
+      delete mockSkills[name];
+      // Same contract as core: report the profiles that still list it.
+      return Object.values(mockProfiles).filter((p) => (p.skills ?? []).includes(name)).map((p) => p.name);
     }
 
     default:

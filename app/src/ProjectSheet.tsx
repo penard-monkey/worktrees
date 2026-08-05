@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
+import type { ProfilesInfo } from "./ProfilesPanel";
 
 // Right-side slide-over for ONE project — SettingsSheet's twin (proposal §10).
 //
@@ -121,6 +122,7 @@ export function ProjectSheet({
   const [running, setRunning] = useState<"" | "relink" | "force" | "provision" | "init">("");
   const [log, setLog] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [pinfo, setPinfo] = useState<ProfilesInfo | null>(null);
   const [showToml, setShowToml] = useState(false);
   // Arm-then-confirm for the one destructive control in this sheet (`--force`),
   // same two-click shape as .pop-item.danger / .ctrl.sm.danger elsewhere. It is
@@ -167,7 +169,12 @@ export function ProjectSheet({
     setShowToml(false);
     setArmed(false);
     refresh();
-  }, [open, refresh]);
+    // On sheet-open only: profiles_info does a filesystem probe per profile, so
+    // it must never ride the 3s poll.
+    invoke<ProfilesInfo | null>("profiles_info", { repo: root })
+      .then((i) => setPinfo(i))
+      .catch(() => {});
+  }, [open, refresh, root]);
 
   useEffect(() => {
     if (!open) return;
@@ -281,6 +288,44 @@ export function ProjectSheet({
             </div>
             {cfg?.error && <pre className="update-log">{cfg.error}</pre>}
             {cfg?.warnings.map((w, i) => <div className="hint" key={i}>! {w}</div>)}
+          </section>
+
+          <section className="setting">
+            <label>AI profile</label>
+            <div className="row2">
+              <select
+                value={pinfo?.assigned_id ?? ""}
+                disabled={!!pinfo?.env_override}
+                onChange={async (e) => {
+                  const id = e.target.value || null;
+                  try {
+                    await invoke("set_project_profile", { repo: root, id });
+                    setPinfo(await invoke<ProfilesInfo | null>("profiles_info", { repo: root }));
+                  } catch (err) { note(String(err)); }
+                }}
+              >
+                <option value="">(use the default)</option>
+                {(pinfo?.profiles ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="hint">
+              A project profile REPLACES the global default for this repo — the two do not merge.
+              {pinfo?.effective_id
+                ? ` Sessions here launch with \u201c${(pinfo.profiles ?? []).find((p) => p.id === pinfo.effective_id)?.name ?? pinfo.effective_id}\u201d.`
+                : " Sessions here launch unprofiled."}
+            </div>
+            {pinfo?.env_override ? (
+              <div className="hint"><code>WORKTREES_PROFILE={pinfo.env_override}</code> overrides this choice.</div>
+            ) : null}
+            {pinfo?.repo_has_unprofiled_history && !pinfo?.effective_id ? (
+              <div className="hint">
+                Heads up: this repo already has Claude conversations under <code>~/.claude</code>. Binding a
+                profile starts a FRESH conversation, because history lives with the profile. Nothing is
+                deleted \u2014 unbind and the old one comes back.
+              </div>
+            ) : null}
           </section>
 
           <section className="setting">

@@ -124,6 +124,118 @@ async fn log_tail(lines: Option<usize>) -> Result<String, String> {
     Ok(all[start..].join("\n"))
 }
 
+// ── AI profiles + the skill store ────────────────────────────────────────────
+//
+// Thin wrappers: core owns profiles.json and the skill store (the CLI reads the
+// same files), so these must never keep their own copy of that state.
+
+#[tauri::command]
+async fn profiles_info(repo: String) -> Result<serde_json::Value, String> {
+    // Filesystem probes per profile (`ever_launched`) live here rather than in
+    // `snapshot`, because this is called on sheet-open and that is on the 3s poll.
+    serde_json::to_value(worktrees_core::profile::info_for(&repo)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_profile(profile: serde_json::Value) -> Result<String, String> {
+    let p: worktrees_core::profile::Profile =
+        serde_json::from_value(profile).map_err(|e| format!("invalid profile: {e}"))?;
+    worktrees_core::profile::save(p).inspect_err(|e| applog("error", &format!("save_profile: {e}")))
+}
+
+#[tauri::command]
+async fn new_profile_id(name: String) -> Result<String, String> {
+    let taken: Vec<String> = worktrees_core::profile::read_lenient().profiles.keys().cloned().collect();
+    Ok(worktrees_core::profile::new_id_from(&name, &taken))
+}
+
+/// What deleting a profile actually costs, reported rather than done silently.
+#[derive(Serialize)]
+struct ProfileRemoval {
+    /// The materialized dir is LEFT ON DISK — it holds the session transcripts.
+    dir: Option<String>,
+    /// A keychain item may remain. worktrees never touches credentials (that is
+    /// the invariant that made this whole feature safe), so it cannot delete one
+    /// either — the UI tells the user where it is instead of pretending.
+    keychain_hint: bool,
+}
+
+#[tauri::command]
+async fn delete_profile(id: String) -> Result<ProfileRemoval, String> {
+    let dir = worktrees_core::profile::profile_dir(&id).map(|d| d.to_string_lossy().into_owned());
+    let launched = worktrees_core::profile::ever_launched(&id);
+    worktrees_core::profile::remove(&id)
+        .inspect_err(|e| applog("error", &format!("delete_profile: {e}")))?;
+    Ok(ProfileRemoval { dir, keychain_hint: launched })
+}
+
+#[tauri::command]
+async fn set_project_profile(repo: String, id: Option<String>) -> Result<(), String> {
+    worktrees_core::profile::assign(&repo, id.as_deref())
+        .inspect_err(|e| applog("error", &format!("set_project_profile: {e}")))
+}
+
+#[tauri::command]
+async fn set_default_profile(id: Option<String>) -> Result<(), String> {
+    worktrees_core::profile::set_default(id.as_deref())
+        .inspect_err(|e| applog("error", &format!("set_default_profile: {e}")))
+}
+
+#[tauri::command]
+async fn skills_list() -> Result<serde_json::Value, String> {
+    serde_json::to_value(worktrees_core::skillstore::list()).map_err(|e| e.to_string())
+}
+
+/// Read a candidate skill directory WITHOUT installing it — the review step.
+#[tauri::command]
+async fn skill_inspect(path: String) -> Result<serde_json::Value, String> {
+    let i = worktrees_core::skillstore::inspect(Path::new(&path))?;
+    Ok(serde_json::json!({
+        "name": i.name, "description": i.description,
+        "capabilities": i.capabilities, "files": i.files, "bytes": i.bytes,
+        "skill_md": i.skill_md,
+    }))
+}
+
+#[tauri::command]
+async fn skill_install_local(path: String) -> Result<serde_json::Value, String> {
+    let e = worktrees_core::skillstore::install_local(Path::new(&path))
+        .inspect_err(|e| applog("error", &format!("skill_install_local: {e}")))?;
+    serde_json::to_value(e).map_err(|e| e.to_string())
+}
+
+/// Clone, inspect, discard. Installs nothing — see `skill_install_git`.
+#[tauri::command]
+async fn skill_preview_git(url: String, rev: Option<String>) -> Result<serde_json::Value, String> {
+    let p = worktrees_core::skillstore::preview_git(&url, rev.as_deref().unwrap_or(""))
+        .inspect_err(|e| applog("warn", &format!("skill_preview_git: {e}")))?;
+    serde_json::to_value(p).map_err(|e| e.to_string())
+}
+
+/// Install at the sha the user reviewed. Refuses if the branch moved.
+#[tauri::command]
+async fn skill_install_git(
+    url: String,
+    rev: Option<String>,
+    sha: String,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let e = worktrees_core::skillstore::install_git_pinned(
+        &url,
+        rev.as_deref().unwrap_or(""),
+        &sha,
+        &name,
+    )
+    .inspect_err(|e| applog("error", &format!("skill_install_git: {e}")))?;
+    serde_json::to_value(e).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn skill_remove(name: String) -> Result<Vec<String>, String> {
+    worktrees_core::skillstore::remove(&name)
+        .inspect_err(|e| applog("error", &format!("skill_remove: {e}")))
+}
+
 // ── state: core-derived places + declared overlay + reconciled lifecycle ─────
 
 /// One repo's merged snapshot: core's live `ls` + DECLARED store overlay +
@@ -133,6 +245,10 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     let mut v = serde_json::to_value(project.ls()).map_err(|e| e.to_string())?;
     let store = store::read_lenient(repo);
     let now = sysclock::now_epoch();
+    // Read the declarations ONCE per snapshot, not per place. This runs on the
+    // 3s poll, so it stays a single small JSON read — no per-profile filesystem
+    // probes here (those live in `profiles_info`, which is called on sheet-open).
+    let profiles = worktrees_core::profile::read_lenient();
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
             let slug = place.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
@@ -142,6 +258,24 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
                 .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null);
             place["lifecycle_effective"] = serde_json::Value::String(store::reconcile(decl, tmux_up, now));
+
+            // What a LIVE session is actually running, versus the profile as
+            // edited since. Both derived from the launch stamp ops writes when a
+            // session is created — a place with no stamp simply has no badge.
+            let (mut pname, mut stale) = (serde_json::Value::Null, false);
+            if let Some(d) = decl {
+                if let Some(pid) = d.profile_id.as_deref() {
+                    if let Some(p) = profiles.profiles.get(pid) {
+                        pname = serde_json::Value::String(p.name.clone());
+                        // Only meaningful while the session is up: a closed place
+                        // will pick up the current profile on its next launch, so
+                        // calling it "stale" would be noise.
+                        stale = tmux_up && d.profile_epoch.unwrap_or(0) < p.updated_epoch;
+                    }
+                }
+            }
+            place["profile_name"] = pname;
+            place["profile_stale"] = serde_json::Value::Bool(stale);
         }
     }
     Ok(v)
@@ -2181,6 +2315,18 @@ pub fn run() {
             shell_resize,
             shell_detach,
             settings_info,
+            profiles_info,
+            save_profile,
+            new_profile_id,
+            delete_profile,
+            set_project_profile,
+            set_default_profile,
+            skills_list,
+            skill_inspect,
+            skill_install_local,
+            skill_preview_git,
+            skill_install_git,
+            skill_remove,
             get_settings,
             set_settings,
             term_open,

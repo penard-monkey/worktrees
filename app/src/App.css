@@ -896,3 +896,22 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .row2 input { width: 90px; }
 .row2 select { flex: 1; min-width: 0; }
 .times { color: var(--txt-mute); }
+
+/* AI-profile badge in the topbar, beside .live-badge. `.stale` means the live
+   session started before the profile was last edited — restarting applies it.
+   Scoped to rules/model/MCP: skills are symlinked, so they already reached it. */
+.profile-badge { color: var(--txt-dim); }
+.profile-badge.stale { color: var(--warn); }
+
+/* The rules editor. No <textarea> existed in the app before this; it mirrors the
+   .setting input rule above and switches to the mono face, since what goes in it
+   is instructions for a model rather than prose. */
+.setting textarea {
+  width: 100%;
+  background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: var(--s2); font-size: var(--fs-label); color: var(--txt); outline: none;
+  font-family: var(--font-mono);
+  resize: vertical;
+  min-height: calc(var(--ui-rem) * 6);
+}
+.setting textarea:focus { border-color: var(--line-strong); }

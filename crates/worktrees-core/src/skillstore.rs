@@ -710,6 +710,96 @@ pub fn list_at(paths: &StorePaths) -> Vec<Entry> {
     read_lenient_at(paths).skills.into_values().collect()
 }
 
+// ── UI-facing preview/install ────────────────────────────────────────────────
+
+/// What a git URL contains, without installing any of it.
+#[derive(Serialize, Clone, Debug)]
+pub struct GitPreview {
+    pub url: String,
+    pub rev: String,
+    /// The commit that was inspected. Installing pins THIS, so what the user
+    /// reviewed is exactly what lands.
+    pub sha: String,
+    pub skills: Vec<PreviewSkill>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct PreviewSkill {
+    pub name: String,
+    pub description: String,
+    /// Everything in the frontmatter we do not positively recognise, plus the
+    /// keys we do and consider capability-shaped. The review gate.
+    pub capabilities: Vec<String>,
+    pub files: usize,
+    pub bytes: u64,
+    /// The full SKILL.md. This is what the model would read, so the user gets to
+    /// read it first.
+    pub skill_md: String,
+}
+
+/// Clone, inspect, throw the clone away, and report. Installs nothing.
+///
+/// Deliberately stateless: the alternative (keep the clone alive between a
+/// "preview" call and an "install" call) means the app holds a temp directory
+/// whose lifetime nobody owns, and a stale one silently installs content the
+/// user never reviewed. Installing re-fetches AT THE PREVIEWED SHA instead, so
+/// the reviewed bytes are the installed bytes even if the branch moved.
+pub fn preview_git(url: &str, rev: &str) -> Result<GitPreview, String> {
+    let tmp = unique_temp_dir("wt-skill-preview")?;
+    let out = (|| -> Result<GitPreview, String> {
+        let (sha, root, found) = fetch_git(url, rev, &tmp)?;
+        let mut skills = Vec::new();
+        for d in &found {
+            let i = inspect(d)?;
+            skills.push(PreviewSkill {
+                name: i.name,
+                description: i.description,
+                capabilities: i.capabilities,
+                files: i.files,
+                bytes: i.bytes,
+                skill_md: i.skill_md,
+            });
+        }
+        let _ = root;
+        Ok(GitPreview { url: url.to_string(), rev: rev.to_string(), sha, skills })
+    })();
+    let _ = fs::remove_dir_all(&tmp);
+    out
+}
+
+/// Install one skill from a git URL, pinned to `sha` — the commit a preview
+/// showed the user.
+///
+/// The sha is REQUIRED, not optional: without it this would fetch whatever the
+/// branch points at now, which is not what was reviewed.
+pub fn install_git_pinned(url: &str, rev: &str, sha: &str, name: &str) -> Result<Entry, String> {
+    if sha.trim().is_empty() {
+        return Err("a reviewed commit sha is required".into());
+    }
+    let tmp = unique_temp_dir("wt-skill-install")?;
+    let out = (|| -> Result<Entry, String> {
+        let (got, root, found) = fetch_git(url, rev, &tmp)?;
+        if got != sha {
+            // The branch moved between review and install. Refusing is the whole
+            // point of pinning — silently installing the newer commit would mean
+            // the review applied to something else.
+            return Err(format!(
+                "that repository moved since it was reviewed ({} → {}) — review it again",
+                &sha[..sha.len().min(8)],
+                &got[..got.len().min(8)]
+            ));
+        }
+        let chosen = found
+            .iter()
+            .find(|d| d.file_name().map(|f| f.to_string_lossy() == *name).unwrap_or(false))
+            .or_else(|| if found.len() == 1 { found.first() } else { None })
+            .ok_or_else(|| format!("no skill named {name:?} in that repository"))?;
+        install_from_clone(url, rev, sha, &root, chosen)
+    })();
+    let _ = fs::remove_dir_all(&tmp);
+    out
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 /// `worktrees skills …`
@@ -1265,6 +1355,67 @@ mod tests {
         assert!(e.contains("not valid JSON"), "{e}");
         assert_eq!(fs::read_to_string(&paths.manifest).unwrap(), "{ truncated",
             "a hand-edit typo stays human-repairable");
+    }
+
+    #[test]
+    fn a_pinned_install_refuses_a_repository_that_moved_since_review() {
+        // The review gate is only worth anything if the reviewed bytes are the
+        // installed bytes. A branch that moved between preview and install must
+        // stop, not silently install the newer commit.
+        let t = tmp("moved");
+        let repo = t.0.join("repo");
+        let sk = repo.join("gitskill");
+        fs::create_dir_all(&sk).unwrap();
+        fs::write(sk.join("SKILL.md"), "---\nname: gitskill\ndescription: v1\n---\nv1\n").unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "one"]);
+
+        let url = format!("file://{}", repo.display());
+        let p1 = preview_git(&url, "").unwrap();
+        assert_eq!(p1.skills.len(), 1);
+        assert_eq!(p1.skills[0].description, "v1");
+
+        // move the branch on
+        fs::write(sk.join("SKILL.md"), "---\nname: gitskill\ndescription: v2\n---\nv2\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "two"]);
+
+        let e = install_git_pinned(&url, "", &p1.sha, "gitskill").unwrap_err();
+        assert!(e.contains("moved since it was reviewed"), "{e}");
+    }
+
+    #[test]
+    fn preview_installs_nothing_and_surfaces_capabilities() {
+        let t = tmp("preview");
+        let repo = t.0.join("repo");
+        let sk = repo.join("risky");
+        fs::create_dir_all(&sk).unwrap();
+        fs::write(
+            sk.join("SKILL.md"),
+            "---\nname: risky\ndescription: d\nallowed-tools: Bash(rm:*)\n---\nbody\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().expect("git");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "one"]);
+
+        let p = preview_git(&format!("file://{}", repo.display()), "").unwrap();
+        assert_eq!(p.skills[0].name, "risky");
+        assert!(p.skills[0].capabilities.iter().any(|c| c.contains("pre-authorises")));
+        assert!(p.skills[0].skill_md.contains("body"), "the user reads what the model would read");
+        assert!(!p.sha.is_empty());
     }
 
     #[test]

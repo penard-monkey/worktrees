@@ -137,6 +137,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
             );
             ui.error(&format!("profile '{}' could not be prepared ({e}) — claude not launched", prof.name));
             crate::profile::AiLaunch {
+                profile: None,
                 env: Vec::new(),
                 cmd: format!("printf '%s\\n' {} >&2", crate::profile::shell_quote(&msg)),
                 match_word: plain.match_word,
@@ -198,6 +199,17 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         match tmux::new_session(&session, wt, &pane0) {
             Ok(pid) => {
                 tmux::tune_session(&session);
+                // Stamp WHICH profile this session started with. Only here, in
+                // the branch that actually creates a session — an attach reuses
+                // whatever the running process already loaded, so overwriting the
+                // stamp there would clear a legitimate "restart to apply" badge.
+                if let Some((id, epoch)) = &ai.profile {
+                    let slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+                    let _ = crate::store::edit(&p.main_root, &slug, |d| {
+                        d.profile_id = Some(id.clone());
+                        d.profile_epoch = Some(*epoch);
+                    });
+                }
                 if spare_shell {
                     tmux::split_window(&pid, wt, &pane1);
                     tmux::select_pane(&pid);
