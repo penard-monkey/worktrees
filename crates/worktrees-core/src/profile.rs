@@ -1079,8 +1079,13 @@ pub fn has_unprofiled_history(repo_root: &str) -> bool {
         repo_root.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     rd.flatten().any(|e| {
         let name = e.file_name().to_string_lossy().into_owned();
-        // Any place UNDER this repo counts, not just the main root.
-        name.starts_with(&mangled)
+        // Any place UNDER this repo counts, not just the main root — but a
+        // SIBLING must not: `/x/foo` would otherwise match `/x/foo-bar`, since
+        // both `/` and `-` mangle to `-`. Requiring the next character to be a
+        // separator-derived `-` narrows it; claude's mangling makes an exact
+        // boundary test impossible, so a rare false positive costs one spurious
+        // "this starts a fresh conversation" note, never a wrong launch.
+        (name == mangled || name.starts_with(&format!("{mangled}-")))
             && fs::read_dir(e.path())
                 .map(|d| d.flatten().any(|f| f.file_name().to_string_lossy().ends_with(".jsonl")))
                 .unwrap_or(false)
@@ -1275,6 +1280,13 @@ pub fn save(mut p: Profile) -> Result<String, String> {
     }
     if p.name.trim().is_empty() {
         p.name = p.id.clone();
+    }
+    // The UI round-trips a decorated profile (`ever_launched`, `dir` are
+    // computed, not stored). `extra` would otherwise swallow them into
+    // profiles.json forever — harmless today only because the outer
+    // ProfileInfo fields serialize after the flattened map and overwrite them.
+    for k in ["ever_launched", "dir"] {
+        p.extra.remove(k);
     }
     p.updated_epoch = now_epoch();
     let id = p.id.clone();

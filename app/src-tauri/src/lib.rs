@@ -154,6 +154,9 @@ async fn new_profile_id(name: String) -> Result<String, String> {
 struct ProfileRemoval {
     /// The materialized dir is LEFT ON DISK — it holds the session transcripts.
     dir: Option<String>,
+    /// The keychain item's service name, when it was recorded — so the message
+    /// can name what to look for instead of sending the user hunting.
+    keychain_service: Option<String>,
     /// A keychain item may remain. worktrees never touches credentials (that is
     /// the invariant that made this whole feature safe), so it cannot delete one
     /// either — the UI tells the user where it is instead of pretending.
@@ -164,9 +167,9 @@ struct ProfileRemoval {
 async fn delete_profile(id: String) -> Result<ProfileRemoval, String> {
     let dir = worktrees_core::profile::profile_dir(&id).map(|d| d.to_string_lossy().into_owned());
     let launched = worktrees_core::profile::ever_launched(&id);
-    worktrees_core::profile::remove(&id)
+    let keychain_service = worktrees_core::profile::remove(&id)
         .inspect_err(|e| applog("error", &format!("delete_profile: {e}")))?;
-    Ok(ProfileRemoval { dir, keychain_hint: launched })
+    Ok(ProfileRemoval { dir, keychain_service, keychain_hint: launched })
 }
 
 #[tauri::command]
@@ -249,6 +252,10 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     // 3s poll, so it stays a single small JSON read — no per-profile filesystem
     // probes here (those live in `profiles_info`, which is called on sheet-open).
     let profiles = worktrees_core::profile::read_lenient();
+    // What this repo's NEXT launch would use — so a session started under a
+    // different (or since-unbound) profile reads as stale rather than merely
+    // naming whatever it started with.
+    let effective = worktrees_core::profile::resolve_profile_id(repo);
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
             let slug = place.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
@@ -265,13 +272,34 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             let (mut pname, mut stale) = (serde_json::Value::Null, false);
             if let Some(d) = decl {
                 if let Some(pid) = d.profile_id.as_deref() {
-                    if let Some(p) = profiles.profiles.get(pid) {
-                        pname = serde_json::Value::String(p.name.clone());
-                        // Only meaningful while the session is up: a closed place
-                        // will pick up the current profile on its next launch, so
-                        // calling it "stale" would be noise.
-                        stale = tmux_up && d.profile_epoch.unwrap_or(0) < p.updated_epoch;
+                    // A profile deleted mid-session must not make the badge
+                    // vanish — the session is still running it. Name it as gone
+                    // rather than showing nothing.
+                    let name = profiles
+                        .profiles
+                        .get(pid)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| format!("{pid} (deleted)"));
+                    pname = serde_json::Value::String(name);
+                    // Only meaningful while the session is up: a closed place
+                    // picks up the current profile on its next launch, so calling
+                    // it "stale" would be noise.
+                    if tmux_up {
+                        let edited = profiles
+                            .profiles
+                            .get(pid)
+                            .map(|p| d.profile_epoch.unwrap_or(0) < p.updated_epoch)
+                            .unwrap_or(true); // deleted counts as changed
+                        // A REBIND is the edit a user most expects the badge to
+                        // cover: the session is running one profile while the
+                        // repo is now bound to another.
+                        let rebound = effective.as_deref() != Some(pid);
+                        stale = edited || rebound;
                     }
+                } else if tmux_up && effective.is_some() {
+                    // Launched unprofiled, but a profile is bound now.
+                    pname = serde_json::Value::Null;
+                    stale = true;
                 }
             }
             place["profile_name"] = pname;

@@ -25,6 +25,8 @@ export type Place = {
   last_commit_epoch?: number | null;
   tmux_session: { name: string; up: boolean };
   claude_session_present: boolean;
+  profile_name?: string | null;
+  profile_stale?: boolean;
   declared: Declared;
   lifecycle_effective: string;
 };
@@ -72,11 +74,16 @@ function cdv(): ProjectView {
       slug: "(main)", branch: "main", is_main: true,
       tmux_session: { name: `${P}-(main)`, up: true }, ahead: 0, behind: 0,
       last_commit_subject: "chore: bump deps", lifecycle_effective: "active",
+      // The topbar profile badge, in its ordinary state.
+      profile_name: "Work", profile_stale: false,
     }),
     place(P, root, {
       slug: "messaging", branch: "feat/messaging-sse",
       dirty: true, dirty_files: 4, ahead: 2, behind: 0,
       tmux_session: { name: `${P}-messaging`, up: true }, claude_session_present: true,
+      // …and in its stale state, so "restart to apply" is reachable by clicking
+      // rather than only existing in the backend.
+      profile_name: "Work", profile_stale: true,
       last_commit_subject: "wire up SSE reconnect", last_commit_epoch: NOW - DAY,
       declared: { lifecycle: "saved", pinned: true, note: "auth refactor place", last_opened_epoch: NOW - DAY },
       lifecycle_effective: "saved",

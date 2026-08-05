@@ -173,7 +173,10 @@ export function ProjectSheet({
     // it must never ride the 3s poll.
     invoke<ProfilesInfo | null>("profiles_info", { repo: root })
       .then((i) => setPinfo(i))
-      .catch(() => {});
+      // Swallowing this would leave the section rendering "(use the default) /
+      // Sessions here launch unprofiled" — which may be false, in the direction
+      // that matters most for a restrictive profile.
+      .catch((e) => note(`could not read AI profiles: ${e}`));
   }, [open, refresh, root]);
 
   useEffect(() => {
@@ -323,7 +326,7 @@ export function ProjectSheet({
               <div className="hint">
                 Heads up: this repo already has Claude conversations under <code>~/.claude</code>. Binding a
                 profile starts a FRESH conversation, because history lives with the profile. Nothing is
-                deleted \u2014 unbind and the old one comes back.
+                deleted — unbind and the old one comes back.
               </div>
             ) : null}
           </section>

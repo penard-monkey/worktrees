@@ -60,6 +60,8 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
   const [skills, setSkills] = useState<SkillEntry[]>([]);
   const [sel, setSel] = useState<string>("");
   const [draft, setDraft] = useState<Profile | null>(null);
+  // The last value loaded from core, to tell a real edit from a bare focus change.
+  const [clean, setClean] = useState<string>("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [armed, setArmed] = useState("");
@@ -96,16 +98,30 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
   const pick = (p: Profile) => {
     setSel(p.id);
     setDraft({ ...p });
+    setClean(JSON.stringify(p));
     setErr("");
+    // Otherwise an armed Delete on one profile is still armed when you come
+    // back to it, and the next single click deletes.
+    setArmed("");
+  };
+
+  /// Blur fires whether or not anything changed, and `save` bumps
+  /// `updated_epoch` — which is what marks live sessions "restart to apply".
+  /// Clicking through fields must not flag every session stale.
+  const saveIfDirty = (p: Profile) => {
+    if (JSON.stringify(p) === clean) return;
+    void save(p);
   };
 
   const save = async (p: Profile) => {
     setBusy(true);
     try {
-      // `ever_launched`/`dir` are decoration, not stored fields — sending them
-      // back would have serde reject the profile.
+      // `ever_launched`/`dir` are decoration, not stored fields. Sending them
+      // does not fail — `Profile`'s flattened `extra` would swallow them into
+      // profiles.json and keep them forever. (The backend strips them too.)
       const { ever_launched: _e, dir: _d, ...body } = p;
       await invoke("save_profile", { profile: body });
+      setClean(JSON.stringify(p));
       await reload();
       onReport(`Saved profile “${p.name}”.`);
     } catch (e) {
@@ -134,16 +150,29 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
   const remove = async (id: string) => {
     setBusy(true);
     try {
-      const r = await invoke<{ dir?: string | null; keychain_hint?: boolean }>("delete_profile", { id });
+      const r = await invoke<{ dir?: string | null; keychain_service?: string | null; keychain_hint?: boolean }>(
+        "delete_profile",
+        { id },
+      );
       await reload();
       setSel("");
       setDraft(null);
-      // Both of these are things we deliberately do NOT do silently.
+      // Say what was NOT done. A never-launched profile has no transcripts and
+      // no keychain item, so claiming either would send the user hunting for
+      // something that was never there.
+      const left: string[] = [];
+      if (r?.keychain_hint && r?.dir) left.push(`its conversation history at ${r.dir}`);
+      if (r?.keychain_hint) {
+        left.push(
+          r?.keychain_service
+            ? `its saved sign-in in your login keychain (${r.keychain_service})`
+            : "its saved sign-in in your login keychain",
+        );
+      }
       onReport(
-        `Removed the profile.${r?.dir ? ` Its conversation history is still at ${r.dir} — delete it by hand if you want it gone.` : ""}` +
-          (r?.keychain_hint
-            ? " Its saved sign-in also stays in your login keychain (worktrees never touches credentials); remove it in Keychain Access if you want it gone."
-            : ""),
+        left.length
+          ? `Removed the profile. Left behind: ${left.join(" and ")} — worktrees never touches credentials, so remove those by hand if you want them gone.`
+          : "Removed the profile.",
       );
     } catch (e) {
       fail(e, "delete profile");
@@ -225,10 +254,18 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
   };
 
   const profiles = info?.profiles ?? [];
+  // Saves IMMEDIATELY rather than on blur. WKWebView (what Tauri renders in on
+  // macOS) does not give a checkbox focus on click, so `onBlur` never fires from
+  // normal mouse use and the toggle would live only in local state until the
+  // sheet closed. Chromium does focus it — which is exactly why the mock harness
+  // would never have shown this.
   const toggleSkill = (name: string) => {
     if (!draft) return;
     const have = draft.skills ?? [];
-    setDraft({ ...draft, skills: have.includes(name) ? have.filter((s) => s !== name) : [...have, name] });
+    const next = have.includes(name) ? have.filter((s) => s !== name) : [...have, name];
+    const updated = { ...draft, skills: next };
+    setDraft(updated);
+    void save(updated);
   };
 
   return (
@@ -293,7 +330,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               type="text"
               value={draft.name}
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-              onBlur={() => save(draft)}
+              onBlur={() => saveIfDirty(draft)}
             />
             <label className="sub">Identifier</label>
             <div className="hint">
@@ -310,7 +347,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               value={draft.rules ?? ""}
               placeholder="Be succinct. Prefer small diffs. …"
               onChange={(e) => setDraft({ ...draft, rules: e.target.value })}
-              onBlur={() => save(draft)}
+              onBlur={() => saveIfDirty(draft)}
             />
             <div className="hint">
               Added to every session in this profile. Note it ADDS to your global{" "}
@@ -325,15 +362,17 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               value={draft.model ?? ""}
               placeholder="(claude's default)"
               onChange={(e) => setDraft({ ...draft, model: e.target.value || null })}
-              onBlur={() => save(draft)}
+              onBlur={() => saveIfDirty(draft)}
             />
           </section>
 
           <section className="setting">
             <label>Skills</label>
             <div className="hint">
-              Enabled skills are symlinked into the profile, so editing one reaches a RUNNING session.
-              (The “restart to apply” badge covers rules, model, MCP and settings — not skills.)
+              Enabled skills are symlinked into the profile, so editing a skill's body reaches a
+              RUNNING session. Its description and frontmatter are read at session start, so those
+              still need a restart. (The “restart to apply” badge covers rules, model, MCP and
+              settings.)
             </div>
             <div className="ver-rows">
               {skills.length === 0 ? <div className="ver-row">No skills installed.</div> : null}
@@ -343,10 +382,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
                     <input
                       type="checkbox"
                       checked={(draft.skills ?? []).includes(s.name)}
-                      onChange={() => {
-                        toggleSkill(s.name);
-                      }}
-                      onBlur={() => save(draft)}
+                      onChange={() => toggleSkill(s.name)}
                     />
                     {s.name}
                   </label>

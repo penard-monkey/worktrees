@@ -199,16 +199,32 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         match tmux::new_session(&session, wt, &pane0) {
             Ok(pid) => {
                 tmux::tune_session(&session);
-                // Stamp WHICH profile this session started with. Only here, in
-                // the branch that actually creates a session — an attach reuses
-                // whatever the running process already loaded, so overwriting the
-                // stamp there would clear a legitimate "restart to apply" badge.
-                if let Some((id, epoch)) = &ai.profile {
-                    let slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
-                    let _ = crate::store::edit(&p.main_root, &slug, |d| {
+                // Stamp WHICH profile this session started with — including
+                // "none at all". Only here, in the branch that actually creates a
+                // session: an attach reuses whatever the running process already
+                // loaded, so stamping there would clear a legitimate "restart to
+                // apply" badge.
+                //
+                // Writing the CLEARED case matters as much as the set one. A
+                // stamp that is only ever written and never cleared outlives the
+                // binding: unbind a profile, relaunch, and the badge would keep
+                // naming a profile the session is demonstrably not running — the
+                // badge lying is the exact failure this feature exists to avoid.
+                let slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+                let stamp = ai.profile.clone();
+                if let Err(e) = crate::store::edit(&p.main_root, &slug, |d| match &stamp {
+                    Some((id, epoch)) => {
                         d.profile_id = Some(id.clone());
                         d.profile_epoch = Some(*epoch);
-                    });
+                    }
+                    None => {
+                        d.profile_id = None;
+                        d.profile_epoch = None;
+                    }
+                }) {
+                    // Not fatal — the session is up — but silence here means the
+                    // badge simply never appears, with nothing to explain why.
+                    ui.warn(&format!("could not record which profile this session started with: {e}"));
                 }
                 if spare_shell {
                     tmux::split_window(&pid, wt, &pane1);
