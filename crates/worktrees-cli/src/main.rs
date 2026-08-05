@@ -8,6 +8,8 @@ use worktrees_core::ops;
 use worktrees_core::render::error_line;
 use worktrees_core::{CliUi, Project};
 
+mod mcp;
+
 const USAGE: &str = "\
 worktrees — one git worktree per branch, one tmux session per worktree.
 
@@ -24,6 +26,7 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees doctor [<name>]             report declared-file drift (--json --strict --config-only)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
+  worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";
 
@@ -92,6 +95,9 @@ fn run() -> i32 {
         "provision" => ops::cmd_provision(&project, &mut ui, rest),
         "doctor" => ops::cmd_doctor(&project, &mut ui, rest),
         "init" => ops::cmd_init(&project, &mut ui, rest),
+        // Note: not routed through `ui` — this speaks JSON-RPC on stdout, and
+        // anything else written there corrupts the transport.
+        "mcp" => mcp::cmd_mcp(rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));
             println!();

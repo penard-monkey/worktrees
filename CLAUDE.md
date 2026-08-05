@@ -27,6 +27,7 @@ cargo build --release -p worktrees-cli   # FIRST — bin/worktrees shim prefers
 make test           # bats suite vs the Rust binary (fake git/tmux shims)
 make lint           # shellcheck + bash-3.2 gate (shim + install.sh)
 cargo test -p worktrees-core
+cargo test -p worktrees-cli   # MCP protocol unit tests live here
 cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 ```
 

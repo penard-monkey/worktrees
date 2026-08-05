@@ -29,6 +29,10 @@ jobs:
         run: |
           cargo build -p worktrees-core -p worktrees-cli --locked
           cargo test -p worktrees-core --locked
+          # The CLI crate has unit tests too (the MCP server's protocol shaping).
+          # Without this line they compile only when someone runs cargo test by
+          # hand — a broken test module shipped once because of exactly that.
+          cargo test -p worktrees-cli --locked
 
   # Default gate: the bats suite against the Rust binary (the shipped engine).
   test:
