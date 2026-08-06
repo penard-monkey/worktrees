@@ -46,6 +46,12 @@
     border-radius:12px; background:var(--panel);
   }
   .hero figure { margin-top:44px; }
+  /* The clip autoplays: 18s, silent, looping, with controls so it can be
+     stopped. There is no CSS-only way to honour prefers-reduced-motion for
+     video playback, and this page ships no script by design — so rather than
+     leave a rule that looks like it handles that and does not, the trade is
+     stated here. `controls` is the mitigation. */
+  video.shot { display:block; }
   figcaption { color:var(--txt-mute); font-size:14px; margin-top:10px; }
 
   /* ── layout ───────────────────────────────────────────────────────── */
@@ -104,8 +110,12 @@
       launches gets them. Your normal <code>claude</code> in a terminal is completely untouched.
     </p>
     <figure>
-      <img class="shot" src="media/profiles/hero.png" alt="The worktrees app with an AI profile applied to a live session">
-      <figcaption>A live session running the “Work” profile. The badge names it — and says when it has drifted.</figcaption>
+      <video class="shot" src="media/profiles/walkthrough.mp4" poster="media/profiles/hero.png"
+             autoplay loop muted playsinline controls
+             aria-label="Creating an AI profile: opening Settings, adding rules, enabling a skill, and seeing the badge on a live session"></video>
+      <figcaption>
+        Settings → AI profiles → rules → a skill → and the badge on a live session. 18 seconds, no narration.
+      </figcaption>
     </figure>
   </div>
 </header>
@@ -319,6 +329,53 @@
           asked — turning on a profile is never weaker than running claude normally.</p>
       </div>
     </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Never open the app? It all works from the terminal</h2>
+    <p class="sub">
+      The app is a front end for the same engine. <code>worktrees open</code> resolves the same
+      profile the app would — one resolver, so the two cannot disagree about what a session is
+      running.
+    </p>
+    <div class="cards">
+      <div class="card">
+        <h4>Profiles</h4>
+        <p><code>~/.config/worktrees/profiles.json</code> is plain JSON, hand-editable, and read by
+          both the CLI and the app.</p>
+      </div>
+      <div class="card">
+        <h4>Skills</h4>
+        <p><code>worktrees skills</code> runs anywhere — it does not need to be inside a repo,
+          because the store is yours, not a project's.</p>
+      </div>
+      <div class="card">
+        <h4>Escape hatch</h4>
+        <p><code>WORKTREES_PROFILE=none</code> on a single launch, or <code>"none"</code> anywhere in
+          the chain, opts out entirely.</p>
+      </div>
+    </div>
+    <pre class="term" style="margin-top:26px"><span class="c"># install a skill from a folder, or a pinned commit</span>
+<span class="p">$</span> worktrees skills add ~/src/my-skill
+<span class="p">$</span> worktrees skills add <span class="a">--git</span> https://github.com/acme/claude-skills <span class="a">--pick</span> deploy-helper
+<span class="p">$</span> worktrees skills list
+  deploy-helper  (git https://github.com/acme/claude-skills@1f4c9ab2)
+    Prepares a release branch and runs the gates.
+    <span class="w">! pre-authorises tools: Bash(git push:*)</span>
+
+<span class="c"># see what a skill would tell the model, before enabling it anywhere</span>
+<span class="p">$</span> worktrees skills show deploy-helper
+
+<span class="c"># open a worktree — the bound profile applies here exactly as in the app</span>
+<span class="p">$</span> worktrees open feat-x
+
+<span class="c"># …or deliberately without it</span>
+<span class="p">$</span> WORKTREES_PROFILE=none worktrees open feat-x
+
+<span class="c"># the MCP server, if you want to wire it up by hand</span>
+<span class="p">$</span> worktrees mcp <span class="c"># stdio; add --mutations to allow worktree changes</span></pre>
   </div>
 </section>
 
