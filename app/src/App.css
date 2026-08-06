@@ -144,12 +144,14 @@ button { cursor: pointer; }
   display: flex; align-items: center; gap: var(--s2);
   font-size: var(--fs-micro); color: var(--txt-dim);
 }
+/* shrinkable: at the 220px nav floor the label ellipsizes before the bar
+   collapses — a truncated model name still reads, a 4px bar doesn't */
 .usage-label {
-  flex: 0 0 auto; max-width: 6em;
+  flex: 0 1 auto; max-width: 6em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .usage-bar {
-  flex: 1; min-width: 0; height: 3px; overflow: hidden;
+  flex: 1 1 auto; min-width: 2.5em; height: 3px; overflow: hidden;
   background: var(--line); border-radius: var(--r-full);
 }
 .usage-bar > i {
@@ -162,6 +164,16 @@ button { cursor: pointer; }
 .usage-pct { flex: 0 0 auto; min-width: 2.6em; text-align: right; font-variant-numeric: tabular-nums; }
 .usage-row.warn > .usage-pct { color: var(--warn); }
 .usage-row.over > .usage-pct { color: var(--danger); }
+/* time until the window resets. Deliberately NOT tinted by severity: the
+   countdown is the same neutral fact whether you're at 5% or 95% — only the
+   bar and the number carry the alarm. Fixed width + tabular figures so the
+   column doesn't twitch each tick ("2d 5h" ↔ "3h 02m" are the extremes).
+   Inherits the row's --txt-dim rather than fading further: at --fs-micro on the
+   light themes another step down stops being legible. */
+.usage-eta {
+  flex: 0 0 auto; min-width: 4.1em; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 
 .add-footer {
   margin: 0; padding: var(--s2) var(--s3); text-align: left;

@@ -801,6 +801,10 @@ type UsageInfo = { source: string; fetched_at: number; limits: UsageLimit[] };
 // 180s — the endpoint is undocumented and has rate-limited hard before; the
 // backend also caps real fetches at one per 120s.
 const USAGE_POLL_MS = 180_000;
+// The countdown ticks off the LOCAL clock, not off a poll: `resets_at` is
+// absolute, so a 15s tick keeps the minute display honest without touching the
+// rate-limited endpoint (polling harder to animate a clock would be absurd).
+const USAGE_TICK_MS = 15_000;
 
 /** "5h" / "7d" for the two standard windows; model buckets keep their name. */
 function usageTick(l: UsageLimit): string {
@@ -809,12 +813,40 @@ function usageTick(l: UsageLimit): string {
   return l.label;
 }
 
+/** Seconds-until-reset → two units, biggest first: "2d 5h", "3h 02m", "42m",
+ *  "<1m". Empty once the window has rolled over — a window whose reset is in the
+ *  past (the statusline snapshot is often that stale) shows no countdown rather
+ *  than a negative one. Minutes are zero-padded so the column can't jitter. */
+function fmtEta(secs: number): string {
+  if (secs <= 0) return "";
+  if (secs < 60) return "<1m";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${String(mins % 60).padStart(2, "0")}m`;
+  const days = Math.floor(hours / 24);
+  // "3d 0h" reads as noise — at day scale the zero hour carries nothing
+  return hours % 24 === 0 ? `${days}d` : `${days}d ${hours % 24}h`;
+}
+
 function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
   const [info, setInfo] = useState<UsageInfo | null>(null);
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+
+  // Own timer, deliberately separate from the poll effect: cheap (a number in a
+  // module-scope component, so the re-render stays inside the widget) and it
+  // must keep running between the 180s pulls.
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), USAGE_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     let alive = true;
     const pull = () => {
+      // a pull is also the moment to re-zero the countdown clock: coming back
+      // from sleep, the 15s tick may be up to a tick behind
+      setNowSec(Math.floor(Date.now() / 1000));
       invoke<UsageInfo>("claude_usage")
         .then((u) => { if (alive) setInfo(u); })
         .catch((e) => { if (alive) onError(e); });
@@ -833,6 +865,9 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
   if (!info || info.source === "unavailable" || info.limits.length === 0) return null;
   // statusline = a local snapshot only as fresh as the last Claude Code session
   const stale = info.source === "statusline";
+  // no row has a live reset (endpoint dropped the field, or every window has
+  // already rolled over) → no column at all, rather than a strip of blanks
+  const anyEta = info.limits.some((l) => l.resets_at && l.resets_at > nowSec);
   return (
     <div
       className={"usage" + (stale ? " stale" : "")}
@@ -841,12 +876,20 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
       {info.limits.map((l) => {
         const pct = Math.max(0, Math.min(100, Math.round(l.percent)));
         const tone = l.severity === "normal" ? "" : l.severity === "warning" ? " warn" : " over";
+        const eta = l.resets_at ? fmtEta(l.resets_at - nowSec) : "";
         const resets = l.resets_at ? `, resets ${new Date(l.resets_at * 1000).toLocaleString()}` : "";
         return (
-          <div className={"usage-row" + tone} key={l.kind + "|" + l.label} title={`${l.label} — ${pct}% used${resets}`}>
+          <div
+            className={"usage-row" + tone}
+            key={l.kind + "|" + l.label}
+            title={`${l.label} — ${pct}% used${eta ? `, ${eta} left` : ""}${resets}`}
+          >
             <span className="usage-label">{usageTick(l)}</span>
             <span className="usage-bar"><i style={{ width: `${pct}%` }} /></span>
             <span className="usage-pct">{pct}%</span>
+            {/* column is reserved even when a row's reset has passed, so the
+                three ETAs stay right-aligned with each other */}
+            {anyEta && <span className="usage-eta">{eta}</span>}
           </div>
         );
       })}
