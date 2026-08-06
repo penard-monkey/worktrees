@@ -32,6 +32,11 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 
 CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 
+A FRESH worktree needs two bootstraps first, and both fail confusingly:
+`git submodule update --init --recursive` (without it `make test` dies with a
+bare "No such file or directory" naming the bats binary, not the submodule),
+and `pnpm install` in `app/` under Node >= 22.13 (`nvm use 22.23.2`).
+
 ## Tauri app — hard-won rules
 
 - **Commands must be `async fn`** — sync handlers run on the main thread and
@@ -44,6 +49,14 @@ CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 - The mock harness (`pnpm dev:mock`, `app/src/mock/install.ts`) must track
   every command in lib.rs — it's how the UI is developed/driven headlessly
   (Playwright). Port 1420 = `tauri dev`; run the harness on another port.
+- **HMR is dead inside `.worktrees/`** — chokidar ignores dot-directories, so
+  vite never sees the edit and keeps serving the PRE-edit file. A reload and a
+  `touch` both "work" and change nothing; a real fix looks like it failed.
+  Restart with `--force` after every source edit, and when a change seems not to
+  apply, diff what the server serves (`curl -s localhost:PORT/src/App.css`)
+  against disk before debugging the change itself.
+- Assert layout in the harness (`getComputedStyle`), don't eyeball it — a CSS
+  rule killed by a stray `*/` still renders a plausible-looking widget.
 - Plugin permissions live in `app/src-tauri/capabilities/default.json`;
   `opener:default` has open-url + reveal-item-in-dir but NOT open-path —
   a missing permission rejects the invoke silently. Never swallow errors:
