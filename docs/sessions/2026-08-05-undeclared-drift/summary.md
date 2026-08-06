@@ -1,3 +1,7 @@
+---
+title: "Session: undeclared-file drift + ADR 0001"
+---
+
 # Session: undeclared-file drift + ADR 0001
 
 - **Date:** 2026-08-02 → 2026-08-05

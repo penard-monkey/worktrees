@@ -1,3 +1,7 @@
+---
+title: "Session: app-created places open single-pane"
+---
+
 # Session: app-created places open single-pane
 
 - **Date:** 2026-08-01

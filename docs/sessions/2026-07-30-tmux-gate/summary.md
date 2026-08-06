@@ -1,3 +1,7 @@
+---
+title: "Session: tmux install gate + missing-tmux banner"
+---
+
 # Session: tmux install gate + missing-tmux banner
 
 - **Date:** 2026-07-30

@@ -1,3 +1,7 @@
+---
+title: "Session — per-project settings (`.worktrees.toml`)"
+---
+
 # Session — per-project settings (`.worktrees.toml`)
 
 - **Date:** 2026-07-27 → 2026-07-28

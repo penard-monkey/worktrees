@@ -34,3 +34,7 @@ dist/
 /align-*.png
 /theme-*.png
 /Screenshot*.png
+
+# local Jekyll builds of docs/ (the GitHub Pages site)
+_site/
+.sass-cache/

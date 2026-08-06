@@ -1,3 +1,7 @@
+---
+title: "Session: UI batch — named terminal tabs, settings categories, guide-line toggle, log tail (+ v0.6.0 release)"
+---
+
 # Session: UI batch — named terminal tabs, settings categories, guide-line toggle, log tail (+ v0.6.0 release)
 
 - **Date:** 2026-07-31 → 2026-08-01

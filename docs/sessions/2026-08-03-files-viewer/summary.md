@@ -1,3 +1,7 @@
+---
+title: "Session: dock Files tab — document rendering + layout"
+---
+
 # Session: dock Files tab — document rendering + layout
 
 - **Date:** 2026-08-02 → 2026-08-03

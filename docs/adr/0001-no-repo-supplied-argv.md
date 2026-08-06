@@ -1,3 +1,7 @@
+---
+title: "ADR 0001 — a cloned repo never supplies argv"
+---
+
 # ADR 0001 — a cloned repo never supplies argv
 
 - **Status:** accepted, permanent

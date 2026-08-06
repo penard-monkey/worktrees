@@ -1,3 +1,7 @@
+---
+title: "Proposal — per-project settings"
+---
+
 # Proposal — per-project settings
 
 **Status:** v1, v2, and v3 BUILT on branch `next-stream` (2026-07-28), not yet
