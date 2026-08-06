@@ -228,3 +228,43 @@ close-out ritual (.claude/skills/close-out).
   proposal doc), and run `provision` against the two unprovisioned worktrees
   before anyone runs `deploy-local.sh` in either.
   _From: [docs/proposals/project-settings.md §12](docs/proposals/project-settings.md)_
+
+- **No automated UI tests exist at all.** The mock harness makes the app
+  drivable headlessly (Playwright), and three scripts already drive it to
+  produce media — but nothing asserts behaviour. Both HIGH findings in the last
+  two AI-profiles reviews were UI bugs, and one of them (skill toggles saved on
+  `onBlur`) exists *only* on WKWebView, the engine the harness does not run —
+  so a headless suite would not have caught it either. Worth pairing a spec
+  suite with at least a smoke pass in a real WebKit.
+  _From: [2026-08-06 ai-rules-layer session](docs/sessions/2026-08-06-ai-rules-layer/summary.md)_
+
+- **`--` end-of-options in core's arg parsers.** ADR 0001 forbids repo-supplied
+  argv; the MCP server enforces the same at its own boundary with `safe_arg`,
+  because a value beginning with `-` is consumed as a flag and
+  `--ai=<cmd>` reaches `ops::launch`, which interpolates it into `sh -ic`. That
+  boundary check is the fix that shipped; a `--` terminator in `cmd_new` /
+  `cmd_open` / `cmd_rm` would be the second layer, and would make the property
+  structural rather than remembered.
+  _From: [2026-08-06 ai-rules-layer session](docs/sessions/2026-08-06-ai-rules-layer/summary.md)_
+
+- **Importing or sharing an AI profile — blocked on treating it as executable
+  content.** A profile's `mcp_servers` become subprocess command lines and its
+  `settings.json` is where `hooks` live. That is fine while the author is the
+  user (same trust level as `ai_cmd`); it stops being fine the moment a profile
+  can arrive from anywhere else, because installing one would be
+  indistinguishable from running a script. Prerequisites, all of them: a
+  confirmation UI showing `command`/`args`/`hooks` verbatim, default-dropping
+  `hooks` and `permissions` from imported settings, and `source: "imported"`
+  provenance so the UI can badge it. v1 deliberately ships "reveal the file in
+  Finder" instead.
+  _From: [2026-08-06 ai-rules-layer session](docs/sessions/2026-08-06-ai-rules-layer/summary.md)_
+
+- **Keychain GC on profile delete — evaluated and DECLINED for now.** claude
+  derives its keychain service name from an undocumented 8-hex hash of the
+  config-dir path, so mapping a profile to its item means reimplementing that
+  hash and betting it never changes. Core also has no credential code path by
+  design, which is the property that made the whole feature safe. Delete
+  therefore *names* what it left behind (dir + service name when one was
+  recorded) rather than pretending to clean it. Reopen only if claude documents
+  the derivation or exposes the item itself.
+  _From: [2026-08-06 ai-rules-layer session](docs/sessions/2026-08-06-ai-rules-layer/summary.md)_
