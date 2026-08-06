@@ -28,7 +28,7 @@ export type Place = {
   declared: Declared;
   lifecycle_effective: string;
 };
-export type Snapshot = { repo: string; prefix: string; places: Place[] };
+export type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean };
 export type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 export type Workspace = { projects: ProjectView[] };
 

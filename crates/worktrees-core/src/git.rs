@@ -46,6 +46,13 @@ pub fn git_ok(cwd: &str, args: &[&str]) -> bool {
     git(cwd, args).map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Does HEAD resolve to a commit? False for an unborn HEAD — a `git init`ed repo
+/// with no commits, where branch refs exist in name only and every start-point
+/// (`main`, `HEAD`, …) is an invalid object name.
+pub fn has_commits(cwd: &str) -> bool {
+    git_ok(cwd, &["rev-parse", "--verify", "--quiet", "HEAD"])
+}
+
 pub fn have_git() -> bool {
     Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
