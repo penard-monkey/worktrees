@@ -30,24 +30,24 @@ zsh -lic 'which -a claude'   # >1 install on PATH is its own bug — the app
 
 ### The sandbox
 
-`app/scripts/profiles-sandbox.sh` builds an isolated worktrees — its own tmux
-prefix, its own profiles, its own skill store, its own scratch repo:
+`app/scripts/sandbox.sh` builds an isolated worktrees for whatever branch you
+are on — its own tmux prefix, its own profiles, its own skill store, its own
+scratch repo:
 
 ```sh
-cargo build --release -p worktrees-cli
-eval "$(app/scripts/profiles-sandbox.sh)"   # sets the env + cd's into the scratch repo
+eval "$(app/scripts/sandbox.sh)"            # sets the env + cd's into a scratch repo
 ```
 
-**How you tell them apart:** every sandbox session is named `wtsbx-<slug>`, while
+**How you tell them apart:** every sandbox session is named `sbx-<branch>-<slug>`, while
 yours keep their real prefix (`cdv-…`, `worktrees-…`). `tmux ls` shows both, and
 they can never collide because the names differ.
 
 ```sh
-tmux ls | grep wtsbx     # the sandbox
-tmux ls | grep -v wtsbx  # yours, untouched
+tmux ls | grep sbx-      # sandboxes (one prefix per branch)
+tmux ls | grep -v sbx-   # yours, untouched
 ```
 
-Tear it down with `app/scripts/profiles-sandbox.sh --clean`. Note that each
+Tear it down with `app/scripts/sandbox.sh --clean`. Note that each
 sandbox profile you sign into leaves its own keychain item
 (`Claude Code-credentials-<hash>`); the script says so, and cannot remove them,
 because worktrees never touches credentials.
@@ -65,11 +65,19 @@ silent failures.
 
 Only §4 (the "restart to apply" badge) needs the desktop app. Two options:
 
-- **Quit your installed app first**, then `cd app && pnpm tauri dev` from the
-  sandboxed shell. It inherits the sandbox's profiles and tmux prefix. Cleanest.
-- **Run both**, accepting that `ui-state.json` and `projects.json` are shared —
-  so a settings or project-list change in one can be overwritten by the other.
-  The tmux sessions still stay separate, which is the part that would have hurt.
+```sh
+app/scripts/sandbox.sh --app
+```
+
+That launches the app against the sandbox under a **different bundle identifier
+and product name**, so it gets its own config dir and shows as
+`worktrees (sbx …)` in the window title.
+
+**Verify the override took**: Settings → Data & Logs should show a path under
+`net.casadelvalle.worktrees.sbx`. If it shows the plain identifier instead, the
+config merge did not apply and this app is sharing `ui-state.json` with your
+installed one — quit the installed app before going further. (The tmux sessions
+stay separate regardless, which is the part that would actually have hurt.)
 
 ---
 
