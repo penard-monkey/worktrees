@@ -1,3 +1,7 @@
+---
+title: "AI profiles — manual verification checklist"
+---
+
 # AI profiles — manual verification checklist
 
 Everything in this list depends on how a real `claude` binary behaves. None of it
