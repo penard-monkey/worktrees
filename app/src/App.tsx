@@ -2174,16 +2174,21 @@ function App() {
                         Deliberately says "rules/model/MCP": skills are symlinked
                         and reach a running session already, so claiming the badge
                         covers them would be a lie. */}
-                    {selected.profile_name ? (
+                    {selected.profile_name || selected.profile_stale ? (
                       <span
                         className={"live-badge profile-badge" + (selected.profile_stale ? " stale" : "")}
                         title={
-                          selected.profile_stale
-                            ? `This session started with an older version of “${selected.profile_name}”. Restart it to apply your rules/model/MCP edits (skill edits already apply).`
-                            : `AI profile: ${selected.profile_name}`
+                          !selected.profile_stale
+                            ? `AI profile: ${selected.profile_name}`
+                            : selected.profile_name
+                              ? `This session started with an older version of “${selected.profile_name}”. Restart it to apply your rules/model/MCP edits (skill edits already apply).`
+                              // Started before a profile was bound to this repo:
+                              // the backend flags it stale with no name, and the
+                              // badge used to render nothing at all for it.
+                              : "This session started before a profile was bound to this repo. Restart it to apply that profile."
                         }
                       >
-                        {selected.profile_name}
+                        {selected.profile_name ?? "unprofiled"}
                         {selected.profile_stale ? " · restart to apply" : ""}
                       </span>
                     ) : null}

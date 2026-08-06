@@ -715,7 +715,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       delete mockProfiles[id];
       if (mockDefaultProfile === id) mockDefaultProfile = null;
       for (const k of Object.keys(mockAssignments)) if (mockAssignments[k] === id) delete mockAssignments[k];
-      return { dir: `/mock/data/worktrees/profiles/${id}`, keychain_hint: launched };
+      return {
+        dir: `/mock/data/worktrees/profiles/${id}`,
+        // Mirrors the real handler: core returns the recorded service name so the
+        // caller can name what it left behind.
+        keychain_service: launched ? `Claude Code-credentials-${id.slice(0, 8)}` : null,
+        keychain_hint: launched,
+      };
     }
     case "set_project_profile": {
       const repo = String(args?.repo ?? "");

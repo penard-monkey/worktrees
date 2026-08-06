@@ -254,18 +254,31 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
   };
 
   const profiles = info?.profiles ?? [];
-  // Saves IMMEDIATELY rather than on blur. WKWebView (what Tauri renders in on
-  // macOS) does not give a checkbox focus on click, so `onBlur` never fires from
-  // normal mouse use and the toggle would live only in local state until the
-  // sheet closed. Chromium does focus it — which is exactly why the mock harness
-  // would never have shown this.
+  // EVERY checkbox in this panel goes through here. Two separate traps, and the
+  // first fix originally landed on one checkbox out of four:
+  //
+  //  1. Saving on `onBlur` loses the change entirely — WKWebView (what Tauri
+  //     renders in on macOS) does not give a checkbox focus on click, so blur
+  //     never fires from normal mouse use. Chromium does, which is exactly why
+  //     the mock harness could not show it.
+  //  2. Saving WITHOUT `setDraft` is worse: these are controlled inputs bound to
+  //     `draft`, and `save`'s reload refreshes `info`, not `draft`. The box snaps
+  //     back, the UI then disagrees with what is stored, and because the rendered
+  //     value never changes every later click re-sends the same value — so it
+  //     cannot be toggled back at all.
+  //
+  // Hence: update the draft AND persist, in one place.
+  const patch = (fields: Partial<Profile>) => {
+    if (!draft) return;
+    const updated = { ...draft, ...fields };
+    setDraft(updated);
+    void save(updated);
+  };
+
   const toggleSkill = (name: string) => {
     if (!draft) return;
     const have = draft.skills ?? [];
-    const next = have.includes(name) ? have.filter((s) => s !== name) : [...have, name];
-    const updated = { ...draft, skills: next };
-    setDraft(updated);
-    void save(updated);
+    patch({ skills: have.includes(name) ? have.filter((s) => s !== name) : [...have, name] });
   };
 
   return (
@@ -409,7 +422,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               <input
                 type="checkbox"
                 checked={!!draft.inherit_global_skills}
-                onChange={(e) => save({ ...draft, inherit_global_skills: e.target.checked })}
+                onChange={(e) => patch({ inherit_global_skills: e.target.checked })}
               />
               Also load my global <code>~/.claude/skills</code>
             </label>
@@ -466,7 +479,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               <input
                 type="checkbox"
                 checked={!!draft.worktrees_mcp}
-                onChange={(e) => save({ ...draft, worktrees_mcp: e.target.checked })}
+                onChange={(e) => patch({ worktrees_mcp: e.target.checked })}
               />
               Expose the worktrees MCP server (read-only tools for this repo)
             </label>
@@ -474,7 +487,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               <input
                 type="checkbox"
                 checked={!!draft.inherit_global_mcp}
-                onChange={(e) => save({ ...draft, inherit_global_mcp: e.target.checked })}
+                onChange={(e) => patch({ inherit_global_mcp: e.target.checked })}
               />
               Also load my global MCP servers
             </label>

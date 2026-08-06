@@ -212,7 +212,19 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
                 // badge lying is the exact failure this feature exists to avoid.
                 let slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
                 let stamp = ai.profile.clone();
-                if let Err(e) = crate::store::edit(&p.main_root, &slug, |d| match &stamp {
+                // Skip the write entirely when there is nothing to record and
+                // nothing to clear. Otherwise every unprofiled CLI launch would
+                // rewrite `.worktrees.places.json` — bumping updated_epoch and
+                // creating empty entries — for people who never use profiles.
+                let already_clear = stamp.is_none()
+                    && crate::store::read_lenient(&p.main_root)
+                        .places
+                        .get(&slug)
+                        .map(|d| d.profile_id.is_none() && d.profile_epoch.is_none())
+                        .unwrap_or(true);
+                if already_clear {
+                    // nothing to do
+                } else if let Err(e) = crate::store::edit(&p.main_root, &slug, |d| match &stamp {
                     Some((id, epoch)) => {
                         d.profile_id = Some(id.clone());
                         d.profile_epoch = Some(*epoch);

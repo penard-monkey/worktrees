@@ -332,6 +332,22 @@ pub fn resolve_profile(repo_root: &str) -> Option<Profile> {
     ps.profiles.get(&id).cloned()
 }
 
+/// Resolve against an ALREADY-LOADED declaration set.
+///
+/// The app's snapshot runs on a 3s poll and already holds `Profiles`; without
+/// this it would read and parse the file a second time in the same tick, and the
+/// two reads could disagree if a save landed between them.
+pub fn resolve_profile_id_in(ps: &Profiles, repo_root: &str) -> Option<String> {
+    let env = std::env::var("WORKTREES_PROFILE").ok();
+    let known: Vec<String> = ps.profiles.keys().cloned().collect();
+    resolve_profile_id_from(
+        env.as_deref(),
+        ps.assignments.get(repo_root).map(|s| s.as_str()),
+        ps.default_id.as_deref(),
+        &known,
+    )
+}
+
 /// Live resolution for one repo root.
 pub fn resolve_profile_id(repo_root: &str) -> Option<String> {
     let ps = read_lenient();

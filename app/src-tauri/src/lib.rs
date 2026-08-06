@@ -255,7 +255,9 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     // What this repo's NEXT launch would use — so a session started under a
     // different (or since-unbound) profile reads as stale rather than merely
     // naming whatever it started with.
-    let effective = worktrees_core::profile::resolve_profile_id(repo);
+    // Resolved against the set already loaded above — not a second read of the
+    // same file in the same tick.
+    let effective = worktrees_core::profile::resolve_profile_id_in(&profiles, repo);
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
             let slug = place.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
