@@ -23,6 +23,8 @@ for _ in $(seq 1 80); do
 done
 
 echo "→ shooting"
-python3 "$APP_DIR/scripts/shoot-profiles.py" --port "$PORT" --out "$OUT_DIR"
+# Raw full-window shots stay in scratch; only the derived page images are
+# committed, so the repo does not carry 2.5MB of mostly-empty terminal.
+python3 "$APP_DIR/scripts/shoot-profiles.py" --port "$PORT" --raw "$TMP" --out "$OUT_DIR"
 echo "→ wrote $OUT_DIR"
 ls -1 "$OUT_DIR"
