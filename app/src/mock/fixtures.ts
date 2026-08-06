@@ -63,6 +63,13 @@ function place(prefix: string, root: string, o: Opt): Place {
     claude_session_present: o.claude_session_present ?? false,
     declared: o.declared ?? null,
     lifecycle_effective: o.lifecycle_effective ?? "closed",
+    // Must be listed explicitly: this builder constructs the object field by
+    // field rather than spreading `o`, so anything omitted here is silently
+    // dropped even though `Opt` accepts it and `Place` declares it optional —
+    // type-valid, and a lie. (The profile badge was invisible in the harness
+    // for exactly this reason.)
+    profile_name: o.profile_name ?? null,
+    profile_stale: o.profile_stale ?? false,
   };
 }
 

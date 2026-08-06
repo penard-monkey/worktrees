@@ -66,7 +66,19 @@ type MockProfile = {
   model?: string | null; updated_epoch?: number;
 };
 const mockProfiles: Record<string, MockProfile> = {
-  work: { id: "work", name: "Work", rules: "Be succinct.", skills: ["demo-skill"], updated_epoch: 1000 },
+  work: {
+    id: "work",
+    name: "Work",
+    // Realistic multi-line rules: this is the field the feature exists for, and
+    // a one-liner makes the editor look like it takes one.
+    rules:
+      "Be succinct — no preamble, no restating the question.\n" +
+      "Prefer small diffs. Explain a design choice only when it is not obvious.\n" +
+      "When you change a public API, say so in the first line.\n" +
+      "Never commit without running the gates.",
+    skills: ["demo-skill"],
+    updated_epoch: 1000,
+  },
 };
 let mockDefaultProfile: string | null = "work";
 const mockAssignments: Record<string, string> = {};
