@@ -17,6 +17,60 @@ zsh -lic 'which -a claude'   # >1 install on PATH is its own bug — the app
                              # resolves the LOGIN shell's PATH via fixup_gui_path
 ```
 
+
+## Running this without disturbing a worktrees app you already have open
+
+**It does collide, so do not just launch a second build.** Three ways:
+
+| | |
+|---|---|
+| tmux sessions | Names are `<prefix>-<slug>`, derived from the repo — so a second build computes the **same name** and attaches to the session your open app is using. Closing it in one kills it in the other. |
+| App config | Both builds share the bundle id `net.casadelvalle.worktrees`, so both read and write the same `ui-state.json` and `projects.json`. Settings are one debounced blob: last writer wins. |
+| No single-instance guard | Two app instances will happily both run, and nothing on screen tells them apart. |
+
+### The sandbox
+
+`app/scripts/profiles-sandbox.sh` builds an isolated worktrees — its own tmux
+prefix, its own profiles, its own skill store, its own scratch repo:
+
+```sh
+cargo build --release -p worktrees-cli
+eval "$(app/scripts/profiles-sandbox.sh)"   # sets the env + cd's into the scratch repo
+```
+
+**How you tell them apart:** every sandbox session is named `wtsbx-<slug>`, while
+yours keep their real prefix (`cdv-…`, `worktrees-…`). `tmux ls` shows both, and
+they can never collide because the names differ.
+
+```sh
+tmux ls | grep wtsbx     # the sandbox
+tmux ls | grep -v wtsbx  # yours, untouched
+```
+
+Tear it down with `app/scripts/profiles-sandbox.sh --clean`. Note that each
+sandbox profile you sign into leaves its own keychain item
+(`Claude Code-credentials-<hash>`); the script says so, and cannot remove them,
+because worktrees never touches credentials.
+
+Your real `~/.claude` is deliberately **not** isolated — §2 needs to confirm your
+global `CLAUDE.md` still loads under a profile, which is the one thing a profile
+cannot suppress.
+
+### What needs the app, and what does not
+
+Sections 1, 2, 3, 5, 6, 7, 8 and 9 are all reachable from the sandboxed CLI
+(`worktrees new`, `worktrees open`, `worktrees skills`, `worktrees mcp`) with no
+app running at all. **Do those first** — they are also the sections covering the
+silent failures.
+
+Only §4 (the "restart to apply" badge) needs the desktop app. Two options:
+
+- **Quit your installed app first**, then `cd app && pnpm tauri dev` from the
+  sandboxed shell. It inherits the sandbox's profiles and tmux prefix. Cleanest.
+- **Run both**, accepting that `ui-state.json` and `projects.json` are shared —
+  so a settings or project-list change in one can be overwritten by the other.
+  The tmux sessions still stay separate, which is the part that would have hurt.
+
 ---
 
 ## 1. The swap applies at all
