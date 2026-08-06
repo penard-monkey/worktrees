@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The usage bars say when the window resets.** Every row in the nav footer
+  gains a countdown column: `5h  ▬▬▬  35%  3h 02m`, and the weekly rows read
+  `2d 5h` — days and hours, minutes dropped at that scale. The model-scoped
+  bucket (Fable) gets the same treatment; a percentage alone never said whether
+  it was worth waiting out. Two units, biggest first (`<1m` / `47m` / `3h 02m` /
+  `2d 5h`), tabular figures so the column can't twitch as it ticks. The
+  countdown runs off the local clock at 15s — `resets_at` is absolute, so the
+  rate-limited endpoint keeps its 180s poll untouched. A window whose reset has
+  already passed (the statusline snapshot is often that stale) shows a blank
+  cell rather than a negative one, and the absolute reset time stays in the
+  tooltip.
 - **`doctor` now reports files the config never learned about.** Every other
   check is judged *by* `.worktrees.toml`, so a config that stopped being true was
   invisible to all of them: detection ran exactly once, at `init`, and the

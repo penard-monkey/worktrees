@@ -515,6 +515,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // lib.rs: a Fable bucket at severity "warning" so the amber tier is
     // exercisable, and `?usage=stale` / `?usage=off` for the two degraded
     // sources (statusline snapshot → dimmed; unavailable → widget hidden).
+    // `?usage=edge` drives the reset-countdown formatter through every branch.
     case "claude_usage": {
       const t = now();
       if (location.search.includes("usage=off")) return { source: "unavailable", fetched_at: t, limits: [] };
@@ -528,13 +529,29 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           ],
         };
       }
+      // every countdown branch at once: sub-minute, minutes-only, a window whose
+      // reset already passed (blank cell, column still reserved), and a
+      // long-name model bucket to squeeze the label at a narrow nav
+      if (location.search.includes("usage=edge")) {
+        return {
+          source: "oauth",
+          fetched_at: t,
+          limits: [
+            { kind: "session", label: "Session", percent: 97, severity: "error", resets_at: t + 40 },
+            { kind: "weekly_all", label: "Weekly", percent: 88, severity: "warning", resets_at: t + 47 * 60 },
+            { kind: "weekly_scoped", label: "Fable", percent: 12, severity: "normal", resets_at: t - 90 },
+          ],
+        };
+      }
       return {
         source: "oauth",
         fetched_at: t,
         limits: [
-          { kind: "session", label: "Session", percent: 35, severity: "normal", resets_at: t + 54 * 60 },
-          { kind: "weekly_all", label: "Weekly", percent: 59, severity: "normal", resets_at: t + 3 * 86400 },
-          { kind: "weekly_scoped", label: "Fable", percent: 80, severity: "warning", resets_at: t + 3 * 86400 },
+          // resets are deliberately off round numbers so the countdown column
+          // shows its real shapes ("3h 02m", "2d 5h"), not a tidy "3d"
+          { kind: "session", label: "Session", percent: 35, severity: "normal", resets_at: t + 3 * 3600 + 2 * 60 },
+          { kind: "weekly_all", label: "Weekly", percent: 59, severity: "normal", resets_at: t + 2 * 86400 + 5 * 3600 },
+          { kind: "weekly_scoped", label: "Fable", percent: 80, severity: "warning", resets_at: t + 2 * 86400 + 5 * 3600 },
         ],
       };
     }
