@@ -66,6 +66,26 @@ setup() {
   [ "$(git -C "$REPO" branch --format='%(refname:short)' | wc -l)" -eq "$nbranches" ]
 }
 
+@test "new: repo with no commits → refused with the first-commit remedy, nothing created" {
+  local empty="$BATS_TEST_TMPDIR/fresh"
+  git init -q "$empty"
+  empty="$(cd "$empty" && pwd -P)"
+
+  run_wt -C "$empty" new feat-x --no-tmux
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no commits yet"* ]]
+  [[ "$output" == *"commit --allow-empty"* ]]
+  # git's own riddle never reaches the user, and no half-made worktree is left
+  [[ "$output" != *"not a valid object name"* ]]
+  [ ! -e "$empty/.worktrees/feat-x" ]
+
+  # and once a commit exists the same command works
+  git -C "$empty" commit -q --allow-empty -m init
+  run_wt -C "$empty" new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+  [ -d "$empty/.worktrees/feat-x" ]
+}
+
 @test "new: remote-only branch → fetched, checked out with tracking upstream" {
   make_remote_branch rb2
 

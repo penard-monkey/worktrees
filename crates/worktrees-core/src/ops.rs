@@ -264,6 +264,16 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         return 1;
     }
     let branch = strip_origin(&branch).to_string();
+    // A freshly `git init`ed repo has an UNBORN HEAD: the branch ref exists in
+    // name only, with no commit behind it, so every start-point is unresolvable
+    // and `git worktree add` dies with "fatal: not a valid object name: 'main'".
+    // Nothing downstream can recover, and git's message names neither the cause
+    // nor the fix — so refuse here, with the one command that unblocks it.
+    if !git::has_commits(&p.main_root) {
+        ui.error("This repo has no commits yet — git cannot create a worktree off an unborn branch.");
+        ui.error(&format!("Make the first commit, then retry:  git -C {} commit --allow-empty -m \"Initial commit\"", p.main_root));
+        return 1;
+    }
     if base.is_empty() {
         base = p.default_base();
     }

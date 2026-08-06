@@ -40,12 +40,16 @@ type Place = {
   declared: Declared;
   lifecycle_effective: string;
 };
-type Snapshot = { repo: string; prefix: string; places: Place[] };
+/** `unborn`: the repo was `git init`ed but has no commits — it lists fine, yet
+ *  no worktree can be created off an unborn branch. The nav offers the first
+ *  commit rather than letting `new_place` fail on an invalid object name. */
+type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean };
 type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 type Workspace = { projects: ProjectView[] };
 /** `needs_confirm` (close only): core stopped because killing this session needs
  *  the user's word, and the string is the session that would die. Not a failure
  *  — a question, so it must never reach the error banner. */
+type DirProbe = { exists: boolean; is_git: boolean; has_commits: boolean };
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; needs_confirm?: string | null; warnings?: string[] };
 type Lens = "places" | "recent" | "attention";
 /** Last known `doctor` state for one project root. `slugs` decorates rows,
@@ -277,6 +281,64 @@ function NewPlaceForm({ project, initialBase, onCreate, onCancel }: {
       <input placeholder="base (default: main)" value={base}
         onChange={(e) => setBase(e.currentTarget.value)} onKeyDown={onKey} />
       <button onClick={submit} disabled={!branch.trim()}>Create</button>
+    </div>
+  );
+}
+
+// A picked folder that isn't a git repo. Offering `git init` here is the whole
+// point — the old path just said "Not inside a git repository." and stopped.
+// The empty first commit rides along because a repo without one cannot host a
+// worktree at all (git: "not a valid object name"), so init-only would just
+// move the dead end one click later. Module scope: keeps its busy flag across
+// App's re-renders.
+function InitRepoPrompt({ dir, onInit, onCancel }: {
+  dir: string;
+  onInit: (dir: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    await onInit(dir);
+    setBusy(false);
+  };
+  return (
+    <div className="newform nav-newform">
+      <div className="newform-h">
+        Not a git repo · <b>{basename(dir)}</b>
+        <button className="mini" title="cancel" onClick={onCancel}><Icons.X size={13} /></button>
+      </div>
+      <p className="newform-note">
+        <code>{dir}</code> isn't a git repository. Initialize it with an empty first commit?
+      </p>
+      <button disabled={busy} onClick={run}>{busy ? "Initializing…" : "git init + first commit"}</button>
+    </div>
+  );
+}
+
+// Tracked repo, unborn HEAD: `new` cannot work until a commit exists, so the
+// new-worktree form is replaced by the one action that unblocks it.
+function UnbornPrompt({ project, onCommit, onCancel }: {
+  project: string;
+  onCommit: (repo: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    await onCommit(project);
+    setBusy(false);
+  };
+  return (
+    <div className="newform nav-newform">
+      <div className="newform-h">
+        No commits yet · <b>{basename(project)}</b>
+        <button className="mini" title="cancel (Esc)" onClick={onCancel}><Icons.X size={13} /></button>
+      </div>
+      <p className="newform-note">
+        git can't branch off an unborn HEAD. Make the first commit, then create worktrees.
+      </p>
+      <button disabled={busy} onClick={run}>{busy ? "Committing…" : "Create initial commit"}</button>
     </div>
   );
 }
@@ -862,6 +924,8 @@ function App() {
   const [lens, setLens] = useState<Lens>("places");
   const [newFor, setNewFor] = useState<string | null>(null);
   const [newBase, setNewBase] = useState("");
+  // A picked folder that is not a repo yet, awaiting the `git init` offer.
+  const [initAsk, setInitAsk] = useState<string | null>(null);
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
   // The armed Close needs one fact more than `confirmRm` can carry: WHICH tmux
@@ -1307,10 +1371,38 @@ function App() {
     }
   };
 
+  // Roots whose repo has no commits yet — the new-worktree form is useless there.
+  const unbornProjects = useMemo(
+    () => new Set((ws?.projects ?? []).filter((p) => p.snapshot?.unborn).map((p) => p.root)),
+    [ws],
+  );
   const addProject = async () => {
     try {
       const dir = await open({ directory: true, title: "Add a git project" });
-      if (typeof dir === "string") { setErr(""); setWs(await invoke<Workspace>("add_project", { dir })); }
+      if (typeof dir !== "string") return;
+      setErr("");
+      // Probe BEFORE add_project: a plain folder is a normal thing to pick for a
+      // new project, and the answer is an offer (`git init`), not an error.
+      const probe = await invoke<DirProbe>("probe_dir", { dir });
+      if (!probe.is_git) {
+        setInitAsk(dir);
+        if (settings.nav_collapsed) toggleNav();
+        return;
+      }
+      setWs(await invoke<Workspace>("add_project", { dir }));
+    } catch (e) { fail(e); }
+  };
+  const initRepo = async (dir: string) => {
+    try {
+      setErr("");
+      setWs(await invoke<Workspace>("init_repo", { dir }));
+      setInitAsk(null);
+    } catch (e) { fail(e); }
+  };
+  const createInitialCommit = async (repo: string) => {
+    try {
+      setErr("");
+      setWs(await invoke<Workspace>("create_initial_commit", { repo }));
     } catch (e) { fail(e); }
   };
   const removeProject = async (root: string) => {
@@ -2053,14 +2145,25 @@ function App() {
           <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}><Icons.Search /></button>
         </div>
         <input ref={searchRef} className="search" placeholder="filter places…" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} />
+        {initAsk && (
+          <InitRepoPrompt dir={initAsk} onInit={initRepo} onCancel={() => setInitAsk(null)} />
+        )}
         {newFor && (
-          <NewPlaceForm
-            key={newFor + "|" + newBase}
-            project={newFor}
-            initialBase={newBase}
-            onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
-            onCancel={() => { setNewFor(null); setNewBase(""); }}
-          />
+          unbornProjects.has(newFor) ? (
+            <UnbornPrompt
+              project={newFor}
+              onCommit={createInitialCommit}
+              onCancel={() => { setNewFor(null); setNewBase(""); }}
+            />
+          ) : (
+            <NewPlaceForm
+              key={newFor + "|" + newBase}
+              project={newFor}
+              initialBase={newBase}
+              onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
+              onCancel={() => { setNewFor(null); setNewBase(""); }}
+            />
+          )
         )}
         <div className="nav-scroll">
           {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}

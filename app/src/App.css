@@ -646,6 +646,11 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 }
 .newform-h b { color: var(--txt); }
 .newform-h .mini { margin-left: auto; }
+/* explanatory line for the remediation prompts (git init / first commit) */
+.newform-note {
+  margin: 0; font-size: var(--fs-meta); color: var(--txt-mute); line-height: 1.4;
+}
+.newform-note code { word-break: break-all; color: var(--txt); }
 
 /* note */
 .note-strip {

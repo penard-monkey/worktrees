@@ -38,6 +38,23 @@ let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
 const mockTmuxStuck = location.search.includes("notmux=stuck");
 let mockTmux = !location.search.includes("notmux");
 const MOCK_SETTINGS_KEY = "wt-mock-ui-state"; // sessionStorage: see get_settings
+// Onboarding states a folder pick can land in (probe_dir). Same query-knob shape
+// as ?notmux: the state is chosen at load, and the path itself carries it so a
+// dir stays what it was picked as. `mockInited` is what init_repo /
+// create_initial_commit promote — once bootstrapped, a dir is a normal repo.
+const mockPickPrefix = location.search.includes("empty")
+  ? "empty-"
+  : location.search.includes("unborn")
+    ? "unborn-"
+    : "picked-";
+const mockInited = new Set<string>();
+function dirKind(dir: string): "repo" | "empty" | "unborn" {
+  if (mockInited.has(dir) || findProject(dir)) return "repo";
+  const base = dir.split("/").pop() || dir;
+  if (base.startsWith("empty-")) return "empty";
+  if (base.startsWith("unborn-")) return "unborn";
+  return "repo";
+}
 
 // ── project config / doctor / init (the Project sheet) ──────────────────────
 // STATEFUL, like mockCliVersion: relink clears the drift findings (so the badge
@@ -351,23 +368,43 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return clone(findProject(args.repo)?.snapshot ?? null);
 
     case "plugin:dialog|open": {
-      // simulate a native folder pick → a fresh project path
+      // simulate a native folder pick → a fresh project path. `?empty` picks a
+      // bare folder (drives the git-init offer), `?unborn` a repo with no
+      // commits (drives the first-commit offer); default stays a normal repo.
       dialogCount += 1;
-      return `/Users/demo/workspace/picked-${dialogCount}`;
+      return `/Users/demo/workspace/${mockPickPrefix}${dialogCount}`;
+    }
+    case "probe_dir": {
+      const dir: string = args.dir;
+      const kind = dirKind(dir);
+      return { exists: true, is_git: kind !== "empty", has_commits: kind === "repo" };
+    }
+    case "init_repo": {
+      // git init + empty first commit → the dir is a normal repo from here on.
+      mockInited.add(args.dir as string);
+      return mockInvoke("add_project", { dir: args.dir });
+    }
+    case "create_initial_commit": {
+      mockInited.add(args.repo as string);
+      const pv = findProject(args.repo);
+      if (pv?.snapshot) pv.snapshot.unborn = false;
+      return clone(ws);
     }
     case "add_project": {
       const root: string = args.dir;
       if (!findProject(root)) {
         const name = root.split("/").pop() || root;
+        const unborn = dirKind(root) === "unborn";
         ws.projects.push({
           root, ok: true, error: null,
           snapshot: {
-            repo: root, prefix: name,
+            repo: root, prefix: name, unborn,
             places: [{
               slug: "(main)", path: root, is_main: true, registered: true,
               branch: "main", detached: false, dirty: false, dirty_files: 0,
-              ahead: 0, behind: 0, last_commit_subject: "initial commit",
-              last_commit_epoch: now() - 86400,
+              ahead: 0, behind: 0,
+              last_commit_subject: unborn ? "" : "initial commit",
+              last_commit_epoch: unborn ? null : now() - 86400,
               tmux_session: { name: sessionName(name, "(main)"), up: false },
               claude_session_present: false, declared: null, lifecycle_effective: "closed",
             }],

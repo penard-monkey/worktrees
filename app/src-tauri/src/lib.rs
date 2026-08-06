@@ -19,7 +19,7 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{ops, store, sysclock, Project, Ui};
+use worktrees_core::{git, ops, store, sysclock, Project, Ui};
 
 // ── app log ──────────────────────────────────────────────────────────────────
 // Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
@@ -131,6 +131,10 @@ async fn log_tail(lines: Option<usize>) -> Result<String, String> {
 fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     let project = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
     let mut v = serde_json::to_value(project.ls()).map_err(|e| e.to_string())?;
+    // Unborn HEAD (git init, no commits): the repo lists fine but no worktree can
+    // be created from it. Carried on the snapshot so the nav can offer the first
+    // commit instead of letting `new` fail on an invalid object name.
+    v["unborn"] = serde_json::Value::Bool(!git::has_commits(&project.main_root));
     let store = store::read_lenient(repo);
     let now = sysclock::now_epoch();
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
@@ -226,6 +230,66 @@ async fn add_project(app: AppHandle, dir: String) -> Result<Workspace, String> {
         write_projects(&app, &roots)?;
     }
     list_workspace(app).await
+}
+
+/// What a picked folder actually IS, before we try to add it. The Add-project
+/// path needs to tell "not a repo" (offer `git init`) from "repo with no
+/// commits" (offer a first commit) apart — `add_project`'s flat error string
+/// can't carry that, and neither state is a dead end.
+#[derive(Serialize)]
+struct DirProbe {
+    exists: bool,
+    is_git: bool,
+    has_commits: bool,
+}
+
+#[tauri::command]
+async fn probe_dir(dir: String) -> Result<DirProbe, String> {
+    let exists = Path::new(&dir).is_dir();
+    let is_git = exists && git::git_ok(&dir, &["rev-parse", "--is-inside-work-tree"]);
+    let has_commits = is_git && git::has_commits(&dir);
+    Ok(DirProbe { exists, is_git, has_commits })
+}
+
+/// `git init` + an EMPTY first commit, then add the repo to the workspace. The
+/// commit is not optional politeness: without it HEAD is unborn and the very
+/// next thing the user does (new worktree) fails on an invalid object name.
+/// `--allow-empty` keeps it a pure bootstrap — no file is added or touched.
+#[tauri::command]
+async fn init_repo(app: AppHandle, dir: String) -> Result<Workspace, String> {
+    if !Path::new(&dir).is_dir() {
+        return Err(format!("{dir} is not a directory"));
+    }
+    if !git::git_ok(&dir, &["rev-parse", "--is-inside-work-tree"]) {
+        git::git_status_captured(&dir, &["init"]).map_err(|e| {
+            applog("error", &format!("git init failed in {dir}: {e}"));
+            e
+        })?;
+    }
+    if !git::has_commits(&dir) {
+        first_commit(&dir)?;
+    }
+    add_project(app, dir).await
+}
+
+/// Bootstrap commit for a repo that IS tracked but has an unborn HEAD.
+#[tauri::command]
+async fn create_initial_commit(app: AppHandle, repo: String) -> Result<Workspace, String> {
+    if git::has_commits(&repo) {
+        return list_workspace(app).await;
+    }
+    first_commit(&repo)?;
+    list_workspace(app).await
+}
+
+/// The empty bootstrap commit. Git refuses to commit without an identity, and
+/// its stderr says exactly which `git config` line is missing — pass it through
+/// rather than paraphrasing.
+fn first_commit(dir: &str) -> Result<(), String> {
+    git::git_status_captured(dir, &["commit", "--allow-empty", "-m", "Initial commit"]).map_err(|e| {
+        applog("error", &format!("initial commit failed in {dir}: {e}"));
+        e
+    })
 }
 
 #[tauri::command]
@@ -2450,6 +2514,9 @@ pub fn run() {
             list_places,
             list_workspace,
             add_project,
+            probe_dir,
+            init_repo,
+            create_initial_commit,
             remove_project,
             set_lifecycle,
             set_pin,

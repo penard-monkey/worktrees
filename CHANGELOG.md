@@ -24,6 +24,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   re-renders from scratch, which destroys every hand-set `mode = "copy"` and the
   comment explaining why. This writes nothing: paths the parser refuses come out
   commented with the reason, exactly as `init` emits them.
+- Adding a folder that isn't a git repository now offers `git init` plus an empty
+  first commit, instead of refusing with "Not inside a git repository." A repo
+  that has no commits yet is spotted in the nav too: the new-worktree form is
+  replaced by a "Create initial commit" action, because git cannot branch off an
+  unborn HEAD.
+
+### Fixed
+- `worktrees new` in a repo with no commits used to fail with git's own riddle
+  (`fatal: not a valid object name: 'main'`). It now refuses up front, naming the
+  cause and the one command that unblocks it.
 
 ## [0.8.0] - 2026-08-03
 
