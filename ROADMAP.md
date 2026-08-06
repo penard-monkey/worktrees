@@ -175,8 +175,19 @@ close-out ritual (.claude/skills/close-out).
 - **Smoke-test the usage widget on a real launch.** v0.7.0's nav-footer
   bars are verified against the endpoint via curl and in the mock harness,
   but the built app's Keychain path (one-time prompt for "Claude
-  Code-credentials") hasn't been exercised end-to-end.
-  _From: [2026-08-02 usage-widget session](docs/sessions/2026-08-02-usage-widget/summary.md)_
+  Code-credentials") hasn't been exercised end-to-end. Now also covers the
+  reset countdowns: `resets_at` has only ever been read through the tooltip on
+  the real oauth path, so the live `2d 5h` has never been seen outside the mock.
+  _From: [2026-08-02 usage-widget session](docs/sessions/2026-08-02-usage-widget/summary.md),
+  [2026-08-06 usage-countdown session](docs/sessions/2026-08-06-usage-countdown/summary.md)_
+
+- **CI has never run against the countdown change.** PR #82 merged while
+  GitHub's queue was backed up and no workflow run was ever created, so
+  `--auto` had no required check to wait on. Local gates cover everything
+  ci.yml does except the app-crate build on ubuntu — glance at the next run on
+  main and, if the queue keeps swallowing runs, consider whether a required
+  check should gate merges at all (today nothing does).
+  _From: [2026-08-06 usage-countdown session](docs/sessions/2026-08-06-usage-countdown/summary.md)_
 
 - **Usage credits in the widget.** The oauth/usage endpoint's `spend` object
   carries extra-usage credits (balance, cap, severity); skipped in v0.7.0
