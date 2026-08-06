@@ -1,3 +1,7 @@
+---
+title: "Session: right dock — file browser, editable viewer, embedded terminals"
+---
+
 # Session: right dock — file browser, editable viewer, embedded terminals
 
 - **Dates:** 2026-07-27 → 2026-07-28

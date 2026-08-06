@@ -1,3 +1,7 @@
+---
+title: "Session: close-out ritual + session archive system"
+---
+
 # Session: close-out ritual + session archive system
 
 - **Date:** 2026-07-27

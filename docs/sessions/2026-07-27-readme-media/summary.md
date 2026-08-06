@@ -1,3 +1,7 @@
+---
+title: "README desktop-app media — session summary"
+---
+
 # README desktop-app media — session summary
 
 - **Date:** 2026-07-27

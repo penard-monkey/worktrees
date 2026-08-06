@@ -1,3 +1,7 @@
+---
+title: "Session: right panel, icon set, owned dock shells, nav fixes → v0.5.0"
+---
+
 # Session: right panel, icon set, owned dock shells, nav fixes → v0.5.0
 
 - **Date**: 2026-07-29 → 2026-07-30

@@ -108,13 +108,37 @@ close-out ritual (.claude/skills/close-out).
   _From: 2026-07-27 readme-media session_
 
 - **Dock file viewer: in-app editing, if it is ever wanted again.** The viewer
-  is now read-only and renders markdown/code/images (2026-08-02 session); the
-  textarea and its save path are gone. Bringing editing back means CodeMirror or
-  equivalent — a real decision, not a default. The read-mode highlighter is
-  hand-rolled (`app/src/highlight.ts`) and deliberately approximate: it does not
-  parse, so exotic constructs can mis-colour. Known gaps: Rust char literals are
-  uncoloured (the same rule that keeps `&'a str` lifetimes correct), and `.m` is
-  assumed C-like rather than MATLAB.
+  is now read-only and renders markdown/code/images. Bringing editing back means
+  CodeMirror or equivalent — a real decision, not a default. The read-mode
+  highlighter is hand-rolled (`app/src/highlight.ts`) and deliberately
+  approximate: it does not parse, so exotic constructs can mis-colour. Known
+  gaps: Rust char literals are uncoloured (the same rule that keeps `&'a str`
+  lifetimes correct), and `.m` is assumed C-like rather than MATLAB.
+  _From: [2026-08-03 files-viewer session](docs/sessions/2026-08-03-files-viewer/summary.md)_
+
+- **Smoke the v0.8.0 Files tab in the REAL app** — shipped on mock-harness
+  evidence only. Three things the mock cannot prove: `read_file_base64` against
+  real bytes (a multi-MB PNG, the 4 MiB truncation branch), the refusal of
+  `file:`/`data:` links in a real WKWebView, and whether WKWebView's middle-click
+  follows an href the way Chromium does. Also worth eyeballing a big real README
+  and a deep tree for scroll/perf.
+  _From: [2026-08-03 files-viewer session](docs/sessions/2026-08-03-files-viewer/summary.md)_
+
+- **A global React error boundary.** There is none above `App` (`main.tsx`
+  renders `<App/>` bare), so any uncaught throw unmounts the root and leaves a
+  blank window with no way back but a restart. The Files tab now has a local
+  `ViewErrorBoundary`, which only covers the viewer body. A top-level boundary
+  that shows the error and offers a reload — routed through `applog` — would
+  turn a class of crashes into a recoverable pane.
+  _From: [2026-08-03 files-viewer session](docs/sessions/2026-08-03-files-viewer/summary.md)_
+
+- **Markdown viewer gaps** (all small, none blocking): only 7 HTML entities are
+  decoded (`&copy;`, `&hellip;`, numeric refs render literally — zero occurrences
+  in this repo's docs today); heading slugs are GitHub-style but not
+  de-duplicated, so two headings with the same text share an id; a 1000-level
+  nested list takes ~1.2s to build; footnotes (`[^1]`) render as literal text
+  since marked core has no footnote extension.
+  _From: [2026-08-03 files-viewer session](docs/sessions/2026-08-03-files-viewer/summary.md)_
 
 - **Smoke the v0.5.0 dock + drag in the real app** — neither is verifiable in
   the mock harness: (1) manual sort drag (fix was `dragDropEnabled:false`;

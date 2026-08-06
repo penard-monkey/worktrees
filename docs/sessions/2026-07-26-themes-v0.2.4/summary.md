@@ -1,3 +1,7 @@
+---
+title: "Session: light mode + theme gallery → v0.2.4"
+---
+
 # Session: light mode + theme gallery → v0.2.4
 
 - **Date:** 2026-07-26 → 2026-07-27

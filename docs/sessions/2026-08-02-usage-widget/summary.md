@@ -1,3 +1,7 @@
+---
+title: "Session: Claude plan-usage widget → v0.7.0"
+---
+
 # Session: Claude plan-usage widget → v0.7.0
 
 - **Date:** 2026-08-01 → 2026-08-02
