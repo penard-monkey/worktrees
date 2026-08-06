@@ -41,6 +41,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   replaced by a "Create initial commit" action, because git cannot branch off an
   unborn HEAD.
 
+### Changed
+- **The nav tree now ranks the project above its places.** With one project open
+  the header's position carried it; with several, the eye found `★ bug-fixes`
+  before it found the repo that owns it — the project name was literally smaller
+  type than its own children (13px against a 15px slug, same colour, no rule
+  between projects). The name now matches a slug's size at bold weight, projects
+  are separated by a hairline, and the header **sticks to the top of the nav**
+  while you scroll its places, so a long PINNED list can't orphan its rows.
+- **Dormant recedes by fading, not by banding.** The dark full-bleed rectangle
+  was darker as designed, but a hard-edged rect reads as a divider rather than
+  as depth: it cut across the tree and, sitting last in each project, doubled as
+  a false separator competing with the next project header. The group now sits
+  at 62% opacity with no fill, and comes back to full on hover, on keyboard
+  focus, and whenever the place you're standing in lives inside it. Its caret is
+  the same SVG chevron every other group header uses.
+
 ### Fixed
 - `worktrees new` in a repo with no commits used to fail with git's own riddle
   (`fatal: not a valid object name: 'main'`). It now refuses up front, naming the

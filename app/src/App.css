@@ -190,9 +190,19 @@ button { cursor: pointer; }
 
 /* ── project node ── */
 .project { margin-top: var(--s2); }
+/* Between projects only: a hairline + extra air. It scrolls away with the
+   project it opens, so the STUCK header never carries a stray rule. */
+.project + .project { margin-top: var(--s3); border-top: 1px solid var(--line); }
+/* Sticky: with several projects open, the header of the one you're scrolling
+   through must stay on screen — otherwise a long PINNED list orphans its rows.
+   .nav-scroll is the scroll container; each header sticks inside its own
+   .project box, so the next one pushes the previous out (native stacking).
+   Opaque --bg-tree is load-bearing: rows slide UNDER this. */
 .project-h {
+  position: sticky; top: 0; z-index: 2;
   display: flex; align-items: center; gap: var(--s2);
   padding: var(--s2) var(--s3); font-size: var(--fs-label);
+  background: var(--bg-tree);
 }
 .caret { color: var(--txt-mute); font-size: var(--fs-meta); cursor: pointer; width: 10px; }
 /* project icon; a busy child shows as a small pulsing badge on its corner */
@@ -211,8 +221,13 @@ button { cursor: pointer; }
   background: var(--warn); box-shadow: 0 0 0 2px var(--bg-tree);
 }
 .rollup.broken { background: transparent; color: var(--danger); width: auto; height: auto; }
+/* The project must out-rank its own children. It used to be --fs-label (13px)
+   against --fs-row (15px) slugs, so with 3 projects open the eye found
+   "★ bug-fixes" before it found the repo it lives in. Same size as a slug,
+   heavier, slightly tracked out — the rule + sticky do the rest. */
 .pname {
-  flex: 1; font-weight: var(--fw-bold); color: var(--txt-hi); cursor: pointer;
+  flex: 1; font-size: var(--fs-row); font-weight: var(--fw-bold);
+  letter-spacing: 0.01em; color: var(--txt-hi); cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .pcount {
@@ -311,8 +326,17 @@ html[data-guides="off"] .kids-d::before,
 html[data-guides="off"] .group > .places::before,
 html[data-guides="off"] .subgroup > .places::before,
 html[data-guides="off"] .kids > .places::after { display: none; }
-/* dormant recession: darker = deader (full-bleed — rail x-math needs left edge at 0) */
-.group.dormant { background: var(--bg-abyss); border-radius: var(--r-md); }
+/* Dormant recession by FADE, not by fill. The old --bg-abyss band was darker
+   as designed, but a hard-edged full-bleed rectangle is a figure, not a
+   ground: it cut the tree horizontally and, sitting last in a project, doubled
+   as a false separator competing with the next project header. Opacity
+   recedes without drawing an edge. Restore on hover / focus-within so the
+   group stays reachable, and on a selected descendant so entering a dormant
+   place doesn't leave the row you're standing in dimmed. */
+.group.dormant { opacity: 0.62; transition: opacity var(--dur-fast); }
+.group.dormant:hover,
+.group.dormant:focus-within,
+.group.dormant:has(.row.sel) { opacity: 1; }
 
 /* ── place row (3-col grid → glyphs can never collide) ── */
 .places { list-style: none; margin: 0; padding: 0 var(--s2) 0 0; }

@@ -2087,7 +2087,9 @@ function App() {
               return (
                 <div className="group dormant" key={key}>
                   <div className="group-h dormant-h" onClick={() => toggleGroup(key, false)}>
-                    <span className="caret">{opened ? "▾" : "▸"}</span>
+                    {/* same SVG caret as every other group header — the ASCII
+                        ▾/▸ was one more thing making the quietest row louder */}
+                    <span className="caret">{opened ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
                     Dormant<span className="count">{dormant.length}</span>
                   </div>
                   {opened && (
