@@ -264,6 +264,49 @@ Both are development loops. To actually *use* a locally built app, see
 `make install-app` under [Install](#install) — that produces the bundle and puts
 it in `/Applications`.
 
+### Scripts
+
+| Script | What it does | Touches |
+|---|---|---|
+| `sandbox.sh` | Builds the current branch and hands you an isolated worktrees to test it in. `--app` launches the desktop app against it. | a scratch repo, or one you name with `--repo` |
+| `record-readme.sh` | Regenerates the README's desktop media (`docs/media/desktop-*.{gif,png}`). | nothing — mock harness |
+| `shoot-profiles.sh` | Regenerates the AI-profiles screenshots for `docs/ai-profiles.html`. | nothing — mock harness |
+| `record-profiles.sh` | Regenerates that page's walkthrough clip (`walkthrough.mp4`). | nothing — mock harness |
+
+The three media scripts drive the **mock harness** — the real `App.tsx` against
+fixtures, in a plain browser — so they are deterministic and cannot touch your
+projects. The `.py` file beside each is the Playwright driver; run the `.sh`,
+which starts the harness, waits for it, drives it, encodes, and cleans up.
+
+`sandbox.sh` is the exception: it builds and runs the REAL binary, against a
+scratch repo by default and against whatever you pass to `--repo` if you ask.
+
+They need Python Playwright and Chromium once — `pip install playwright &&
+playwright install chromium` — plus `ffmpeg` for the two that record video.
+
+#### Testing a branch without disturbing an app you already have open
+
+```sh
+eval "$(app/scripts/sandbox.sh)"    # CLI: isolated env + a scratch repo
+app/scripts/sandbox.sh --app        # …or the desktop app against that sandbox
+app/scripts/sandbox.sh --clean
+```
+
+This matters more than it sounds. tmux session names are `<prefix>-<slug>`
+derived from the repo, so **a second build computes the same name and attaches to
+the session your open app is using** — closing it in one kills it in the other.
+The sandbox takes a per-branch prefix (`sbx-<branch>-<slug>`), which both
+prevents that and is how you tell them apart:
+
+```sh
+tmux ls | grep sbx-      # sandboxes, one prefix per branch
+tmux ls | grep -v sbx-   # yours, untouched
+```
+
+It also isolates the AI-profile store and, with `--app`, overrides the bundle
+identifier so the sandbox app gets its own `ui-state.json` instead of sharing
+yours.
+
 ## License
 
 MIT

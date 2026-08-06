@@ -30,6 +30,20 @@ pub struct Declared {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_opened_epoch: Option<i64>,
+    /// The AI profile this place's session was last STARTED with, and that
+    /// profile's `updated_epoch` at the time.
+    ///
+    /// Recorded so the UI can say "this session is running an older version of
+    /// the profile — restart to pick up your edits". Without a stamp there is
+    /// nothing to compare a profile's current `updated_epoch` against, and the
+    /// badge would either never appear or always appear.
+    ///
+    /// NOT written when a launch merely attaches to a session that was already
+    /// up: that session is still running whatever it started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_epoch: Option<i64>,
     #[serde(flatten)]
     pub extra: Map<String, serde_json::Value>,
 }

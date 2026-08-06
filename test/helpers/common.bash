@@ -34,7 +34,12 @@ common_setup() {
   # XDG_STATE_HOME for the same reason as XDG_CONFIG_HOME: `init`'s once-only
   # hint marker lives under it, and a developer who exports it would have the
   # suite writing into (and reading back) their real state dir between runs.
-  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME || true
+  # XDG_DATA_HOME and WORKTREES_PROFILE join them for AI profiles (profile.rs):
+  # the data dir is where a profile's materialized claude config lives, and
+  # WORKTREES_PROFILE is the top rung of the profile resolution chain — read on
+  # every `ls` snapshot. An exported XDG_DATA_HOME (common on Linux and in
+  # dotfile setups) would put the suite in the developer's real ~/.local/share.
+  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME WORKTREES_PROFILE || true
 
   make_repo
 }

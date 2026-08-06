@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import ProfilesPanel from "./ProfilesPanel";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, THEMES } from "./settings";
 
@@ -18,6 +19,7 @@ const CATS = [
   { id: "terminal", label: "Terminal" },
   { id: "navigation", label: "Navigation" },
   { id: "commands", label: "Commands" },
+  { id: "ai", label: "AI profiles" },
   { id: "behavior", label: "Behavior" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
@@ -40,6 +42,8 @@ export function SettingsSheet({
   onCheckUpdate,
   onShowNotes,
   onReset,
+  repo,
+  onReport,
 }: {
   open: boolean;
   settings: Settings;
@@ -52,6 +56,10 @@ export function SettingsSheet({
   onCheckUpdate: () => Promise<void> | void;
   onShowNotes: () => void;
   onReset: () => void;
+  /// The project in focus — AI profiles can be bound per repo, so the panel
+  /// needs to know which one to report as effective. Empty is fine (global view).
+  repo: string;
+  onReport: (msg: string) => void;
 }) {
   // Selected category — local, deliberately NOT persisted: the sheet always
   // opens on Appearance so "where was I" never depends on last session.
@@ -262,6 +270,8 @@ export function SettingsSheet({
             />
           </section>
           </>}
+
+          {cat === "ai" && <ProfilesPanel key={repo || "none"} repo={repo} onReport={onReport} />}
 
           {cat === "commands" && <>
           <section className="setting">

@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI profiles — worktrees</title>
+<meta name="description" content="Set your Claude rules, skills and MCP servers once, and have them apply to every worktree session — without touching your normal terminal setup.">
+<style>
+  /* Palette lifted from the app's own tokens.css, so the page and the product
+     look like the same thing. No CDN, no external font, no script — this file
+     plus the images beside it are the whole page. */
+  :root {
+    --abyss:#0f0f16; --tree:#16161e; --panel:#1a1b26; --elev:#1e2030; --input:#12131c;
+    --line:#252838; --line-strong:#33384f;
+    --txt-hi:#e6eaff; --txt:#c0caf5; --txt-dim:#8a93bf; --txt-mute:#565f89;
+    --accent:#7aa2f7; --ok:#9ece6a; --ai:#bb9af7; --warn:#ff9e64; --danger:#f7768e;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",monospace;
+    --ui: ui-sans-serif,-apple-system,"Inter",system-ui,sans-serif;
+    --maxw: 1080px;
+  }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body {
+    margin:0; background:var(--abyss); color:var(--txt);
+    font:400 17px/1.65 var(--ui); -webkit-font-smoothing:antialiased;
+  }
+  a { color:var(--accent); }
+  code, .mono { font-family:var(--mono); font-size:.92em; }
+  .wrap { max-width:var(--maxw); margin:0 auto; padding:0 24px; }
+
+  /* ── hero ─────────────────────────────────────────────────────────── */
+  header.hero { padding:96px 0 56px; border-bottom:1px solid var(--line); }
+  .eyebrow {
+    display:inline-block; font-family:var(--mono); font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--ai); border:1px solid var(--line-strong);
+    border-radius:999px; padding:5px 12px; margin-bottom:22px;
+  }
+  h1 { font-size:clamp(34px,5.2vw,56px); line-height:1.1; margin:0 0 20px;
+       color:var(--txt-hi); font-weight:600; letter-spacing:-.02em; }
+  h1 em { font-style:normal; color:var(--accent); }
+  .lede { font-size:clamp(18px,2.2vw,21px); color:var(--txt-dim); max-width:64ch; margin:0 0 14px; }
+  .lede strong { color:var(--txt); font-weight:500; }
+  figure { margin:0; }
+  .shot {
+    display:block; width:100%; height:auto; border:1px solid var(--line);
+    border-radius:12px; background:var(--panel);
+  }
+  .hero figure { margin-top:44px; }
+  /* The clip autoplays: 18s, silent, looping, with controls so it can be
+     stopped. There is no CSS-only way to honour prefers-reduced-motion for
+     video playback, and this page ships no script by design — so rather than
+     leave a rule that looks like it handles that and does not, the trade is
+     stated here. `controls` is the mitigation. */
+  video.shot { display:block; }
+  figcaption { color:var(--txt-mute); font-size:14px; margin-top:10px; }
+
+  /* ── layout ───────────────────────────────────────────────────────── */
+  section { padding:72px 0; border-bottom:1px solid var(--line); }
+  h2 { font-size:clamp(24px,3vw,32px); color:var(--txt-hi); font-weight:600;
+       letter-spacing:-.01em; margin:0 0 8px; }
+  .sub { color:var(--txt-dim); max-width:62ch; margin:0 0 34px; }
+  .flow { display:grid; grid-template-columns:1fr 1fr; gap:40px; align-items:start; }
+  .flow.rev > figure { order:2; }
+  @media (max-width:860px){ .flow{grid-template-columns:1fr;} .flow.rev > figure{order:0;} }
+  .flow h3 { font-size:20px; color:var(--txt-hi); margin:0 0 10px; font-weight:600; }
+  .flow p { margin:0 0 14px; }
+  ul.ticks { list-style:none; padding:0; margin:16px 0 0; }
+  ul.ticks li { position:relative; padding-left:26px; margin-bottom:10px; color:var(--txt-dim); }
+  ul.ticks li::before { content:"→"; position:absolute; left:0; color:var(--accent); }
+
+  /* ── terminal blocks ──────────────────────────────────────────────── */
+  pre.term {
+    background:var(--input); border:1px solid var(--line); border-radius:10px;
+    padding:16px 18px; overflow-x:auto; font-family:var(--mono); font-size:13.5px;
+    line-height:1.7; color:var(--txt); margin:0;
+  }
+  pre.term .c { color:var(--txt-mute); }      /* comment */
+  pre.term .p { color:var(--ok); }            /* prompt  */
+  pre.term .w { color:var(--warn); }          /* warning */
+  pre.term .a { color:var(--accent); }        /* flag    */
+
+  /* ── callouts ─────────────────────────────────────────────────────── */
+  .note {
+    border-left:2px solid var(--warn); background:rgba(255,158,100,.06);
+    padding:14px 18px; border-radius:0 8px 8px 0; color:var(--txt-dim); margin:22px 0 0;
+  }
+  .note b { color:var(--warn); font-weight:600; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px; margin-top:30px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; }
+  .card h4 { margin:0 0 8px; color:var(--txt-hi); font-size:16px; font-weight:600; }
+  .card p { margin:0; color:var(--txt-dim); font-size:15px; }
+  .card.no h4 { color:var(--danger); }
+
+  footer { padding:56px 0 80px; color:var(--txt-mute); font-size:14px; }
+  footer a { color:var(--txt-dim); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="eyebrow">worktrees · AI profiles</span>
+    <h1>Your Claude setup, <em>per project</em> —<br>without touching your terminal.</h1>
+    <p class="lede">
+      Every new session starts from scratch. You re-explain the same conventions, re-enable the same
+      skills, and hope you remembered. <strong>AI profiles fix that once.</strong>
+    </p>
+    <p class="lede">
+      Define rules, skills, MCP servers and a model in the worktrees UI. Every session worktrees
+      launches gets them. Your normal <code>claude</code> in a terminal is completely untouched.
+    </p>
+    <figure>
+      <video class="shot" src="media/profiles/walkthrough.mp4" poster="media/profiles/hero.png"
+             autoplay loop muted playsinline controls
+             aria-label="Creating an AI profile: opening Settings, adding rules, enabling a skill, and seeing the badge on a live session"></video>
+      <figcaption>
+        Settings → AI profiles → rules → a skill → and the badge on a live session. 18 seconds, no narration.
+      </figcaption>
+    </figure>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>Update your instructions once</h2>
+    <p class="sub">
+      The workflow this exists for. Change a rule, and every session that starts afterwards has it —
+      no copy-pasting into a fresh chat, no per-repo <code>CLAUDE.md</code> to keep in sync.
+    </p>
+    <div class="flow">
+      <figure>
+        <img class="shot" src="media/profiles/panel-rules.png" alt="The rules editor inside the AI profiles panel">
+      </figure>
+      <div>
+        <h3>Settings → AI profiles → Rules</h3>
+        <p>
+          Plain text. It becomes the session's system prompt — visible in <code>/context</code>,
+          surviving <code>/clear</code>, and not eating your conversation history.
+        </p>
+        <ul class="ticks">
+          <li>Applies to every worktree you open, in every project</li>
+          <li>Or bind a different profile to one repo</li>
+          <li>Live sessions tell you they need a restart, rather than silently drifting</li>
+        </ul>
+        <div class="note">
+          <b>Said plainly:</b> a profile <em>adds</em> to your global <code>~/.claude/CLAUDE.md</code>.
+          It cannot suppress it. Nothing we could do would — claude reads that file regardless — so
+          the UI says so instead of letting you find out.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Different rules for different work</h2>
+    <p class="sub">
+      A client repo and a side project rarely want the same instructions. Set a global default, then
+      override it per project.
+    </p>
+    <div class="flow rev">
+      <figure>
+        <img class="shot" src="media/profiles/panel-project.png" alt="Per-project AI profile picker in the project sheet">
+      </figure>
+      <div>
+        <h3>One picker, no merge rules to learn</h3>
+        <p>
+          A project profile <strong>replaces</strong> the default — the two do not merge. That is a
+          deliberate choice: merge semantics are the thing nobody remembers correctly at 6pm.
+        </p>
+        <ul class="ticks">
+          <li><code>worktrees open</code> from a terminal applies the same profile the app would</li>
+          <li><code>WORKTREES_PROFILE=none</code> opts a single launch out</li>
+          <li>The picker disables itself if an environment variable already decided</li>
+        </ul>
+        <div class="note">
+          <b>Before you click:</b> conversation history lives with the profile, so binding one to a
+          repo that already has chats starts a fresh one. Nothing is deleted — unbind and the old
+          conversation comes back. The picker warns first.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Skills you can actually trust</h2>
+    <p class="sub">
+      Install a skill from a folder or a git URL, and enable it per profile. An installed skill's
+      description is loaded into <em>every</em> session before anything invokes it — so installing one
+      is closer to running someone else's prompt than to copying a file. The UI treats it that way.
+    </p>
+    <div class="flow">
+      <figure>
+        <img class="shot" src="media/profiles/panel-review.png" alt="The skill review gate showing capabilities and the full SKILL.md before install">
+      </figure>
+      <div>
+        <h3>Read it before it lands</h3>
+        <p>
+          Paste a URL and hit <em>Review</em>. worktrees clones it, reads it, throws the clone away,
+          and shows you the whole <code>SKILL.md</code> plus anything it asks for beyond reading files.
+          Nothing is installed yet.
+        </p>
+        <ul class="ticks">
+          <li>Installing never executes anything from the source</li>
+          <li>Pinned to the exact commit you reviewed</li>
+          <li>If the branch moved since, it refuses instead of installing something else</li>
+          <li>A symlink anywhere inside is rejected outright</li>
+        </ul>
+      </div>
+    </div>
+    <pre class="term"><span class="c"># the same gate from the CLI</span>
+<span class="p">$</span> worktrees skills add <span class="a">--git</span> https://github.com/acme/claude-skills
+<span class="w">!</span> 'deploy-helper' asks for capabilities beyond reading files:
+<span class="w">!</span>   pre-authorises tools: Bash(rm:*)
+  Review it, then re-run with <span class="a">--yes</span> to install.</pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Give Claude the worktree layer</h2>
+    <p class="sub">
+      A session running inside a worktree can drive worktrees itself, as tools, instead of
+      reverse-engineering your layout with raw git.
+    </p>
+    <div class="flow rev">
+      <figure>
+        <img class="shot" src="media/profiles/panel-mcp.png" alt="MCP server toggles in the profile editor">
+      </figure>
+      <div>
+        <h3>Read-only by default</h3>
+        <p>
+          Toggle it on per profile. It lists places, reports status, and reads notes — and that is all,
+          unless you say otherwise.
+        </p>
+        <ul class="ticks">
+          <li>Pinned to the repo it was launched in; no tool takes a path</li>
+          <li>Worktree mutations are opt-in, per profile</li>
+          <li>Removing a worktree needs explicit confirmation on top of that</li>
+          <li>Turn <em>off</em> “also load my global MCP servers” and the profile's set is the whole
+            set — that is how a profile <em>removes</em> a noisy server, not just adds to one</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Know what a session is actually running</h2>
+    <p class="sub">
+      The quiet failure mode of any config layer is not knowing whether it applied. The badge answers
+      that without being asked.
+    </p>
+    <figure>
+      <img class="shot" src="media/profiles/badge.png" alt="Topbar badge reading: Work · restart to apply" style="max-width:420px">
+      <figcaption>Edit a profile while a session is live and it says so.</figcaption>
+    </figure>
+    <div class="cards">
+      <div class="card">
+        <h4>Scoped honestly</h4>
+        <p>“Restart to apply” covers rules, model, MCP and settings. Skill edits already reach a
+          running session, so it does not claim them.</p>
+      </div>
+      <div class="card">
+        <h4>Never a false positive</h4>
+        <p>Clicking through the editor without changing anything does not mark your sessions stale.</p>
+      </div>
+      <div class="card">
+        <h4>Fails closed</h4>
+        <p>If a profile can't be applied, the pane opens on a shell with the reason — it does not
+          quietly launch claude without your restrictions.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Each profile signs in once, by itself</h2>
+    <p class="sub">
+      Claude keys its saved sign-in to the config directory it is given, so every profile gets its own.
+      <strong>worktrees never copies, reads or stores a credential</strong> to make that work.
+    </p>
+    <div class="flow">
+      <figure>
+        <img class="shot" src="media/profiles/panel-list.png" alt="Profile list showing a needs-sign-in tag">
+      </figure>
+      <div>
+        <h3>The first launch asks — and we tell you first</h3>
+        <p>
+          A new profile's first pane shows <code>Not logged in · Run /login</code>. That is correct, and
+          it reads as broken unless something says so in advance — so the list tags it
+          <em>needs sign-in</em> before you ever open it.
+        </p>
+        <ul class="ticks">
+          <li>Signing in to a profile does not touch your main login</li>
+          <li>Deleting a profile tells you what it left behind, instead of pretending to clean it</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>What it is not</h2>
+    <p class="sub">
+      Three things are easy to assume here, and all three are wrong. Better to read them now than to
+      discover them.
+    </p>
+    <div class="cards">
+      <div class="card no">
+        <h4>Not a sandbox against the repo</h4>
+        <p>A worktree's own committed <code>.claude/settings.json</code>, <code>.mcp.json</code> and
+          <code>CLAUDE.md</code> still load. A profile controls your user scope, not the project's.</p>
+      </div>
+      <div class="card no">
+        <h4>Not able to mute your global rules</h4>
+        <p><code>~/.claude/CLAUDE.md</code> and anything it imports load in every profiled session.
+          Profiles add; they do not remove.</p>
+      </div>
+      <div class="card no">
+        <h4>Not free trust</h4>
+        <p>Trust is mirrored from your own claude, never invented. A freshly cloned repo still gets
+          asked — turning on a profile is never weaker than running claude normally.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Never open the app? It all works from the terminal</h2>
+    <p class="sub">
+      The app is a front end for the same engine. <code>worktrees open</code> resolves the same
+      profile the app would — one resolver, so the two cannot disagree about what a session is
+      running.
+    </p>
+    <div class="cards">
+      <div class="card">
+        <h4>Profiles</h4>
+        <p><code>~/.config/worktrees/profiles.json</code> is plain JSON, hand-editable, and read by
+          both the CLI and the app.</p>
+      </div>
+      <div class="card">
+        <h4>Skills</h4>
+        <p><code>worktrees skills</code> runs anywhere — it does not need to be inside a repo,
+          because the store is yours, not a project's.</p>
+      </div>
+      <div class="card">
+        <h4>Escape hatch</h4>
+        <p><code>WORKTREES_PROFILE=none</code> on a single launch, or <code>"none"</code> anywhere in
+          the chain, opts out entirely.</p>
+      </div>
+    </div>
+    <pre class="term" style="margin-top:26px"><span class="c"># install a skill from a folder, or a pinned commit</span>
+<span class="p">$</span> worktrees skills add ~/src/my-skill
+<span class="p">$</span> worktrees skills add <span class="a">--git</span> https://github.com/acme/claude-skills <span class="a">--pick</span> deploy-helper
+<span class="p">$</span> worktrees skills list
+  deploy-helper  (git https://github.com/acme/claude-skills@1f4c9ab2)
+    Prepares a release branch and runs the gates.
+    <span class="w">! pre-authorises tools: Bash(git push:*)</span>
+
+<span class="c"># see what a skill would tell the model, before enabling it anywhere</span>
+<span class="p">$</span> worktrees skills show deploy-helper
+
+<span class="c"># open a worktree — the bound profile applies here exactly as in the app</span>
+<span class="p">$</span> worktrees open feat-x
+
+<span class="c"># …or deliberately without it</span>
+<span class="p">$</span> WORKTREES_PROFILE=none worktrees open feat-x
+
+<span class="c"># the MCP server, if you want to wire it up by hand</span>
+<span class="p">$</span> worktrees mcp <span class="c"># stdio; add --mutations to allow worktree changes</span></pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Try it</h2>
+    <pre class="term"><span class="c"># in the app: Settings → AI profiles → New profile</span>
+<span class="c"># or by hand, shared with the CLI:</span>
+<span class="p">$</span> $EDITOR ~/.config/worktrees/profiles.json
+
+<span class="c"># skills</span>
+<span class="p">$</span> worktrees skills add ~/my-skill
+<span class="p">$</span> worktrees skills list
+
+<span class="c"># open a worktree — the profile applies to both the app and the CLI</span>
+<span class="p">$</span> worktrees open feat-x
+<span class="c"># first launch of a profile asks you to /login once, in the pane</span></pre>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      Part of <a href="https://github.com/penard-monkey/worktrees">worktrees</a> — one git worktree per
+      branch, one tmux session per worktree.
+    </p>
+    <p>
+      Screenshots are generated from the app's own mock harness
+      (<code>app/scripts/shoot-profiles.sh</code>), so they regenerate deterministically and cannot
+      drift from the UI.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -77,17 +77,90 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
     }
 }
 
+/// THE seam where a profile turns a bare `ai_cmd` into the real launch shape.
+///
+/// One function, called by every launch path (`new`, `open`, and the app's
+/// direct main-checkout launch), so the CLI and the app cannot diverge on which
+/// profile a place gets — a `worktrees open` from a bare terminal must produce
+/// the same session the app would, or an unprofiled CLI session gets silently
+/// ADOPTED by the app and displayed as though it were profiled.
+///
+/// Phase 4 is deliberately behaviour-preserving: it returns the plain launch and
+/// leaves the env/flag composition to the claude adapter. What it establishes is
+/// that `env` and `match_word` travel BESIDE the command instead of being parsed
+/// back out of it.
+pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
+    let plain = crate::profile::AiLaunch::plain(ai_cmd);
+    // Reads the same flag the PROBE side reads, so the two cannot get out of
+    // step — `claude_config_dir_for_repo` returns `~/.claude` while this is off.
+    if !crate::profile::launch_honors_profiles() {
+        return plain;
+    }
+    // `ai_cmd = none` (plain shell), or a different AI tool. The profile model
+    // is tool-agnostic but the recipe is claude's; anything else launches
+    // exactly as it does today rather than being handed flags it never had.
+    if plain.cmd.is_empty() || plain.match_word != "claude" {
+        return plain;
+    }
+    let Some(prof) = crate::profile::resolve_profile(&p.main_root) else {
+        return plain;
+    };
+    match crate::profile::materialize(&prof, wt, &p.main_root) {
+        Ok(m) => {
+            // Never swallowed: a skipped skill or a missing worktrees binary
+            // changes what the session can do, so the user has to see it.
+            for w in &m.warnings {
+                ui.warn(&format!("profile '{}': {w}", prof.name));
+            }
+            crate::profile::claude_launch(&plain, &prof, &m)
+        }
+        Err(e) => {
+            // FAIL CLOSED. Launching unprofiled claude here would be the worst
+            // outcome available: a profile is frequently RESTRICTIVE — it is how
+            // `--strict-mcp-config` removes a dangerous global server, and where
+            // settings deny tools — so "couldn't apply your profile" must never
+            // silently mean "ran without your restrictions". Every visible signal
+            // (a pane running claude, the activity dots) would have said the
+            // profile applied.
+            //
+            // It also keeps the probe/launch seam honest: an unprofiled fallback
+            // writes its conversation to ~/.claude while the probes keep reading
+            // the profile dir, so auto-resume would lose it — exactly the
+            // divergence `launch_honors_profiles` exists to prevent.
+            //
+            // The pane still opens, on a plain shell with the reason printed, so
+            // nothing is stranded and the user can run claude by hand if they
+            // want it anyway.
+            let msg = format!(
+                "worktrees: profile '{}' could not be prepared: {e}\\nNOT launching claude — your profile's rules and MCP settings are not in effect.\\nFix the profile (or unset it) and reopen; run `claude` here to start an unprofiled session anyway.",
+                prof.name
+            );
+            ui.error(&format!("profile '{}' could not be prepared ({e}) — claude not launched", prof.name));
+            crate::profile::AiLaunch {
+                profile: None,
+                env: Vec::new(),
+                cmd: format!("printf '%s\\n' {} >&2", crate::profile::shell_quote(&msg)),
+                match_word: plain.match_word,
+            }
+        }
+    }
+}
+
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
 // Returns 0 on success (session live / adopted / attached), 1 when tmux refuses
 // to create the session (the reason is surfaced via ui.error — the app shows it
 // and the CLI exits nonzero, instead of the old silent "Session ready" lie).
-pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_cmd: &str, ai_cmd: &str, do_attach: bool, spare_shell: bool) -> i32 {
+pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_cmd: &str, ai: &crate::profile::AiLaunch, do_attach: bool, spare_shell: bool) -> i32 {
     let keep = "exec \"${SHELL:-/bin/sh}\"";
-    let ai_word_full = ai_cmd.split_whitespace().next().unwrap_or("");
-    let ai_word = {
-        let b = if ai_word_full.is_empty() { "claude" } else { ai_word_full };
-        basename(b)
-    };
+    // The word tmux adoption matches on. It comes from the RESOLVED PROGRAM, not
+    // from the string we are about to build: a profiled launch prefixes
+    // `CLAUDE_CONFIG_DIR=… ` onto that string, and deriving the word from it
+    // would yield `CLAUDE_CONFIG_DIR=…`. `session_in` substring-matches this
+    // against `pane_current_command`, so getting it wrong does not error — it
+    // silently downgrades adoption to "first pane in the worktree" and switches
+    // the app's auto-resume off.
+    let ai_word = ai.match_word.clone();
+    let ai_cmd = ai.cmd.as_str();
     let mut session = session_in.to_string();
     if !tmux::session_exists(&session) {
         // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
@@ -102,8 +175,14 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         ui.warn(&format!("tmux session '{session}' already in this worktree — attaching."));
     } else {
         ui.header(&format!("Opening tmux session '{session}'"));
+        // Env assignments go INSIDE the -ic string, ahead of the command, rather
+        // than through `tmux new-session -e`: env baked into the process survives
+        // detach, reattach and a tmux server restart by definition, and the bats
+        // fake-tmux shim parses argv positionally with no `-e` case. Assignments
+        // first also keeps the program itself as pane0's foreground process, so
+        // `pane_current_command` stays `claude`.
         let pane0 = if !ai_cmd.is_empty() {
-            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&format!("{ai_cmd}; {keep}")))
+            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&ai.pane0_body(keep)))
         } else {
             keep.to_string()
         };
@@ -121,6 +200,45 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         match tmux::new_session(&session, wt, &pane0) {
             Ok(pid) => {
                 tmux::tune_session(&session);
+                // Stamp WHICH profile this session started with — including
+                // "none at all". Only here, in the branch that actually creates a
+                // session: an attach reuses whatever the running process already
+                // loaded, so stamping there would clear a legitimate "restart to
+                // apply" badge.
+                //
+                // Writing the CLEARED case matters as much as the set one. A
+                // stamp that is only ever written and never cleared outlives the
+                // binding: unbind a profile, relaunch, and the badge would keep
+                // naming a profile the session is demonstrably not running — the
+                // badge lying is the exact failure this feature exists to avoid.
+                let slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+                let stamp = ai.profile.clone();
+                // Skip the write entirely when there is nothing to record and
+                // nothing to clear. Otherwise every unprofiled CLI launch would
+                // rewrite `.worktrees.places.json` — bumping updated_epoch and
+                // creating empty entries — for people who never use profiles.
+                let already_clear = stamp.is_none()
+                    && crate::store::read_lenient(&p.main_root)
+                        .places
+                        .get(&slug)
+                        .map(|d| d.profile_id.is_none() && d.profile_epoch.is_none())
+                        .unwrap_or(true);
+                if already_clear {
+                    // nothing to do
+                } else if let Err(e) = crate::store::edit(&p.main_root, &slug, |d| match &stamp {
+                    Some((id, epoch)) => {
+                        d.profile_id = Some(id.clone());
+                        d.profile_epoch = Some(*epoch);
+                    }
+                    None => {
+                        d.profile_id = None;
+                        d.profile_epoch = None;
+                    }
+                }) {
+                    // Not fatal — the session is up — but silence here means the
+                    // badge simply never appears, with nothing to explain why.
+                    ui.warn(&format!("could not record which profile this session started with: {e}"));
+                }
                 if spare_shell {
                     tmux::split_window(&pid, wt, &pane1);
                     tmux::select_pane(&pid);
@@ -425,7 +543,8 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         ui.info(&format!("then: {install_cmd}"));
     }
     let pane1_install = if spare_shell { install_cmd.as_str() } else { "" };
-    let rc = launch(p, ui, &wt, &session, pane1_install, &ai_cmd, do_attach, spare_shell);
+    let ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    let rc = launch(p, ui, &wt, &session, pane1_install, &ai, do_attach, spare_shell);
     if rc != 0 {
         rc
     } else {
@@ -597,7 +716,8 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if resume && !ai_cmd.is_empty() {
         ai_cmd = format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg());
     }
-    launch(p, ui, &wt, &session, "", &ai_cmd, do_attach, spare_shell)
+    let ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    launch(p, ui, &wt, &session, "", &ai, do_attach, spare_shell)
 }
 
 // ── close ────────────────────────────────────────────────────────────────────

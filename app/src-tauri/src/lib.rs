@@ -124,6 +124,121 @@ async fn log_tail(lines: Option<usize>) -> Result<String, String> {
     Ok(all[start..].join("\n"))
 }
 
+// ── AI profiles + the skill store ────────────────────────────────────────────
+//
+// Thin wrappers: core owns profiles.json and the skill store (the CLI reads the
+// same files), so these must never keep their own copy of that state.
+
+#[tauri::command]
+async fn profiles_info(repo: String) -> Result<serde_json::Value, String> {
+    // Filesystem probes per profile (`ever_launched`) live here rather than in
+    // `snapshot`, because this is called on sheet-open and that is on the 3s poll.
+    serde_json::to_value(worktrees_core::profile::info_for(&repo)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_profile(profile: serde_json::Value) -> Result<String, String> {
+    let p: worktrees_core::profile::Profile =
+        serde_json::from_value(profile).map_err(|e| format!("invalid profile: {e}"))?;
+    worktrees_core::profile::save(p).inspect_err(|e| applog("error", &format!("save_profile: {e}")))
+}
+
+#[tauri::command]
+async fn new_profile_id(name: String) -> Result<String, String> {
+    let taken: Vec<String> = worktrees_core::profile::read_lenient().profiles.keys().cloned().collect();
+    Ok(worktrees_core::profile::new_id_from(&name, &taken))
+}
+
+/// What deleting a profile actually costs, reported rather than done silently.
+#[derive(Serialize)]
+struct ProfileRemoval {
+    /// The materialized dir is LEFT ON DISK — it holds the session transcripts.
+    dir: Option<String>,
+    /// The keychain item's service name, when it was recorded — so the message
+    /// can name what to look for instead of sending the user hunting.
+    keychain_service: Option<String>,
+    /// A keychain item may remain. worktrees never touches credentials (that is
+    /// the invariant that made this whole feature safe), so it cannot delete one
+    /// either — the UI tells the user where it is instead of pretending.
+    keychain_hint: bool,
+}
+
+#[tauri::command]
+async fn delete_profile(id: String) -> Result<ProfileRemoval, String> {
+    let dir = worktrees_core::profile::profile_dir(&id).map(|d| d.to_string_lossy().into_owned());
+    let launched = worktrees_core::profile::ever_launched(&id);
+    let keychain_service = worktrees_core::profile::remove(&id)
+        .inspect_err(|e| applog("error", &format!("delete_profile: {e}")))?;
+    Ok(ProfileRemoval { dir, keychain_service, keychain_hint: launched })
+}
+
+#[tauri::command]
+async fn set_project_profile(repo: String, id: Option<String>) -> Result<(), String> {
+    worktrees_core::profile::assign(&repo, id.as_deref())
+        .inspect_err(|e| applog("error", &format!("set_project_profile: {e}")))
+}
+
+#[tauri::command]
+async fn set_default_profile(id: Option<String>) -> Result<(), String> {
+    worktrees_core::profile::set_default(id.as_deref())
+        .inspect_err(|e| applog("error", &format!("set_default_profile: {e}")))
+}
+
+#[tauri::command]
+async fn skills_list() -> Result<serde_json::Value, String> {
+    serde_json::to_value(worktrees_core::skillstore::list()).map_err(|e| e.to_string())
+}
+
+/// Read a candidate skill directory WITHOUT installing it — the review step.
+#[tauri::command]
+async fn skill_inspect(path: String) -> Result<serde_json::Value, String> {
+    let i = worktrees_core::skillstore::inspect(Path::new(&path))?;
+    Ok(serde_json::json!({
+        "name": i.name, "description": i.description,
+        "capabilities": i.capabilities, "files": i.files, "bytes": i.bytes,
+        "skill_md": i.skill_md,
+    }))
+}
+
+#[tauri::command]
+async fn skill_install_local(path: String) -> Result<serde_json::Value, String> {
+    let e = worktrees_core::skillstore::install_local(Path::new(&path))
+        .inspect_err(|e| applog("error", &format!("skill_install_local: {e}")))?;
+    serde_json::to_value(e).map_err(|e| e.to_string())
+}
+
+/// Clone, inspect, discard. Installs nothing — see `skill_install_git`.
+#[tauri::command]
+async fn skill_preview_git(url: String, rev: Option<String>) -> Result<serde_json::Value, String> {
+    let p = worktrees_core::skillstore::preview_git(&url, rev.as_deref().unwrap_or(""))
+        .inspect_err(|e| applog("warn", &format!("skill_preview_git: {e}")))?;
+    serde_json::to_value(p).map_err(|e| e.to_string())
+}
+
+/// Install at the sha the user reviewed. Refuses if the branch moved.
+#[tauri::command]
+async fn skill_install_git(
+    url: String,
+    rev: Option<String>,
+    sha: String,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let e = worktrees_core::skillstore::install_git_pinned(
+        &url,
+        rev.as_deref().unwrap_or(""),
+        &sha,
+        &name,
+    )
+    .inspect_err(|e| applog("error", &format!("skill_install_git: {e}")))?;
+    serde_json::to_value(e).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn skill_remove(name: String) -> Result<Vec<String>, String> {
+    worktrees_core::skillstore::remove(&name)
+        .inspect_err(|e| applog("error", &format!("skill_remove: {e}")))
+}
+
 // ── state: core-derived places + declared overlay + reconciled lifecycle ─────
 
 /// One repo's merged snapshot: core's live `ls` + DECLARED store overlay +
@@ -137,6 +252,16 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     v["unborn"] = serde_json::Value::Bool(!git::has_commits(&project.main_root));
     let store = store::read_lenient(repo);
     let now = sysclock::now_epoch();
+    // Read the declarations ONCE per snapshot, not per place. This runs on the
+    // 3s poll, so it stays a single small JSON read — no per-profile filesystem
+    // probes here (those live in `profiles_info`, which is called on sheet-open).
+    let profiles = worktrees_core::profile::read_lenient();
+    // What this repo's NEXT launch would use — so a session started under a
+    // different (or since-unbound) profile reads as stale rather than merely
+    // naming whatever it started with.
+    // Resolved against the set already loaded above — not a second read of the
+    // same file in the same tick.
+    let effective = worktrees_core::profile::resolve_profile_id_in(&profiles, repo);
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
             let slug = place.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
@@ -146,6 +271,45 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
                 .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null);
             place["lifecycle_effective"] = serde_json::Value::String(store::reconcile(decl, tmux_up, now));
+
+            // What a LIVE session is actually running, versus the profile as
+            // edited since. Both derived from the launch stamp ops writes when a
+            // session is created — a place with no stamp simply has no badge.
+            let (mut pname, mut stale) = (serde_json::Value::Null, false);
+            if let Some(d) = decl {
+                if let Some(pid) = d.profile_id.as_deref() {
+                    // A profile deleted mid-session must not make the badge
+                    // vanish — the session is still running it. Name it as gone
+                    // rather than showing nothing.
+                    let name = profiles
+                        .profiles
+                        .get(pid)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| format!("{pid} (deleted)"));
+                    pname = serde_json::Value::String(name);
+                    // Only meaningful while the session is up: a closed place
+                    // picks up the current profile on its next launch, so calling
+                    // it "stale" would be noise.
+                    if tmux_up {
+                        let edited = profiles
+                            .profiles
+                            .get(pid)
+                            .map(|p| d.profile_epoch.unwrap_or(0) < p.updated_epoch)
+                            .unwrap_or(true); // deleted counts as changed
+                        // A REBIND is the edit a user most expects the badge to
+                        // cover: the session is running one profile while the
+                        // repo is now bound to another.
+                        let rebound = effective.as_deref() != Some(pid);
+                        stale = edited || rebound;
+                    }
+                } else if tmux_up && effective.is_some() {
+                    // Launched unprofiled, but a profile is bound now.
+                    pname = serde_json::Value::Null;
+                    stale = true;
+                }
+            }
+            place["profile_name"] = pname;
+            place["profile_stale"] = serde_json::Value::Bool(stale);
         }
     }
     Ok(v)
@@ -506,7 +670,7 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
         // AI actually being Claude — appending -r to an arbitrary ai_cmd breaks it.
         let resume = !fresh.unwrap_or(false)
             && ai_is_claude()
-            && worktrees_core::project::claude_session_present(&p.place_dir(&slug));
+            && p.claude_session_present(&p.place_dir(&slug));
         if slug == "(main)" {
             if !worktrees_core::tmux::have_tmux() {
                 ui.error("tmux not found");
@@ -521,7 +685,8 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
             // banner / app.log, not silently report success. Single-pane
             // (spare_shell=false): Claude gets full width; the scratch shell
             // lives in the dock's Terminal tab.
-            ops::launch(p, ui, &p.main_root, &session, "", &ai_cmd, false, false)
+            let ai = ops::ai_launch_for(p, ui, &p.main_root, &ai_cmd);
+            ops::launch(p, ui, &p.main_root, &session, "", &ai, false, false)
         } else {
             let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
             if resume {
@@ -535,10 +700,9 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
 /// Auto-resume only applies when the AI pane actually runs Claude Code (same
 /// first-word/basename derivation as ops::launch).
 fn ai_is_claude() -> bool {
-    let cmd = worktrees_core::config::resolve_ai_cmd(None);
-    let word = cmd.split_whitespace().next().unwrap_or("");
-    let base = word.rsplit('/').next().unwrap_or(word);
-    base == "claude"
+    // Same single derivation core uses for tmux adoption — see
+    // `profile::ai_word_of`. Re-deriving it here is how the three copies drifted.
+    worktrees_core::profile::ai_word_of(&worktrees_core::config::resolve_ai_cmd(None)) == "claude"
 }
 
 /// End a place's tmux session — the worktree stays (right-click "Close session").
@@ -777,35 +941,40 @@ fn pid_alive(pid: i32) -> bool {
 fn claude_activity() -> (Vec<String>, Vec<String>) {
     let mut busy = Vec::new();
     let mut waiting = Vec::new();
-    let home = std::env::var("HOME").unwrap_or_default();
-    if home.is_empty() {
-        return (busy, waiting);
-    }
-    let dir = Path::new(&home).join(".claude/sessions");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return (busy, waiting), // dir missing/unreadable → no dots
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
+    // Scan EVERY config root, not just `~/.claude`: a profiled session writes its
+    // probes under the profile's own dir, so a $HOME-only scan would leave the
+    // busy/waiting dots permanently dark for profiled places — a silent
+    // degradation with nothing in the log to explain it.
+    //
+    // Union is safe because each probe carries its own `cwd` and `pid`, so it is
+    // self-describing: we never need to know which profile a place is bound to,
+    // and a place whose profile changed mid-session still lights up.
+    for root in worktrees_core::profile::claude_config_dirs_all() {
+        let entries = match std::fs::read_dir(root.join("sessions")) {
+            Ok(e) => e,
+            Err(_) => continue, // dir missing/unreadable → no dots from this root
         };
-        let probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
-            Ok(p) => p,          // missing pid/cwd/status → parse fails → skip
-            Err(_) => continue,
-        };
-        if probe.cwd.is_empty() || !pid_alive(probe.pid) {
-            continue; // dead pid (or crashed-session stale file) → no dot
-        }
-        match probe.status.as_str() {
-            "busy" => busy.push(probe.cwd),
-            "waiting" => waiting.push(probe.cwd),
-            _ => {} // idle / shell / anything else → no dot
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
+                Ok(p) => p,          // missing pid/cwd/status → parse fails → skip
+                Err(_) => continue,
+            };
+            if probe.cwd.is_empty() || !pid_alive(probe.pid) {
+                continue; // dead pid (or crashed-session stale file) → no dot
+            }
+            match probe.status.as_str() {
+                "busy" => busy.push(probe.cwd),
+                "waiting" => waiting.push(probe.cwd),
+                _ => {} // idle / shell / anything else → no dot
+            }
         }
     }
     (busy, waiting)
@@ -2560,6 +2729,18 @@ pub fn run() {
             shell_resize,
             shell_detach,
             settings_info,
+            profiles_info,
+            save_profile,
+            new_profile_id,
+            delete_profile,
+            set_project_profile,
+            set_default_profile,
+            skills_list,
+            skill_inspect,
+            skill_install_local,
+            skill_preview_git,
+            skill_install_git,
+            skill_remove,
             get_settings,
             set_settings,
             term_open,
