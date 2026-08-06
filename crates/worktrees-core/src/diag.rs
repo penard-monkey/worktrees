@@ -72,6 +72,27 @@ pub enum Code {
     NotGitignored,
     /// A copy differs from its source and the SOURCE is newer.
     CopyStale,
+    /// A gitignored, untracked file sits in the main checkout that NO `[[file]]`
+    /// entry declares. ⚠ Not in §7's slug list, and the gap it closes is the one
+    /// the whole feature exists for: every other code here is judged against the
+    /// config, so a config that stopped being true is invisible to all of them.
+    /// Detection ran exactly once, at `init` — `hint_init` is on `cmd_new`'s
+    /// no-config branch and `cmd_init` refuses to re-run over an existing file —
+    /// so the day after the config is written, a new `.env` is undetectable and
+    /// every worktree silently lacks it. That is §1.2 again, displaced from "no
+    /// config" to "stale config", which is the steady state of any repo older
+    /// than a month.
+    ///
+    /// Repo-scoped: `place` is always `None`. Warn for a credential, Info for
+    /// `.env*` — the same split `hint_init` uses (§12), because a missing `.env`
+    /// breaks loudly on the next command while a missing `google-services.json`
+    /// builds fine and dies on a device days later.
+    ///
+    /// ⚠ `--strict` promotes only the WARN half, i.e. credentials. An undeclared
+    /// `.env*` is Info and can never fail a run — the same asymmetry `--strict`
+    /// already has with `CopyStale`, which it promotes from Warn and leaves alone
+    /// at Info. Do not read "`--strict` promotes undeclared" as covering `.env*`.
+    Undeclared,
     // §6 — port slots
     /// Two places claim the same `WORKTREE_SLOT`.
     SlotConflict,
@@ -234,6 +255,7 @@ mod tests {
             (Code::PortBusy, "port-busy"),
             (Code::ComposeDrift, "compose-drift"),
             (Code::CopyStale, "copy-stale"),
+            (Code::Undeclared, "undeclared"),
             (Code::UnknownKey, "unknown-key"),
             (Code::PrefixMismatch, "prefix-mismatch"),
             (Code::SessionDrift, "session-drift"),

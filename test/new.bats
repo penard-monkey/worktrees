@@ -66,6 +66,26 @@ setup() {
   [ "$(git -C "$REPO" branch --format='%(refname:short)' | wc -l)" -eq "$nbranches" ]
 }
 
+@test "new: repo with no commits → refused with the first-commit remedy, nothing created" {
+  local empty="$BATS_TEST_TMPDIR/fresh"
+  git init -q "$empty"
+  empty="$(cd "$empty" && pwd -P)"
+
+  run_wt -C "$empty" new feat-x --no-tmux
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no commits yet"* ]]
+  [[ "$output" == *"commit --allow-empty"* ]]
+  # git's own riddle never reaches the user, and no half-made worktree is left
+  [[ "$output" != *"not a valid object name"* ]]
+  [ ! -e "$empty/.worktrees/feat-x" ]
+
+  # and once a commit exists the same command works
+  git -C "$empty" commit -q --allow-empty -m init
+  run_wt -C "$empty" new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+  [ -d "$empty/.worktrees/feat-x" ]
+}
+
 @test "new: remote-only branch → fetched, checked out with tracking upstream" {
   make_remote_branch rb2
 
@@ -299,6 +319,30 @@ setup() {
   run_wt new feat-ni --no-install
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane1_cmd repo-feat-ni)" != *install* ]]
+}
+
+@test "new (default) splits a spare shell into pane 1" {
+  run_wt new feat-sp
+  [ "$status" -eq 0 ]
+  [ -n "$(tmux_pane1_cmd repo-feat-sp)" ]   # split-window ran → pane 1 exists
+  grep -q 'split-window' "$TMUX_LOG"
+}
+
+@test "new --no-spare: single pane, no split-window (the app's path)" {
+  run_wt new feat-ns --no-spare
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-ns
+  [[ "$(tmux_pane0_cmd repo-feat-ns)" == *fake-ai* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-ns)" ]   # no pane 1
+  ! grep -q 'split-window' "$TMUX_LOG"
+}
+
+@test "new --no-spare: a detected install is hinted, never silently dropped" {
+  add_lockfile pnpm-lock.yaml
+  run_wt new feat-nsi --no-spare
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"then: pnpm install"* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-nsi)" ]
 }
 
 @test "new: --no-attach → session ready detached, no attach/switch-client" {

@@ -6,6 +6,96 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The usage bars say when the window resets.** Every row in the nav footer
+  gains a countdown column: `5h  ▬▬▬  35%  3h 02m`, and the weekly rows read
+  `2d 5h` — days and hours, minutes dropped at that scale. The model-scoped
+  bucket (Fable) gets the same treatment; a percentage alone never said whether
+  it was worth waiting out. Two units, biggest first (`<1m` / `47m` / `3h 02m` /
+  `2d 5h`), tabular figures so the column can't twitch as it ticks. The
+  countdown runs off the local clock at 15s — `resets_at` is absolute, so the
+  rate-limited endpoint keeps its 180s poll untouched. A window whose reset has
+  already passed (the statusline snapshot is often that stale) shows a blank
+  cell rather than a negative one, and the absolute reset time stays in the
+  tooltip.
+- **`doctor` now reports files the config never learned about.** Every other
+  check is judged *by* `.worktrees.toml`, so a config that stopped being true was
+  invisible to all of them: detection ran exactly once, at `init`, and the
+  passive hint on `new` only fires for repos that have no config at all. A
+  credential added the day after the config was written was therefore
+  undetectable, and every worktree silently lacked it. The new `undeclared`
+  finding asks the reverse question — what is gitignored, untracked, and named by
+  no `[[file]]` entry. Warn for a credential, Info for `.env*`; repo-scoped, so
+  it is said once and not once per worktree. It exits 0 by default (drift is the
+  steady state); `doctor --strict` promotes the credential warning to a failure,
+  alongside `copy-stale`. An undeclared `.env*` stays Info and never fails a run
+  — the same asymmetry `--strict` already has with `copy-stale`.
+- **`worktrees init --diff`** prints just the `[[file]]` stanzas an existing
+  config is missing, as an appendable fragment on stdout — the second look the
+  flow never had. `init` refuses to run over an existing config and `--force`
+  re-renders from scratch, which destroys every hand-set `mode = "copy"` and the
+  comment explaining why. This writes nothing: paths the parser refuses come out
+  commented with the reason, exactly as `init` emits them.
+- Adding a folder that isn't a git repository now offers `git init` plus an empty
+  first commit, instead of refusing with "Not inside a git repository." A repo
+  that has no commits yet is spotted in the nav too: the new-worktree form is
+  replaced by a "Create initial commit" action, because git cannot branch off an
+  unborn HEAD.
+
+### Fixed
+- `worktrees new` in a repo with no commits used to fail with git's own riddle
+  (`fatal: not a valid object name: 'main'`). It now refuses up front, naming the
+  cause and the one command that unblocks it.
+
+## [0.8.0] - 2026-08-03
+
+### Added
+- **The dock's Files tab reads documents properly.** Markdown renders (headings,
+  nested and task lists, GFM tables, blockquotes, fenced code, links, relative
+  images) with a Preview/Source toggle; source files get syntax highlighting and
+  a line-number gutter; images show inline over a checkerboard with their
+  dimensions, byte size and a fit/1:1 toggle; PDFs, archives, fonts and media
+  get a named placeholder with "Open in editor" and "Reveal" instead of a bare
+  "binary file".
+- **The Files tab lays out to fit.** Past ~620px of dock width the tree moves
+  beside the content instead of above it; the divider drags and the ratio
+  persists. A header button cycles auto → stacked → side-by-side.
+- **Reading mode (⌘⇧E).** The open file expands over the main pane at a proper
+  reading measure; Esc or the Collapse button returns. The dock falls back to
+  showing just the tree while it is up.
+
+### Changed
+- **The dock's file viewer is read-only.** Editing was a plain `<textarea>` with
+  a save path; it is now a renderer, and edits go through "Open in editor". This
+  removes the save-conflict UI and any chance of the dock clobbering a file the
+  agent in the next pane is writing. (`write_file` remains in the backend.)
+
+## [0.7.0] - 2026-08-01
+
+### Added
+- **Claude plan usage in the nav footer.** Three hairline bars mirror Claude
+  Code's `/usage` panel: the 5-hour session window, the weekly all-models
+  window, and any model-scoped weekly bucket (e.g. "Fable"), colored by the
+  severity Anthropic reports (normal / warning / exceeded), with reset times in
+  the tooltip. Data comes from the same endpoint the `/usage` panel uses,
+  authenticated with the Claude Code login already in the macOS Keychain — the
+  first fetch may show one Keychain prompt. If that's unavailable the app falls
+  back to the statusline snapshot in `~/.claude/widgets/rate_limits.json`
+  (rendered dimmed), and with no source at all the widget simply stays hidden.
+- `.nvmrc` (22.13.0 — the floor pnpm 11 requires). `make install-app` checks the
+  active Node against it up front rather than letting pnpm fail with its own
+  version error minutes into the cargo build.
+
+### Fixed
+- Removing a place from the app always failed with `invalid args 'delBranch' for
+  command 'remove_place'` and never reached the CLI. The frontend passed the flag
+  as `del_branch`, but Tauri renames Rust snake_case parameters to camelCase
+  across the IPC boundary. The mock harness now rejects the wrong spelling the
+  same way the real backend does — it previously ignored the flag entirely, which
+  is why the bug survived headless testing.
+- The "Not configured" banner no longer sticks for the rest of the session once a
+  `.worktrees.toml` appears from outside the app (a merge, a pull, or the CLI's
+  `init`). The suggestion probe rides the same five-minute sweep as doctor instead
+  of running once per project at startup.
 - **AI profiles.** Settings → AI profiles lets you define what a worktrees-launched
   `claude` runs with — rules text, skills, MCP servers, model and settings — instead
   of your global `~/.claude` setup. Your normal terminal `claude` is untouched. A
@@ -78,6 +168,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   to `--no-tmux` if tmux disappears later.
 
 ### Fixed
+- **Creating a place from the app now opens a single pane, like reopening one.**
+  New places came up with the AI pane squeezed next to a spare shell, while
+  reopening the same place gave Claude the full width — the same place looked
+  different depending on how you got there. `new` learned `--no-spare` (which
+  the app passes) so both paths agree. Dependencies are no longer auto-installed
+  in that second pane; install them in the dock's Terminal tab — the command
+  that would have run is printed for you. The CLI is unchanged: a bare
+  `worktrees new` still splits the spare shell and installs deps there.
 - The app's PATH fixup now always appends the standard install dirs
   (`~/.local/bin`, `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) after the
   login shell's PATH, not only when the shell probe fails. A profile that never

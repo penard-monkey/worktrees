@@ -38,6 +38,23 @@ let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
 const mockTmuxStuck = location.search.includes("notmux=stuck");
 let mockTmux = !location.search.includes("notmux");
 const MOCK_SETTINGS_KEY = "wt-mock-ui-state"; // sessionStorage: see get_settings
+// Onboarding states a folder pick can land in (probe_dir). Same query-knob shape
+// as ?notmux: the state is chosen at load, and the path itself carries it so a
+// dir stays what it was picked as. `mockInited` is what init_repo /
+// create_initial_commit promote — once bootstrapped, a dir is a normal repo.
+const mockPickPrefix = location.search.includes("empty")
+  ? "empty-"
+  : location.search.includes("unborn")
+    ? "unborn-"
+    : "picked-";
+const mockInited = new Set<string>();
+function dirKind(dir: string): "repo" | "empty" | "unborn" {
+  if (mockInited.has(dir) || findProject(dir)) return "repo";
+  const base = dir.split("/").pop() || dir;
+  if (base.startsWith("empty-")) return "empty";
+  if (base.startsWith("unborn-")) return "unborn";
+  return "repo";
+}
 
 // ── project config / doctor / init (the Project sheet) ──────────────────────
 // STATEFUL, like mockCliVersion: relink clears the drift findings (so the badge
@@ -203,7 +220,7 @@ const mockSuggestions: Record<string, any> = {
 // first listing; files seed content so read/write round-trips.
 type MockEntry = { name: string; path: string; is_dir: boolean };
 const fsChildren = new Map<string, MockEntry[]>();
-const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number }>();
+const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number; b64?: string }>();
 // dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
 const shellSidecars = new Map<string, Set<number>>();
 // exited-but-kept shells (mirrors the real registry's try_wait liveness) — the
@@ -212,18 +229,179 @@ const deadShells = new Map<string, Set<number>>();
 let shellGen = 0; // attach generation counter (real backend: per-shell)
 const sidecarKey = (repo: string, slug: string) => `${repo}|${slug}`;
 
+/** Fixture lookup that SEEDS the parent directory on demand. Content is
+ *  materialized when a directory is listed, so a file referenced before its
+ *  folder was ever expanded (a relative image in a markdown doc) would
+ *  otherwise 404 — an artifact of the harness that looks like an app bug. */
+function fsFile(path: string) {
+  const hit = fsFiles.get(path);
+  if (hit) return hit;
+  const parent = path.slice(0, path.lastIndexOf("/"));
+  if (parent) seedDir(parent);
+  return fsFiles.get(path);
+}
+
+/** Decoded byte count of a base64 string — padding-aware, so the size the
+ *  viewer prints matches the file on disk exactly (the real backend counts
+ *  bytes, not characters). */
+const b64Bytes = (b64: string) => (b64.length / 4) * 3 - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
+
+// A 64×48 palette PNG (152 bytes) — the smallest thing that proves the image
+// viewer's whole path: base64 → data: URI → natural dimensions → fit/1:1.
+const MOCK_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAMAAACWlYwtAAAAD1BMVEUaGyZ6oveezmrgr2i7mvf67mx0AAAA" +
+  "RElEQVR42u2QMQoAMAgDbe3/39wOEcTN0XK3ZcgFYiaWiLxFZBeRjzAEXwg4D0GmW6zDCGYLOA9BpluswwhmCzgPweMCcYUPAT0FSt4AAAAASUVORK5CYII=";
+
+// Per-name fixture content, so every renderer the dock has is reachable
+// headlessly: markdown (all GFM constructs), TS, Rust, TOML, JSON, shell,
+// an image, and a file the backend would report as binary.
+const MOCK_MD = `# Worktrees
+
+One git worktree per branch, one **tmux session** per worktree. A worktree is a
+durable _place_; a branch is work that flows through it.
+
+## Why
+
+> A place you return to beats a directory you recreate.
+
+- One engine, two frontends
+- State split into **derived** and **declared**
+  - derived: live git/tmux, recomputed
+  - declared: \`.worktrees.places.json\`
+- Terminals attach to tmux, never own shells
+
+### Checklist
+
+- [x] Port the bash engine to Rust
+- [x] Ship the desktop app
+- [ ] Better document formatting in the dock
+
+### Gates
+
+| Command | What it covers | Required |
+| --- | --- | :---: |
+| \`make test\` | bats suite vs the Rust binary | yes |
+| \`make lint\` | shellcheck + bash-3.2 gate | yes |
+| \`cargo test\` | core unit tests | yes |
+
+Session name is \`<prefix>-<slug>\` with \`.\` → \`-\`. See [the design doc](DESIGN.md)
+or [the repo](https://github.com/example/worktrees).
+
+\`\`\`rust
+/// Resolve the login-shell PATH at startup — GUI launches get launchd's bare
+/// PATH, so homebrew (and therefore tmux) is missing without this.
+fn fixup_gui_path() -> Option<String> {
+    let out = Command::new("zsh").args(["-lc", "echo $PATH"]).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+\`\`\`
+
+![a mock image](src/logo.png)
+
+---
+
+Run \`worktrees new feature-x\` to make one.
+`;
+
+const MOCK_TS = `import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+type Place = { slug: string; branch: string; dirty: boolean };
+
+/** Poll the workspace snapshot — the backend recomputes derived state. */
+export function usePlaces(repo: string): Place[] {
+  const [places, setPlaces] = useState<Place[]>([]);
+  useEffect(() => {
+    let alive = true;
+    invoke<Place[]>("list_places", { repo })
+      .then((p) => { if (alive) setPlaces(p); })
+      .catch(() => setPlaces([]));
+    return () => { alive = false; };
+  }, [repo]);
+  return places;
+}
+`;
+
+const MOCK_TOML = `[workspace]
+members = ["crates/worktrees-core", "crates/worktrees-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.5.0"
+edition = "2021"
+
+# One version source — the app crate and tauri.conf inherit it.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+`;
+
+const MOCK_JSON = `{
+  "identifier": "net.casadelvalle.worktrees",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    { "identifier": "opener:allow-reveal-item-in-dir", "allow": [{ "path": "**" }] }
+  ],
+  "truncated": false,
+  "retries": 3
+}
+`;
+
+const MOCK_SH = `#!/usr/bin/env bash
+# install.sh — copies the release binary into place (bash 3.2 compatible).
+set -euo pipefail
+
+PREFIX="\${PREFIX:-$HOME/.local}"
+BIN="$PREFIX/bin/worktrees"
+
+if [ ! -d "$PREFIX/bin" ]; then
+  mkdir -p "$PREFIX/bin"   # first install
+fi
+
+echo "installing to $BIN"
+install -m 0755 target/release/worktrees "$BIN"
+`;
+
+function mockContent(name: string, path: string): { content: string; binary: boolean; b64?: string } {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".md")) return { content: MOCK_MD, binary: false };
+  if (lower.endsWith(".tsx") || lower.endsWith(".ts")) return { content: MOCK_TS, binary: false };
+  if (lower.endsWith(".toml")) return { content: MOCK_TOML, binary: false };
+  if (lower.endsWith(".json")) return { content: MOCK_JSON, binary: false };
+  if (lower.endsWith(".sh") || lower === ".gitignore") {
+    return lower === ".gitignore"
+      ? { content: "target/\nnode_modules/\n.DS_Store\n_tmp/\n\n# planning docs are working memory\ntask_plan.md\nfindings.md\nprogress.md\n", binary: false }
+      : { content: MOCK_SH, binary: false };
+  }
+  if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".gif"))
+    return { content: "", binary: true, b64: MOCK_PNG_B64 };
+  if (lower.endsWith(".pdf") || lower.endsWith(".zip")) return { content: "", binary: true };
+  return {
+    content: `// ${name}\n// mock content — ${path}\n\nfn main() {\n    println!("hello from the harness");\n}\n`,
+    binary: false,
+  };
+}
+
 function seedDir(dir: string) {
   if (fsChildren.has(dir)) return fsChildren.get(dir)!;
   const base = dir.split("/").pop() || dir;
   const mk = (name: string, is_dir: boolean): MockEntry => ({ name, path: `${dir}/${name}`, is_dir });
   let entries: MockEntry[];
-  if (base === "src") entries = [mk("App.tsx", false), mk("main.rs", false), mk("lib.rs", false)];
+  if (base === "src") entries = [mk("App.tsx", false), mk("main.rs", false), mk("lib.rs", false), mk("logo.png", false)];
   else if (base === "crates") entries = [mk("worktrees-core", true), mk("worktrees-cli", true)];
-  else entries = [mk("src", true), mk("crates", true), mk("README.md", false), mk("Cargo.toml", false), mk(".gitignore", false)];
+  else if (base === "docs") entries = [mk("DESIGN.md", false), mk("spec.pdf", false)];
+  else entries = [
+    mk("src", true), mk("crates", true), mk("docs", true),
+    mk("README.md", false), mk("Cargo.toml", false), mk("tauri.conf.json", false),
+    mk("install.sh", false), mk(".gitignore", false),
+  ];
   fsChildren.set(dir, entries);
   for (const e of entries) {
     if (!e.is_dir && !fsFiles.has(e.path)) {
-      fsFiles.set(e.path, { content: `// ${e.name}\n// mock content — ${e.path}\n\nfn main() {\n    println!("hello from the harness");\n}\n`, binary: false, mtime: Date.now() });
+      const c = mockContent(e.name, e.path);
+      fsFiles.set(e.path, { ...c, mtime: Date.now() });
     }
   }
   return entries;
@@ -238,23 +416,43 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return clone(findProject(args.repo)?.snapshot ?? null);
 
     case "plugin:dialog|open": {
-      // simulate a native folder pick → a fresh project path
+      // simulate a native folder pick → a fresh project path. `?empty` picks a
+      // bare folder (drives the git-init offer), `?unborn` a repo with no
+      // commits (drives the first-commit offer); default stays a normal repo.
       dialogCount += 1;
-      return `/Users/demo/workspace/picked-${dialogCount}`;
+      return `/Users/demo/workspace/${mockPickPrefix}${dialogCount}`;
+    }
+    case "probe_dir": {
+      const dir: string = args.dir;
+      const kind = dirKind(dir);
+      return { exists: true, is_git: kind !== "empty", has_commits: kind === "repo" };
+    }
+    case "init_repo": {
+      // git init + empty first commit → the dir is a normal repo from here on.
+      mockInited.add(args.dir as string);
+      return mockInvoke("add_project", { dir: args.dir });
+    }
+    case "create_initial_commit": {
+      mockInited.add(args.repo as string);
+      const pv = findProject(args.repo);
+      if (pv?.snapshot) pv.snapshot.unborn = false;
+      return clone(ws);
     }
     case "add_project": {
       const root: string = args.dir;
       if (!findProject(root)) {
         const name = root.split("/").pop() || root;
+        const unborn = dirKind(root) === "unborn";
         ws.projects.push({
           root, ok: true, error: null,
           snapshot: {
-            repo: root, prefix: name,
+            repo: root, prefix: name, unborn,
             places: [{
               slug: "(main)", path: root, is_main: true, registered: true,
               branch: "main", detached: false, dirty: false, dirty_files: 0,
-              ahead: 0, behind: 0, last_commit_subject: "initial commit",
-              last_commit_epoch: now() - 86400,
+              ahead: 0, behind: 0,
+              last_commit_subject: unborn ? "" : "initial commit",
+              last_commit_epoch: unborn ? null : now() - 86400,
               tmux_session: { name: sessionName(name, "(main)"), up: false },
               claude_session_present: false, declared: null, lifecycle_effective: "closed",
             }],
@@ -398,6 +596,51 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       if (args.refresh && !mockTmuxStuck) mockTmux = true;
       return mockTmux;
 
+    // Claude plan usage → the nav-footer bars. Mirrors the oauth shape from
+    // lib.rs: a Fable bucket at severity "warning" so the amber tier is
+    // exercisable, and `?usage=stale` / `?usage=off` for the two degraded
+    // sources (statusline snapshot → dimmed; unavailable → widget hidden).
+    // `?usage=edge` drives the reset-countdown formatter through every branch.
+    case "claude_usage": {
+      const t = now();
+      if (location.search.includes("usage=off")) return { source: "unavailable", fetched_at: t, limits: [] };
+      if (location.search.includes("usage=stale")) {
+        return {
+          source: "statusline",
+          fetched_at: t - 3 * 3600, // file mtime: last statusline write
+          limits: [
+            { kind: "session", label: "Session", percent: 46, severity: "normal", resets_at: t + 41 * 60 },
+            { kind: "weekly_all", label: "Weekly", percent: 61, severity: "normal", resets_at: t + 2 * 86400 },
+          ],
+        };
+      }
+      // every countdown branch at once: sub-minute, minutes-only, a window whose
+      // reset already passed (blank cell, column still reserved), and a
+      // long-name model bucket to squeeze the label at a narrow nav
+      if (location.search.includes("usage=edge")) {
+        return {
+          source: "oauth",
+          fetched_at: t,
+          limits: [
+            { kind: "session", label: "Session", percent: 97, severity: "error", resets_at: t + 40 },
+            { kind: "weekly_all", label: "Weekly", percent: 88, severity: "warning", resets_at: t + 47 * 60 },
+            { kind: "weekly_scoped", label: "Fable", percent: 12, severity: "normal", resets_at: t - 90 },
+          ],
+        };
+      }
+      return {
+        source: "oauth",
+        fetched_at: t,
+        limits: [
+          // resets are deliberately off round numbers so the countdown column
+          // shows its real shapes ("3h 02m", "2d 5h"), not a tidy "3d"
+          { kind: "session", label: "Session", percent: 35, severity: "normal", resets_at: t + 3 * 3600 + 2 * 60 },
+          { kind: "weekly_all", label: "Weekly", percent: 59, severity: "normal", resets_at: t + 2 * 86400 + 5 * 3600 },
+          { kind: "weekly_scoped", label: "Fable", percent: 80, severity: "warning", resets_at: t + 2 * 86400 + 5 * 3600 },
+        ],
+      };
+    }
+
     case "switch_place":
       editPlace(args.repo, args.slug, (p) => { p.branch = args.branch; });
       return { ok: true, code: 0, output: `Switched ${args.slug} → ${args.branch}` };
@@ -420,7 +663,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // Mirror the real backend (ops.rs remove_one): refuse a DIRTY worktree
       // unless --force, WITHOUT deleting. This finally makes the error-banner
       // path reachable headlessly (several fixtures are dirty:true).
-      console.info("[mock] remove_place:", args); // logs del_branch/force flags
+      console.info("[mock] remove_place:", args); // logs delBranch/force flags
+      // Tauri renames Rust snake_case params to camelCase over IPC and rejects
+      // anything else ("missing required key delBranch"). The mock deserializes
+      // nothing, so a snake_case caller used to sail through here and only blow
+      // up in the real app — mirror the strictness instead.
+      // Rejects with a bare STRING, not an Error — that is what a real invoke
+      // does, and `fail()` renders it verbatim (an Error would add "Error: ").
+      if (typeof args.delBranch !== "boolean")
+        throw "invalid args `delBranch` for command `remove_place`: command remove_place missing required key delBranch";
       const pv = findProject(args.repo);
       const pl = pv?.snapshot?.places.find((p) => p.slug === args.slug);
       if (pl?.dirty && !args.force) {
@@ -433,7 +684,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
             `Refusing to remove. Commit/stash, or pass --force.`,
         };
       }
-      // del_branch is state-invisible here (no branch objects modeled) — the
+      // delBranch is state-invisible here (no branch objects modeled) — the
       // place is removed either way; the flag is logged above.
       if (pv?.snapshot) pv.snapshot.places = pv.snapshot.places.filter((p) => p.slug !== args.slug);
       return { ok: true, code: 0, output: `Removed ${args.slug}` };
@@ -460,10 +711,25 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "list_dir":
       return seedDir(args.path as string);
     case "read_file": {
-      const f = fsFiles.get(args.path as string);
-      return f
-        ? { content: f.content, truncated: false, binary: f.binary, mtime: f.mtime }
-        : { content: `// ${args.path}\n`, truncated: false, binary: false, mtime: 0 };
+      const f = fsFile(args.path as string);
+      if (!f) return { content: `// ${args.path}\n`, truncated: false, binary: false, mtime: 0, size: 0 };
+      // `size` mirrors the backend: bytes ON DISK, not the length of `content`
+      // (which is empty for a binary and capped for a big file).
+      const size = f.binary ? b64Bytes(f.b64 ?? "") : new TextEncoder().encode(f.content).length;
+      return { content: f.content, truncated: false, binary: f.binary, mtime: f.mtime, size };
+    }
+    case "read_file_base64": {
+      // Backend parity: this encodes ANY regular file, not just images — the
+      // caller decides what the bytes mean. A text fixture is encoded on the
+      // fly so the mock can't be more restrictive than the real command.
+      const f = fsFile(args.path as string);
+      if (!f) throw new Error(`not a file: ${args.path}`);
+      const b64 = f.b64 ?? btoa(String.fromCharCode(...new TextEncoder().encode(f.content)));
+      const size = b64Bytes(b64);
+      // `?truncated` on the path forces the too-large branch, which is
+      // otherwise unreachable headlessly (no fixture is 4 MB).
+      const truncated = (args.path as string).includes("truncated");
+      return { b64, size, truncated, mtime: f.mtime };
     }
     case "write_file": {
       const path = args.path as string;

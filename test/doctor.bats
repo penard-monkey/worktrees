@@ -183,3 +183,64 @@ wt() { echo "$REPO/.worktrees/$1"; }
   [ "$status" -eq 1 ]
   [[ "$output" == *"No worktree 'nope'"* ]]
 }
+
+# ── undeclared drift ─────────────────────────────────────────────────────────
+# The gap every other check here misses: they are all judged BY the config, so a
+# config that stopped being true is invisible to them. Detection otherwise ran
+# exactly once, at `init`.
+
+@test "doctor: a gitignored file the config never learned about is reported" {
+  make_secret_repo '.env' 'google-services.json'
+  printf 'SECRET=1\n'   > "$REPO/.env"
+  write_project_config '[[file]]' 'path = ".env"'
+  run_wt new feat-x --no-tmux
+  [ "$status" -eq 0 ]
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean"* ]]
+
+  # …the credential arrives AFTER the config was written
+  printf '{}\n' > "$REPO/google-services.json"
+  run_wt doctor
+  [ "$status" -eq 0 ]                       # warn, not error: CI stays green
+  [[ "$output" == *"google-services.json"* ]]
+  [[ "$output" == *"no [[file]] entry declares it"* ]]
+  [[ "$output" == *"SILENTLY"* ]]
+
+  # --strict is the knob that fails a run on it
+  run_wt doctor --strict
+  [ "$status" -eq 2 ]
+}
+
+@test "doctor: undeclared is repo-scoped — said once, not once per worktree" {
+  make_secret_repo '.env' 'google-services.json'
+  printf 'SECRET=1\n' > "$REPO/.env"
+  printf '{}\n'       > "$REPO/google-services.json"
+  write_project_config '[[file]]' 'path = ".env"'
+  run_wt new feat-x --no-tmux
+  run_wt new feat-y --no-tmux
+
+  run_wt doctor --json
+  [ "$status" -eq 0 ]
+  local n
+  n=$(printf '%s' "$output" | /usr/bin/grep -o '"code":"undeclared"' | wc -l | tr -d ' ')
+  [ "$n" -eq 1 ]
+  [[ "$output" == *'"place":null'* ]]
+
+  # …and a named place is a question about that place, so it is not asked there
+  run_wt doctor feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"google-services.json"* ]]
+}
+
+@test "doctor: --config-only never walks the checkout for undeclared files" {
+  # That mode is config-vs-git on a bare clone, where every gitignored file is
+  # absent by definition — reporting from it would be machine-dependent.
+  make_secret_repo '.env' 'google-services.json'
+  printf 'SECRET=1\n' > "$REPO/.env"
+  printf '{}\n'       > "$REPO/google-services.json"
+  write_project_config '[[file]]' 'path = ".env"'
+  run_wt doctor --config-only
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"google-services.json"* ]]
+}

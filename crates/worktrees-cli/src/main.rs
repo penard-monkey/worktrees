@@ -23,8 +23,9 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees rm <name> [name...]         tear one (or more) down
   worktrees relink [<name>|--all]       re-apply .worktrees.toml's files (--force to overwrite)
   worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
-  worktrees doctor [<name>]             report declared-file drift (--json --strict --config-only)
+  worktrees doctor [<name>]             report file drift, declared and un- (--json --strict --config-only)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
+  worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
   worktrees -V | --version              print version   (also: help / -h)

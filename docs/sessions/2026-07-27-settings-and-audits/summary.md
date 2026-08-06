@@ -1,3 +1,7 @@
+---
+title: "Session: settings evaluation, nav audits, ⌘K, v0.3.0 + v0.3.1"
+---
+
 # Session: settings evaluation, nav audits, ⌘K, v0.3.0 + v0.3.1
 
 - **Date:** 2026-07-27

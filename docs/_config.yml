@@ -1,0 +1,36 @@
+# GitHub Pages (legacy Jekyll build) — source is main:/docs, so this directory
+# IS the site root. Adding a page means adding a .md file WITH front matter:
+# Jekyll only converts files that have it; everything else is copied verbatim
+# (which is what we want for the media and the session tarballs).
+title: worktrees
+description: One git worktree per branch, one tmux session per worktree — a CLI and a macOS app.
+theme: jekyll-theme-primer
+
+# The repo is the canonical home; the site is a reading surface for it.
+repository: penard-monkey/worktrees
+show_downloads: false
+
+# The site is served from a project subpath (penard-monkey.github.io/worktrees),
+# NOT a user root. Without these the theme emits root-absolute asset links
+# (/assets/css/style.css) that 404 there and the site renders unstyled.
+url: https://penard-monkey.github.io
+baseurl: /worktrees
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+# Working artifacts stay in the repo but are not part of the built site. The
+# planning tarballs are session working memory — downloadable from GitHub if
+# anyone needs them, but they are not pages.
+exclude:
+  - "**/planning.tar.gz"
+  - ".DS_Store"
+  - "**/.DS_Store"
+
+# Relative links between docs keep working on GitHub AND on the site.
+relative_links:
+  enabled: true
+  collections: false

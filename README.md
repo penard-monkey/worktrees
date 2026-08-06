@@ -152,7 +152,7 @@ Flags:
 
 | Command | Flags |
 |---|---|
-| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) |
+| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--no-spare` (single pane — no spare shell, and for `new` no auto-install) |
 | `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |
@@ -235,6 +235,34 @@ make test-real-tmux   # 3 integration smokes against real tmux
 Tests are bats-core (vendored as submodules); the suite fakes tmux with a PATH
 shim so every pane command is assertable, and CI runs ubuntu + macos, the latter
 twice — once under stock bash 3.2.
+
+### Running the desktop app from source
+
+The app is Tauri, so `cargo` is driven for you — there is no `cargo run`. Node
+must match `.nvmrc` (pnpm 11 refuses anything older), and dependencies are
+installed once per clone:
+
+```sh
+nvm use                      # or any node >= the version in .nvmrc
+pnpm --dir app install       # first time only
+make dev-app                 # or: pnpm --dir app tauri dev
+```
+
+That builds the `app` crate and serves the frontend on **port 1420**, with hot
+reload on the TypeScript/CSS side; a Rust change rebuilds and relaunches the
+window. Real git and tmux are used, so it acts on whatever projects you have
+registered.
+
+To work on the UI alone — no Rust build, no tmux, fake backend — use the mock
+harness, which runs the real `App.tsx` against fixtures in a plain browser:
+
+```sh
+pnpm --dir app dev:mock --port 1425    # any port but 1420
+```
+
+Both are development loops. To actually *use* a locally built app, see
+`make install-app` under [Install](#install) — that produces the bundle and puts
+it in `/Applications`.
 
 ## License
 

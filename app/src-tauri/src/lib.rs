@@ -19,7 +19,7 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{ops, store, sysclock, Project, Ui};
+use worktrees_core::{git, ops, store, sysclock, Project, Ui};
 
 // ── app log ──────────────────────────────────────────────────────────────────
 // Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
@@ -246,6 +246,10 @@ async fn skill_remove(name: String) -> Result<Vec<String>, String> {
 fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     let project = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
     let mut v = serde_json::to_value(project.ls()).map_err(|e| e.to_string())?;
+    // Unborn HEAD (git init, no commits): the repo lists fine but no worktree can
+    // be created from it. Carried on the snapshot so the nav can offer the first
+    // commit instead of letting `new` fail on an invalid object name.
+    v["unborn"] = serde_json::Value::Bool(!git::has_commits(&project.main_root));
     let store = store::read_lenient(repo);
     let now = sysclock::now_epoch();
     // Read the declarations ONCE per snapshot, not per place. This runs on the
@@ -390,6 +394,66 @@ async fn add_project(app: AppHandle, dir: String) -> Result<Workspace, String> {
         write_projects(&app, &roots)?;
     }
     list_workspace(app).await
+}
+
+/// What a picked folder actually IS, before we try to add it. The Add-project
+/// path needs to tell "not a repo" (offer `git init`) from "repo with no
+/// commits" (offer a first commit) apart — `add_project`'s flat error string
+/// can't carry that, and neither state is a dead end.
+#[derive(Serialize)]
+struct DirProbe {
+    exists: bool,
+    is_git: bool,
+    has_commits: bool,
+}
+
+#[tauri::command]
+async fn probe_dir(dir: String) -> Result<DirProbe, String> {
+    let exists = Path::new(&dir).is_dir();
+    let is_git = exists && git::git_ok(&dir, &["rev-parse", "--is-inside-work-tree"]);
+    let has_commits = is_git && git::has_commits(&dir);
+    Ok(DirProbe { exists, is_git, has_commits })
+}
+
+/// `git init` + an EMPTY first commit, then add the repo to the workspace. The
+/// commit is not optional politeness: without it HEAD is unborn and the very
+/// next thing the user does (new worktree) fails on an invalid object name.
+/// `--allow-empty` keeps it a pure bootstrap — no file is added or touched.
+#[tauri::command]
+async fn init_repo(app: AppHandle, dir: String) -> Result<Workspace, String> {
+    if !Path::new(&dir).is_dir() {
+        return Err(format!("{dir} is not a directory"));
+    }
+    if !git::git_ok(&dir, &["rev-parse", "--is-inside-work-tree"]) {
+        git::git_status_captured(&dir, &["init"]).map_err(|e| {
+            applog("error", &format!("git init failed in {dir}: {e}"));
+            e
+        })?;
+    }
+    if !git::has_commits(&dir) {
+        first_commit(&dir)?;
+    }
+    add_project(app, dir).await
+}
+
+/// Bootstrap commit for a repo that IS tracked but has an unborn HEAD.
+#[tauri::command]
+async fn create_initial_commit(app: AppHandle, repo: String) -> Result<Workspace, String> {
+    if git::has_commits(&repo) {
+        return list_workspace(app).await;
+    }
+    first_commit(&repo)?;
+    list_workspace(app).await
+}
+
+/// The empty bootstrap commit. Git refuses to commit without an identity, and
+/// its stderr says exactly which `git config` line is missing — pass it through
+/// rather than paraphrasing.
+fn first_commit(dir: &str) -> Result<(), String> {
+    git::git_status_captured(dir, &["commit", "--allow-empty", "-m", "Initial commit"]).map_err(|e| {
+        applog("error", &format!("initial commit failed in {dir}: {e}"));
+        e
+    })
 }
 
 #[tauri::command]
@@ -546,6 +610,10 @@ async fn new_place(
         args.push(n);
     }
     args.push("--no-attach".into());
+    // Single-pane like `open_place` below: Claude gets the full width and the
+    // scratch shell lives in the dock's Terminal tab (which is also where deps
+    // get installed — `--no-spare` suppresses the auto-install pane).
+    args.push("--no-spare".into());
     let mut r = run_op(&format!("new {branch_log}"), &repo, |p, ui| ops::cmd_new(p, ui, &args))?;
     if r.ok {
         r.slug = resolved_slug;
@@ -917,6 +985,245 @@ fn claude_activity() -> (Vec<String>, Vec<String>) {
 struct ClaudeActivity {
     busy: Vec<String>,
     waiting: Vec<String>,
+}
+
+// ── Claude plan usage (nav footer widget) ────────────────────────────────────
+// Same bars Claude Code's /usage panel shows: the 5h session window, the weekly
+// all-models window, and any model-scoped weekly bucket (e.g. "Fable").
+//
+// Primary source is the OAuth usage endpoint the TUI itself calls — free GET, no
+// quota, but undocumented and unversioned, so EVERY step degrades instead of
+// failing: the authoritative field is `limits[]` and the rest of the payload is
+// full of experimental nulls we deliberately ignore. Token comes from the macOS
+// Keychain via `security` (shelled out — house style, and it keeps the secret out
+// of our address space longer than a lib would). Claude Code rotates the token
+// ~hourly, so a 401 buys exactly one retry with a freshly re-read token.
+//
+// Fallback is the statusline widget's local snapshot (`~/.claude/widgets/
+// rate_limits.json`, written by whatever statusline script the user runs) —
+// session + weekly only, no model bucket, and only as fresh as the last Claude
+// Code session, hence the file mtime as `fetched_at` and the dimmed UI.
+//
+// Missing data is NOT an error: `source: "unavailable"` with no limits just
+// hides the widget. The reason still lands in app.log.
+
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// Claude Code's own UA. Load-bearing: a foreign UA lands in a much more
+/// aggressive rate-limit bucket on this endpoint.
+const USAGE_UA: &str = "claude-code/2.1.220";
+/// Minimum gap between real fetches. The frontend polls at 180s; this is the
+/// floor that also covers window-focus pulls and a re-mount storm.
+const USAGE_TTL_SECS: i64 = 120;
+
+#[derive(Serialize, Clone)]
+struct UsageLimit {
+    kind: String,     // session | weekly_all | weekly_scoped
+    label: String,    // "Session" | "Weekly" | model display name ("Fable")
+    percent: f64,
+    severity: String, // normal | warning | … (rendered as a color tier)
+    resets_at: Option<i64>, // unix seconds
+}
+
+#[derive(Serialize, Clone)]
+struct UsageInfo {
+    source: String, // oauth | statusline | unavailable
+    fetched_at: i64,
+    limits: Vec<UsageLimit>,
+}
+
+/// Last SUCCESSFUL oauth answer, with the epoch it was fetched at (see TTL).
+static USAGE_CACHE: Mutex<Option<UsageInfo>> = Mutex::new(None);
+
+/// ISO-8601 (`2026-08-04T00:00:00Z`, `…+00:00`, optional fraction) → unix
+/// seconds. days_from_civil, the inverse of fmt_utc's civil_from_days — same
+/// reason: no chrono dep for two date conversions.
+fn parse_iso8601(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse::<i64>().ok() };
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, se) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if mo > 2 { mo - 3 } else { mo + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let mut epoch = days * 86_400 + h * 3600 + mi * 60 + se;
+    // trailing zone: `Z`, nothing, or ±HH:MM (after an optional .fraction)
+    let rest = s[19..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let sign = rest.chars().next().unwrap_or('Z');
+    if sign == '+' || sign == '-' {
+        let oh: i64 = rest.get(1..3)?.parse().ok()?;
+        let om: i64 = rest.get(4..6).and_then(|m| m.parse::<i64>().ok()).unwrap_or(0);
+        let off = oh * 3600 + om * 60;
+        epoch += if sign == '-' { off } else { -off };
+    }
+    Some(epoch)
+}
+
+/// The Claude Code OAuth access token, straight out of the login Keychain item.
+/// None on any failure (not macOS, item absent, locked keychain, shape changed).
+fn claude_oauth_token() -> Option<String> {
+    let mut cmd = std::process::Command::new("/usr/bin/security");
+    cmd.args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]);
+    let out = run_deadline(cmd, 6).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    v.get("claudeAiOauth")?.get("accessToken")?.as_str().map(String::from)
+}
+
+/// GET the usage endpoint → (http status, body). curl, not a HTTP crate: the app
+/// already shells out to curl for the release check and this keeps the dep tree
+/// (and the TLS stack) exactly where it is.
+fn usage_get(token: &str) -> Result<(u16, String), String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-s", "--max-time", "10", "-w", "\n%{http_code}"])
+        .arg("-H")
+        .arg(format!("Authorization: Bearer {token}"))
+        .arg("-H")
+        .arg("anthropic-beta: oauth-2025-04-20")
+        .arg("-H")
+        .arg(format!("User-Agent: {USAGE_UA}"))
+        .arg("-H")
+        .arg("Content-Type: application/json")
+        .arg(USAGE_URL);
+    let out = run_deadline(cmd, 15).map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("curl exited {}", out.status.code().unwrap_or(-1)));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    // -w appended "\n<code>" AFTER the body; the body itself may contain newlines.
+    let cut = text.rfind('\n').ok_or("curl produced no status line")?;
+    let code: u16 = text[cut + 1..].trim().parse().map_err(|_| "curl produced no status code".to_string())?;
+    Ok((code, text[..cut].to_string()))
+}
+
+/// `limits[]` → our rows. Unknown kinds and unparseable entries are SKIPPED, not
+/// fatal — the endpoint ships experimental buckets we've never seen. `None` only
+/// when there is no `limits` array at all (i.e. the shape moved under us).
+fn parse_usage_limits(body: &str) -> Option<Vec<UsageLimit>> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let arr = v.get("limits")?.as_array()?;
+    let mut out = Vec::new();
+    for e in arr {
+        let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or_default();
+        let label = match kind {
+            "session" => "Session".to_string(),
+            "weekly_all" => "Weekly".to_string(),
+            // the model bar (e.g. "Fable") — no name, no row
+            "weekly_scoped" => match e.pointer("/scope/model/display_name").and_then(|d| d.as_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            },
+            _ => continue,
+        };
+        let percent = match e.get("percent").and_then(|p| p.as_f64()) {
+            Some(p) => p,
+            None => continue,
+        };
+        out.push(UsageLimit {
+            kind: kind.to_string(),
+            label,
+            percent,
+            severity: e.get("severity").and_then(|s| s.as_str()).unwrap_or("normal").to_string(),
+            resets_at: e.get("resets_at").and_then(|r| r.as_str()).and_then(parse_iso8601),
+        });
+    }
+    Some(out)
+}
+
+fn usage_from_oauth(now: i64) -> Result<UsageInfo, String> {
+    let token = claude_oauth_token().ok_or("keychain: no Claude Code credentials")?;
+    let (mut code, mut body) = usage_get(&token)?;
+    if code == 401 {
+        // token rotated under us (Claude Code refreshes ~hourly) — re-read once
+        let fresh = claude_oauth_token().ok_or("keychain: re-read failed after 401")?;
+        let retry = usage_get(&fresh)?;
+        code = retry.0;
+        body = retry.1;
+    }
+    if code != 200 {
+        return Err(format!("usage endpoint http {code}"));
+    }
+    let limits = parse_usage_limits(&body).ok_or("usage response carries no `limits` array")?;
+    Ok(UsageInfo { source: "oauth".into(), fetched_at: now, limits })
+}
+
+/// The statusline widget's local snapshot: `{"five_hour":{"used_percentage":46,
+/// "resets_at":<epoch secs>}, "seven_day":{…}}`. No severity and no model bucket
+/// — the frontend dims the whole widget for this source.
+fn usage_from_statusline() -> Option<UsageInfo> {
+    let home = std::env::var("HOME").ok()?;
+    let path = Path::new(&home).join(".claude/widgets/rate_limits.json");
+    let fetched_at = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_else(sysclock::now_epoch);
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    let mut limits = Vec::new();
+    for (key, kind, label) in [("five_hour", "session", "Session"), ("seven_day", "weekly_all", "Weekly")] {
+        let bucket = match v.get(key) {
+            Some(b) => b,
+            None => continue,
+        };
+        let percent = match bucket.get("used_percentage").and_then(|p| p.as_f64()) {
+            Some(p) => p,
+            None => continue,
+        };
+        limits.push(UsageLimit {
+            kind: kind.into(),
+            label: label.into(),
+            percent,
+            severity: "normal".into(),
+            resets_at: bucket.get("resets_at").and_then(|r| r.as_i64()),
+        });
+    }
+    if limits.is_empty() {
+        return None;
+    }
+    Some(UsageInfo { source: "statusline".into(), fetched_at, limits })
+}
+
+/// Plan-usage bars for the nav footer. Never Errs on "no data" — the widget is
+/// ambient, and a banner for a background poll would be worse than a blank
+/// corner; the reason goes to app.log instead.
+#[tauri::command]
+async fn claude_usage() -> Result<UsageInfo, String> {
+    let now = sysclock::now_epoch();
+    {
+        let cache = USAGE_CACHE.lock().unwrap();
+        if let Some(c) = cache.as_ref() {
+            if now - c.fetched_at < USAGE_TTL_SECS {
+                return Ok(c.clone());
+            }
+        }
+    }
+    match usage_from_oauth(now) {
+        Ok(info) => {
+            *USAGE_CACHE.lock().unwrap() = Some(info.clone());
+            Ok(info)
+        }
+        Err(why) => {
+            applog("warn", &format!("claude_usage: oauth unavailable: {why}"));
+            match usage_from_statusline() {
+                Some(info) => Ok(info),
+                None => {
+                    applog("warn", "claude_usage: no statusline snapshot either — widget hidden");
+                    Ok(UsageInfo { source: "unavailable".into(), fetched_at: now, limits: Vec::new() })
+                }
+            }
+        }
+    }
 }
 
 /// Find the installed CLI: whatever `command -v` resolves in the USER'S login
@@ -1600,6 +1907,21 @@ struct FileContent {
     /// mtime (ms since epoch) — the dock echoes it back on save as a
     /// compare-and-swap token so a stale buffer can't clobber a newer edit.
     mtime: u64,
+    /// Full size on disk (NOT the length of `content`, which is capped) — the
+    /// viewer header shows it, and it's the only honest number for a file that
+    /// came back truncated or binary.
+    size: u64,
+}
+
+/// An image (or any small blob) as base64, for the viewer's `data:` URI. Kept
+/// separate from `read_file` so the text path never pays for the encode.
+#[derive(Serialize)]
+struct FileBlob {
+    b64: String,
+    /// Bytes actually encoded (== `size` unless the cap truncated the read).
+    size: u64,
+    truncated: bool,
+    mtime: u64,
 }
 
 /// File mtime in ms since the epoch (0 if unavailable) — a cheap change token.
@@ -1705,7 +2027,11 @@ async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Resu
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
     }
-    let cap = max_bytes.unwrap_or(1_000_000);
+    // `max_bytes` is frontend-controlled: clamp it. An unclamped `cap + 1`
+    // overflows on u64::MAX — panicking in a debug build, and in release
+    // wrapping to 0, which would report a non-empty file as empty and NOT
+    // truncated. Saturating keeps the failure mode "reads everything".
+    let cap = max_bytes.unwrap_or(1_000_000).min(u64::MAX - 1);
     // Bounded read: `take(cap+1)` never allocates more than the cap even for a
     // multi-GB file the user clicks by accident (video, core dump, tarball).
     let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
@@ -1714,10 +2040,63 @@ async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Resu
     let truncated = bytes.len() as u64 > cap;
     let slice = &bytes[..bytes.len().min(cap as usize)];
     let mtime = file_mtime_ms(&f);
+    let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(bytes.len() as u64);
     if slice.contains(&0) {
-        return Ok(FileContent { content: String::new(), truncated, binary: true, mtime });
+        return Ok(FileContent { content: String::new(), truncated, binary: true, mtime, size });
     }
-    Ok(FileContent { content: String::from_utf8_lossy(slice).to_string(), truncated, binary: false, mtime })
+    Ok(FileContent {
+        content: String::from_utf8_lossy(slice).to_string(),
+        truncated,
+        binary: false,
+        mtime,
+        size,
+    })
+}
+
+/// Raw bytes as base64 — the viewer builds a `data:` URI from it to show an
+/// image inline. Same path guard as every other FS command. The cap is smaller
+/// than `read_file`'s (base64 inflates 4/3, and this crosses the IPC bridge as
+/// one string): a bigger image reports `truncated` and the viewer refuses to
+/// render a half-decoded file rather than showing a corrupt one.
+#[tauri::command]
+async fn read_file_base64(app: AppHandle, path: String, max_bytes: Option<u64>) -> Result<FileBlob, String> {
+    let f = guard_under_projects(&app, &path)?;
+    if !f.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    // 4 MiB: base64 inflates 4/3 and the result crosses the IPC bridge as one
+    // string, so a markdown doc full of images can hold several of these at
+    // once. Clamped for the same overflow reason as `read_file`.
+    let cap = max_bytes.unwrap_or(4_000_000).min(u64::MAX - 1);
+    let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let truncated = bytes.len() as u64 > cap;
+    if truncated {
+        bytes.truncate(cap as usize);
+    }
+    Ok(FileBlob {
+        b64: b64_encode(&bytes),
+        size: bytes.len() as u64,
+        truncated,
+        mtime: file_mtime_ms(&f),
+    })
+}
+
+/// Standard base64 (RFC 4648, padded). Hand-rolled: the app pulls in no base64
+/// crate for what is one table and a three-byte loop.
+fn b64_encode(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 /// Save an edit. The file must already exist (guard canonicalizes) — the dock
@@ -2304,6 +2683,9 @@ pub fn run() {
             list_places,
             list_workspace,
             add_project,
+            probe_dir,
+            init_repo,
+            create_initial_commit,
             remove_project,
             set_lifecycle,
             set_pin,
@@ -2329,6 +2711,7 @@ pub fn run() {
             init_write,
             diagnostics,
             tmux_check,
+            claude_usage,
             log_info,
             log_event,
             log_tail,
@@ -2337,6 +2720,7 @@ pub fn run() {
             open_terminal,
             list_dir,
             read_file,
+            read_file_base64,
             write_file,
             list_shell_sessions,
             close_shell_session,

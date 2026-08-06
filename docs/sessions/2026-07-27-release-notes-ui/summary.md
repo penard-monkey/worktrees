@@ -1,3 +1,7 @@
+---
+title: "Session: release-notes UI — 2026-07-27"
+---
+
 # Session: release-notes UI — 2026-07-27
 
 - **Worktree**: `.worktrees/ui-changes`

@@ -1,3 +1,7 @@
+---
+title: "Session: busy-only dots, nav with Home, system theme pairs"
+---
+
 # Session: busy-only dots, nav with Home, system theme pairs
 
 - **Date:** 2026-07-27

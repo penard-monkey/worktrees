@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { ShellPane, TerminalPane } from "./TerminalPane";
+import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
@@ -44,12 +45,16 @@ type Place = {
   declared: Declared;
   lifecycle_effective: string;
 };
-type Snapshot = { repo: string; prefix: string; places: Place[] };
+/** `unborn`: the repo was `git init`ed but has no commits — it lists fine, yet
+ *  no worktree can be created off an unborn branch. The nav offers the first
+ *  commit rather than letting `new_place` fail on an invalid object name. */
+type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean };
 type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 type Workspace = { projects: ProjectView[] };
 /** `needs_confirm` (close only): core stopped because killing this session needs
  *  the user's word, and the string is the session that would die. Not a failure
  *  — a question, so it must never reach the error banner. */
+type DirProbe = { exists: boolean; is_git: boolean; has_commits: boolean };
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; needs_confirm?: string | null; warnings?: string[] };
 type Lens = "places" | "recent" | "attention";
 /** Last known `doctor` state for one project root. `slugs` decorates rows,
@@ -285,6 +290,64 @@ function NewPlaceForm({ project, initialBase, onCreate, onCancel }: {
   );
 }
 
+// A picked folder that isn't a git repo. Offering `git init` here is the whole
+// point — the old path just said "Not inside a git repository." and stopped.
+// The empty first commit rides along because a repo without one cannot host a
+// worktree at all (git: "not a valid object name"), so init-only would just
+// move the dead end one click later. Module scope: keeps its busy flag across
+// App's re-renders.
+function InitRepoPrompt({ dir, onInit, onCancel }: {
+  dir: string;
+  onInit: (dir: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    await onInit(dir);
+    setBusy(false);
+  };
+  return (
+    <div className="newform nav-newform">
+      <div className="newform-h">
+        Not a git repo · <b>{basename(dir)}</b>
+        <button className="mini" title="cancel" onClick={onCancel}><Icons.X size={13} /></button>
+      </div>
+      <p className="newform-note">
+        <code>{dir}</code> isn't a git repository. Initialize it with an empty first commit?
+      </p>
+      <button disabled={busy} onClick={run}>{busy ? "Initializing…" : "git init + first commit"}</button>
+    </div>
+  );
+}
+
+// Tracked repo, unborn HEAD: `new` cannot work until a commit exists, so the
+// new-worktree form is replaced by the one action that unblocks it.
+function UnbornPrompt({ project, onCommit, onCancel }: {
+  project: string;
+  onCommit: (repo: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    await onCommit(project);
+    setBusy(false);
+  };
+  return (
+    <div className="newform nav-newform">
+      <div className="newform-h">
+        No commits yet · <b>{basename(project)}</b>
+        <button className="mini" title="cancel (Esc)" onClick={onCancel}><Icons.X size={13} /></button>
+      </div>
+      <p className="newform-note">
+        git can't branch off an unborn HEAD. Make the first commit, then create worktrees.
+      </p>
+      <button disabled={busy} onClick={run}>{busy ? "Committing…" : "Create initial commit"}</button>
+    </div>
+  );
+}
+
 // ── ⌘K quick-switcher ──
 // Fuzzy SUBSEQUENCE match over a composite key (slug + branch + project basename
 // + note). A place matches if the query chars appear IN ORDER (case-insensitive);
@@ -444,169 +507,14 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
   );
 }
 
-// ── right dock: file browser + editable viewer + embedded terminal ───────────
-// All at MODULE scope (stable identity — components defined inside App() remount
-// every render and would lose tree-expansion / textarea focus).
+// ── right dock: files + embedded terminal ───────────────────────────────────
+// The Files tab (tree, viewers, split layout) lives in FilesPane.tsx. Both are
+// at MODULE scope — components defined inside App() remount every render.
 
-type FsEntry = { name: string; path: string; is_dir: boolean };
-
-// One lazy directory node: fetches its children the first time it's expanded and
-// caches them. Files bubble a click up via onOpen; dirs toggle.
-function TreeNode({ entry, depth, openPath, onOpen, onError }: {
-  entry: FsEntry; depth: number; openPath: string | null; onOpen: (path: string) => void; onError: (e: unknown) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [kids, setKids] = useState<FsEntry[] | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const toggle = async () => {
-    if (!entry.is_dir) { onOpen(entry.path); return; }
-    const next = !open;
-    setOpen(next);
-    if (next && kids === null && !loading) {
-      setLoading(true);
-      // Surface a failure (permissions, backend error) rather than showing it as
-      // an empty directory — a swallowed error reads as "it just didn't respond".
-      try { setKids(await invoke<FsEntry[]>("list_dir", { path: entry.path })); }
-      catch (e) { setKids([]); onError(e); }
-      finally { setLoading(false); }
-    }
-  };
-
-  const isSel = !entry.is_dir && openPath === entry.path;
-  return (
-    <div className="tree-node">
-      <button
-        className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "")}
-        style={{ paddingLeft: `calc(var(--s2) + ${depth} * var(--s3))` }}
-        onClick={toggle}
-        title={entry.name}
-      >
-        <span className="tree-caret">{entry.is_dir && (open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />)}</span>
-        <span className="tree-name">{entry.name}</span>
-      </button>
-      {entry.is_dir && open && (
-        <div className="tree-kids">
-          {loading && <div className="tree-note">…</div>}
-          {kids && kids.length === 0 && !loading && <div className="tree-note">empty</div>}
-          {kids?.map((k) => (
-            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath} onOpen={onOpen} onError={onError} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Files tab tree. `root` = the place's worktree path; remount per place via key.
-function FileTree({ root, openPath, onOpen, onError }: { root: string; openPath: string | null; onOpen: (path: string) => void; onError: (e: unknown) => void }) {
-  const [entries, setEntries] = useState<FsEntry[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setEntries(null); setErr(null);
-    invoke<FsEntry[]>("list_dir", { path: root })
-      .then((e) => { if (alive) setEntries(e); })
-      .catch((e) => { if (alive) setErr(String(e)); });
-    return () => { alive = false; };
-  }, [root]);
-  if (err) return <div className="tree-note err-note">{err}</div>;
-  if (!entries) return <div className="tree-note">loading…</div>;
-  if (!entries.length) return <div className="tree-note">empty worktree</div>;
-  return (
-    <div className="filetree">
-      {entries.map((e) => <TreeNode key={e.path} entry={e} depth={0} openPath={openPath} onOpen={onOpen} onError={onError} />)}
-    </div>
-  );
-}
-
-// Editable viewer. Reads on path change; plain textarea (no editor lib). ⌘S /
-// Save writes back. Binary + truncated files are read-only (partial saves would
-// corrupt), with an "Open in editor" escape hatch. Because Claude edits the same
-// tree in another pane, this guards against clobbering: it auto-reloads from disk
-// while the buffer is clean (`reloadToken` bumps on places:changed), and on save
-// passes the file's mtime as a compare-and-swap token — a diverged file is
-// refused, not overwritten.
-type FileRead = { content: string; truncated: boolean; binary: boolean; mtime: number };
-function FileViewer({ path, reloadToken, onOpenEditor, onError }: {
-  path: string; reloadToken: number; onOpenEditor: (path: string) => void; onError: (e: unknown) => void;
-}) {
-  const [orig, setOrig] = useState("");
-  const [text, setText] = useState("");
-  const [meta, setMeta] = useState<{ binary: boolean; truncated: boolean; mtime: number } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [conflict, setConflict] = useState(false);
-
-  const load = useCallback(() => {
-    let alive = true;
-    setLoading(true); setMeta(null); setConflict(false);
-    invoke<FileRead>("read_file", { path })
-      .then((r) => { if (!alive) return; setOrig(r.content); setText(r.content); setMeta({ binary: r.binary, truncated: r.truncated, mtime: r.mtime }); })
-      .catch((e) => { if (alive) onError(e); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
-  }, [path, onError]);
-
-  useEffect(() => load(), [load]); // (re)load on path change
-
-  const dirty = text !== orig;
-  const canEdit = !!meta && !meta.binary && !meta.truncated;
-
-  // Auto-refresh from disk when the tree changed elsewhere AND the buffer is
-  // clean — never nuke unsaved edits (the save-time CAS covers the dirty case).
-  const dirtyRef = useRef(false); dirtyRef.current = dirty;
-  const firstReload = useRef(true);
-  useEffect(() => {
-    if (firstReload.current) { firstReload.current = false; return; }
-    if (!dirtyRef.current) load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadToken]);
-
-  const save = async () => {
-    if (!dirty || saving || !canEdit) return;
-    setSaving(true);
-    try {
-      await invoke("write_file", { path, content: text, expectedMtime: meta?.mtime ?? null });
-      setOrig(text); setConflict(false);
-      const r = await invoke<FileRead>("read_file", { path }); // pick up the new mtime for the next CAS
-      setMeta((m) => (m ? { ...m, mtime: r.mtime } : m));
-    } catch (e) {
-      if (String(e).includes("changed on disk")) setConflict(true);
-      onError(e);
-    } finally { setSaving(false); }
-  };
-
-  return (
-    <div className="viewer">
-      <div className="viewer-h">
-        <span className="viewer-path" title={path}>{basename(path)}{dirty ? " ●" : ""}</span>
-        {meta?.truncated && <span className="viewer-tag">truncated</span>}
-        {conflict && <span className="viewer-tag conflict">changed on disk</span>}
-        <span className="dock-spacer" />
-        {conflict && <button className="ctrl sm" onClick={load}>Reload</button>}
-        {canEdit && <button className="ctrl sm" disabled={!dirty || saving} onClick={save}>{saving ? "Saving…" : "Save"}</button>}
-        <button className="ctrl sm" onClick={() => onOpenEditor(path)}>Editor</button>
-      </div>
-      {loading ? (
-        <div className="tree-note">loading…</div>
-      ) : meta?.binary ? (
-        <div className="tree-note">binary file — <button className="linklike" onClick={() => onOpenEditor(path)}>open in editor</button></div>
-      ) : (
-        <textarea
-          className="viewer-text"
-          value={text}
-          spellCheck={false}
-          readOnly={!canEdit}
-          onChange={(e) => setText(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); }
-          }}
-        />
-      )}
-    </div>
-  );
-}
+// Files-tab layout cycle for the dock header button.
+const NEXT_FILES_LAYOUT: Record<Settings["files_layout"], Settings["files_layout"]> = {
+  auto: "stack", stack: "split", split: "auto",
+};
 
 // A dock shell is just a ShellPane now — the backend spawns-or-reattaches on
 // open, keyed by repo+slug+index (the webview never names one), so there's no
@@ -939,6 +847,123 @@ function TmuxBanner({ onRecheck }: { onRecheck: () => Promise<boolean> }) {
   );
 }
 
+// ── Claude plan usage (nav footer) ──────────────────────────────────────────
+// The same bars as Claude Code's /usage panel: 5h session window, weekly
+// all-models, plus any model-scoped weekly bucket ("Fable"). Backend
+// (`claude_usage`) never errors on missing data — it answers
+// source: "unavailable" and we render nothing, so a machine without Claude Code
+// credentials just has a plain nav.
+//
+// Module scope with props, per CLAUDE.md: it owns poll state, which a component
+// declared inside App() would throw away (and re-fetch) on every render.
+type UsageLimit = {
+  kind: string;
+  label: string;
+  percent: number;
+  severity: string;
+  resets_at: number | null;
+};
+type UsageInfo = { source: string; fetched_at: number; limits: UsageLimit[] };
+
+// 180s — the endpoint is undocumented and has rate-limited hard before; the
+// backend also caps real fetches at one per 120s.
+const USAGE_POLL_MS = 180_000;
+// The countdown ticks off the LOCAL clock, not off a poll: `resets_at` is
+// absolute, so a 15s tick keeps the minute display honest without touching the
+// rate-limited endpoint (polling harder to animate a clock would be absurd).
+const USAGE_TICK_MS = 15_000;
+
+/** "5h" / "7d" for the two standard windows; model buckets keep their name. */
+function usageTick(l: UsageLimit): string {
+  if (l.kind === "session") return "5h";
+  if (l.kind === "weekly_all") return "7d";
+  return l.label;
+}
+
+/** Seconds-until-reset → two units, biggest first: "2d 5h", "3h 02m", "42m",
+ *  "<1m". Empty once the window has rolled over — a window whose reset is in the
+ *  past (the statusline snapshot is often that stale) shows no countdown rather
+ *  than a negative one. Minutes are zero-padded so the column can't jitter. */
+function fmtEta(secs: number): string {
+  if (secs <= 0) return "";
+  if (secs < 60) return "<1m";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${String(mins % 60).padStart(2, "0")}m`;
+  const days = Math.floor(hours / 24);
+  // "3d 0h" reads as noise — at day scale the zero hour carries nothing
+  return hours % 24 === 0 ? `${days}d` : `${days}d ${hours % 24}h`;
+}
+
+function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
+  const [info, setInfo] = useState<UsageInfo | null>(null);
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+
+  // Own timer, deliberately separate from the poll effect: cheap (a number in a
+  // module-scope component, so the re-render stays inside the widget) and it
+  // must keep running between the 180s pulls.
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), USAGE_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const pull = () => {
+      // a pull is also the moment to re-zero the countdown clock: coming back
+      // from sleep, the 15s tick may be up to a tick behind
+      setNowSec(Math.floor(Date.now() / 1000));
+      invoke<UsageInfo>("claude_usage")
+        .then((u) => { if (alive) setInfo(u); })
+        .catch((e) => { if (alive) onError(e); });
+    };
+    pull();
+    const id = setInterval(pull, USAGE_POLL_MS);
+    // coming back to the window is exactly when a stale bar is most visible
+    window.addEventListener("focus", pull);
+    return () => {
+      alive = false;
+      clearInterval(id);
+      window.removeEventListener("focus", pull);
+    };
+  }, [onError]);
+
+  if (!info || info.source === "unavailable" || info.limits.length === 0) return null;
+  // statusline = a local snapshot only as fresh as the last Claude Code session
+  const stale = info.source === "statusline";
+  // no row has a live reset (endpoint dropped the field, or every window has
+  // already rolled over) → no column at all, rather than a strip of blanks
+  const anyEta = info.limits.some((l) => l.resets_at && l.resets_at > nowSec);
+  return (
+    <div
+      className={"usage" + (stale ? " stale" : "")}
+      title={stale ? `Claude usage — statusline snapshot from ${new Date(info.fetched_at * 1000).toLocaleString()}` : undefined}
+    >
+      {info.limits.map((l) => {
+        const pct = Math.max(0, Math.min(100, Math.round(l.percent)));
+        const tone = l.severity === "normal" ? "" : l.severity === "warning" ? " warn" : " over";
+        const eta = l.resets_at ? fmtEta(l.resets_at - nowSec) : "";
+        const resets = l.resets_at ? `, resets ${new Date(l.resets_at * 1000).toLocaleString()}` : "";
+        return (
+          <div
+            className={"usage-row" + tone}
+            key={l.kind + "|" + l.label}
+            title={`${l.label} — ${pct}% used${eta ? `, ${eta} left` : ""}${resets}`}
+          >
+            <span className="usage-label">{usageTick(l)}</span>
+            <span className="usage-bar"><i style={{ width: `${pct}%` }} /></span>
+            <span className="usage-pct">{pct}%</span>
+            {/* column is reserved even when a row's reset has passed, so the
+                three ETAs stay right-aligned with each other */}
+            {anyEta && <span className="usage-eta">{eta}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
@@ -947,6 +972,8 @@ function App() {
   const [lens, setLens] = useState<Lens>("places");
   const [newFor, setNewFor] = useState<string | null>(null);
   const [newBase, setNewBase] = useState("");
+  // A picked folder that is not a repo yet, awaiting the `git init` offer.
+  const [initAsk, setInitAsk] = useState<string | null>(null);
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
   // The armed Close needs one fact more than `confirmRm` can carry: WHICH tmux
@@ -999,7 +1026,16 @@ function App() {
   const searchRef = useRef<HTMLInputElement | null>(null);
   // right dock: which file the Files tab is viewing (null = none). Reset per place.
   const [dockFile, setDockFile] = useState<string | null>(null);
-  useEffect(() => { setDockFile(null); }, [sel?.repo, sel?.slug]);
+  // Reading mode (⌘⇧E): the open file takes over the main pane. Closed by a
+  // place switch or by the file going away — an overlay with nothing under it
+  // would hide the terminal for no reason.
+  const [reading, setReading] = useState(false);
+  useEffect(() => { setDockFile(null); setReading(false); }, [sel?.repo, sel?.slug]);
+  useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
+  // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
+  // make that a lie. Same for flipping the dock to the Terminal tab.
+  const filesDockShown = settings.dock_open && settings.dock_tab === "files";
+  useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
   // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
   const [newTermToken, setNewTermToken] = useState(0);
   // bumps on places:changed → the dock's file viewer re-reads from disk when clean.
@@ -1137,16 +1173,27 @@ function App() {
   useEffect(() => {
     okRoots.current = new Set((ws?.projects ?? []).filter((pv) => pv.ok).map((pv) => pv.root));
   }, [ws]);
-  // Which roots have already had their once-per-project init probe (below).
-  // Declared here because the sweep effect prunes it alongside the two maps.
-  const suggestedFor = useRef<Set<string>>(new Set());
+  // Probes for the `.worktrees.toml` suggestion behind the "Not configured"
+  // banner. Also called directly after the sheet writes a config, so the banner
+  // retires immediately instead of at the next sweep.
+  const probeSuggest = useCallback(async (root: string) => {
+    try {
+      const s = await invoke<InitSuggestion | null>("init_suggest", { repo: root });
+      // Store unconditionally. Do NOT skip on an unchanged `hash` to save the
+      // re-render: `suggestion_key` covers files/ports/compose/truncated and
+      // deliberately NOT `exists` (it keys the DISMISSAL, so writing the config
+      // must not re-suggest). A config appearing therefore keeps the same hash
+      // while flipping `exists` — the one update the banner depends on.
+      if (s) setSuggest((m) => ({ ...m, [root]: s }));
+    } catch (e) {
+      invoke("log_event", { level: "warn", msg: `init_suggest ${root}: ${String(e)}` }).catch(() => {});
+    }
+  }, []);
   useEffect(() => {
     const roots = rootsKey ? rootsKey.split("\n") : [];
-    // A removed project must not keep its drift decoration, its suggestion, or
-    // its once-only probe marker alive for the rest of the session — re-adding it
-    // would then show stale findings and never re-probe.
+    // A removed project must not keep its drift decoration or its suggestion
+    // alive for the rest of the session — re-adding it would show stale findings.
     const live = new Set(roots);
-    for (const r of suggestedFor.current) if (!live.has(r)) suggestedFor.current.delete(r);
     const prune = <T,>(m: Record<string, T>) =>
       Object.keys(m).every((k) => live.has(k))
         ? m
@@ -1154,28 +1201,20 @@ function App() {
     setHealth((m) => prune(m));
     setSuggest((m) => prune(m));
     if (roots.length === 0) return;
-    const sweep = () => roots.filter((r) => okRoots.current.has(r)).forEach((r) => sweepDoctor(r));
+    // The init probe rides the doctor sweep rather than running once per root:
+    // `.worktrees.toml` can appear from OUTSIDE the app (a merge, a pull, the
+    // CLI's `init`), and a once-only probe leaves "Not configured" on screen for
+    // the rest of the session after it does. Same cost class as doctor, same
+    // 5-minute cadence, and it skips not-ok roots for free.
+    const sweep = () =>
+      roots.filter((r) => okRoots.current.has(r)).forEach((r) => {
+        sweepDoctor(r);
+        probeSuggest(r);
+      });
     sweep();
     const t = setInterval(sweep, 5 * 60_000); // slow timer, not the poll
     return () => clearInterval(t);
-  }, [rootsKey, sweepDoctor]);
-  // The suggestion is stable for a given checkout, so probe each project once;
-  // `probeSuggest` re-runs it after a config is written (the banner retires).
-  const probeSuggest = useCallback(async (root: string) => {
-    try {
-      const s = await invoke<InitSuggestion | null>("init_suggest", { repo: root });
-      if (s) setSuggest((m) => ({ ...m, [root]: s }));
-    } catch (e) {
-      invoke("log_event", { level: "warn", msg: `init_suggest ${root}: ${String(e)}` }).catch(() => {});
-    }
-  }, []);
-  useEffect(() => {
-    for (const root of rootsKey ? rootsKey.split("\n") : []) {
-      if (suggestedFor.current.has(root)) continue;
-      suggestedFor.current.add(root);
-      probeSuggest(root);
-    }
-  }, [rootsKey, probeSuggest]);
+  }, [rootsKey, sweepDoctor, probeSuggest]);
 
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
@@ -1386,10 +1425,38 @@ function App() {
     }
   };
 
+  // Roots whose repo has no commits yet — the new-worktree form is useless there.
+  const unbornProjects = useMemo(
+    () => new Set((ws?.projects ?? []).filter((p) => p.snapshot?.unborn).map((p) => p.root)),
+    [ws],
+  );
   const addProject = async () => {
     try {
       const dir = await open({ directory: true, title: "Add a git project" });
-      if (typeof dir === "string") { setErr(""); setWs(await invoke<Workspace>("add_project", { dir })); }
+      if (typeof dir !== "string") return;
+      setErr("");
+      // Probe BEFORE add_project: a plain folder is a normal thing to pick for a
+      // new project, and the answer is an offer (`git init`), not an error.
+      const probe = await invoke<DirProbe>("probe_dir", { dir });
+      if (!probe.is_git) {
+        setInitAsk(dir);
+        if (settings.nav_collapsed) toggleNav();
+        return;
+      }
+      setWs(await invoke<Workspace>("add_project", { dir }));
+    } catch (e) { fail(e); }
+  };
+  const initRepo = async (dir: string) => {
+    try {
+      setErr("");
+      setWs(await invoke<Workspace>("init_repo", { dir }));
+      setInitAsk(null);
+    } catch (e) { fail(e); }
+  };
+  const createInitialCommit = async (repo: string) => {
+    try {
+      setErr("");
+      setWs(await invoke<Workspace>("create_initial_commit", { repo }));
     } catch (e) { fail(e); }
   };
   const removeProject = async (root: string) => {
@@ -1584,7 +1651,8 @@ function App() {
   // remove still succeeds — del_branch is safe by construction.
   const confirmRemovePlaceCtx = async (repo: string, slug: string, delBranch: boolean) => {
     closeCtx();
-    if ((await runCmd("remove_place", { repo, slug, del_branch: delBranch, force: false }))?.ok) {
+    // Arg keys are camelCase: Tauri renames Rust snake_case params over IPC.
+    if ((await runCmd("remove_place", { repo, slug, delBranch, force: false }))?.ok) {
       if (sel?.repo === repo && sel?.slug === slug) setSel(null);
     }
   };
@@ -1662,7 +1730,7 @@ function App() {
   const confirmRemove = async (delBranch: boolean) => {
     if (!sel) return;
     closeMenu();
-    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, del_branch: delBranch, force: false }))?.ok) setSel(null);
+    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, delBranch, force: false }))?.ok) setSel(null);
   };
 
   const toggleProject = (root: string) => {
@@ -1720,8 +1788,8 @@ function App() {
   }, []);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
-  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen });
-  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen };
+  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false });
+  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen, filesTabOpen: settings.dock_open && settings.dock_tab === "files" };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // ⌘⇧T — new dock terminal. Handled BEFORE the meta-only guard (it needs
@@ -1731,6 +1799,25 @@ function App() {
       if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "t") {
         e.preventDefault();
         if (!keyRef.current.switchOpen) setNewTermToken((v) => v + 1);
+        return;
+      }
+      // Esc leaves reading mode — but only when reading is the TOP surface.
+      // The settings sheet and the ⌘K palette are above it and own Escape
+      // first, or one keypress dismisses the thing you can't see.
+      if (e.key === "Escape" && keyRef.current.reading && !keyRef.current.settingsOpen && !keyRef.current.switchOpen) {
+        e.preventDefault();
+        setReading(false);
+        return;
+      }
+      // ⌘⇧E — reading mode: the dock's current file expands over the main pane.
+      // No-op with no file open, so the chord can't blank the terminal for
+      // nothing. Also shift-guarded, hence its place above the meta-only gate.
+      if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        // Only meaningful with the Files tab showing a file: opening a reader
+        // for a stale path behind a modal, or over the Terminal tab, is noise.
+        if (keyRef.current.switchOpen || keyRef.current.settingsOpen) return;
+        setReading((v) => (v ? false : keyRef.current.filesTabOpen && !!keyRef.current.dockFile));
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
@@ -2112,14 +2199,25 @@ function App() {
           <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}><Icons.Search /></button>
         </div>
         <input ref={searchRef} className="search" placeholder="filter places…" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} />
+        {initAsk && (
+          <InitRepoPrompt dir={initAsk} onInit={initRepo} onCancel={() => setInitAsk(null)} />
+        )}
         {newFor && (
-          <NewPlaceForm
-            key={newFor + "|" + newBase}
-            project={newFor}
-            initialBase={newBase}
-            onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
-            onCancel={() => { setNewFor(null); setNewBase(""); }}
-          />
+          unbornProjects.has(newFor) ? (
+            <UnbornPrompt
+              project={newFor}
+              onCommit={createInitialCommit}
+              onCancel={() => { setNewFor(null); setNewBase(""); }}
+            />
+          ) : (
+            <NewPlaceForm
+              key={newFor + "|" + newBase}
+              project={newFor}
+              initialBase={newBase}
+              onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
+              onCancel={() => { setNewFor(null); setNewBase(""); }}
+            />
+          )
         )}
         <div className="nav-scroll">
           {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}
@@ -2134,6 +2232,9 @@ function App() {
             </>
           )}
         </div>
+        {/* Claude plan usage — nav-only by design: no rail affordance, it rides
+            out ⌘B inside the hidden nav (and keeps polling, one call/180s). */}
+        <UsageWidget onError={fail} />
         <button className="add-footer with-icon" onClick={addProject}><Icons.Plus size={13} /> Add project</button>
         <div className="nav-resizer" onMouseDown={onResize} />
       </aside>
@@ -2310,6 +2411,37 @@ function App() {
             </div>
           </div>
         )}
+
+        {/* ── reading mode (⌘⇧E): the dock's open file over the whole main
+            pane. The terminal stays MOUNTED underneath (hidden, not
+            unmounted) — unmounting would drop the xterm and its scrollback;
+            TerminalPane refits when it is revealed again. */}
+        {reading && dockFile && selected && (
+          // Spans the main pane AND the dock (stopping at the rails): an
+          // overlay confined to `main` gets NARROWER as the dock grows, which
+          // is the opposite of "expand".
+          <div
+            className="reading"
+            role="dialog"
+            aria-label="File reader"
+            style={{ left: 0, right: dockShown ? -fit.dockW : 0 }}
+          >
+            <FileView
+              key={dockFile}
+              path={dockFile}
+              reloadToken={placesToken}
+              onOpen={setDockFile}
+              onOpenEditor={editIn}
+              onError={fail}
+              wrap={settings.files_wrap}
+              onWrap={(v) => updateSettings({ files_wrap: v })}
+              mdSource={settings.files_md_source}
+              onMdSource={(v) => updateSettings({ files_md_source: v })}
+              expanded
+              onExpand={(v) => setReading(v)}
+            />
+          </div>
+        )}
       </main>
 
       {/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ── */}
@@ -2321,17 +2453,38 @@ function App() {
           <div className="dock-tabs">
             <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
             <span className="dock-spacer" />
+            {settings.dock_tab === "files" && (
+              <button
+                className="ctrl sm icon-only"
+                aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
+                title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
+                onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
+              >
+                {settings.files_layout === "auto" ? "A" : settings.files_layout === "stack" ? "▤" : "▥"}
+              </button>
+            )}
           </div>
           <div className="dock-body">
             {settings.dock_tab === "files" ? (
-              <div className="dock-files">
-                <div className="dock-tree">
-                  <FileTree key={selected.path} root={selected.path} openPath={dockFile} onOpen={setDockFile} onError={fail} />
-                </div>
-                {dockFile
-                  ? <FileViewer key={dockFile} path={dockFile} reloadToken={placesToken} onOpenEditor={editIn} onError={fail} />
-                  : <div className="tree-note viewer-hint">select a file to view</div>}
-              </div>
+              <FilesPane
+                root={selected.path}
+                openPath={dockFile}
+                dockW={fit.dockW}
+                layout={settings.files_layout}
+                splitPct={settings.files_split_pct}
+                stackPct={settings.files_stack_pct}
+                onSplitPct={(v, o) => updateSettings(o === "split" ? { files_split_pct: v } : { files_stack_pct: v })}
+                reloadToken={placesToken}
+                onOpen={setDockFile}
+                onOpenEditor={editIn}
+                onError={fail}
+                wrap={settings.files_wrap}
+                onWrap={(v) => updateSettings({ files_wrap: v })}
+                mdSource={settings.files_md_source}
+                onMdSource={(v) => updateSettings({ files_md_source: v })}
+                expanded={false}
+                onExpand={(v) => setReading(v)}
+              />
             ) : (
               <TerminalTabs key={sel.repo + "|" + sel.slug}
                 repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}

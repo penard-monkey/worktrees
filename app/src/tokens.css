@@ -73,6 +73,21 @@
   --ansi-6: #7dcfff;  --ansi-14: #a4daff;
   --ansi-7: #a9b1d6;  --ansi-15: #c0caf5;
 
+  /* ── syntax highlighting (the dock's read-mode code viewer) ──
+   * A SEPARATE ramp from the chrome tokens: chrome colours are tuned against
+   * panel surfaces, and reused verbatim on the code background several of them
+   * fell under 3:1 on the light themes. Defaults below are the dark ramp; each
+   * light theme overrides the whole set. All values verified ≥ 4.5:1 against
+   * that theme's --bg-abyss. */
+  --syn-com: #6b7394;   /* comments */
+  --syn-str: #9ece6a;   /* strings */
+  --syn-num: #ff9e64;   /* numbers + literals */
+  --syn-kw: #bb9af7;    /* keywords */
+  --syn-typ: #7dcfff;   /* types */
+  --syn-fn: #7aa2f7;    /* call sites */
+  --syn-attr: #e0af68;  /* keys / attributes */
+  --syn-punc: #8a93bf;  /* punctuation */
+
   --scrim: rgba(0, 0, 0, 0.4);
 
   /* ── spacing (4px grid) ── */
@@ -168,6 +183,16 @@
   --ansi-5: #9854f1;  --ansi-13: #a463ff;
   --ansi-6: #007197;  --ansi-14: #007ea8;
   --ansi-7: #6172b0;  --ansi-15: #3760bf;
+
+  /* syntax ramp — all ≥ 4.5:1 on --bg-abyss #c1c9df */
+  --syn-com: #4a5275;
+  --syn-str: #315d1b;
+  --syn-num: #754c0f;
+  --syn-kw: #7420a8;
+  --syn-typ: #0d5782;
+  --syn-fn: #204eac;
+  --syn-attr: #814407;
+  --syn-punc: #47517c;
 }
 
 /* Catppuccin Mocha — crust/mantle/base/surface ladder, official ANSI spec. */
@@ -258,6 +283,16 @@
   --ansi-5: #8839ef;  --ansi-13: #8839ef;
   --ansi-6: #179299;  --ansi-14: #2d9fa8;
   --ansi-7: #acb0be;  --ansi-15: #bcc0cc;
+
+  /* syntax ramp — all ≥ 4.5:1 on --bg-abyss #dce0e8 */
+  --syn-com: #5e6075;
+  --syn-str: #40620a;
+  --syn-num: #8f4b12;
+  --syn-kw: #7a1fa2;
+  --syn-typ: #0d5c73;
+  --syn-fn: #1e58c4;
+  --syn-attr: #8a4b06;
+  --syn-punc: #5c5f77;
 }
 
 /* Nord — Polar Night surfaces, Snow Storm text, Frost accent, Aurora status.
