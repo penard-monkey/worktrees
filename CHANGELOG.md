@@ -3,9 +3,46 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.9.0] - 2026-08-06
 
 ### Added
+- **AI profiles — per-project Claude rules, skills, MCP servers and model.** A
+  profile is a named bundle of rules text, skills, MCP servers, settings and
+  model, applied to the `claude` session worktrees launches in a worktree's tmux
+  pane. Your normal terminal `claude` is untouched. A profile is either the
+  global default or bound to one project, and a project profile REPLACES the
+  default rather than merging with it — merging two rule sets produces a third
+  one nobody wrote. `WORKTREES_PROFILE=none` opts a single launch out, and
+  `worktrees open` from a terminal resolves the same profile the app would:
+  one resolver in core, so the CLI and the app cannot drift. The mechanism is a
+  `CLAUDE_CONFIG_DIR` swap, verified against claude 2.1.220 — rules ship via
+  `--append-system-prompt-file`, MCP via `--mcp-config` plus
+  `--strict-mcp-config` when not inheriting globals, which is what lets a
+  profile REMOVE a global server. Each profile holds its own credential through
+  a one-time `/login` in its pane, because claude derives its keychain service
+  name from the config-dir path; worktrees never copies, reads or stores a
+  token, which is also why deleting a profile reports the keychain item it
+  cannot remove instead of pretending to have cleaned it. It **fails closed**:
+  a profile that cannot be materialized opens the pane on a plain shell with
+  the reason and does not launch claude, because profiles are usually
+  restrictive and "could not apply your profile" must never quietly mean "ran
+  without your restrictions". Stated in the UI and in DESIGN.md: a profile
+  controls user scope, not the project's — a repo's committed
+  `.claude/settings.json`, `.mcp.json` and `CLAUDE.md` still load, and
+  `~/.claude/CLAUDE.md` with its @-imports loads regardless, so profiles ADD
+  rules and cannot suppress yours. Binding a profile to a repo that already has
+  conversations starts a fresh one, since history lives with the profile;
+  nothing is deleted, and unbinding brings it back.
+- **A skill store (`worktrees skills`)** that treats an installed skill as
+  instructions the model will read: capability-shaped frontmatter is surfaced
+  for review before install, git installs are pinned to the reviewed commit and
+  refuse if the branch moved underneath them, and installing never executes
+  anything from the source.
+- **`worktrees mcp`, a hand-rolled stdio MCP server** exposing the worktree
+  model to a session. Read-only by default; worktree mutations are opt-in per
+  profile and the destructive ones are additionally confirm-gated. Hand-rolled
+  because rmcp would have taken the CLI from 32 to 124 crates and dragged tokio
+  into a sync binary.
 - **The usage bars say when the window resets.** Every row in the nav footer
   gains a countdown column: `5h  ▬▬▬  35%  3h 02m`, and the weekly rows read
   `2d 5h` — days and hours, minutes dropped at that scale. The model-scoped
