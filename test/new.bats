@@ -91,9 +91,47 @@ setup() {
 
   run_wt new rb2 --no-tmux
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Fetching origin/rb2"* ]]
+  # One fetch of the whole remote, not a per-ref one: the old pair of targeted
+  # fetches spent a doomed round trip asking for a branch that usually does not
+  # exist yet. What the user needs to see is unchanged — the branch was found.
+  [[ "$output" == *"Fetching origin..."* ]]
   [[ "$output" == *"Checking out remote branch origin/rb2"* ]]
   [ "$(git -C "$REPO/.worktrees/rb2" rev-parse --abbrev-ref '@{u}')" = "origin/rb2" ]
+}
+
+# The fetch is GUARDED by the tracking ref, not unconditional. When
+# origin/<branch> is already on disk there is nothing left to ask the remote, and
+# the old code took this path fully offline — a floor of ZERO round trips that
+# collapsing the two fetches into one must not quietly raise to one. Enforced by
+# pointing origin at a path that cannot answer: any network attempt fails loudly.
+@test "new: tracking ref already present → no fetch at all (works with origin unreachable)" {
+  make_remote_branch rb3
+  git -C "$REPO" fetch -q origin "refs/heads/rb3:refs/remotes/origin/rb3"
+  git -C "$REPO" remote set-url origin /nonexistent/origin.git
+
+  run_wt new rb3 --no-tmux
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Fetching"* ]]
+  [[ "$output" == *"Checking out remote branch origin/rb3"* ]]
+  [ "$(git -C "$REPO/.worktrees/rb3" rev-parse --abbrev-ref '@{u}')" = "origin/rb3" ]
+}
+
+# The deliberate narrowing that came with the single fetch: it honours the repo's
+# CONFIGURED refspec, so a clone restricted to one branch no longer materializes
+# an unfetched remote branch the way an explicit `refs/heads/<x>:…` forced it to.
+# It falls through to a new local branch off the base instead of failing.
+@test "new: restricted refspec → remote-only branch is not materialized, falls through to base" {
+  make_remote_branch rb4
+  # what `git clone --single-branch` leaves behind: origin only ever offers main
+  git -C "$REPO" config remote.origin.fetch "+refs/heads/main:refs/remotes/origin/main"
+
+  run_wt new rb4 --no-tmux
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Fetching origin..."* ]]
+  # the fetch ran but this clone's refspec does not carry rb4
+  ! git -C "$REPO" show-ref --verify --quiet refs/remotes/origin/rb4
+  [[ "$output" == *"Creating new branch 'rb4' off 'origin/main'"* ]]
+  [ -d "$REPO/.worktrees/rb4" ]
 }
 
 @test "new: remote-only branch + --no-fetch → falls through to new branch off base" {

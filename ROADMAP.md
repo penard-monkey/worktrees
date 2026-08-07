@@ -4,6 +4,23 @@ Parking lot for work we've decided to keep but not do now. Each item links
 the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (.claude/skills/close-out).
 
+- **`do_switch` still pays the doomed two-fetch pair.** `cmd_new` was fixed to
+  ask the remote once (`ops.rs`, guarded single `git fetch origin`), but
+  `do_switch` (`ops.rs:309-321`) keeps the old shape: a targeted
+  `fetch refs/heads/<branch>:refs/remotes/origin/<branch>` — the request that
+  cannot succeed for a branch being invented — followed by a separate base
+  fetch. It matters beyond `switch`, because `new` ROUTES through it when the
+  worktree already exists on another branch, so that path still costs two
+  network waits. Same three-line fix, but it changes `switch`'s own semantics
+  and goldens (`test/switch.bats`), so it was left out of the `new` change
+  rather than smuggled in. Note the fork it leaves: a `--single-branch` clone no
+  longer force-materializes a remote branch via `new`, but still does via
+  `switch`. Related: on that same holder-reuse path the nav's new pending row is
+  suppressed by the slug dedup (the place already exists), so the user gets
+  neither the spinner nor the speedup — marking the EXISTING row busy would be
+  the fix, not a second ghost.
+  _From: 2026-08-07 ui-next session (new-worktree delay + warn spam)_
+
 - **App signing + notarization** — bundles ship unsigned; install.sh strips
   quarantine on a checksum-verified install. The proper distribution tier is
   Developer ID signing + notarization so Gatekeeper passes without the

@@ -3,6 +3,38 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Creating a worktree says so while it works.** The nav now shows the place
+  being created the moment you submit the form, with the form dismissed and a
+  spinner on the row, instead of leaving the whole app silent for the seconds
+  the work actually takes. It read as hung because nothing anywhere
+  acknowledged the click — the form fired its op un-awaited and no part of the
+  UI held a pending state. The row hands over to the real one with no gap, and
+  a failed create retires it rather than leaving it spinning.
+- **`new` on a branch you are inventing contacts the remote once, not twice.**
+  It used to fetch `refs/heads/<branch>` — a request that cannot succeed for a
+  branch that does not exist yet, which is the usual case — and then fetch the
+  base separately, so the common path paid two network waits to learn one
+  thing. A single `git fetch origin` answers both questions, taking ~0.8s off
+  every such `new`. When the tracking ref is already on disk it still fetches
+  nothing at all, as before. Narrowing worth knowing: the single fetch honours
+  the repo's configured refspec, so a `--single-branch` clone no longer
+  force-materializes a remote branch it was set up not to see — `new` creates a
+  local branch off the base there instead. `switch` keeps its own pair of
+  targeted fetches for now, so `new` onto an existing worktree that sits on
+  another branch still goes through that older path.
+
+### Fixed
+- **Reopening a place is no longer logged as a warning.** Finding the session
+  already up is what a durable place IS — the normal outcome, not something to
+  act on — but it was emitted at warn severity, and the app logs warnings even
+  for commands that succeeded, so every single `open` wrote a `[warn]` line and
+  buried the log's real content. It also claimed to be "attaching" on the app
+  path, which passes `--no-attach` and embeds the session in its own PTY; the
+  message now says what actually happened.
+
 ## [0.9.0] - 2026-08-06
 
 ### Added

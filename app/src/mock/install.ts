@@ -48,6 +48,16 @@ const mockPickPrefix = location.search.includes("empty")
     ? "unborn-"
     : "picked-";
 const mockInited = new Set<string>();
+// `new` is the one command that is slow for real (git fetch + worktree add +
+// materialize + tmux — measured ~2s), and that latency is the whole reason the
+// nav shows a pending row. Instantly-resolving mock would render the row for a
+// single frame, so nothing headless could ever see it. Same query-knob idiom as
+// ?notmux: `?slowcreate` for the default 2000ms, `?slowcreate=500` to pick one.
+const mockCreateDelayMs = (() => {
+  const m = /[?&]slowcreate(?:=(\d+))?/.exec(location.search);
+  return m ? Number(m[1] ?? 2000) : 0;
+})();
+const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
 function dirKind(dir: string): "repo" | "empty" | "unborn" {
   if (mockInited.has(dir) || findProject(dir)) return "repo";
   const base = dir.split("/").pop() || dir;
@@ -489,6 +499,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return null;
 
     case "new_place": {
+      await sleep(mockCreateDelayMs); // BEFORE the mutation — the place must not exist while the op runs
+      // A REJECTED create is its own UI path (banner + the form comes back
+      // carrying what was typed), and it was unreachable headlessly while every
+      // mock create succeeded. Any branch name containing "fail" takes it —
+      // core's real refusals here are all "that name cannot be used".
+      if (String(args.branch).includes("fail")) {
+        return { ok: false, code: 1, output: `Failed to create branch '${args.branch}': mock refusal` };
+      }
       const pv = findProject(args.repo);
       const slug = (args.name || args.branch).replace(/\//g, "-");
       if (pv?.snapshot && !pv.snapshot.places.find((p) => p.slug === slug)) {
