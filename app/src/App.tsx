@@ -226,9 +226,18 @@ function parseNotes(md: string): NotesSection[] {
   return sections.filter((s) => s.groups.some((g) => g.items.length));
 }
 
-// `code spans` → <code>; the only inline markup the changelog uses.
+// `code` / **strong** / *em* — the inline markup the changelog uses. One
+// alternation, code first, so a `**` inside a code span stays literal. The
+// inner text of a match can never re-match its own delimiter (each arm forbids
+// it), so the recursion below bottoms out after at most two levels.
+const INLINE = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*)/;
 function renderInline(s: string): React.ReactNode[] {
-  return s.split(/`([^`]+)`/g).map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part));
+  return s.split(INLINE).map((part, i) => {
+    if (i % 2 === 0) return part;
+    if (part.startsWith("`")) return <code key={i}>{part.slice(1, -1)}</code>;
+    if (part.startsWith("**")) return <strong key={i}>{renderInline(part.slice(2, -2))}</strong>;
+    return <em key={i}>{renderInline(part.slice(1, -1))}</em>;
+  });
 }
 
 function ReleaseNotes({ notes }: { notes: string }) {

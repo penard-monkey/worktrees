@@ -929,7 +929,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return {
         version: "0.2.2",
         changelog:
-          "# Changelog\n\n## [Unreleased]\n\n## [0.2.2] - 2026-07-26\n\n### Added\n- Nav tier show/hide, sort modes (last-used / A–Z / manual drag), release\n  notes on update — hard-wrapped like the real CHANGELOG to exercise\n  bullet unwrapping.\n\n### Fixed\n- Multi-client size clamp left stale cells in the embedded terminal;\n  sessions now use `window-size latest` + `aggressive-resize`.\n\n## [0.2.1] - 2026-07-25\n\n### Added\n- App self-update.\n",
+          "# Changelog\n\n## [Unreleased]\n\n## [0.2.2] - 2026-07-26\n\n### Added\n- **Nav tier show/hide, sort modes and release notes.** Sort is last-used /\n  A–Z / manual drag — hard-wrapped like the real CHANGELOG to exercise\n  bullet unwrapping, and *bolded* lead-ins to exercise inline markup.\n- **`worktrees doctor --strict`** — bold wrapping a code span.\n\n### Fixed\n- Multi-client size clamp left stale cells in the embedded terminal;\n  sessions now use `window-size latest` + `aggressive-resize`.\n\n## [0.2.1] - 2026-07-25\n\n### Added\n- App self-update.\n",
       };
 
     case "settings_info":
