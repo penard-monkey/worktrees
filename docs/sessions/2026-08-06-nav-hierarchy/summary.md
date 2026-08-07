@@ -8,7 +8,7 @@ title: "Session: nav hierarchy — projects up, dormant down"
 - **Worktree:** ui-tweaks
 - **Branches:** ui-nav-hierarchy (feature), ui-closeout-nav-hierarchy (this archive)
 - **PRs:** [#84](https://github.com/penard-monkey/worktrees/pull/84) (squash-merged → `29b2aea`)
-- **Release:** none — lands in `[Unreleased]`, next tag picks it up
+- **Release:** shipped in **v0.9.0** ([#86](https://github.com/penard-monkey/worktrees/pull/86), tagged the same day). Written as `[Unreleased]` during the session; the release cut hours later swept it in.
 - **Planning files:** planning.tar.gz alongside this summary (task_plan / findings / progress)
 
 ## Where this started
