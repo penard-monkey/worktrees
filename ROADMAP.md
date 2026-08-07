@@ -110,8 +110,11 @@ close-out ritual (.claude/skills/close-out).
     native WKWebView menu leaks over popovers.
   - _Zero-knob fix:_ `origin/HEAD` base detection to replace the rejected
     default-base setting (+ fix the "base (default: main)" placeholder lie).
-  - _Test infra:_ mock fault-injection (no mock `CmdResult` returns `ok:false`, so
-    the error-banner path is untestable headlessly).
+  - ~~_Test infra:_ mock fault-injection (no mock `CmdResult` returns `ok:false`, so
+    the error-banner path is untestable headlessly).~~ **Done 2026-08-07** — a
+    `new_place` branch containing `fail` returns `ok:false`, which is what made the
+    rejected-create path testable. Only `new_place` has it; the other commands still
+    always succeed, so widen it where a failure path needs covering.
   - _ai-command phase 2:_ editable AI command — needs a comment-preserving
     `cfg_set` writer in worktrees-core first.
   - ~26 polish items (menu keyboard/ARIA, mock parity drifts, minor labels).
