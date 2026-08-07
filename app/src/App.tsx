@@ -896,17 +896,62 @@ function fmtEta(secs: number): string {
   return hours % 24 === 0 ? `${days}d` : `${days}d ${hours % 24}h`;
 }
 
+/** Is anyone actually looking at this window? Two signals, because on macOS
+ * neither covers the other:
+ *
+ *   pageVisible — `document.visibilityState`. WebKit drives it off
+ *     `NSWindowDidChangeOcclusionState`, so it catches minimize, ⌘H, a Space
+ *     switch and FULL occlusion. It does NOT catch plain focus loss.
+ *   winFocused  — the window is key. Catches "another app is in front but our
+ *     window is still on screen".
+ *
+ * Heavy work (the git sweep, the polls) gates on `pageVisible` only: a visible
+ * but unfocused window is a dashboard someone is still reading, and freezing it
+ * would be a bug, not a saving. Cosmetics (cursor blink) gate on `winFocused`.
+ *
+ * Every transition is logged, because whether WKWebView really fires
+ * `visibilitychange` for occlusion is the one thing in this whole effort that
+ * the test suite cannot answer — read app.log (Settings → Logs) to confirm on a
+ * real build before trusting the gate.
+ */
+function useWindowAwake() {
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
+  const [winFocused, setWinFocused] = useState(() => document.hasFocus());
+  useEffect(() => {
+    const onVis = () => {
+      const v = document.visibilityState !== "hidden";
+      setPageVisible(v);
+      invoke("log_event", { level: "info", msg: `window ${v ? "visible" : "hidden"}` }).catch(() => {});
+    };
+    const onFocus = () => setWinFocused(true);
+    const onBlur = () => setWinFocused(false);
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+  return { pageVisible, winFocused };
+}
+
 function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
   const [info, setInfo] = useState<UsageInfo | null>(null);
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  const { pageVisible } = useWindowAwake();
 
   // Own timer, deliberately separate from the poll effect: cheap (a number in a
   // module-scope component, so the re-render stays inside the widget) and it
-  // must keep running between the 180s pulls.
+  // must keep running between the 180s pulls — but only while the window is
+  // actually on screen. Nobody needs a countdown animated at a minimized window.
   useEffect(() => {
+    if (!pageVisible) return;
+    setNowSec(Math.floor(Date.now() / 1000)); // re-zero: we may have been away for hours
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), USAGE_TICK_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [pageVisible]);
 
   useEffect(() => {
     let alive = true;
@@ -919,15 +964,18 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
         .catch((e) => { if (alive) onError(e); });
     };
     pull();
-    const id = setInterval(pull, USAGE_POLL_MS);
+    // Hidden → no interval at all. Coming back re-runs this effect, so the
+    // catch-up pull is free. A doubled pull with the focus listener below is
+    // harmless: the backend caps real fetches at one per 120s.
+    const id = pageVisible ? setInterval(pull, USAGE_POLL_MS) : null;
     // coming back to the window is exactly when a stale bar is most visible
     window.addEventListener("focus", pull);
     return () => {
       alive = false;
-      clearInterval(id);
+      if (id) clearInterval(id);
       window.removeEventListener("focus", pull);
     };
-  }, [onError]);
+  }, [onError, pageVisible]);
 
   if (!info || info.source === "unavailable" || info.limits.length === 0) return null;
   // statusline = a local snapshot only as fresh as the last Claude Code session
@@ -1040,6 +1088,10 @@ function App() {
   const [newTermToken, setNewTermToken] = useState(0);
   // bumps on places:changed → the dock's file viewer re-reads from disk when clean.
   const [placesToken, setPlacesToken] = useState(0);
+  // Gates every periodic cost in the app — see useWindowAwake. Only the
+  // visibility half is wanted here: cursor blink is the one thing that follows
+  // FOCUS, and it is wired inside TerminalPane where the terminals live.
+  const { pageVisible } = useWindowAwake();
 
   // every surfaced error also lands in the app log (Settings → Logs)
   const fail = useCallback((e: unknown) => {
@@ -1056,6 +1108,8 @@ function App() {
   // branch collision, a shadowed file on relink — and silence is the bug this
   // whole surface exists to fix.
   const refreshErr = useRef("");
+  // Serialized last snapshot, for the no-change bail below.
+  const lastSnap = useRef("");
   const refresh = useCallback(async () => {
     try {
       const w = await invoke<Workspace>("list_workspace");
@@ -1065,6 +1119,13 @@ function App() {
       const stale = refreshErr.current;
       refreshErr.current = "";
       if (stale) setErr((e) => (e === stale ? "" : e));
+      // An idle poll returns a BYTE-IDENTICAL workspace, and the backend forces
+      // one every 30s whether or not anything moved. Replacing `ws` anyway gave
+      // it a fresh identity and re-rendered the whole tree for no change at all
+      // — forever, in the background, on battery. Compare and bail.
+      const snap = JSON.stringify(w);
+      if (snap === lastSnap.current) return;
+      lastSnap.current = snap;
       setWs(w);
     } catch (e) {
       refreshErr.current = String(e); // same text fail() shows
@@ -1096,11 +1157,37 @@ function App() {
     }
   }, [fail, refresh]);
 
-  // live refresh: backend emits "places:changed" (poll/fs-watch) → re-pull
+  // live refresh: backend emits "places:changed" (poll/fs-watch) → re-pull.
+  //
+  // This listener is the THROTTLE POINT for the app's biggest power cost. The
+  // event itself is nearly free; `refresh()` is what invokes `list_workspace`,
+  // and that fans out to a git subprocess per place per project — measured at
+  // ~1.3 git spawns/second on an idle machine, running whether or not the
+  // window was on screen. Hidden → remember that we owe a refresh and do
+  // nothing else.
+  //
+  // `document.visibilityState` is read live rather than closing over
+  // `pageVisible`, so the listener never has to be torn down and re-registered
+  // (and can't act on a stale value).
+  const pendingRefresh = useRef(false);
   useEffect(() => {
-    const un = listen("places:changed", () => { refresh(); setPlacesToken((v) => v + 1); });
+    const un = listen("places:changed", () => {
+      if (document.visibilityState === "hidden") { pendingRefresh.current = true; return; }
+      refresh();
+      setPlacesToken((v) => v + 1);
+    });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
+
+  // The deferred catch-up. Coming back to the window is precisely when a stale
+  // nav is most obvious, so this runs on the visible edge rather than waiting
+  // for the next backend tick.
+  useEffect(() => {
+    if (!pageVisible || !pendingRefresh.current) return;
+    pendingRefresh.current = false;
+    refresh();
+    setPlacesToken((v) => v + 1);
+  }, [pageVisible, refresh]);
 
   // Claude working state — pushed by the backend poll thread from the
   // ~/.claude/sessions/<pid>.json probes (see lib.rs claude_activity). Keyed by
@@ -1212,9 +1299,13 @@ function App() {
         probeSuggest(r);
       });
     sweep();
-    const t = setInterval(sweep, 5 * 60_000); // slow timer, not the poll
+    // Slow timer, not the poll — but it still shells out per root, so it stops
+    // while the window is off screen. Coming back re-runs this effect, which
+    // sweeps immediately: the catch-up is free.
+    if (!pageVisible) return;
+    const t = setInterval(sweep, 5 * 60_000);
     return () => clearInterval(t);
-  }, [rootsKey, sweepDoctor, probeSuggest]);
+  }, [rootsKey, sweepDoctor, probeSuggest, pageVisible]);
 
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
