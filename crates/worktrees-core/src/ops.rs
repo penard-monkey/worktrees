@@ -172,7 +172,18 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
     }
     if tmux::session_exists(&session) {
-        ui.warn(&format!("tmux session '{session}' already in this worktree — attaching."));
+        // INFO, not warn. Finding the session already up is the normal, healthy
+        // outcome of reopening a place — it is what a durable place IS — so it is
+        // not something the user has to act on. At Warn severity it rode out
+        // through `CaptureUi::warnings()` and `run_op` logged it on EVERY app
+        // `open` (that path logs warnings even for rc=0), which is the whole of
+        // what made the app log unreadable.
+        //
+        // The tail follows `do_attach` because only one of the two callers
+        // attaches. The app passes false and embeds the session in its own PTY —
+        // "— attaching." was simply not true there.
+        let tail = if do_attach { "attaching." } else { "reusing it." };
+        ui.info(&format!("tmux session '{session}' already in this worktree — {tail}"));
     } else {
         ui.header(&format!("Opening tmux session '{session}'"));
         // Env assignments go INSIDE the -ic string, ahead of the command, rather
@@ -461,9 +472,34 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             return 1;
         }
     } else {
+        // ONE round trip, not two. This block has two questions for the remote —
+        // "does origin/<branch> exist?" and "is origin/<base> current?" — and it
+        // used to pay a separate fetch for each. Worse, the FIRST of them asked
+        // for `refs/heads/<branch>` on a branch the user is typically inventing,
+        // so it could not succeed: `fatal: couldn't find remote ref`, one full
+        // network wait spent to learn nothing. Measured here, that pair was
+        // ~1.6s of a 2.07s `new` — most of the delay that made the app look hung.
+        //
+        // A default `git fetch origin` answers both at once, and both `show-ref`
+        // calls below then read purely local refs. Narrowing to be aware of: this
+        // honours the repo's CONFIGURED refspec, so in a `--single-branch` clone
+        // an unfetched remote branch no longer materializes the way the explicit
+        // refspec forced it to. Creating a worktree for a branch such a clone was
+        // deliberately set up not to see is the rarer case by far, and forcing
+        // `+refs/heads/*:…` on every user to serve it would fetch refs those
+        // clones exist to avoid.
+        //
+        // The guard is the SAME one the old first fetch carried, and keeping it is
+        // not optional: when `origin/<branch>` is already on disk (a background
+        // fetcher, a previous `new`, an `rm` that kept the tracking ref) the old
+        // path took the tracking checkout below without touching the network at
+        // all. Dropping it would turn that case from zero round trips into one —
+        // and offline or on a flaky link, into a DNS/TCP timeout before producing
+        // the identical worktree. Fewer round trips was the point; this keeps the
+        // floor at zero and only collapses the 2 into 1.
         if do_fetch && !git::git_ok(&p.main_root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
-            ui.info(&format!("Fetching origin/{branch}..."));
-            let _ = git::git(&p.main_root, &["fetch", "--quiet", "origin", &format!("refs/heads/{branch}:refs/remotes/origin/{branch}")]);
+            ui.info("Fetching origin...");
+            let _ = git::git(&p.main_root, &["fetch", "--quiet", "origin"]);
         }
         if git::git_ok(&p.main_root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
             ui.info(&format!("Checking out remote branch origin/{branch} (tracking)."));
@@ -473,9 +509,6 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
                 return 1;
             }
         } else {
-            if do_fetch {
-                let _ = git::git(&p.main_root, &["fetch", "--quiet", "origin", &base]);
-            }
             let mut start = base.clone();
             if git::git_ok(&p.main_root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{base}")]) {
                 start = format!("origin/{base}");
