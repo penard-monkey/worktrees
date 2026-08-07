@@ -27,6 +27,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   another branch still goes through that older path.
 
 ### Fixed
+- **Release notes render their bold and italics instead of printing the
+  asterisks.** The "What's new" sheet parses the changelog itself — sections,
+  group chips, hard-wrapped bullets — but its inline pass only knew about
+  `code spans`, so every `**lead-in**` in a release since the notes gained them
+  came out with the markup showing. Strong and emphasis now render, including a
+  code span nested inside a bold lead-in, and the mock changelog carries all
+  three so the harness exercises them.
 - **Reopening a place is no longer logged as a warning.** Finding the session
   already up is what a durable place IS — the normal outcome, not something to
   act on — but it was emitted at warn severity, and the app logs warnings even

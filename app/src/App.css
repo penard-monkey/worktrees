@@ -623,6 +623,10 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   font-size: var(--fs-body); line-height: var(--lh-prose); color: var(--txt);
 }
 .rel-group li::marker { color: var(--txt-mute); }
+/* Most entries open with a bolded lead-in sentence — it carries the heading
+   weight the group tag can't, so it gets the brighter ink. */
+.rel-group li strong { font-weight: var(--fw-bold); color: var(--txt-hi); }
+.rel-group li em { font-style: italic; }
 .rel-group code {
   font-family: var(--font-mono); font-size: 0.85em;
   padding: 0 3px; border-radius: 3px;
