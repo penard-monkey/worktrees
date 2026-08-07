@@ -118,6 +118,11 @@ Screenshots, harness output, and other throwaway artifacts go in
 `~/.cache/worktrees/<project>/<worktree-name>/` (e.g.
 `~/.cache/worktrees/worktrees/ui-changes/`) — never the repo root.
 
+The Playwright MCP tools can't honour that directly: they refuse any path
+outside the repo ("outside allowed roots") and drop their own output in
+`.playwright-mcp/`. Let them write into the repo, then MOVE the artifacts to
+the cache dir before close-out.
+
 ## Close-out ritual
 
 When a work stream is done and the session is about to be `/clear`ed, run
@@ -125,3 +130,9 @@ the `/close-out` skill (`.claude/skills/close-out/SKILL.md`). Short version:
 scratch → `~/.cache/worktrees/…`, session summary + planning tarball →
 `docs/sessions/<date>-<slug>/` (committed), stragglers → `ROADMAP.md`,
 one squash-merged PR, then a fresh branch off origin/main.
+
+Branch off a FRESHLY FETCHED `origin/main`, and check with
+`git rev-list --left-right --count origin/main...HEAD` — an idle worktree's
+last commit can look like the tip and not be. PR numbers are not merge order:
+a long-lived PR merges after higher-numbered ones, so a worktree parked on
+"close out #83" was a commit behind because #72 landed later.

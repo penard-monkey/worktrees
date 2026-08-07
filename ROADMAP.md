@@ -268,3 +268,19 @@ close-out ritual (.claude/skills/close-out).
   recorded) rather than pretending to clean it. Reopen only if claude documents
   the derivation or exposes the item itself.
   _From: [2026-08-06 ai-rules-layer session](docs/sessions/2026-08-06-ai-rules-layer/summary.md)_
+
+- **Nav hierarchy in light themes.** The project-header and dormant-fade work
+  was verified only against dark themes (the harness runs tokyo-night; the
+  complaint screenshot was catppuccin-mocha). Everything keys off tokens, but
+  `.group.dormant`'s `opacity: 0.62` is a fixed number, and 62% over a light
+  ground is a different perceptual step than 62% over a dark one. Wants a pass
+  through tokyo-day / catppuccin-latte, and possibly a per-theme value.
+  _From: [2026-08-06 nav-hierarchy session](docs/sessions/2026-08-06-nav-hierarchy/summary.md)_
+
+- **Project names truncate sooner in the nav.** Accepted cost of moving `.pname`
+  to `--fs-row`: at narrow nav widths a long repo reads `casa-del-valle-mo…`.
+  The `title={pv.root}` tooltip covers it and the nav is user-resizable, so this
+  was taken deliberately — but a middle-ellipsis (`casa-…-monorepo`) would keep
+  the distinguishing tail, which for sibling repos sharing a prefix is the half
+  that matters.
+  _From: [2026-08-06 nav-hierarchy session](docs/sessions/2026-08-06-nav-hierarchy/summary.md)_
