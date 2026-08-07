@@ -72,9 +72,17 @@ impl SysClock {
             }
         }
         let epoch = self.stat_birth_uncached(path);
-        if let Some(k) = key {
-            if let Ok(mut c) = birth_cache().lock() {
-                c.insert(k, epoch);
+        // Don't memoize the failure sentinel. `stat_birth_uncached` returns 0 for
+        // EVERY failure — including a transient fork failure under the parallel
+        // snapshot fan-out — and the key stays valid for the life of the
+        // directory, so a single unlucky spawn would pin `created: "-"` on that
+        // place until the app restarts (and `recency_key` would sink it to the
+        // bottom of the nav). Before the cache, the next 3s poll healed it.
+        if epoch > 0 {
+            if let Some(k) = key {
+                if let Ok(mut c) = birth_cache().lock() {
+                    c.insert(k, epoch);
+                }
             }
         }
         epoch

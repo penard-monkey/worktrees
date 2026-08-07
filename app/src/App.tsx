@@ -896,18 +896,19 @@ function fmtEta(secs: number): string {
   return hours % 24 === 0 ? `${days}d` : `${days}d ${hours % 24}h`;
 }
 
-/** Is anyone actually looking at this window? Two signals, because on macOS
- * neither covers the other:
+/** Is anyone actually looking at this window?
  *
- *   pageVisible — `document.visibilityState`. WebKit drives it off
- *     `NSWindowDidChangeOcclusionState`, so it catches minimize, ⌘H, a Space
- *     switch and FULL occlusion. It does NOT catch plain focus loss.
- *   winFocused  — the window is key. Catches "another app is in front but our
- *     window is still on screen".
- *
- * Heavy work (the git sweep, the polls) gates on `pageVisible` only: a visible
+ * `document.visibilityState` — WebKit drives it off
+ * `NSWindowDidChangeOcclusionState`, so it catches minimize, ⌘H, a Space switch
+ * and FULL occlusion. It deliberately does NOT catch plain focus loss: a visible
  * but unfocused window is a dashboard someone is still reading, and freezing it
- * would be a bug, not a saving. Cosmetics (cursor blink) gate on `winFocused`.
+ * would be a bug, not a saving.
+ *
+ * This hook tracks visibility ONLY. Cursor blink is the one thing that follows
+ * window FOCUS, and it lives in TerminalPane with its own listeners — keeping a
+ * focus boolean here too would re-render the whole App tree on every ⌘-Tab to
+ * store something nobody reads, which is the exact cost this file is trying to
+ * remove.
  *
  * Every transition is logged, because whether WKWebView really fires
  * `visibilitychange` for occlusion is the one thing in this whole effort that
@@ -916,25 +917,16 @@ function fmtEta(secs: number): string {
  */
 function useWindowAwake() {
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
-  const [winFocused, setWinFocused] = useState(() => document.hasFocus());
   useEffect(() => {
     const onVis = () => {
       const v = document.visibilityState !== "hidden";
       setPageVisible(v);
       invoke("log_event", { level: "info", msg: `window ${v ? "visible" : "hidden"}` }).catch(() => {});
     };
-    const onFocus = () => setWinFocused(true);
-    const onBlur = () => setWinFocused(false);
     document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("blur", onBlur);
-    };
+    return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
-  return { pageVisible, winFocused };
+  return { pageVisible };
 }
 
 function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
@@ -963,10 +955,12 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
         .then((u) => { if (alive) setInfo(u); })
         .catch((e) => { if (alive) onError(e); });
     };
-    pull();
-    // Hidden → no interval at all. Coming back re-runs this effect, so the
-    // catch-up pull is free. A doubled pull with the focus listener below is
-    // harmless: the backend caps real fetches at one per 120s.
+    // Hidden → no pull and no interval. The guard covers the immediate pull too:
+    // this effect re-runs on the hidden edge, and invoking there would spend a
+    // fetch on the transition into going quiet. Coming back re-runs it visible,
+    // so the catch-up pull is free. A doubled pull with the focus listener below
+    // is harmless: the backend caps real fetches at one per 120s.
+    if (pageVisible) pull();
     const id = pageVisible ? setInterval(pull, USAGE_POLL_MS) : null;
     // coming back to the window is exactly when a stale bar is most visible
     window.addEventListener("focus", pull);
@@ -1131,6 +1125,16 @@ function App() {
       refreshErr.current = String(e); // same text fail() shows
       fail(e);
     }
+  }, []);
+  /** The ONLY other way `ws` may be replaced. `lastSnap` is the dedupe's record
+   * of what `ws` currently holds; a bare `setWs` leaves the two describing
+   * different things, and a later refresh that happens to match `lastSnap` would
+   * then bail while `ws` still held the stale value — permanently, because the
+   * snapshot is stable at that point. Commands that mutate the workspace and get
+   * a fresh one back go through here. */
+  const commitWs = useCallback((w: Workspace) => {
+    lastSnap.current = JSON.stringify(w);
+    setWs(w);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -1298,11 +1302,15 @@ function App() {
         sweepDoctor(r);
         probeSuggest(r);
       });
-    sweep();
     // Slow timer, not the poll — but it still shells out per root, so it stops
-    // while the window is off screen. Coming back re-runs this effect, which
-    // sweeps immediately: the catch-up is free.
+    // while the window is off screen. The guard sits BEFORE the immediate sweep
+    // deliberately: this effect re-runs on the hidden edge too, and sweeping
+    // there would spend git on the exact transition we're trying to go quiet on
+    // — occlusion flaps (a window dragged across, a Space switch) would then
+    // cost MORE than the ungated timer did. Coming back re-runs it with
+    // pageVisible true, so the catch-up is still free.
     if (!pageVisible) return;
+    sweep();
     const t = setInterval(sweep, 5 * 60_000);
     return () => clearInterval(t);
   }, [rootsKey, sweepDoctor, probeSuggest, pageVisible]);
@@ -1534,25 +1542,25 @@ function App() {
         if (settings.nav_collapsed) toggleNav();
         return;
       }
-      setWs(await invoke<Workspace>("add_project", { dir }));
+      commitWs(await invoke<Workspace>("add_project", { dir }));
     } catch (e) { fail(e); }
   };
   const initRepo = async (dir: string) => {
     try {
       setErr("");
-      setWs(await invoke<Workspace>("init_repo", { dir }));
+      commitWs(await invoke<Workspace>("init_repo", { dir }));
       setInitAsk(null);
     } catch (e) { fail(e); }
   };
   const createInitialCommit = async (repo: string) => {
     try {
       setErr("");
-      setWs(await invoke<Workspace>("create_initial_commit", { repo }));
+      commitWs(await invoke<Workspace>("create_initial_commit", { repo }));
     } catch (e) { fail(e); }
   };
   const removeProject = async (root: string) => {
     try {
-      setWs(await invoke<Workspace>("remove_project", { root }));
+      commitWs(await invoke<Workspace>("remove_project", { root }));
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };

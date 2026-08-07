@@ -16,8 +16,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   five-minute doctor/init sweep — and each one catches up the moment the window
   comes back, which is exactly when a stale view is most obvious. Measured on
   the same workspace, backgrounded and idle: **CPU 3.19% → 0.10%, energy impact
-  3.22 → 0.10, child processes 159 → 1 per two minutes.** Visible and idle, where
-  the app must keep working: **CPU 3.19% → 1.80%, energy impact 3.22 → 1.91.**
+  3.22 → 0.10**, and observed child processes over two minutes 159 → 1. Visible
+  and idle, where the app must keep working: **CPU 3.19% → 1.80%, energy impact
+  3.22 → 1.91.** The process counts come from a 1 Hz sampler that undercounts
+  very short-lived spawns, so treat them as the shape rather than the exact
+  figure; the backend's own 3-second tmux poll is not gated by this change and
+  is now the largest remaining background cost.
 - **A snapshot costs a third of the subprocesses it used to.** None of this
   changes the shelling-out-to-git-and-tmux design; it stops paying twice for
   answers already in hand. One `git status --porcelain=v2 --branch` replaces
@@ -29,7 +33,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   process rather than once per snapshot, with the birth-date lookups memoized
   behind it. **91 → 55 subprocesses for a cold snapshot of a nine-place repo, and
   91 → 32 in the repeat-poll regime the app actually runs in.** `ls --json`
-  output is byte-identical to 0.9.0.
+  output is byte-identical to 0.9.0 on a real workspace, verified by diff, with
+  one documented exception: a repo with no commits yet whose upstream already
+  resolves now reports no upstream, a field nothing consumes.
 - A refresh that returns an unchanged workspace no longer replaces state and
   re-renders the tree. The forced 30-second poll produces a byte-identical
   snapshot on an idle machine, and every one of them was rebuilding the nav.

@@ -142,6 +142,15 @@ impl Project {
     ///   `# branch.ab` is the free discriminator: git emits it only when the
     ///   upstream resolves well enough to count ahead/behind. Gate on it and the
     ///   old answer is preserved without paying for the extra spawn.
+    ///   ONE known divergence, accepted: on an UNBORN HEAD whose upstream does
+    ///   resolve (`git init` + a fetched `origin/main`), git omits `branch.ab`
+    ///   because the branch is initial, not because the upstream is bad — so
+    ///   this reports None where `rev-parse @{u}` reported the ref. Widening the
+    ///   gate to `has_ab || unborn` only trades it for the opposite error on an
+    ///   unborn branch with an unresolvable upstream, which is the commoner
+    ///   state. `Place::upstream` has no consumer today (it is `ls --json`/MCP
+    ///   surface, "informational" per the note below), so neither corner is
+    ///   worth code — but it is worth writing down.
     /// * **not a repo / git failed** — empty output → detached, clean, no upstream,
     ///   exactly as the three separate failures produced.
     ///
