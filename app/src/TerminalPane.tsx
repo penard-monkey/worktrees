@@ -40,6 +40,27 @@ function termOptions() {
   return { family, size, theme };
 }
 
+// ── cursor blink, gated on the window ──────────────────────────────────────
+// A blinking cursor is a style recalc + paint twice a second, per mounted
+// terminal, forever — and xterm 5.5 has no "stop blinking when idle" (that
+// landed upstream in 7.0). xterm's own gate is the `.xterm-focus` class, which
+// is useless here: `useTerm` force-focuses the pane on mount and on every
+// re-entry, and element focus does NOT drop when the OS window deactivates. So
+// the blink ran whenever the app was open, whether or not anyone was there.
+//
+// Every live terminal registers here and follows the window instead. Listeners
+// are module-scope and deliberately never removed — they outlive any single
+// pane and cost one function call per window event.
+const liveTerms = new Set<Terminal>();
+const blinkWanted = () => document.visibilityState !== "hidden" && document.hasFocus();
+const applyBlink = () => {
+  const on = blinkWanted();
+  liveTerms.forEach((t) => { t.options.cursorBlink = on; });
+};
+window.addEventListener("focus", applyBlink);
+window.addEventListener("blur", applyBlink);
+document.addEventListener("visibilitychange", applyBlink);
+
 /** How one pane talks to its backend. `close` is the unmount path and means
  * "stop streaming" for BOTH kinds — detach the tmux client, or drop the sink on
  * an owned shell. Neither ends the thing on the other side. */
@@ -90,7 +111,8 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     let disposed = false;
 
     const { family, size, theme } = termOptions();
-    const term = new Terminal({ fontFamily: family, fontSize: size, cursorBlink: true, theme });
+    const term = new Terminal({ fontFamily: family, fontSize: size, cursorBlink: blinkWanted(), theme });
+    liveTerms.add(term);
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
@@ -133,6 +155,7 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       disposed = true;
       ro.disconnect();
       tx.close(); // detach, not kill — for either backend
+      liveTerms.delete(term);
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

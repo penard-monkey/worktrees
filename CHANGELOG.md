@@ -6,6 +6,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The app stopped burning power in the background.** It showed up under
+  macOS's "Apps Using Significant Energy" while doing nothing, and the cause was
+  that it did the same work whether or not anyone was looking at it: a forced
+  refresh every 30 seconds fanned out to a git subprocess per place per project,
+  measured at ~1.3 spawns per second on an idle machine with the window not even
+  frontmost. Every periodic cost now gates on window visibility — the
+  `places:changed` refresh, the usage countdown's tick and poll, and the
+  five-minute doctor/init sweep — and each one catches up the moment the window
+  comes back, which is exactly when a stale view is most obvious. Measured on
+  the same workspace, backgrounded and idle: **CPU 3.19% → 0.10%, energy impact
+  3.22 → 0.10**, and observed child processes over two minutes 159 → 1. Visible
+  and idle, where the app must keep working: **CPU 3.19% → 1.80%, energy impact
+  3.22 → 1.91.** The process counts come from a 1 Hz sampler that undercounts
+  very short-lived spawns, so treat them as the shape rather than the exact
+  figure; the backend's own 3-second tmux poll is not gated by this change and
+  is now the largest remaining background cost.
+- **A snapshot costs a third of the subprocesses it used to.** None of this
+  changes the shelling-out-to-git-and-tmux design; it stops paying twice for
+  answers already in hand. One `git status --porcelain=v2 --branch` replaces
+  three calls (`rev-parse --abbrev-ref HEAD`, `status --porcelain`,
+  `rev-parse @{u}`); one `git log` with a tab-joined format replaces the separate
+  `%ct` and `%s` calls; the canonical tmux session check reads the pane list the
+  snapshot already prefetched instead of running its own `list-sessions` per
+  place; and the BSD-vs-GNU `stat`/`date` probe is now genuinely done once per
+  process rather than once per snapshot, with the birth-date lookups memoized
+  behind it. **91 → 55 subprocesses for a cold snapshot of a nine-place repo, and
+  91 → 32 in the repeat-poll regime the app actually runs in.** `ls --json`
+  output is byte-identical to 0.9.0 on a real workspace, verified by diff, with
+  one documented exception: a repo with no commits yet whose upstream already
+  resolves now reports no upstream, a field nothing consumes.
+- A refresh that returns an unchanged workspace no longer replaces state and
+  re-renders the tree. The forced 30-second poll produces a byte-identical
+  snapshot on an idle machine, and every one of them was rebuilding the nav.
+- The terminal cursor stops blinking when the window is not focused. xterm gates
+  blinking on its own focus class, which never dropped here: the pane is
+  force-focused on mount and on every re-entry, and element focus survives the
+  OS window being deactivated — so the cursor repainted twice a second for as
+  long as the app was open. The busy-session pulse is stepped rather than
+  smoothly interpolated for the same reason: it was driving a compositor frame
+  at display rate for as long as any session was working.
 - **Creating a worktree says so while it works.** The nav now shows the place
   being created the moment you submit the form, with the form dismissed and a
   spinner on the row, instead of leaving the whole app silent for the seconds
@@ -27,6 +67,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   another branch still goes through that older path.
 
 ### Fixed
+- The upstream shown for a place whose remote-tracking branch no longer exists
+  (deleted on origin, or never fetched) stays empty, as it was. Worth recording
+  because the porcelain-v2 consolidation above nearly changed it silently: git's
+  `# branch.upstream` reports the *configured* upstream even when it does not
+  resolve, where the `rev-parse @{u}` it replaced reported only one that does.
+  `# branch.ab` is the discriminator, and it is free.
 - **Release notes render their bold and italics instead of printing the
   asterisks.** The "What's new" sheet parses the changelog itself — sections,
   group chips, hard-wrapped bullets — but its inline pass only knew about

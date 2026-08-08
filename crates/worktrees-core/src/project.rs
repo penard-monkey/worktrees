@@ -21,6 +21,15 @@ pub struct Project {
     clock: SysClock,
 }
 
+/// What one `git status --porcelain=v2 --branch` tells us — see `status_v2`.
+struct StatusV2 {
+    /// None when detached OR unborn (matches the old `rev-parse` behaviour).
+    branch: Option<String>,
+    detached: bool,
+    dirty_files: u32,
+    upstream: Option<String>,
+}
+
 fn canon(p: PathBuf) -> Option<String> {
     std::fs::canonicalize(p).ok().map(|c| c.to_string_lossy().into_owned())
 }
@@ -111,6 +120,81 @@ impl Project {
     }
     fn commit_epoch(&self, dir: &str) -> i64 {
         git::git_out(dir, &["log", "-1", "--format=%ct"]).and_then(|s| s.parse().ok()).unwrap_or(0)
+    }
+    /// Branch, dirty count and upstream from ONE `git status --porcelain=v2
+    /// --branch`, replacing three spawns every place paid every poll:
+    /// `rev-parse --abbrev-ref HEAD`, `status --porcelain`, `rev-parse @{u}`.
+    ///
+    /// Semantics are pinned to what those three returned, ugly corners included:
+    ///
+    /// * **unborn HEAD** — `rev-parse --abbrev-ref HEAD` FAILS on a repo with no
+    ///   commits, so the old code saw empty and called it detached. v2 helpfully
+    ///   reports the branch-to-be via `# branch.head`; we deliberately throw that
+    ///   away (keyed off `# branch.oid (initial)`) so the answer doesn't change.
+    ///   `init_repo`/`create_initial_commit` make this a state the app really sees.
+    /// * **detached** — v2 says `# branch.head (detached)`, the old call said
+    ///   `HEAD`. Both mean "not a branch name".
+    /// * **upstream** — subtler than it looks, and caught by diffing `ls --json`
+    ///   against v0.9.0. `rev-parse @{u}` reports only an upstream that RESOLVES;
+    ///   v2's `# branch.upstream` reports the CONFIGURED one even when its
+    ///   remote-tracking ref is gone (branch deleted on origin, never fetched),
+    ///   which silently turned `null` into `origin/<branch>` for such a place.
+    ///   `# branch.ab` is the free discriminator: git emits it only when the
+    ///   upstream resolves well enough to count ahead/behind. Gate on it and the
+    ///   old answer is preserved without paying for the extra spawn.
+    ///   ONE known divergence, accepted: on an UNBORN HEAD whose upstream does
+    ///   resolve (`git init` + a fetched `origin/main`), git omits `branch.ab`
+    ///   because the branch is initial, not because the upstream is bad — so
+    ///   this reports None where `rev-parse @{u}` reported the ref. Widening the
+    ///   gate to `has_ab || unborn` only trades it for the opposite error on an
+    ///   unborn branch with an unresolvable upstream, which is the commoner
+    ///   state. `Place::upstream` has no consumer today (it is `ls --json`/MCP
+    ///   surface, "informational" per the note below), so neither corner is
+    ///   worth code — but it is worth writing down.
+    /// * **not a repo / git failed** — empty output → detached, clean, no upstream,
+    ///   exactly as the three separate failures produced.
+    ///
+    /// Dirty count is the non-header lines (`1`/`2`/`u`/`?`) — the same set v1
+    /// listed one per line, with the same untracked defaults, so counts match.
+    fn status_v2(&self, dir: &str) -> StatusV2 {
+        let text = git::git_out(dir, &["status", "--porcelain=v2", "--branch"]).unwrap_or_default();
+        let (mut head, mut oid, mut upstream) = (String::new(), String::new(), None);
+        let (mut has_ab, mut dirty_files) = (false, 0u32);
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("# branch.head ") {
+                head = rest.to_string();
+            } else if let Some(rest) = line.strip_prefix("# branch.oid ") {
+                oid = rest.to_string();
+            } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
+                upstream = Some(rest.to_string());
+            } else if line.starts_with("# branch.ab ") {
+                has_ab = true;
+            } else if !line.is_empty() && !line.starts_with('#') {
+                dirty_files += 1;
+            }
+        }
+        let detached = oid == "(initial)" || head.is_empty() || head == "(detached)";
+        StatusV2 {
+            branch: if detached { None } else { Some(head) },
+            detached,
+            dirty_files,
+            // no branch.ab ⇒ the upstream does not resolve ⇒ what `rev-parse @{u}` called None
+            upstream: upstream.filter(|s| !s.is_empty() && has_ab),
+        }
+    }
+
+    /// Epoch AND subject of the last commit in ONE `git log`. `place_json` wants
+    /// both and used to spawn git twice for them; a snapshot pays this per place,
+    /// every poll. Tab-joined because a subject can contain anything but a
+    /// newline — `splitn(2)` keeps a subject that itself contains tabs intact.
+    fn last_commit(&self, dir: &str) -> (i64, Option<String>) {
+        let Some(line) = git::git_out(dir, &["log", "-1", "--format=%ct%x09%s"]) else {
+            return (0, None);
+        };
+        let mut it = line.splitn(2, '\t');
+        let epoch = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let subj = it.next().filter(|s| !s.is_empty()).map(|s| s.to_string());
+        (epoch, subj)
     }
 
     // ── human `ls` ──────────────────────────────────────────────────────────
@@ -217,12 +301,17 @@ impl Project {
         // Canonical name first (exact match). If it's down, adopt any session
         // with a pane cwd'd in this dir — the SAME session `open` reuses. Without
         // this an adopted (foreign-named) session read as "down", the app never
-        // mounted its terminal, and Enter looked dead. Uses the prefetched pane
-        // list (no per-place tmux shell-out). For MAIN, exclude `.worktrees/`:
-        // worktree dirs nest under the main root, so without the exclusion any
-        // live worktree session would falsely read as main's.
+        // mounted its terminal, and Enter looked dead. For MAIN, exclude
+        // `.worktrees/`: worktree dirs nest under the main root, so without the
+        // exclusion any live worktree session would falsely read as main's.
+        //
+        // BOTH lookups answer from the prefetched pane list — zero per-place
+        // tmux shell-outs. The canonical check used `session_exists`, which is
+        // its own `list-sessions`, so an N-place snapshot paid N of them every
+        // poll. `has_session` is exact-match over the same snapshot and every
+        // live session has at least one pane, so `list-panes -a` names them all.
         let exclude = if is_main { Some(self.wt_root.as_str()) } else { None };
-        let (session, tmux_up) = if tmux::session_exists(&canonical) {
+        let (session, tmux_up) = if panes.is_some_and(|pl| pl.has_session(&canonical)) {
             (canonical, true)
         } else if let Some(adopted) = panes.and_then(|pl| pl.session_in(dir, ai_word, exclude)) {
             (adopted, true)
@@ -265,17 +354,8 @@ impl Project {
             return Place { registered: false, ..base };
         }
 
-        let raw = self.branch_raw(dir);
-        let detached = raw.is_empty() || raw == "HEAD";
-        let branch = if detached { None } else { Some(raw) };
-        let dirtytext = git::git_out(dir, &["status", "--porcelain"]).unwrap_or_default();
-        let (dirty, dirty_files) = if dirtytext.is_empty() {
-            (false, 0)
-        } else {
-            (true, dirtytext.lines().filter(|l| !l.is_empty()).count() as u32)
-        };
-        let upstream = git::git_out(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-            .filter(|s| !s.is_empty());
+        let StatusV2 { branch, detached, dirty_files, upstream } = self.status_v2(dir);
+        let dirty = dirty_files > 0;
         // Divergence vs the repo's BASE branch, not @{u}. Work flows through
         // worktrees toward main, and that's the question ↑↓ answers on sight:
         // "how far from main". Upstream told a different story — a branch that
@@ -291,8 +371,7 @@ impl Project {
             }
             _ => (None, None),
         };
-        let cepoch = self.commit_epoch(dir);
-        let csubj = git::git_out(dir, &["log", "-1", "--format=%s"]).filter(|s| !s.is_empty());
+        let (cepoch, csubj) = self.last_commit(dir);
         let install = detect_install_cmd(dir);
 
         Place {

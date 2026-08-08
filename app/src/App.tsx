@@ -927,17 +927,54 @@ function fmtEta(secs: number): string {
   return hours % 24 === 0 ? `${days}d` : `${days}d ${hours % 24}h`;
 }
 
+/** Is anyone actually looking at this window?
+ *
+ * `document.visibilityState` — WebKit drives it off
+ * `NSWindowDidChangeOcclusionState`, so it catches minimize, ⌘H, a Space switch
+ * and FULL occlusion. It deliberately does NOT catch plain focus loss: a visible
+ * but unfocused window is a dashboard someone is still reading, and freezing it
+ * would be a bug, not a saving.
+ *
+ * This hook tracks visibility ONLY. Cursor blink is the one thing that follows
+ * window FOCUS, and it lives in TerminalPane with its own listeners — keeping a
+ * focus boolean here too would re-render the whole App tree on every ⌘-Tab to
+ * store something nobody reads, which is the exact cost this file is trying to
+ * remove.
+ *
+ * Every transition is logged, because whether WKWebView really fires
+ * `visibilitychange` for occlusion is the one thing in this whole effort that
+ * the test suite cannot answer — read app.log (Settings → Logs) to confirm on a
+ * real build before trusting the gate.
+ */
+function useWindowAwake() {
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
+  useEffect(() => {
+    const onVis = () => {
+      const v = document.visibilityState !== "hidden";
+      setPageVisible(v);
+      invoke("log_event", { level: "info", msg: `window ${v ? "visible" : "hidden"}` }).catch(() => {});
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+  return { pageVisible };
+}
+
 function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
   const [info, setInfo] = useState<UsageInfo | null>(null);
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  const { pageVisible } = useWindowAwake();
 
   // Own timer, deliberately separate from the poll effect: cheap (a number in a
   // module-scope component, so the re-render stays inside the widget) and it
-  // must keep running between the 180s pulls.
+  // must keep running between the 180s pulls — but only while the window is
+  // actually on screen. Nobody needs a countdown animated at a minimized window.
   useEffect(() => {
+    if (!pageVisible) return;
+    setNowSec(Math.floor(Date.now() / 1000)); // re-zero: we may have been away for hours
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), USAGE_TICK_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [pageVisible]);
 
   useEffect(() => {
     let alive = true;
@@ -949,16 +986,21 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
         .then((u) => { if (alive) setInfo(u); })
         .catch((e) => { if (alive) onError(e); });
     };
-    pull();
-    const id = setInterval(pull, USAGE_POLL_MS);
+    // Hidden → no pull and no interval. The guard covers the immediate pull too:
+    // this effect re-runs on the hidden edge, and invoking there would spend a
+    // fetch on the transition into going quiet. Coming back re-runs it visible,
+    // so the catch-up pull is free. A doubled pull with the focus listener below
+    // is harmless: the backend caps real fetches at one per 120s.
+    if (pageVisible) pull();
+    const id = pageVisible ? setInterval(pull, USAGE_POLL_MS) : null;
     // coming back to the window is exactly when a stale bar is most visible
     window.addEventListener("focus", pull);
     return () => {
       alive = false;
-      clearInterval(id);
+      if (id) clearInterval(id);
       window.removeEventListener("focus", pull);
     };
-  }, [onError]);
+  }, [onError, pageVisible]);
 
   if (!info || info.source === "unavailable" || info.limits.length === 0) return null;
   // statusline = a local snapshot only as fresh as the last Claude Code session
@@ -1082,6 +1124,10 @@ function App() {
   const [newTermToken, setNewTermToken] = useState(0);
   // bumps on places:changed → the dock's file viewer re-reads from disk when clean.
   const [placesToken, setPlacesToken] = useState(0);
+  // Gates every periodic cost in the app — see useWindowAwake. Only the
+  // visibility half is wanted here: cursor blink is the one thing that follows
+  // FOCUS, and it is wired inside TerminalPane where the terminals live.
+  const { pageVisible } = useWindowAwake();
 
   // every surfaced error also lands in the app log (Settings → Logs)
   const fail = useCallback((e: unknown) => {
@@ -1098,6 +1144,8 @@ function App() {
   // branch collision, a shadowed file on relink — and silence is the bug this
   // whole surface exists to fix.
   const refreshErr = useRef("");
+  // Serialized last snapshot, for the no-change bail below.
+  const lastSnap = useRef("");
   const refresh = useCallback(async () => {
     try {
       const w = await invoke<Workspace>("list_workspace");
@@ -1107,11 +1155,28 @@ function App() {
       const stale = refreshErr.current;
       refreshErr.current = "";
       if (stale) setErr((e) => (e === stale ? "" : e));
+      // An idle poll returns a BYTE-IDENTICAL workspace, and the backend forces
+      // one every 30s whether or not anything moved. Replacing `ws` anyway gave
+      // it a fresh identity and re-rendered the whole tree for no change at all
+      // — forever, in the background, on battery. Compare and bail.
+      const snap = JSON.stringify(w);
+      if (snap === lastSnap.current) return;
+      lastSnap.current = snap;
       setWs(w);
     } catch (e) {
       refreshErr.current = String(e); // same text fail() shows
       fail(e);
     }
+  }, []);
+  /** The ONLY other way `ws` may be replaced. `lastSnap` is the dedupe's record
+   * of what `ws` currently holds; a bare `setWs` leaves the two describing
+   * different things, and a later refresh that happens to match `lastSnap` would
+   * then bail while `ws` still held the stale value — permanently, because the
+   * snapshot is stable at that point. Commands that mutate the workspace and get
+   * a fresh one back go through here. */
+  const commitWs = useCallback((w: Workspace) => {
+    lastSnap.current = JSON.stringify(w);
+    setWs(w);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -1138,11 +1203,37 @@ function App() {
     }
   }, [fail, refresh]);
 
-  // live refresh: backend emits "places:changed" (poll/fs-watch) → re-pull
+  // live refresh: backend emits "places:changed" (poll/fs-watch) → re-pull.
+  //
+  // This listener is the THROTTLE POINT for the app's biggest power cost. The
+  // event itself is nearly free; `refresh()` is what invokes `list_workspace`,
+  // and that fans out to a git subprocess per place per project — measured at
+  // ~1.3 git spawns/second on an idle machine, running whether or not the
+  // window was on screen. Hidden → remember that we owe a refresh and do
+  // nothing else.
+  //
+  // `document.visibilityState` is read live rather than closing over
+  // `pageVisible`, so the listener never has to be torn down and re-registered
+  // (and can't act on a stale value).
+  const pendingRefresh = useRef(false);
   useEffect(() => {
-    const un = listen("places:changed", () => { refresh(); setPlacesToken((v) => v + 1); });
+    const un = listen("places:changed", () => {
+      if (document.visibilityState === "hidden") { pendingRefresh.current = true; return; }
+      refresh();
+      setPlacesToken((v) => v + 1);
+    });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
+
+  // The deferred catch-up. Coming back to the window is precisely when a stale
+  // nav is most obvious, so this runs on the visible edge rather than waiting
+  // for the next backend tick.
+  useEffect(() => {
+    if (!pageVisible || !pendingRefresh.current) return;
+    pendingRefresh.current = false;
+    refresh();
+    setPlacesToken((v) => v + 1);
+  }, [pageVisible, refresh]);
 
   // Claude working state — pushed by the backend poll thread from the
   // ~/.claude/sessions/<pid>.json probes (see lib.rs claude_activity). Keyed by
@@ -1253,10 +1344,18 @@ function App() {
         sweepDoctor(r);
         probeSuggest(r);
       });
+    // Slow timer, not the poll — but it still shells out per root, so it stops
+    // while the window is off screen. The guard sits BEFORE the immediate sweep
+    // deliberately: this effect re-runs on the hidden edge too, and sweeping
+    // there would spend git on the exact transition we're trying to go quiet on
+    // — occlusion flaps (a window dragged across, a Space switch) would then
+    // cost MORE than the ungated timer did. Coming back re-runs it with
+    // pageVisible true, so the catch-up is still free.
+    if (!pageVisible) return;
     sweep();
-    const t = setInterval(sweep, 5 * 60_000); // slow timer, not the poll
+    const t = setInterval(sweep, 5 * 60_000);
     return () => clearInterval(t);
-  }, [rootsKey, sweepDoctor, probeSuggest]);
+  }, [rootsKey, sweepDoctor, probeSuggest, pageVisible]);
 
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
@@ -1485,25 +1584,25 @@ function App() {
         if (settings.nav_collapsed) toggleNav();
         return;
       }
-      setWs(await invoke<Workspace>("add_project", { dir }));
+      commitWs(await invoke<Workspace>("add_project", { dir }));
     } catch (e) { fail(e); }
   };
   const initRepo = async (dir: string) => {
     try {
       setErr("");
-      setWs(await invoke<Workspace>("init_repo", { dir }));
+      commitWs(await invoke<Workspace>("init_repo", { dir }));
       setInitAsk(null);
     } catch (e) { fail(e); }
   };
   const createInitialCommit = async (repo: string) => {
     try {
       setErr("");
-      setWs(await invoke<Workspace>("create_initial_commit", { repo }));
+      commitWs(await invoke<Workspace>("create_initial_commit", { repo }));
     } catch (e) { fail(e); }
   };
   const removeProject = async (root: string) => {
     try {
-      setWs(await invoke<Workspace>("remove_project", { root }));
+      commitWs(await invoke<Workspace>("remove_project", { root }));
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
