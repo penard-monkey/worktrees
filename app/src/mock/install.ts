@@ -48,6 +48,16 @@ const mockPickPrefix = location.search.includes("empty")
     ? "unborn-"
     : "picked-";
 const mockInited = new Set<string>();
+// `new` is the one command that is slow for real (git fetch + worktree add +
+// materialize + tmux — measured ~2s), and that latency is the whole reason the
+// nav shows a pending row. Instantly-resolving mock would render the row for a
+// single frame, so nothing headless could ever see it. Same query-knob idiom as
+// ?notmux: `?slowcreate` for the default 2000ms, `?slowcreate=500` to pick one.
+const mockCreateDelayMs = (() => {
+  const m = /[?&]slowcreate(?:=(\d+))?/.exec(location.search);
+  return m ? Number(m[1] ?? 2000) : 0;
+})();
+const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
 function dirKind(dir: string): "repo" | "empty" | "unborn" {
   if (mockInited.has(dir) || findProject(dir)) return "repo";
   const base = dir.split("/").pop() || dir;
@@ -489,6 +499,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return null;
 
     case "new_place": {
+      await sleep(mockCreateDelayMs); // BEFORE the mutation — the place must not exist while the op runs
+      // A REJECTED create is its own UI path (banner + the form comes back
+      // carrying what was typed), and it was unreachable headlessly while every
+      // mock create succeeded. Any branch name containing "fail" takes it —
+      // core's real refusals here are all "that name cannot be used".
+      if (String(args.branch).includes("fail")) {
+        return { ok: false, code: 1, output: `Failed to create branch '${args.branch}': mock refusal` };
+      }
       const pv = findProject(args.repo);
       const slug = (args.name || args.branch).replace(/\//g, "-");
       if (pv?.snapshot && !pv.snapshot.places.find((p) => p.slug === slug)) {
@@ -911,7 +929,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return {
         version: "0.2.2",
         changelog:
-          "# Changelog\n\n## [Unreleased]\n\n## [0.2.2] - 2026-07-26\n\n### Added\n- Nav tier show/hide, sort modes (last-used / A–Z / manual drag), release\n  notes on update — hard-wrapped like the real CHANGELOG to exercise\n  bullet unwrapping.\n\n### Fixed\n- Multi-client size clamp left stale cells in the embedded terminal;\n  sessions now use `window-size latest` + `aggressive-resize`.\n\n## [0.2.1] - 2026-07-25\n\n### Added\n- App self-update.\n",
+          "# Changelog\n\n## [Unreleased]\n\n## [0.2.2] - 2026-07-26\n\n### Added\n- **Nav tier show/hide, sort modes and release notes.** Sort is last-used /\n  A–Z / manual drag — hard-wrapped like the real CHANGELOG to exercise\n  bullet unwrapping, and *bolded* lead-ins to exercise inline markup.\n- **`worktrees doctor --strict`** — bold wrapping a code span.\n\n### Fixed\n- Multi-client size clamp left stale cells in the embedded terminal;\n  sessions now use `window-size latest` + `aggressive-resize`.\n\n## [0.2.1] - 2026-07-25\n\n### Added\n- App self-update.\n",
       };
 
     case "settings_info":

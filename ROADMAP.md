@@ -4,6 +4,23 @@ Parking lot for work we've decided to keep but not do now. Each item links
 the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (.claude/skills/close-out).
 
+- **`do_switch` still pays the doomed two-fetch pair.** `cmd_new` was fixed to
+  ask the remote once (`ops.rs`, guarded single `git fetch origin`), but
+  `do_switch` (`ops.rs:309-321`) keeps the old shape: a targeted
+  `fetch refs/heads/<branch>:refs/remotes/origin/<branch>` — the request that
+  cannot succeed for a branch being invented — followed by a separate base
+  fetch. It matters beyond `switch`, because `new` ROUTES through it when the
+  worktree already exists on another branch, so that path still costs two
+  network waits. Same three-line fix, but it changes `switch`'s own semantics
+  and goldens (`test/switch.bats`), so it was left out of the `new` change
+  rather than smuggled in. Note the fork it leaves: a `--single-branch` clone no
+  longer force-materializes a remote branch via `new`, but still does via
+  `switch`. Related: on that same holder-reuse path the nav's new pending row is
+  suppressed by the slug dedup (the place already exists), so the user gets
+  neither the spinner nor the speedup — marking the EXISTING row busy would be
+  the fix, not a second ghost.
+  _From: 2026-08-07 ui-next session (new-worktree delay + warn spam)_
+
 - **App signing + notarization** — bundles ship unsigned; install.sh strips
   quarantine on a checksum-verified install. The proper distribution tier is
   Developer ID signing + notarization so Gatekeeper passes without the
@@ -93,8 +110,11 @@ close-out ritual (.claude/skills/close-out).
     native WKWebView menu leaks over popovers.
   - _Zero-knob fix:_ `origin/HEAD` base detection to replace the rejected
     default-base setting (+ fix the "base (default: main)" placeholder lie).
-  - _Test infra:_ mock fault-injection (no mock `CmdResult` returns `ok:false`, so
-    the error-banner path is untestable headlessly).
+  - ~~_Test infra:_ mock fault-injection (no mock `CmdResult` returns `ok:false`, so
+    the error-banner path is untestable headlessly).~~ **Done 2026-08-07** — a
+    `new_place` branch containing `fail` returns `ok:false`, which is what made the
+    rejected-create path testable. Only `new_place` has it; the other commands still
+    always succeed, so widen it where a failure path needs covering.
   - _ai-command phase 2:_ editable AI command — needs a comment-preserving
     `cfg_set` writer in worktrees-core first.
   - ~26 polish items (menu keyboard/ARIA, mock parity drifts, minor labels).
@@ -268,3 +288,19 @@ close-out ritual (.claude/skills/close-out).
   recorded) rather than pretending to clean it. Reopen only if claude documents
   the derivation or exposes the item itself.
   _From: [2026-08-06 ai-rules-layer session](docs/sessions/2026-08-06-ai-rules-layer/summary.md)_
+
+- **Nav hierarchy in light themes.** The project-header and dormant-fade work
+  was verified only against dark themes (the harness runs tokyo-night; the
+  complaint screenshot was catppuccin-mocha). Everything keys off tokens, but
+  `.group.dormant`'s `opacity: 0.62` is a fixed number, and 62% over a light
+  ground is a different perceptual step than 62% over a dark one. Wants a pass
+  through tokyo-day / catppuccin-latte, and possibly a per-theme value.
+  _From: [2026-08-06 nav-hierarchy session](docs/sessions/2026-08-06-nav-hierarchy/summary.md)_
+
+- **Project names truncate sooner in the nav.** Accepted cost of moving `.pname`
+  to `--fs-row`: at narrow nav widths a long repo reads `casa-del-valle-mo…`.
+  The `title={pv.root}` tooltip covers it and the nav is user-resizable, so this
+  was taken deliberately — but a middle-ellipsis (`casa-…-monorepo`) would keep
+  the distinguishing tail, which for sibling repos sharing a prefix is the half
+  that matters.
+  _From: [2026-08-06 nav-hierarchy session](docs/sessions/2026-08-06-nav-hierarchy/summary.md)_

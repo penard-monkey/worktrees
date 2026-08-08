@@ -226,9 +226,18 @@ function parseNotes(md: string): NotesSection[] {
   return sections.filter((s) => s.groups.some((g) => g.items.length));
 }
 
-// `code spans` → <code>; the only inline markup the changelog uses.
+// `code` / **strong** / *em* — the inline markup the changelog uses. One
+// alternation, code first, so a `**` inside a code span stays literal. The
+// inner text of a match can never re-match its own delimiter (each arm forbids
+// it), so the recursion below bottoms out after at most two levels.
+const INLINE = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*)/;
 function renderInline(s: string): React.ReactNode[] {
-  return s.split(/`([^`]+)`/g).map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part));
+  return s.split(INLINE).map((part, i) => {
+    if (i % 2 === 0) return part;
+    if (part.startsWith("`")) return <code key={i}>{part.slice(1, -1)}</code>;
+    if (part.startsWith("**")) return <strong key={i}>{renderInline(part.slice(2, -2))}</strong>;
+    return <em key={i}>{renderInline(part.slice(1, -1))}</em>;
+  });
 }
 
 function ReleaseNotes({ notes }: { notes: string }) {
@@ -259,14 +268,21 @@ function ReleaseNotes({ notes }: { notes: string }) {
 // New-worktree form. Module scope + OWN draft state: components defined inside
 // App get a fresh identity every render, which remounts their DOM and drops
 // input focus per keystroke — the form must live outside that churn.
-function NewPlaceForm({ project, initialBase, onCreate, onCancel }: {
+// `initialBranch`/`initialName` exist so a FAILED create can hand the user back
+// what they typed. The form is dismissed the moment it is submitted (the nav's
+// pending row takes over from there), so without this the three fields would die
+// with the unmount and a rejected branch name — a typo'd base, a branch already
+// checked out elsewhere — would cost a full retype to correct.
+function NewPlaceForm({ project, initialBranch, initialName, initialBase, onCreate, onCancel }: {
   project: string;
+  initialBranch: string;
+  initialName: string;
   initialBase: string;
   onCreate: (branch: string, name: string, base: string) => void;
   onCancel: () => void;
 }) {
-  const [branch, setBranch] = useState("");
-  const [name, setName] = useState("");
+  const [branch, setBranch] = useState(initialBranch);
+  const [name, setName] = useState(initialName);
   const [base, setBase] = useState(initialBase);
   const submit = () => { if (branch.trim()) onCreate(branch.trim(), name.trim(), base.trim()); };
   const onKey = (e: React.KeyboardEvent) => {
@@ -287,6 +303,21 @@ function NewPlaceForm({ project, initialBase, onCreate, onCancel }: {
         onChange={(e) => setBase(e.currentTarget.value)} onKeyDown={onKey} />
       <button onClick={submit} disabled={!branch.trim()}>Create</button>
     </div>
+  );
+}
+
+// A place that does not exist yet — `new` is still running. It stands in the
+// nav where the real row will land, so the seconds of git fetch / worktree add /
+// tmux read as work in progress instead of a dead app. Deliberately inert: no
+// click, no context menu, no drag — there is nothing behind it to act on yet.
+// Module scope, like every other stateless row.
+function PendingRow({ label }: { label: string }) {
+  return (
+    <li className="row pending" title={`creating ${label}…`} aria-busy="true">
+      <span className="status-dot pending" />
+      <span className="row-id"><span className="row-name">{label}</span></span>
+      <span className="glyphs"><span className="row-age">creating…</span></span>
+    </li>
   );
 }
 
@@ -1014,6 +1045,17 @@ function App() {
   const [lens, setLens] = useState<Lens>("places");
   const [newFor, setNewFor] = useState<string | null>(null);
   const [newBase, setNewBase] = useState("");
+  // What a REJECTED create had typed in it, so reopening the form restores the
+  // fields instead of handing back three empty boxes. Null for a fresh form.
+  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string } | null>(null);
+  // Places whose `new` is still running. Creating one takes seconds of network
+  // and disk (git fetch, worktree add, materialize, tmux) and the nav had NO
+  // representation of it, so the app read as hung — the whole complaint. Each
+  // entry is one in-flight op; the id keeps two concurrent creates from
+  // retiring each other's row, since the slug is only a guess until core
+  // answers with the real one.
+  const [pendingNew, setPendingNew] = useState<{ id: number; repo: string; label: string }[]>([]);
+  const pendingSeq = useRef(0);
   // A picked folder that is not a repo yet, awaiting the `git init` offer.
   const [initAsk, setInitAsk] = useState<string | null>(null);
   const [ctx, setCtx] = useState<Ctx | null>(null);
@@ -1803,13 +1845,33 @@ function App() {
 
   const createPlace = async (repo: string, branch: string, name: string, base: string) => {
     if (!branch) return;
-    const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null });
-    if (r?.ok) {
+    // Dismiss the form and put a ghost row in the nav IMMEDIATELY — the click is
+    // acknowledged before any of the work starts. The label is the same
+    // derivation the old success path used as its fallback; core may land on a
+    // different slug (origin/ stripped, holder reuse), which is why the ghost is
+    // retired by `id` and the selection below still uses core's answer.
+    const id = ++pendingSeq.current;
+    const label = (name || branch).replace(/\//g, "-");
+    setPendingNew((v) => [...v, { id, repo, label }]);
+    setNewFor(null);
+    setNewBase("");
+    setNewDraft(null);
+    try {
+      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null });
       // Select core's ACTUAL final slug (origin/ stripped, holder-reuse applied);
       // fall back to the old derivation only if the backend didn't report one.
-      setSel({ repo, slug: r.slug ?? (name || branch).replace(/\//g, "-") });
-      setNewFor(null);
-      setNewBase("");
+      if (r?.ok) setSel({ repo, slug: r.slug ?? label });
+      // A rejected create is usually a fixable typo (a base that does not exist,
+      // a branch checked out in another worktree). Put the form back with what
+      // was typed still in it — dismissing on submit must not also mean losing
+      // the input. `runCmd` owns the banner, so this only restores the fields.
+      else if (r) { setNewDraft({ branch, name, base }); setNewBase(base); setNewFor(repo); }
+    } finally {
+      // `runCmd` awaits its own refresh() before returning, so the real row is
+      // already in `ws` by now — the ghost hands over with no empty frame
+      // between them. `finally`: a failed create must not leave a row spinning
+      // forever (runCmd has already put the reason in the error banner).
+      setPendingNew((v) => v.filter((x) => x.id !== id));
     }
   };
   // The switcher owns its own text now; this just runs the op and reports.
@@ -2111,6 +2173,14 @@ function App() {
     const open = !collapsed[pv.root];
     const places = (pv.snapshot?.places ?? []).filter(matchPlace);
     const main = places.find((p) => p.is_main) ?? null;
+    // In-flight creates for this project. Checked against the UNFILTERED
+    // snapshot: `new` on a branch that already has a worktree reuses that one,
+    // and a ghost beside the row it is about to become reads as a duplicate.
+    // The nav filter is deliberately not applied — this row is the answer to a
+    // click the user just made, so it shows even if the text filter excludes it.
+    const ghosts = pendingNew.filter(
+      (g) => g.repo === pv.root && !(pv.snapshot?.places ?? []).some((p) => p.slug === g.label),
+    );
     // Rollup: a working child dominates a waiting one — busy wins, else waiting.
     const rollup = places.some((p) => activityOf(p) === "busy")
       ? "busy"
@@ -2143,7 +2213,7 @@ function App() {
               onClick={() => setProjSheet(pv.root)}
             >⚑</button>
           ) : null}
-          <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); }}><Icons.Plus size={13} /></button>
+          <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
           <button
             className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
             title={confirmRm === `hdr|${pv.root}` ? "click again to remove from workspace" : "remove project"}
@@ -2170,6 +2240,11 @@ function App() {
               );
             })()}
             {main && <ul className="places"><PlaceRow repo={pv.root} p={main} /></ul>}
+            {/* above the tier groups, not inside one: which tier it lands in is
+                not known until it exists */}
+            {ghosts.length > 0 && (
+              <ul className="places">{ghosts.map((g) => <PendingRow key={g.id} label={g.label} />)}</ul>
+            )}
             {LIVE_TIERS.filter((g) => buckets[g]?.length && !hiddenTiers.has(g)).map((g) => {
               const key = `${pv.root}|${g}`;
               const opened = isOpen(key, g !== "idle"); // idle collapsed by default
@@ -2308,15 +2383,20 @@ function App() {
             <UnbornPrompt
               project={newFor}
               onCommit={createInitialCommit}
-              onCancel={() => { setNewFor(null); setNewBase(""); }}
+              onCancel={() => { setNewFor(null); setNewBase(""); setNewDraft(null); }}
             />
           ) : (
             <NewPlaceForm
-              key={newFor + "|" + newBase}
+              // the draft is part of the identity: a rejected create reopens the
+              // form for the same project, and without it in the key React would
+              // reuse the old instance and its now-stale field state
+              key={newFor + "|" + newBase + "|" + (newDraft?.branch ?? "")}
               project={newFor}
-              initialBase={newBase}
+              initialBranch={newDraft?.branch ?? ""}
+              initialName={newDraft?.name ?? ""}
+              initialBase={newDraft?.base ?? newBase}
               onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
-              onCancel={() => { setNewFor(null); setNewBase(""); }}
+              onCancel={() => { setNewFor(null); setNewBase(""); setNewDraft(null); }}
             />
           )
         )}

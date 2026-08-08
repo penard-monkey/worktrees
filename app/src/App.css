@@ -359,6 +359,14 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .status-dot.busy { background: var(--ok); animation: breathe 2s steps(4, jump-none) infinite; } /* Claude working */
 .status-dot.waiting { background: var(--warn); } /* Claude needs input — STATIC, no blink */
 .status-dot.on { background: var(--ok); } /* static "tmux up" fact (topbar) */
+/* a place being created — accent, not --ok: this is the app working, not a
+   session. Same `breathe` as .busy so "something is happening" reads the same
+   everywhere in the nav. */
+.status-dot.pending { background: var(--accent); animation: breathe 2s ease-in-out infinite; }
+/* dimmed and inert: nothing here is clickable until core answers */
+.row.pending { cursor: default; opacity: 0.7; }
+.row.pending:hover { background: transparent; }
+.row.pending .row-age { color: var(--accent); }
 .row-id { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .row-name {
   font-size: var(--fs-row); font-weight: var(--fw-med); color: var(--txt-hi);
@@ -615,6 +623,10 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   font-size: var(--fs-body); line-height: var(--lh-prose); color: var(--txt);
 }
 .rel-group li::marker { color: var(--txt-mute); }
+/* Most entries open with a bolded lead-in sentence — it carries the heading
+   weight the group tag can't, so it gets the brighter ink. */
+.rel-group li strong { font-weight: var(--fw-bold); color: var(--txt-hi); }
+.rel-group li em { font-style: italic; }
 .rel-group code {
   font-family: var(--font-mono); font-size: 0.85em;
   padding: 0 3px; border-radius: 3px;
