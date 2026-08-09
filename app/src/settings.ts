@@ -48,6 +48,7 @@ export type Settings = {
   files_stack_pct: number; // 15–85, the tree's HEIGHT share when stacked
   files_wrap: boolean; // wrap long lines in the source view
   files_md_source: boolean; // markdown/SVG: show source instead of the render
+  files_show_ignored: boolean; // list gitignored entries too (dimmed), .git aside
   // Dock terminal tab names: `repo|slug` → tab index → user-chosen label.
   // Only the NAME persists across restarts, never the shell: a named tab with no
   // live shell is seeded back into the strip and spawns a fresh shell when you
@@ -100,6 +101,7 @@ export const DEFAULTS: Settings = {
   files_stack_pct: 40,
   files_wrap: false,
   files_md_source: false,
+  files_show_ignored: false,
   term_tab_names: {},
   editor_cmd: "code",
   terminal_cmd: "",

@@ -22,33 +22,44 @@ import { Markdown } from "./markdown";
 import { basename, fileInfo, humanSize, type FileKind } from "./filekind";
 import type { Settings } from "./settings";
 
-type FsEntry = { name: string; path: string; is_dir: boolean };
+type FsEntry = { name: string; path: string; is_dir: boolean; ignored?: boolean };
 type FileRead = { content: string; truncated: boolean; binary: boolean; mtime: number; size: number };
 type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number };
 
 // ── tree ─────────────────────────────────────────────────────────────────
 
-// One lazy directory node: fetches its children the first time it's expanded
-// and caches them. Files bubble a click up via onOpen; dirs toggle.
-function TreeNode({ entry, depth, openPath, onOpen, onError }: {
-  entry: FsEntry; depth: number; openPath: string | null; onOpen: (path: string) => void; onError: (e: unknown) => void;
+// One lazy directory node. Files bubble a click up via onOpen; dirs toggle.
+function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, onError }: {
+  entry: FsEntry; depth: number; openPath: string | null; showIgnored: boolean; reloadToken: number;
+  onOpen: (path: string) => void; onError: (e: unknown) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [kids, setKids] = useState<FsEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const toggle = async () => {
-    if (!entry.is_dir) { onOpen(entry.path); return; }
-    const next = !open;
-    setOpen(next);
-    if (next && kids === null && !loading) {
-      setLoading(true);
+  // Children are fetched by EFFECT, not by the click handler. The handler
+  // version listed a directory ONCE — `kids === null` guarded the fetch, so a
+  // file created after the first expand stayed invisible for the life of the
+  // node, and collapsing/re-expanding did not help either. Keying off
+  // reloadToken re-lists every OPEN directory instead; closed ones still cost
+  // nothing. The previous listing stays on screen while a reload runs, so the
+  // periodic bump never blanks the tree.
+  useEffect(() => {
+    if (!entry.is_dir || !open) return;
+    let alive = true;
+    setLoading(true);
+    invoke<FsEntry[]>("list_dir", { path: entry.path, showIgnored })
       // Surface a failure (permissions, backend error) rather than showing it as
       // an empty directory — a swallowed error reads as "it just didn't respond".
-      try { setKids(await invoke<FsEntry[]>("list_dir", { path: entry.path })); }
-      catch (e) { setKids([]); onError(e); }
-      finally { setLoading(false); }
-    }
+      .then((e) => { if (alive) setKids(e); })
+      .catch((e) => { if (alive) { setKids([]); onError(e); } })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [entry.is_dir, entry.path, open, showIgnored, reloadToken, onError]);
+
+  const toggle = () => {
+    if (!entry.is_dir) { onOpen(entry.path); return; }
+    setOpen((o) => !o);
   };
 
   const isSel = !entry.is_dir && openPath === entry.path;
@@ -56,10 +67,10 @@ function TreeNode({ entry, depth, openPath, onOpen, onError }: {
   return (
     <div className="tree-node">
       <button
-        className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "")}
+        className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "") + (entry.ignored ? " ign" : "")}
         style={{ paddingLeft: `calc(var(--s2) + ${depth} * var(--s3))` }}
         onClick={toggle}
-        title={entry.name}
+        title={entry.ignored ? `${entry.name} — gitignored` : entry.name}
       >
         <span className="tree-caret">{entry.is_dir && (open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />)}</span>
         <span className={`tree-glyph k-${entry.is_dir ? "dir" : kind}`} aria-hidden="true">{entry.is_dir ? "" : KIND_GLYPH[kind!]}</span>
@@ -67,10 +78,13 @@ function TreeNode({ entry, depth, openPath, onOpen, onError }: {
       </button>
       {entry.is_dir && open && (
         <div className="tree-kids">
-          {loading && <div className="tree-note">…</div>}
+          {/* only while there is nothing to show — a reload must not add a
+              spinner line under every open directory every few seconds */}
+          {loading && kids === null && <div className="tree-note">…</div>}
           {kids && kids.length === 0 && !loading && <div className="tree-note">empty</div>}
           {kids?.map((k) => (
-            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath} onOpen={onOpen} onError={onError} />
+            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath}
+              showIgnored={showIgnored} reloadToken={reloadToken} onOpen={onOpen} onError={onError} />
           ))}
         </div>
       )}
@@ -84,25 +98,32 @@ const KIND_GLYPH: Record<FileKind, string> = {
 };
 
 // Files tab tree. `root` = the place's worktree path; remount per place via key.
-function FileTree({ root, openPath, onOpen, onError }: {
-  root: string; openPath: string | null; onOpen: (path: string) => void; onError: (e: unknown) => void;
+function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onError }: {
+  root: string; openPath: string | null; showIgnored: boolean; reloadToken: number;
+  onOpen: (path: string) => void; onError: (e: unknown) => void;
 }) {
   const [entries, setEntries] = useState<FsEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // No setEntries(null) here: this effect re-runs on every reload, and blanking
+  // first would flash "loading…" over the whole tree each time. `root` cannot
+  // change under a mounted FileTree anyway — the caller keys on it — so the
+  // one genuine empty state is the initial mount.
   useEffect(() => {
     let alive = true;
-    setEntries(null); setErr(null);
-    invoke<FsEntry[]>("list_dir", { path: root })
-      .then((e) => { if (alive) setEntries(e); })
+    invoke<FsEntry[]>("list_dir", { path: root, showIgnored })
+      .then((e) => { if (alive) { setEntries(e); setErr(null); } })
       .catch((e) => { if (alive) setErr(String(e)); });
     return () => { alive = false; };
-  }, [root]);
+  }, [root, showIgnored, reloadToken]);
   if (err) return <div className="tree-note err-note">{err}</div>;
   if (!entries) return <div className="tree-note">loading…</div>;
   if (!entries.length) return <div className="tree-note">empty worktree</div>;
   return (
     <div className="filetree">
-      {entries.map((e) => <TreeNode key={e.path} entry={e} depth={0} openPath={openPath} onOpen={onOpen} onError={onError} />)}
+      {entries.map((e) => (
+        <TreeNode key={e.path} entry={e} depth={0} openPath={openPath}
+          showIgnored={showIgnored} reloadToken={reloadToken} onOpen={onOpen} onError={onError} />
+      ))}
     </div>
   );
 }
@@ -188,7 +209,9 @@ class ViewErrorBoundary extends Component<{ resetKey: string; children: ReactNod
 
 export type FileViewProps = {
   path: string;
-  /** bumps on places:changed → re-read from disk (nothing to lose: read-only) */
+  /** bumps on places:changed and on the dock's Refresh → re-read from disk
+   *  (nothing to lose: read-only). FilesPane re-lists the tree off the same
+   *  token, so a new file appears without the user reselecting the place. */
   reloadToken: number;
   onOpenEditor: (path: string) => void;
   onOpen: (path: string) => void;
@@ -343,6 +366,8 @@ export const SPLIT_FLOOR = 420;
 export type FilesPaneProps = Omit<FileViewProps, "path" | "expanded" | "onExpand"> & {
   root: string;
   openPath: string | null;
+  /** list gitignored entries too, dimmed (the reader overlay has no tree) */
+  showIgnored: boolean;
   /** live dock width — decides the `auto` orientation */
   dockW: number;
   layout: Settings["files_layout"];
@@ -363,7 +388,8 @@ export function orientationFor(layout: Settings["files_layout"], dockW: number):
 }
 
 export function FilesPane(props: FilesPaneProps) {
-  const { root, openPath, dockW, layout, splitPct, stackPct, onSplitPct, onOpen, onError, expanded } = props;
+  const { root, openPath, dockW, layout, splitPct, stackPct, onSplitPct, onOpen, onError, expanded,
+    showIgnored, reloadToken } = props;
   const orient = expanded ? "split" : orientationFor(layout, dockW);
   const hostRef = useRef<HTMLDivElement>(null);
   // The drag reads BOTH of these live: the window can resize mid-drag (flipping
@@ -413,7 +439,8 @@ export function FilesPane(props: FilesPaneProps) {
       {!expanded && (
         <>
           <div className="dock-tree" style={treeStyle}>
-            <FileTree key={root} root={root} openPath={openPath} onOpen={onOpen} onError={onError} />
+            <FileTree key={root} root={root} openPath={openPath} showIgnored={showIgnored}
+              reloadToken={reloadToken} onOpen={onOpen} onError={onError} />
           </div>
           <div
             className="files-divider"
