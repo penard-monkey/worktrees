@@ -201,13 +201,23 @@ close-out ritual (.claude/skills/close-out).
   _From: [2026-08-02 usage-widget session](docs/sessions/2026-08-02-usage-widget/summary.md),
   [2026-08-06 usage-countdown session](docs/sessions/2026-08-06-usage-countdown/summary.md)_
 
-- **CI has never run against the countdown change.** PR #82 merged while
+- **CI has never run against several merged changes.** PR #82 merged while
   GitHub's queue was backed up and no workflow run was ever created, so
-  `--auto` had no required check to wait on. Local gates cover everything
-  ci.yml does except the app-crate build on ubuntu — glance at the next run on
-  main and, if the queue keeps swallowing runs, consider whether a required
+  `--auto` had no required check to wait on. PR #80 (empty-project onboarding)
+  then merged with its checks stuck pending during the same incident — a
+  deliberate call, on the strength of the local gates. Local gates cover
+  everything ci.yml does except the app-crate build on ubuntu, and nothing in
+  this stream has been verified on Linux at all. Re-run CI on main once the
+  queue is healthy, and if it keeps swallowing runs, consider whether a required
   check should gate merges at all (today nothing does).
-  _From: [2026-08-06 usage-countdown session](docs/sessions/2026-08-06-usage-countdown/summary.md)_
+  _From: [2026-08-06 usage-countdown session](docs/sessions/2026-08-06-usage-countdown/summary.md),
+  [2026-08-06 empty-project-onboarding session](docs/sessions/2026-08-06-empty-project-onboarding/summary.md)_
+
+- **First commit is only offered from the new-worktree form.** A tracked repo
+  with an unborn HEAD gets its "Create initial commit" action when you click
+  **New worktree** and nowhere else. If that state proves common, the project
+  row is the more discoverable home for it.
+  _From: [2026-08-06 empty-project-onboarding session](docs/sessions/2026-08-06-empty-project-onboarding/summary.md)_
 
 - **Usage credits in the widget.** The oauth/usage endpoint's `spend` object
   carries extra-usage credits (balance, cap, severity); skipped in v0.7.0
