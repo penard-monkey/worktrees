@@ -33,6 +33,21 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 
 CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 
+**Consolidating a git invocation? Diff `ls --json` against the SHIPPED binary.**
+Folding three git calls into one `status --porcelain=v2` silently changed
+`upstream` for one worktree — v2 reports the CONFIGURED upstream, `rev-parse
+@{u}` reported only one that RESOLVES. Neither bats nor the 205 unit tests
+covered it; only the output diff did. `~/.local/bin/worktrees` is the last
+release, so it is the reference.
+
+**Counting subprocesses: shim the CLI, never the app.** Wrap `git`/`tmux`/
+`stat`/`date` in counting wrappers on PATH and run `worktrees ls --json` — the
+identical `snapshot()` path (`spawn-count.sh` in the worktree's cache dir).
+`ps`-sampling undercounts by ~3× and misses sub-millisecond spawns entirely. The
+shim can't measure the APP: `fixup_gui_path()` prepends the login-shell PATH at
+startup and keeps the inherited one only as a trailing fallback, so the real git
+wins.
+
 A FRESH worktree needs two bootstraps first, and both fail confusingly:
 `git submodule update --init --recursive` (without it `make test` dies with a
 bare "No such file or directory" naming the bats binary, not the submodule),
@@ -75,6 +90,18 @@ is invisible to the bats suite — there is no fake claude. Re-run
   PARSER that emits data we render ourselves is allowed, and `marked` (lexer
   only, for the dock's markdown) is the one instance. Syntax highlighting is
   hand-rolled in `app/src/highlight.ts` for the same reason.
+- **Never run the bundle's binary to probe it.**
+  `target/release/bundle/macos/worktrees.app/Contents/MacOS/app --version` is the
+  GUI entry point — it LAUNCHES a second instance instead of printing a version.
+- **`document.visibilityState` works here** — WKWebView fires `visibilitychange`
+  on minimize, ⌘H, Space switch and full occlusion (confirmed on a real build via
+  logged transitions). The Tauri issues claiming otherwise are Windows/WebView2.
+  No `objc2`/NSWindow occlusion observer needed. It does NOT fire on plain focus
+  loss, which is correct: a visible-but-unfocused window is still being read.
+- Measuring anything in the app: `app.log` timestamps are **UTC**, most harness
+  output is local. Cross-reference before trusting a window-state measurement —
+  a "hidden" run that showed MORE work turned out to have flapped visible five
+  times mid-window.
 - macOS FS is case-insensitive: `Settings.tsx` collided with `settings.ts`
   once (component is `SettingsSheet.tsx`). Watch new filenames.
 
@@ -130,6 +157,12 @@ the `/close-out` skill (`.claude/skills/close-out/SKILL.md`). Short version:
 scratch → `~/.cache/worktrees/…`, session summary + planning tarball →
 `docs/sessions/<date>-<slug>/` (committed), stragglers → `ROADMAP.md`,
 one squash-merged PR, then a fresh branch off origin/main.
+
+**Tag the release from the worktree that already owns `main`** (the repo root).
+`git checkout -B main` inside a side worktree moves the SHARED branch ref out
+from under it, leaving the root on the new commit with a stale working tree and
+phantom "modifications" — the inverse of the release, staged. Recoverable with
+`reset --hard`, but check for untracked files first.
 
 Branch off a FRESHLY FETCHED `origin/main`, and check with
 `git rev-list --left-right --count origin/main...HEAD` — an idle worktree's

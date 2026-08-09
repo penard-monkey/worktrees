@@ -4,6 +4,78 @@ Parking lot for work we've decided to keep but not do now. Each item links
 the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (.claude/skills/close-out).
 
+- **The backend 3 s poll loop is the largest remaining background cost.** v0.9.1
+  gated every FRONTEND periodic cost on window visibility, which is what killed
+  the git-sweep storm — but the setup thread in `app/src-tauri/src/lib.rs` still
+  runs `session_fingerprint()` (a `tmux list-sessions` spawn) plus
+  `claude_activity()` (read_dir + parse + `pid_alive` per probe) **every 3
+  seconds regardless of visibility**, and the auto-fetch pass fires a `git fetch`
+  per root on the same ungated thread — real battery on a docked laptop
+  overnight. The shape to copy already exists: push a mode from the frontend the
+  way `set_fetch_interval` does, 3 s focused → 20-30 s unfocused → parked when
+  hidden, with one immediate tick on the visible edge. Measured floor: a hidden
+  v0.9.1 window still spawned tmux on this cadence.
+  _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
+
+- **Zombie children — real, unreproduced, and the obvious diagnosis is wrong.**
+  A 14-hour v0.9.0 instance accumulated 41 unreaped children. `term_close` /
+  `kill_shell` call `child.kill()` with no `wait()`, which looks like the bug and
+  is not: `portable_pty`'s `ChildKiller::kill` sends **SIGHUP** then polls
+  `try_wait()` five times over ~200 ms, and `try_wait` reaps. The genuine hole is
+  the fall-through — a child outliving that grace period gets `SIGKILL` and no
+  final wait. Four reproduction attempts failed (plain `sleep` via PTY,
+  `trap "" HUP`, enumerating all children, standalone outside the test harness),
+  so a written fix was reverted rather than shipped under a claim it hadn't
+  earned. ⚠ The regression test written for it passed identically with and
+  without the fix — verify any guard FAILS on the unfixed code first. Live check
+  in the session summary; grab a reproduction when the count climbs.
+  _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
+
+- **The nav is rebuilt, not re-rendered.** `PlaceRow`, `GroupHeader`,
+  `ProjectNode` and `FlatLens` are defined inside `App()` (`app/src/App.tsx`), so
+  every App render gives them new identities and React unmounts and recreates the
+  entire subtree — ~450-600 DOM nodes, on every refresh, every busy-dot flip and
+  **every keystroke in the filter box**. The comment at the definition site
+  documents the exception and justifies it on correctness grounds (no local
+  state, no focus), which is sound and silent about DOM churn. All four must move
+  to module scope together with `memo` — hoisting the leaf alone achieves
+  nothing, since a redefined `ProjectNode` unmounts its children regardless.
+  Held back from v0.9.1 deliberately: ~30 closed-over values, invisible to bats,
+  and the energy measurements never implicated render churn — so measure before
+  spending the refactor.
+  _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
+
+- **Event-driven place refresh (FSEvents) instead of the 30 s blind emit.** The
+  backend force-emits `places:changed` every 30 s as a safety net for drift with
+  no tmux trace — an editor writing files, a commit from a bare terminal. All of
+  those are filesystem events under the project root, and worktrees nest under
+  it, so one recursive `notify` watch per project covers the working trees and
+  the `.git` common dir. Would cost ~zero when nothing changes and make the UI
+  update in under a second instead of up to 30 — strictly better on both axes.
+  Adds a dependency; keep a slow backstop for FSEvents edge cases. Same watcher
+  would replace the claude probe-dir scan.
+  _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
+
+- **PTY → IPC coalescing (terminal throughput).** Both reader threads send one
+  `Channel::send` per `read()` syscall. In tauri 2.11.5
+  (`src/ipc/channel.rs:155-183`) every send becomes a webview main-thread JS
+  eval, and raw payloads **under 1024 B are serialized by `serde_json` into a
+  JSON array of integers** (~4 chars per byte) — so a PTY under a build emits
+  few-hundred-byte reads at kHz rates and pins the WebContent process. Coalesce
+  with a state machine that cannot hurt echo latency: send immediately when idle,
+  and only batch (8-16 ms or 32-64 KB) once reads arrive back-to-back. Bursts
+  then clear 1024 B and take the cheaper-per-byte path, and xterm gets fewer,
+  larger writes. Optional companion: `@xterm/addon-webgl` with
+  `onContextLoss → dispose` (DOM renderer is the sanctioned fallback) — invisible
+  to bats, so it needs a manual-check doc entry.
+  _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
+
+- **Flaky test: `skills add installs from a local git repo and pins the commit`**
+  (`test/skills.bats:175`) failed on macOS CI only, passed locally and on Linux,
+  and passed clean on re-run. A `git clone file://` test. Worth pinning down
+  before it trains everyone to re-run CI on red.
+  _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
+
 - **Links in release notes still print raw.** `renderInline` (App.tsx) now
   handles `code`, `**strong**` and `*em*` — the markup the changelog bullets
   actually use — but not `[text](url)`. Nothing renders wrong today: links
