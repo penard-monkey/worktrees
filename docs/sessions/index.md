@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-07](2026-08-07-relnotes-inline-markdown/summary.html) | release notes render their own markdown |
 | [2026-08-07](2026-08-07-new-place-feedback/summary.html) | creating a place says so, reopening one stops shouting |
 | [2026-08-06](2026-08-06-nav-hierarchy/summary.html) | nav hierarchy — projects up, dormant down |
 | [2026-08-06](2026-08-06-ai-rules-layer/summary.html) | AI profiles — per-project Claude rules, skills, MCP and model |
