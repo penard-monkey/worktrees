@@ -76,6 +76,18 @@ close-out ritual (.claude/skills/close-out).
   before it trains everyone to re-run CI on red.
   _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
 
+- **Links in release notes still print raw.** `renderInline` (App.tsx) now
+  handles `code`, `**strong**` and `*em*` — the markup the changelog bullets
+  actually use — but not `[text](url)`. Nothing renders wrong today: links
+  appear in the changelog's file header, never inside a `### ` group's bullets,
+  which is all the sheet renders. The first entry that links a PR or an ADR will
+  show the brackets. Not free to add: a rendered href needs `safeHref`-style
+  vetting and click routing, because a click handler alone is not a boundary
+  (middle-click fires `auxclick` with no `click`, so `preventDefault()` never
+  runs and the WebView follows the attribute) — `markdown.tsx` already solved
+  this and is the place to copy from.
+  _From: [2026-08-07 release-notes markdown session](docs/sessions/2026-08-07-relnotes-inline-markdown/summary.md)_
+
 - **`do_switch` still pays the doomed two-fetch pair.** `cmd_new` was fixed to
   ask the remote once (`ops.rs`, guarded single `git fetch origin`), but
   `do_switch` (`ops.rs:309-321`) keeps the old shape: a targeted
