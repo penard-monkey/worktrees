@@ -29,6 +29,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   so the hiding state is legible without hovering. Installs that already
   persisted the old default are migrated once; toggling it back off still
   sticks. `.git` stays hidden either way.
+- **The nav tree's clock and order track activity, not attention.** Each row's
+  age and the tree's default sort (labelled "Activity" in the sort menu,
+  previously "Last used") both counted merely opening a place as recency, so
+  clicking a row reset its age to "now" and reshuffled the order — the glance
+  destroyed the very signal it was after. Both now move only when something
+  happens in the worktree: Claude finishes work there, or the branch tip
+  changes. Opening a closed place still brings it back into the active group,
+  but its age and its order within the group no longer flinch. The Recent
+  lens, the Resume list, and ⌘K still count opens on purpose — "where was I"
+  is their job, and the Recent lens now labels its rows with that same clock.
 
 ## [0.10.0] - 2026-08-09
 
