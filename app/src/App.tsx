@@ -153,10 +153,11 @@ function doneTier(epoch: number, nowSec: number): DoneTier {
 /// restore-on-launch target.
 const usedEpoch = (p: Place) =>
   Math.max(p.declared?.last_opened_epoch ?? 0, p.declared?.last_worked_epoch ?? 0);
-/// Sort key for the NAV tree and ⌘K, which have always fallen back to the last
-/// commit so a never-opened place still lands somewhere sensible in the order
-/// rather than sinking to the bottom of every list. Kept exactly as it was,
-/// plus work.
+/// Sort key for ⌘K, which has always fallen back to the last commit so a
+/// never-opened place still lands somewhere sensible in the order rather than
+/// sinking to the bottom of every list. The switcher keeps opens on purpose —
+/// "jump back to where I just was" is its job. The NAV tree no longer sorts by
+/// this: opens reshuffling the tree carried no signal (see activityAt).
 const recencyEpoch = (p: Place) => usedEpoch(p) || p.last_commit_epoch || 0;
 
 // fixed-order signal glyphs; geometry (3-col row grid) guarantees no collision.
@@ -1325,6 +1326,11 @@ function App() {
   }, []);
   const workedAt = (p: Place) =>
     Math.max(donePaths.get(p.path) ?? 0, p.declared?.last_worked_epoch ?? 0);
+  // Nav row age AND Recent-sort key: when something HAPPENED here — Claude work
+  // or a commit, never an open. `last_opened_epoch` is deliberately excluded so
+  // clicking a row neither resets its clock to "now" nor reshuffles the tree.
+  // Opens still count for Resume (usedEpoch) and ⌘K (recencyEpoch).
+  const activityAt = (p: Place) => Math.max(workedAt(p), p.last_commit_epoch ?? 0);
 
   // The decay clock. One minute is far finer than the coarsest boundary it has
   // to land on (15m), and it is gated on visibility exactly like the usage poll
@@ -1921,7 +1927,7 @@ function App() {
   };
 
   // ── nav sorting (Settings-persisted; Manual = drag) ──
-  const recencyOf = recencyEpoch;
+  const recencyOf = activityAt;
   const sortPlaces = (repo: string, arr: Place[]): Place[] => {
     const out = [...arr];
     if (settings.sort_mode === "manual") {
@@ -2260,7 +2266,7 @@ function App() {
           {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
-          <span className="row-age">{ago(recencyOf(p))}</span>
+          <span className="row-age">{ago(activityAt(p))}</span>
         </span>
       </li>
     );

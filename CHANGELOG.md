@@ -16,6 +16,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   so the hiding state is legible without hovering. Installs that already
   persisted the old default are migrated once; toggling it back off still
   sticks. `.git` stays hidden either way.
+- **The nav's clock and Recent order track activity, not attention.** The age on
+  each row and the Recent sort both counted merely opening a place as recency,
+  so clicking a row reset its age to "now" and reshuffled the tree — the glance
+  destroyed the very signal it was after. Both now move only when something
+  happens there: Claude finishes work, or a commit lands. Resume and ⌘K still
+  count opens on purpose — "where was I" is their job.
 
 ## [0.10.0] - 2026-08-09
 
