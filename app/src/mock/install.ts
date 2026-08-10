@@ -753,8 +753,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // …and the backend's order (dirs first, then case-insensitive by name).
       // The fixtures are already written that way; sorting here is what keeps a
       // file added mid-session by __mock.createFile from landing at the bottom.
-      return [...shown].sort((a, b) =>
-        Number(b.is_dir) - Number(a.is_dir) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+      // Compared with < / > rather than localeCompare, because lib.rs orders by
+      // `to_lowercase().cmp()` — a plain codepoint compare. localeCompare would
+      // file `éclair.md` next to "e" where the real backend puts it after "z",
+      // so a harness assertion on row order could pass against a real app that
+      // fails.
+      return [...shown].sort((a, b) => {
+        const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
+        return Number(b.is_dir) - Number(a.is_dir) || (an < bn ? -1 : an > bn ? 1 : 0);
+      });
     }
     case "read_file": {
       const f = fsFile(args.path as string);

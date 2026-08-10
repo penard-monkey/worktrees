@@ -44,15 +44,32 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
   // reloadToken re-lists every OPEN directory instead; closed ones still cost
   // nothing. The previous listing stays on screen while a reload runs, so the
   // periodic bump never blanks the tree.
+  //
+  // Both halves of the failure path exist because this now runs REPEATEDLY,
+  // where the click-handler version ran once per expand:
+  //   · a failed reload keeps the last good listing. Wiping to [] would render
+  //     "empty" and unmount every grandchild, so one blip (a directory swapped
+  //     out under a `git checkout`) would collapse a deep expansion until the
+  //     next tick.
+  //   · the error is reported only when it CHANGES. A directory that stays
+  //     unreadable — a root-owned build dir the ◌ toggle just made visible —
+  //     would otherwise re-raise the banner and append to app.log on every
+  //     bump, forever, for as long as it stayed expanded.
+  const lastErr = useRef<string | null>(null);
   useEffect(() => {
     if (!entry.is_dir || !open) return;
     let alive = true;
     setLoading(true);
     invoke<FsEntry[]>("list_dir", { path: entry.path, showIgnored })
-      // Surface a failure (permissions, backend error) rather than showing it as
-      // an empty directory — a swallowed error reads as "it just didn't respond".
-      .then((e) => { if (alive) setKids(e); })
-      .catch((e) => { if (alive) { setKids([]); onError(e); } })
+      .then((e) => { if (alive) { setKids(e); lastErr.current = null; } })
+      .catch((e) => {
+        if (!alive) return;
+        // Nothing listed yet: an empty body plus the banner. A swallowed error
+        // on the FIRST listing reads as "it just didn't respond".
+        setKids((prev) => prev ?? []);
+        const msg = String(e);
+        if (lastErr.current !== msg) { lastErr.current = msg; onError(e); }
+      })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [entry.is_dir, entry.path, open, showIgnored, reloadToken, onError]);
@@ -115,11 +132,17 @@ function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onError }:
       .catch((e) => { if (alive) setErr(String(e)); });
     return () => { alive = false; };
   }, [root, showIgnored, reloadToken]);
-  if (err) return <div className="tree-note err-note">{err}</div>;
+  // The error REPLACES the tree only when there is no tree yet. Once a listing
+  // has landed, a failed reload shows the reason above the last good one
+  // instead of swapping it out: this effect re-runs on every bump now, so
+  // returning the bare note would unmount every TreeNode — and with them every
+  // expansion the user had opened — on one transient failure.
+  if (err && !entries) return <div className="tree-note err-note">{err}</div>;
   if (!entries) return <div className="tree-note">loading…</div>;
   if (!entries.length) return <div className="tree-note">empty worktree</div>;
   return (
     <div className="filetree">
+      {err && <div className="tree-note err-note">{err}</div>}
       {entries.map((e) => (
         <TreeNode key={e.path} entry={e} depth={0} openPath={openPath}
           showIgnored={showIgnored} reloadToken={reloadToken} onOpen={onOpen} onError={onError} />
