@@ -153,10 +153,11 @@ function doneTier(epoch: number, nowSec: number): DoneTier {
 /// restore-on-launch target.
 const usedEpoch = (p: Place) =>
   Math.max(p.declared?.last_opened_epoch ?? 0, p.declared?.last_worked_epoch ?? 0);
-/// Sort key for the NAV tree and ⌘K, which have always fallen back to the last
-/// commit so a never-opened place still lands somewhere sensible in the order
-/// rather than sinking to the bottom of every list. Kept exactly as it was,
-/// plus work.
+/// Sort key for ⌘K, which has always fallen back to the last commit so a
+/// never-opened place still lands somewhere sensible in the order rather than
+/// sinking to the bottom of every list. The switcher keeps opens on purpose —
+/// "jump back to where I just was" is its job. The NAV tree no longer sorts by
+/// this: opens reshuffling the tree carried no signal (see activityAt).
 const recencyEpoch = (p: Place) => usedEpoch(p) || p.last_commit_epoch || 0;
 
 // fixed-order signal glyphs; geometry (3-col row grid) guarantees no collision.
@@ -1325,6 +1326,12 @@ function App() {
   }, []);
   const workedAt = (p: Place) =>
     Math.max(donePaths.get(p.path) ?? 0, p.declared?.last_worked_epoch ?? 0);
+  // Nav row age AND the "Activity" sort key: when something HAPPENED here —
+  // Claude work or a commit, never an open. `last_opened_epoch` is deliberately
+  // excluded so clicking a row neither resets its clock to "now" nor reshuffles
+  // the tree. Opens still count where "where was I" is the question: the Recent
+  // lens, Resume (usedEpoch), and ⌘K (recencyEpoch).
+  const activityAt = (p: Place) => Math.max(workedAt(p), p.last_commit_epoch ?? 0);
 
   // The decay clock. One minute is far finer than the coarsest boundary it has
   // to land on (15m), and it is gated on visibility exactly like the usage poll
@@ -1921,7 +1928,6 @@ function App() {
   };
 
   // ── nav sorting (Settings-persisted; Manual = drag) ──
-  const recencyOf = recencyEpoch;
   const sortPlaces = (repo: string, arr: Place[]): Place[] => {
     const out = [...arr];
     if (settings.sort_mode === "manual") {
@@ -1931,7 +1937,7 @@ function App() {
       return out;
     }
     if (settings.sort_mode === "alpha") out.sort((a, b) => a.slug.localeCompare(b.slug));
-    else out.sort((a, b) => recencyOf(b) - recencyOf(a));
+    else out.sort((a, b) => activityAt(b) - activityAt(a));
     const flip = settings.sort_mode === "alpha" ? settings.sort_dir === "desc" : settings.sort_dir === "asc";
     if (flip) out.reverse();
     return out;
@@ -2228,7 +2234,10 @@ function App() {
   // `drift` prop-by-closure and its tooltip is a plain `title` attribute. The
   // moment this needs useState (a hover card, an inline editor), hoist it to
   // module scope with props FIRST.
-  const PlaceRow = ({ repo, p, showProject }: { repo: string; p: Place; showProject?: boolean }) => {
+  // `ageEpoch` overrides the age clock for lists that sort by a different key —
+  // a list must label rows with the SAME clock it orders by, or its ages read
+  // as a broken sort (the Recent lens sorts by usedEpoch, opens included).
+  const PlaceRow = ({ repo, p, showProject, ageEpoch }: { repo: string; p: Place; showProject?: boolean; ageEpoch?: number }) => {
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
     return (
       <li
@@ -2260,7 +2269,7 @@ function App() {
           {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
-          <span className="row-age">{ago(recencyOf(p))}</span>
+          <span className="row-age">{ago(ageEpoch ?? activityAt(p))}</span>
         </span>
       </li>
     );
@@ -2396,10 +2405,10 @@ function App() {
   };
 
   // flat lens (recent / attention) across all projects
-  const FlatLens = ({ items }: { items: { pv: ProjectView; p: Place }[] }) => (
+  const FlatLens = ({ items, ageOf }: { items: { pv: ProjectView; p: Place }[]; ageOf?: (p: Place) => number }) => (
     <ul className="places flat">
       {items.length === 0 && <li className="flat-empty">Nothing here.</li>}
-      {items.map(({ pv, p }) => <PlaceRow key={pv.root + p.slug} repo={pv.root} p={p} showProject />)}
+      {items.map(({ pv, p }) => <PlaceRow key={pv.root + p.slug} repo={pv.root} p={p} showProject ageEpoch={ageOf?.(p)} />)}
     </ul>
   );
 
@@ -2468,7 +2477,7 @@ function App() {
             {sortOpen && (
               <div className="popover sortpop">
                 <div className="pop-hint">sort places</div>
-                {([["recent", "Last used"], ["alpha", "A–Z"], ["manual", "Manual (drag rows)"]] as const).map(([m, label]) => (
+                {([["recent", "Activity"], ["alpha", "A–Z"], ["manual", "Manual (drag rows)"]] as const).map(([m, label]) => (
                   <button key={m} className="pop-item"
                     onClick={() => updateSettings({ sort_mode: m, sort_dir: m === "alpha" ? "asc" : "desc" })}>
                     <span className="check">{settings.sort_mode === m && <Icons.Check size={12} />}</span>{label}
@@ -2513,7 +2522,7 @@ function App() {
         <div className="nav-scroll">
           {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}
           {lens === "places" && ws?.projects.map((pv) => <ProjectNode key={pv.root} pv={pv} />)}
-          {lens === "recent" && <FlatLens items={recentItems} />}
+          {lens === "recent" && <FlatLens items={recentItems} ageOf={usedEpoch} />}
           {lens === "attention" && (
             <>
               <FlatLens items={attentionItems} />
