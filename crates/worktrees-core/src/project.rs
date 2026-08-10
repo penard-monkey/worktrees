@@ -642,7 +642,7 @@ pub fn claude_session_present_in(claude_root: &Path, dir: &str) -> bool {
     claude_has_session(&claude_dir_in(claude_root, dir))
 }
 
-fn claude_dir_in(claude_root: &Path, dir: &str) -> String {
+pub fn claude_dir_in(claude_root: &Path, dir: &str) -> String {
     // Claude Code names a project dir by replacing EVERY non-alphanumeric char
     // with '-' (not just '/' and '.') — match it or paths with '_' etc. miss.
     let mangled: String = dir.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();

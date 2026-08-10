@@ -31,6 +31,14 @@
 
   --ok: #9ece6a;         /* live tmux / active / ahead / listening */
   --ai: #bb9af7;         /* AI (claude) session */
+  /* Afterglow — "Claude finished a task here", decaying. Aliased to --ai and NOT
+     given its own hex, so every theme gets a correct ember for free. This works
+     because every theme block below re-declares --ai on :root, which is where
+     --done is declared and therefore where var(--ai) is substituted — a theme
+     that scoped --ai to a DESCENDANT instead would leave --done on the base
+     purple. Purple because it is the one free hue that already MEANS claude
+     here (green is busy, amber is waiting, accent-blue is the app's pending). */
+  --done: var(--ai);
   --dirty: #e0af68;      /* uncommitted / behind */
   --danger: #f7768e;     /* destructive / broken / error */
   --warn: #ff9e64;       /* attention / Claude waiting for input (amber) */

@@ -8,6 +8,7 @@ export type Declared = {
   pinned?: boolean;
   note?: string;
   last_opened_epoch?: number;
+  last_worked_epoch?: number;
 } | null;
 
 export type Place = {
@@ -36,6 +37,11 @@ export type Workspace = { projects: ProjectView[] };
 
 const NOW = 1784332800; // ~2026-07-21
 const DAY = 86400;
+/** Afterglow ages must be relative to the WALL CLOCK, not the frozen `NOW`:
+ *  `doneTier` measures against `Date.now()`, so a fixed epoch would age out of
+ *  every tier and the harness would boot showing no embers at all. */
+const REAL_NOW = Math.floor(Date.now() / 1000);
+const MIN = 60;
 
 /** The canonical tmux session name for a place — `Project::session_name`
  *  (project.rs), including the `.` → `-` replacement tmux needs. Anything that
@@ -115,12 +121,15 @@ function cdv(): ProjectView {
     place(P, root, {
       slug: "search-index", branch: "feat/search-opensearch",
       ahead: 0, behind: 3, last_commit_subject: "index mapping draft",
-      declared: { last_opened_epoch: NOW - 2 * DAY, note: "waiting on infra ticket" },
+      // afterglow t1 — freshest tier, full ember + halo
+      declared: { last_opened_epoch: NOW - 2 * DAY, last_worked_epoch: REAL_NOW - 4 * MIN, note: "waiting on infra ticket" },
       lifecycle_effective: "idle",
     }),
     place(P, root, {
       slug: "hotfix-login", branch: "fix/login-loop", dirty: true, dirty_files: 1,
-      last_commit_subject: "guard null session", declared: { lifecycle: "closed", last_opened_epoch: NOW - 20 * DAY },
+      // afterglow t2 — worked this block, session since closed
+      last_commit_subject: "guard null session",
+      declared: { lifecycle: "closed", last_opened_epoch: NOW - 20 * DAY, last_worked_epoch: REAL_NOW - 45 * MIN },
       lifecycle_effective: "closed",
     }),
     place(P, root, {
@@ -144,6 +153,9 @@ function worktreesRepo(): ProjectView {
     place(P, root, {
       slug: "(main)", branch: "main", is_main: true, ahead: 0, behind: 0,
       tmux_session: { name: `${P}-(main)`, up: false }, last_commit_subject: "docs: readme",
+      // main glows too — a session run in the repo root stamps under the `(main)`
+      // store key, same as any other place (lib.rs place_key_for)
+      declared: { last_worked_epoch: REAL_NOW - 30 * MIN },
       lifecycle_effective: "closed",
     }),
     place(P, root, {
@@ -154,7 +166,9 @@ function worktreesRepo(): ProjectView {
     }),
     place(P, root, {
       slug: "fix-flaky-ci", branch: "fix/flaky-ci",
-      last_commit_subject: "retry tmux smoke", declared: { lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY },
+      // afterglow t3 — this morning's work, nearly out
+      last_commit_subject: "retry tmux smoke",
+      declared: { lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY, last_worked_epoch: REAL_NOW - 5 * 3600 },
       lifecycle_effective: "closed",
     }),
   ];

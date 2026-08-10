@@ -220,6 +220,13 @@ button { cursor: pointer; }
   width: 6px; height: 6px; border-radius: var(--r-full);
   background: var(--warn); box-shadow: 0 0 0 2px var(--bg-tree);
 }
+/* a child that JUST finished (t1 only — see the rollup in App.tsx). Deliberately
+   not the older tiers: a badge every project wears all day is decoration. */
+.picon.done::after {
+  content: ""; position: absolute; top: -2px; right: -2px;
+  width: 6px; height: 6px; border-radius: var(--r-full);
+  background: var(--done); box-shadow: 0 0 0 2px var(--bg-tree);
+}
 .rollup.broken { background: transparent; color: var(--danger); width: auto; height: auto; }
 /* The project must out-rank its own children. It used to be --fs-label (13px)
    against --fs-row (15px) slugs, so with 3 projects open the eye found
@@ -353,12 +360,27 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   content: ""; position: absolute; left: 2px; top: 4px; bottom: 4px;
   width: 2px; border-radius: var(--r-full); background: var(--accent);
 }
-/* the dot means ONE thing: this session is working right now. Empty slot
- * otherwise (fixed width, so names never shift when a dot appears). */
+/* The dot carries session state on THREE channels, in this precedence:
+ *   busy    green, MOVING     — Claude is working right now
+ *   waiting amber, static     — Claude needs input
+ *   done    purple, static    — Claude finished here recently, decaying out
+ * Empty slot otherwise (fixed width, so names never shift when a dot appears).
+ *
+ * Hue does the separating, never motion alone: `prefers-reduced-motion` kills
+ * the blink (tokens.css), and a busy dot and a finished one that differed ONLY
+ * by animation would collapse into the same pixel for those users. */
 .status-dot { width: 8px; height: 8px; border-radius: var(--r-full); background: transparent; flex: none; }
 .status-dot.busy { background: var(--ok); animation: breathe 2s steps(4, jump-none) infinite; } /* Claude working */
 .status-dot.waiting { background: var(--warn); } /* Claude needs input — STATIC, no blink */
 .status-dot.on { background: var(--ok); } /* static "tmux up" fact (topbar) */
+/* Afterglow. NEVER animated — movement in this app means "running now", and the
+ * decay is stepped in JS (App.tsx doneTier) rather than keyframed so it survives
+ * reduced-motion, a remount, and a restart. t1's ring is a box-shadow, not an
+ * animation, so it survives all three too. */
+.status-dot.done { background: var(--done); }
+.status-dot.done.t1 { box-shadow: 0 0 0 3px color-mix(in srgb, var(--done) 30%, transparent); }
+.status-dot.done.t2 { opacity: 0.65; }
+.status-dot.done.t3 { opacity: 0.3; }
 /* a place being created — accent, not --ok: this is the app working, not a
    session. Same `breathe` as .busy so "something is happening" reads the same
    everywhere in the nav. */

@@ -21,6 +21,9 @@ type Declared = {
   pinned?: boolean;
   note?: string;
   last_opened_epoch?: number;
+  /// When Claude last FINISHED a task here (see store.rs). Opening a session
+  /// never sets it — only work does.
+  last_worked_epoch?: number;
 } | null;
 
 type Place = {
@@ -114,6 +117,47 @@ function ago(epoch?: number): string {
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
 }
+
+// ── afterglow: "Claude finished a task here", decaying ───────────────────────
+// The busy dot vanishing used to be the end of all visibility. These tiers keep
+// a place lit after its work lands and dim it out over the working day, so the
+// nav answers "what moved recently" at a glance.
+//
+// DISCRETE, not a continuous fade, for three reasons: absolute opacity is
+// unreadable on its own (only the contrast BETWEEN rows carries), a CSS
+// animation long enough to cover 12h is frozen at frame 0 by
+// `prefers-reduced-motion` (tokens.css) — full brightness forever, the exact
+// inverse of the signal — and steps are assertable with getComputedStyle
+// instead of racing an in-flight animation.
+const DONE_T1_SECS = 15 * 60; // "just finished — go look"
+const DONE_T2_SECS = 2 * 3600; // this working block
+const DONE_T3_SECS = 12 * 3600; // overnight; past this the Recent lens takes over
+type DoneTier = "" | "t1" | "t2" | "t3";
+function doneTier(epoch: number, nowSec: number): DoneTier {
+  if (!epoch) return "";
+  const age = nowSec - epoch;
+  if (age < DONE_T1_SECS) return "t1"; // negative (clock skew) lands here too
+  if (age < DONE_T2_SECS) return "t2";
+  if (age < DONE_T3_SECS) return "t3";
+  return "";
+}
+/// "When did I last USE this place" — opened or worked, whichever is newer. Work
+/// outranks nothing; it is the other half of the same fact, since a place you
+/// prompted in an hour ago is more current than one you opened yesterday.
+///
+/// Deliberately has NO commit-epoch fallback: the lists that answer "where was
+/// I" (Resume, the Recent lens, auto-restore) must not be led by a branch tip.
+/// A worktree created from the CLI and never touched has a commit from
+/// yesterday and no user history at all — ranking it above a place actually
+/// opened last week would put it at the top of Resume and make it the
+/// restore-on-launch target.
+const usedEpoch = (p: Place) =>
+  Math.max(p.declared?.last_opened_epoch ?? 0, p.declared?.last_worked_epoch ?? 0);
+/// Sort key for the NAV tree and ⌘K, which have always fallen back to the last
+/// commit so a never-opened place still lands somewhere sensible in the order
+/// rather than sinking to the bottom of every list. Kept exactly as it was,
+/// plus work.
+const recencyEpoch = (p: Place) => usedEpoch(p) || p.last_commit_epoch || 0;
 
 // fixed-order signal glyphs; geometry (3-col row grid) guarantees no collision.
 //
@@ -384,7 +428,7 @@ function UnbornPrompt({ project, onCommit, onCancel }: {
 // + note). A place matches if the query chars appear IN ORDER (case-insensitive);
 // score prefers a contiguous substring hit over a scattered subsequence, an
 // earlier hit over a later one, and a slug hit over a branch/project hit. Recency
-// (declared.last_opened_epoch desc) breaks ties. Empty query → all places sorted
+// (`recencyEpoch` desc — opened OR worked) breaks ties. Empty query → all places sorted
 // by recency (the instant "recent places" list — the common case).
 type SwitchItem = { pv: ProjectView; p: Place };
 const SWITCH_CAP = 50; // rendered-list cap for big workspaces (perf; query narrows it)
@@ -424,7 +468,7 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const rec = (p: Place) => p.declared?.last_opened_epoch ?? p.last_commit_epoch ?? 0;
+    const rec = recencyEpoch;
     if (!q) {
       return [...items]
         .sort((a, b) => rec(b.p) - rec(a.p))
@@ -899,6 +943,9 @@ type UsageInfo = { source: string; fetched_at: number; limits: UsageLimit[] };
 // 180s — the endpoint is undocumented and has rate-limited hard before; the
 // backend also caps real fetches at one per 120s.
 const USAGE_POLL_MS = 180_000;
+/// Afterglow re-tier cadence. Boundaries then land within ±60s of true, which is
+/// invisible at 15m/2h/12h — and it is a pure recompute, no I/O.
+const DECAY_TICK_MS = 60_000;
 // The countdown ticks off the LOCAL clock, not off a poll: `resets_at` is
 // absolute, so a 15s tick keeps the minute display honest without touching the
 // rate-limited endpoint (polling harder to animate a clock would be absurd).
@@ -1258,6 +1305,60 @@ function App() {
   }, []);
   const activityOf = (p: Place): "busy" | "waiting" | "" =>
     busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
+
+  // Task-completed stamps. Two sources, and the overlay is why both exist: the
+  // snapshot carries `declared.last_worked_epoch` (durable, survives restarts,
+  // backfilled at launch), but a snapshot only re-pulls on `places:changed` —
+  // which a completion does NOT trigger, since finishing a task leaves no tmux
+  // trace. The `sessions:done` event closes that gap instantly, at the cost of
+  // one Map. Taking the max of the two means neither can regress the other.
+  const [donePaths, setDonePaths] = useState<Map<string, number>>(new Map());
+  useEffect(() => {
+    const un = listen<{ path: string; epoch: number }>("sessions:done", (e) => {
+      setDonePaths((m) => {
+        const next = new Map(m);
+        next.set(e.payload.path, Math.max(next.get(e.payload.path) ?? 0, e.payload.epoch));
+        return next;
+      });
+    });
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, []);
+  const workedAt = (p: Place) =>
+    Math.max(donePaths.get(p.path) ?? 0, p.declared?.last_worked_epoch ?? 0);
+
+  // The decay clock. One minute is far finer than the coarsest boundary it has
+  // to land on (15m), and it is gated on visibility exactly like the usage poll
+  // — a hidden window has nothing to re-render for. Returning to the window
+  // re-runs this effect, so a woken nav corrects on the next frame instead of
+  // waiting out the rest of an interval (the effect runs after paint, so one
+  // stale-tier frame can show — invisible at these horizons).
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (!pageVisible) return;
+    setNowSec(Math.floor(Date.now() / 1000));
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), DECAY_TICK_MS);
+    return () => clearInterval(id);
+  }, [pageVisible]);
+  // Precedence in the dot slot: busy > waiting > done. Live state always wins —
+  // the ember is what the slot shows when there is nothing happening NOW.
+  const doneOf = (p: Place): DoneTier =>
+    activityOf(p) ? "" : doneTier(workedAt(p), nowSec);
+  // One derivation for both the nav row and the Resume list — they are the same
+  // signal in two places, and drifting them apart is how a dot starts lying.
+  const dotClass = (p: Place) => {
+    const act = activityOf(p);
+    if (act) return " " + act;
+    const tier = doneOf(p);
+    return tier ? ` done ${tier}` : "";
+  };
+  const dotTitle = (p: Place) => {
+    const act = activityOf(p);
+    if (act === "busy") return "Claude working";
+    if (act === "waiting") return "Claude needs input";
+    if (!doneOf(p)) return undefined;
+    const a = ago(workedAt(p));
+    return a === "now" ? "Claude finished just now" : `Claude finished ${a} ago`;
+  };
 
   // ── project config: drift + the init suggestion ──
   // NEITHER runs on the 3s poll (proposal §10). `places:changed` already triggers
@@ -1820,7 +1921,7 @@ function App() {
   };
 
   // ── nav sorting (Settings-persisted; Manual = drag) ──
-  const recencyOf = (p: Place) => p.declared?.last_opened_epoch ?? p.last_commit_epoch ?? 0;
+  const recencyOf = recencyEpoch;
   const sortPlaces = (repo: string, arr: Place[]): Place[] => {
     const out = [...arr];
     if (settings.sort_mode === "manual") {
@@ -2064,7 +2165,7 @@ function App() {
   const resume = useMemo(
     () => allPlaces
       .filter(({ p }) => !p.is_main)
-      .sort((a, b) => (b.p.declared?.last_opened_epoch ?? 0) - (a.p.declared?.last_opened_epoch ?? 0))
+      .sort((a, b) => usedEpoch(b.p) - usedEpoch(a.p))
       .slice(0, 6),
     [allPlaces],
   );
@@ -2073,8 +2174,8 @@ function App() {
   // nothing else — NO enterPlace/touch_place/open_place (those would auto-resume a
   // Claude session on every reboot). TerminalPane attaches on its own if the tmux
   // session is up; otherwise the place view shows its normal "Enter ▸ to start".
-  // Target = the most recently opened place across all projects (max
-  // last_opened_epoch, main excluded) — same derivation as the Resume list, so
+  // Target = the most recently USED place across all projects (max of opened /
+  // worked, main excluded) — same derivation as the Resume list, so
   // resume[0]. Fires exactly once, and only after BOTH settings hydration and the
   // first workspace load have landed, only if restore_last is on, and only if the
   // user hasn't already selected something.
@@ -2146,10 +2247,7 @@ function App() {
         onDragEnd={() => { setDrag(null); setDragOver(null); }}
         title={p.slug}
       >
-        <span
-          className={"status-dot" + (activityOf(p) === "busy" ? " busy" : activityOf(p) === "waiting" ? " waiting" : "")}
-          title={activityOf(p) === "busy" ? "Claude working" : activityOf(p) === "waiting" ? "Claude needs input" : undefined}
-        />
+        <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
         <span className="row-id">
           <span className="row-name">
             {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
@@ -2188,12 +2286,17 @@ function App() {
     const ghosts = pendingNew.filter(
       (g) => g.repo === pv.root && !(pv.snapshot?.places ?? []).some((p) => p.slug === g.label),
     );
-    // Rollup: a working child dominates a waiting one — busy wins, else waiting.
+    // Rollup: a working child dominates a waiting one — busy wins, else waiting,
+    // else a JUST-finished one (t1 only). Restricting the ember to the freshest
+    // tier is deliberate: t2/t3 would leave a permanent badge on every project
+    // anyone touched today, which is decoration, not signal.
     const rollup = places.some((p) => activityOf(p) === "busy")
       ? "busy"
       : places.some((p) => activityOf(p) === "waiting")
         ? "waiting"
-        : "";
+        : places.some((p) => doneOf(p) === "t1")
+          ? "done"
+          : "";
     const buckets: Record<string, Place[]> = {};
     for (const p of places) { if (p.is_main) continue; (buckets[bucketOf(p)] ??= []).push(p); }
     for (const k of Object.keys(buckets)) buckets[k] = sortPlaces(pv.root, buckets[k]);
@@ -2205,7 +2308,7 @@ function App() {
         <div className="project-h" onContextMenu={(e) => projectCtx(e, pv.root)}>
           <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
           {pv.ok
-            ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : undefined}><FolderIcon /></span>
+            ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : rollup === "done" ? "a session just finished" : undefined}><FolderIcon /></span>
             : <span className="rollup broken" title="repo gone">⊘</span>}
           <span className="pname" title={pv.root} onClick={() => toggleProject(pv.root)}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
@@ -2302,7 +2405,7 @@ function App() {
 
   const recentItems = useMemo(
     () => allPlaces.filter(({ p }) => matchPlace(p) && !p.is_main)
-      .sort((a, b) => (b.p.declared?.last_opened_epoch ?? 0) - (a.p.declared?.last_opened_epoch ?? 0)),
+      .sort((a, b) => usedEpoch(b.p) - usedEpoch(a.p)),
     [allPlaces, q],
   );
   const attentionItems = useMemo(
@@ -2585,14 +2688,11 @@ function App() {
               {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
               {resume.map(({ pv, p }) => (
                 <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
-                  <span
-                    className={"status-dot" + (activityOf(p) === "busy" ? " busy" : activityOf(p) === "waiting" ? " waiting" : "")}
-                    title={activityOf(p) === "busy" ? "Claude working" : activityOf(p) === "waiting" ? "Claude needs input" : undefined}
-                  />
+                  <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
                   <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{p.slug}</span>
                   <span className="rr-proj">{basename(pv.root)}</span>
                   <span className="rr-life">{p.lifecycle_effective}</span>
-                  <span className="rr-age">{ago(p.declared?.last_opened_epoch)}</span>
+                  <span className="rr-age">{ago(usedEpoch(p))}</span>
                   <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
                 </div>
               ))}
