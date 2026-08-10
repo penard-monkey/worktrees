@@ -159,10 +159,14 @@ the cache dir before close-out.
 ## Close-out ritual
 
 When a work stream is done and the session is about to be `/clear`ed, run
-the `/close-out` skill (`.claude/skills/close-out/SKILL.md`). Short version:
-scratch → `~/.cache/worktrees/…`, session summary + planning tarball →
-`docs/sessions/<date>-<slug>/` (committed), stragglers → `ROADMAP.md`,
-one squash-merged PR, then a fresh branch off origin/main.
+the `/close-out` skill — GLOBAL since 2026-08-10, source in
+`~/workspace/claude-skills` (symlinked into `~/.claude/skills`). This repo's
+paths, gates, index and branch naming live in `.claude/close-out.md`, which
+the skill reads; edit that file, not the skill. Short version: scratch →
+`~/.cache/worktrees/…`, session summary + planning tarball →
+`docs/sessions/<date>-<slug>/` + a row in `docs/sessions/index.md`
+(committed), stragglers → `ROADMAP.md`, one squash-merged PR, then a fresh
+branch off origin/main.
 
 **Tag the release from the worktree that already owns `main`** (the repo root).
 `git checkout -B main` inside a side worktree moves the SHARED branch ref out
