@@ -5,6 +5,15 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The activity clock stops at the nav tree; ⌘K and Resume still rank on
+  opens.** Deliberate — "where was I" wants opens — but if clicking proves as
+  noisy there as it did in the tree, `activityAt` (App.tsx) is the drop-in
+  key. Related accepted edge: a just-created worktree shows the base tip's age
+  ("5d" seconds after creation) until work or a commit lands; the fix, if it
+  ever reads wrong in practice, is a creation epoch in the declared store, not
+  a special case in the clock.
+  _From: [2026-08-10 nav-activity-age session](docs/sessions/2026-08-10-nav-activity-age/summary.md)_
+
 - **The backend 3 s poll loop is the largest remaining background cost.** v0.9.1
   gated every FRONTEND periodic cost on window visibility, which is what killed
   the git-sweep storm — but the setup thread in `app/src-tauri/src/lib.rs` still
