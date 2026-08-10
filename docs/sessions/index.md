@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-10](2026-08-10-files-tab-visibility/summary.html) | the Files tab stops hiding things silently — gitignored by default, symlinks marked → v0.11.0 |
 | [2026-08-09](2026-08-09-afterglow-dot/summary.html) | the afterglow dot — a place stays lit after Claude finishes → v0.10.0 |
 | [2026-08-09](2026-08-09-files-tab-refresh/summary.html) | the Files tab shows files as they are created → v0.10.0 |
 | [2026-08-07](2026-08-07-power-consumption/summary.html) | the app stopped burning power in the background → v0.9.1 |

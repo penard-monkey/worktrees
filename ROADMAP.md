@@ -429,3 +429,27 @@ close-out ritual (.claude/skills/close-out).
   if the dock is ever left open on a deep tree, or alongside the backend
   poll-gating item above.
   _From: [2026-08-09 files-tab-refresh session](docs/sessions/2026-08-09-files-tab-refresh/summary.md)_
+
+- **The `.git` read path has no guard of its own.** `list_dir` now refuses to
+  follow a symlink whose target resolves into a `.git` — the listing hides
+  `.git` by NAME, so `ln -s .git g` walked around it, and
+  `guard_under_projects` has no opinion (it accepts any existing path under a
+  registered root). The READ path still does not: a markdown doc link to
+  `/abs/path/.git/config` opens in the viewer via `read_file`. Pre-existing,
+  not a regression, and reachable only from a link a repo supplies — which is
+  exactly the threat model ADR 0001 argues about. The fix is one component
+  check in `guard_under_projects`, but it is a behaviour change on every read
+  command, so it wants its own change and its own test rather than a
+  drive-by.
+  _From: [2026-08-10 files-tab-visibility session](docs/sessions/2026-08-10-files-tab-visibility/summary.md)_
+
+- **The workspace-containment predicate now exists twice.**
+  `guard_under_projects` keeps its own inline scan so it can short-circuit on
+  the first matching root (canonicalizing every root eagerly would stat a dead
+  network mount ordered after the hit), while `under_roots` takes an
+  already-built slice for `list_dir`'s per-symlink question. Same rule, two
+  expressions of it, and the guard is the app's entire filesystem boundary —
+  so a future edit to one is a silent divergence. Unifying means either giving
+  up the short-circuit or threading a lazy iterator through both; neither is
+  obviously worth it today, which is why this is a note and not a task.
+  _From: [2026-08-10 files-tab-visibility session](docs/sessions/2026-08-10-files-tab-visibility/summary.md)_
