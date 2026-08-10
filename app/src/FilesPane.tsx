@@ -52,7 +52,7 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
   //     out under a `git checkout`) would collapse a deep expansion until the
   //     next tick.
   //   · the error is reported only when it CHANGES. A directory that stays
-  //     unreadable — a root-owned build dir the ◌ toggle just made visible —
+  //     unreadable — a root-owned build dir, which the tree now lists by default —
   //     would otherwise re-raise the banner and append to app.log on every
   //     bump, forever, for as long as it stayed expanded.
   const lastErr = useRef<string | null>(null);

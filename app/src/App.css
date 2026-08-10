@@ -832,7 +832,8 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .tree-row:hover { background: var(--bg-elev); }
 .tree-row.sel { background: var(--bg-elev); color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); }
 .tree-row.dir { color: var(--txt-dim); }
-/* Gitignored, and only ever present when the dock's ◌ toggle is on. Dimmed
+/* Gitignored — listed by default, absent only when the dock's toggle is off
+   (its glyph reads ◌ in that state, ◉ otherwise). Dimmed
    rather than styled apart: the point is that `target/` reads as background
    noise next to tracked files, without a second glyph column to scan. */
 .tree-row.ign { color: var(--txt-mute); }

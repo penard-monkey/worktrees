@@ -3,6 +3,20 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **The Files tab shows gitignored entries by default.** 0.10.0 made them
+  reachable behind the `◌` toggle but left them hidden until you found it, and a
+  tree that withholds entries without saying so does not read as a filter — it
+  reads as a listing that lost files. The working notes a session had just
+  written (`task_plan.md`, `findings.md`, `progress.md`) and `node_modules/`
+  were simply absent next to a shell listing them. They now show dimmed from
+  the start, and the toggle's glyph fills (`◉`) when nothing is being withheld,
+  so the hiding state is legible without hovering. Installs that already
+  persisted the old default are migrated once; toggling it back off still
+  sticks. `.git` stays hidden either way.
+
 ## [0.10.0] - 2026-08-09
 
 ### Added

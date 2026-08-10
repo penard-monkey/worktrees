@@ -2760,7 +2760,10 @@ function App() {
                     : "Show gitignored files (build output, working notes)"}
                   onClick={() => updateSettings({ files_show_ignored: !settings.files_show_ignored })}
                 >
-                  ◌
+                  {/* Filled when nothing is being withheld. The `on` class alone
+                      is a tint, and a tint is not enough to notice that a tree
+                      IS hiding entries — which is the state that misleads. */}
+                  {settings.files_show_ignored ? "◉" : "◌"}
                 </button>
                 <button
                   className="ctrl sm icon-only"
