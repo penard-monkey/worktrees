@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.10.0] - 2026-08-09
 
 ### Added
 - **The Files tab can show gitignored files.** A `◌` toggle in the dock header
