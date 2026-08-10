@@ -228,7 +228,14 @@ const mockSuggestions: Record<string, any> = {
 // Deterministic + lazily materialized from whatever worktree path the tree
 // asks for, so ANY fixture place works headlessly. Dirs seed their children on
 // first listing; files seed content so read/write round-trips.
-type MockEntry = { name: string; path: string; is_dir: boolean; ignored: boolean };
+type MockEntry = { name: string; path: string; is_dir: boolean; ignored: boolean; link?: string; link_block?: "outside" | "git" | "missing" };
+// Blocked link paths → the error the REAL backend answers with, or null where
+// it would answer normally. Faithful beats tidy here: the guard refuses a link
+// out of the workspace and a dangling one, but a link into `.git` it happily
+// lists — that case is blocked in the tree, by classification, and nowhere else.
+// Without this table the harness would browse a link the app cannot, and a test
+// could pass here and fail against the binary.
+const fsBlocked = new Map<string, string | null>();
 const fsChildren = new Map<string, MockEntry[]>();
 const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number; b64?: string }>();
 // dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
@@ -405,6 +412,19 @@ function seedDir(dir: string) {
   const base = dir.split("/").pop() || dir;
   const mk = (name: string, is_dir: boolean, ignored = false): MockEntry =>
     ({ name, path: `${dir}/${name}`, is_dir, ignored });
+  /** A symlink. `is_dir` is the TARGET's shape (the backend stats through the
+   *  link), and `block` is the reason the guard would refuse it — the row then
+   *  renders inert, so both halves of that split are drivable here. */
+  const link = (name: string, target: string, is_dir: boolean,
+                block?: MockEntry["link_block"], ignored = false): MockEntry => {
+    const path = `${dir}/${name}`;
+    if (block) {
+      fsBlocked.set(path, block === "outside" ? `path outside workspace: ${path}`
+        : block === "missing" ? `${path}: No such file or directory (os error 2)`
+        : null); // "git": the guard has no opinion, so neither does the mock
+    }
+    return { name, path, is_dir, ignored, link: target, link_block: block };
+  };
   let entries: MockEntry[];
   if (base === "src") entries = [
     mk("App.tsx", false), mk("main.rs", false), mk("lib.rs", false), mk("logo.png", false),
@@ -412,6 +432,9 @@ function seedDir(dir: string) {
   ];
   else if (base === "crates") entries = [mk("worktrees-core", true), mk("worktrees-cli", true)];
   else if (base === "docs") entries = [mk("DESIGN.md", false), mk("spec.pdf", false)];
+  // The in-workspace symlink's target. Without a branch it falls through to the
+  // repo-root listing and `shared/` grows a second copy of the whole tree.
+  else if (base === "shared") entries = [mk("logo.svg", false), mk("theme.css", false)];
   // Inside an ignored directory EVERYTHING is ignored — that is what
   // check-ignore reports, so the tree must dim the whole subtree, not just its
   // root. These branches also terminate: without them `base` falls through to
@@ -425,6 +448,10 @@ function seedDir(dir: string) {
     mk("install.sh", false), mk(".gitignore", false),
     mk("target", true, true), mk("node_modules", true, true),
     mk("task_plan.md", false, true), mk("progress.md", false, true),
+    // Both sides of the symlink split: one that stays inside the workspace and
+    // expands like any directory, one that leaves it and cannot.
+    link("shared", "../shared", true),
+    link("_tmp", "/Users/demo/Library/Mobile Documents/com~apple~CloudDocs/_tmp", true, "outside"),
   ];
   fsChildren.set(dir, entries);
   for (const e of entries) {
@@ -746,6 +773,10 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
 
     // ── dock Files tab (virtual FS) + Terminal shells ──
     case "list_dir": {
+      // Backend parity: a path the guard refuses is an ERROR, not an empty
+      // listing — the tree must never be able to walk one.
+      const refusal = fsBlocked.get(args.path as string);
+      if (refusal) throw refusal;
       // Backend parity: gitignored entries are FILTERED unless asked for, and
       // only ever carry the flag in the show-ignored listing.
       const all = seedDir(args.path as string);

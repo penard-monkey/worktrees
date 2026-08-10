@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **Symlinks in the Files tab are symlinks.** `read_dir` answers about the link,
+  not its target, so a symlink to a directory came back as a plain file: a file
+  glyph, no caret, and a click that tried to open a directory as text. The tree
+  now stats through the link for its shape and marks it `↗` with the target in
+  the tooltip. A link the app will not follow — one leaving the workspace
+  (`_tmp` pointing at iCloud), one into `.git`, or one that dangles — renders
+  inert with the reason in its tooltip, rather than offering a caret. Not
+  following is the point rather than a limitation: a repo's own contents do not
+  get to choose what the app reads. For a link out or a dangling one the guard
+  would refuse the call anyway, so the row was only ever going to produce an
+  error banner. For `ln -s .git` it would not — the listing hides `.git` by
+  *name*, and a link is a way around that — so there the classifier is the only
+  thing that stops it.
+
 ### Changed
 - **The Files tab shows gitignored entries by default.** 0.10.0 made them
   reachable behind the `◌` toggle but left them hidden until you found it, and a

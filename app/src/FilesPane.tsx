@@ -22,7 +22,16 @@ import { Markdown } from "./markdown";
 import { basename, fileInfo, humanSize, type FileKind } from "./filekind";
 import type { Settings } from "./settings";
 
-type FsEntry = { name: string; path: string; is_dir: boolean; ignored?: boolean };
+// `link` is the symlink target as written (relative stays relative);
+// `link_block` is why the backend will not follow it — absent when it will.
+type LinkBlock = "outside" | "git" | "missing";
+type FsEntry = { name: string; path: string; is_dir: boolean; ignored?: boolean; link?: string | null; link_block?: LinkBlock | null };
+
+const BLOCK_WHY: Record<LinkBlock, string> = {
+  outside: "outside the workspace, not followed",
+  git: "inside .git, not followed",
+  missing: "target is missing",
+};
 type FileRead = { content: string; truncated: boolean; binary: boolean; mtime: number; size: number };
 type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number };
 
@@ -56,8 +65,19 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
   //     would otherwise re-raise the banner and append to app.log on every
   //     bump, forever, for as long as it stayed expanded.
   const lastErr = useRef<string | null>(null);
+  // A blocked link is inert on purpose. For one pointing out of the workspace
+  // or at nothing, the guard behind every command here would refuse the call
+  // anyway and the click could only produce an error banner. For one into
+  // `.git` it would NOT: the listing hides `.git` by name, the guard never asks,
+  // so this gate is the whole defense there rather than a courtesy. The title
+  // says where the link points and why nothing happens.
+  const inert = !!entry.link_block;
   useEffect(() => {
-    if (!entry.is_dir || !open) return;
+    // `inert` too, not just `open`: a link that becomes unfollowable while
+    // expanded (retargeted, or its project unregistered) would otherwise keep
+    // firing a doomed list_dir on every reload bump for as long as it stays
+    // mounted — the children are already hidden by then.
+    if (!entry.is_dir || !open || inert) return;
     let alive = true;
     setLoading(true);
     invoke<FsEntry[]>("list_dir", { path: entry.path, showIgnored })
@@ -72,28 +92,39 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [entry.is_dir, entry.path, open, showIgnored, reloadToken, onError]);
+  }, [entry.is_dir, entry.path, open, inert, showIgnored, reloadToken, onError]);
 
   const toggle = () => {
+    if (inert) return;
     if (!entry.is_dir) { onOpen(entry.path); return; }
     setOpen((o) => !o);
   };
 
   const isSel = !entry.is_dir && openPath === entry.path;
   const kind = entry.is_dir ? null : fileInfo(entry.name).kind;
+  const title = [
+    entry.link ? `${entry.name} → ${entry.link}` : entry.name,
+    entry.link_block ? BLOCK_WHY[entry.link_block] : null,
+    entry.ignored ? "gitignored" : null,
+  ].filter(Boolean).join(" — ");
   return (
     <div className="tree-node">
       <button
-        className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "") + (entry.ignored ? " ign" : "")}
+        className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "") + (entry.ignored ? " ign" : "")
+          + (entry.link ? " link" : "") + (inert ? " inert" : "")}
         style={{ paddingLeft: `calc(var(--s2) + ${depth} * var(--s3))` }}
         onClick={toggle}
-        title={entry.ignored ? `${entry.name} — gitignored` : entry.name}
+        aria-disabled={inert || undefined}
+        title={title}
       >
-        <span className="tree-caret">{entry.is_dir && (open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />)}</span>
+        <span className="tree-caret">{entry.is_dir && !inert && (open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />)}</span>
         <span className={`tree-glyph k-${entry.is_dir ? "dir" : kind}`} aria-hidden="true">{entry.is_dir ? "" : KIND_GLYPH[kind!]}</span>
         <span className="tree-name">{entry.name}</span>
+        {/* The one thing the row cannot say with an icon slot it already spends
+            on file kind: that this name is a pointer somewhere else. */}
+        {entry.link && <span className="tree-link" aria-hidden="true">↗</span>}
       </button>
-      {entry.is_dir && open && (
+      {entry.is_dir && !inert && open && (
         <div className="tree-kids">
           {/* only while there is nothing to show — a reload must not add a
               spinner line under every open directory every few seconds */}

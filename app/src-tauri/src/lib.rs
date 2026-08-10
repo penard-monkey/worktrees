@@ -2171,6 +2171,15 @@ struct FsEntry {
     /// Only ever true when the caller asked for ignored entries — the filtered
     /// listing has nothing to mark, since everything ignored is already gone.
     ignored: bool,
+    /// Symlink target exactly as written — a relative link stays relative,
+    /// because that is what is on disk and what the user would `ls -l`. None
+    /// for every ordinary entry.
+    link: Option<String>,
+    /// Why the tree must not follow this link, or None when it may. A reason
+    /// code rather than a bool: all three render inert, but "outside the
+    /// workspace" is a false statement about a link that merely dangles, and
+    /// the row's tooltip is the only place a user learns why nothing happens.
+    link_block: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -2213,14 +2222,55 @@ fn file_mtime_ms(p: &Path) -> u64 {
 /// files the tree surfaced, never create arbitrary ones.
 fn guard_under_projects(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
     let canon = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
-    for r in read_projects(app) {
-        if let Ok(rc) = std::fs::canonicalize(&r) {
-            if canon == rc || canon.starts_with(&rc) {
-                return Ok(canon);
-            }
-        }
+    // Lazily, so a match on the first root does not pay to canonicalize the
+    // rest — one of which can be a dead network mount that blocks on stat.
+    let hit = read_projects(app)
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .any(|r| canon == r || canon.starts_with(&r));
+    if hit {
+        return Ok(canon);
     }
     Err(format!("path outside workspace: {path}"))
+}
+
+/// Registered project roots, canonicalized (unreadable ones simply drop out).
+/// Built once per listing, unlike the guard's lazy scan: a directory of links
+/// would otherwise re-read the projects file per entry.
+fn project_roots(app: &AppHandle) -> Vec<PathBuf> {
+    read_projects(app).iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect()
+}
+
+/// The containment test `guard_under_projects` applies, against an ALREADY
+/// canonical path. Split out so the tree can ask the same question about a
+/// symlink target without going through a command that would reject it.
+fn under_roots(roots: &[PathBuf], canon: &Path) -> bool {
+    roots.iter().any(|r| canon == r || canon.starts_with(r))
+}
+
+/// One symlink as the tree needs it: `(is_dir, target, why_not_to_follow)`.
+///
+/// `is_dir` follows the link, because the shape a user means by `_tmp/` is the
+/// target's. `target` is what the link literally says — a relative link stays
+/// relative, matching `ls -l`.
+///
+/// The block reason is the guard's own question asked ahead of time, plus the
+/// one thing the guard does not ask: `.git`. The listing drops it by NAME, so
+/// without this a repo shipping `ln -s .git g` would hand the tree a browsable
+/// caret straight into it — the whole point of not following links is that a
+/// repo's own contents do not get to choose what the app opens.
+fn classify_symlink(p: &Path, roots: &[PathBuf]) -> (bool, Option<String>, Option<&'static str>) {
+    let is_dir = std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false);
+    let target = std::fs::read_link(p).map(|t| t.to_string_lossy().to_string()).ok();
+    let block = match std::fs::canonicalize(p) {
+        // Dangling. Every command behind the row canonicalizes too, so it is
+        // just as inert as one pointing away — for a different reason.
+        Err(_) => Some("missing"),
+        Ok(c) if !under_roots(roots, &c) => Some("outside"),
+        Ok(c) if c.components().any(|s| s.as_os_str() == ".git") => Some("git"),
+        Ok(_) => None,
+    };
+    (is_dir, target, block)
 }
 
 /// Immediate children of `path` (one level; the tree lazy-expands). Dirs first,
@@ -2231,6 +2281,12 @@ fn guard_under_projects(app: &AppHandle, path: &str) -> Result<PathBuf, String> 
 /// than filtered — the tree dims them. The toggle exists because the files a
 /// session actually produces (build output, and this repo's own gitignored
 /// working notes) are exactly the ones the filtered listing hides.
+///
+/// Symlinks are stat'd THROUGH for their shape (so a link to a directory reads
+/// as one) and carry their target plus `link_block`, the reason the tree must
+/// not follow them. Following is left to the tree, which does not: the guard
+/// canonicalizes, so a link out of the workspace is unlistable by construction,
+/// and honouring one would let a repo's own contents choose what the app reads.
 #[tauri::command]
 async fn list_dir(app: AppHandle, path: String, show_ignored: Option<bool>) -> Result<Vec<FsEntry>, String> {
     let dir = guard_under_projects(&app, &path)?;
@@ -2238,15 +2294,29 @@ async fn list_dir(app: AppHandle, path: String, show_ignored: Option<bool>) -> R
         return Err(format!("not a directory: {path}"));
     }
     let mut entries: Vec<FsEntry> = Vec::new();
+    // Built on the first symlink seen, not up front: most directories have none
+    // and would pay a projects-file read plus a canonicalize per root for it.
+    let mut roots: Option<Vec<PathBuf>> = None;
     for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
         let e = e.map_err(|e| e.to_string())?;
         let name = e.file_name().to_string_lossy().to_string();
         if name == ".git" {
             continue;
         }
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let path = e.path().to_string_lossy().to_string();
-        entries.push(FsEntry { name, path, is_dir, ignored: false });
+        let ft = e.file_type().ok();
+        let p = e.path();
+        // read_dir's file_type is an lstat: it answers about the LINK, so a
+        // symlink to a directory came back `is_dir: false` — a file glyph, no
+        // caret, and a click that tried to open it as a file. Stat the target
+        // for the shape; a broken link has none and stays a file.
+        let (is_dir, link, link_block) = match ft {
+            Some(t) if t.is_symlink() => {
+                classify_symlink(&p, roots.get_or_insert_with(|| project_roots(&app)))
+            }
+            other => (other.map(|t| t.is_dir()).unwrap_or(false), None, None),
+        };
+        let path = p.to_string_lossy().to_string();
+        entries.push(FsEntry { name, path, is_dir, ignored: false, link, link_block });
     }
     // One `git check-ignore --stdin` batch for the whole directory (NUL-safe).
     let ignored = git_check_ignore(&dir, entries.iter().map(|e| e.path.as_str()));
@@ -3085,6 +3155,58 @@ mod tests {
 
     fn v(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Real symlinks on a real filesystem — the whole point of the classifier is
+    /// what the syscalls answer, so a fake would test nothing. Torn down at the
+    /// end; a panic leaves a directory under $TMPDIR, which is what it is for.
+    #[test]
+    fn symlinks_report_target_shape_and_whether_they_leave_the_workspace() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("wt-symlink-{}", std::process::id()));
+        let root = base.join("project");
+        let outside = base.join("elsewhere");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("sub/file.txt"), b"x").unwrap();
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+        symlink("sub", root.join("inside")).unwrap(); // relative, in-workspace
+        symlink(root.join("sub/file.txt"), root.join("inside-file")).unwrap();
+        symlink(&outside, root.join("away")).unwrap(); // absolute, out
+        symlink(root.join("nope"), root.join("broken")).unwrap();
+        symlink(".git", root.join("g")).unwrap(); // the name-skip, routed around
+        let roots = vec![std::fs::canonicalize(&root).unwrap()];
+
+        let (is_dir, target, block) = classify_symlink(&root.join("inside"), &roots);
+        assert!(is_dir, "a link to a directory must read as a directory");
+        assert_eq!(target.as_deref(), Some("sub"), "a relative link stays relative");
+        assert_eq!(block, None, "target is inside the project root — followable");
+
+        let (is_dir, _, block) = classify_symlink(&root.join("inside-file"), &roots);
+        assert!(!is_dir);
+        assert_eq!(block, None);
+
+        let (is_dir, target, block) = classify_symlink(&root.join("away"), &roots);
+        assert!(is_dir);
+        assert!(target.unwrap().ends_with("elsewhere"));
+        assert_eq!(block, Some("outside"), "outside every root — must not be followed");
+
+        // A dangling link resolves nowhere, so it is a file for shape purposes
+        // and just as inert — but for a different reason than one pointing away,
+        // and the row says which.
+        let (is_dir, target, block) = classify_symlink(&root.join("broken"), &roots);
+        assert!(!is_dir);
+        assert!(target.is_some(), "the link still says where it MEANT to point");
+        assert_eq!(block, Some("missing"));
+
+        // `list_dir` drops `.git` by name, so a link is the way around it.
+        let (is_dir, _, block) = classify_symlink(&root.join("g"), &roots);
+        assert!(is_dir);
+        assert_eq!(block, Some("git"), "a link must not be a way back into .git");
+
+        // An ordinary directory is never mistaken for a link out.
+        assert!(under_roots(&roots, &std::fs::canonicalize(root.join("sub")).unwrap()));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// The dwell guard: a place must be seen busy on two consecutive ticks

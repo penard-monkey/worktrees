@@ -850,6 +850,15 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .tree-glyph.k-code { color: var(--accent); }
 .tree-glyph.k-binary { color: var(--txt-mute); }
 .tree-name { overflow: hidden; text-overflow: ellipsis; }
+/* Symlink marker. Trails the name rather than replacing the kind glyph: a link
+   to a PNG is still a PNG, and the tree scans by that colour. */
+.tree-link { flex: none; color: var(--txt-mute); font-size: var(--fs-micro); }
+/* A link the tree will not follow — out of the workspace, into .git, or
+   dangling. It reads as a label rather than a control: no caret, no pointer,
+   no hover lift. Why it is blocked lives in the row's tooltip. */
+.tree-row.inert { cursor: default; }
+.tree-row.inert .tree-name { color: var(--txt-dim); }
+.tree-row.inert:hover { background: transparent; }
 .tree-note { padding: var(--s2) var(--s3); color: var(--txt-mute); font-size: var(--fs-meta); }
 .err-note { color: var(--danger); white-space: pre-wrap; word-break: break-word; }
 
