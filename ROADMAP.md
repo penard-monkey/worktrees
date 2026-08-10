@@ -15,7 +15,25 @@ close-out ritual (.claude/skills/close-out).
   way `set_fetch_interval` does, 3 s focused → 20-30 s unfocused → parked when
   hidden, with one immediate tick on the visible edge. Measured floor: a hidden
   v0.9.1 window still spawned tmux on this cadence.
-  _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
+  ⚠ **Since v0.10.0 this loop also carries the afterglow's completion edge**
+  (`completion_edges` in lib.rs), which is exactly what lets a task finishing
+  while the window is hidden still light its dot. Parking the loop when hidden
+  would silently drop those completions until the next launch's backfill —
+  slowing the cadence is fine, stopping it is not, and `claude_activity()` is
+  the part that has to keep running.
+  _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md), amended [2026-08-09 afterglow-dot](docs/sessions/2026-08-09-afterglow-dot/summary.md)_
+
+- **The afterglow's signal path has no automated coverage, by necessity.** There
+  is no fake `claude`, so the busy→ember hand-off and the `history.jsonl`
+  backfill are proven only by construction (unit tests on the pure pieces) and
+  against the mock harness. `docs/ai-profiles-manual-checks.md` §10 is the
+  vehicle — nine checks, **not yet run against the real app even once**. The
+  load-bearing ones: a session opened but never prompted must stay dark, `claude`
+  run from a subdirectory must light the PLACE and not invent a store entry named
+  after the subdir, and `/clear` must neither light a place nor inflate an
+  existing ember. Re-run whenever the `claude` binary is upgraded — the probe
+  schema and the history format are both undocumented.
+  _From: [2026-08-09 afterglow-dot session](docs/sessions/2026-08-09-afterglow-dot/summary.md)_
 
 - **Zombie children — real, unreproduced, and the obvious diagnosis is wrong.**
   A 14-hour v0.9.0 instance accumulated 41 unreaped children. `term_close` /

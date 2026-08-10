@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-09](2026-08-09-afterglow-dot/summary.html) | the afterglow dot — a place stays lit after Claude finishes → v0.10.0 |
 | [2026-08-07](2026-08-07-power-consumption/summary.html) | the app stopped burning power in the background → v0.9.1 |
 | [2026-08-07](2026-08-07-relnotes-inline-markdown/summary.html) | release notes render their own markdown |
 | [2026-08-07](2026-08-07-new-place-feedback/summary.html) | creating a place says so, reopening one stops shouting |
