@@ -76,6 +76,12 @@ is invisible to the bats suite — there is no fake claude. Re-run
   Restart with `--force` after every source edit, and when a change seems not to
   apply, diff what the server serves (`curl -s localhost:PORT/src/App.css`)
   against disk before debugging the change itself.
+  **Killing the harness needs a CONTENT check, not a port check.** Two vite
+  instances can hold the same port — kill one and `lsof -ti:PORT` still answers,
+  so "port free" reads as true while a survivor serves the PRE-edit file and a
+  test "verifies" the old code. Use `lsof -ti:PORT -sTCP:LISTEN` (plain `-ti`
+  also returns Chrome's network-service helpers), then grep the served file for
+  something the edit added.
 - Assert layout in the harness (`getComputedStyle`), don't eyeball it — a CSS
   rule killed by a stray `*/` still renders a plausible-looking widget.
 - Plugin permissions live in `app/src-tauri/capabilities/default.json`;

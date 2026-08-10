@@ -416,3 +416,16 @@ close-out ritual (.claude/skills/close-out).
   the distinguishing tail, which for sibling repos sharing a prefix is the half
   that matters.
   _From: [2026-08-06 nav-hierarchy session](docs/sessions/2026-08-06-nav-hierarchy/summary.md)_
+
+- **The Files tree re-renders every open directory on every poll tick.** The
+  tree now re-lists on `placesToken` (v0.10.0), which is what makes new files
+  appear — but each bump runs `setLoading(true)` → `setKids(freshArray)` →
+  `setLoading(false)` per open node, handing React a new array identity even
+  when the listing came back byte-identical. Roughly three renders per open node
+  per 30s, all to display what is already on screen. Not a correctness bug:
+  child effects key on `entry.path`, so nothing refetches. The fix is the same
+  shape v0.9.1 used for `ws` — a byte-compare before `setState`, `lastSnap` in
+  `App.tsx` — applied to `setKids`/`setEntries` in `FilesPane.tsx`. Worth doing
+  if the dock is ever left open on a deep tree, or alongside the backend
+  poll-gating item above.
+  _From: [2026-08-09 files-tab-refresh session](docs/sessions/2026-08-09-files-tab-refresh/summary.md)_
