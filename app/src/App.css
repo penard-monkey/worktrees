@@ -853,8 +853,9 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 /* Symlink marker. Trails the name rather than replacing the kind glyph: a link
    to a PNG is still a PNG, and the tree scans by that colour. */
 .tree-link { flex: none; color: var(--txt-mute); font-size: var(--fs-micro); }
-/* A link whose target leaves the workspace. Nothing behind it will answer, so
-   it reads as a label, not a control — no caret, no pointer, no hover lift. */
+/* A link the tree will not follow — out of the workspace, into .git, or
+   dangling. It reads as a label rather than a control: no caret, no pointer,
+   no hover lift. Why it is blocked lives in the row's tooltip. */
 .tree-row.inert { cursor: default; }
 .tree-row.inert .tree-name { color: var(--txt-dim); }
 .tree-row.inert:hover { background: transparent; }

@@ -65,9 +65,12 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
   //     would otherwise re-raise the banner and append to app.log on every
   //     bump, forever, for as long as it stayed expanded.
   const lastErr = useRef<string | null>(null);
-  // A blocked link is inert on purpose: every command behind this row
-  // canonicalizes first and would refuse it, so a click could only produce an
-  // error banner. The title says where it points and why nothing happens.
+  // A blocked link is inert on purpose. For one pointing out of the workspace
+  // or at nothing, the guard behind every command here would refuse the call
+  // anyway and the click could only produce an error banner. For one into
+  // `.git` it would NOT: the listing hides `.git` by name, the guard never asks,
+  // so this gate is the whole defense there rather than a courtesy. The title
+  // says where the link points and why nothing happens.
   const inert = !!entry.link_block;
   useEffect(() => {
     // `inert` too, not just `open`: a link that becomes unfollowable while

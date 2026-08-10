@@ -12,11 +12,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   now stats through the link for its shape and marks it `↗` with the target in
   the tooltip. A link the app will not follow — one leaving the workspace
   (`_tmp` pointing at iCloud), one into `.git`, or one that dangles — renders
-  inert with the reason in its tooltip, rather than offering a caret that could
-  only error: every command behind the row canonicalizes first and would refuse
-  it. Deliberately not followed, so a repo's own contents can never choose what
-  the app reads — including via `ln -s .git`, which would otherwise walk around
-  the listing's `.git` skip, since that one goes by name.
+  inert with the reason in its tooltip, rather than offering a caret. Not
+  following is the point rather than a limitation: a repo's own contents do not
+  get to choose what the app reads. For a link out or a dangling one the guard
+  would refuse the call anyway, so the row was only ever going to produce an
+  error banner. For `ln -s .git` it would not — the listing hides `.git` by
+  *name*, and a link is a way around that — so there the classifier is the only
+  thing that stops it.
 
 ### Changed
 - **The Files tab shows gitignored entries by default.** 0.10.0 made them

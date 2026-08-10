@@ -229,10 +229,13 @@ const mockSuggestions: Record<string, any> = {
 // asks for, so ANY fixture place works headlessly. Dirs seed their children on
 // first listing; files seed content so read/write round-trips.
 type MockEntry = { name: string; path: string; is_dir: boolean; ignored: boolean; link?: string; link_block?: "outside" | "git" | "missing" };
-// Paths the real `guard_under_projects` would refuse. list_dir throws for these
-// exactly as the backend does — without it the harness would happily browse a
-// link the app cannot, and a test could pass here and fail against the binary.
-const fsBlocked = new Set<string>();
+// Blocked link paths → the error the REAL backend answers with, or null where
+// it would answer normally. Faithful beats tidy here: the guard refuses a link
+// out of the workspace and a dangling one, but a link into `.git` it happily
+// lists — that case is blocked in the tree, by classification, and nowhere else.
+// Without this table the harness would browse a link the app cannot, and a test
+// could pass here and fail against the binary.
+const fsBlocked = new Map<string, string | null>();
 const fsChildren = new Map<string, MockEntry[]>();
 const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number; b64?: string }>();
 // dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
@@ -415,7 +418,11 @@ function seedDir(dir: string) {
   const link = (name: string, target: string, is_dir: boolean,
                 block?: MockEntry["link_block"], ignored = false): MockEntry => {
     const path = `${dir}/${name}`;
-    if (block) fsBlocked.add(path);
+    if (block) {
+      fsBlocked.set(path, block === "outside" ? `path outside workspace: ${path}`
+        : block === "missing" ? `${path}: No such file or directory (os error 2)`
+        : null); // "git": the guard has no opinion, so neither does the mock
+    }
     return { name, path, is_dir, ignored, link: target, link_block: block };
   };
   let entries: MockEntry[];
@@ -768,7 +775,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "list_dir": {
       // Backend parity: a path the guard refuses is an ERROR, not an empty
       // listing — the tree must never be able to walk one.
-      if (fsBlocked.has(args.path as string)) throw `path outside workspace: ${args.path}`;
+      const refusal = fsBlocked.get(args.path as string);
+      if (refusal) throw refusal;
       // Backend parity: gitignored entries are FILTERED unless asked for, and
       // only ever carry the flag in the show-ignored listing.
       const all = seedDir(args.path as string);
