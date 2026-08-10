@@ -2,7 +2,8 @@
 
 Parking lot for work we've decided to keep but not do now. Each item links
 the session summary that spawned it (see docs/sessions/). Groomed during the
-close-out ritual (.claude/skills/close-out).
+close-out ritual (global `/close-out` skill; this repo's settings in
+`.claude/close-out.md`).
 
 - **The backend 3 s poll loop is the largest remaining background cost.** v0.9.1
   gated every FRONTEND periodic cost on window visibility, which is what killed
