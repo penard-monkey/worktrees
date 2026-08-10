@@ -48,7 +48,7 @@ export type Settings = {
   files_stack_pct: number; // 15–85, the tree's HEIGHT share when stacked
   files_wrap: boolean; // wrap long lines in the source view
   files_md_source: boolean; // markdown/SVG: show source instead of the render
-  files_show_ignored: boolean; // list gitignored entries too (dimmed), .git aside
+  files_show_ignored: boolean; // list gitignored entries too (dimmed), .git aside; on by default
   // Dock terminal tab names: `repo|slug` → tab index → user-chosen label.
   // Only the NAME persists across restarts, never the shell: a named tab with no
   // live shell is seeded back into the strip and spawns a fresh shell when you
@@ -80,7 +80,14 @@ export type Settings = {
   // the same re-suggest rule, and unifying them would mean the CLI reading an
   // app-owned file — a worse dependency than a duplicated boolean-shaped fact.
   init_dismissed: Record<string, string>;
+  // Bumped when a DEFAULT changes in a way that has to reach installs which
+  // already persisted the old value. Without it a default flip is invisible to
+  // exactly the people who have been running the app — see `migrate`.
+  settings_rev: number;
 };
+
+/** Current settings revision. Bump ONLY together with a step in `migrate`. */
+export const SETTINGS_REV = 1;
 
 export const DEFAULTS: Settings = {
   ui_rem: 15,
@@ -101,7 +108,7 @@ export const DEFAULTS: Settings = {
   files_stack_pct: 40,
   files_wrap: false,
   files_md_source: false,
-  files_show_ignored: false,
+  files_show_ignored: true,
   term_tab_names: {},
   editor_cmd: "code",
   terminal_cmd: "",
@@ -117,6 +124,7 @@ export const DEFAULTS: Settings = {
   manual_order: {},
   last_seen_version: "",
   init_dismissed: {},
+  settings_rev: SETTINGS_REV,
 };
 
 /** check_update result — versions the Settings "Version" section renders. */
@@ -216,6 +224,21 @@ function normalizePair(t: unknown, appearance: "light" | "dark", fallback: Theme
   return hit ? hit.id : fallback;
 }
 
+/** Re-apply defaults that changed since the persisted revision. Mutates `s`;
+ *  returns whether anything moved, which is also whether it must be SAVED —
+ *  an unsaved migration re-runs on every launch and would keep overwriting a
+ *  deliberate later choice.
+ *
+ *  rev 1 — `files_show_ignored` flipped to true. A tree that withholds entries
+ *  with nothing on screen admitting it does not read as a filter, it reads as a
+ *  broken listing: the files a session had just written were simply absent. */
+function migrate(s: Settings, from: number): boolean {
+  if (from >= SETTINGS_REV) return false;
+  if (from < 1) s.files_show_ignored = DEFAULTS.files_show_ignored;
+  s.settings_rev = SETTINGS_REV;
+  return true;
+}
+
 export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await invoke<Partial<Settings> | null>("get_settings");
@@ -223,6 +246,7 @@ export async function loadSettings(): Promise<Settings> {
     s.theme = normalizeTheme(s.theme);
     s.theme_light = normalizePair(s.theme_light, "light", DEFAULTS.theme_light);
     s.theme_dark = normalizePair(s.theme_dark, "dark", DEFAULTS.theme_dark);
+    if (migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0)) saveSettings(s);
     return s;
   } catch {
     return { ...DEFAULTS };
