@@ -1136,9 +1136,19 @@ const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
 let actIdx = 0;
 setTimeout(() => emitEvent("sessions:busy", ACTIVITY_CYCLE[0]), 400);
 setInterval(() => {
+  const before = ACTIVITY_CYCLE[actIdx].busy;
   actIdx = (actIdx + 1) % ACTIVITY_CYCLE.length;
-  emitEvent("sessions:busy", ACTIVITY_CYCLE[actIdx]);
+  const now = ACTIVITY_CYCLE[actIdx];
+  emitEvent("sessions:busy", now);
+  // Mirror the backend contract (lib.rs poll thread): a path that LEAVES the
+  // busy set finished a task, and gets its own `sessions:done` stamp right
+  // after the busy emit. Without this the harness could never show the
+  // green→ember hand-off, which is the whole point of the state.
+  for (const path of before) {
+    if (!now.busy.includes(path)) emitEvent("sessions:done", { path, epoch: nowSec() });
+  }
 }, 5000);
+const nowSec = () => Math.floor(Date.now() / 1000);
 
 // Harness-only controls for states a user cannot reach by clicking. An
 // unreadable `.worktrees.toml` is the highest-consequence state in the Project
@@ -1147,6 +1157,7 @@ setInterval(() => {
 //
 //   __mock.breakConfig(root?)   // config stops parsing; doctor exits on a guard
 //   __mock.fixConfig(root?)     // back to parsing
+//   __mock.finishTask(path, minsAgo?)  // afterglow of an arbitrary age
 //
 // `root` defaults to the cdv fixture. Returns the root it touched. Both fire a
 // places:changed so the nav re-pulls immediately instead of waiting on the sweep.
@@ -1193,6 +1204,15 @@ const healthyConfigs: Record<string, MockCfg> = {};
     emitEvent("places:changed", {});
     return root;
   },
+  /** Stamp an afterglow of arbitrary age on a place — the only way to reach a
+   * specific decay tier headlessly, since the real one takes 15m/2h/12h of wall
+   * clock to walk. `path` is a place's `path` (== the probe cwd the backend
+   * keys on). Returns the epoch it emitted. */
+  finishTask(path: string, minsAgo = 0) {
+    const epoch = nowSec() - Math.round(minsAgo * 60);
+    emitEvent("sessions:done", { path, epoch });
+    return epoch;
+  },
   fixConfig(root: string = CDV_ROOT) {
     if (!healthyConfigs[root]) return null;
     mockConfigs[root] = clone(healthyConfigs[root]);
@@ -1201,4 +1221,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/createFile)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/createFile/finishTask)");

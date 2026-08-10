@@ -170,6 +170,37 @@ These fail *quietly* when wrong, which is why they are on the list.
       refuses because the branch moved past the reviewed sha.
 - [ ] Enable a skill, open a place → it is listed in `/context`.
 
+## 10. The afterglow dot (task-completed state)
+
+Same reason as everything above: the signal is read out of claude's own
+`sessions/<pid>.json` probes and `history.jsonl`, both undocumented, so a claude
+upgrade can change the shape or the write timing and the dot degrades in silence.
+
+- [ ] Open a place, do NOT prompt → the dot stays empty. (An open-but-quiet
+      session probes `status: "idle"`; if a new claude version probes something
+      else here, every idle session would light up as finished work.)
+- [ ] Prompt something that runs >6s → green blinks, then a **purple static**
+      dot when it lands. Hover: "Claude finished just now".
+- [ ] Prompt something trivial (<3s) → no ember. The dwell guard needs two
+      consecutive 3s ticks.
+- [ ] Run claude from a **subdirectory** of a place (`cd app && claude`, prompt
+      once) → the ember lands on that PLACE, and `.worktrees.places.json` gains
+      no entry named after the subdir.
+- [ ] Run claude in the repo ROOT → the ember lands on the `◆ (main)` row, and
+      the store gains a `(main)` key.
+- [ ] Answer a permission prompt mid-task → amber (waiting) out-ranks the ember;
+      the ember returns when the task lands.
+- [ ] Quit the app, prompt in a place, relaunch → the ember is there on frame
+      one (the 12h `history.jsonl` backfill).
+- [ ] In that same window, type `/clear` and nothing else, then relaunch → that
+      place does **not** light up, and an already-dim ember does not jump back
+      to the freshest tier. (This is the one that catches a change in when
+      claude writes transcript `.jsonl` files — the backfill refines a stamp
+      using that prompt's OWN session file precisely so housekeeping cannot
+      inflate it.)
+- [ ] `kill -9` a busy session → it stamps "finished". Known and accepted: the
+      busy-exit edge cannot tell completion from death.
+
 ---
 
 ## Known-unverifiable

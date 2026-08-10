@@ -30,6 +30,17 @@ pub struct Declared {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_opened_epoch: Option<i64>,
+    /// When Claude last FINISHED a task here. Deliberately NOT the same fact as
+    /// `last_opened_epoch`: opening (or resuming) a session leaves its probe at
+    /// `status: "idle"` and never stamps this — only a session that actually
+    /// went `busy` and came back out of it does. That distinction is the whole
+    /// feature: the nav's decaying "afterglow" dot must mean *work happened*,
+    /// not *you looked in here*.
+    ///
+    /// Monotonic: every writer takes `max` with what is already stored, so a
+    /// startup backfill from an older log can never walk a live observation back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_worked_epoch: Option<i64>,
     /// The AI profile this place's session was last STARTED with, and that
     /// profile's `updated_epoch` at the time.
     ///
@@ -161,4 +172,62 @@ pub fn edit<F: FnOnce(&mut Declared)>(repo: &str, slug: &str, f: F) -> Result<()
     store.version = 1;
     store.updated_epoch = Some(now_epoch());
     write_atomic(&path, &store)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Tmp(PathBuf);
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn tmp(tag: &str) -> Tmp {
+        let t = std::env::temp_dir().join(format!(
+            "wtstore-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&t);
+        fs::create_dir_all(&t).unwrap();
+        Tmp(t)
+    }
+
+    /// The afterglow stamp's migration story, which is the whole reason it could
+    /// be added without a version bump: a store written by an OLDER binary has
+    /// no `last_worked_epoch` (reads as None), and a store carrying keys this
+    /// binary has never heard of must survive a write untouched — otherwise a
+    /// newer app's fields would be silently deleted by an older one.
+    #[test]
+    fn worked_stamp_round_trips_beside_unknown_keys() {
+        let t = tmp("worked");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::write(
+            t.0.join(STORE_FILE),
+            r#"{"version":1,"places":{"alpha":{"pinned":true,"from_the_future":42}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_lenient(&repo).places["alpha"].last_worked_epoch, None);
+
+        edit(&repo, "alpha", |d| d.last_worked_epoch = Some(1_700_000_000)).unwrap();
+
+        let back = read_lenient(&repo);
+        let alpha = &back.places["alpha"];
+        assert_eq!(alpha.last_worked_epoch, Some(1_700_000_000));
+        assert_eq!(alpha.pinned, Some(true));
+        assert_eq!(alpha.extra.get("from_the_future").and_then(|v| v.as_i64()), Some(42));
+    }
+
+    /// `last_worked_epoch` must NOT be confused with `last_opened_epoch`: only
+    /// the latter feeds lifecycle reconciliation, so work alone can never make a
+    /// place that was never opened read as `idle`.
+    #[test]
+    fn worked_stamp_does_not_move_lifecycle() {
+        let now = 1_700_000_000;
+        let d = Declared { last_worked_epoch: Some(now - 60), ..Default::default() };
+        assert_eq!(reconcile(Some(&d), false, now), "closed");
+    }
 }

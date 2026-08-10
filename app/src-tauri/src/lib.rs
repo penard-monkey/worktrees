@@ -7,7 +7,7 @@
 // See DESIGN.md / MIGRATION.md.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -985,6 +985,277 @@ fn claude_activity() -> (Vec<String>, Vec<String>) {
 struct ClaudeActivity {
     busy: Vec<String>,
     waiting: Vec<String>,
+}
+
+// ── task-completed stamps (the nav's decaying "afterglow" dot) ───────────────
+// A place stops being busy → Claude finished a task there. That instant is worth
+// keeping: the green dot vanishing is currently the end of all visibility, and
+// "which places did work recently" has no answer at all once it goes.
+//
+// Why the busy-EXIT edge and not "a session exists": opening or resuming a
+// session leaves its probe at `status: "idle"`, so this signal already excludes
+// mere presence — the constraint the whole feature hangs on. The dwell guard
+// below is the only other filter needed.
+//
+// The stamp is a monotonic FACT, so it gets its own event (`sessions:done`)
+// rather than riding on `sessions:busy`, which is a live SET that reconciles to
+// current truth every tick. Merging the two would make a completion something
+// the next tick could retract.
+
+/// Consecutive 3s ticks a place must be observed busy before its exit counts as
+/// a finished task. Two ticks (~3–6s) discards startup/resume blips; no real
+/// prompt turns around that fast.
+const DONE_DWELL_TICKS: u32 = 2;
+
+/// Payload for `sessions:done` — one place finished a task at `epoch`.
+#[derive(Serialize, Clone)]
+struct TaskDone {
+    path: String,
+    epoch: i64,
+}
+
+/// Advance the dwell counters by one tick and return the paths that just
+/// FINISHED: busy for at least `DONE_DWELL_TICKS` consecutive observations, and
+/// no longer busy now. Pure, so the ordering (measure exits, then drop, then
+/// count) is testable without a Claude session — it is the one piece here with
+/// genuinely tricky sequencing, and there is no fake `claude` to drive it.
+///
+/// `busy_now` must be de-duplicated; a repeated path would double-count.
+///
+/// busy→waiting is an exit too: the work finished, and amber merely out-ranks
+/// the ember in the dot until the question is answered. (busy→dead-pid is also
+/// an exit — a killed session is indistinguishable from a finished one here,
+/// which the busy-edge design accepts.)
+///
+/// Ticks are only as regular as the loop: the inline auto-fetch pass can stall
+/// it for up to ~60s per repo, so a task that starts and ends inside a stall is
+/// missed entirely. A miss, never a false stamp — and the next cold start's
+/// backfill picks it up from history.
+fn completion_edges(busy_ticks: &mut HashMap<String, u32>, busy_now: &[String]) -> Vec<String> {
+    let exits: Vec<String> = busy_ticks
+        .iter()
+        .filter(|(p, t)| **t >= DONE_DWELL_TICKS && !busy_now.contains(p))
+        .map(|(p, _)| p.clone())
+        .collect();
+    busy_ticks.retain(|p, _| busy_now.contains(p)); // sub-dwell blips drop unstamped
+    for p in busy_now {
+        *busy_ticks.entry(p.clone()).or_insert(0) += 1;
+    }
+    exits
+}
+
+/// Resolve a session cwd → (repo root, store slug), or `None` when the path is
+/// not inside a TRACKED project. The guard matters: `claude_activity` reports
+/// every live session on the machine, and without it a Claude run in some
+/// unrelated clone would drop a `.worktrees.places.json` into that repo.
+///
+/// The slug comes from the session's WORKTREE TOP, never from the cwd itself.
+/// A session's cwd is wherever the user happened to be — `<place>/app` is
+/// entirely normal — and slugging that basename would both invent a phantom
+/// store entry ("app") and miss the place that actually did the work. Store
+/// keys are `basename(worktree_dir)`, or `(main)` for the main root
+/// (`project::place_json`), so the cwd has to be resolved back to that dir
+/// first. `--show-toplevel` answers exactly that, including for linked
+/// worktrees, and it normalizes a symlinked spelling on the way.
+fn place_key_for(path: &str, roots: &[String]) -> Option<(String, String)> {
+    let project = Project::discover(Path::new(path)).ok()?;
+    let root = project.main_root;
+    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+    let root_c = canon(&root);
+    if !roots.iter().any(|r| canon(r) == root_c) {
+        return None; // untracked repo — not ours to write in
+    }
+    let top = git::git_out(path, &["rev-parse", "--show-toplevel"])?;
+    let top_c = canon(top.trim());
+    if top_c == root_c {
+        return Some((root, "(main)".to_string()));
+    }
+    let slug = top_c.file_name()?.to_string_lossy().into_owned();
+    Some((root, slug))
+}
+
+/// Stamp `last_worked_epoch` forward-only. Returns true when the store actually
+/// moved, so callers only emit an event for a real change. Never fatal: an
+/// untracked path is silent (expected), a write failure is logged.
+fn stamp_worked(roots: &[String], path: &str, epoch: i64) -> bool {
+    let Some((repo, slug)) = place_key_for(path, roots) else {
+        return false;
+    };
+    if store::read_lenient(&repo)
+        .places
+        .get(&slug)
+        .and_then(|d| d.last_worked_epoch)
+        .unwrap_or(0)
+        >= epoch
+    {
+        return false; // already know about newer work here
+    }
+    match store::edit(&repo, &slug, |d| {
+        if d.last_worked_epoch.unwrap_or(0) < epoch {
+            d.last_worked_epoch = Some(epoch);
+        }
+    }) {
+        Ok(()) => true,
+        Err(e) => {
+            applog("warn", &format!("worked stamp {path}: {e}"));
+            false
+        }
+    }
+}
+
+/// How far back the startup backfill looks. Matches the UI's afterglow horizon —
+/// anything older renders as an empty dot slot, so reading it would be waste.
+const BACKFILL_WINDOW_SECS: i64 = 12 * 3600;
+/// Tail of `history.jsonl` to read. The file is append-only and grows without
+/// bound (MBs), but 12h of prompts is a few KB; this is slack for pasted blobs.
+const HISTORY_TAIL_BYTES: u64 = 512 * 1024;
+/// Slash commands that are session HOUSEKEEPING, not a task. They land in
+/// history.jsonl exactly like a prompt, and without this a `/clear` ten minutes
+/// ago would light a place where nothing was done. Unknown slash commands are
+/// deliberately NOT filtered — a user's own `/close-out` or `/commit` is work.
+const NON_WORK_SLASH: &[&str] = &[
+    "/clear", "/exit", "/quit", "/help", "/status", "/config", "/model", "/login", "/logout",
+    "/cost", "/usage", "/resume", "/compact", "/doctor", "/context", "/permissions", "/mcp",
+    "/memory", "/hooks", "/agents", "/add-dir", "/export", "/todos", "/ide", "/statusline",
+    "/bug", "/vim", "/terminal-setup", "/release-notes",
+];
+
+#[derive(serde::Deserialize)]
+struct HistLine {
+    display: Option<String>,
+    /// Claude Code has written this as both a JSON number and a quoted string
+    /// across versions; parsed leniently below rather than trusted as one shape.
+    #[serde(default)]
+    timestamp: serde_json::Value,
+    project: Option<String>,
+    /// Names THIS prompt's transcript file, which is how the completion time is
+    /// refined without letting unrelated activity in the same place count.
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+}
+
+fn hist_epoch(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        .map(|ms| ms / 1000)
+}
+
+fn is_work_prompt(display: &str) -> bool {
+    let t = display.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if !t.starts_with('/') {
+        return true;
+    }
+    let head = t.split_whitespace().next().unwrap_or(t);
+    !NON_WORK_SLASH.contains(&head)
+}
+
+/// Read the tail of a file as whole lines (the first, possibly-truncated line is
+/// dropped). Returns empty on any I/O failure — a backfill is a nicety.
+///
+/// Decoded LOSSILY on purpose. Seeking to a byte offset lands mid-character
+/// whenever the boundary falls inside a multi-byte char — routine in a file full
+/// of pasted prompts — and a strict decode would throw away the whole tail, not
+/// just the fragment that is discarded anyway. Worse, the boundary only moves as
+/// the file grows, so a strict failure would be silent AND sticky.
+fn tail_lines(path: &Path, max_bytes: u64) -> Vec<String> {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let partial = len > max_bytes;
+    if partial && f.seek(std::io::SeekFrom::Start(len - max_bytes)).is_err() {
+        applog("warn", &format!("history tail seek failed: {}", path.display()));
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if let Err(e) = f.read_to_end(&mut buf) {
+        applog("warn", &format!("history tail read failed ({e}): {}", path.display()));
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines().map(|s| s.to_string()).collect::<Vec<_>>();
+    if partial && !lines.is_empty() {
+        lines.remove(0);
+    }
+    lines
+}
+
+/// Backfill afterglow from `history.jsonl` at startup, so a machine where the
+/// app was closed all night still shows what was worked on. Live observation
+/// (the poll thread) can only see completions while the app runs; this is the
+/// half that survives a cold start.
+///
+/// Prompt time is when work STARTED, so where a transcript exists its newest
+/// `.jsonl` mtime is taken as the better completion time — bounded by now, and
+/// only for places a qualifying prompt already vouched for. mtime alone would
+/// re-light every place merely opened, which is exactly what must not happen.
+fn backfill_worked(handle: &AppHandle) {
+    let roots = read_projects(handle);
+    if roots.is_empty() {
+        return;
+    }
+    let now = sysclock::now_epoch();
+    let cutoff = now - BACKFILL_WINDOW_SECS;
+    let mut newest: HashMap<String, i64> = HashMap::new();
+    for root in worktrees_core::profile::claude_config_dirs_all() {
+        for line in tail_lines(&root.join("history.jsonl"), HISTORY_TAIL_BYTES) {
+            let Ok(h) = serde_json::from_str::<HistLine>(&line) else {
+                continue;
+            };
+            let (Some(project), Some(epoch)) = (h.project, hist_epoch(&h.timestamp)) else {
+                continue;
+            };
+            if epoch < cutoff || !is_work_prompt(h.display.as_deref().unwrap_or("")) {
+                continue;
+            }
+            let mut stamp = epoch;
+            // Refine upward to when the work actually LANDED: the prompt only
+            // says when it was asked for, and a long task can finish an hour
+            // later. Strictly THIS prompt's own transcript — the dir's newest
+            // file would let a later `/clear` (which starts a fresh session
+            // file) drag a ten-hour-old prompt up to "just finished", quietly
+            // undoing the denylist above.
+            if let Some(sid) = h.session_id.as_deref() {
+                let cdir = worktrees_core::project::claude_dir_in(&root, &project);
+                let jsonl = Path::new(&cdir).join(format!("{sid}.jsonl"));
+                if let Some(m) = mtime_epoch(&jsonl) {
+                    if m > stamp {
+                        stamp = m.min(now);
+                    }
+                }
+            }
+            let slot = newest.entry(project).or_insert(0);
+            *slot = (*slot).max(stamp);
+        }
+    }
+    let mut stamped = false;
+    for (path, epoch) in newest {
+        if stamp_worked(&roots, &path, epoch) {
+            stamped = true;
+            let _ = handle.emit("sessions:done", TaskDone { path, epoch });
+        }
+    }
+    // The emits above almost certainly land before the webview has registered
+    // its listener (this runs at thread spawn), and a dropped event has no
+    // retry. One `places:changed` re-pulls the snapshot, which carries the same
+    // stamps durably — otherwise the afterglow stays dark until the ~30s safety
+    // re-emit, on exactly the launch where it has the most to say.
+    if stamped {
+        let _ = handle.emit("places:changed", ());
+    }
+}
+
+/// mtime in epoch seconds, or `None` for anything unreadable.
+fn mtime_epoch(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
 }
 
 // ── Claude plan usage (nav footer widget) ────────────────────────────────────
@@ -2664,6 +2935,12 @@ pub fn run() {
                 // acceptable, since a stale tmux fingerprint only delays a refresh
                 // the fetch itself will trigger via places:changed at the end.
                 let mut last_fetch = std::time::Instant::now();
+                // Consecutive ticks each path has been busy — the dwell guard's
+                // memory, and the only state a completion edge needs.
+                let mut busy_ticks: HashMap<String, u32> = HashMap::new();
+                // Cold start: what happened while the app was closed. Runs before
+                // the first sleep so the nav's afterglow is right on frame one.
+                backfill_worked(&handle);
                 loop {
                     std::thread::sleep(Duration::from_secs(3));
                     let interval = FETCH_INTERVAL_SECS.load(Ordering::Relaxed);
@@ -2684,12 +2961,34 @@ pub fn run() {
                     let (mut busy, mut waiting) = claude_activity();
                     busy.sort_unstable();
                     waiting.sort_unstable();
+                    // Two sessions in the SAME dir each push their cwd. The
+                    // frontend already de-dupes into a Set, but the dwell
+                    // counter would not: a doubled path would qualify in one
+                    // tick instead of two and let a blip through.
+                    busy.dedup();
+                    waiting.dedup();
                     // Change-gated: emit only when EITHER set shifts, so an idle
                     // machine stays silent (the frontend just re-applies the last set).
                     if busy != last_busy || waiting != last_waiting {
                         last_busy = busy.clone();
                         last_waiting = waiting.clone();
-                        let _ = handle.emit("sessions:busy", ClaudeActivity { busy, waiting });
+                        let _ = handle.emit(
+                            "sessions:busy",
+                            ClaudeActivity { busy: busy.clone(), waiting },
+                        );
+                    }
+                    // Completion edges, computed AFTER the busy emit so the dot's
+                    // hand-off (green out, ember in) arrives in that order.
+                    let exits = completion_edges(&mut busy_ticks, &busy);
+                    if !exits.is_empty() {
+                        // read_projects only on a real edge — not every 3s tick
+                        let roots = read_projects(&handle);
+                        let epoch = sysclock::now_epoch();
+                        for path in exits {
+                            if stamp_worked(&roots, &path, epoch) {
+                                let _ = handle.emit("sessions:done", TaskDone { path, epoch });
+                            }
+                        }
                     }
                 }
             });
@@ -2778,4 +3077,100 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The dwell guard: a place must be seen busy on two consecutive ticks
+    /// before leaving counts as finished work. One tick is a blip (a resume, a
+    /// probe written mid-transition) and must stamp nothing.
+    #[test]
+    fn completion_edge_needs_two_consecutive_busy_ticks() {
+        let mut t = HashMap::new();
+        assert!(completion_edges(&mut t, &v(&["/a"])).is_empty()); // tick 1: seen once
+        assert!(completion_edges(&mut t, &[]).is_empty()); // gone after ONE tick → blip
+        assert!(t.is_empty(), "a discarded blip must not linger in the counters");
+
+        assert!(completion_edges(&mut t, &v(&["/a"])).is_empty());
+        assert!(completion_edges(&mut t, &v(&["/a"])).is_empty()); // still busy on tick 2
+        assert_eq!(completion_edges(&mut t, &[]), v(&["/a"]));
+        assert!(completion_edges(&mut t, &[]).is_empty()); // and only ONCE
+    }
+
+    /// Independent places must not interfere: one finishing says nothing about
+    /// another still working.
+    #[test]
+    fn completion_edges_track_places_independently() {
+        let mut t = HashMap::new();
+        for _ in 0..2 {
+            completion_edges(&mut t, &v(&["/a", "/b"]));
+        }
+        assert_eq!(completion_edges(&mut t, &v(&["/b"])), v(&["/a"]));
+        assert_eq!(completion_edges(&mut t, &[]), v(&["/b"]));
+    }
+
+    /// Two sessions in the same dir report the same cwd twice. The caller
+    /// de-dupes; if it ever stops, the dwell guard would silently halve.
+    #[test]
+    fn duplicate_paths_would_double_count_the_dwell() {
+        let mut t = HashMap::new();
+        completion_edges(&mut t, &v(&["/a", "/a"]));
+        assert_eq!(t["/a"], 2, "documents WHY the caller must dedup before this");
+    }
+
+    /// The backfill's only judgement call: which history lines are WORK. Slash
+    /// housekeeping lands in history.jsonl exactly like a prompt, so without the
+    /// denylist a `/clear` would light a place where nothing happened — the one
+    /// thing the afterglow must never do.
+    #[test]
+    fn work_prompts_exclude_housekeeping_slashes() {
+        assert!(is_work_prompt("fix the flaky test"));
+        assert!(is_work_prompt("  /commit -m wip  ")); // unknown slash = user's own command
+        assert!(is_work_prompt("/close-out"));
+        assert!(!is_work_prompt("/clear"));
+        assert!(!is_work_prompt("/resume some-session")); // args must not smuggle it past
+        assert!(!is_work_prompt(""));
+        assert!(!is_work_prompt("   "));
+    }
+
+    /// Claude Code has written `timestamp` as both a number and a quoted string.
+    /// Trusting one shape would silently zero the backfill on the other.
+    #[test]
+    fn history_epoch_accepts_both_shapes() {
+        use serde_json::json;
+        assert_eq!(hist_epoch(&json!(1_786_318_766_274i64)), Some(1_786_318_766));
+        assert_eq!(hist_epoch(&json!("1786318766274")), Some(1_786_318_766));
+        assert_eq!(hist_epoch(&json!(null)), None);
+        assert_eq!(hist_epoch(&json!("not-a-number")), None);
+    }
+
+    /// A tail read starts mid-line by construction; that fragment must be
+    /// dropped rather than fed to the JSON parser as a whole record.
+    #[test]
+    fn tail_lines_drops_the_partial_first_line() {
+        let p = std::env::temp_dir().join(format!("wt-tail-{}.jsonl", std::process::id()));
+        std::fs::write(&p, "aaaa\nbbbb\ncccc\n").unwrap();
+        assert_eq!(tail_lines(&p, 1024), vec!["aaaa", "bbbb", "cccc"]);
+        // 9 bytes back = "b\ncccc\n" plus a fragment of the first line
+        assert_eq!(tail_lines(&p, 9), vec!["cccc"]);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The tail offset lands wherever it lands, and prompts contain emoji. A
+    /// strict decode would throw away every line over a split character — and
+    /// stay broken, since the boundary only moves as the file grows.
+    #[test]
+    fn tail_lines_survives_a_split_multibyte_char() {
+        let p = std::env::temp_dir().join(format!("wt-tail-utf8-{}.jsonl", std::process::id()));
+        std::fs::write(&p, "aaaa\n🎉bbb\ncccc\n").unwrap(); // 5 + 8 + 5 = 18 bytes
+        // 11 bytes back = offset 7, two bytes into the 4-byte emoji at 5..9
+        assert_eq!(tail_lines(&p, 11), vec!["cccc"]);
+        let _ = std::fs::remove_file(&p);
+    }
 }

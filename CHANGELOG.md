@@ -11,6 +11,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   hover, and the choice persists. Everything a session actually produces —
   build output, and this repo's own gitignored planning docs — was invisible in
   a tree that filtered them unconditionally. `.git` stays hidden either way.
+- **A place stays lit after Claude finishes there.** The green blinking dot only
+  ever answered "is Claude working *right now*" — the moment a task landed, the
+  nav forgot it, and "what moved recently" had no answer at all. Places now carry
+  a third dot state: a purple ember that appears when a session finishes work and
+  decays out over the working day (full with a halo under 15 minutes, dimmer to
+  two hours, fainter to twelve, then nothing). It is deliberately not a
+  brightness ramp on the green dot — motion stays reserved for "running now", so
+  the two can never be confused, including for anyone running with reduced
+  motion, where the blink is disabled entirely.
+- Merely *opening* a session does not light it. The stamp comes from a session
+  that actually went busy and came back out (an idle-but-open session never
+  qualifies), so the ember means work happened, not that you looked in. A place
+  worked on while the app was closed still lights up on next launch: startup
+  backfills the last twelve hours from Claude's own prompt history, ignoring
+  housekeeping commands like `/clear`. Sessions run in a repo's main worktree
+  count the same as any other place.
+
+### Changed
+- "Recent" now means recently *used*, not recently *opened* — the Recent lens,
+  the home screen's Resume list, ⌘K's ordering and the nav's recency sort all
+  rank on whichever is newer, so a place you prompted in an hour ago outranks
+  one you merely clicked into yesterday.
 
 ### Fixed
 - **The file tree picks up files created while it is open.** A directory was
