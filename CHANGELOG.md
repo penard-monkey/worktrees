@@ -3,6 +3,27 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **The Files tab can show gitignored files.** A `◌` toggle in the dock header
+  lists them alongside the tracked ones, dimmed and labelled "gitignored" on
+  hover, and the choice persists. Everything a session actually produces —
+  build output, and this repo's own gitignored planning docs — was invisible in
+  a tree that filtered them unconditionally. `.git` stays hidden either way.
+
+### Fixed
+- **The file tree picks up files created while it is open.** A directory was
+  listed exactly once: the root when you selected the place, a subfolder the
+  first time you expanded it, and never again — the fetch was guarded on
+  "children not loaded yet", so a file written after that point stayed
+  invisible for the life of the node, and collapsing and re-expanding did not
+  help either. Open directories now re-list on the same signal the file viewer
+  already re-read on (the backend's poll, so within seconds), and the dock
+  header gained a `↻` for when that is not fast enough. Expansion state and
+  scroll survive a re-list, and the previous listing stays on screen while one
+  runs, so the refresh never blanks the tree.
+
 ## [0.9.1] - 2026-08-07
 
 ### Changed

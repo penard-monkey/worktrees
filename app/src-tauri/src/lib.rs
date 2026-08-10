@@ -1897,6 +1897,9 @@ struct FsEntry {
     name: String,
     path: String,
     is_dir: bool,
+    /// Only ever true when the caller asked for ignored entries — the filtered
+    /// listing has nothing to mark, since everything ignored is already gone.
+    ignored: bool,
 }
 
 #[derive(Serialize)]
@@ -1950,9 +1953,15 @@ fn guard_under_projects(app: &AppHandle, path: &str) -> Result<PathBuf, String> 
 }
 
 /// Immediate children of `path` (one level; the tree lazy-expands). Dirs first,
-/// then case-insensitive by name. `.git` and gitignored entries are dropped.
+/// then case-insensitive by name.
+///
+/// `.git` is always dropped. Gitignored entries are dropped too UNLESS
+/// `show_ignored` asks for them, in which case they are returned flagged rather
+/// than filtered — the tree dims them. The toggle exists because the files a
+/// session actually produces (build output, and this repo's own gitignored
+/// working notes) are exactly the ones the filtered listing hides.
 #[tauri::command]
-async fn list_dir(app: AppHandle, path: String) -> Result<Vec<FsEntry>, String> {
+async fn list_dir(app: AppHandle, path: String, show_ignored: Option<bool>) -> Result<Vec<FsEntry>, String> {
     let dir = guard_under_projects(&app, &path)?;
     if !dir.is_dir() {
         return Err(format!("not a directory: {path}"));
@@ -1965,11 +1974,18 @@ async fn list_dir(app: AppHandle, path: String) -> Result<Vec<FsEntry>, String> 
             continue;
         }
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        entries.push(FsEntry { name, path: e.path().to_string_lossy().to_string(), is_dir });
+        let path = e.path().to_string_lossy().to_string();
+        entries.push(FsEntry { name, path, is_dir, ignored: false });
     }
-    // Drop gitignored entries in one `git check-ignore --stdin` batch (NUL-safe).
+    // One `git check-ignore --stdin` batch for the whole directory (NUL-safe).
     let ignored = git_check_ignore(&dir, entries.iter().map(|e| e.path.as_str()));
-    entries.retain(|e| !ignored.contains(&e.path));
+    if show_ignored.unwrap_or(false) {
+        for e in &mut entries {
+            e.ignored = ignored.contains(&e.path);
+        }
+    } else {
+        entries.retain(|e| !ignored.contains(&e.path));
+    }
     entries.sort_by(|a, b| {
         b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });

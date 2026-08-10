@@ -1227,13 +1227,20 @@ function App() {
 
   // The deferred catch-up. Coming back to the window is precisely when a stale
   // nav is most obvious, so this runs on the visible edge rather than waiting
-  // for the next backend tick.
+  // for the next backend tick. It carries the Files tab with it: placesToken is
+  // what the tree re-lists on, so a file written while the app was hidden is
+  // there when you look, without its own visibility plumbing.
   useEffect(() => {
     if (!pageVisible || !pendingRefresh.current) return;
     pendingRefresh.current = false;
     refresh();
     setPlacesToken((v) => v + 1);
   }, [pageVisible, refresh]);
+
+  // What the dock's Refresh button does. placesToken is what the Files tab
+  // re-lists and re-reads off, so this is the same work "places:changed" does
+  // — the button only exists to skip the wait for the next poll tick.
+  const reloadFiles = useCallback(() => { refresh(); setPlacesToken((v) => v + 1); }, [refresh]);
 
   // Claude working state — pushed by the backend poll thread from the
   // ~/.claude/sessions/<pid>.json probes (see lib.rs claude_activity). Keyed by
@@ -2635,14 +2642,35 @@ function App() {
             <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
             <span className="dock-spacer" />
             {settings.dock_tab === "files" && (
-              <button
-                className="ctrl sm icon-only"
-                aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
-                title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
-                onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
-              >
-                {settings.files_layout === "auto" ? "A" : settings.files_layout === "stack" ? "▤" : "▥"}
-              </button>
+              <>
+                <button
+                  className="ctrl sm icon-only"
+                  aria-label="Refresh the file tree"
+                  title="Re-list files from disk"
+                  onClick={reloadFiles}
+                >
+                  ↻
+                </button>
+                <button
+                  className={"ctrl sm icon-only" + (settings.files_show_ignored ? " on" : "")}
+                  aria-label={`Gitignored files: ${settings.files_show_ignored ? "shown" : "hidden"}. Click to toggle.`}
+                  aria-pressed={settings.files_show_ignored}
+                  title={settings.files_show_ignored
+                    ? "Hide gitignored files"
+                    : "Show gitignored files (build output, working notes)"}
+                  onClick={() => updateSettings({ files_show_ignored: !settings.files_show_ignored })}
+                >
+                  ◌
+                </button>
+                <button
+                  className="ctrl sm icon-only"
+                  aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
+                  title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
+                  onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
+                >
+                  {settings.files_layout === "auto" ? "A" : settings.files_layout === "stack" ? "▤" : "▥"}
+                </button>
+              </>
             )}
           </div>
           <div className="dock-body">
@@ -2655,6 +2683,7 @@ function App() {
                 splitPct={settings.files_split_pct}
                 stackPct={settings.files_stack_pct}
                 onSplitPct={(v, o) => updateSettings(o === "split" ? { files_split_pct: v } : { files_stack_pct: v })}
+                showIgnored={settings.files_show_ignored}
                 reloadToken={placesToken}
                 onOpen={setDockFile}
                 onOpenEditor={editIn}

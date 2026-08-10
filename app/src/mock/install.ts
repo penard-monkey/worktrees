@@ -228,7 +228,7 @@ const mockSuggestions: Record<string, any> = {
 // Deterministic + lazily materialized from whatever worktree path the tree
 // asks for, so ANY fixture place works headlessly. Dirs seed their children on
 // first listing; files seed content so read/write round-trips.
-type MockEntry = { name: string; path: string; is_dir: boolean };
+type MockEntry = { name: string; path: string; is_dir: boolean; ignored: boolean };
 const fsChildren = new Map<string, MockEntry[]>();
 const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number; b64?: string }>();
 // dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
@@ -394,18 +394,37 @@ function mockContent(name: string, path: string): { content: string; binary: boo
   };
 }
 
+/** Every entry the directory HAS, ignored ones included — `list_dir` does the
+ *  filtering, exactly as the backend does, so the harness can drive the dock's
+ *  show-ignored toggle. The ignored fixtures match the `.gitignore` fixture in
+ *  mockContent(); they are the whole point of the toggle, since the files a
+ *  session produces (build output, the gitignored planning docs) are the ones
+ *  the filtered listing hides. */
 function seedDir(dir: string) {
   if (fsChildren.has(dir)) return fsChildren.get(dir)!;
   const base = dir.split("/").pop() || dir;
-  const mk = (name: string, is_dir: boolean): MockEntry => ({ name, path: `${dir}/${name}`, is_dir });
+  const mk = (name: string, is_dir: boolean, ignored = false): MockEntry =>
+    ({ name, path: `${dir}/${name}`, is_dir, ignored });
   let entries: MockEntry[];
-  if (base === "src") entries = [mk("App.tsx", false), mk("main.rs", false), mk("lib.rs", false), mk("logo.png", false)];
+  if (base === "src") entries = [
+    mk("App.tsx", false), mk("main.rs", false), mk("lib.rs", false), mk("logo.png", false),
+    mk("bundle.js", false, true),
+  ];
   else if (base === "crates") entries = [mk("worktrees-core", true), mk("worktrees-cli", true)];
   else if (base === "docs") entries = [mk("DESIGN.md", false), mk("spec.pdf", false)];
+  // Inside an ignored directory EVERYTHING is ignored — that is what
+  // check-ignore reports, so the tree must dim the whole subtree, not just its
+  // root. These branches also terminate: without them `base` falls through to
+  // the repo-root listing and target/ grows a src/ and a docs/.
+  else if (base === "target" || base === "node_modules") entries = [mk("debug", true, true), mk("build.log", false, true)];
+  else if (base === "debug") entries = [mk("worktrees", false, true), mk("deps", true, true)];
+  else if (base === "deps") entries = [mk("libcore.rlib", false, true)];
   else entries = [
     mk("src", true), mk("crates", true), mk("docs", true),
     mk("README.md", false), mk("Cargo.toml", false), mk("tauri.conf.json", false),
     mk("install.sh", false), mk(".gitignore", false),
+    mk("target", true, true), mk("node_modules", true, true),
+    mk("task_plan.md", false, true), mk("progress.md", false, true),
   ];
   fsChildren.set(dir, entries);
   for (const e of entries) {
@@ -726,8 +745,17 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return null;
 
     // ── dock Files tab (virtual FS) + Terminal shells ──
-    case "list_dir":
-      return seedDir(args.path as string);
+    case "list_dir": {
+      // Backend parity: gitignored entries are FILTERED unless asked for, and
+      // only ever carry the flag in the show-ignored listing.
+      const all = seedDir(args.path as string);
+      const shown = args.showIgnored ? all : all.filter((e) => !e.ignored);
+      // …and the backend's order (dirs first, then case-insensitive by name).
+      // The fixtures are already written that way; sorting here is what keeps a
+      // file added mid-session by __mock.createFile from landing at the bottom.
+      return [...shown].sort((a, b) =>
+        Number(b.is_dir) - Number(a.is_dir) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+    }
     case "read_file": {
       const f = fsFile(args.path as string);
       if (!f) return { content: `// ${args.path}\n`, truncated: false, binary: false, mtime: 0, size: 0 };
@@ -1126,6 +1154,21 @@ const healthyConfigs: Record<string, MockCfg> = {};
     emitEvent("shell:exit", { repo, slug, index });
     return { repo, slug, index };
   },
+  /** Add a file to the virtual FS the way a working session would. Nothing in
+   * the UI writes files, so "a file appeared on disk while the tree was open"
+   * — the state that used to leave an expanded directory stale forever — is
+   * unreachable by clicking. Fires places:changed, the same event the backend
+   * poll emits and the Files tab re-lists on. */
+  createFile(dir: string, name: string, ignored = false) {
+    const kids = seedDir(dir);
+    const path = `${dir}/${name}`;
+    if (!kids.some((e) => e.path === path)) {
+      kids.push({ name, path, is_dir: false, ignored });
+      fsFiles.set(path, { ...mockContent(name, path), mtime: Date.now() });
+    }
+    emitEvent("places:changed", {});
+    return path;
+  },
   breakConfig(root: string = CDV_ROOT, msg?: string) {
     const cfg = mockConfigs[root];
     if (!cfg) return null;
@@ -1151,4 +1194,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/createFile)");
