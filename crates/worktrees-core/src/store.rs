@@ -28,6 +28,24 @@ pub struct Declared {
     pub pinned: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// A human-readable name for this place, shown instead of the slug.
+    ///
+    /// The slug is NOT a name the tool stores — it is `basename(worktree_dir)`,
+    /// re-derived from disk on every read. Renaming the *place* would therefore
+    /// mean renaming the directory, which is a rename of six things at once:
+    /// the git worktree registration, this store's key, the tmux session
+    /// (`{prefix}-{slug}`) and every `~term` sidecar hanging off it, the
+    /// recorded `COMPOSE_PROJECT_NAME`, and — worst — the Claude history
+    /// directory, which is keyed on the ABSOLUTE worktree path, so a rename
+    /// silently orphans the conversation and breaks auto-resume.
+    ///
+    /// So this is a LABEL, and identity stays where it is. AI profiles already
+    /// draw the same line (`profile.rs`: an immutable `id`, a freely renameable
+    /// `name`); places simply never had it. The UI keeps the slug visible
+    /// alongside a title precisely because the session, the directory and
+    /// "Copy path" are all still slug-derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_opened_epoch: Option<i64>,
     /// When Claude last FINISHED a task here. Deliberately NOT the same fact as
@@ -219,6 +237,40 @@ mod tests {
         assert_eq!(alpha.last_worked_epoch, Some(1_700_000_000));
         assert_eq!(alpha.pinned, Some(true));
         assert_eq!(alpha.extra.get("from_the_future").and_then(|v| v.as_i64()), Some(42));
+    }
+
+    /// `title` rides the same no-version-bump story as the afterglow stamp: an
+    /// older binary's store has no `title` (reads as `None`), and adding one
+    /// must leave every other field — including keys this binary has never
+    /// heard of — exactly as it found them. Writing a title must also not
+    /// disturb `note`, which is the field it sits next to and is most likely to
+    /// be confused with.
+    #[test]
+    fn title_round_trips_beside_note_and_unknown_keys() {
+        let t = tmp("title");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::write(
+            t.0.join(STORE_FILE),
+            r#"{"version":1,"places":{"alpha":{"note":"auth refactor","pinned":true,"from_the_future":42}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_lenient(&repo).places["alpha"].title, None);
+
+        edit(&repo, "alpha", |d| d.title = Some("Auth refactor".into())).unwrap();
+
+        let back = read_lenient(&repo);
+        let alpha = &back.places["alpha"];
+        assert_eq!(alpha.title.as_deref(), Some("Auth refactor"));
+        assert_eq!(alpha.note.as_deref(), Some("auth refactor"));
+        assert_eq!(alpha.pinned, Some(true));
+        assert_eq!(alpha.extra.get("from_the_future").and_then(|v| v.as_i64()), Some(42));
+
+        // clearing is how the UI removes a title (empty string -> None), and it
+        // must not leave a `"title": null` behind for an older binary to read
+        edit(&repo, "alpha", |d| d.title = None).unwrap();
+        let raw = fs::read_to_string(t.0.join(STORE_FILE)).unwrap();
+        assert!(!raw.contains("title"), "cleared title must not be serialized: {raw}");
     }
 
     /// `last_worked_epoch` must NOT be confused with `last_opened_epoch`: only

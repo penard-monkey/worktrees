@@ -473,6 +473,27 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi);
 }
+/* The slug beside a renamed place. Quieter than the branch chip and NOT a
+   chip — it is what the directory and the tmux session are called, so it has to
+   stay legible without competing with the name. */
+.slug-alias {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt-mute);
+}
+/* Rename-in-place. Sized like the name it replaces so the header does not jump
+   when the editor opens. */
+.title-input {
+  flex: 0 1 auto; min-width: 8ch; max-width: 32ch;
+  padding: 1px var(--s2);
+  background: var(--bg-elev); color: var(--txt-hi);
+  border: 1px solid var(--accent); border-radius: var(--r-sm);
+  font-size: var(--fs-h); font-weight: var(--fw-bold);
+}
+.title-input:focus { outline: none; }
+/* ⌘K: the slug behind a renamed place, so the row still says which worktree */
+.qs-alias { color: var(--txt-mute); font-family: var(--font-mono); font-size: var(--fs-meta); }
+
 .topbar .branch {
   flex: 0 1 auto; min-width: 0; max-width: 45%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

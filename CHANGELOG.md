@@ -6,6 +6,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Places can be given a name.** A worktree was always called whatever its
+  directory is called — useful for `cd`, less useful for "which of these three
+  is the auth work". The `⋯` menu (or a double-click on the name in the header)
+  now sets a display name, and ⌘K, the nav filter and alphabetical sort all
+  follow it, so a renamed place is findable by the name you can actually see.
+  Clearing the name goes back to the slug.
+
+  The name is a LABEL: the directory, the branch and the tmux session keep the
+  slug, which stays on screen next to the name rather than being replaced. That
+  is deliberate rather than a shortcut — the slug is not a name the tool stores,
+  it is the directory's basename read fresh from disk, so renaming the *place*
+  would mean renaming the directory and with it the git registration, the tmux
+  session and its shell sidecars, the recorded compose project, and the Claude
+  history directory, which is keyed on the absolute path. That last one would
+  silently orphan the conversation and break auto-resume — too high a price for
+  something that looks like editing a label. AI profiles already split an
+  immutable id from a renameable name; places now do too.
+
+  The main checkout can be named as well, which is where it helps most: its slug
+  is the literal `(main)`.
 - **Every space remembers its own panels.** Whether the dock is open, which tab
   it is on and how wide it is are now remembered per worktree, so coming back to
   a place finds it the way you left it instead of however the last place you

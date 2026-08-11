@@ -19,6 +19,9 @@ import "./App.css";
 type Declared = {
   lifecycle?: string;
   pinned?: boolean;
+  /// Display name. The slug stays the identity (see store.rs) — this only
+  /// changes what a place is CALLED. Use `nameOf(place)` to render either.
+  title?: string;
   note?: string;
   last_opened_epoch?: number;
   /// When Claude last FINISHED a task here (see store.rs). Opening a session
@@ -102,6 +105,10 @@ const SETTABLE = [
   { label: "Abandon", value: "abandoned" },
 ];
 const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
+/** What a place is CALLED. The slug remains its identity — the directory, the
+ *  tmux session and "Copy path" are all still slug-derived — so anywhere this
+ *  is rendered the slug must stay reachable rather than be replaced outright. */
+const nameOf = (p: { slug: string; declared?: Declared }) => p.declared?.title?.trim() || p.slug;
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
 const hasAttention = (p: Place) => !!p.dirty || !!p.ahead || !!p.behind;
 
@@ -351,6 +358,44 @@ function NewPlaceForm({ project, initialBranch, initialName, initialBase, onCrea
   );
 }
 
+// Rename-in-place for the space header's name.
+//
+// ⚠ MODULE SCOPE, and it has to be: a component defined inside App() gets a new
+// identity on every render, so React would unmount and recreate this input —
+// and the 3s poll renders App constantly. It would lose focus, the caret, and
+// any partial edit, roughly once per keystroke's worth of polling.
+//
+// Uncontrolled + committed on blur, matching the note strip. Enter commits,
+// Escape reverts; both blur, so `done` guards against the blur handler firing a
+// second commit after the key already handled it.
+function TitleEditor({ initial, slug, onCommit, onCancel }: {
+  initial: string;
+  slug: string;
+  onCommit: (v: string) => void;
+  onCancel: () => void;
+}) {
+  const done = useRef(false);
+  return (
+    <input
+      className="title-input"
+      defaultValue={initial}
+      autoFocus
+      spellCheck={false}
+      aria-label={`Name for ${slug}`}
+      placeholder={slug}
+      onFocus={(e) => e.currentTarget.select()}
+      onBlur={(e) => { if (!done.current) { done.current = true; onCommit(e.currentTarget.value); } }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") { done.current = true; onCommit(e.currentTarget.value); }
+        else if (e.key === "Escape") { done.current = true; onCancel(); }
+        else return;
+        e.preventDefault();
+        e.stopPropagation(); // never let Enter/Escape reach the global keydown
+      }}
+    />
+  );
+}
+
 // A place that does not exist yet — `new` is still running. It stands in the
 // nav where the real row will land, so the seconds of git fetch / worktree add /
 // tmux read as work in progress instead of a dead app. Deliberately inert: no
@@ -479,15 +524,20 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
     for (const it of items) {
       const { pv, p } = it;
       const slug = p.slug.toLowerCase();
+      // A renamed place must be findable by the name actually on screen —
+      // otherwise ⌘K is the one place a title makes you WORSE off.
+      const title = (p.declared?.title ?? "").toLowerCase();
       const branch = (p.branch ?? "").toLowerCase();
       const proj = basename(pv.root).toLowerCase();
       const note = (p.declared?.note ?? "").toLowerCase();
-      const composite = `${slug} ${branch} ${proj} ${note}`;
+      const composite = `${slug} ${title} ${branch} ${proj} ${note}`;
       // reject early: must match the whole composite as a subsequence
       if (fuzzyScore(q, composite) < 0) continue;
-      // rank on the best field, biased toward the slug
+      // rank on the best field, biased toward whatever NAMES the place — the
+      // title carries the slug's bias because it is what the user sees
       const s = Math.max(
         fuzzyScore(q, slug) + 200, // slug hits win
+        title ? fuzzyScore(q, title) + 200 : -1,
         fuzzyScore(q, branch),
         fuzzyScore(q, proj),
         fuzzyScore(q, note),
@@ -568,8 +618,9 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
                     title={act === "busy" ? "Claude working" : act === "waiting" ? "Claude needs input" : undefined}
                   />
                   <span className="qs-slug">
-                    {p.declared?.pinned ? "★ " : p.is_main ? "◆ " : ""}{p.slug}
+                    {p.declared?.pinned ? "★ " : p.is_main ? "◆ " : ""}{nameOf(p)}
                   </span>
+                  {nameOf(p) !== p.slug && <span className="qs-alias">{p.slug}</span>}
                   <span className="qs-proj">{basename(pv.root)}</span>
                   {p.branch && p.branch !== p.slug && <span className="qs-branch">{p.branch}</span>}
                   <span className={"life " + p.lifecycle_effective}>{p.lifecycle_effective}</span>
@@ -1170,13 +1221,17 @@ function App() {
   const selRef = useRef(sel);
   selRef.current = sel;
 
+  // rename-in-place for the header name. Transient, and reset on a place switch
+  // like dockFile below — a half-typed name must not follow you somewhere else.
+  const [renaming, setRenaming] = useState(false);
+
   // right dock: which file the Files tab is viewing (null = none). Reset per place.
   const [dockFile, setDockFile] = useState<string | null>(null);
   // Reading mode (⌘⇧E): the open file takes over the main pane. Closed by a
   // place switch or by the file going away — an overlay with nothing under it
   // would hide the terminal for no reason.
   const [reading, setReading] = useState(false);
-  useEffect(() => { setDockFile(null); setReading(false); }, [sel?.repo, sel?.slug]);
+  useEffect(() => { setDockFile(null); setReading(false); setRenaming(false); }, [sel?.repo, sel?.slug]);
   useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab.
@@ -1657,6 +1712,15 @@ function App() {
     dropPanels((k) => ok.some((pv) => k.startsWith(pv.root + "|")) && !live.has(k));
   }, [ws, dropPanels]);
 
+  /** Name a place, or clear the name with "". Declared state, so it lives in
+   *  `.worktrees.places.json` beside the note and the pin — NOT in ui-state,
+   *  because what a place is called belongs to the project, not to this app
+   *  install. */
+  const setTitle = (repo: string, slug: string, title: string) => {
+    setRenaming(false);
+    mutate(invoke("set_title", { repo, slug, title }));
+  };
+
   // Dock terminal tab names live in ui-state.json under `repo|slug` → index →
   // name (name === null deletes). Empty buckets are pruned so a place you never
   // named leaves no trace in the settings file.
@@ -2033,7 +2097,9 @@ function App() {
       out.sort((a, b) => idx(a) - idx(b));
       return out;
     }
-    if (settings.sort_mode === "alpha") out.sort((a, b) => a.slug.localeCompare(b.slug));
+    // by the DISPLAYED name: sorting renamed places by a hidden slug reads as
+    // an alphabetical list that is not alphabetical
+    if (settings.sort_mode === "alpha") out.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
     else out.sort((a, b) => activityAt(b) - activityAt(a));
     const flip = settings.sort_mode === "alpha" ? settings.sort_dir === "desc" : settings.sort_dir === "asc";
     if (flip) out.reverse();
@@ -2250,6 +2316,9 @@ function App() {
   const matchPlace = (p: Place) =>
     !q ||
     p.slug.toLowerCase().includes(q) ||
+    // a renamed place has to be findable by the name on screen — and still by
+    // its slug, which is what the directory and the tmux session are called
+    (p.declared?.title ?? "").toLowerCase().includes(q) ||
     (p.branch ?? "").toLowerCase().includes(q) ||
     (p.declared?.note ?? "").toLowerCase().includes(q);
 
@@ -2349,13 +2418,13 @@ function App() {
         onDragLeave={() => { if (dragOver === p.slug) setDragOver(null); }}
         onDrop={(e) => { e.preventDefault(); dropOnRow(repo, p.slug); }}
         onDragEnd={() => { setDrag(null); setDragOver(null); }}
-        title={p.slug}
+        title={p.declared?.title ? `${p.declared.title} — ${p.slug}` : p.slug}
       >
         <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
         <span className="row-id">
           <span className="row-name">
             {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
-            {p.slug}
+            {nameOf(p)}
             {showProject ? <span className="row-proj">{basename(repo)}</span> : null}
           </span>
           {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
@@ -2653,7 +2722,30 @@ function App() {
           <>
             <header className="topbar">
               <div className="identity">
-                <b className="slug">{selected.is_main ? "◆ " : ""}{selected.slug}</b>
+                {renaming ? (
+                  <TitleEditor
+                    key={sel.repo + "|" + sel.slug}
+                    initial={selected.declared?.title ?? ""}
+                    slug={selected.slug}
+                    onCommit={(v) => setTitle(sel.repo, sel.slug, v)}
+                    onCancel={() => setRenaming(false)}
+                  />
+                ) : (
+                  <>
+                    <b
+                      className="slug"
+                      title={selected.declared?.title ? "Double-click to rename" : "Double-click to name this place"}
+                      onDoubleClick={() => setRenaming(true)}
+                    >
+                      {selected.is_main ? "◆ " : ""}{nameOf(selected)}
+                    </b>
+                    {/* renamed: the slug still names the directory and the tmux
+                        session, so it stays on screen rather than being replaced */}
+                    {selected.declared?.title?.trim() ? (
+                      <span className="slug-alias" title="worktree directory and tmux session name">{selected.slug}</span>
+                    ) : null}
+                  </>
+                )}
                 {selected.branch && (
                   <span className={"branch" + (!selected.is_main && selected.branch !== selected.slug ? " hi" : "")}>
                     {!selected.is_main && selected.branch !== selected.slug ? "↗ " : ""}{selected.branch}
@@ -2733,24 +2825,36 @@ function App() {
                   )}
                 </div>
 
-                {!selected.is_main && (
-                  <div className="menu-wrap">
-                    <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
-                    {menu === "more" && (
-                      <div className="popover right">
-                        <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
-                        {confirmRm === `${sel.repo}|${sel.slug}` ? (
+                {/* The menu is no longer gated on `!is_main`: Rename and Copy
+                    path apply to the main checkout too — its slug is the
+                    literal "(main)", which is exactly where a real name helps
+                    most. Only Remove stays main-only. */}
+                <div className="menu-wrap">
+                  <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
+                  {menu === "more" && (
+                    <div className="popover right">
+                      <button className="pop-item" onClick={() => { closeMenu(); setRenaming(true); }}>
+                        {selected.declared?.title ? "Rename…" : "Name this place…"}
+                      </button>
+                      {selected.declared?.title && (
+                        <button className="pop-item" onClick={() => { closeMenu(); setTitle(sel.repo, sel.slug, ""); }}>
+                          Clear name (show <code>{selected.slug}</code>)
+                        </button>
+                      )}
+                      <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
+                      {!selected.is_main && (
+                        confirmRm === `${sel.repo}|${sel.slug}` ? (
                           <>
                             <button className="pop-item danger armed" onClick={() => confirmRemove(false)}>Confirm remove</button>
                             <button className="pop-item danger armed" onClick={() => confirmRemove(true)}>Confirm remove + branch</button>
                           </>
                         ) : (
                           <button className="pop-item danger" onClick={armRemove}>Remove worktree…</button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
+                        )
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </header>
 
@@ -2815,7 +2919,7 @@ function App() {
                   {resume.map(({ pv, p }) => (
                     <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
                       <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
-                      <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{p.slug}</span>
+                      <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{nameOf(p)}</span>
                       <span className="rr-proj">{basename(pv.root)}</span>
                       <span className="rr-life">{p.lifecycle_effective}</span>
                       <span className="rr-age">{ago(usedEpoch(p))}</span>
