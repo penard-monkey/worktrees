@@ -180,7 +180,10 @@ export const clampDock = (v: number, navW = 0, w = viewport()) =>
 export type Fit = { navShown: boolean; navW: number; dockShown: boolean; dockW: number; mainW: number; tight: boolean };
 
 /** Below this the topbar can't hold the status badges AND a readable slug, so
- * the badges retire — they're duplicated in the nav row and the status bar. */
+ * the badges retire — they're duplicated in the nav row and the status bar.
+ * Measured against the SPACE HEADER's width (main + dock), not `mainW`: the
+ * header spans both columns, so a wide dock gives it room the center pane
+ * alone does not have. */
 export const MAIN_TIGHT = 560;
 
 export function fitLayout(s: Settings, dockEligible: boolean, w = viewport()): Fit {
@@ -197,7 +200,7 @@ export function fitLayout(s: Settings, dockEligible: boolean, w = viewport()): F
     navW = navShown ? clampNav(s.nav_width, 0, w) : 0;
   }
   const mainW = w - RAILS_W - navW - dockW;
-  return { navShown, navW, dockShown, dockW, mainW, tight: mainW < MAIN_TIGHT };
+  return { navShown, navW, dockShown, dockW, mainW, tight: mainW + dockW < MAIN_TIGHT };
 }
 
 /** Write the visual settings to the DOM as CSS vars / data-attrs. Cheap; safe to call often.
