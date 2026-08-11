@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **Every space remembers its own panels.** Whether the dock is open, which tab
+  it is on and how wide it is are now remembered per worktree, so coming back to
+  a place finds it the way you left it instead of however the last place you
+  visited happened to be set up. A place you have never opened inherits the
+  current layout rather than snapping to a default — arriving somewhere new
+  should not rearrange the furniture either.
+
+  Only those three things are per-place. How you like to *read* a file — the
+  Files tab's split, wrap and gitignored toggles — stays global, as does the
+  nav, which is how you leave a space rather than part of one. The open file is
+  not remembered on purpose: a path can be deleted or renamed between visits,
+  which would turn "restore what I left" into an error on arrival.
+
 ### Changed
 - **The top bar now crowns the whole space, not just the terminal.** Files and
   Terminal read as app furniture that happened to point at a place, because

@@ -11,7 +11,7 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
-import { applySettings, clampDock, clampNav, DEFAULTS, fitLayout, loadSettings, saveSettings, viewportWidth, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, clampDock, clampNav, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -1156,6 +1156,20 @@ function App() {
   const appStale = !!(upd?.latest && vnewer(upd.latest, upd.app_version));
   const updateAvail = cliStale || cliMissing || appStale;
   const searchRef = useRef<HTMLInputElement | null>(null);
+
+  // ── per-place panel state ────────────────────────────────────────────────
+  // A space owns its dock: what is open, which tab, how wide. `settings` holds
+  // the LAST-USED values (the seed a never-visited place inherits), and
+  // `place_panels[key]` overrides them for a place you have set up before.
+  // `eff` is what the UI must READ everywhere the dock is concerned — reading
+  // `settings.dock_*` directly is the bug this indirection exists to prevent.
+  const selKey = sel ? placeKey(sel.repo, sel.slug) : null;
+  const eff = panelsFor(settings, selKey);
+  // The selected place, for callbacks that must stay dependency-free (see
+  // `toggleDock`, registered once in the keydown effect).
+  const selRef = useRef(sel);
+  selRef.current = sel;
+
   // right dock: which file the Files tab is viewing (null = none). Reset per place.
   const [dockFile, setDockFile] = useState<string | null>(null);
   // Reading mode (⌘⇧E): the open file takes over the main pane. Closed by a
@@ -1166,7 +1180,7 @@ function App() {
   useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab.
-  const filesDockShown = settings.dock_open && settings.dock_tab === "files";
+  const filesDockShown = eff.dock_open && eff.dock_tab === "files";
   useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
   // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
   const [newTermToken, setNewTermToken] = useState(0);
@@ -1564,6 +1578,85 @@ function App() {
       setTermVersion((v) => v + 1);
   };
 
+  /** Write dock panel state for the SELECTED place (and to the globals, which
+   *  keep tracking "last used" so the next unvisited place inherits it).
+   *
+   *  Always stores the FULL triple, never the patch it was handed. A partial
+   *  entry falls through to the globals for whatever it omits, which is exactly
+   *  how another place's choice bleeds in: open the dock in A (storing only
+   *  `dock_open`), flip to Terminal in B (moving the global `dock_tab`), come
+   *  back to A and it is open on B's tab. That is the jarring switch this
+   *  feature exists to remove.
+   *
+   *  Stable (refs only, functional setState) so `toggleDock` can stay
+   *  dependency-free for the keydown effect. */
+  const updatePanels = useCallback((patch: Partial<PlacePanels> | ((cur: PlacePanels) => Partial<PlacePanels>)) => {
+    setSettings((prev) => {
+      const s = selRef.current;
+      const key = s ? placeKey(s.repo, s.slug) : null;
+      const cur = panelsFor(prev, key);
+      const p = typeof patch === "function" ? patch(cur) : patch;
+      const triple: PlacePanels = {
+        dock_open: p.dock_open ?? cur.dock_open,
+        dock_tab: p.dock_tab ?? cur.dock_tab,
+        dock_width: p.dock_width ?? cur.dock_width,
+      };
+      const next: Settings = {
+        ...prev,
+        ...triple,
+        ...(key ? { place_panels: { ...(prev.place_panels ?? {}), [key]: triple } } : null),
+      };
+      applySettings(next);
+      if (hydrated.current) saveSettings(next);
+      // Pre-hydration, record ONLY the fields the caller actually asked for —
+      // `p`, not `triple`. `preHydration` is SHALLOW-merged over the settings
+      // read from disk and then saved, so every key present here overwrites the
+      // stored value. `triple` fills its gaps from `cur`, which pre-hydration is
+      // DEFAULTS: stashing it would write default `dock_tab`/`dock_width` over
+      // the user's real ones for a ⌘J that only meant to toggle `dock_open`.
+      // (`place_panels` must stay out for the same reason, one level up: a
+      // shallow merge would replace the whole map with a one-entry object.)
+      else Object.assign(preHydration.current, p);
+      return next;
+    });
+  }, []);
+
+  /** Forget remembered panels for keys matching `shouldDrop`.
+   *
+   *  `ui-state.json` is written as one blob and unknown keys survive a reload
+   *  forever, so without pruning this map only ever grows — a place removed
+   *  years ago would still be carrying a dock width. */
+  const dropPanels = useCallback((shouldDrop: (key: string) => boolean) => {
+    setSettings((prev) => {
+      const panels = prev.place_panels ?? {};
+      const kept = Object.fromEntries(Object.entries(panels).filter(([k]) => !shouldDrop(k)));
+      if (Object.keys(kept).length === Object.keys(panels).length) return prev;
+      const next = { ...prev, place_panels: kept };
+      if (hydrated.current) saveSettings(next);
+      return next;
+    });
+  }, []);
+
+  // Sweep entries whose place no longer exists. ONCE per session, on the first
+  // workspace that actually reported something: at hydration there is no
+  // snapshot to compare against, and re-running it on every poll would risk
+  // discarding real state over a momentary blip.
+  //
+  // Guarded PER PROJECT. A repo whose snapshot failed (`ok: false`) is skipped
+  // entirely — its places are *unknown*, not absent, and treating an unreadable
+  // repo as an empty one would wipe every place in it. A repo that is no longer
+  // tracked at all reports nothing either way, which is why untracking has its
+  // own drop (see removeProject).
+  const prunedOnce = useRef(false);
+  useEffect(() => {
+    if (!ws || prunedOnce.current || !hydrated.current) return;
+    const ok = ws.projects.filter((pv) => pv.ok && pv.snapshot);
+    if (!ok.length) return;
+    prunedOnce.current = true;
+    const live = new Set(ok.flatMap((pv) => pv.snapshot!.places.map((p) => placeKey(pv.root, p.slug))));
+    dropPanels((k) => ok.some((pv) => k.startsWith(pv.root + "|")) && !live.has(k));
+  }, [ws, dropPanels]);
+
   // Dock terminal tab names live in ui-state.json under `repo|slug` → index →
   // name (name === null deletes). Empty buckets are pruned so a place you never
   // named leaves no trace in the settings file.
@@ -1610,11 +1703,11 @@ function App() {
 
   // Dock only makes sense with a place selected (Files/Terminal need a worktree).
   const dockEligible = !!selected && !!sel;
-  const fit = fitLayout(settings, dockEligible, vw);
+  const fit = fitLayout(eff, dockEligible, vw);
   const dockShown = fit.dockShown;
   // Would the dock fit if it were open? Drives the toggle's disabled state, so a
   // ⌘J that can't visibly do anything is at least honest about why.
-  const dockFits = fitLayout({ ...settings, dock_open: true }, dockEligible, vw).dockShown;
+  const dockFits = fitLayout({ ...eff, dock_open: true }, dockEligible, vw).dockShown;
 
   useLayoutEffect(() => {
     const root = document.documentElement.style;
@@ -1718,6 +1811,9 @@ function App() {
   const removeProject = async (root: string) => {
     try {
       commitWs(await invoke<Workspace>("remove_project", { root }));
+      // untracking reports nothing either way, so the snapshot sweep can never
+      // judge these keys — drop them here or they are stranded forever
+      dropPanels((k) => k.startsWith(root + "|"));
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
@@ -1909,6 +2005,7 @@ function App() {
     closeCtx();
     // Arg keys are camelCase: Tauri renames Rust snake_case params over IPC.
     if ((await runCmd("remove_place", { repo, slug, delBranch, force: false }))?.ok) {
+      dropPanels((k) => k === placeKey(repo, slug));
       if (sel?.repo === repo && sel?.slug === slug) setSel(null);
     }
   };
@@ -2005,7 +2102,10 @@ function App() {
   const confirmRemove = async (delBranch: boolean) => {
     if (!sel) return;
     closeMenu();
-    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, delBranch, force: false }))?.ok) setSel(null);
+    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, delBranch, force: false }))?.ok) {
+      dropPanels((k) => k === placeKey(sel.repo, sel.slug));
+      setSel(null);
+    }
   };
 
   const toggleProject = (root: string) => {
@@ -2032,22 +2132,17 @@ function App() {
   // Right rail → dock tab. Clicking the ACTIVE tab collapses the dock (VS Code's
   // model), which is why the topbar no longer carries its own dock toggle.
   const pickDockTab = (tab: Settings["dock_tab"]) =>
-    updateSettings(
-      settings.dock_open && settings.dock_tab === tab
+    updatePanels(
+      eff.dock_open && eff.dock_tab === tab
         ? { dock_open: false }
         : { dock_tab: tab, dock_open: true },
     );
-  // right dock (Files / Terminal) — only renders with a place selected, but the
-  // preference persists globally (stable useCallback: safe in the keydown effect).
+  // right dock (Files / Terminal) — remembered per place, with the global value
+  // as the seed. Stable useCallback (updatePanels reads the place from a ref),
+  // so the keydown effect still registers once.
   const toggleDock = useCallback(() => {
-    setSettings((prev) => {
-      const next = { ...prev, dock_open: !prev.dock_open };
-      applySettings(next);
-      if (hydrated.current) saveSettings(next);
-      else preHydration.current.dock_open = next.dock_open;
-      return next;
-    });
-  }, []);
+    updatePanels((cur) => ({ dock_open: !cur.dock_open }));
+  }, [updatePanels]);
   // keyboard lens select (⌘2..N): unlike changeLens, re-selecting the active lens
   // must NOT toggle/collapse the nav — a keyboard chord always REVEALS the view.
   const selectLens = useCallback((l: Lens) => {
@@ -2064,7 +2159,7 @@ function App() {
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
   const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false });
-  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen, filesTabOpen: settings.dock_open && settings.dock_tab === "files" };
+  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen, filesTabOpen: eff.dock_open && eff.dock_tab === "files" };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // ⌘⇧T — new dock terminal. Handled BEFORE the meta-only guard (it needs
@@ -2207,7 +2302,7 @@ function App() {
     const startW = settings.nav_width;
     const move = (ev: MouseEvent) =>
       updateSettings({
-        nav_width: clampNav(startW + (ev.clientX - startX), dockShown ? settings.dock_width : 0, window.innerWidth),
+        nav_width: clampNav(startW + (ev.clientX - startX), dockShown ? eff.dock_width : 0, window.innerWidth),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
@@ -2218,9 +2313,9 @@ function App() {
   const onDockResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
-    const startW = settings.dock_width;
+    const startW = eff.dock_width;
     const move = (ev: MouseEvent) =>
-      updateSettings({
+      updatePanels({
         dock_width: clampDock(startW - (ev.clientX - startX), fit.navShown ? fit.navW : 0, window.innerWidth),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
@@ -2742,9 +2837,9 @@ function App() {
               {/* the rail owns tab selection AND collapse, so this is a title, not
                   a control strip */}
               <div className="dock-tabs">
-                <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
+                <span className="dock-title">{eff.dock_tab === "files" ? "Files" : "Terminal"}</span>
                 <span className="dock-spacer" />
-                {settings.dock_tab === "files" && (
+                {eff.dock_tab === "files" && (
                   <>
                     <button
                       className="ctrl sm icon-only"
@@ -2780,7 +2875,7 @@ function App() {
                 )}
               </div>
               <div className="dock-body">
-                {settings.dock_tab === "files" ? (
+                {eff.dock_tab === "files" ? (
                   <FilesPane
                     root={selected.path}
                     openPath={dockFile}
@@ -2847,7 +2942,7 @@ function App() {
           with no place selected — Files/Terminal both need a worktree. */}
       <nav className="rail rail-right">
         {DOCK_RAIL.map((d) => {
-          const on = dockShown && settings.dock_tab === d.key;
+          const on = dockShown && eff.dock_tab === d.key;
           const why = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
           return (
             <button
