@@ -25,6 +25,38 @@ export function resolveTheme(s: Pick<Settings, "theme" | "theme_light" | "theme_
   return s.theme;
 }
 
+/** The panel state a SPACE owns — what is open, which tab, how wide.
+ *
+ *  Deliberately just these three. The Files viewer's own preferences
+ *  (`files_layout`, `files_split_pct`, `files_wrap`, `files_md_source`,
+ *  `files_show_ignored`) stay GLOBAL: they are how you like to read a file, not
+ *  which panel a place has open. The nav stays global for the same reason in
+ *  reverse — it is how you LEAVE a space, so it must not move under you when
+ *  you arrive somewhere.
+ *
+ *  The open FILE is not here either. A remembered path can be deleted, renamed
+ *  or gitignored between visits, which turns "restore what I left" into an
+ *  error banner on arrival. */
+export type PlacePanels = {
+  dock_open: boolean;
+  dock_tab: "files" | "terminal";
+  dock_width: number;
+};
+
+/** Key for the per-place records in `Settings` (`place_panels`,
+ *  `term_tab_names`). A place is identified by the PAIR — slugs are only unique
+ *  within a project. */
+export const placeKey = (repo: string, slug: string) => `${repo}|${slug}`;
+
+/** Settings as they apply to ONE place: the globals are the seed, the place's
+ *  own remembered panels win where present. Returns `s` unchanged when the
+ *  place has no entry (or nothing is selected), so the common path allocates
+ *  nothing and keeps a stable identity for memo comparisons. */
+export function panelsFor(s: Settings, key: string | null): Settings {
+  const p = key ? s.place_panels?.[key] : undefined;
+  return p ? { ...s, ...p } : s;
+}
+
 export type Settings = {
   ui_rem: number; // 13–18
   term_family: string;
@@ -54,6 +86,13 @@ export type Settings = {
   // live shell is seeded back into the strip and spawns a fresh shell when you
   // activate it. Closing a tab explicitly drops its name.
   term_tab_names: Record<string, Record<number, string>>;
+  // Per-place panel state, keyed `repo|slug` (the same scheme as
+  // `term_tab_names`). The flat `dock_*` fields above keep their meaning as the
+  // LAST-USED seed: a place with no entry here inherits them, so arriving
+  // somewhere you have never been looks like the place you came from rather
+  // than snapping back to a default — which is the same jarring switch in
+  // reverse. Entries are pruned when a place or a project goes away.
+  place_panels: Record<string, PlacePanels>;
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
   ai_auto_resume: boolean; // single-click Enter resumes an existing Claude conversation (Claude only)
@@ -110,6 +149,7 @@ export const DEFAULTS: Settings = {
   files_md_source: false,
   files_show_ignored: true,
   term_tab_names: {},
+  place_panels: {},
   editor_cmd: "code",
   terminal_cmd: "",
   ai_auto_resume: true,
