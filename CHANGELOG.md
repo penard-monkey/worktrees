@@ -3,6 +3,24 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **The top bar now crowns the whole space, not just the terminal.** Files and
+  Terminal read as app furniture that happened to point at a place, because
+  structurally that is what they were: the header was a child of `main`, and the
+  dock was a separate grid column sitting *beside* it, outside the header's
+  scope. The header now spans the terminal and the dock together — they share
+  one `space` cell, and the dock is a flex sibling of the terminal rather than a
+  column of its own. The layout picture in DESIGN.md predates the dock, which is
+  how it came to be bolted on next to the model instead of into it.
+
+  The dock could not simply span two grid columns: the columns are *removed*
+  when hidden rather than zeroed, so every line index shifts when the nav
+  collapses. Reading mode gets simpler as a result — it used to need an inline
+  negative offset to escape `main` and reach across the dock, and now just fills
+  the space body, which is already exactly that wide.
+
 ## [0.11.0] - 2026-08-10
 
 ### Fixed

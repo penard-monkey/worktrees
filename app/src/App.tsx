@@ -2435,11 +2435,15 @@ function App() {
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
   // shrink below the center pane's content and pushes the fixed columns off the
   // window instead of letting anything ellipsise.
+  //
+  // The DOCK IS NOT A COLUMN. It and the terminal share one `.space` cell so the
+  // space header can crown both (see `.space` in App.css) — a header spanning
+  // two grid columns can't be expressed here, because these columns are
+  // *removed* when hidden, not zeroed, so every line index shifts with ⌘B.
   const gridCols = [
     "var(--rail-w)",
     fit.navShown ? `${fit.navW}px` : null,
-    "minmax(0, 1fr)",
-    dockShown ? `${fit.dockW}px` : null,
+    "minmax(0, 1fr)", // .space — terminal + dock, under one header
     "var(--rail-w)", // right rail — permanent, like the left one
   ].filter(Boolean).join(" ");
 
@@ -2539,10 +2543,18 @@ function App() {
         <div className="nav-resizer" onMouseDown={onResize} />
       </aside>
 
-      {/* ── main ── */}
-      <main className="main">
+      {/* ── space: the selected place's whole workbench ──
+          The header crowns BOTH the terminal and the dock, because both belong
+          to the place. Before this the header lived inside `main` and the dock
+          sat outside it as a sibling, which is precisely what made Files and
+          Terminal read as app furniture pointed at a place rather than as parts
+          of it. */}
+      <div className="space">
+        {/* tmux missing is an APP-level condition, not a per-place one, so it
+            stays above the space header rather than under it. */}
         {!tmuxOk && <TmuxBanner onRecheck={recheckTmux} />}
-        {selected && sel ? (
+
+        {selected && sel && (
           <>
             <header className="topbar">
               <div className="identity">
@@ -2650,152 +2662,170 @@ function App() {
             <input className="note-strip" placeholder="note…" defaultValue={selected.declared?.note ?? ""}
               key={sel.repo + sel.slug + (selected.declared?.note ?? "")}
               onBlur={(e) => mutate(invoke("set_note", { repo: sel.repo, slug: sel.slug, note: e.currentTarget.value }))} />
+          </>
+        )}
 
-            {selected.tmux_session.up ? (
-              <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus} />
+        {/* ── space body: terminal and dock, side by side under the header ──
+            `position: relative` lives here now (it used to be on `.main`) so it
+            anchors the reading overlay — which therefore reaches across the
+            dock for free, instead of needing a negative inline offset. */}
+        <div className="space-body">
+          <main className="main">
+            {selected && sel ? (
+              <>
+                {selected.tmux_session.up ? (
+                  <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus} />
+                ) : (
+                  <div className="term-empty">
+                    <div className="term-empty-card">
+                      <div className="te-title">No live session for <b>{selected.slug}</b></div>
+                      <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
+                    </div>
+                  </div>
+                )}
+
+                <footer className="statusbar">
+                  <div className="switch-wrap">
+                    {!selected.is_main && (
+                      <>
+                        <span className="sb-label" title={`on ${selected.branch ?? "?"}`}><Icons.GitBranch size={13} /></span>
+                        <BranchSwitcher key={sel.repo + "|" + sel.slug} repo={sel.repo} slug={sel.slug}
+                          onSwitch={doSwitch} onError={fail} />
+                      </>
+                    )}
+                  </div>
+                  <div className="sb-facts">
+                    {selected.tmux_session.up ? <>tmux <span className="ok">●</span> up · {selected.tmux_session.name}</> : <>tmux <span className="off">○</span> down</>}
+                    {selected.claude_session_present ? " · pane0 claude" : ""}
+                  </div>
+                </footer>
+              </>
             ) : (
-              <div className="term-empty">
-                <div className="term-empty-card">
-                  <div className="te-title">No live session for <b>{selected.slug}</b></div>
-                  <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
+              <div className="briefing">
+                <div className="home-hero">
+                  <img className="home-logo" src={logoUrl} alt="worktrees logo" />
+                  <div className="home-id">
+                    <h1>worktrees</h1>
+                    <div className="home-tag">a place for every work stream</div>
+                  </div>
+                </div>
+                <button className="enter-btn big home-open with-icon" onClick={addProject}><Icons.Plus size={15} /> Open a project</button>
+                <div className="chips">
+                  <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
+                  <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
+                </div>
+                <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
+                <div className="resume">
+                  {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
+                  {resume.map(({ pv, p }) => (
+                    <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
+                      <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
+                      <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{p.slug}</span>
+                      <span className="rr-proj">{basename(pv.root)}</span>
+                      <span className="rr-life">{p.lifecycle_effective}</span>
+                      <span className="rr-age">{ago(usedEpoch(p))}</span>
+                      <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
+          </main>
 
-            <footer className="statusbar">
-              <div className="switch-wrap">
-                {!selected.is_main && (
+          {/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ──
+              A flex sibling of `main` inside the space body — no longer a grid
+              column of its own. That is what puts it under the space header
+              instead of beside it. */}
+          {dockShown && selected && sel && (
+            <aside className="dock" style={{ flex: `0 0 ${fit.dockW}px` }}>
+              <div className="dock-resizer" onMouseDown={onDockResize} />
+              {/* the rail owns tab selection AND collapse, so this is a title, not
+                  a control strip */}
+              <div className="dock-tabs">
+                <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
+                <span className="dock-spacer" />
+                {settings.dock_tab === "files" && (
                   <>
-                    <span className="sb-label" title={`on ${selected.branch ?? "?"}`}><Icons.GitBranch size={13} /></span>
-                    <BranchSwitcher key={sel.repo + "|" + sel.slug} repo={sel.repo} slug={sel.slug}
-                      onSwitch={doSwitch} onError={fail} />
+                    <button
+                      className="ctrl sm icon-only"
+                      aria-label="Refresh the file tree"
+                      title="Re-list files from disk"
+                      onClick={reloadFiles}
+                    >
+                      ↻
+                    </button>
+                    <button
+                      className={"ctrl sm icon-only" + (settings.files_show_ignored ? " on" : "")}
+                      aria-label={`Gitignored files: ${settings.files_show_ignored ? "shown" : "hidden"}. Click to toggle.`}
+                      aria-pressed={settings.files_show_ignored}
+                      title={settings.files_show_ignored
+                        ? "Hide gitignored files"
+                        : "Show gitignored files (build output, working notes)"}
+                      onClick={() => updateSettings({ files_show_ignored: !settings.files_show_ignored })}
+                    >
+                      {/* Filled when nothing is being withheld. The `on` class alone
+                          is a tint, and a tint is not enough to notice that a tree
+                          IS hiding entries — which is the state that misleads. */}
+                      {settings.files_show_ignored ? "◉" : "◌"}
+                    </button>
+                    <button
+                      className="ctrl sm icon-only"
+                      aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
+                      title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
+                      onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
+                    >
+                      {settings.files_layout === "auto" ? "A" : settings.files_layout === "stack" ? "▤" : "▥"}
+                    </button>
                   </>
                 )}
               </div>
-              <div className="sb-facts">
-                {selected.tmux_session.up ? <>tmux <span className="ok">●</span> up · {selected.tmux_session.name}</> : <>tmux <span className="off">○</span> down</>}
-                {selected.claude_session_present ? " · pane0 claude" : ""}
+              <div className="dock-body">
+                {settings.dock_tab === "files" ? (
+                  <FilesPane
+                    root={selected.path}
+                    openPath={dockFile}
+                    dockW={fit.dockW}
+                    layout={settings.files_layout}
+                    splitPct={settings.files_split_pct}
+                    stackPct={settings.files_stack_pct}
+                    onSplitPct={(v, o) => updateSettings(o === "split" ? { files_split_pct: v } : { files_stack_pct: v })}
+                    showIgnored={settings.files_show_ignored}
+                    reloadToken={placesToken}
+                    onOpen={setDockFile}
+                    onOpenEditor={editIn}
+                    onError={fail}
+                    wrap={settings.files_wrap}
+                    onWrap={(v) => updateSettings({ files_wrap: v })}
+                    mdSource={settings.files_md_source}
+                    onMdSource={(v) => updateSettings({ files_md_source: v })}
+                    expanded={false}
+                    onExpand={(v) => setReading(v)}
+                  />
+                ) : (
+                  <TerminalTabs key={sel.repo + "|" + sel.slug}
+                    repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
+                    termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
+                    names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
+                    onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
+                    onError={fail} />
+                )}
               </div>
-            </footer>
-          </>
-        ) : (
-          <div className="briefing">
-            <div className="home-hero">
-              <img className="home-logo" src={logoUrl} alt="worktrees logo" />
-              <div className="home-id">
-                <h1>worktrees</h1>
-                <div className="home-tag">a place for every work stream</div>
-              </div>
-            </div>
-            <button className="enter-btn big home-open with-icon" onClick={addProject}><Icons.Plus size={15} /> Open a project</button>
-            <div className="chips">
-              <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
-              <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
-            </div>
-            <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
-            <div className="resume">
-              {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
-              {resume.map(({ pv, p }) => (
-                <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
-                  <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
-                  <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{p.slug}</span>
-                  <span className="rr-proj">{basename(pv.root)}</span>
-                  <span className="rr-life">{p.lifecycle_effective}</span>
-                  <span className="rr-age">{ago(usedEpoch(p))}</span>
-                  <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+            </aside>
+          )}
 
-        {/* ── reading mode (⌘⇧E): the dock's open file over the whole main
-            pane. The terminal stays MOUNTED underneath (hidden, not
-            unmounted) — unmounting would drop the xterm and its scrollback;
-            TerminalPane refits when it is revealed again. */}
-        {reading && dockFile && selected && (
-          // Spans the main pane AND the dock (stopping at the rails): an
-          // overlay confined to `main` gets NARROWER as the dock grows, which
-          // is the opposite of "expand".
-          <div
-            className="reading"
-            role="dialog"
-            aria-label="File reader"
-            style={{ left: 0, right: dockShown ? -fit.dockW : 0 }}
-          >
-            <FileView
-              key={dockFile}
-              path={dockFile}
-              reloadToken={placesToken}
-              onOpen={setDockFile}
-              onOpenEditor={editIn}
-              onError={fail}
-              wrap={settings.files_wrap}
-              onWrap={(v) => updateSettings({ files_wrap: v })}
-              mdSource={settings.files_md_source}
-              onMdSource={(v) => updateSettings({ files_md_source: v })}
-              expanded
-              onExpand={(v) => setReading(v)}
-            />
-          </div>
-        )}
-      </main>
-
-      {/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ── */}
-      {dockShown && selected && sel && (
-        <aside className="dock">
-          <div className="dock-resizer" onMouseDown={onDockResize} />
-          {/* the rail owns tab selection AND collapse, so this is a title, not
-              a control strip */}
-          <div className="dock-tabs">
-            <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
-            <span className="dock-spacer" />
-            {settings.dock_tab === "files" && (
-              <>
-                <button
-                  className="ctrl sm icon-only"
-                  aria-label="Refresh the file tree"
-                  title="Re-list files from disk"
-                  onClick={reloadFiles}
-                >
-                  ↻
-                </button>
-                <button
-                  className={"ctrl sm icon-only" + (settings.files_show_ignored ? " on" : "")}
-                  aria-label={`Gitignored files: ${settings.files_show_ignored ? "shown" : "hidden"}. Click to toggle.`}
-                  aria-pressed={settings.files_show_ignored}
-                  title={settings.files_show_ignored
-                    ? "Hide gitignored files"
-                    : "Show gitignored files (build output, working notes)"}
-                  onClick={() => updateSettings({ files_show_ignored: !settings.files_show_ignored })}
-                >
-                  {/* Filled when nothing is being withheld. The `on` class alone
-                      is a tint, and a tint is not enough to notice that a tree
-                      IS hiding entries — which is the state that misleads. */}
-                  {settings.files_show_ignored ? "◉" : "◌"}
-                </button>
-                <button
-                  className="ctrl sm icon-only"
-                  aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
-                  title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
-                  onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
-                >
-                  {settings.files_layout === "auto" ? "A" : settings.files_layout === "stack" ? "▤" : "▥"}
-                </button>
-              </>
-            )}
-          </div>
-          <div className="dock-body">
-            {settings.dock_tab === "files" ? (
-              <FilesPane
-                root={selected.path}
-                openPath={dockFile}
-                dockW={fit.dockW}
-                layout={settings.files_layout}
-                splitPct={settings.files_split_pct}
-                stackPct={settings.files_stack_pct}
-                onSplitPct={(v, o) => updateSettings(o === "split" ? { files_split_pct: v } : { files_stack_pct: v })}
-                showIgnored={settings.files_show_ignored}
+          {/* ── reading mode (⌘⇧E): the dock's open file over the whole space
+              body. The terminal stays MOUNTED underneath (hidden, not
+              unmounted) — unmounting would drop the xterm and its scrollback;
+              TerminalPane refits when it is revealed again.
+              It reaches across the dock because it is anchored to
+              `.space-body`, which is exactly as wide as terminal + dock. The
+              old negative-right offset compensated for an overlay trapped
+              inside `main`; there is nothing left to compensate for. */}
+          {reading && dockFile && selected && (
+            <div className="reading" role="dialog" aria-label="File reader">
+              <FileView
+                key={dockFile}
+                path={dockFile}
                 reloadToken={placesToken}
                 onOpen={setDockFile}
                 onOpenEditor={editIn}
@@ -2804,20 +2834,13 @@ function App() {
                 onWrap={(v) => updateSettings({ files_wrap: v })}
                 mdSource={settings.files_md_source}
                 onMdSource={(v) => updateSettings({ files_md_source: v })}
-                expanded={false}
+                expanded
                 onExpand={(v) => setReading(v)}
               />
-            ) : (
-              <TerminalTabs key={sel.repo + "|" + sel.slug}
-                repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
-                termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
-                names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
-                onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
-                onError={fail} />
-            )}
-          </div>
-        </aside>
-      )}
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* ── right rail: mirrors the left one. Permanent, so the dock always has
           a visible affordance; the active icon collapses the dock. Disabled
