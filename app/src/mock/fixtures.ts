@@ -6,6 +6,7 @@
 export type Declared = {
   lifecycle?: string;
   pinned?: boolean;
+  title?: string;
   note?: string;
   last_opened_epoch?: number;
   last_worked_epoch?: number;
