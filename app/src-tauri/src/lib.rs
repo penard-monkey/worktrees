@@ -6,7 +6,7 @@
 //                 shell, and OWNS the dock's scratch shells outright (no tmux).
 // See DESIGN.md / MIGRATION.md.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -2218,6 +2218,36 @@ struct FileBlob {
     mtime: u64,
 }
 
+/// How one path differs from the branch's base, coarsely. Four classes is what
+/// a tinted NAME can carry on its own; a fifth would need a second channel.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+enum ChangeKind {
+    Modified,
+    Added,
+    Untracked,
+    Deleted,
+}
+
+#[derive(Serialize, PartialEq, Eq, Debug)]
+struct FileChange {
+    /// Absolute, canonical — the same shape `list_dir` hands the tree, so the
+    /// frontend can look a row up by `entry.path` with no normalizing.
+    path: String,
+    status: ChangeKind,
+}
+
+/// Everything in one worktree that differs from its branch's base.
+#[derive(Serialize)]
+struct ChangeSet {
+    /// The repo top-level these paths hang off, canonicalized. Returned rather
+    /// than assumed: the tree walks ancestors to cascade a marker upward, and it
+    /// needs to know where to stop without trusting the `root` it passed in
+    /// (a place path can be a symlink; every path here is resolved).
+    root: String,
+    files: Vec<FileChange>,
+}
+
 /// File mtime in ms since the epoch (0 if unavailable) — a cheap change token.
 fn file_mtime_ms(p: &Path) -> u64 {
     std::fs::metadata(p)
@@ -2384,6 +2414,141 @@ fn git_check_ignore<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) -> std
         .filter(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).to_string())
         .collect()
+}
+
+/// Every path under `root` that differs from the branch's BASE — committed on
+/// this branch *and* uncommitted (staged, unstaged, untracked). The Files tab
+/// tints those rows and cascades the mark up through their directories.
+///
+/// THREE spawns per call, and the call is per REFRESH, not per directory: the
+/// frontend derives a set once and answers every row from it. Doing this the way
+/// `list_dir` does `check-ignore` — a batch per listing — would be one git
+/// process per open node per poll tick, and the tree re-lists every open node.
+///
+/// A path that is not a repo (or has no git) gets an empty set, not an error:
+/// nothing differs from a base that does not exist, and the tree must still list.
+#[tauri::command]
+async fn changed_files(app: AppHandle, root: String) -> Result<ChangeSet, String> {
+    let dir = guard_under_projects(&app, &root)?;
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {root}"));
+    }
+    let cwd = dir.to_string_lossy().to_string();
+    // Porcelain paths are relative to the repo TOP-LEVEL, never to `-C`. For a
+    // place that IS the worktree root they agree; resolving it anyway is what
+    // keeps a root one level down from marking the wrong rows.
+    let top = match git::git_out(&cwd, &["rev-parse", "--show-toplevel"]) {
+        Some(t) if !t.is_empty() => std::fs::canonicalize(&t).unwrap_or_else(|_| PathBuf::from(t)),
+        _ => return Ok(ChangeSet { root: cwd, files: Vec::new() }),
+    };
+    let mut map: BTreeMap<String, ChangeKind> = BTreeMap::new();
+    // Committed on this branch. THREE dots — the diff is against the merge base,
+    // so a base branch that has moved on since doesn't light up every file those
+    // other commits touched. Candidates follow core's `base_ref()` precedence
+    // (the remote's view first, since `origin/main` is what moves on fetch); the
+    // first range git can resolve wins, and a repo with none of them — an unborn
+    // HEAD, a repo with no main/master — just gets the uncommitted half.
+    for cand in ["origin/main", "origin/master", "main", "master"] {
+        if let Some(out) = git::git_out(&cwd, &["diff", "--name-status", "-z", &format!("{cand}...HEAD")]) {
+            for (p, k) in parse_name_status_z(&out) {
+                map.insert(p, k);
+            }
+            break;
+        }
+    }
+    // Uncommitted. `--untracked-files=all` is not optional: the default
+    // `-unormal` collapses a whole new directory into one `dir/` record, which
+    // would mark the directory and leave every file inside it unmarked.
+    //
+    // Applied SECOND so it wins on collision — it describes the disk as it is
+    // now. A file added in a commit and then deleted has to read `deleted`
+    // (there is no row to tint, only a ghost to draw), not `added`.
+    if let Some(out) = git::git_out(&cwd, &["status", "--porcelain", "-z", "--untracked-files=all"]) {
+        for (p, k) in parse_status_z(&out) {
+            map.insert(p, k);
+        }
+    }
+    let files = map
+        .into_iter()
+        .map(|(rel, status)| FileChange { path: top.join(&rel).to_string_lossy().to_string(), status })
+        .collect();
+    Ok(ChangeSet { root: top.to_string_lossy().to_string(), files })
+}
+
+/// `git status --porcelain -z --untracked-files=all` → (repo-relative, kind).
+///
+/// `-z` records are NUL-terminated `XY <path>`, and a rename/copy puts the
+/// ORIGINAL path in the NEXT record instead of after a ` -> ` — which is the
+/// whole reason for `-z`: no C-quoting, and no ambiguity with a filename that
+/// contains an arrow. A rename's original is GONE from disk, so it is reported
+/// deleted; that is what gives the tree a ghost row to draw for it.
+fn parse_status_z(out: &str) -> Vec<(String, ChangeKind)> {
+    let mut it = out.split('\0').filter(|r| !r.is_empty());
+    let mut v = Vec::new();
+    while let Some(rec) = it.next() {
+        // "XY path": two status columns, a space, then at least one path byte.
+        if rec.len() < 4 {
+            continue;
+        }
+        let (x, y) = (rec.as_bytes()[0], rec.as_bytes()[1]);
+        // Byte 3 is a char boundary — the two columns and the space are ASCII.
+        let path = rec[3..].to_string();
+        match (x, y) {
+            (b'?', _) => v.push((path, ChangeKind::Untracked)),
+            (b'!', _) => {} // ignored — only ever emitted with --ignored, never asked for
+            (b'R', _) | (b'C', _) => {
+                let orig = it.next().unwrap_or("").to_string();
+                v.push((path, ChangeKind::Added));
+                // A copy leaves its source where it was; a rename does not.
+                if x == b'R' && !orig.is_empty() {
+                    v.push((orig, ChangeKind::Deleted));
+                }
+            }
+            // Before the `A` arm on purpose: `AD` is staged-added then removed
+            // from the worktree, and the row that would carry `added` is gone.
+            (b'D', _) | (_, b'D') => v.push((path, ChangeKind::Deleted)),
+            (b'A', _) => v.push((path, ChangeKind::Added)),
+            // M, T, U and anything a future git adds: it differs, which is all
+            // four classes are for.
+            _ => v.push((path, ChangeKind::Modified)),
+        }
+    }
+    v
+}
+
+/// `git diff --name-status -z <range>` → (repo-relative, kind). Fields are
+/// NUL-separated, a status token then its path — except `R…`/`C…`, which are
+/// followed by TWO paths (old, then new).
+fn parse_name_status_z(out: &str) -> Vec<(String, ChangeKind)> {
+    let mut it = out.split('\0').filter(|r| !r.is_empty());
+    let mut v = Vec::new();
+    while let Some(tok) = it.next() {
+        let letter = tok.as_bytes()[0];
+        match letter {
+            b'R' | b'C' => {
+                let old = it.next().unwrap_or("").to_string();
+                let new = it.next().unwrap_or("").to_string();
+                if !new.is_empty() {
+                    v.push((new, ChangeKind::Added));
+                }
+                if letter == b'R' && !old.is_empty() {
+                    v.push((old, ChangeKind::Deleted));
+                }
+            }
+            _ => {
+                // A trailing status with no path means truncated output; stop
+                // rather than pairing it with the next record's status token.
+                let Some(path) = it.next() else { break };
+                let kind = match letter {
+                    b'A' => ChangeKind::Added,
+                    b'D' => ChangeKind::Deleted,
+                    _ => ChangeKind::Modified,
+                };
+                v.push((path.to_string(), kind));
+            }
+        }
+    }
+    v
 }
 
 /// File contents for the viewer. Capped (default 1 MiB) and binary-guarded
@@ -3116,6 +3281,7 @@ pub fn run() {
             open_editor,
             open_terminal,
             list_dir,
+            changed_files,
             read_file,
             read_file_base64,
             write_file,
@@ -3306,5 +3472,187 @@ mod tests {
         // 11 bytes back = offset 7, two bytes into the 4-byte emoji at 5..9
         assert_eq!(tail_lines(&p, 11), vec!["cccc"]);
         let _ = std::fs::remove_file(&p);
+    }
+
+    // ── change set parsers ───────────────────────────────────────────────
+    // Fixtures are real `-z` output: NUL-TERMINATED records, not newlines.
+
+    use ChangeKind::*;
+
+    fn st(out: &str) -> Vec<(String, ChangeKind)> {
+        parse_status_z(out)
+    }
+    fn ns(out: &str) -> Vec<(String, ChangeKind)> {
+        parse_name_status_z(out)
+    }
+    fn p(s: &str, k: ChangeKind) -> (String, ChangeKind) {
+        (s.to_string(), k)
+    }
+    /// Records joined the way git emits them: NUL-TERMINATED, one per entry.
+    /// Built from a slice rather than one `\`-continued literal — the
+    /// continuation strips leading whitespace, which would silently eat the very
+    /// status column (` M`, ` D`) these fixtures exist to cover.
+    fn z(recs: &[&str]) -> String {
+        recs.iter().map(|r| format!("{r}\0")).collect()
+    }
+
+    #[test]
+    fn status_z_classifies_every_column_pair_the_tree_can_meet() {
+        let out = z(&[
+            " M src/App.tsx",
+            "M  src/lib.rs",
+            "MM Cargo.toml",
+            "A  src/new.rs",
+            "?? notes.md",
+            " D gone.txt",
+            "D  staged-gone.txt",
+            " T link",
+            "UU conflict.rs",
+        ]);
+        assert_eq!(
+            st(&out),
+            vec![
+                p("src/App.tsx", Modified),
+                p("src/lib.rs", Modified),
+                p("Cargo.toml", Modified),
+                p("src/new.rs", Added),
+                p("notes.md", Untracked),
+                p("gone.txt", Deleted),
+                p("staged-gone.txt", Deleted),
+                p("link", Modified),
+                p("conflict.rs", Modified),
+            ]
+        );
+    }
+
+    /// `AD` is added to the index and then removed from the worktree. There is no
+    /// row on disk to call "added", so it has to come back deleted — otherwise
+    /// the tree marks a directory and shows nothing inside it.
+    #[test]
+    fn status_z_reports_a_staged_add_deleted_from_the_worktree_as_deleted() {
+        assert_eq!(st("AD src/oops.rs\0"), vec![p("src/oops.rs", Deleted)]);
+    }
+
+    /// The original of a rename lives in the NEXT record, and it is gone from
+    /// disk — the ghost row the tree draws for it depends on this pair. A COPY's
+    /// source is still there, so it must not be reported.
+    #[test]
+    fn status_z_splits_a_rename_into_added_plus_deleted_and_leaves_a_copy_alone() {
+        assert_eq!(
+            st("R  new/name.rs\0old/name.rs\0"),
+            vec![p("new/name.rs", Added), p("old/name.rs", Deleted)]
+        );
+        assert_eq!(st("C  copy.rs\0orig.rs\0"), vec![p("copy.rs", Added)]);
+        // …and the extra field must be CONSUMED: a record after a rename is a
+        // status again, not a path.
+        assert_eq!(
+            st("R  a\0b\0?? c\0"),
+            vec![p("a", Added), p("b", Deleted), p("c", Untracked)]
+        );
+    }
+
+    /// A filename git would C-quote in the newline format arrives raw under `-z`
+    /// — including a space, which is why the path starts at byte 3 and is never
+    /// split on whitespace.
+    #[test]
+    fn status_z_keeps_paths_with_spaces_and_non_ascii_whole() {
+        assert_eq!(st("?? docs/my notes.md\0"), vec![p("docs/my notes.md", Untracked)]);
+        assert_eq!(st(" M docs/éclair 🎉.md\0"), vec![p("docs/éclair 🎉.md", Modified)]);
+    }
+
+    #[test]
+    fn status_z_ignores_junk_records() {
+        // `!!` only appears with --ignored, but the tree must not show ignored
+        // files as untracked if it ever does; a stub too short to hold a path is
+        // not a record.
+        assert_eq!(st("!! target/debug\0 M ok.rs\0"), vec![p("ok.rs", Modified)]);
+        assert_eq!(st("?? \0"), vec![]);
+        assert_eq!(st(""), vec![]);
+    }
+
+    #[test]
+    fn name_status_z_pairs_each_letter_with_its_path() {
+        let out = "M\0src/App.tsx\0A\0src/new.rs\0D\0old.rs\0T\0link\0";
+        assert_eq!(
+            ns(out),
+            vec![
+                p("src/App.tsx", Modified),
+                p("src/new.rs", Added),
+                p("old.rs", Deleted),
+                p("link", Modified),
+            ]
+        );
+    }
+
+    /// `R100`/`C75` carry a similarity score on the token and TWO paths after it.
+    /// Reading only one would pair the next record's status with a path.
+    #[test]
+    fn name_status_z_consumes_both_paths_of_a_rename() {
+        assert_eq!(
+            ns("R100\0old.rs\0new.rs\0M\0after.rs\0"),
+            vec![p("new.rs", Added), p("old.rs", Deleted), p("after.rs", Modified)]
+        );
+        assert_eq!(ns("C75\0orig.rs\0copy.rs\0"), vec![p("copy.rs", Added)]);
+    }
+
+    #[test]
+    fn name_status_z_stops_on_a_status_with_no_path() {
+        assert_eq!(ns("M\0a.rs\0M"), vec![p("a.rs", Modified)]);
+        assert_eq!(ns(""), vec![]);
+    }
+
+    /// The two calls' REAL output, captured verbatim from a scratch repo whose
+    /// branch carries one of every shape at once: a commit that modified, added,
+    /// deleted and renamed, then uncommitted work that modified, deleted, and
+    /// left an untracked file inside a brand-new directory. Both parsers are
+    /// covered above; this is the ONE case that asserts what the frontend
+    /// actually receives, and it is real bytes rather than a guess at the format.
+    #[test]
+    fn the_union_matches_what_git_printed_for_a_branch_with_every_shape() {
+        let diff = z(&[
+            "D", "docs/old.md",
+            "A", "src/added.rs",
+            "M", "src/mod.rs",
+            "R100", "src/moved-from.rs", "src/moved-to.rs",
+        ]);
+        let status = z(&[" M src/keep.rs", " D tools/gen.sh", "?? fresh/deep/untracked.txt"]);
+        let mut map: BTreeMap<String, ChangeKind> = BTreeMap::new();
+        for (k, v) in ns(&diff) {
+            map.insert(k, v);
+        }
+        for (k, v) in st(&status) {
+            map.insert(k, v);
+        }
+        let want: BTreeMap<String, ChangeKind> = [
+            // the rename's source is gone, so the tree gets a ghost for it
+            ("docs/old.md", Deleted),
+            ("src/moved-from.rs", Deleted),
+            ("tools/gen.sh", Deleted),
+            ("src/added.rs", Added),
+            ("src/moved-to.rs", Added),
+            ("src/mod.rs", Modified),
+            ("src/keep.rs", Modified),
+            // `-uall`: the file, not the `fresh/` directory that holds it
+            ("fresh/deep/untracked.txt", Untracked),
+        ]
+        .into_iter()
+        .map(|(p, k)| (p.to_string(), k))
+        .collect();
+        assert_eq!(map, want);
+    }
+
+    /// The whole point of the two-call union: the working tree is applied second
+    /// and wins, because it describes the disk the tree is about to list.
+    #[test]
+    fn working_tree_status_overrides_the_committed_one_for_the_same_path() {
+        let mut map: BTreeMap<String, ChangeKind> = BTreeMap::new();
+        for (k, v) in ns("A\0src/new.rs\0M\0src/App.tsx\0") {
+            map.insert(k, v);
+        }
+        for (k, v) in st(" D src/new.rs\0") {
+            map.insert(k, v);
+        }
+        assert_eq!(map.get("src/new.rs"), Some(&Deleted));
+        assert_eq!(map.get("src/App.tsx"), Some(&Modified));
     }
 }

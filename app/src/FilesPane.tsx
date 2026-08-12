@@ -25,12 +25,110 @@ import type { Settings } from "./settings";
 // `link` is the symlink target as written (relative stays relative);
 // `link_block` is why the backend will not follow it — absent when it will.
 type LinkBlock = "outside" | "git" | "missing";
-type FsEntry = { name: string; path: string; is_dir: boolean; ignored?: boolean; link?: string | null; link_block?: LinkBlock | null };
+type FsEntry = {
+  name: string; path: string; is_dir: boolean; ignored?: boolean; link?: string | null; link_block?: LinkBlock | null;
+  /** Client-side only: this row has no directory entry behind it. A deleted path
+   *  is not on disk, so the tree INVENTS its row (and any directory the deletion
+   *  took with it) rather than marking a folder whose changed child can't be
+   *  shown. Never set by `list_dir`. */
+  ghost?: true;
+};
 
 const BLOCK_WHY: Record<LinkBlock, string> = {
   outside: "outside the workspace, not followed",
   git: "inside .git, not followed",
   missing: "target is missing",
+};
+
+// ── change set ───────────────────────────────────────────────────────────
+// What differs from the branch's BASE — committed on this branch and
+// uncommitted alike. One `changed_files` call per refresh for the whole tree
+// (see lib.rs); everything below turns that flat list into per-row answers.
+
+/** Mirrors lib.rs `ChangeKind`. */
+type ChangeKind = "modified" | "added" | "untracked" | "deleted";
+type FileChange = { path: string; status: ChangeKind };
+type ChangeSetDto = { root: string; files: FileChange[] };
+
+type Changes = {
+  /** the worktree top the backend resolved these against, canonical */
+  root: string;
+  files: Map<string, ChangeKind>;
+  /** absolute dir → changed files anywhere beneath it: the upward cascade AND
+   *  the count badge, which is the only way to tell a one-file directory from a
+   *  rewritten subsystem without expanding it */
+  dirs: Map<string, number>;
+  /** absolute dir → ghost rows to splice into its listing (see `FsEntry.ghost`) */
+  ghosts: Map<string, FsEntry[]>;
+};
+const NO_CHANGES: Changes = { root: "", files: new Map(), dirs: new Map(), ghosts: new Map() };
+
+const parentOf = (p: string) => p.slice(0, p.lastIndexOf("/"));
+const nameOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+
+/** `list_dir`'s order — directories first, then case-insensitive by name.
+ *  Compared with `<`/`>` and not localeCompare, because the backend sorts by
+ *  `to_lowercase().cmp()`, a plain codepoint compare: localeCompare would file a
+ *  spliced ghost `éclair.md` next to "e" where the real listing puts it after
+ *  "z", and the ghost would sit visibly out of order. */
+const cmpEntries = (a: FsEntry, b: FsEntry) => {
+  const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
+  return Number(b.is_dir) - Number(a.is_dir) || (an < bn ? -1 : an > bn ? 1 : 0);
+};
+
+/** Flat list → per-row lookups, once per refresh. Every changed path walks up to
+ *  the root: an ancestor collects the count, and a DELETED path also leaves a
+ *  ghost at each level, because `git rm -r tools/` takes the directory with it
+ *  and there would otherwise be no row anywhere to hang the mark on. Ghosts a
+ *  listing does have on disk are dropped at render (`withGhosts`), which is what
+ *  keeps this from having to know what still exists. */
+function buildChanges(dto: ChangeSetDto): Changes {
+  const root = dto.root.replace(/\/+$/, "");
+  const files = new Map<string, ChangeKind>();
+  const dirs = new Map<string, number>();
+  // dir → name → row, so two deleted files under one vanished directory yield a
+  // single ghost dir instead of one per file.
+  const byDir = new Map<string, Map<string, FsEntry>>();
+  for (const c of dto.files) {
+    if (!root || !c.path.startsWith(`${root}/`)) continue; // not in this tree
+    files.set(c.path, c.status);
+    let child = c.path;
+    let dir = parentOf(child);
+    while (dir.length >= root.length) {
+      dirs.set(dir, (dirs.get(dir) ?? 0) + 1);
+      if (c.status === "deleted") {
+        let m = byDir.get(dir);
+        if (!m) { m = new Map(); byDir.set(dir, m); }
+        // Only the leaf is a file; every level above it is a directory that may
+        // or may not still exist.
+        if (!m.has(nameOf(child))) m.set(nameOf(child), { name: nameOf(child), path: child, is_dir: child !== c.path, ghost: true });
+      }
+      if (dir === root) break;
+      child = dir;
+      dir = parentOf(dir);
+    }
+  }
+  return { root, files, dirs, ghosts: new Map([...byDir].map(([d, m]) => [d, [...m.values()]])) };
+}
+
+/** A listing plus the ghost rows for `dir` that are genuinely gone — anything
+ *  the real listing still has wins, so a file deleted from the index but left on
+ *  disk keeps its one real row. */
+function withGhosts(dir: string, kids: FsEntry[], changes: Changes): FsEntry[] {
+  const g = changes.ghosts.get(dir);
+  if (!g?.length) return kids;
+  const have = new Set(kids.map((k) => k.name));
+  const add = g.filter((e) => !have.has(e.name));
+  return add.length ? [...kids, ...add].sort(cmpEntries) : kids;
+}
+
+/** The word the row's tooltip uses. `untracked` rather than "added" for a file
+ *  git has never seen: both are new, but only one of them is staged. */
+const CHANGE_WHY: Record<ChangeKind, string> = {
+  modified: "modified on this branch",
+  added: "added on this branch",
+  untracked: "untracked",
+  deleted: "deleted on this branch",
 };
 type FileRead = { content: string; truncated: boolean; binary: boolean; mtime: number; size: number };
 type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number };
@@ -38,9 +136,9 @@ type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number }
 // ── tree ─────────────────────────────────────────────────────────────────
 
 // One lazy directory node. Files bubble a click up via onOpen; dirs toggle.
-function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, onError }: {
+function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, onOpen, onError }: {
   entry: FsEntry; depth: number; openPath: string | null; showIgnored: boolean; reloadToken: number;
-  onOpen: (path: string) => void; onError: (e: unknown) => void;
+  changes: Changes; onOpen: (path: string) => void; onError: (e: unknown) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [kids, setKids] = useState<FsEntry[] | null>(null);
@@ -71,13 +169,20 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
   // `.git` it would NOT: the listing hides `.git` by name, the guard never asks,
   // so this gate is the whole defense there rather than a courtesy. The title
   // says where the link points and why nothing happens.
-  const inert = !!entry.link_block;
+  // A ghost FILE is inert for the same reason: it is not on disk, so every
+  // command behind the row would fail — a click could only raise a banner
+  // saying so. A ghost DIRECTORY still toggles; its children come from the
+  // change set, not from a listing.
+  const ghost = !!entry.ghost;
+  const inert = !!entry.link_block || (ghost && !entry.is_dir);
   useEffect(() => {
     // `inert` too, not just `open`: a link that becomes unfollowable while
     // expanded (retargeted, or its project unregistered) would otherwise keep
     // firing a doomed list_dir on every reload bump for as long as it stays
     // mounted — the children are already hidden by then.
-    if (!entry.is_dir || !open || inert) return;
+    // `ghost` likewise: a deleted directory has nothing to list, and
+    // canonicalize() in the guard would reject the path anyway.
+    if (!entry.is_dir || !open || inert || ghost) return;
     let alive = true;
     setLoading(true);
     invoke<FsEntry[]>("list_dir", { path: entry.path, showIgnored })
@@ -92,7 +197,7 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [entry.is_dir, entry.path, open, inert, showIgnored, reloadToken, onError]);
+  }, [entry.is_dir, entry.path, open, inert, ghost, showIgnored, reloadToken, onError]);
 
   const toggle = () => {
     if (inert) return;
@@ -102,16 +207,32 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
 
   const isSel = !entry.is_dir && openPath === entry.path;
   const kind = entry.is_dir ? null : fileInfo(entry.name).kind;
+  // A file says WHAT changed; a directory says HOW MUCH, since its own name
+  // never changed — something under it did.
+  const status = entry.is_dir ? undefined : changes.files.get(entry.path);
+  const count = entry.is_dir ? changes.dirs.get(entry.path) ?? 0 : 0;
   const title = [
     entry.link ? `${entry.name} → ${entry.link}` : entry.name,
     entry.link_block ? BLOCK_WHY[entry.link_block] : null,
+    status ? CHANGE_WHY[status] : null,
+    // A ghost DIRECTORY has no status of its own — git tracks files, so what is
+    // deleted is everything that was under it. Without this the strikethrough is
+    // the only thing saying so, and a tooltip that only counts changes reads as
+    // if the directory were still there.
+    ghost && entry.is_dir ? "deleted with its contents" : null,
+    count ? `${count} changed file${count === 1 ? "" : "s"}` : null,
     entry.ignored ? "gitignored" : null,
   ].filter(Boolean).join(" — ");
+  // A ghost dir's children are the change set's, not a listing's.
+  const shown = ghost
+    ? changes.ghosts.get(entry.path) ?? []
+    : kids && withGhosts(entry.path, kids, changes);
   return (
     <div className="tree-node">
       <button
         className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "") + (entry.ignored ? " ign" : "")
-          + (entry.link ? " link" : "") + (inert ? " inert" : "")}
+          + (entry.link ? " link" : "") + (inert ? " inert" : "")
+          + (status ? ` chg chg-${status}` : "") + (count ? " chg chg-dir" : "") + (ghost ? " ghost" : "")}
         style={{ paddingLeft: `calc(var(--s2) + ${depth} * var(--s3))` }}
         onClick={toggle}
         aria-disabled={inert || undefined}
@@ -123,16 +244,19 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, onOpen, on
         {/* The one thing the row cannot say with an icon slot it already spends
             on file kind: that this name is a pointer somewhere else. */}
         {entry.link && <span className="tree-link" aria-hidden="true">↗</span>}
+        {/* Shown expanded too, not just collapsed: it is the same number either
+            way, and a badge that vanished on expand would read as "resolved". */}
+        {count > 0 && <span className="tree-count" aria-hidden="true">{count}</span>}
       </button>
       {entry.is_dir && !inert && open && (
         <div className="tree-kids">
           {/* only while there is nothing to show — a reload must not add a
               spinner line under every open directory every few seconds */}
           {loading && kids === null && <div className="tree-note">…</div>}
-          {kids && kids.length === 0 && !loading && <div className="tree-note">empty</div>}
-          {kids?.map((k) => (
+          {shown && shown.length === 0 && !loading && <div className="tree-note">empty</div>}
+          {shown?.map((k) => (
             <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath}
-              showIgnored={showIgnored} reloadToken={reloadToken} onOpen={onOpen} onError={onError} />
+              showIgnored={showIgnored} reloadToken={reloadToken} changes={changes} onOpen={onOpen} onError={onError} />
           ))}
         </div>
       )}
@@ -152,6 +276,7 @@ function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onError }:
 }) {
   const [entries, setEntries] = useState<FsEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [changes, setChanges] = useState<Changes>(NO_CHANGES);
   // No setEntries(null) here: this effect re-runs on every reload, and blanking
   // first would flash "loading…" over the whole tree each time. `root` cannot
   // change under a mounted FileTree anyway — the caller keys on it — so the
@@ -163,6 +288,28 @@ function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onError }:
       .catch((e) => { if (alive) setErr(String(e)); });
     return () => { alive = false; };
   }, [root, showIgnored, reloadToken]);
+  // ONE call for the whole tree, here rather than per node: `TreeNode` would
+  // make it a git process per open directory per bump, and the tree re-lists
+  // every open directory on every bump. Unmounted while the reader is expanded,
+  // so a full-pane read costs nothing.
+  //
+  // The markers are ADDITIVE, so a failure keeps the last good set and leaves
+  // the tree fully usable — and is reported only when the message CHANGES, for
+  // the same reason TreeNode's listing errors are: this re-runs on every bump,
+  // and a repo that stays unreadable would otherwise re-raise the banner and
+  // append to app.log forever.
+  const chErr = useRef<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    invoke<ChangeSetDto>("changed_files", { root })
+      .then((dto) => { if (alive) { setChanges(buildChanges(dto)); chErr.current = null; } })
+      .catch((e) => {
+        if (!alive) return;
+        const msg = String(e);
+        if (chErr.current !== msg) { chErr.current = msg; onError(e); }
+      });
+    return () => { alive = false; };
+  }, [root, reloadToken, onError]);
   // The error REPLACES the tree only when there is no tree yet. Once a listing
   // has landed, a failed reload shows the reason above the last good one
   // instead of swapping it out: this effect re-runs on every bump now, so
@@ -171,12 +318,16 @@ function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onError }:
   if (err && !entries) return <div className="tree-note err-note">{err}</div>;
   if (!entries) return <div className="tree-note">loading…</div>;
   if (!entries.length) return <div className="tree-note">empty worktree</div>;
+  // Keyed on the CANONICAL root the backend resolved, not the `root` prop: a
+  // place path can run through a symlink, and the ghosts are filed under
+  // resolved paths (as is every path `list_dir` returns).
+  const rows = withGhosts(changes.root || root, entries, changes);
   return (
     <div className="filetree">
       {err && <div className="tree-note err-note">{err}</div>}
-      {entries.map((e) => (
+      {rows.map((e) => (
         <TreeNode key={e.path} entry={e} depth={0} openPath={openPath}
-          showIgnored={showIgnored} reloadToken={reloadToken} onOpen={onOpen} onError={onError} />
+          showIgnored={showIgnored} reloadToken={reloadToken} changes={changes} onOpen={onOpen} onError={onError} />
       ))}
     </div>
   );
