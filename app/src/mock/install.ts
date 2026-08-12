@@ -428,6 +428,11 @@ function seedDir(dir: string) {
   let entries: MockEntry[];
   if (base === "src") entries = [
     mk("App.tsx", false), mk("main.rs", false), mk("lib.rs", false), mk("logo.png", false),
+    // Untracked in MOCK_CHANGED, and therefore listed: an untracked file is one
+    // that exists on disk and not in git. Leaving it out of the listing would
+    // make the tree's changed-file COUNT larger than the rows it can show, which
+    // is exactly the bug the ghost rows exist to prevent.
+    mk("new.tsx", false),
     mk("bundle.js", false, true),
   ];
   else if (base === "crates") entries = [mk("worktrees-core", true), mk("worktrees-cli", true)];
@@ -462,6 +467,23 @@ function seedDir(dir: string) {
   }
   return entries;
 }
+
+/** What the selected place's branch changed, in `changed_files`' shape: paths
+ *  that differ from the branch's base, committed and uncommitted alike. Kept
+ *  RELATIVE so any place gets a set, and deliberately covering all four classes
+ *  plus the two shapes the tree has to invent a row for — a deleted file whose
+ *  directory survives, and one that took its directory with it. */
+const MOCK_CHANGED: Array<[string, "modified" | "added" | "untracked" | "deleted"]> = [
+  ["src/App.tsx", "modified"],
+  ["src/lib.rs", "modified"],
+  ["src/new.tsx", "untracked"],
+  // Two levels down: the mark has to reach `crates/` for a collapsed row to
+  // admit there is work inside it.
+  ["crates/worktrees-core/src/lib.rs", "modified"],
+  ["README.md", "added"],
+  ["docs/old-spec.md", "deleted"], // ghost row in a directory that still exists
+  ["tools/gen.sh", "deleted"], // ghost row AND a ghost directory
+];
 
 type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
@@ -793,6 +815,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         const an = a.name.toLowerCase(), bn = b.name.toLowerCase();
         return Number(b.is_dir) - Number(a.is_dir) || (an < bn ? -1 : an > bn ? 1 : 0);
       });
+    }
+    // Backend parity: absolute paths under the CANONICAL root the command
+    // resolved, which it returns rather than leaving the tree to assume — the
+    // frontend anchors its cascade and its ghost rows on it.
+    case "changed_files": {
+      const root = args.root as string;
+      return { root, files: MOCK_CHANGED.map(([rel, status]) => ({ path: `${root}/${rel}`, status })) };
     }
     case "read_file": {
       const f = fsFile(args.path as string);

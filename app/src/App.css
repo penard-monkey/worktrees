@@ -859,6 +859,35 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .tree-row.inert { cursor: default; }
 .tree-row.inert .tree-name { color: var(--txt-dim); }
 .tree-row.inert:hover { background: transparent; }
+/* Differs from the branch's BASE — committed on this branch or not (see
+   `changed_files` in lib.rs). The NAME carries it, tint plus weight, rather than
+   a new column: the row already spends its glyph slot on file kind, and every
+   other state this tree has (gitignored, link, inert) is likewise a colour on
+   the same text. Declared AFTER .inert so a ghost row's own styling below wins.
+   A selected changed row keeps its tint — selection still reads through the
+   wash and the inset bar, and dropping the tint would hide the one state the
+   user is looking at. */
+.tree-row.chg .tree-name { font-weight: 600; }
+.tree-row.chg-modified .tree-name { color: var(--warn); }
+/* Added and untracked are both net-new against the base. Which one is staged is
+   a distinction for the tooltip, not for a 13px row. */
+.tree-row.chg-added .tree-name,
+.tree-row.chg-untracked .tree-name { color: var(--ok); }
+.tree-row.chg-deleted .tree-name { color: var(--danger); }
+/* A changed DIRECTORY gets no hue: it did not change, something under it did.
+   Lifting it out of the folder grey IS the mark, and the count carries the
+   detail — one file is a typo fix, twelve is a subsystem. */
+.tree-row.chg-dir .tree-name { color: var(--txt); font-weight: 550; }
+.tree-count {
+  flex: none; margin-left: auto; padding: 0 4px; border-radius: var(--r-full);
+  background: var(--bg-elev); color: var(--txt-dim);
+  font-size: var(--fs-micro); font-variant-numeric: tabular-nums;
+}
+/* Gone from disk. A deleted path has no directory entry, so this row is invented
+   (`ghost` in FilesPane) — otherwise a directory would carry a mark with nothing
+   marked inside it. Struck and dimmed instead of red: the strike says deleted
+   once, and files are inert because there is nothing left to open. */
+.tree-row.ghost .tree-name { color: var(--txt-mute); font-weight: 400; text-decoration: line-through; }
 .tree-note { padding: var(--s2) var(--s3); color: var(--txt-mute); font-size: var(--fs-meta); }
 .err-note { color: var(--danger); white-space: pre-wrap; word-break: break-word; }
 

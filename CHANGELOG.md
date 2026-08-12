@@ -3,6 +3,32 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **The Files tab says what the branch changed.** The tree tints and bolds every
+  file that differs from the branch's base — committed on this branch *and*
+  uncommitted, staged, unstaged or untracked alike — so the dock answers "what is
+  this worktree's work" without a terminal. Amber is modified, green is new
+  (added or untracked), red is deleted. The mark cascades: a directory anywhere
+  above a changed file lifts out of the folder grey and carries a count, which is
+  what tells a one-file fix from a rewritten subsystem while it is still
+  collapsed.
+
+  The base is the merge base with the repo's base branch (`origin/main`, else
+  `origin/master`, else the local ones) — the same ref the nav's ↑↓ divergence
+  already measures against, and the reason a base branch that has moved on does
+  not light up every file those other commits touched. Note this is a wider
+  question than the nav's dirty count, which stays uncommitted-only: a branch with
+  clean commits shows marks in the tree and no dirty badge in the nav.
+
+  A deleted path has no directory entry to tint, so the tree invents its row —
+  dimmed, struck through and inert — including the directories a `git rm -r` took
+  with it. Without those a directory would carry a mark and show nothing marked
+  inside it. Cost is three git invocations per tree refresh for the WHOLE tree
+  (the tree already spends one `check-ignore` per open directory), and none at all
+  while the reader is expanded.
+
 ## [0.11.0] - 2026-08-10
 
 ### Fixed
