@@ -1263,9 +1263,35 @@ function App() {
   const refreshErr = useRef("");
   // Serialized last snapshot, for the no-change bail below.
   const lastSnap = useRef("");
+  // Start-order ticket for the read below. Eight call sites fire `refresh()` —
+  // the mount effect, mutate, runCmd, the "places:changed" listener, the
+  // visible-edge catch-up, reloadFiles, the tmux re-check and onConfigWritten —
+  // none of them awaiting each other, so several `list_workspace` sweeps can be
+  // in flight at once and they do NOT resolve in the order they started (each
+  // is seconds of git fan-out whose duration
+  // depends on which project it hit). Without a ticket the LAST to RESOLVE wins:
+  // a sweep that snapshotted the store BEFORE a declared write lands after the
+  // write's own refresh and puts the pre-write value back. That is the renamed
+  // place reverting to its slug in the nav.
+  const refreshSeq = useRef(0);
+  // The newest ticket that has already SPOKEN. The test is `older than what has
+  // landed`, not `not the newest issued`: a read only has to outrank what is on
+  // screen, and gating on the newest ISSUED ticket instead would discard every
+  // read that completes while another is in flight — during a burst of refreshes
+  // (the Refresh button, a run of edits, a workspace whose sweep outlasts the
+  // next trigger) that is every one of them, and the tree stops updating until
+  // the burst ends. Each read carries a view at least as new as the one before
+  // it, so letting them land in ticket order is both safe and live.
+  const refreshDone = useRef(0);
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
     try {
       const w = await invoke<Workspace>("list_workspace");
+      // A read that a NEWER one already spoke for is history, not news — its
+      // snapshot predates that one's by construction. Dropping it here is what
+      // stops a pre-write sweep from putting the old value back.
+      if (seq < refreshDone.current) return;
+      refreshDone.current = seq;
       // Read the claim into a local FIRST: the updater below runs when React gets
       // to it, by which time the ref would already be cleared and every message
       // would look like someone else's.
@@ -1281,6 +1307,10 @@ function App() {
       lastSnap.current = snap;
       setWs(w);
     } catch (e) {
+      // Same rule for failures: a superseded read must not banner an error that
+      // a newer, successful sweep has already disproved. A FAILED read does not
+      // advance `refreshDone` — it spoke for nothing.
+      if (seq < refreshDone.current) return;
       refreshErr.current = String(e); // same text fail() shows
       fail(e);
     }
@@ -1290,8 +1320,14 @@ function App() {
    * different things, and a later refresh that happens to match `lastSnap` would
    * then bail while `ws` still held the stale value — permanently, because the
    * snapshot is stable at that point. Commands that mutate the workspace and get
-   * a fresh one back go through here. */
+   * a fresh one back go through here.
+   *
+   * It also OUTRANKS every read still in flight. The workspace here came back
+   * from the command that changed things, so it is newer than any sweep that
+   * started before it — without the bump, a read issued before `remove_project`
+   * resolves after it and puts the removed project back. */
   const commitWs = useCallback((w: Workspace) => {
+    refreshDone.current = ++refreshSeq.current;
     lastSnap.current = JSON.stringify(w);
     setWs(w);
   }, []);
@@ -1808,16 +1844,30 @@ function App() {
    *  The refresh still follows and remains the source of truth; this only closes
    *  the gap until it lands.
    *
-   *  ⚠ Deliberately does NOT touch `lastSnap`. That is refresh's record of what
-   *  the BACKEND last said, and the confirming refresh has to be able to tell
-   *  its own result apart from it — writing an optimistic value there would make
-   *  the real one look like a no-op and get dropped.
+   *  ⚠ Never write the optimistic value into `lastSnap`. That is refresh's record
+   *  of what the BACKEND last said, and a guess does not belong in it. CLEARING
+   *  it is the opposite move and is required: `ws` now holds something the
+   *  backend never produced, so the confirming refresh must be allowed to write
+   *  even when the backend's answer matches what refresh last saw. Otherwise a
+   *  write that changes nothing on disk — one that FAILED, a name retyped
+   *  identically, a note blurred unedited — leaves the dedupe bailing against a
+   *  snapshot that still describes the pre-patch world, and the optimistic value
+   *  stands with nothing left to correct it. `""` never equals a real
+   *  JSON.stringify, so the next refresh always lands; the dedupe resumes on the
+   *  one after it, which is the idle case it was written for.
    *
    *  ⚠ Only for declared fields the backend copies through verbatim. NOT for
    *  `lifecycle`: `lifecycle_effective` is reconciled server-side from the
    *  declared label AND live tmux state, so patching the label alone would show
    *  a row disagreeing with its own badge until the refresh landed. */
-  const patchDeclared = (repo: string, slug: string, patch: Partial<NonNullable<Declared>>) =>
+  const patchDeclared = (repo: string, slug: string, patch: Partial<NonNullable<Declared>>) => {
+    // Outranks every read already in flight, the same way commitWs does. Those
+    // reads were issued before the user typed this, so none of them can contain
+    // it — letting one land would wipe the value back off the screen, and the
+    // confirming refresh (issued after this, so higher-ticketed) still corrects
+    // whatever the guess got wrong.
+    refreshDone.current = ++refreshSeq.current;
+    lastSnap.current = ""; // force the confirming refresh to land — see above
     setWs((cur) =>
       !cur ? cur : {
         projects: cur.projects.map((pv) =>
@@ -1835,6 +1885,7 @@ function App() {
         ),
       },
     );
+  };
 
   const mutate = async (p: Promise<unknown>) => {
     try { await p; } catch (e) { fail(e); }

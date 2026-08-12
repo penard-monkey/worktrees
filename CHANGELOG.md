@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **A background refresh can no longer put a stale name back.** Every screen
+  refresh is a sweep of all your projects, several can be running at once, and
+  whichever finished last used to win — so a sweep that started *before* a rename
+  could land *after* it and quietly restore the old name, where it stuck until
+  something else changed. Reads are now applied in the order they were started
+  and stale ones are dropped, which also fixes a removed project reappearing.
 - **Renaming a place (or pinning one, or editing its note) shows up at once.**
   The change was written immediately, but the nav only caught up after the app
   had re-scanned every registered project — each one a fan-out of git calls, so
