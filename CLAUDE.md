@@ -33,6 +33,28 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 
 CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 
+**A stale release binary does not only make bats FAIL — it can make it PASS.**
+The note above says "fail mysteriously", which is the friendlier half. Edit a
+crate *after* the release build and `make test` happily green-lights the OLD
+binary; the same goes for the `ls --json` diff below, which then compares the
+shipped binary against another copy of itself. Both read `target/release`, and
+neither notices it predates the change. Rebuild, then confirm before believing a
+result: `[ target/release/worktrees -nt crates/worktrees-core/src/store.rs ]`.
+
+**Report cargo with a grep, not a tail.** `cargo test -p worktrees-core | tail -4`
+prints `running 0 tests / ok. 0 passed` — that is the **Doc-tests** block, and
+the real `running 207 tests` is above the cut. A tail-truncated run reads exactly
+like a crate with no tests. Use `grep -E "^running|^test result"`. Related shell
+trap when scripting gates: `grep -c` **exits non-zero on a count of 0**, so
+`... | grep -c "^not ok" && next-gate` silently skips everything after it — a
+gate that never ran looks identical to a gate with no output.
+
+**A new test must be shown to FAIL first.** ROADMAP's zombie-children item
+records a regression test that passed identically with and without its fix.
+Break the thing under test (drop the `skip_serializing_if`, restore the old
+line), watch it go red, then restore. Two tests this repo now relies on were
+confirmed this way.
+
 **Consolidating a git invocation? Diff `ls --json` against the SHIPPED binary.**
 Folding three git calls into one `status --porcelain=v2` silently changed
 `upstream` for one worktree — v2 reports the CONFIGURED upstream, `rev-parse

@@ -27,7 +27,9 @@ button { cursor: pointer; }
 
 .app {
   display: grid;
-  grid-template-columns: var(--rail-w) var(--nav-w) minmax(0, 1fr);
+  /* Fallback only — App.tsx always sets this inline (the nav column disappears
+     on ⌘B). Four columns: rail, nav, .space (terminal + dock), rail. */
+  grid-template-columns: var(--rail-w) var(--nav-w) minmax(0, 1fr) var(--rail-w);
   height: 100%;
   background: var(--bg-abyss);
   color: var(--txt);
@@ -410,9 +412,21 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .g-more { color: var(--txt-mute); background: var(--bg-panel); padding: 0 4px; border-radius: var(--r-full); }
 .row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; }
 
+/* ── space ──
+ * One grid cell holding the selected place's whole workbench: the header on
+ * top, then the terminal and the dock side by side beneath it. The dock is a
+ * FLEX SIBLING of `main`, not a grid column, because a header spanning two grid
+ * columns cannot be expressed when the columns are removed rather than zeroed
+ * (see `gridCols` in App.tsx — every line index shifts with ⌘B). */
+.space { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* `position: relative` anchors the reading-mode overlay (.reading). It lives
+ * here rather than on `.main` so the overlay is as wide as terminal + dock. */
+.space-body { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+
 /* ── main ── */
-/* `position: relative` anchors the reading-mode overlay (.reading) */
-.main { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-abyss); }
+/* `position: relative` no longer anchors .reading (that moved to .space-body);
+ * kept so anything else inside the pane still positions against it. */
+.main { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-abyss); }
 
 /* tmux missing: a standing condition, not a toast — it sits above the top bar
    until tmux is actually there. Amber (the "needs a human" colour), one line,
@@ -459,6 +473,27 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi);
 }
+/* The slug beside a renamed place. Quieter than the branch chip and NOT a
+   chip — it is what the directory and the tmux session are called, so it has to
+   stay legible without competing with the name. */
+.slug-alias {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt-mute);
+}
+/* Rename-in-place. Sized like the name it replaces so the header does not jump
+   when the editor opens. */
+.title-input {
+  flex: 0 1 auto; min-width: 8ch; max-width: 32ch;
+  padding: 1px var(--s2);
+  background: var(--bg-elev); color: var(--txt-hi);
+  border: 1px solid var(--accent); border-radius: var(--r-sm);
+  font-size: var(--fs-h); font-weight: var(--fw-bold);
+}
+.title-input:focus { outline: none; }
+/* ⌘K: the slug behind a renamed place, so the row still says which worktree */
+.qs-alias { color: var(--txt-mute); font-family: var(--font-mono); font-size: var(--fs-meta); }
+
 .topbar .branch {
   flex: 0 1 auto; min-width: 0; max-width: 45%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1061,10 +1096,11 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 
 /* ── reading mode: the viewer over the main pane ── */
 .reading {
-  /* `inset` is overridden inline so this can reach across the dock — see the
-     call site in App.tsx. z-index sits above the dock but BELOW the settings
-     sheet and the ⌘K palette, which own the keyboard when they are up. */
-  position: absolute; top: 0; bottom: 0; z-index: 20;
+  /* Fills `.space-body`, so it covers the terminal AND the dock with no inline
+     offset — the body is exactly as wide as the two together. z-index sits
+     above the dock but BELOW the settings sheet and the ⌘K palette, which own
+     the keyboard when they are up. */
+  position: absolute; inset: 0; z-index: 20;
   display: flex; flex-direction: column;
   background: var(--bg-abyss);
   animation: reading-in var(--dur) var(--ease);

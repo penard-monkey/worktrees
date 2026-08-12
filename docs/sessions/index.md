@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-11](2026-08-11-space-workbench/summary.html) | a space owns its whole workbench — header over terminal+dock, per-place panel memory, nameable places |
 | [2026-08-10](2026-08-10-files-tab-visibility/summary.html) | the Files tab stops hiding things silently — gitignored by default, symlinks marked → v0.11.0 |
 | [2026-08-10](2026-08-10-global-skills-repo/summary.html) | close-out leaves the repo — a personal skills repo at `~/workspace/claude-skills` |
 | [2026-08-10](2026-08-10-nav-activity-age/summary.html) | nav clock + order track activity, not attention → v0.11.0 |

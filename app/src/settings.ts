@@ -25,6 +25,51 @@ export function resolveTheme(s: Pick<Settings, "theme" | "theme_light" | "theme_
   return s.theme;
 }
 
+/** The panel state a SPACE owns — what is open, which tab, how wide.
+ *
+ *  Deliberately just these three. The Files viewer's own preferences
+ *  (`files_layout`, `files_split_pct`, `files_wrap`, `files_md_source`,
+ *  `files_show_ignored`) stay GLOBAL: they are how you like to read a file, not
+ *  which panel a place has open. The nav stays global for the same reason in
+ *  reverse — it is how you LEAVE a space, so it must not move under you when
+ *  you arrive somewhere.
+ *
+ *  The open FILE is not here either. A remembered path can be deleted, renamed
+ *  or gitignored between visits, which turns "restore what I left" into an
+ *  error banner on arrival. */
+export type PlacePanels = {
+  dock_open: boolean;
+  dock_tab: "files" | "terminal";
+  dock_width: number;
+};
+
+/** Key for the per-place records in `Settings` (`place_panels`,
+ *  `term_tab_names`). A place is identified by the PAIR — slugs are only unique
+ *  within a project. */
+export const placeKey = (repo: string, slug: string) => `${repo}|${slug}`;
+
+/** Settings as they apply to ONE place: the place's own remembered panels win
+ *  where present, and a place with no entry starts with the dock CLOSED. */
+export function panelsFor(s: Settings, key: string | null): Settings {
+  const p = key ? s.place_panels?.[key] : undefined;
+  if (p) return { ...s, ...p };
+  // A place you have never opened the dock in starts CLOSED — the global
+  // `dock_open` is NOT a seed.
+  //
+  // It used to be, on the theory that arriving somewhere new should not
+  // rearrange the furniture. In practice that made the dock SPREAD: open it in
+  // one place and every place you visited afterwards was already open before
+  // you asked for it, which is the same "it changed what I left it in"
+  // complaint pointed the other way. "No entry" has to mean "not set up yet",
+  // not "whatever the last place was set to".
+  //
+  // `dock_tab` and `dock_width` still seed from the globals: neither is visible
+  // until the dock is open, so inheriting them only decides what the FIRST
+  // deliberate open looks like, which is exactly where a last-used value is
+  // the right guess.
+  return s.dock_open ? { ...s, dock_open: false } : s;
+}
+
 export type Settings = {
   ui_rem: number; // 13–18
   term_family: string;
@@ -54,6 +99,14 @@ export type Settings = {
   // live shell is seeded back into the strip and spawns a fresh shell when you
   // activate it. Closing a tab explicitly drops its name.
   term_tab_names: Record<string, Record<number, string>>;
+  // Per-place panel state, keyed `repo|slug` (the same scheme as
+  // `term_tab_names`). An entry here means "this place has been SET UP"; its
+  // absence means the dock has never been opened there, and such a place starts
+  // CLOSED — see `panelsFor`, which deliberately does not let the global
+  // `dock_open` seed it. The flat `dock_tab`/`dock_width` DO still seed, since
+  // neither is visible until the dock is open. Entries persist across restarts
+  // and are pruned when a place or a project goes away.
+  place_panels: Record<string, PlacePanels>;
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
   ai_auto_resume: boolean; // single-click Enter resumes an existing Claude conversation (Claude only)
@@ -110,6 +163,7 @@ export const DEFAULTS: Settings = {
   files_md_source: false,
   files_show_ignored: true,
   term_tab_names: {},
+  place_panels: {},
   editor_cmd: "code",
   terminal_cmd: "",
   ai_auto_resume: true,
@@ -180,7 +234,10 @@ export const clampDock = (v: number, navW = 0, w = viewport()) =>
 export type Fit = { navShown: boolean; navW: number; dockShown: boolean; dockW: number; mainW: number; tight: boolean };
 
 /** Below this the topbar can't hold the status badges AND a readable slug, so
- * the badges retire — they're duplicated in the nav row and the status bar. */
+ * the badges retire — they're duplicated in the nav row and the status bar.
+ * Measured against the SPACE HEADER's width (main + dock), not `mainW`: the
+ * header spans both columns, so a wide dock gives it room the center pane
+ * alone does not have. */
 export const MAIN_TIGHT = 560;
 
 export function fitLayout(s: Settings, dockEligible: boolean, w = viewport()): Fit {
@@ -197,7 +254,7 @@ export function fitLayout(s: Settings, dockEligible: boolean, w = viewport()): F
     navW = navShown ? clampNav(s.nav_width, 0, w) : 0;
   }
   const mainW = w - RAILS_W - navW - dockW;
-  return { navShown, navW, dockShown, dockW, mainW, tight: mainW < MAIN_TIGHT };
+  return { navShown, navW, dockShown, dockW, mainW, tight: mainW + dockW < MAIN_TIGHT };
 }
 
 /** Write the visual settings to the DOM as CSS vars / data-attrs. Cheap; safe to call often.

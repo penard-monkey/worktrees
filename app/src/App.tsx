@@ -11,7 +11,7 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
-import { applySettings, clampDock, clampNav, DEFAULTS, fitLayout, loadSettings, saveSettings, viewportWidth, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, clampDock, clampNav, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -19,6 +19,9 @@ import "./App.css";
 type Declared = {
   lifecycle?: string;
   pinned?: boolean;
+  /// Display name. The slug stays the identity (see store.rs) — this only
+  /// changes what a place is CALLED. Use `nameOf(place)` to render either.
+  title?: string;
   note?: string;
   last_opened_epoch?: number;
   /// When Claude last FINISHED a task here (see store.rs). Opening a session
@@ -102,6 +105,10 @@ const SETTABLE = [
   { label: "Abandon", value: "abandoned" },
 ];
 const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
+/** What a place is CALLED. The slug remains its identity — the directory, the
+ *  tmux session and "Copy path" are all still slug-derived — so anywhere this
+ *  is rendered the slug must stay reachable rather than be replaced outright. */
+const nameOf = (p: { slug: string; declared?: Declared }) => p.declared?.title?.trim() || p.slug;
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
 const hasAttention = (p: Place) => !!p.dirty || !!p.ahead || !!p.behind;
 
@@ -351,6 +358,44 @@ function NewPlaceForm({ project, initialBranch, initialName, initialBase, onCrea
   );
 }
 
+// Rename-in-place for the space header's name.
+//
+// ⚠ MODULE SCOPE, and it has to be: a component defined inside App() gets a new
+// identity on every render, so React would unmount and recreate this input —
+// and the 3s poll renders App constantly. It would lose focus, the caret, and
+// any partial edit, roughly once per keystroke's worth of polling.
+//
+// Uncontrolled + committed on blur, matching the note strip. Enter commits,
+// Escape reverts; both blur, so `done` guards against the blur handler firing a
+// second commit after the key already handled it.
+function TitleEditor({ initial, slug, onCommit, onCancel }: {
+  initial: string;
+  slug: string;
+  onCommit: (v: string) => void;
+  onCancel: () => void;
+}) {
+  const done = useRef(false);
+  return (
+    <input
+      className="title-input"
+      defaultValue={initial}
+      autoFocus
+      spellCheck={false}
+      aria-label={`Name for ${slug}`}
+      placeholder={slug}
+      onFocus={(e) => e.currentTarget.select()}
+      onBlur={(e) => { if (!done.current) { done.current = true; onCommit(e.currentTarget.value); } }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") { done.current = true; onCommit(e.currentTarget.value); }
+        else if (e.key === "Escape") { done.current = true; onCancel(); }
+        else return;
+        e.preventDefault();
+        e.stopPropagation(); // never let Enter/Escape reach the global keydown
+      }}
+    />
+  );
+}
+
 // A place that does not exist yet — `new` is still running. It stands in the
 // nav where the real row will land, so the seconds of git fetch / worktree add /
 // tmux read as work in progress instead of a dead app. Deliberately inert: no
@@ -479,15 +524,20 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
     for (const it of items) {
       const { pv, p } = it;
       const slug = p.slug.toLowerCase();
+      // A renamed place must be findable by the name actually on screen —
+      // otherwise ⌘K is the one place a title makes you WORSE off.
+      const title = (p.declared?.title ?? "").toLowerCase();
       const branch = (p.branch ?? "").toLowerCase();
       const proj = basename(pv.root).toLowerCase();
       const note = (p.declared?.note ?? "").toLowerCase();
-      const composite = `${slug} ${branch} ${proj} ${note}`;
+      const composite = `${slug} ${title} ${branch} ${proj} ${note}`;
       // reject early: must match the whole composite as a subsequence
       if (fuzzyScore(q, composite) < 0) continue;
-      // rank on the best field, biased toward the slug
+      // rank on the best field, biased toward whatever NAMES the place — the
+      // title carries the slug's bias because it is what the user sees
       const s = Math.max(
         fuzzyScore(q, slug) + 200, // slug hits win
+        title ? fuzzyScore(q, title) + 200 : -1,
         fuzzyScore(q, branch),
         fuzzyScore(q, proj),
         fuzzyScore(q, note),
@@ -568,8 +618,9 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
                     title={act === "busy" ? "Claude working" : act === "waiting" ? "Claude needs input" : undefined}
                   />
                   <span className="qs-slug">
-                    {p.declared?.pinned ? "★ " : p.is_main ? "◆ " : ""}{p.slug}
+                    {p.declared?.pinned ? "★ " : p.is_main ? "◆ " : ""}{nameOf(p)}
                   </span>
+                  {nameOf(p) !== p.slug && <span className="qs-alias">{p.slug}</span>}
                   <span className="qs-proj">{basename(pv.root)}</span>
                   {p.branch && p.branch !== p.slug && <span className="qs-branch">{p.branch}</span>}
                   <span className={"life " + p.lifecycle_effective}>{p.lifecycle_effective}</span>
@@ -1156,17 +1207,35 @@ function App() {
   const appStale = !!(upd?.latest && vnewer(upd.latest, upd.app_version));
   const updateAvail = cliStale || cliMissing || appStale;
   const searchRef = useRef<HTMLInputElement | null>(null);
+
+  // ── per-place panel state ────────────────────────────────────────────────
+  // A space owns its dock: what is open, which tab, how wide. `settings` holds
+  // the LAST-USED values (the seed a never-visited place inherits), and
+  // `place_panels[key]` overrides them for a place you have set up before.
+  // `eff` is what the UI must READ everywhere the dock is concerned — reading
+  // `settings.dock_*` directly is the bug this indirection exists to prevent.
+  const selKey = sel ? placeKey(sel.repo, sel.slug) : null;
+  const eff = panelsFor(settings, selKey);
+  // The selected place, for callbacks that must stay dependency-free (see
+  // `toggleDock`, registered once in the keydown effect).
+  const selRef = useRef(sel);
+  selRef.current = sel;
+
+  // rename-in-place for the header name. Transient, and reset on a place switch
+  // like dockFile below — a half-typed name must not follow you somewhere else.
+  const [renaming, setRenaming] = useState(false);
+
   // right dock: which file the Files tab is viewing (null = none). Reset per place.
   const [dockFile, setDockFile] = useState<string | null>(null);
   // Reading mode (⌘⇧E): the open file takes over the main pane. Closed by a
   // place switch or by the file going away — an overlay with nothing under it
   // would hide the terminal for no reason.
   const [reading, setReading] = useState(false);
-  useEffect(() => { setDockFile(null); setReading(false); }, [sel?.repo, sel?.slug]);
+  useEffect(() => { setDockFile(null); setReading(false); setRenaming(false); }, [sel?.repo, sel?.slug]);
   useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab.
-  const filesDockShown = settings.dock_open && settings.dock_tab === "files";
+  const filesDockShown = eff.dock_open && eff.dock_tab === "files";
   useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
   // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
   const [newTermToken, setNewTermToken] = useState(0);
@@ -1564,6 +1633,94 @@ function App() {
       setTermVersion((v) => v + 1);
   };
 
+  /** Write dock panel state for the SELECTED place (and to the globals, which
+   *  keep tracking "last used" so the next unvisited place inherits it).
+   *
+   *  Always stores the FULL triple, never the patch it was handed. A partial
+   *  entry falls through to the globals for whatever it omits, which is exactly
+   *  how another place's choice bleeds in: open the dock in A (storing only
+   *  `dock_open`), flip to Terminal in B (moving the global `dock_tab`), come
+   *  back to A and it is open on B's tab. That is the jarring switch this
+   *  feature exists to remove.
+   *
+   *  Stable (refs only, functional setState) so `toggleDock` can stay
+   *  dependency-free for the keydown effect. */
+  const updatePanels = useCallback((patch: Partial<PlacePanels> | ((cur: PlacePanels) => Partial<PlacePanels>)) => {
+    setSettings((prev) => {
+      const s = selRef.current;
+      const key = s ? placeKey(s.repo, s.slug) : null;
+      const cur = panelsFor(prev, key);
+      const p = typeof patch === "function" ? patch(cur) : patch;
+      const triple: PlacePanels = {
+        dock_open: p.dock_open ?? cur.dock_open,
+        dock_tab: p.dock_tab ?? cur.dock_tab,
+        dock_width: p.dock_width ?? cur.dock_width,
+      };
+      const next: Settings = {
+        ...prev,
+        ...triple,
+        ...(key ? { place_panels: { ...(prev.place_panels ?? {}), [key]: triple } } : null),
+      };
+      applySettings(next);
+      if (hydrated.current) saveSettings(next);
+      // Pre-hydration, record ONLY the fields the caller actually asked for —
+      // `p`, not `triple`. `preHydration` is SHALLOW-merged over the settings
+      // read from disk and then saved, so every key present here overwrites the
+      // stored value. `triple` fills its gaps from `cur`, which pre-hydration is
+      // DEFAULTS: stashing it would write default `dock_tab`/`dock_width` over
+      // the user's real ones for a ⌘J that only meant to toggle `dock_open`.
+      // (`place_panels` must stay out for the same reason, one level up: a
+      // shallow merge would replace the whole map with a one-entry object.)
+      else Object.assign(preHydration.current, p);
+      return next;
+    });
+  }, []);
+
+  /** Forget remembered panels for keys matching `shouldDrop`.
+   *
+   *  `ui-state.json` is written as one blob and unknown keys survive a reload
+   *  forever, so without pruning this map only ever grows — a place removed
+   *  years ago would still be carrying a dock width. */
+  const dropPanels = useCallback((shouldDrop: (key: string) => boolean) => {
+    setSettings((prev) => {
+      const panels = prev.place_panels ?? {};
+      const kept = Object.fromEntries(Object.entries(panels).filter(([k]) => !shouldDrop(k)));
+      if (Object.keys(kept).length === Object.keys(panels).length) return prev;
+      const next = { ...prev, place_panels: kept };
+      if (hydrated.current) saveSettings(next);
+      return next;
+    });
+  }, []);
+
+  // Sweep entries whose place no longer exists. ONCE per session, on the first
+  // workspace that actually reported something: at hydration there is no
+  // snapshot to compare against, and re-running it on every poll would risk
+  // discarding real state over a momentary blip.
+  //
+  // Guarded PER PROJECT. A repo whose snapshot failed (`ok: false`) is skipped
+  // entirely — its places are *unknown*, not absent, and treating an unreadable
+  // repo as an empty one would wipe every place in it. A repo that is no longer
+  // tracked at all reports nothing either way, which is why untracking has its
+  // own drop (see removeProject).
+  const prunedOnce = useRef(false);
+  useEffect(() => {
+    if (!ws || prunedOnce.current || !hydrated.current) return;
+    const ok = ws.projects.filter((pv) => pv.ok && pv.snapshot);
+    if (!ok.length) return;
+    prunedOnce.current = true;
+    const live = new Set(ok.flatMap((pv) => pv.snapshot!.places.map((p) => placeKey(pv.root, p.slug))));
+    dropPanels((k) => ok.some((pv) => k.startsWith(pv.root + "|")) && !live.has(k));
+  }, [ws, dropPanels]);
+
+  /** Name a place, or clear the name with "". Declared state, so it lives in
+   *  `.worktrees.places.json` beside the note and the pin — NOT in ui-state,
+   *  because what a place is called belongs to the project, not to this app
+   *  install. */
+  const setTitle = (repo: string, slug: string, title: string) => {
+    setRenaming(false);
+    mutate(invoke("set_title", { repo, slug, title }));
+  };
+
   // Dock terminal tab names live in ui-state.json under `repo|slug` → index →
   // name (name === null deletes). Empty buckets are pruned so a place you never
   // named leaves no trace in the settings file.
@@ -1610,11 +1767,11 @@ function App() {
 
   // Dock only makes sense with a place selected (Files/Terminal need a worktree).
   const dockEligible = !!selected && !!sel;
-  const fit = fitLayout(settings, dockEligible, vw);
+  const fit = fitLayout(eff, dockEligible, vw);
   const dockShown = fit.dockShown;
   // Would the dock fit if it were open? Drives the toggle's disabled state, so a
   // ⌘J that can't visibly do anything is at least honest about why.
-  const dockFits = fitLayout({ ...settings, dock_open: true }, dockEligible, vw).dockShown;
+  const dockFits = fitLayout({ ...eff, dock_open: true }, dockEligible, vw).dockShown;
 
   useLayoutEffect(() => {
     const root = document.documentElement.style;
@@ -1718,6 +1875,9 @@ function App() {
   const removeProject = async (root: string) => {
     try {
       commitWs(await invoke<Workspace>("remove_project", { root }));
+      // untracking reports nothing either way, so the snapshot sweep can never
+      // judge these keys — drop them here or they are stranded forever
+      dropPanels((k) => k.startsWith(root + "|"));
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
@@ -1909,6 +2069,7 @@ function App() {
     closeCtx();
     // Arg keys are camelCase: Tauri renames Rust snake_case params over IPC.
     if ((await runCmd("remove_place", { repo, slug, delBranch, force: false }))?.ok) {
+      dropPanels((k) => k === placeKey(repo, slug));
       if (sel?.repo === repo && sel?.slug === slug) setSel(null);
     }
   };
@@ -1936,7 +2097,9 @@ function App() {
       out.sort((a, b) => idx(a) - idx(b));
       return out;
     }
-    if (settings.sort_mode === "alpha") out.sort((a, b) => a.slug.localeCompare(b.slug));
+    // by the DISPLAYED name: sorting renamed places by a hidden slug reads as
+    // an alphabetical list that is not alphabetical
+    if (settings.sort_mode === "alpha") out.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
     else out.sort((a, b) => activityAt(b) - activityAt(a));
     const flip = settings.sort_mode === "alpha" ? settings.sort_dir === "desc" : settings.sort_dir === "asc";
     if (flip) out.reverse();
@@ -2005,7 +2168,10 @@ function App() {
   const confirmRemove = async (delBranch: boolean) => {
     if (!sel) return;
     closeMenu();
-    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, delBranch, force: false }))?.ok) setSel(null);
+    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, delBranch, force: false }))?.ok) {
+      dropPanels((k) => k === placeKey(sel.repo, sel.slug));
+      setSel(null);
+    }
   };
 
   const toggleProject = (root: string) => {
@@ -2032,22 +2198,17 @@ function App() {
   // Right rail → dock tab. Clicking the ACTIVE tab collapses the dock (VS Code's
   // model), which is why the topbar no longer carries its own dock toggle.
   const pickDockTab = (tab: Settings["dock_tab"]) =>
-    updateSettings(
-      settings.dock_open && settings.dock_tab === tab
+    updatePanels(
+      eff.dock_open && eff.dock_tab === tab
         ? { dock_open: false }
         : { dock_tab: tab, dock_open: true },
     );
-  // right dock (Files / Terminal) — only renders with a place selected, but the
-  // preference persists globally (stable useCallback: safe in the keydown effect).
+  // right dock (Files / Terminal) — remembered per place, with the global value
+  // as the seed. Stable useCallback (updatePanels reads the place from a ref),
+  // so the keydown effect still registers once.
   const toggleDock = useCallback(() => {
-    setSettings((prev) => {
-      const next = { ...prev, dock_open: !prev.dock_open };
-      applySettings(next);
-      if (hydrated.current) saveSettings(next);
-      else preHydration.current.dock_open = next.dock_open;
-      return next;
-    });
-  }, []);
+    updatePanels((cur) => ({ dock_open: !cur.dock_open }));
+  }, [updatePanels]);
   // keyboard lens select (⌘2..N): unlike changeLens, re-selecting the active lens
   // must NOT toggle/collapse the nav — a keyboard chord always REVEALS the view.
   const selectLens = useCallback((l: Lens) => {
@@ -2064,7 +2225,7 @@ function App() {
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
   const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false });
-  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen, filesTabOpen: settings.dock_open && settings.dock_tab === "files" };
+  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen, filesTabOpen: eff.dock_open && eff.dock_tab === "files" };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // ⌘⇧T — new dock terminal. Handled BEFORE the meta-only guard (it needs
@@ -2155,6 +2316,9 @@ function App() {
   const matchPlace = (p: Place) =>
     !q ||
     p.slug.toLowerCase().includes(q) ||
+    // a renamed place has to be findable by the name on screen — and still by
+    // its slug, which is what the directory and the tmux session are called
+    (p.declared?.title ?? "").toLowerCase().includes(q) ||
     (p.branch ?? "").toLowerCase().includes(q) ||
     (p.declared?.note ?? "").toLowerCase().includes(q);
 
@@ -2207,7 +2371,7 @@ function App() {
     const startW = settings.nav_width;
     const move = (ev: MouseEvent) =>
       updateSettings({
-        nav_width: clampNav(startW + (ev.clientX - startX), dockShown ? settings.dock_width : 0, window.innerWidth),
+        nav_width: clampNav(startW + (ev.clientX - startX), dockShown ? eff.dock_width : 0, window.innerWidth),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
@@ -2218,9 +2382,9 @@ function App() {
   const onDockResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
-    const startW = settings.dock_width;
+    const startW = eff.dock_width;
     const move = (ev: MouseEvent) =>
-      updateSettings({
+      updatePanels({
         dock_width: clampDock(startW - (ev.clientX - startX), fit.navShown ? fit.navW : 0, window.innerWidth),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
@@ -2254,13 +2418,13 @@ function App() {
         onDragLeave={() => { if (dragOver === p.slug) setDragOver(null); }}
         onDrop={(e) => { e.preventDefault(); dropOnRow(repo, p.slug); }}
         onDragEnd={() => { setDrag(null); setDragOver(null); }}
-        title={p.slug}
+        title={p.declared?.title ? `${p.declared.title} — ${p.slug}` : p.slug}
       >
         <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
         <span className="row-id">
           <span className="row-name">
             {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
-            {p.slug}
+            {nameOf(p)}
             {showProject ? <span className="row-proj">{basename(repo)}</span> : null}
           </span>
           {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
@@ -2435,11 +2599,15 @@ function App() {
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
   // shrink below the center pane's content and pushes the fixed columns off the
   // window instead of letting anything ellipsise.
+  //
+  // The DOCK IS NOT A COLUMN. It and the terminal share one `.space` cell so the
+  // space header can crown both (see `.space` in App.css) — a header spanning
+  // two grid columns can't be expressed here, because these columns are
+  // *removed* when hidden, not zeroed, so every line index shifts with ⌘B.
   const gridCols = [
     "var(--rail-w)",
     fit.navShown ? `${fit.navW}px` : null,
-    "minmax(0, 1fr)",
-    dockShown ? `${fit.dockW}px` : null,
+    "minmax(0, 1fr)", // .space — terminal + dock, under one header
     "var(--rail-w)", // right rail — permanent, like the left one
   ].filter(Boolean).join(" ");
 
@@ -2539,14 +2707,45 @@ function App() {
         <div className="nav-resizer" onMouseDown={onResize} />
       </aside>
 
-      {/* ── main ── */}
-      <main className="main">
+      {/* ── space: the selected place's whole workbench ──
+          The header crowns BOTH the terminal and the dock, because both belong
+          to the place. Before this the header lived inside `main` and the dock
+          sat outside it as a sibling, which is precisely what made Files and
+          Terminal read as app furniture pointed at a place rather than as parts
+          of it. */}
+      <div className="space">
+        {/* tmux missing is an APP-level condition, not a per-place one, so it
+            stays above the space header rather than under it. */}
         {!tmuxOk && <TmuxBanner onRecheck={recheckTmux} />}
-        {selected && sel ? (
+
+        {selected && sel && (
           <>
             <header className="topbar">
               <div className="identity">
-                <b className="slug">{selected.is_main ? "◆ " : ""}{selected.slug}</b>
+                {renaming ? (
+                  <TitleEditor
+                    key={sel.repo + "|" + sel.slug}
+                    initial={selected.declared?.title ?? ""}
+                    slug={selected.slug}
+                    onCommit={(v) => setTitle(sel.repo, sel.slug, v)}
+                    onCancel={() => setRenaming(false)}
+                  />
+                ) : (
+                  <>
+                    <b
+                      className="slug"
+                      title={selected.declared?.title ? "Double-click to rename" : "Double-click to name this place"}
+                      onDoubleClick={() => setRenaming(true)}
+                    >
+                      {selected.is_main ? "◆ " : ""}{nameOf(selected)}
+                    </b>
+                    {/* renamed: the slug still names the directory and the tmux
+                        session, so it stays on screen rather than being replaced */}
+                    {selected.declared?.title?.trim() ? (
+                      <span className="slug-alias" title="worktree directory and tmux session name">{selected.slug}</span>
+                    ) : null}
+                  </>
+                )}
                 {selected.branch && (
                   <span className={"branch" + (!selected.is_main && selected.branch !== selected.slug ? " hi" : "")}>
                     {!selected.is_main && selected.branch !== selected.slug ? "↗ " : ""}{selected.branch}
@@ -2626,176 +2825,206 @@ function App() {
                   )}
                 </div>
 
-                {!selected.is_main && (
-                  <div className="menu-wrap">
-                    <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
-                    {menu === "more" && (
-                      <div className="popover right">
-                        <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
-                        {confirmRm === `${sel.repo}|${sel.slug}` ? (
+                {/* The menu is no longer gated on `!is_main`: Rename and Copy
+                    path apply to the main checkout too — its slug is the
+                    literal "(main)", which is exactly where a real name helps
+                    most. Only Remove stays main-only. */}
+                <div className="menu-wrap">
+                  <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
+                  {menu === "more" && (
+                    <div className="popover right">
+                      <button className="pop-item" onClick={() => { closeMenu(); setRenaming(true); }}>
+                        {selected.declared?.title ? "Rename…" : "Name this place…"}
+                      </button>
+                      {selected.declared?.title && (
+                        <button className="pop-item" onClick={() => { closeMenu(); setTitle(sel.repo, sel.slug, ""); }}>
+                          Clear name (show <code>{selected.slug}</code>)
+                        </button>
+                      )}
+                      <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
+                      {!selected.is_main && (
+                        confirmRm === `${sel.repo}|${sel.slug}` ? (
                           <>
                             <button className="pop-item danger armed" onClick={() => confirmRemove(false)}>Confirm remove</button>
                             <button className="pop-item danger armed" onClick={() => confirmRemove(true)}>Confirm remove + branch</button>
                           </>
                         ) : (
                           <button className="pop-item danger" onClick={armRemove}>Remove worktree…</button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
+                        )
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </header>
 
             <input className="note-strip" placeholder="note…" defaultValue={selected.declared?.note ?? ""}
               key={sel.repo + sel.slug + (selected.declared?.note ?? "")}
               onBlur={(e) => mutate(invoke("set_note", { repo: sel.repo, slug: sel.slug, note: e.currentTarget.value }))} />
+          </>
+        )}
 
-            {selected.tmux_session.up ? (
-              <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus} />
+        {/* ── space body: terminal and dock, side by side under the header ──
+            `position: relative` lives here now (it used to be on `.main`) so it
+            anchors the reading overlay — which therefore reaches across the
+            dock for free, instead of needing a negative inline offset. */}
+        <div className="space-body">
+          <main className="main">
+            {selected && sel ? (
+              <>
+                {selected.tmux_session.up ? (
+                  <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus} />
+                ) : (
+                  <div className="term-empty">
+                    <div className="term-empty-card">
+                      <div className="te-title">No live session for <b>{selected.slug}</b></div>
+                      <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
+                    </div>
+                  </div>
+                )}
+
+                <footer className="statusbar">
+                  <div className="switch-wrap">
+                    {!selected.is_main && (
+                      <>
+                        <span className="sb-label" title={`on ${selected.branch ?? "?"}`}><Icons.GitBranch size={13} /></span>
+                        <BranchSwitcher key={sel.repo + "|" + sel.slug} repo={sel.repo} slug={sel.slug}
+                          onSwitch={doSwitch} onError={fail} />
+                      </>
+                    )}
+                  </div>
+                  <div className="sb-facts">
+                    {selected.tmux_session.up ? <>tmux <span className="ok">●</span> up · {selected.tmux_session.name}</> : <>tmux <span className="off">○</span> down</>}
+                    {selected.claude_session_present ? " · pane0 claude" : ""}
+                  </div>
+                </footer>
+              </>
             ) : (
-              <div className="term-empty">
-                <div className="term-empty-card">
-                  <div className="te-title">No live session for <b>{selected.slug}</b></div>
-                  <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
+              <div className="briefing">
+                <div className="home-hero">
+                  <img className="home-logo" src={logoUrl} alt="worktrees logo" />
+                  <div className="home-id">
+                    <h1>worktrees</h1>
+                    <div className="home-tag">a place for every work stream</div>
+                  </div>
+                </div>
+                <button className="enter-btn big home-open with-icon" onClick={addProject}><Icons.Plus size={15} /> Open a project</button>
+                <div className="chips">
+                  <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
+                  <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
+                </div>
+                <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
+                <div className="resume">
+                  {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
+                  {resume.map(({ pv, p }) => (
+                    <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
+                      <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
+                      <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{nameOf(p)}</span>
+                      <span className="rr-proj">{basename(pv.root)}</span>
+                      <span className="rr-life">{p.lifecycle_effective}</span>
+                      <span className="rr-age">{ago(usedEpoch(p))}</span>
+                      <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
+          </main>
 
-            <footer className="statusbar">
-              <div className="switch-wrap">
-                {!selected.is_main && (
+          {/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ──
+              A flex sibling of `main` inside the space body — no longer a grid
+              column of its own. That is what puts it under the space header
+              instead of beside it. */}
+          {dockShown && selected && sel && (
+            <aside className="dock" style={{ flex: `0 0 ${fit.dockW}px` }}>
+              <div className="dock-resizer" onMouseDown={onDockResize} />
+              {/* the rail owns tab selection AND collapse, so this is a title, not
+                  a control strip */}
+              <div className="dock-tabs">
+                <span className="dock-title">{eff.dock_tab === "files" ? "Files" : "Terminal"}</span>
+                <span className="dock-spacer" />
+                {eff.dock_tab === "files" && (
                   <>
-                    <span className="sb-label" title={`on ${selected.branch ?? "?"}`}><Icons.GitBranch size={13} /></span>
-                    <BranchSwitcher key={sel.repo + "|" + sel.slug} repo={sel.repo} slug={sel.slug}
-                      onSwitch={doSwitch} onError={fail} />
+                    <button
+                      className="ctrl sm icon-only"
+                      aria-label="Refresh the file tree"
+                      title="Re-list files from disk"
+                      onClick={reloadFiles}
+                    >
+                      ↻
+                    </button>
+                    <button
+                      className={"ctrl sm icon-only" + (settings.files_show_ignored ? " on" : "")}
+                      aria-label={`Gitignored files: ${settings.files_show_ignored ? "shown" : "hidden"}. Click to toggle.`}
+                      aria-pressed={settings.files_show_ignored}
+                      title={settings.files_show_ignored
+                        ? "Hide gitignored files"
+                        : "Show gitignored files (build output, working notes)"}
+                      onClick={() => updateSettings({ files_show_ignored: !settings.files_show_ignored })}
+                    >
+                      {/* Filled when nothing is being withheld. The `on` class alone
+                          is a tint, and a tint is not enough to notice that a tree
+                          IS hiding entries — which is the state that misleads. */}
+                      {settings.files_show_ignored ? "◉" : "◌"}
+                    </button>
+                    <button
+                      className="ctrl sm icon-only"
+                      aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
+                      title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
+                      onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
+                    >
+                      {settings.files_layout === "auto" ? "A" : settings.files_layout === "stack" ? "▤" : "▥"}
+                    </button>
                   </>
                 )}
               </div>
-              <div className="sb-facts">
-                {selected.tmux_session.up ? <>tmux <span className="ok">●</span> up · {selected.tmux_session.name}</> : <>tmux <span className="off">○</span> down</>}
-                {selected.claude_session_present ? " · pane0 claude" : ""}
+              <div className="dock-body">
+                {eff.dock_tab === "files" ? (
+                  <FilesPane
+                    root={selected.path}
+                    openPath={dockFile}
+                    dockW={fit.dockW}
+                    layout={settings.files_layout}
+                    splitPct={settings.files_split_pct}
+                    stackPct={settings.files_stack_pct}
+                    onSplitPct={(v, o) => updateSettings(o === "split" ? { files_split_pct: v } : { files_stack_pct: v })}
+                    showIgnored={settings.files_show_ignored}
+                    reloadToken={placesToken}
+                    onOpen={setDockFile}
+                    onOpenEditor={editIn}
+                    onError={fail}
+                    wrap={settings.files_wrap}
+                    onWrap={(v) => updateSettings({ files_wrap: v })}
+                    mdSource={settings.files_md_source}
+                    onMdSource={(v) => updateSettings({ files_md_source: v })}
+                    expanded={false}
+                    onExpand={(v) => setReading(v)}
+                  />
+                ) : (
+                  <TerminalTabs key={sel.repo + "|" + sel.slug}
+                    repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
+                    termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
+                    names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
+                    onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
+                    onError={fail} />
+                )}
               </div>
-            </footer>
-          </>
-        ) : (
-          <div className="briefing">
-            <div className="home-hero">
-              <img className="home-logo" src={logoUrl} alt="worktrees logo" />
-              <div className="home-id">
-                <h1>worktrees</h1>
-                <div className="home-tag">a place for every work stream</div>
-              </div>
-            </div>
-            <button className="enter-btn big home-open with-icon" onClick={addProject}><Icons.Plus size={15} /> Open a project</button>
-            <div className="chips">
-              <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
-              <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
-            </div>
-            <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
-            <div className="resume">
-              {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
-              {resume.map(({ pv, p }) => (
-                <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
-                  <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
-                  <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{p.slug}</span>
-                  <span className="rr-proj">{basename(pv.root)}</span>
-                  <span className="rr-life">{p.lifecycle_effective}</span>
-                  <span className="rr-age">{ago(usedEpoch(p))}</span>
-                  <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+            </aside>
+          )}
 
-        {/* ── reading mode (⌘⇧E): the dock's open file over the whole main
-            pane. The terminal stays MOUNTED underneath (hidden, not
-            unmounted) — unmounting would drop the xterm and its scrollback;
-            TerminalPane refits when it is revealed again. */}
-        {reading && dockFile && selected && (
-          // Spans the main pane AND the dock (stopping at the rails): an
-          // overlay confined to `main` gets NARROWER as the dock grows, which
-          // is the opposite of "expand".
-          <div
-            className="reading"
-            role="dialog"
-            aria-label="File reader"
-            style={{ left: 0, right: dockShown ? -fit.dockW : 0 }}
-          >
-            <FileView
-              key={dockFile}
-              path={dockFile}
-              reloadToken={placesToken}
-              onOpen={setDockFile}
-              onOpenEditor={editIn}
-              onError={fail}
-              wrap={settings.files_wrap}
-              onWrap={(v) => updateSettings({ files_wrap: v })}
-              mdSource={settings.files_md_source}
-              onMdSource={(v) => updateSettings({ files_md_source: v })}
-              expanded
-              onExpand={(v) => setReading(v)}
-            />
-          </div>
-        )}
-      </main>
-
-      {/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ── */}
-      {dockShown && selected && sel && (
-        <aside className="dock">
-          <div className="dock-resizer" onMouseDown={onDockResize} />
-          {/* the rail owns tab selection AND collapse, so this is a title, not
-              a control strip */}
-          <div className="dock-tabs">
-            <span className="dock-title">{settings.dock_tab === "files" ? "Files" : "Terminal"}</span>
-            <span className="dock-spacer" />
-            {settings.dock_tab === "files" && (
-              <>
-                <button
-                  className="ctrl sm icon-only"
-                  aria-label="Refresh the file tree"
-                  title="Re-list files from disk"
-                  onClick={reloadFiles}
-                >
-                  ↻
-                </button>
-                <button
-                  className={"ctrl sm icon-only" + (settings.files_show_ignored ? " on" : "")}
-                  aria-label={`Gitignored files: ${settings.files_show_ignored ? "shown" : "hidden"}. Click to toggle.`}
-                  aria-pressed={settings.files_show_ignored}
-                  title={settings.files_show_ignored
-                    ? "Hide gitignored files"
-                    : "Show gitignored files (build output, working notes)"}
-                  onClick={() => updateSettings({ files_show_ignored: !settings.files_show_ignored })}
-                >
-                  {/* Filled when nothing is being withheld. The `on` class alone
-                      is a tint, and a tint is not enough to notice that a tree
-                      IS hiding entries — which is the state that misleads. */}
-                  {settings.files_show_ignored ? "◉" : "◌"}
-                </button>
-                <button
-                  className="ctrl sm icon-only"
-                  aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
-                  title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
-                  onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
-                >
-                  {settings.files_layout === "auto" ? "A" : settings.files_layout === "stack" ? "▤" : "▥"}
-                </button>
-              </>
-            )}
-          </div>
-          <div className="dock-body">
-            {settings.dock_tab === "files" ? (
-              <FilesPane
-                root={selected.path}
-                openPath={dockFile}
-                dockW={fit.dockW}
-                layout={settings.files_layout}
-                splitPct={settings.files_split_pct}
-                stackPct={settings.files_stack_pct}
-                onSplitPct={(v, o) => updateSettings(o === "split" ? { files_split_pct: v } : { files_stack_pct: v })}
-                showIgnored={settings.files_show_ignored}
+          {/* ── reading mode (⌘⇧E): the dock's open file over the whole space
+              body. The terminal stays MOUNTED underneath (hidden, not
+              unmounted) — unmounting would drop the xterm and its scrollback;
+              TerminalPane refits when it is revealed again.
+              It reaches across the dock because it is anchored to
+              `.space-body`, which is exactly as wide as terminal + dock. The
+              old negative-right offset compensated for an overlay trapped
+              inside `main`; there is nothing left to compensate for. */}
+          {reading && dockFile && selected && (
+            <div className="reading" role="dialog" aria-label="File reader">
+              <FileView
+                key={dockFile}
+                path={dockFile}
                 reloadToken={placesToken}
                 onOpen={setDockFile}
                 onOpenEditor={editIn}
@@ -2804,27 +3033,20 @@ function App() {
                 onWrap={(v) => updateSettings({ files_wrap: v })}
                 mdSource={settings.files_md_source}
                 onMdSource={(v) => updateSettings({ files_md_source: v })}
-                expanded={false}
+                expanded
                 onExpand={(v) => setReading(v)}
               />
-            ) : (
-              <TerminalTabs key={sel.repo + "|" + sel.slug}
-                repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
-                termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
-                names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
-                onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
-                onError={fail} />
-            )}
-          </div>
-        </aside>
-      )}
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* ── right rail: mirrors the left one. Permanent, so the dock always has
           a visible affordance; the active icon collapses the dock. Disabled
           with no place selected — Files/Terminal both need a worktree. */}
       <nav className="rail rail-right">
         {DOCK_RAIL.map((d) => {
-          const on = dockShown && settings.dock_tab === d.key;
+          const on = dockShown && eff.dock_tab === d.key;
           const why = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
           return (
             <button

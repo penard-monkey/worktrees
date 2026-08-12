@@ -28,6 +28,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   inside it. Cost is three git invocations per tree refresh for the WHOLE tree
   (the tree already spends one `check-ignore` per open directory), and none at all
   while the reader is expanded.
+- **Places can be given a name.** A worktree was always called whatever its
+  directory is called — useful for `cd`, less useful for "which of these three
+  is the auth work". The `⋯` menu (or a double-click on the name in the header)
+  now sets a display name, and ⌘K, the nav filter and alphabetical sort all
+  follow it, so a renamed place is findable by the name you can actually see.
+  Clearing the name goes back to the slug.
+
+  The name is a LABEL: the directory, the branch and the tmux session keep the
+  slug, which stays on screen next to the name rather than being replaced. That
+  is deliberate rather than a shortcut — the slug is not a name the tool stores,
+  it is the directory's basename read fresh from disk, so renaming the *place*
+  would mean renaming the directory and with it the git registration, the tmux
+  session and its shell sidecars, the recorded compose project, and the Claude
+  history directory, which is keyed on the absolute path. That last one would
+  silently orphan the conversation and break auto-resume — too high a price for
+  something that looks like editing a label. AI profiles already split an
+  immutable id from a renameable name; places now do too.
+
+  The main checkout can be named as well, which is where it helps most: its slug
+  is the literal `(main)`.
+- **Every space remembers its own panels.** Whether the dock is open, which tab
+  it is on and how wide it is are now remembered per worktree, so coming back to
+  a place finds it the way you left it instead of however the last place you
+  visited happened to be set up. A place where you have never opened the dock
+  starts closed, and stays closed until you open it there — opening the dock in
+  one worktree does not open it everywhere else you then click. What you set up
+  survives quitting the app.
+
+  Only those three things are per-place. How you like to *read* a file — the
+  Files tab's split, wrap and gitignored toggles — stays global, as does the
+  nav, which is how you leave a space rather than part of one. The open file is
+  not remembered on purpose: a path can be deleted or renamed between visits,
+  which would turn "restore what I left" into an error on arrival.
+
+### Changed
+- **The top bar now crowns the whole space, not just the terminal.** Files and
+  Terminal read as app furniture that happened to point at a place, because
+  structurally that is what they were: the header was a child of `main`, and the
+  dock was a separate grid column sitting *beside* it, outside the header's
+  scope. The header now spans the terminal and the dock together — they share
+  one `space` cell, and the dock is a flex sibling of the terminal rather than a
+  column of its own. The layout picture in DESIGN.md predates the dock, which is
+  how it came to be bolted on next to the model instead of into it.
+
+  The dock could not simply span two grid columns: the columns are *removed*
+  when hidden rather than zeroed, so every line index shifts when the nav
+  collapses. Reading mode gets simpler as a result — it used to need an inline
+  negative offset to escape `main` and reach across the dock, and now just fills
+  the space body, which is already exactly that wide.
 
 ## [0.11.0] - 2026-08-10
 

@@ -282,12 +282,20 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   _From: [2026-07-29 right-panel session](docs/sessions/2026-07-29-right-panel/summary.md)_
 
 - **Right-panel review nits** (deliberately left): `--nav-w`/`--dock-w` CSS vars
-  still written by App's layout effect but nothing consumes them (grid uses
-  inline px) — delete the effect or re-point the static `.app` rule;
+  still written by App's layout effect — ⚠ **"nothing consumes them" is wrong**,
+  and acting on it as written would have shipped a bug: `App.css:30` uses
+  `var(--nav-w)` in the base `.app` rule and `tokens.css:113` defines it as
+  `300px`. The inline `gridTemplateColumns` always overrides it, so the base
+  rule is a fallback that never applies in practice — but deleting the effect
+  without also re-pointing those two lines leaves the fallback resolving to a
+  stale 300px. `--dock-w` **is** genuinely dead now (the 2026-08-11 session made
+  the dock a flex sibling rather than a grid column). Three files, so it wants
+  its own change;
   `place_session_cwd` doc comment still explains sidecar-name stability;
   combobox Enter with a highlight index stale after a filter shrink falls back
   to raw text (acceptable, but a bounds-clamp on `hi` is one line).
-  _From: [2026-07-29 right-panel session](docs/sessions/2026-07-29-right-panel/summary.md)_
+  _From: [2026-07-29 right-panel session](docs/sessions/2026-07-29-right-panel/summary.md),
+  corrected [2026-08-11 space-workbench](docs/sessions/2026-08-11-space-workbench/summary.md)_
 
 - **tmux gate: manual `[Y/n]` run + PATH hygiene.** The installer's
   interactive macOS brew prompt (install.sh `require_tmux`) has never been
@@ -463,3 +471,46 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   up the short-circuit or threading a lazy iterator through both; neither is
   obviously worth it today, which is why this is a note and not a task.
   _From: [2026-08-10 files-tab-visibility session](docs/sessions/2026-08-10-files-tab-visibility/summary.md)_
+
+- **A true `worktrees rename` — a CLI verb, not a UI button.** v0.12's place
+  `title` renames the LABEL and deliberately leaves identity alone, because the
+  slug is `basename(worktree_dir)` re-derived on every read, so renaming the
+  place means renaming the directory — and that is six systems, non-atomically:
+  the git worktree registration, the declared store's `BTreeMap` key (`store.rs`
+  has only `edit()`, which CREATES on absent — there is no delete-key API), the
+  tmux session `{prefix}-{slug}` plus every `~term` sidecar (`tmux.rs:24-27`),
+  the recorded `COMPOSE_PROJECT_NAME` in `.worktree.env` (which wins forever
+  once written, `provision.rs:522`), the app's slug-keyed maps (`ShellKey`,
+  `term_tab_names`, `place_panels`, `manual_order`), and — the one that decides
+  it — **the Claude history directory, keyed on the ABSOLUTE worktree path**
+  (`project.rs:645-650`), so a rename silently orphans the conversation and
+  breaks auto-resume. Any real attempt has to answer the history question FIRST;
+  a verb that renames five things and quietly drops your agent transcript is
+  worse than no verb. Wants a recovery path for a partial failure, too.
+  _From: [2026-08-11 space-workbench session](docs/sessions/2026-08-11-space-workbench/summary.md)_
+
+- **Mock-harness console noise, unexplained.** Switching places in
+  `pnpm dev:mock` throws two kinds of `TypeError` per switch: xterm's
+  `Viewport.syncScrollArea` reading `dimensions` of undefined, and the Tauri
+  event shim's `_unlisten` reading `unregisterListener` of undefined. **Both are
+  pre-existing** — proven by replaying the identical click sequence against a
+  content-checked baseline harness (18 and 12 occurrences, same as the change
+  under test), so they are not from the panel or title work. They are harness-
+  only (the real backend has a real `unlisten`), which is why they have survived
+  this long, but they make `browser_console_messages` noisy enough that a REAL
+  error can hide among them — which is a live risk every time the harness is used
+  to verify something. Worth a session: the unlisten one looks like the mock's
+  `listen` returning an unlisten that assumes a plugin the browser does not have.
+  _From: [2026-08-11 space-workbench session](docs/sessions/2026-08-11-space-workbench/summary.md)_
+
+- **`term_tab_names` is not pruned at the lifecycle points `place_panels` now
+  is.** Both are per-place maps in `ui-state.json` keyed `repo|slug`, but only
+  `place_panels` gained a once-per-session sweep plus explicit drops on
+  `remove_place` and `remove_project` (2026-08-11). `term_tab_names` still only
+  prunes its own empty buckets when a tab is renamed, so a removed place leaves
+  its terminal tab names behind forever. Pre-existing and harmless (a few bytes,
+  and a stale key can only be read by a place with the same repo+slug, i.e. one
+  recreated at the same path — where arguably you WANT the old names back), but
+  the two maps now behave differently for no articulated reason, and `dropPanels`
+  is a one-line generalisation away from covering both.
+  _From: [2026-08-11 space-workbench session](docs/sessions/2026-08-11-space-workbench/summary.md)_

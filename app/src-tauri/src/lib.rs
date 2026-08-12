@@ -526,6 +526,17 @@ async fn set_note(repo: String, slug: String, note: String) -> Result<(), String
     })
 }
 
+/// Rename a place's LABEL. Empty clears it, which is how the UI goes back to
+/// showing the slug — see `Declared::title` for why this is a label and not a
+/// rename of the worktree.
+#[tauri::command]
+async fn set_title(repo: String, slug: String, title: String) -> Result<(), String> {
+    store::edit(&repo, &slug, |d| {
+        let t = title.trim();
+        d.title = if t.is_empty() { None } else { Some(t.to_string()) }
+    })
+}
+
 /// Stamp last-opened (drives the `idle` window). Called when a place is opened.
 #[tauri::command]
 async fn touch_place(repo: String, slug: String) -> Result<(), String> {
@@ -3240,6 +3251,7 @@ pub fn run() {
             set_lifecycle,
             set_pin,
             set_note,
+            set_title,
             touch_place,
             new_place,
             switch_place,

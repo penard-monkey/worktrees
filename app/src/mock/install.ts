@@ -559,6 +559,11 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         p.declared = { ...(p.declared ?? {}), note: args.note || undefined };
       });
       return null;
+    case "set_title":
+      editPlace(args.repo, args.slug, (p) => {
+        p.declared = { ...(p.declared ?? {}), title: args.title?.trim() || undefined };
+      });
+      return null;
     case "touch_place":
       editPlace(args.repo, args.slug, (p) => {
         p.declared = { ...(p.declared ?? {}), last_opened_epoch: now() };
