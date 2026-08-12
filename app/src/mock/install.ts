@@ -901,6 +901,9 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         .map((index) => ({ index, dead: deadSet.has(index) }));
     }
     case "close_shell_session": {
+      // `args.forget` (false when RESTARTING a tab) only governs the backend's
+      // shell-cwds.json, and the mock owns no shells and no directories — the
+      // tab bookkeeping below is the same either way.
       shellSidecars.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
       deadShells.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
       return null;

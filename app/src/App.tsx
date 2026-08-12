@@ -708,8 +708,11 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   // Restore tabs from the live shell registry on mount / place change, UNIONed
   // with the tabs the user named for this place. Names outlive the process (they
   // live in ui-state.json) while shells don't, so a named tab comes back as a
-  // tab: activating it mounts ShellPane, which spawns a fresh shell. The union
-  // is gated on a live session — a closed place still shows nothing.
+  // tab: activating it mounts ShellPane, which spawns a fresh shell. That fresh
+  // shell starts in the tab's LAST directory, which the backend remembers
+  // separately (shell-cwds.json) — the name and the place it points at are the
+  // only two things that outlive the process. The union is gated on a live
+  // session — a closed place still shows nothing.
   useEffect(() => {
     let alive = true;
     restoringRef.current = true;
@@ -757,7 +760,9 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   }, [repo, slug]);
 
   const restartTab = (id: number) => {
-    invoke("close_shell_session", { repo, slug, index: id }).catch(onError);
+    // forget:false — this closes the DEAD shell to make room for a new one in
+    // the same tab, so the tab keeps the directory it died in.
+    invoke("close_shell_session", { repo, slug, index: id, forget: false }).catch(onError);
     setDead((d) => d.filter((x) => x !== id));
     setRestartToken((t) => t + 1); // remount the pane → shell_open spawns afresh
   };
@@ -779,7 +784,9 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   }, [addToken, addTab]);
 
   const closeTab = (id: number) => {
-    invoke("close_shell_session", { repo, slug, index: id }).catch(onError);
+    // forget:true — the tab is going away, so the backend drops its remembered
+    // directory too (the counterpart of dropping its name, just below).
+    invoke("close_shell_session", { repo, slug, index: id, forget: true }).catch(onError);
     onRename(id, null); // an explicitly closed tab drops its name — otherwise it
                         // would be seeded straight back on the next restore
     const remaining = idsRef.current.filter((x) => x !== id);
