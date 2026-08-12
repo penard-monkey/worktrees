@@ -101,6 +101,22 @@ is invisible to the bats suite — there is no fake claude. Re-run
 - The mock harness (`pnpm dev:mock`, `app/src/mock/install.ts`) must track
   every command in lib.rs — it's how the UI is developed/driven headlessly
   (Playwright). Port 1420 = `tauri dev`; run the harness on another port.
+- **The mock answers INSTANTLY, and that hides a whole class of bug.** Its
+  invokes resolve in a microtask, so two `list_workspace` sweeps never overlap
+  and there is no gap between "write done" and "refresh returned" — the real one
+  is a git fan-out over every project (0.28s for one project with nine
+  worktrees, seconds across a workspace). Three v0.12.x bugs passed gates,
+  review and harness checks and were then found by running the real app; all
+  three lived in timing the harness cannot express. Before releasing anything
+  touching refresh, optimistic UI or per-place state, run it for real:
+  `app/scripts/sandbox.sh --app` (isolated identifier + tmux prefix, so it
+  cannot collide with your installed app — and NOTE bare `sandbox.sh` is the
+  CLI sandbox meant to be `eval`'d, it does not launch the app). Two tools now
+  cover the shapes already hit: `?slowlist=<ms>` makes the mock's
+  `list_workspace` slow, and `app/scripts/race-check.mjs` drives the real
+  `refresh`/`commitWs`/`patchDeclared`/`mutate` source under controlled
+  promise-resolution orders (`node app/scripts/race-check.mjs [App.tsx]`, exits
+  non-zero on failure — it fails on v0.12.0, which is how it earns trust).
 - **HMR is dead inside `.worktrees/`** — chokidar ignores dot-directories, so
   vite never sees the edit and keeps serving the PRE-edit file. A reload and a
   `touch` both "work" and change nothing; a real fix looks like it failed.
