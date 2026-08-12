@@ -514,3 +514,38 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   the two maps now behave differently for no articulated reason, and `dropPanels`
   is a one-line generalisation away from covering both.
   _From: [2026-08-11 space-workbench session](docs/sessions/2026-08-11-space-workbench/summary.md)_
+
+- **A "changes only" view of the Files tab, and auto-expand to changed files.**
+  Both were offered when the changed-file markers were scoped and both were
+  deliberately left out, so the first slice stayed one clean thing. The tree now
+  already knows everything either would need: `Changes.dirs` in `FilesPane.tsx`
+  holds the count of changed files beneath every directory, so a filter is
+  "hide any file without a status and any directory whose count is 0", and
+  auto-expand is "open the path to each `files` key on first load". The open
+  question is not the mechanism, it is whether either earns a control — a filter
+  turns the tree into the branch's diff list (which may be what you want most of
+  the time, or may be a mode you forget you left on, the way show-ignored was),
+  and auto-expand is noisy on a branch that touched a dozen directories. Worth
+  living with the markers first.
+  _From: [2026-08-11 files-changed-markers session](docs/sessions/2026-08-11-files-changed-markers/summary.md)_
+
+- **The nav's dirty count and the tree's change badge answer different
+  questions, and nothing on screen says so.** `dirty_files` (the nav's badge,
+  from `status_v2` in `project.rs`) counts UNCOMMITTED files only; a directory
+  badge in the Files tab counts uncommitted *and* committed-on-this-branch. Both
+  are right for their own surface — "is there work I could lose" vs "what did
+  this branch touch" — but a place showing no dirty badge next to a tree full of
+  marks looks like a bug, and the only place the distinction is written down is
+  the CHANGELOG entry and the session summary. Either a tooltip on each side
+  saying which question it answers, or the nav grows a second (quieter) signal
+  for branch divergence by FILE — it already shows it by commit (↑↓).
+  _From: [2026-08-11 files-changed-markers session](docs/sessions/2026-08-11-files-changed-markers/summary.md)_
+
+- **The changed-file markers have no off switch.** Nobody asked for one, and the
+  bar for new config in this repo is deliberately high (ADR 0001), so they are
+  simply always on — unlike the Files tab's other two behaviours (show-ignored,
+  layout), which are both persisted toggles. If the tint ever proves too loud
+  next to the gitignored dimming and the symlink `↗`, the settings shape already
+  exists (`files_show_ignored` is the pattern to copy) and the cost of the git
+  calls is the thing an off switch would actually save.
+  _From: [2026-08-11 files-changed-markers session](docs/sessions/2026-08-11-files-changed-markers/summary.md)_
