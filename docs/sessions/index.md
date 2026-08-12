@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-11](2026-08-11-v0-12-releases/summary.html) | the sandbox found what the mock harness could not — dock default, nav refresh race → v0.12.0, v0.12.1 |
 | [2026-08-11](2026-08-11-files-changed-markers/summary.html) | the Files tab says what the branch changed — tinted names, cascading counts, ghost rows for deletions |
 | [2026-08-11](2026-08-11-space-workbench/summary.html) | a space owns its whole workbench — header over terminal+dock, per-place panel memory, nameable places |
 | [2026-08-10](2026-08-10-files-tab-visibility/summary.html) | the Files tab stops hiding things silently — gitignored by default, symlinks marked → v0.11.0 |

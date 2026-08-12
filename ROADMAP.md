@@ -549,3 +549,45 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   exists (`files_show_ignored` is the pattern to copy) and the cost of the git
   calls is the thing an off switch would actually save.
   _From: [2026-08-11 files-changed-markers session](docs/sessions/2026-08-11-files-changed-markers/summary.md)_
+
+- **The mock harness cannot express real backend timing, and three shipped bugs
+  came out of that gap in one session.** `list_workspace` answers in a microtask
+  there, so: two sweeps never overlap (an ordering race cannot exist), there is
+  no gap between "write done" and "refresh returned" (a latency bug cannot
+  exist), and any state that only exists *before* a record is written is easy to
+  never exercise. All three v0.12.x bugs — the dock seeding from the last place,
+  the rename not reaching the nav, and the stale sweep reverting it — passed
+  gates, adversarial review and harness verification, and were then found by
+  running the real app via `app/scripts/sandbox.sh --app`. Two narrow
+  mitigations shipped: `?slowlist=<ms>` in `app/src/mock/install.ts` (real
+  sweep latency) and `app/scripts/race-check.mjs` (controlled promise-resolution
+  orders over the real `refresh`/`commitWs`/`patchDeclared`/`mutate` source).
+  The general problem is untouched: the mock is a fixture store with instant
+  IPC, and anything whose correctness lives in the timing between calls is
+  invisible to it. Worth considering a mode where every mocked invoke takes a
+  configurable, jittered delay by default, so the harness is timing-hostile
+  rather than timing-free — the current default of "instant" is the one setting
+  guaranteed never to catch this class.
+  _From: [2026-08-11 v0-12-releases session](docs/sessions/2026-08-11-v0-12-releases/summary.md)_
+
+- **`patchDeclared` covers title, pin and note but not lifecycle**, so changing
+  a place's lifecycle still waits on a full `list_workspace` sweep — seconds on
+  a large workspace, the same lag the other three used to have. Deliberate:
+  `lifecycle_effective` is reconciled server-side from the declared label AND
+  live tmux state (`store::reconcile`), so patching the label alone would show a
+  row disagreeing with its own badge. Closing it means either reimplementing
+  `reconcile` in TypeScript (a second source of truth for a rule that already
+  bit this repo once) or having `set_lifecycle` return the reconciled place so
+  the frontend can patch from the backend's own answer. The second is the right
+  shape and is a small command-signature change.
+  _From: [2026-08-11 v0-12-releases session](docs/sessions/2026-08-11-v0-12-releases/summary.md)_
+
+- **`refresh()` re-snapshots every registered project on every call**, and it is
+  called from eight places. Measured 0.28s for one project with nine worktrees;
+  a real multi-project workspace is seconds, and it runs on the 3s poll, on
+  every `places:changed`, after every command and on the visible edge. The
+  ordering guard added in #118 stops stale reads from *winning*, but the work is
+  still done and thrown away. A per-project refresh (the changed root only)
+  would cut nearly all of it — `list_places(repo)` already exists and returns
+  exactly one project's snapshot; nothing calls it from the poll path.
+  _From: [2026-08-11 v0-12-releases session](docs/sessions/2026-08-11-v0-12-releases/summary.md)_
