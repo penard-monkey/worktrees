@@ -29,9 +29,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **Every space remembers its own panels.** Whether the dock is open, which tab
   it is on and how wide it is are now remembered per worktree, so coming back to
   a place finds it the way you left it instead of however the last place you
-  visited happened to be set up. A place you have never opened inherits the
-  current layout rather than snapping to a default — arriving somewhere new
-  should not rearrange the furniture either.
+  visited happened to be set up. A place where you have never opened the dock
+  starts closed, and stays closed until you open it there — opening the dock in
+  one worktree does not open it everywhere else you then click. What you set up
+  survives quitting the app.
 
   Only those three things are per-place. How you like to *read* a file — the
   Files tab's split, wrap and gitignored toggles — stays global, as does the

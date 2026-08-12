@@ -48,13 +48,26 @@ export type PlacePanels = {
  *  within a project. */
 export const placeKey = (repo: string, slug: string) => `${repo}|${slug}`;
 
-/** Settings as they apply to ONE place: the globals are the seed, the place's
- *  own remembered panels win where present. Returns `s` unchanged when the
- *  place has no entry (or nothing is selected), so the common path allocates
- *  nothing and keeps a stable identity for memo comparisons. */
+/** Settings as they apply to ONE place: the place's own remembered panels win
+ *  where present, and a place with no entry starts with the dock CLOSED. */
 export function panelsFor(s: Settings, key: string | null): Settings {
   const p = key ? s.place_panels?.[key] : undefined;
-  return p ? { ...s, ...p } : s;
+  if (p) return { ...s, ...p };
+  // A place you have never opened the dock in starts CLOSED — the global
+  // `dock_open` is NOT a seed.
+  //
+  // It used to be, on the theory that arriving somewhere new should not
+  // rearrange the furniture. In practice that made the dock SPREAD: open it in
+  // one place and every place you visited afterwards was already open before
+  // you asked for it, which is the same "it changed what I left it in"
+  // complaint pointed the other way. "No entry" has to mean "not set up yet",
+  // not "whatever the last place was set to".
+  //
+  // `dock_tab` and `dock_width` still seed from the globals: neither is visible
+  // until the dock is open, so inheriting them only decides what the FIRST
+  // deliberate open looks like, which is exactly where a last-used value is
+  // the right guess.
+  return s.dock_open ? { ...s, dock_open: false } : s;
 }
 
 export type Settings = {
@@ -87,11 +100,12 @@ export type Settings = {
   // activate it. Closing a tab explicitly drops its name.
   term_tab_names: Record<string, Record<number, string>>;
   // Per-place panel state, keyed `repo|slug` (the same scheme as
-  // `term_tab_names`). The flat `dock_*` fields above keep their meaning as the
-  // LAST-USED seed: a place with no entry here inherits them, so arriving
-  // somewhere you have never been looks like the place you came from rather
-  // than snapping back to a default — which is the same jarring switch in
-  // reverse. Entries are pruned when a place or a project goes away.
+  // `term_tab_names`). An entry here means "this place has been SET UP"; its
+  // absence means the dock has never been opened there, and such a place starts
+  // CLOSED — see `panelsFor`, which deliberately does not let the global
+  // `dock_open` seed it. The flat `dock_tab`/`dock_width` DO still seed, since
+  // neither is visible until the dock is open. Entries persist across restarts
+  // and are pruned when a place or a project goes away.
   place_panels: Record<string, PlacePanels>;
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
