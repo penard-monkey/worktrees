@@ -57,6 +57,18 @@ const mockCreateDelayMs = (() => {
   const m = /[?&]slowcreate(?:=(\d+))?/.exec(location.search);
   return m ? Number(m[1] ?? 2000) : 0;
 })();
+// `list_workspace` answers INSTANTLY here, and the real one does not: it
+// re-snapshots every registered project, each fanning out up to 16 concurrent
+// git calls (~0.3s for one project with nine worktrees, seconds across a real
+// workspace). Anything whose correctness depends on that gap — optimistic
+// updates, in-flight refresh races, spinners — is therefore invisible to this
+// harness by construction, which is exactly how a declared edit that waited on
+// a full git sweep before showing up reached a release. `?slowlist` for the
+// default 1500ms, `?slowlist=400` to pick one.
+const mockListDelayMs = (() => {
+  const m = /[?&]slowlist(?:=(\d+))?/.exec(location.search);
+  return m ? Number(m[1] ?? 1500) : 0;
+})();
 const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
 function dirKind(dir: string): "repo" | "empty" | "unborn" {
   if (mockInited.has(dir) || findProject(dir)) return "repo";
@@ -489,6 +501,7 @@ type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
   switch (cmd) {
     case "list_workspace":
+      await sleep(mockListDelayMs);
       return clone(ws);
     case "list_places":
       return clone(findProject(args.repo)?.snapshot ?? null);

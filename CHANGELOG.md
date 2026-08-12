@@ -3,6 +3,23 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A background refresh can no longer put a stale name back.** Every screen
+  refresh is a sweep of all your projects, several can be running at once, and
+  whichever finished last used to win — so a sweep that started *before* a rename
+  could land *after* it and quietly restore the old name, where it stuck until
+  something else changed. Reads are now applied in the order they were started
+  and stale ones are dropped, which also fixes a removed project reappearing.
+- **Renaming a place (or pinning one, or editing its note) shows up at once.**
+  The change was written immediately, but the nav only caught up after the app
+  had re-scanned every registered project — each one a fan-out of git calls, so
+  a workspace of any size left the old name on screen long enough to look
+  broken. On a single-project setup it was instant, which is why it survived
+  testing. Declared edits now apply to the tree the moment they are made; the
+  full re-scan still follows and still has the last word.
+
 ## [0.12.0] - 2026-08-11
 
 ### Added
