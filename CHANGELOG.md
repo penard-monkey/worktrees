@@ -3,6 +3,20 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Every list of places is now in the same order, by the same clock.** ⌘K, the
+  Recent lens and "Resume where you left off" each used to rank by a slightly
+  different notion of recent — one counted opening a place, one fell back to its
+  last commit, the tree counted neither — so the same three places could appear
+  in three orders, and a row's age often had nothing to do with where it sat.
+  All of them now order by the date the nav has always shown: when something
+  *happened* there, your work or a commit. Opening a place still doesn't move
+  it, so clicking around never reshuffles anything.
+- **⌘K rows show that date.** The switcher listed places in a recency order it
+  never displayed; now each row carries the same age as its row in the tree.
+
 ## [0.12.1] - 2026-08-11
 
 ### Fixed
