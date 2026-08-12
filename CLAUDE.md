@@ -49,6 +49,15 @@ trap when scripting gates: `grep -c` **exits non-zero on a count of 0**, so
 `... | grep -c "^not ok" && next-gate` silently skips everything after it — a
 gate that never ran looks identical to a gate with no output.
 
+**A pipeline's exit status is the LAST stage's.** `make test | tail -15` exits 0
+because `tail` did, and a mid-stream `not ok` scrolls off a 15-line window — so
+the run reads green whatever bats said. Redirect, then check both halves:
+`make test > log 2>&1; echo $?` plus `grep -cE '^not ok' log`. Same family as the
+grep traps above, and the reason to run gates with `make -C <repo-root>`: the
+Bash tool's cwd persists between calls, so an earlier `cd app` turns a later
+`make test` into "No rule to make target `test`" — a failure that looks like the
+change broke the build.
+
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old
@@ -106,6 +115,10 @@ is invisible to the bats suite — there is no fake claude. Re-run
   something the edit added.
 - Assert layout in the harness (`getComputedStyle`), don't eyeball it — a CSS
   rule killed by a stray `*/` still renders a plausible-looking widget.
+- **One click per `browser_evaluate`.** React batches, so several `.click()`s in
+  a single eval return before any of them render — the DOM you read back is the
+  one from before the clicks, which reads as "the tree ignored them". Drive
+  state changes one call at a time and query in the next.
 - Plugin permissions live in `app/src-tauri/capabilities/default.json`;
   `opener:default` has open-url + reveal-item-in-dir but NOT open-path —
   a missing permission rejects the invoke silently. Never swallow errors:
