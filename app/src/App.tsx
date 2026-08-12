@@ -1718,6 +1718,7 @@ function App() {
    *  install. */
   const setTitle = (repo: string, slug: string, title: string) => {
     setRenaming(false);
+    patchDeclared(repo, slug, { title: title.trim() || undefined });
     mutate(invoke("set_title", { repo, slug, title }));
   };
 
@@ -1796,8 +1797,52 @@ function App() {
     if (ctx.kind === "project" && !ws.projects.some((v) => v.root === ctx.root)) { setCtx(null); setConfirmRm(null); }
   }, [ctx, ctxPlace, ws]);
 
+  /** Apply a DECLARED change to the workspace already in hand, so the UI shows
+   *  it now instead of after a full git sweep.
+   *
+   *  `refresh()` re-snapshots EVERY registered project, and each snapshot fans
+   *  out up to 16 concurrent git calls — ~0.3s for one project with nine
+   *  worktrees, and seconds across a real workspace. Declared edits do not need
+   *  to wait for any of that: the store write has already happened and the
+   *  result is known in advance, so a name you just typed should appear at once.
+   *  The refresh still follows and remains the source of truth; this only closes
+   *  the gap until it lands.
+   *
+   *  ⚠ Deliberately does NOT touch `lastSnap`. That is refresh's record of what
+   *  the BACKEND last said, and the confirming refresh has to be able to tell
+   *  its own result apart from it — writing an optimistic value there would make
+   *  the real one look like a no-op and get dropped.
+   *
+   *  ⚠ Only for declared fields the backend copies through verbatim. NOT for
+   *  `lifecycle`: `lifecycle_effective` is reconciled server-side from the
+   *  declared label AND live tmux state, so patching the label alone would show
+   *  a row disagreeing with its own badge until the refresh landed. */
+  const patchDeclared = (repo: string, slug: string, patch: Partial<NonNullable<Declared>>) =>
+    setWs((cur) =>
+      !cur ? cur : {
+        projects: cur.projects.map((pv) =>
+          pv.root !== repo || !pv.snapshot
+            ? pv
+            : {
+                ...pv,
+                snapshot: {
+                  ...pv.snapshot,
+                  places: pv.snapshot.places.map((p) =>
+                    p.slug !== slug ? p : { ...p, declared: { ...(p.declared ?? {}), ...patch } },
+                  ),
+                },
+              },
+        ),
+      },
+    );
+
   const mutate = async (p: Promise<unknown>) => {
-    try { await p; await refresh(); } catch (e) { fail(e); }
+    try { await p; } catch (e) { fail(e); }
+    // Re-read either way. A failed declared edit has usually left an optimistic
+    // value on screen, and a failed op can be a PARTIAL success in general (the
+    // same reasoning runCmd states) — so the tree gets re-pulled regardless, and
+    // the refresh corrects anything the optimism got wrong.
+    await refresh();
   };
   // Returns the op's CmdResult (so callers can read result.slug), or null when
   // the invoke itself threw. On a non-ok result the error banner is set here —
@@ -2805,7 +2850,11 @@ function App() {
                   <button className="enter-btn with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /></button>
                 )}
                 <button className={"icon-btn" + (selected.declared?.pinned ? " on" : "")} title={selected.declared?.pinned ? "unpin" : "pin"}
-                  onClick={() => mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on: !selected.declared?.pinned }))}>
+                  onClick={() => {
+                    const on = !selected.declared?.pinned;
+                    patchDeclared(sel.repo, sel.slug, { pinned: on });
+                    mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on }));
+                  }}>
                   <Icons.Pin filled={!!selected.declared?.pinned} />
                 </button>
 
@@ -2860,7 +2909,11 @@ function App() {
 
             <input className="note-strip" placeholder="note…" defaultValue={selected.declared?.note ?? ""}
               key={sel.repo + sel.slug + (selected.declared?.note ?? "")}
-              onBlur={(e) => mutate(invoke("set_note", { repo: sel.repo, slug: sel.slug, note: e.currentTarget.value }))} />
+              onBlur={(e) => {
+                const note = e.currentTarget.value;
+                patchDeclared(sel.repo, sel.slug, { note: note.trim() || undefined });
+                mutate(invoke("set_note", { repo: sel.repo, slug: sel.slug, note }));
+              }} />
           </>
         )}
 
@@ -3148,7 +3201,12 @@ function App() {
           <div className="ctx-sep" />
           {!ctxPlace.is_main && (
             <>
-              <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("set_pin", { repo: ctx.repo, slug: ctxPlace.slug, on: !ctxPlace.declared?.pinned })); }}>
+              <button className="pop-item" onClick={() => {
+                closeCtx();
+                const on = !ctxPlace.declared?.pinned;
+                patchDeclared(ctx.repo, ctxPlace.slug, { pinned: on });
+                mutate(invoke("set_pin", { repo: ctx.repo, slug: ctxPlace.slug, on }));
+              }}>
                 {ctxPlace.declared?.pinned ? "★ Unpin" : "☆ Pin"}
               </button>
               <div className="pop-hint">lifecycle</div>
