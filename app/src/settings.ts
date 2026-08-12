@@ -99,6 +99,17 @@ export type Settings = {
   // live shell is seeded back into the strip and spawns a fresh shell when you
   // activate it. Closing a tab explicitly drops its name.
   term_tab_names: Record<string, Record<number, string>>;
+  // Which dock shell tab was in front, `repo|slug` → tab index. Coming back to
+  // a place used to land on the lowest-numbered tab whatever you were last
+  // looking at — and since the tab list is rebuilt on every place change, that
+  // happened when clicking between places, not only across restarts.
+  //
+  // Deliberately NOT part of `place_panels`: `panelsFor` returns `{...s, ...p}`,
+  // so every key there must also exist as a GLOBAL in `Settings`, and a global
+  // would make one place's tab seed another's. Tab 3 in one worktree says
+  // nothing about the next. Keyed like `term_tab_names`, and read the same way:
+  // a remembered tab that is no longer in the list falls back to the first.
+  term_tab_active: Record<string, number>;
   // Per-place panel state, keyed `repo|slug` (the same scheme as
   // `term_tab_names`). An entry here means "this place has been SET UP"; its
   // absence means the dock has never been opened there, and such a place starts
@@ -163,6 +174,7 @@ export const DEFAULTS: Settings = {
   files_md_source: false,
   files_show_ignored: true,
   term_tab_names: {},
+  term_tab_active: {},
   place_panels: {},
   editor_cmd: "code",
   terminal_cmd: "",

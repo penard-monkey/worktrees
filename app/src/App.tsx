@@ -685,9 +685,10 @@ function TermTabRename({ initial, onCommit, onCancel }: {
   );
 }
 
-function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, names, onRename, onError }: {
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, names, onRename, activeTab, onActiveTab, onError }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
   names: Record<number, string>; onRename: (index: number, name: string | null) => void;
+  activeTab: number | null; onActiveTab: (index: number | null) => void;
   onError: (e: unknown) => void;
 }) {
   const [ids, setIds] = useState<number[] | null>(null); // null = restoring
@@ -698,6 +699,18 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   const [dead, setDead] = useState<number[]>([]);
   const idsRef = useRef<number[]>([]);
   idsRef.current = ids ?? [];
+  // Read by the restore and by the stable callbacks below, which must NOT be
+  // rebuilt when the remembered tab changes — same reason `names` has a ref.
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  const onActiveTabRef = useRef(onActiveTab);
+  onActiveTabRef.current = onActiveTab;
+  /** Change tabs AND remember it. Every path that moves the front tab goes
+   *  through here, so "what I was looking at" is whatever the user last did. */
+  const pick = useCallback((id: number | null) => {
+    setActive(id);
+    onActiveTabRef.current(id);
+  }, []);
   const restoringRef = useRef(true);
   // names is read by the restore, which must NOT re-run on every rename
   const namesRef = useRef(names);
@@ -726,7 +739,13 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
         const union = [...new Set([...existing.map((t) => t.index), ...named])].sort((a, b) => a - b);
         const list = union.length ? union : (sessionUp ? [1] : []);
         setDead(existing.filter((t) => t.dead).map((t) => t.index));
-        setIds(list); setActive(list[0] ?? null); restoringRef.current = false;
+        // The remembered tab, if it is still one of the tabs — it can have been
+        // closed, or belong to a session that is now down. Restoring does NOT
+        // write the fallback back: a place whose remembered tab is temporarily
+        // absent should find it again next time, not have it overwritten.
+        const want = activeTabRef.current;
+        setIds(list); setActive(want != null && list.includes(want) ? want : list[0] ?? null);
+        restoringRef.current = false;
       })
       .catch((e) => {
         if (!alive) return;
@@ -773,8 +792,8 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     const cur = idsRef.current;
     const next = (cur.length ? Math.max(...cur) : 0) + 1;
     setIds([...cur, next]);
-    setActive(next);
-  }, []);
+    pick(next);
+  }, [pick]);
 
   // ⌘⇧T → add a tab. Skip the initial token value so mounting doesn't add one.
   const firstTok = useRef(true);
@@ -791,7 +810,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
                         // would be seeded straight back on the next restore
     const remaining = idsRef.current.filter((x) => x !== id);
     setIds(remaining);
-    if (active === id) setActive(remaining.length ? remaining[remaining.length - 1] : null);
+    if (active === id) pick(remaining.length ? remaining[remaining.length - 1] : null);
   };
 
   if (ids === null) return <div className="tree-note">…</div>;
@@ -809,7 +828,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
               />
             ) : (
               <button className="termtab-label" title={dead.includes(id) ? "process exited" : "double-click to rename"}
-                onClick={() => setActive(id)} onDoubleClick={() => setEditing(id)}>{labelOf(id)}</button>
+                onClick={() => pick(id)} onDoubleClick={() => setEditing(id)}>{labelOf(id)}</button>
             )}
             <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}><Icons.X size={11} /></button>
           </span>
@@ -1733,10 +1752,18 @@ function App() {
    *  years ago would still be carrying a dock width. */
   const dropPanels = useCallback((shouldDrop: (key: string) => boolean) => {
     setSettings((prev) => {
-      const panels = prev.place_panels ?? {};
-      const kept = Object.fromEntries(Object.entries(panels).filter(([k]) => !shouldDrop(k)));
-      if (Object.keys(kept).length === Object.keys(panels).length) return prev;
-      const next = { ...prev, place_panels: kept };
+      // EVERY per-place map, not just the panels: they are all keyed
+      // `repo|slug` and they all outlive the place otherwise. `term_tab_names`
+      // has been leaking entries for removed places since it was added — a tab
+      // name is only dropped when the tab is CLOSED, which a removed place
+      // never gets the chance to do.
+      const swept = (["place_panels", "term_tab_names", "term_tab_active"] as const).flatMap((field) => {
+        const cur = prev[field] ?? {};
+        const kept = Object.fromEntries(Object.entries(cur).filter(([k]) => !shouldDrop(k)));
+        return Object.keys(kept).length === Object.keys(cur).length ? [] : [[field, kept] as const];
+      });
+      if (!swept.length) return prev;
+      const next = { ...prev, ...Object.fromEntries(swept) } as Settings;
       if (hydrated.current) saveSettings(next);
       return next;
     });
@@ -1784,6 +1811,17 @@ function App() {
     if (Object.keys(bucket).length) all[key] = bucket;
     else delete all[key];
     updateSettings({ term_tab_names: all });
+  };
+
+  /** Remember which shell tab is in front for this place (null = none left).
+   *  Sibling of `term_tab_names` rather than a `place_panels` field — see the
+   *  note on `term_tab_active` in settings.ts for why it cannot be one. */
+  const setTermTab = (repo: string, slug: string, index: number | null) => {
+    const key = placeKey(repo, slug);
+    const all = { ...(settings.term_tab_active ?? {}) };
+    if (index == null) delete all[key];
+    else all[key] = index;
+    updateSettings({ term_tab_active: all });
   };
 
   // theme "system": re-apply when macOS appearance flips
@@ -3144,6 +3182,8 @@ function App() {
                     termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
                     names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
                     onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
+                    activeTab={(settings.term_tab_active ?? {})[sel.repo + "|" + sel.slug] ?? null}
+                    onActiveTab={(index) => setTermTab(sel.repo, sel.slug, index)}
                     onError={fail} />
                 )}
               </div>

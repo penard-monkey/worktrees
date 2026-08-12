@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A place remembers which terminal tab you were on.** Coming back to a space
+  always put you on the lowest-numbered tab, whatever you had been looking at —
+  and because the tab strip is rebuilt every time you change place, that
+  happened when clicking between places, not only after a restart. Each place
+  now remembers its front tab. A remembered tab that is no longer there (you
+  closed it, or its shell did not survive a restart) falls back to the first
+  one, without forgetting what it was.
 - **Terminal tabs reopen where you left them.** A dock shell lives and dies with
   the app, so quitting used to drop every tab back at the worktree root however
   deep you had worked. Each tab now remembers its directory and starts there
