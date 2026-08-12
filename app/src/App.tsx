@@ -760,9 +760,9 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   }, [repo, slug]);
 
   const restartTab = (id: number) => {
-    // forget:false — this closes the DEAD shell to make room for a new one in
-    // the same tab, so the tab keeps the directory it died in.
-    invoke("close_shell_session", { repo, slug, index: id, forget: false }).catch(onError);
+    // keepCwd — this closes the DEAD shell to make room for a new one in the
+    // same tab, so the tab keeps the directory it was last in.
+    invoke("close_shell_session", { repo, slug, index: id, keepCwd: true }).catch(onError);
     setDead((d) => d.filter((x) => x !== id));
     setRestartToken((t) => t + 1); // remount the pane → shell_open spawns afresh
   };
@@ -784,9 +784,9 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   }, [addToken, addTab]);
 
   const closeTab = (id: number) => {
-    // forget:true — the tab is going away, so the backend drops its remembered
-    // directory too (the counterpart of dropping its name, just below).
-    invoke("close_shell_session", { repo, slug, index: id, forget: true }).catch(onError);
+    // the tab is going away, so the backend drops its remembered directory too
+    // (the counterpart of dropping its name, just below)
+    invoke("close_shell_session", { repo, slug, index: id, keepCwd: false }).catch(onError);
     onRename(id, null); // an explicitly closed tab drops its name — otherwise it
                         // would be seeded straight back on the next restore
     const remaining = idsRef.current.filter((x) => x !== id);

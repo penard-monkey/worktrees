@@ -2711,18 +2711,17 @@ async fn close_shell_session(
     repo: String,
     slug: String,
     index: u32,
-    forget: Option<bool>,
+    keep_cwd: Option<bool>,
     shells: State<'_, Shells>,
 ) -> Result<(), String> {
     kill_shell(&shells, &(repo.clone(), slug.clone(), index));
     // A tab the user CLOSED forgets where it was, exactly as it drops its name
     // (App.tsx `closeTab`) — otherwise the next tab to take this index would
     // open in a directory it never visited. A tab being RESTARTED goes through
-    // this same command to reap the corpse and must keep its directory: it is
-    // the same tab, and restarting a shell that died in a subdirectory only to
-    // land at the place root is the exact papercut this feature removes.
-    // `None` = forget, so an older frontend can't silently start hoarding.
-    if forget.unwrap_or(true) {
+    // this same command to reap the corpse and asks to KEEP its directory: it
+    // is the same tab, and restarting a shell that died in a subdirectory only
+    // to land at the place root is the exact papercut this feature removes.
+    if !keep_cwd.unwrap_or(false) {
         edit_cwds(&app, |map| forget_tab(map, &repo, &slug, index));
     }
     Ok(())
@@ -2743,7 +2742,7 @@ type CwdMap = BTreeMap<String, BTreeMap<u32, String>>;
 
 /// Serialises writers to `shell-cwds.json`: the slow sampler and the shell
 /// commands both read-modify-write, and interleaving them would lose an update.
-static CWD_FILE: Mutex<()> = Mutex::new(());
+static CWD_FILE_LOCK: Mutex<()> = Mutex::new(());
 
 fn cwd_key(repo: &str, slug: &str) -> String {
     format!("{repo}|{slug}")
@@ -2765,10 +2764,10 @@ fn read_cwds(app: &AppHandle) -> CwdMap {
     cwd_file(app).map(|p| read_cwds_at(&p)).unwrap_or_default()
 }
 
-/// Read-modify-write under `CWD_FILE`. `f` returns false to skip the write —
+/// Read-modify-write under `CWD_FILE_LOCK`. `f` returns false to skip the write —
 /// the sampler runs every few seconds and an idle shell must not churn the disk.
 fn edit_cwds_at(path: &Path, f: impl FnOnce(&mut CwdMap) -> bool) {
-    let _guard = CWD_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CWD_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut map = read_cwds_at(path);
     if !f(&mut map) {
         return;
@@ -2801,8 +2800,12 @@ fn forget_tab(map: &mut CwdMap, repo: &str, slug: &str, index: u32) -> bool {
 }
 
 fn edit_cwds(app: &AppHandle, f: impl FnOnce(&mut CwdMap) -> bool) {
-    let Ok(path) = cwd_file(app) else { return };
-    edit_cwds_at(&path, f);
+    match cwd_file(app) {
+        Ok(path) => edit_cwds_at(&path, f),
+        // A read that can't find the file is just "no memory yet"; a WRITE that
+        // can't resolve the config dir is a real failure and has to say so.
+        Err(e) => applog("error", &format!("shell-cwds path unavailable: {e}")),
+    }
 }
 
 /// A live process's working directory, straight from the OS — no subprocess and
@@ -2897,7 +2900,68 @@ fn save_shell_cwds(app: &AppHandle, shells: &Shells) {
     if sample.is_empty() {
         return; // no shells (or no cwd to be read) — don't even open the file
     }
-    edit_cwds(app, |map| merge_cwds(map, sample));
+    edit_cwds(app, |map| {
+        // Membership is re-checked HERE, under the file lock, because the
+        // registry lock was released before the `proc_cwd` reads above. A tab
+        // closed in that gap has already had its entry forgotten, and merging
+        // the reading we took a moment earlier would put it straight back — so
+        // the next tab to reuse that index would open somewhere it has never
+        // been, which is exactly what `close_shell_session` promises cannot
+        // happen. (No lock-order hazard: nothing that holds the registry ever
+        // waits on this file lock — `shell_open` only READS the file, and reads
+        // don't take it.)
+        let open = shells.0.lock().unwrap();
+        let fresh: Vec<(ShellKey, String)> = sample.into_iter().filter(|(k, _)| open.contains_key(k)).collect();
+        drop(open);
+        merge_cwds(map, fresh)
+    });
+}
+
+/// Which `repo|slug` keys no longer name a place on disk. `place_dir` resolves
+/// one, or returns `None` when the PROJECT itself is unreachable — a repo that
+/// has been deleted or moved takes all of its places with it.
+fn vanished_keys(keys: &[String], mut place_dir: impl FnMut(&str, &str) -> Option<String>) -> Vec<String> {
+    keys.iter()
+        .filter(|key| {
+            // repo roots are absolute paths and a slug is a directory basename,
+            // so the LAST separator is the real one
+            match key.rsplit_once('|') {
+                Some((repo, slug)) => !place_dir(repo, slug).is_some_and(|d| Path::new(&d).is_dir()),
+                None => true, // not a key this app writes — it cannot name a live place
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Forget every place whose worktree is gone. The app cleans up after its own
+/// `remove_place`, but `worktrees rm` from a terminal leaves the entry behind,
+/// and the key is only `repo|slug` — so a slug that is later recreated (a
+/// recycled branch name) would inherit the previous life's directories wherever
+/// those paths still exist in the new checkout. Sweeping at startup shrinks
+/// that to the case where the place is removed and recreated with the app
+/// closed, which is accepted: what survives is a real directory inside the
+/// worktree, so the shell opens somewhere that exists rather than anywhere
+/// misleading.
+fn forget_vanished_places(app: &AppHandle) {
+    let keys: Vec<String> = read_cwds(app).keys().cloned().collect();
+    if keys.is_empty() {
+        return;
+    }
+    let mut projects: HashMap<String, Option<Project>> = HashMap::new();
+    let gone = vanished_keys(&keys, |repo, slug| {
+        projects.entry(repo.to_string()).or_insert_with(|| Project::discover(Path::new(repo)).ok());
+        projects[repo].as_ref().map(|p| p.place_dir(slug))
+    });
+    if gone.is_empty() {
+        return;
+    }
+    applog("info", &format!("shell-cwds: forgetting {} place(s) that no longer exist", gone.len()));
+    edit_cwds(app, |map| {
+        let before = map.len();
+        map.retain(|k, _| !gone.contains(k));
+        map.len() != before
+    });
 }
 
 /// Where a tab should reopen: its last known directory if that still exists,
@@ -3398,6 +3462,9 @@ pub fn run() {
                 // Cold start: what happened while the app was closed. Runs before
                 // the first sleep so the nav's afterglow is right on frame one.
                 backfill_worked(&handle);
+                // Same cold-start slot: drop remembered directories for places
+                // that were removed while the app was closed.
+                forget_vanished_places(&handle);
                 loop {
                     std::thread::sleep(Duration::from_secs(3));
                     let interval = FETCH_INTERVAL_SECS.load(Ordering::Relaxed);
@@ -4065,6 +4132,37 @@ mod tests {
         std::fs::write(&file, b"{not json").unwrap();
         assert_eq!(read_cwds_at(&file), CwdMap::new());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The startup sweep's decision. A place removed with `worktrees rm` from a
+    /// terminal leaves its entry behind — nothing tells the app — so this is
+    /// what stops a recreated slug inheriting the previous life's directories.
+    #[test]
+    fn only_places_that_no_longer_exist_are_forgotten() {
+        let here = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+        let keys: Vec<String> = ["/r|alive", "/r|removed", "/dead-repo|any", "no-separator"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let gone = vanished_keys(&keys, |repo, slug| match (repo, slug) {
+            ("/r", "alive") => Some(here.clone()),
+            ("/r", "removed") => Some("/gone/for/good".into()),
+            _ => None, // the project itself is unreachable
+        });
+        assert_eq!(gone, vec!["/r|removed", "/dead-repo|any", "no-separator"]);
+    }
+
+    /// A repo path is absolute and may itself contain the separator; the slug
+    /// never does, so the split has to come from the right.
+    #[test]
+    fn a_repo_path_containing_the_separator_still_splits_at_the_slug() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let keys = vec!["/odd|repo|feat".to_string()];
+        vanished_keys(&keys, |repo, slug| {
+            seen.borrow_mut().push((repo.to_string(), slug.to_string()));
+            None
+        });
+        assert_eq!(seen.into_inner(), vec![("/odd|repo".to_string(), "feat".to_string())]);
     }
 
     /// `shell_open`'s actual lookup — `remembered_dir` composed with

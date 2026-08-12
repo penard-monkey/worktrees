@@ -12,7 +12,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   again — the directory only: no history, no scrollback, nothing else about the
   session. A remembered directory that no longer exists falls back to the
   worktree root, and closing a tab forgets it — while restarting a shell that
-  exited brings the tab back where it died. The place's own terminal is
+  exited brings the tab back where it was. The place's own terminal is
   unaffected: tmux was already keeping its directory for as long as its server
   lives.
 

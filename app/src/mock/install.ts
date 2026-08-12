@@ -901,9 +901,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         .map((index) => ({ index, dead: deadSet.has(index) }));
     }
     case "close_shell_session": {
-      // `args.forget` (false when RESTARTING a tab) only governs the backend's
-      // shell-cwds.json, and the mock owns no shells and no directories — the
-      // tab bookkeeping below is the same either way.
+      // `keepCwd` (true when RESTARTING a tab, false when CLOSING one) governs
+      // the backend's shell-cwds.json only, and the mock owns no shells and no
+      // directories — the tab bookkeeping below is the same either way. It is
+      // asserted anyway, exactly as `remove_place` asserts `delBranch`: the
+      // real command takes an `Option<bool>`, so a mistyped or dropped key
+      // would deserialize to `None` and silently mean "forget", turning a
+      // restart back into the papercut the directory memory exists to fix.
+      if (typeof args.keepCwd !== "boolean")
+        throw "invalid args `keepCwd` for command `close_shell_session`: expected a boolean";
       shellSidecars.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
       deadShells.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
       return null;

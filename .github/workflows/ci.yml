@@ -100,3 +100,10 @@ jobs:
           pnpm -C app build
       - name: cargo build -p app
         run: cargo build -p app --locked
+      # `build`/`check` do NOT compile `mod tests`, so without this line the app
+      # crate's unit tests only ever run when someone types the command — the
+      # same gap that shipped a broken test module for the CLI crate above.
+      # It matters most on ubuntu: the Linux half of `proc_cwd` (/proc/<pid>/cwd)
+      # is dead code on a mac and this is the only place it is ever executed.
+      - name: cargo test -p app
+        run: cargo test -p app --lib --locked
