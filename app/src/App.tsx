@@ -148,24 +148,22 @@ function doneTier(epoch: number, nowSec: number): DoneTier {
   if (age < DONE_T3_SECS) return "t3";
   return "";
 }
-/// "When did I last USE this place" — opened or worked, whichever is newer. Work
-/// outranks nothing; it is the other half of the same fact, since a place you
-/// prompted in an hour ago is more current than one you opened yesterday.
+/// "When did I last USE this place" — opened or worked, whichever is newer.
 ///
-/// Deliberately has NO commit-epoch fallback: the lists that answer "where was
-/// I" (Resume, the Recent lens, auto-restore) must not be led by a branch tip.
+/// ONE consumer left: the restore-on-launch target. Every list a user reads —
+/// the nav tree, ⌘K, the Recent lens, the home Resume list — orders and labels
+/// by `activityAt` instead, so the age printed on a row is the reason it sits
+/// where it does. Four lists that agreed on nothing were four different answers
+/// to "what did I touch last".
+///
+/// Restore keeps THIS key because it deliberately has no commit-epoch fallback.
 /// A worktree created from the CLI and never touched has a commit from
-/// yesterday and no user history at all — ranking it above a place actually
-/// opened last week would put it at the top of Resume and make it the
-/// restore-on-launch target.
+/// yesterday and no user history at all; `activityAt` would rank it above a
+/// place actually opened last week, and the app would launch itself into a
+/// place the user has never seen. A list can survive being wrong about that —
+/// it shows the next row too. The restore target can't.
 const usedEpoch = (p: Place) =>
   Math.max(p.declared?.last_opened_epoch ?? 0, p.declared?.last_worked_epoch ?? 0);
-/// Sort key for ⌘K, which has always fallen back to the last commit so a
-/// never-opened place still lands somewhere sensible in the order rather than
-/// sinking to the bottom of every list. The switcher keeps opens on purpose —
-/// "jump back to where I just was" is its job. The NAV tree no longer sorts by
-/// this: opens reshuffling the tree carried no signal (see activityAt).
-const recencyEpoch = (p: Place) => usedEpoch(p) || p.last_commit_epoch || 0;
 
 // fixed-order signal glyphs; geometry (3-col row grid) guarantees no collision.
 //
@@ -473,9 +471,14 @@ function UnbornPrompt({ project, onCommit, onCancel }: {
 // Fuzzy SUBSEQUENCE match over a composite key (slug + branch + project basename
 // + note). A place matches if the query chars appear IN ORDER (case-insensitive);
 // score prefers a contiguous substring hit over a scattered subsequence, an
-// earlier hit over a later one, and a slug hit over a branch/project hit. Recency
-// (`recencyEpoch` desc — opened OR worked) breaks ties. Empty query → all places sorted
-// by recency (the instant "recent places" list — the common case).
+// earlier hit over a later one, and a slug hit over a branch/project hit.
+//
+// `rank` (desc) breaks ties, and IS the order when the query is empty — the
+// instant "recent places" list, which is the common case. It arrives as a prop
+// because it is the NAV's clock (`activityAt`, which closes over App state) and
+// the two must not drift: the empty-query list and the tree behind the palette
+// show the same places, so any disagreement reads as one of them being broken.
+// Each row prints that clock, for the same reason nav rows do.
 type SwitchItem = { pv: ProjectView; p: Place };
 const SWITCH_CAP = 50; // rendered-list cap for big workspaces (perf; query narrows it)
 
@@ -499,9 +502,10 @@ function fuzzyScore(query: string, hay: string): number {
   return 400 - first - gaps * 5; // scattered: below any substring hit
 }
 
-function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: {
+function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, onPick, onClose }: {
   open: boolean;
   items: SwitchItem[];
+  rank: (p: Place) => number;
   busyPaths: Set<string>;
   waitingPaths: Set<string>;
   onPick: (root: string, p: Place) => void;
@@ -514,10 +518,9 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const rec = recencyEpoch;
     if (!q) {
       return [...items]
-        .sort((a, b) => rec(b.p) - rec(a.p))
+        .sort((a, b) => rank(b.p) - rank(a.p))
         .slice(0, SWITCH_CAP);
     }
     const scored: { it: SwitchItem; score: number }[] = [];
@@ -544,9 +547,9 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
       );
       scored.push({ it, score: s });
     }
-    scored.sort((a, b) => (b.score - a.score) || (rec(b.it.p) - rec(a.it.p)));
+    scored.sort((a, b) => (b.score - a.score) || (rank(b.it.p) - rank(a.it.p)));
     return scored.slice(0, SWITCH_CAP).map((x) => x.it);
-  }, [items, query]);
+  }, [items, query, rank]);
 
   // fresh mount per open (App renders <QuickSwitch> only when open) → autofocus
   // fires and query/highlight reset. Focus the input on mount as a belt-and-braces
@@ -624,6 +627,7 @@ function QuickSwitch({ open, items, busyPaths, waitingPaths, onPick, onClose }: 
                   <span className="qs-proj">{basename(pv.root)}</span>
                   {p.branch && p.branch !== p.slug && <span className="qs-branch">{p.branch}</span>}
                   <span className={"life " + p.lifecycle_effective}>{p.lifecycle_effective}</span>
+                  <span className="qs-age">{ago(rank(p))}</span>
                 </div>
               );
             })
@@ -1431,11 +1435,14 @@ function App() {
   }, []);
   const workedAt = (p: Place) =>
     Math.max(donePaths.get(p.path) ?? 0, p.declared?.last_worked_epoch ?? 0);
-  // Nav row age AND the "Activity" sort key: when something HAPPENED here —
-  // Claude work or a commit, never an open. `last_opened_epoch` is deliberately
-  // excluded so clicking a row neither resets its clock to "now" nor reshuffles
-  // the tree. Opens still count where "where was I" is the question: the Recent
-  // lens, Resume (usedEpoch), and ⌘K (recencyEpoch).
+  // THE clock. Row age and sort key for every list a user reads — the nav tree,
+  // the Recent lens, the home Resume list, ⌘K — so a row's printed age is the
+  // reason it sits where it does. When something HAPPENED here: Claude work or a
+  // commit, never an open. `last_opened_epoch` is deliberately excluded so
+  // clicking a row neither resets its clock to "now" nor reshuffles the tree
+  // (⌘K used to rank by opens, which is why the palette and the tree behind it
+  // disagreed about what you touched last). The one place opens still decide is
+  // the restore-on-launch target — see `usedEpoch`.
   const activityAt = (p: Place) => Math.max(workedAt(p), p.last_commit_epoch ?? 0);
 
   // The decay clock. One minute is far finer than the coarsest boundary it has
@@ -2428,11 +2435,26 @@ function App() {
     for (const { p } of allPlaces) { if (p.tmux_session.up) live++; if (p.dirty) dirty++; }
     return { live, dirty };
   }, [allPlaces]);
+  // Home "resume where you left off" — same clock and same order as the nav
+  // tree, because it is the same question asked from the empty state.
+  // `donePaths` is a dep, not a bystander: `activityAt` reads it, so a task
+  // finishing while the home view is up has to be able to re-rank the list.
   const resume = useMemo(
     () => allPlaces
       .filter(({ p }) => !p.is_main)
-      .sort((a, b) => usedEpoch(b.p) - usedEpoch(a.p))
+      .sort((a, b) => activityAt(b.p) - activityAt(a.p))
       .slice(0, 6),
+    [allPlaces, donePaths],
+  );
+  // Restore-on-launch target, and the ONE list-shaped thing that still ranks by
+  // opens. Kept separate from `resume` above on purpose: `activityAt` counts
+  // commits, and a CLI-made worktree that was never opened would then be what
+  // the app launches into. See `usedEpoch`. Nothing renders this — it is one
+  // place, read once.
+  const restoreTarget = useMemo(
+    () => allPlaces
+      .filter(({ p }) => !p.is_main)
+      .sort((a, b) => usedEpoch(b.p) - usedEpoch(a.p))[0],
     [allPlaces],
   );
 
@@ -2441,8 +2463,9 @@ function App() {
   // Claude session on every reboot). TerminalPane attaches on its own if the tmux
   // session is up; otherwise the place view shows its normal "Enter ▸ to start".
   // Target = the most recently USED place across all projects (max of opened /
-  // worked, main excluded) — same derivation as the Resume list, so
-  // resume[0]. Fires exactly once, and only after BOTH settings hydration and the
+  // worked, main excluded) — NOT the top of the Resume list, which ranks by
+  // activity and would hand this a place that only has a commit.
+  // Fires exactly once, and only after BOTH settings hydration and the
   // first workspace load have landed, only if restore_last is on, and only if the
   // user hasn't already selected something.
   const restoredOnce = useRef(false);
@@ -2453,9 +2476,8 @@ function App() {
     // toggle off, so enabling it later can't yank the selection mid-session
     if (!settings.restore_last) return;
     if (sel) return; // user already clicked — don't override their choice
-    const target = resume[0];
-    if (target) setSel({ repo: target.pv.root, slug: target.p.slug });
-  }, [ws, settings.restore_last, resume, sel]);
+    if (restoreTarget) setSel({ repo: restoreTarget.pv.root, slug: restoreTarget.p.slug });
+  }, [ws, settings.restore_last, restoreTarget, sel]);
 
   // ── nav resizer (drag the nav's right edge) ──
   // Both resizers clamp against the LIVE viewport, so a drag can never push the
@@ -2494,10 +2516,11 @@ function App() {
   // `drift` prop-by-closure and its tooltip is a plain `title` attribute. The
   // moment this needs useState (a hover card, an inline editor), hoist it to
   // module scope with props FIRST.
-  // `ageEpoch` overrides the age clock for lists that sort by a different key —
-  // a list must label rows with the SAME clock it orders by, or its ages read
-  // as a broken sort (the Recent lens sorts by usedEpoch, opens included).
-  const PlaceRow = ({ repo, p, showProject, ageEpoch }: { repo: string; p: Place; showProject?: boolean; ageEpoch?: number }) => {
+  // No age override any more: every list this row appears in sorts by
+  // `activityAt`, so the row can just print it. The old `ageEpoch` prop existed
+  // because the Recent lens ordered by a different clock, and a list that labels
+  // rows with a clock it does not order by reads as a broken sort.
+  const PlaceRow = ({ repo, p, showProject }: { repo: string; p: Place; showProject?: boolean }) => {
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
     return (
       <li
@@ -2529,7 +2552,7 @@ function App() {
           {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
-          <span className="row-age">{ago(ageEpoch ?? activityAt(p))}</span>
+          <span className="row-age">{ago(activityAt(p))}</span>
         </span>
       </li>
     );
@@ -2665,17 +2688,21 @@ function App() {
   };
 
   // flat lens (recent / attention) across all projects
-  const FlatLens = ({ items, ageOf }: { items: { pv: ProjectView; p: Place }[]; ageOf?: (p: Place) => number }) => (
+  const FlatLens = ({ items }: { items: { pv: ProjectView; p: Place }[] }) => (
     <ul className="places flat">
       {items.length === 0 && <li className="flat-empty">Nothing here.</li>}
-      {items.map(({ pv, p }) => <PlaceRow key={pv.root + p.slug} repo={pv.root} p={p} showProject ageEpoch={ageOf?.(p)} />)}
+      {items.map(({ pv, p }) => <PlaceRow key={pv.root + p.slug} repo={pv.root} p={p} showProject />)}
     </ul>
   );
 
+  // Recent = the tree flattened and ranked, not a second opinion about time.
+  // It used to rank (and label) by `usedEpoch`, so the same place could sit
+  // third here and first in the tree with two different ages next to it.
+  // `donePaths` is a dep because `activityAt` reads it.
   const recentItems = useMemo(
     () => allPlaces.filter(({ p }) => matchPlace(p) && !p.is_main)
-      .sort((a, b) => usedEpoch(b.p) - usedEpoch(a.p)),
-    [allPlaces, q],
+      .sort((a, b) => activityAt(b.p) - activityAt(a.p)),
+    [allPlaces, q, donePaths],
   );
   const attentionItems = useMemo(
     () => allPlaces.filter(({ p }) => matchPlace(p) && hasAttention(p)),
@@ -2786,7 +2813,7 @@ function App() {
         <div className="nav-scroll">
           {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}
           {lens === "places" && ws?.projects.map((pv) => <ProjectNode key={pv.root} pv={pv} />)}
-          {lens === "recent" && <FlatLens items={recentItems} ageOf={usedEpoch} />}
+          {lens === "recent" && <FlatLens items={recentItems} />}
           {lens === "attention" && (
             <>
               <FlatLens items={attentionItems} />
@@ -3026,7 +3053,7 @@ function App() {
                       <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{nameOf(p)}</span>
                       <span className="rr-proj">{basename(pv.root)}</span>
                       <span className="rr-life">{p.lifecycle_effective}</span>
-                      <span className="rr-age">{ago(usedEpoch(p))}</span>
+                      <span className="rr-age">{ago(activityAt(p))}</span>
                       <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
                     </div>
                   ))}
@@ -3196,7 +3223,7 @@ function App() {
           + highlight reset, autofocus fires). enterPlace bumps termFocus, returning
           focus to the terminal after a pick. */}
       {switchOpen && (
-        <QuickSwitch open items={allPlaces} busyPaths={busyPaths} waitingPaths={waitingPaths}
+        <QuickSwitch open items={allPlaces} rank={activityAt} busyPaths={busyPaths} waitingPaths={waitingPaths}
           onPick={(root, p) => { setSwitchOpen(false); enterPlace(root, p); }}
           onClose={() => setSwitchOpen(false)} />
       )}

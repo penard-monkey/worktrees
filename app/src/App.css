@@ -1218,7 +1218,13 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   font-size: var(--fs-label); color: var(--branch); overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; min-width: 0;
 }
+/* `.life` takes the auto margin, so the pair sits hard right and the age is the
+   last thing on the row — same reading order as a nav row, same clock. */
 .qs-row .life { margin-left: auto; flex: none; }
+.qs-age {
+  flex: none; min-width: 2em; text-align: right; color: var(--txt-mute);
+  font-size: var(--fs-micro); font-variant-numeric: tabular-nums;
+}
 .settings-sheet {
   width: min(560px, 92%); height: 100%; background: var(--bg-tree);
   border-left: 1px solid var(--line); box-shadow: var(--shadow-float);
