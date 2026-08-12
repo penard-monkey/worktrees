@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.12.0] - 2026-08-11
 
 ### Added
 - **The Files tab says what the branch changed.** The tree tints and bolds every
