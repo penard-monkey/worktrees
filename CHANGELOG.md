@@ -16,6 +16,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   it, so clicking around never reshuffles anything.
 - **⌘K rows show that date.** The switcher listed places in a recency order it
   never displayed; now each row carries the same age as its row in the tree.
+- **Local installs can carry a stable code signature** (`SIGN_ID` for the
+  Makefile, `WORKTREES_SIGN_ID` for `install.sh`; unset keeps today's behaviour,
+  and nothing about releases changes). Gatekeeper never needed one — local builds
+  aren't quarantined — but macOS privacy prompts do. TCC records an approval
+  ("worktrees would like to access data from other apps", raised when something
+  running under a place's tmux session reads another app's data directory)
+  against the requesting binary's designated requirement, and for the ad-hoc
+  signature cargo and tauri leave behind that requirement IS the cdhash:
+  `designated => cdhash H"09f58b26…"`. Every rebuild is therefore a brand-new app
+  to TCC and the approval is asked again — once per other-app directory the build
+  touches, which is why it arrives in threes. Signing with a cert-backed identity
+  (an Apple Development cert, or a self-signed Code Signing cert from Keychain
+  Access) makes it `identifier "net.casadelvalle.worktrees" and certificate
+  leaf[…]`, which the next build still satisfies, so the approval sticks.
+  `make install-app` checks the identity is in the keychain BEFORE the build
+  rather than after it, and says so when a running instance still holds the
+  previous build's identity.
 
 ## [0.12.1] - 2026-08-11
 

@@ -12,6 +12,7 @@
 #   WORKTREES_INSTALL_DIR=~/bin          alternate target dir
 #   WORKTREES_INSTALL_FROM_SOURCE=1      force a cargo build from source
 #   WORKTREES_INSTALL_APP=1|0            also install the macOS desktop app / never ask
+#   WORKTREES_SIGN_ID="Apple Devel…"     codesign what is installed (macOS, see below)
 #   install.sh --with-app                same as WORKTREES_INSTALL_APP=1
 #   install.sh --uninstall               remove the installed binary (only that)
 #
@@ -23,6 +24,15 @@
 # Desktop app (macOS): with a terminal attached the installer OFFERS to install
 # worktrees.app to /Applications (checksum-verified, then the quarantine attr is
 # stripped — the bundle is unsigned; you explicitly chose to install it).
+#
+# Code signing (WORKTREES_SIGN_ID, macOS): releases ship ad-hoc signed, whose
+# designated requirement is the cdhash — so macOS privacy approvals ("worktrees
+# would like to access data from other apps") are recorded against THIS build and
+# are re-asked after every upgrade. Set WORKTREES_SIGN_ID to one of your own
+# code-signing identities (`security find-identity -v -p codesigning`; a
+# self-signed Code Signing cert from Keychain Access works) and the installer
+# re-signs what it installs, giving TCC a requirement that survives upgrades.
+# This is a LOCAL convenience — it says nothing about authorship.
 #
 # Checksums: a downloaded binary is verified against the release's checksums.txt.
 # This protects against truncation/corruption — it does NOT prove authorship (the
@@ -36,6 +46,19 @@ BIN_NAME="worktrees"
 sha256_check() {   # reads "<hash>  <name>" on stdin, verifies <name> in cwd
   if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -
   else shasum -a 256 -c -; fi
+}
+
+# Optional local re-sign (see the WORKTREES_SIGN_ID note in the header). Never
+# fatal: a failed codesign leaves a working, ad-hoc signed install behind.
+sign_if_asked() {  # $1 = path to a binary or .app bundle
+  [ "$(uname -s)" = Darwin ] || return 0
+  [ -n "${WORKTREES_SIGN_ID:-}" ] || return 0
+  command -v codesign >/dev/null 2>&1 || { echo "WARNING: codesign not found — $1 left ad-hoc signed" >&2; return 0; }
+  if codesign --force --sign "$WORKTREES_SIGN_ID" --identifier net.casadelvalle.worktrees "$1" 2>/dev/null; then
+    echo "signed: $1"
+  else
+    echo "WARNING: codesign of $1 failed (identity '$WORKTREES_SIGN_ID') — left ad-hoc signed" >&2
+  fi
 }
 
 detect_triple() {  # Rust target triple for this host, or "" if unknown
@@ -123,6 +146,7 @@ install_app() {  # $1 version  $2 release download url  $3 tmp dir
   xattr -cr "$tmp/worktrees.app" 2>/dev/null || true
   rm -rf "$appdir/worktrees.app"
   ditto "$tmp/worktrees.app" "$appdir/worktrees.app"
+  sign_if_asked "$appdir/worktrees.app"
   echo "installed: $appdir/worktrees.app  (open -a worktrees)"
   if pgrep -f "worktrees.app/Contents/MacOS" >/dev/null 2>&1; then
     echo "NOTE: worktrees.app is currently running — quit + reopen to pick up the new version."
@@ -231,6 +255,7 @@ main() {
     installed_via="source build"
   fi
 
+  sign_if_asked "$target"
   echo "installed: $target ($("$target" --version)) [$installed_via]"
   [ -n "$old" ] && echo "upgraded from: $old"
 

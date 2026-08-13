@@ -180,6 +180,17 @@ is invisible to the bats suite — there is no fake claude. Re-run
 - CLI stable: `install.sh` (copies). `make install` SYMLINKS the clone's
   build — every rebuild silently becomes "stable"; don't use it for that.
 - App: `make install-app` → /Applications (local builds skip Gatekeeper).
+- **Set `SIGN_ID` (Makefile) / `WORKTREES_SIGN_ID` (install.sh) or macOS
+  re-asks its privacy prompts after every build.** TCC keys "worktrees would
+  like to access data from other apps" to the designated requirement, and
+  ad-hoc/linker-signed code has `designated => cdhash H"…"` — a new identity
+  per build. `codesign -d -r- <path>` shows which you have. Re-signing does
+  NOT affect a RUNNING process (identity is fixed at exec) nor a tmux server it
+  already started (attribution is inherited at spawn and outlives reparenting
+  to launchd), so a grant only takes hold once the app is quit+reopened and the
+  old server is gone — check `ps -o lstart` on the tmux server before concluding
+  a signing fix failed. Releases stay ad-hoc: distributing a signed app is
+  Developer ID + notarization, a separate tier.
 
 ## Decisions
 
