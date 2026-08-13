@@ -5,14 +5,24 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
-- **The activity clock stops at the nav tree; ⌘K and Resume still rank on
-  opens.** Deliberate — "where was I" wants opens — but if clicking proves as
-  noisy there as it did in the tree, `activityAt` (App.tsx) is the drop-in
-  key. Related accepted edge: a just-created worktree shows the base tip's age
-  ("5d" seconds after creation) until work or a commit lands; the fix, if it
-  ever reads wrong in practice, is a creation epoch in the declared store, not
-  a special case in the clock.
-  _From: [2026-08-10 nav-activity-age session](docs/sessions/2026-08-10-nav-activity-age/summary.md)_
+- **A just-created worktree wears the base tip's age** — "5d" seconds after
+  creation, until work or a commit lands in it. Accepted, but the blast radius
+  grew: this used to be a nav-tree quirk, and now that ⌘K, the Recent lens and
+  the home Resume list all rank on `activityAt`, a fresh place sits wherever its
+  base branch's last commit puts it in **every** list. The fix, if it ever reads
+  wrong in practice, is a creation epoch in the declared store — not a special
+  case in the clock. (The other half of this item, "⌘K and Resume still rank on
+  opens", was closed by the cmdk-activity-order session.)
+  _From: [2026-08-10 nav-activity-age session](docs/sessions/2026-08-10-nav-activity-age/summary.md),
+  widened [2026-08-11 cmdk-activity-order](docs/sessions/2026-08-11-cmdk-activity-order/summary.md)_
+
+- **⌘K lists `(main)` places; the Recent lens filters them out.** Both survived
+  the ordering unification untouched, so the asymmetry is now the only thing
+  left that makes those two lists disagree. Arguably right — the switcher is for
+  jumping anywhere, Recent is for resurfacing work — but it has never actually
+  been decided. Worth one deliberate call rather than leaving it as an artifact
+  of two different filters.
+  _From: [2026-08-11 cmdk-activity-order](docs/sessions/2026-08-11-cmdk-activity-order/summary.md)_
 
 - **The backend 3 s poll loop is the largest remaining background cost.** v0.9.1
   gated every FRONTEND periodic cost on window visibility, which is what killed

@@ -225,6 +225,16 @@ from under it, leaving the root on the new commit with a stale working tree and
 phantom "modifications" — the inverse of the release, staged. Recoverable with
 `reset --hard`, but check for untracked files first.
 
+**No `checkout -B` is required to hit this.** Any branch checked out in TWO
+worktrees does it: whoever moves the ref wins, the other tree keeps a stale
+working copy, and its index reads as the inverse of everything that landed in
+between — 600 lines of deletions that are not real. The reflog will not show it
+(it records only that tree's own checkouts), so prove it before resetting:
+`diff <(git diff --cached) <(git diff <branch-tip> <the-commit-you-were-on>)`
+empty ⇒ the tree is exactly the old commit and there is nothing local to lose.
+Give every worktree its own idle base (`<tree>-next`); `.claude/close-out.md`
+lists them.
+
 Branch off a FRESHLY FETCHED `origin/main`, and check with
 `git rev-list --left-right --count origin/main...HEAD` — an idle worktree's
 last commit can look like the tip and not be. PR numbers are not merge order:
