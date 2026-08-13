@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The terminal tabs you opened are still there next time.** Shells do not
+  outlive the app, and the only thing that used to bring a tab back was having
+  NAMED it — so three tabs you had been working in reopened as one, and which
+  ones survived depended on whether you had bothered to label them. The tab
+  strip is now remembered per place, named or not. Each tab still spawns its
+  shell fresh, in the directory it was last in.
 - **A place remembers which terminal tab you were on.** Coming back to a space
   always put you on the lowest-numbered tab, whatever you had been looking at —
   and because the tab strip is rebuilt every time you change place, that

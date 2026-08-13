@@ -685,9 +685,10 @@ function TermTabRename({ initial, onCommit, onCancel }: {
   );
 }
 
-function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, names, onRename, activeTab, onActiveTab, onError }: {
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
   names: Record<number, string>; onRename: (index: number, name: string | null) => void;
+  tabs: number[]; onTabs: (ids: number[]) => void;
   activeTab: number | null; onActiveTab: (index: number | null) => void;
   onError: (e: unknown) => void;
 }) {
@@ -703,6 +704,18 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   // rebuilt when the remembered tab changes — same reason `names` has a ref.
   const activeTabRef = useRef(activeTab);
   activeTabRef.current = activeTab;
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const onTabsRef = useRef(onTabs);
+  onTabsRef.current = onTabs;
+  /** Change the tab strip AND remember it, so the tabs you opened are still
+   *  there after a restart. Only deliberate edits go through here: the restore
+   *  must not write, or a place visited while its session is down would record
+   *  the empty strip it is correctly showing. */
+  const commitIds = useCallback((list: number[]) => {
+    setIds(list);
+    onTabsRef.current(list);
+  }, []);
   const onActiveTabRef = useRef(onActiveTab);
   onActiveTabRef.current = onActiveTab;
   /** Change tabs AND remember it. Every path that moves the front tab goes
@@ -719,13 +732,14 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   const labelOf = (id: number) => names[id] || `sh ${id}`;
 
   // Restore tabs from the live shell registry on mount / place change, UNIONed
-  // with the tabs the user named for this place. Names outlive the process (they
-  // live in ui-state.json) while shells don't, so a named tab comes back as a
-  // tab: activating it mounts ShellPane, which spawns a fresh shell. That fresh
-  // shell starts in the tab's LAST directory, which the backend remembers
-  // separately (shell-cwds.json) — the name and the place it points at are the
-  // only two things that outlive the process. The union is gated on a live
-  // session — a closed place still shows nothing.
+  // with the strip this place had last time. Shells do not outlive the app, so
+  // that remembered strip is what brings a tab back at all: activating it
+  // mounts ShellPane, which spawns a fresh shell — in the tab's LAST directory,
+  // which the backend remembers separately (shell-cwds.json). The union is
+  // gated on a live session, so a closed place still shows nothing.
+  //
+  // `names` is unioned in as well, purely for installs that predate the strip
+  // being remembered: their only record of a tab is the fact it was named.
   useEffect(() => {
     let alive = true;
     restoringRef.current = true;
@@ -733,10 +747,11 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     invoke<{ index: number; dead: boolean }[]>("list_shell_sessions", { repo, slug })
       .then((existing) => {
         if (!alive) return;
-        const named = sessionUp
-          ? Object.keys(namesRef.current).map(Number).filter((n) => Number.isInteger(n) && n > 0)
+        const isTab = (n: number) => Number.isInteger(n) && n > 0;
+        const remembered = sessionUp
+          ? [...tabsRef.current.filter(isTab), ...Object.keys(namesRef.current).map(Number).filter(isTab)]
           : [];
-        const union = [...new Set([...existing.map((t) => t.index), ...named])].sort((a, b) => a - b);
+        const union = [...new Set([...existing.map((t) => t.index), ...remembered])].sort((a, b) => a - b);
         const list = union.length ? union : (sessionUp ? [1] : []);
         setDead(existing.filter((t) => t.dead).map((t) => t.index));
         // The remembered tab, if it is still one of the tabs — it can have been
@@ -791,9 +806,9 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     if (restoringRef.current) return; // don't add a tab the restore is about to overwrite
     const cur = idsRef.current;
     const next = (cur.length ? Math.max(...cur) : 0) + 1;
-    setIds([...cur, next]);
+    commitIds([...cur, next]);
     pick(next);
-  }, [pick]);
+  }, [commitIds, pick]);
 
   // ⌘⇧T → add a tab. Skip the initial token value so mounting doesn't add one.
   const firstTok = useRef(true);
@@ -809,7 +824,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     onRename(id, null); // an explicitly closed tab drops its name — otherwise it
                         // would be seeded straight back on the next restore
     const remaining = idsRef.current.filter((x) => x !== id);
-    setIds(remaining);
+    commitIds(remaining);
     if (active === id) pick(remaining.length ? remaining[remaining.length - 1] : null);
   };
 
@@ -1757,7 +1772,7 @@ function App() {
       // has been leaking entries for removed places since it was added — a tab
       // name is only dropped when the tab is CLOSED, which a removed place
       // never gets the chance to do.
-      const swept = (["place_panels", "term_tab_names", "term_tab_active"] as const).flatMap((field) => {
+      const swept = (["place_panels", "term_tab_names", "term_tab_active", "term_tabs"] as const).flatMap((field) => {
         const cur = prev[field] ?? {};
         const kept = Object.fromEntries(Object.entries(cur).filter(([k]) => !shouldDrop(k)));
         return Object.keys(kept).length === Object.keys(cur).length ? [] : [[field, kept] as const];
@@ -1816,6 +1831,14 @@ function App() {
   /** Remember which shell tab is in front for this place (null = none left).
    *  Sibling of `term_tab_names` rather than a `place_panels` field — see the
    *  note on `term_tab_active` in settings.ts for why it cannot be one. */
+  const setTermTabs = (repo: string, slug: string, ids: number[]) => {
+    const key = placeKey(repo, slug);
+    const all = { ...(settings.term_tabs ?? {}) };
+    if (ids.length) all[key] = ids;
+    else delete all[key];
+    updateSettings({ term_tabs: all });
+  };
+
   const setTermTab = (repo: string, slug: string, index: number | null) => {
     const key = placeKey(repo, slug);
     const all = { ...(settings.term_tab_active ?? {}) };
@@ -3182,6 +3205,8 @@ function App() {
                     termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
                     names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
                     onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
+                    tabs={(settings.term_tabs ?? {})[sel.repo + "|" + sel.slug] ?? []}
+                    onTabs={(ids) => setTermTabs(sel.repo, sel.slug, ids)}
                     activeTab={(settings.term_tab_active ?? {})[sel.repo + "|" + sel.slug] ?? null}
                     onActiveTab={(index) => setTermTab(sel.repo, sel.slug, index)}
                     onError={fail} />
