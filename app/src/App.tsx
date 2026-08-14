@@ -824,8 +824,15 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
 
   const addTab = useCallback(() => {
     if (restoringRef.current) return; // don't add a tab the restore is about to overwrite
+    // Numbered above every index this place KNOWS about, not just the ones on
+    // screen. With the session down the strip is empty by design while the
+    // record still holds [1,2,3], and picking `max(shown)+1` handed the new tab
+    // index 1 — so it appeared already wearing tab 1's name and its shell
+    // opened in tab 1's remembered directory. A brand-new tab impersonating a
+    // tab you cannot see reads as the app being haunted.
+    const known = withRemembered(idsRef.current);
     const cur = idsRef.current;
-    const next = (cur.length ? Math.max(...cur) : 0) + 1;
+    const next = (known.length ? Math.max(...known) : 0) + 1;
     const shown = [...cur, next];
     commitIds(shown, withRemembered(shown));
     pick(next);
