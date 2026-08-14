@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.13.0] - 2026-08-14
 
 ### Added
 - **The terminal tabs you opened are still there next time.** Shells do not
