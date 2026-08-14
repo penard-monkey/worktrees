@@ -1794,14 +1794,19 @@ function App() {
    *  `ui-state.json` is written as one blob and unknown keys survive a reload
    *  forever, so without pruning this map only ever grows — a place removed
    *  years ago would still be carrying a dock width. */
-  const dropPanels = useCallback((shouldDrop: (key: string) => boolean) => {
+  const dropPanels = useCallback((
+    shouldDrop: (key: string) => boolean,
+    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs")[] =
+      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs"],
+  ) => {
     setSettings((prev) => {
-      // EVERY per-place map, not just the panels: they are all keyed
-      // `repo|slug` and they all outlive the place otherwise. `term_tab_names`
-      // has been leaking entries for removed places since it was added — a tab
-      // name is only dropped when the tab is CLOSED, which a removed place
-      // never gets the chance to do.
-      const swept = (["place_panels", "term_tab_names", "term_tab_active", "term_tabs"] as const).flatMap((field) => {
+      // The default sweeps EVERY per-place map, not just the panels: they are
+      // all keyed `repo|slug` and, when the place is truly GONE, they all
+      // outlive it otherwise. `term_tab_names` had been leaking entries for
+      // removed places since it was added — a tab name is only dropped when
+      // the tab is CLOSED, which a removed place never gets the chance to do.
+      // A caller whose place still exists narrows `fields` (see removeProject).
+      const swept = fields.flatMap((field) => {
         const cur = prev[field] ?? {};
         const kept = Object.fromEntries(Object.entries(cur).filter(([k]) => !shouldDrop(k)));
         return Object.keys(kept).length === Object.keys(cur).length ? [] : [[field, kept] as const];
@@ -2077,8 +2082,13 @@ function App() {
     try {
       commitWs(await invoke<Workspace>("remove_project", { root }));
       // untracking reports nothing either way, so the snapshot sweep can never
-      // judge these keys — drop them here or they are stranded forever
-      dropPanels((k) => k.startsWith(root + "|"));
+      // judge these keys — drop the panels here or they are stranded forever.
+      // ONLY the panels, though: untracking is reversible and the backend keeps
+      // its half of a tab's identity (shell-cwds.json survives for places still
+      // on disk), so wiping the term_tab_* maps loses the names AND lets a
+      // fresh "+" tab after re-add land on a surviving index, inheriting a cwd
+      // it never visited.
+      dropPanels((k) => k.startsWith(root + "|"), ["place_panels"]);
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
