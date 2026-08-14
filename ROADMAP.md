@@ -5,6 +5,28 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **A tab index is an identity split across two files, and only one of them is
+  swept.** A dock tab's NAME and STRIP live in `ui-state.json` (frontend), its
+  DIRECTORY in `shell-cwds.json` (backend), and the two halves are dropped by
+  different code — `closeTab` drops all three, `remove_place` drops both sides,
+  but every other path drops one and keeps the other. That asymmetry produced
+  two of the six defects this session (a new tab inheriting a remembered
+  index's name and directory; untracking a project destroying the frontend half
+  while the backend kept its own). The remaining accepted case is a place
+  removed and recreated while the app is closed. Worth considering whether tab
+  identity should live in ONE place — most likely the declared store — rather
+  than being kept in sync by convention.
+  _From: [2026-08-14 terminal-tab-memory](docs/sessions/2026-08-14-terminal-tab-memory/summary.md)_
+
+- **The mock harness models no shells, no directories and no time.** It CAN
+  model `close_place`/`open_place`, and the two session-down defects this
+  session got through only because nothing had ever driven it there — a gap in
+  what we exercise, not in what the harness can express. A short scripted pass
+  over the state machine's transitions (session up/down, place switch, add,
+  close, restart) would have caught both, and would keep catching them; the
+  Playwright runs here were hand-driven each time.
+  _From: [2026-08-14 terminal-tab-memory](docs/sessions/2026-08-14-terminal-tab-memory/summary.md)_
+
 - **A just-created worktree wears the base tip's age** — "5d" seconds after
   creation, until work or a commit lands in it. Accepted, but the blast radius
   grew: this used to be a nav-tree quirk, and now that ⌘K, the Recent lens and

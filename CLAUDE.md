@@ -132,6 +132,23 @@ is invisible to the bats suite — there is no fake claude. Re-run
   something the edit added.
 - Assert layout in the harness (`getComputedStyle`), don't eyeball it — a CSS
   rule killed by a stray `*/` still renders a plausible-looking widget.
+- **portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL** (crate
+  `lib.rs:347`), and an interactive `/bin/sh` on a pty whose master is still
+  open SURVIVES it. The app only gets away with this because dropping the
+  `Shell` closes the master and the EOF finishes the job. Two more traps in the
+  same family, each of which cost a >10-minute hang: **a pty test must DRAIN the
+  master** (without a reader the shell fills the pty buffer and the child wedges
+  mid-exit — `ps` state `E`, never reaped, so even SIGKILL + `wait()` blocks
+  forever), and **`process_id()` keeps returning a REAPED pid** (portable-pty's
+  impl is an unconditional `Some(self.id())`, and `list_shell_sessions` reaps on
+  every dock mount — so anything sampling by pid needs a `try_wait` liveness
+  check first, or it eventually reads a stranger's process).
+- **Playwright: a two-click arm needs BOTH clicks in one `browser_evaluate`.**
+  The arm expires in 4s — longer than one MCP round-trip — and the button's
+  `title` CHANGES when armed, so selecting on the unarmed title silently hits a
+  DIFFERENT row. A run that did nothing at all reads exactly like a run that
+  passed. This is the one exception to one-click-per-evaluate above, which
+  exists for reading state, not for timing; read state in the NEXT call.
 - **One click per `browser_evaluate`.** React batches, so several `.click()`s in
   a single eval return before any of them render — the DOM you read back is the
   one from before the clicks, which reads as "the tree ignored them". Drive
