@@ -95,10 +95,32 @@ export type Settings = {
   files_md_source: boolean; // markdown/SVG: show source instead of the render
   files_show_ignored: boolean; // list gitignored entries too (dimmed), .git aside; on by default
   // Dock terminal tab names: `repo|slug` → tab index → user-chosen label.
-  // Only the NAME persists across restarts, never the shell: a named tab with no
-  // live shell is seeded back into the strip and spawns a fresh shell when you
-  // activate it. Closing a tab explicitly drops its name.
+  // The name persists across restarts; the SHELL never does. A tab with no live
+  // shell is seeded back into the strip (see `term_tabs`) and spawns a fresh one
+  // when you activate it. Closing a tab explicitly drops its name.
   term_tab_names: Record<string, Record<number, string>>;
+  // The dock's shell TAB STRIP per place, `repo|slug` → tab indexes. Shells die
+  // with the app, so without this record only NAMED tabs came back — an unnamed
+  // tab was remembered exclusively by the accident of having been labelled, and
+  // three tabs you had been working in reopened as one. The strip is unioned
+  // with whatever shells are actually live, so a tab is never lost by being
+  // recorded late.
+  //
+  // Kept apart from `term_tab_names`: a tab exists whether or not it is named,
+  // and the two are edited at different moments. Closing a tab drops it from
+  // both.
+  term_tabs: Record<string, number[]>;
+  // Which dock shell tab was in front, `repo|slug` → tab index. Coming back to
+  // a place used to land on the lowest-numbered tab whatever you were last
+  // looking at — and since the tab list is rebuilt on every place change, that
+  // happened when clicking between places, not only across restarts.
+  //
+  // Deliberately NOT part of `place_panels`: `panelsFor` returns `{...s, ...p}`,
+  // so every key there must also exist as a GLOBAL in `Settings`, and a global
+  // would make one place's tab seed another's. Tab 3 in one worktree says
+  // nothing about the next. Keyed like `term_tab_names`, and read the same way:
+  // a remembered tab that is no longer in the list falls back to the first.
+  term_tab_active: Record<string, number>;
   // Per-place panel state, keyed `repo|slug` (the same scheme as
   // `term_tab_names`). An entry here means "this place has been SET UP"; its
   // absence means the dock has never been opened there, and such a place starts
@@ -163,6 +185,8 @@ export const DEFAULTS: Settings = {
   files_md_source: false,
   files_show_ignored: true,
   term_tab_names: {},
+  term_tabs: {},
+  term_tab_active: {},
   place_panels: {},
   editor_cmd: "code",
   terminal_cmd: "",

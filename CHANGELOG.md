@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The terminal tabs you opened are still there next time.** Shells do not
+  outlive the app, and the only thing that used to bring a tab back was having
+  NAMED it — so three tabs you had been working in reopened as one, and which
+  ones survived depended on whether you had bothered to label them. The tab
+  strip is now remembered per place, named or not. Each tab still spawns its
+  shell fresh, in the directory it was last in.
+- **A place remembers which terminal tab you were on.** Coming back to a space
+  always put you on the lowest-numbered tab, whatever you had been looking at —
+  and because the tab strip is rebuilt every time you change place, that
+  happened when clicking between places, not only after a restart. Each place
+  now remembers its front tab. A remembered tab that is no longer there (you
+  closed it, or its shell did not survive a restart) falls back to the first
+  one, without forgetting what it was.
 - **Terminal tabs reopen where you left them.** A dock shell lives and dies with
   the app, so quitting used to drop every tab back at the worktree root however
   deep you had worked. Each tab now remembers its directory and starts there
