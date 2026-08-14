@@ -471,6 +471,10 @@ Serde `Place` struct: every unknowable field `Option<T>` (CLI emits explicit nul
 - `tauri-plugin-window-state` → geometry.
 - `<app-config-dir>/worktrees-ui/ui-state.json` → selected place, terminal-visible,
   nav-collapse, sort (UI-global; NEVER mixed with per-repo `.worktrees.places.json`).
+- `<app-config-dir>/shell-cwds.json` → each dock shell tab's last directory,
+  keyed `repo|slug` → tab index. Its OWN file, not a key in ui-state.json: that
+  one is written whole-blob by the frontend, so a backend write into it is
+  erased by the next settings save. Written by the backend only.
 - Live cadence: `notify` watches `$GIT_COMMON` + places file (300ms debounce) + coarse 4s
   `ls --json` poll for tmux liveness + force-refresh after mutations.
 

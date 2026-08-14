@@ -28,6 +28,7 @@ make test           # bats suite vs the Rust binary (fake git/tmux shims)
 make lint           # shellcheck + bash-3.2 gate (shim + install.sh)
 cargo test -p worktrees-core
 cargo test -p worktrees-cli   # MCP protocol unit tests live here
+cargo test -p app --lib      # `check`/`build` do NOT compile `mod tests`
 cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 ```
 
@@ -140,7 +141,10 @@ is invisible to the bats suite — there is no fake claude. Re-run
   a missing permission rejects the invoke silently. Never swallow errors:
   route failures through `fail()` (frontend) / `applog` (backend).
 - App log: `~/Library/Logs/net.casadelvalle.worktrees/app.log` (Settings →
-  Logs). Persisted UI settings: `ui-state.json` in the app config dir.
+  Logs). Persisted UI settings: `ui-state.json` in the app config dir — written
+  WHOLE-BLOB by the frontend, so the backend must never write into it (its own
+  update would be erased by the next settings save; that is why each dock shell
+  tab's last directory lives in a separate backend-owned `shell-cwds.json`).
 - Design tokens: `app/src/tokens.css` — everything scales off `--ui-rem`;
   terminal font is independent (`--term-*`). No UI libraries, plain CSS. "No UI
   libraries" means no COMPONENT/design-system libraries and no editor — a pure

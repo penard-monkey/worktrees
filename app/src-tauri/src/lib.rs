@@ -2706,14 +2706,278 @@ async fn list_shell_sessions(repo: String, slug: String, shells: State<'_, Shell
 
 /// End one shell tab — kills the process, unlike `shell_detach`.
 #[tauri::command]
-async fn close_shell_session(repo: String, slug: String, index: u32, shells: State<'_, Shells>) -> Result<(), String> {
-    kill_shell(&shells, &(repo, slug, index));
+async fn close_shell_session(
+    app: AppHandle,
+    repo: String,
+    slug: String,
+    index: u32,
+    keep_cwd: Option<bool>,
+    shells: State<'_, Shells>,
+) -> Result<(), String> {
+    kill_shell(&shells, &(repo.clone(), slug.clone(), index));
+    // A tab the user CLOSED forgets where it was, exactly as it drops its name
+    // (App.tsx `closeTab`) — otherwise the next tab to take this index would
+    // open in a directory it never visited. A tab being RESTARTED goes through
+    // this same command to reap the corpse and asks to KEEP its directory: it
+    // is the same tab, and restarting a shell that died in a subdirectory only
+    // to land at the place root is the exact papercut this feature removes.
+    if !keep_cwd.unwrap_or(false) {
+        edit_cwds(&app, |map| forget_tab(map, &repo, &slug, index));
+    }
     Ok(())
+}
+
+// ── dock shell cwd memory ────────────────────────────────────────────────────
+// A dock shell dies with the app, so its tab used to reopen at the place root
+// however deep you had cd'd. We remember the DIRECTORY of each tab — nothing
+// else: no history, no scrollback, no environment.
+//
+// Its own file on purpose. `ui-state.json` is written WHOLE-BLOB by the
+// frontend (`set_settings` takes the entire settings object), so anything the
+// backend wrote into it would be erased by the next settings save.
+
+/// `"<repo>|<slug>"` → tab index → last known directory. Same key scheme as the
+/// frontend's `term_tab_names`, which this shadows one-for-one.
+type CwdMap = BTreeMap<String, BTreeMap<u32, String>>;
+
+/// Serialises writers to `shell-cwds.json`: the slow sampler and the shell
+/// commands both read-modify-write, and interleaving them would lose an update.
+static CWD_FILE_LOCK: Mutex<()> = Mutex::new(());
+
+fn cwd_key(repo: &str, slug: &str) -> String {
+    format!("{repo}|{slug}")
+}
+
+fn cwd_file(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("shell-cwds.json"))
+}
+
+/// A missing or corrupt file is an empty memory, never an error: the worst it
+/// can cost is one shell opening at the place root.
+fn read_cwds_at(path: &Path) -> CwdMap {
+    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn read_cwds(app: &AppHandle) -> CwdMap {
+    cwd_file(app).map(|p| read_cwds_at(&p)).unwrap_or_default()
+}
+
+/// Read-modify-write under `CWD_FILE_LOCK`. `f` returns false to skip the write —
+/// the sampler runs every few seconds and an idle shell must not churn the disk.
+fn edit_cwds_at(path: &Path, f: impl FnOnce(&mut CwdMap) -> bool) {
+    let _guard = CWD_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = read_cwds_at(path);
+    if !f(&mut map) {
+        return;
+    }
+    map.retain(|_, tabs| !tabs.is_empty());
+    let json = match serde_json::to_vec_pretty(&map) {
+        Ok(j) => j,
+        Err(e) => return applog("error", &format!("shell-cwds encode failed: {e}")),
+    };
+    // Write-then-rename, because readers do NOT take this lock: `shell_open`
+    // reads the file while holding the shell registry, and a plain `fs::write`
+    // is a truncate followed by a write — a read landing in between gets half a
+    // JSON document, which parses as "no memory at all".
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)) {
+        applog("error", &format!("shell-cwds write failed: {e}"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The directory remembered for one tab, if any.
+fn remembered_dir(map: &CwdMap, repo: &str, slug: &str, index: u32) -> Option<String> {
+    map.get(&cwd_key(repo, slug)).and_then(|tabs| tabs.get(&index)).cloned()
+}
+
+/// Drop one tab's directory; true if there was one. Empty places are swept by
+/// `edit_cwds_at`, so a place whose last tab closes leaves no husk.
+fn forget_tab(map: &mut CwdMap, repo: &str, slug: &str, index: u32) -> bool {
+    map.get_mut(&cwd_key(repo, slug)).is_some_and(|tabs| tabs.remove(&index).is_some())
+}
+
+fn edit_cwds(app: &AppHandle, f: impl FnOnce(&mut CwdMap) -> bool) {
+    match cwd_file(app) {
+        Ok(path) => edit_cwds_at(&path, f),
+        // A read that can't find the file is just "no memory yet"; a WRITE that
+        // can't resolve the config dir is a real failure and has to say so.
+        Err(e) => applog("error", &format!("shell-cwds path unavailable: {e}")),
+    }
+}
+
+/// A live process's working directory, straight from the OS — no subprocess and
+/// no shell integration. macOS has no `/proc`, so it goes through libproc
+/// (`libc` is already a dependency for the `kill(pid,0)` probes). The shell-side
+/// alternative, OSC 7, is a non-starter here: Apple's `/etc/zshrc` only emits it
+/// when `TERM_PROGRAM` is `Apple_Terminal`, so we would have to lie about
+/// `TERM_PROGRAM` or edit the user's rc files.
+fn proc_cwd(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+        let want = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        // Returns bytes written. Anything short of the whole struct (dead pid,
+        // EPERM) means there is no path to be had — not a truncated one.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+                want,
+            )
+        };
+        if got != want {
+            return None;
+        }
+        // libc spells this MAXPATHLEN buffer `[[c_char; 32]; 32]` (a workaround
+        // for the old rustc it supports), so flatten it back to bytes.
+        let raw = &info.pvi_cdir.vip_path;
+        let bytes = unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), std::mem::size_of_val(raw)) };
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        (end > 0).then(|| PathBuf::from(String::from_utf8_lossy(&bytes[..end]).into_owned()))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The pid of a shell that is STILL RUNNING, or `None`.
+///
+/// The liveness half is not defensive tidiness, it is the whole point. A shell
+/// that exits on its own is deliberately left in the registry so the tab can
+/// survive and offer a restart — and `list_shell_sessions` calls `try_wait` on
+/// every dock mount, which REAPS it. `Child::process_id` then keeps handing
+/// back a pid that the OS is free to hand to something else (macOS wraps at
+/// 99999, days on a normal machine). Sampling that pid would read a stranger's
+/// directory and file it under this tab.
+fn live_pid(child: &mut (dyn Child + Send + Sync)) -> Option<u32> {
+    match child.try_wait() {
+        Ok(None) => child.process_id(), // still running
+        _ => None,                      // exited, or we cannot tell — either way, don't sample
+    }
+}
+
+/// Fold a sample into the stored map; true if anything actually moved.
+///
+/// MERGES rather than replaces, and that is the whole subtlety: after a restart
+/// a tab exists as a NAME long before it is re-spawned, so the map holds
+/// entries with no live shell behind them. A wholesale rewrite from the live
+/// set would wipe exactly the directories this feature exists to keep.
+fn merge_cwds(map: &mut CwdMap, sample: Vec<(ShellKey, String)>) -> bool {
+    let mut changed = false;
+    for ((repo, slug, index), path) in sample {
+        let tabs = map.entry(cwd_key(&repo, &slug)).or_default();
+        if tabs.get(&index) != Some(&path) {
+            tabs.insert(index, path);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Record where every live dock shell currently is. Called on a slow tick — so
+/// a crash or a force-quit still leaves a recent answer — and once more on the
+/// way out, before the exit sweep kills the shells.
+fn save_shell_cwds(app: &AppHandle, shells: &Shells) {
+    let live: Vec<(ShellKey, u32)> = {
+        let mut map = shells.0.lock().unwrap();
+        map.iter_mut().filter_map(|(k, sh)| live_pid(&mut *sh.child).map(|pid| (k.clone(), pid))).collect()
+    };
+    let sample: Vec<(ShellKey, String)> = live
+        .into_iter()
+        .filter_map(|(key, pid)| proc_cwd(pid).map(|p| (key, p.to_string_lossy().into_owned())))
+        .collect();
+    if sample.is_empty() {
+        return; // no shells (or no cwd to be read) — don't even open the file
+    }
+    edit_cwds(app, |map| {
+        // Membership is re-checked HERE, under the file lock, because the
+        // registry lock was released before the `proc_cwd` reads above. A tab
+        // closed in that gap has already had its entry forgotten, and merging
+        // the reading we took a moment earlier would put it straight back — so
+        // the next tab to reuse that index would open somewhere it has never
+        // been, which is exactly what `close_shell_session` promises cannot
+        // happen. (No lock-order hazard: nothing that holds the registry ever
+        // waits on this file lock — `shell_open` only READS the file, and reads
+        // don't take it.)
+        let open = shells.0.lock().unwrap();
+        let fresh: Vec<(ShellKey, String)> = sample.into_iter().filter(|(k, _)| open.contains_key(k)).collect();
+        drop(open);
+        merge_cwds(map, fresh)
+    });
+}
+
+/// Which `repo|slug` keys no longer name a place on disk. `place_dir` resolves
+/// one, or returns `None` when the PROJECT itself is unreachable — a repo that
+/// has been deleted or moved takes all of its places with it.
+fn vanished_keys(keys: &[String], mut place_dir: impl FnMut(&str, &str) -> Option<String>) -> Vec<String> {
+    keys.iter()
+        .filter(|key| {
+            // repo roots are absolute paths and a slug is a directory basename,
+            // so the LAST separator is the real one
+            match key.rsplit_once('|') {
+                Some((repo, slug)) => !place_dir(repo, slug).is_some_and(|d| Path::new(&d).is_dir()),
+                None => true, // not a key this app writes — it cannot name a live place
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Forget every place whose worktree is gone. The app cleans up after its own
+/// `remove_place`, but `worktrees rm` from a terminal leaves the entry behind,
+/// and the key is only `repo|slug` — so a slug that is later recreated (a
+/// recycled branch name) would inherit the previous life's directories wherever
+/// those paths still exist in the new checkout. Sweeping at startup shrinks
+/// that to the case where the place is removed and recreated with the app
+/// closed, which is accepted: what survives is a real directory inside the
+/// worktree, so the shell opens somewhere that exists rather than anywhere
+/// misleading.
+fn forget_vanished_places(app: &AppHandle) {
+    let keys: Vec<String> = read_cwds(app).keys().cloned().collect();
+    if keys.is_empty() {
+        return;
+    }
+    let mut projects: HashMap<String, Option<Project>> = HashMap::new();
+    let gone = vanished_keys(&keys, |repo, slug| {
+        projects.entry(repo.to_string()).or_insert_with(|| Project::discover(Path::new(repo)).ok());
+        projects[repo].as_ref().map(|p| p.place_dir(slug))
+    });
+    if gone.is_empty() {
+        return;
+    }
+    applog("info", &format!("shell-cwds: forgetting {} place(s) that no longer exist", gone.len()));
+    edit_cwds(app, |map| {
+        let before = map.len();
+        map.retain(|k, _| !gone.contains(k));
+        map.len() != before
+    });
+}
+
+/// Where a tab should reopen: its last known directory if that still exists,
+/// else the place root. No subtree restriction — if you cd'd out of the
+/// worktree, out of the worktree is where you were.
+fn pick_start_dir(saved: Option<&str>, place_dir: &str) -> String {
+    match saved {
+        Some(p) if Path::new(p).is_dir() => p.to_string(),
+        _ => place_dir.to_string(),
+    }
 }
 
 /// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
 #[tauri::command]
 async fn remove_place(
+    app: AppHandle,
     repo: String,
     slug: String,
     del_branch: bool,
@@ -2734,6 +2998,10 @@ async fn remove_place(
     let r = run_op(&format!("rm {slug_log}"), &repo, move |p, ui| ops::cmd_rm(p, ui, &args))?;
     if r.ok {
         kill_place_shells(&shells, &repo, &slug_sweep);
+        // The place is gone for good, so its remembered directories are too.
+        // (A `close` deliberately does NOT do this: closing keeps the tab names,
+        // so it has to keep what those tabs point at.)
+        edit_cwds(&app, |map| map.remove(&cwd_key(&repo, &slug_sweep)).is_some());
     }
     Ok(r)
 }
@@ -2973,7 +3241,10 @@ async fn shell_open(
     let shell_bin = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut cmd = CommandBuilder::new(&shell_bin);
     cmd.arg("-l");
-    cmd.cwd(&cwd);
+    // Only the SPAWN path consults the memory: a re-attach above returned long
+    // ago, and that shell's cwd is whatever the user has since cd'd to.
+    let saved = remembered_dir(&read_cwds(&app), &repo, &slug, index);
+    cmd.cwd(pick_start_dir(saved.as_deref(), &cwd));
     cmd.env("TERM", "xterm-256color");
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| {
@@ -3184,9 +3455,16 @@ pub fn run() {
                 // Consecutive ticks each path has been busy — the dwell guard's
                 // memory, and the only state a completion edge needs.
                 let mut busy_ticks: HashMap<String, u32> = HashMap::new();
+                // Dock-shell cwd sampling, every 5th tick (~15s). Slow on
+                // purpose: the exit hook is the accurate capture, this one only
+                // has to bound how much a crash or a force-quit can lose.
+                let mut cwd_ticks: u32 = 0;
                 // Cold start: what happened while the app was closed. Runs before
                 // the first sleep so the nav's afterglow is right on frame one.
                 backfill_worked(&handle);
+                // Same cold-start slot: drop remembered directories for places
+                // that were removed while the app was closed.
+                forget_vanished_places(&handle);
                 loop {
                     std::thread::sleep(Duration::from_secs(3));
                     let interval = FETCH_INTERVAL_SECS.load(Ordering::Relaxed);
@@ -3196,6 +3474,11 @@ pub fn run() {
                         }
                         last_fetch = std::time::Instant::now(); // measure gap AFTER the pass
                         let _ = handle.emit("places:changed", ()); // re-pull fresh ahead/behind once
+                    }
+                    cwd_ticks += 1;
+                    if cwd_ticks >= 5 {
+                        cwd_ticks = 0;
+                        save_shell_cwds(&handle, &handle.state::<Shells>());
                     }
                     let fp = worktrees_core::tmux::session_fingerprint();
                     ticks += 1;
@@ -3319,6 +3602,9 @@ pub fn run() {
         .run(|handle, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 let shells = handle.state::<Shells>();
+                // Where each tab ended up, recorded BEFORE the sweep — a killed
+                // shell has no cwd left to read.
+                save_shell_cwds(handle, &shells);
                 let keys: Vec<ShellKey> = shells.0.lock().unwrap().keys().cloned().collect();
                 for k in &keys {
                     kill_shell(&shells, k);
@@ -3654,5 +3940,266 @@ mod tests {
         }
         assert_eq!(map.get("src/new.rs"), Some(&Deleted));
         assert_eq!(map.get("src/App.tsx"), Some(&Modified));
+    }
+
+    // ── dock shell cwd memory ────────────────────────────────────────────────
+
+    /// The OS read itself, on the one process whose cwd the test already knows.
+    #[test]
+    fn proc_cwd_reads_a_live_process_directory() {
+        let got = proc_cwd(std::process::id()).expect("own cwd");
+        // /var vs /private/var on macOS — compare resolved paths.
+        assert_eq!(
+            std::fs::canonicalize(got).unwrap(),
+            std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap()
+        );
+    }
+
+    /// Read the master to EOF and throw it away. Production always has one of
+    /// these (`shell_open` spawns a reader thread); a pty test that skips it
+    /// deadlocks in a way the app never can — the shell's output fills the pty
+    /// buffer, and the child then WEDGES MID-EXIT (`ps` shows state `E`, never
+    /// reaped) so even SIGKILL + `wait` hangs forever.
+    fn drain(master: &(dyn MasterPty + Send)) {
+        let mut reader = master.try_clone_reader().unwrap();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+        });
+    }
+
+    /// SIGKILL + reap, for tests that must not depend on how a shell reacts to
+    /// a signal. `Child::kill` in portable-pty sends SIGHUP (lib.rs:347 of that
+    /// crate), and an interactive `/bin/sh` on a pty whose master is still open
+    /// survives it. The app gets away with SIGHUP because dropping the `Shell`
+    /// closes the master and the EOF finishes the job; a test holding the master
+    /// open would wait forever.
+    fn hard_kill(child: &mut (dyn Child + Send + Sync)) {
+        if let Some(pid) = child.process_id() {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        let _ = child.wait();
+    }
+
+    fn cwds(entries: &[(&str, u32, &str)]) -> CwdMap {
+        let mut m = CwdMap::new();
+        for (place, idx, path) in entries {
+            m.entry(place.to_string()).or_default().insert(*idx, path.to_string());
+        }
+        m
+    }
+
+    fn key(repo: &str, slug: &str, index: u32) -> ShellKey {
+        (repo.to_string(), slug.to_string(), index)
+    }
+
+    /// The merge exists so a tab that has NOT been re-spawned since the restart
+    /// keeps its directory. Sampling only the live tab must leave the other one
+    /// exactly as it was.
+    #[test]
+    fn merge_cwds_leaves_unsampled_tabs_alone() {
+        let mut map = cwds(&[("/r|feat", 1, "/r/.worktrees/feat/app"), ("/r|feat", 2, "/r/.worktrees/feat/docs")]);
+        let changed = merge_cwds(&mut map, vec![(key("/r", "feat", 1), "/r/.worktrees/feat/crates".into())]);
+        assert!(changed);
+        assert_eq!(map, cwds(&[("/r|feat", 1, "/r/.worktrees/feat/crates"), ("/r|feat", 2, "/r/.worktrees/feat/docs")]));
+    }
+
+    /// An idle shell samples the same path every 15s; that must not be a write.
+    #[test]
+    fn merge_cwds_reports_no_change_when_nothing_moved() {
+        let mut map = cwds(&[("/r|feat", 1, "/r/.worktrees/feat/app")]);
+        assert!(!merge_cwds(&mut map, vec![(key("/r", "feat", 1), "/r/.worktrees/feat/app".into())]));
+    }
+
+    #[test]
+    fn a_remembered_directory_wins_over_the_place_root() {
+        let here = std::env::current_dir().unwrap();
+        let here = here.to_str().unwrap();
+        assert_eq!(pick_start_dir(Some(here), "/place/root"), here);
+    }
+
+    /// A worktree that was removed, a directory that was renamed: the memory is
+    /// stale, and a shell must still open somewhere real.
+    #[test]
+    fn a_vanished_directory_falls_back_to_the_place_root() {
+        assert_eq!(pick_start_dir(Some("/no/such/dir/anywhere"), "/place/root"), "/place/root");
+        assert_eq!(pick_start_dir(None, "/place/root"), "/place/root");
+        // a FILE is not somewhere a shell can start either
+        let f = std::env::current_dir().unwrap().join("Cargo.toml");
+        assert_eq!(pick_start_dir(Some(f.to_str().unwrap()), "/place/root"), "/place/root");
+    }
+
+    /// The mechanism this whole feature rests on: a REAL shell on a REAL pty,
+    /// told to `cd`, and the directory read back out of the OS by pid. Nothing
+    /// mocked — the unit tests above only ever read this process's own cwd,
+    /// which would pass just as happily if `proc_cwd` could not follow a child.
+    #[test]
+    fn proc_cwd_follows_a_live_shell_into_a_new_directory() {
+        // Unique per run: two concurrent `cargo test` invocations must not share
+        // these, and the test removes them at the end.
+        let base = std::env::temp_dir().join(format!("wt-cwd-shell-{}", std::process::id()));
+        let start = base.join("start");
+        let moved = base.join("moved");
+        std::fs::create_dir_all(&start).unwrap();
+        std::fs::create_dir_all(&moved).unwrap();
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        // /bin/sh, not $SHELL -l: the login shell's rc files are the app's
+        // concern, not this mechanism's, and they make the test environment-
+        // dependent for nothing.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.cwd(&start);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        drain(&*pair.master);
+        let pid = live_pid(&mut *child).expect("pid of a running shell");
+
+        assert_eq!(real(&proc_cwd(pid).expect("cwd at spawn")), real(&start));
+
+        let mut w = pair.master.take_writer().unwrap();
+        write!(w, "cd {}\n", moved.display()).unwrap();
+        w.flush().unwrap();
+
+        // The shell needs a moment to read the line; poll rather than sleep a
+        // guessed amount.
+        // resolved BEFORE the cleanup below — canonicalize needs the directory
+        // to still exist, so computing it after the rmdir only ever panics
+        let want = real(&moved);
+        let mut got = None;
+        for _ in 0..100 {
+            let now = proc_cwd(pid).map(|p| real(&p));
+            if now.as_deref() == Some(want.as_path()) {
+                got = now;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        hard_kill(&mut *child);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(got, Some(want), "shell cd was not visible through proc_cwd");
+    }
+
+    /// The reaped-pid guard, which is the difference between sampling this tab
+    /// and sampling whatever process the OS later hands that pid to. A shell
+    /// that exits is deliberately KEPT in the registry (the tab survives and
+    /// offers a restart) and `list_shell_sessions` reaps it on the next dock
+    /// mount — after which `process_id()` still answers, and answers wrongly.
+    #[test]
+    fn a_reaped_shell_reports_no_pid_to_sample() {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut child = pair.slave.spawn_command(CommandBuilder::new("/bin/sh")).unwrap();
+        drop(pair.slave);
+        drain(&*pair.master);
+
+        let pid = live_pid(&mut *child).expect("running shell has a pid");
+        assert!(proc_cwd(pid).is_some(), "a running shell must have a readable cwd");
+
+        hard_kill(&mut *child); // the reap — try_wait in list_shell_sessions does the same
+        assert!(child.process_id().is_some(), "portable-pty still hands back the dangling pid");
+        assert_eq!(live_pid(&mut *child), None, "a reaped shell must never be sampled");
+    }
+
+    /// Round-trip through the real file, including the two rules a plain
+    /// serialize test would miss: an emptied place leaves no husk behind, and a
+    /// `false` return writes nothing at all.
+    #[test]
+    fn the_cwd_file_round_trips_and_prunes() {
+        let dir = std::env::temp_dir().join(format!("wt-cwd-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shell-cwds.json");
+        let _ = std::fs::remove_file(&file);
+
+        edit_cwds_at(&file, |m| merge_cwds(m, vec![(key("/r", "feat", 1), "/tmp".into())]));
+        assert_eq!(read_cwds_at(&file), cwds(&[("/r|feat", 1, "/tmp")]));
+
+        // a no-op edit must not even create noise
+        let before = std::fs::read(&file).unwrap();
+        edit_cwds_at(&file, |m| merge_cwds(m, vec![(key("/r", "feat", 1), "/tmp".into())]));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+
+        // closing the last tab of a place drops the place, not an empty husk —
+        // through the SAME predicate close_shell_session uses, not a copy of it
+        edit_cwds_at(&file, |m| forget_tab(m, "/r", "feat", 1));
+        assert_eq!(read_cwds_at(&file), CwdMap::new());
+        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), "{}");
+
+        // a corrupt file reads as "no memory", never as a failure
+        std::fs::write(&file, b"{not json").unwrap();
+        assert_eq!(read_cwds_at(&file), CwdMap::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The startup sweep's decision. A place removed with `worktrees rm` from a
+    /// terminal leaves its entry behind — nothing tells the app — so this is
+    /// what stops a recreated slug inheriting the previous life's directories.
+    #[test]
+    fn only_places_that_no_longer_exist_are_forgotten() {
+        let here = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+        let keys: Vec<String> = ["/r|alive", "/r|removed", "/dead-repo|any", "no-separator"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let gone = vanished_keys(&keys, |repo, slug| match (repo, slug) {
+            ("/r", "alive") => Some(here.clone()),
+            ("/r", "removed") => Some("/gone/for/good".into()),
+            _ => None, // the project itself is unreachable
+        });
+        assert_eq!(gone, vec!["/r|removed", "/dead-repo|any", "no-separator"]);
+    }
+
+    /// A repo path is absolute and may itself contain the separator; the slug
+    /// never does, so the split has to come from the right.
+    #[test]
+    fn a_repo_path_containing_the_separator_still_splits_at_the_slug() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let keys = vec!["/odd|repo|feat".to_string()];
+        vanished_keys(&keys, |repo, slug| {
+            seen.borrow_mut().push((repo.to_string(), slug.to_string()));
+            None
+        });
+        assert_eq!(seen.into_inner(), vec![("/odd|repo".to_string(), "feat".to_string())]);
+    }
+
+    /// `shell_open`'s actual lookup — `remembered_dir` composed with
+    /// `pick_start_dir` — over a map that came off disk. The pieces were each
+    /// covered; the composition, which is the only thing the feature does for
+    /// the user, was not.
+    #[test]
+    fn a_reopened_tab_starts_in_the_directory_the_file_remembers() {
+        let dir = std::env::temp_dir().join(format!("wt-cwd-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shell-cwds.json");
+        let _ = std::fs::remove_file(&file);
+        let here = std::env::current_dir().unwrap();
+        let here = here.to_str().unwrap().to_string();
+        let place = "/place/root";
+
+        // tab 1 was left in a real directory, tab 2 in one since deleted
+        edit_cwds_at(&file, |m| {
+            merge_cwds(
+                m,
+                vec![
+                    (key("/r", "feat", 1), here.clone()),
+                    (key("/r", "feat", 2), "/gone/for/good".into()),
+                ],
+            )
+        });
+        let map = read_cwds_at(&file);
+
+        let open = |index: u32| pick_start_dir(remembered_dir(&map, "/r", "feat", index).as_deref(), place);
+        assert_eq!(open(1), here, "tab 1 must reopen where it was");
+        assert_eq!(open(2), place, "a vanished directory falls back to the place root");
+        assert_eq!(open(3), place, "a tab with no memory opens at the place root");
+        // a DIFFERENT place must not see this one's memory
+        assert_eq!(
+            pick_start_dir(remembered_dir(&map, "/r", "other", 1).as_deref(), place),
+            place
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
