@@ -698,6 +698,9 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   // the restore can seed it: the exit EVENT is transient and a shell that died
   // while the dock was closed had no listener, so liveness rides on the restore
   const [dead, setDead] = useState<number[]>([]);
+  // Bumped when the place's session comes back UP, to re-run the restore below
+  // (see the effect that watches `sessionUp`).
+  const [upToken, setUpToken] = useState(0);
   const idsRef = useRef<number[]>([]);
   idsRef.current = ids ?? [];
   // Read by the restore and by the stable callbacks below, which must NOT be
@@ -711,11 +714,21 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   /** Change the tab strip AND remember it, so the tabs you opened are still
    *  there after a restart. Only deliberate edits go through here: the restore
    *  must not write, or a place visited while its session is down would record
-   *  the empty strip it is correctly showing. */
-  const commitIds = useCallback((list: number[]) => {
-    setIds(list);
-    onTabsRef.current(list);
+   *  the empty strip it is correctly showing.
+   *
+   *  `shown` and `remembered` are separate because they legitimately differ. A
+   *  place whose session is down shows NO tabs — remembered ones are gated out,
+   *  since resurrecting tabs for a dead session would be a lie — so if a
+   *  deliberate edit wrote the visible strip, the first "+ new terminal" there
+   *  would record `[1]` over the `[1,2,3]` you actually have. Callers pass what
+   *  to display and, separately, what the record should become. */
+  const commitIds = useCallback((shown: number[], remembered: number[]) => {
+    setIds(shown);
+    onTabsRef.current(remembered);
   }, []);
+  /** Sorted union — the record must never lose a tab it already knew about. */
+  const withRemembered = (list: number[]) =>
+    [...new Set([...tabsRef.current, ...list])].sort((a, b) => a - b);
   const onActiveTabRef = useRef(onActiveTab);
   onActiveTabRef.current = onActiveTab;
   /** Change tabs AND remember it. Every path that moves the front tab goes
@@ -768,9 +781,10 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
       });
     return () => { alive = false; };
     // sessionUp intentionally excluded — its transitions are handled below so a
-    // flip doesn't clobber the user's tabs mid-session.
+    // flip doesn't clobber the user's tabs mid-session. `upToken` is that
+    // handling for down→up: a fresh restore, rather than the raw flip.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo, slug]);
+  }, [repo, slug, upToken]);
 
   // When the place's session goes DOWN, Close swept its dock shells too (same
   // rule as the tmux era: scratch shells die with the place) — clear the tabs so
@@ -778,6 +792,12 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   const prevUp = useRef(sessionUp);
   useEffect(() => {
     if (prevUp.current && !sessionUp) { setIds([]); setActive(null); }
+    // …and the other direction, which nothing used to handle: this component is
+    // keyed on the PLACE, so entering a place whose session was down does not
+    // remount it and the mount-only restore never runs again. The strip stayed
+    // empty until you switched places — with the remembered tabs sitting right
+    // there in ui-state.json, which reads as the feature being broken.
+    if (!prevUp.current && sessionUp) setUpToken((t) => t + 1);
     prevUp.current = sessionUp;
   }, [sessionUp]);
 
@@ -806,8 +826,10 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     if (restoringRef.current) return; // don't add a tab the restore is about to overwrite
     const cur = idsRef.current;
     const next = (cur.length ? Math.max(...cur) : 0) + 1;
-    commitIds([...cur, next]);
+    const shown = [...cur, next];
+    commitIds(shown, withRemembered(shown));
     pick(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [commitIds, pick]);
 
   // ⌘⇧T → add a tab. Skip the initial token value so mounting doesn't add one.
@@ -824,7 +846,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     onRename(id, null); // an explicitly closed tab drops its name — otherwise it
                         // would be seeded straight back on the next restore
     const remaining = idsRef.current.filter((x) => x !== id);
-    commitIds(remaining);
+    commitIds(remaining, withRemembered(remaining).filter((x) => x !== id));
     if (active === id) pick(remaining.length ? remaining[remaining.length - 1] : null);
   };
 
@@ -1828,9 +1850,7 @@ function App() {
     updateSettings({ term_tab_names: all });
   };
 
-  /** Remember which shell tab is in front for this place (null = none left).
-   *  Sibling of `term_tab_names` rather than a `place_panels` field — see the
-   *  note on `term_tab_active` in settings.ts for why it cannot be one. */
+  /** Remember this place's shell tab strip (empty = drop the entry). */
   const setTermTabs = (repo: string, slug: string, ids: number[]) => {
     const key = placeKey(repo, slug);
     const all = { ...(settings.term_tabs ?? {}) };
@@ -1839,6 +1859,9 @@ function App() {
     updateSettings({ term_tabs: all });
   };
 
+  /** Remember which shell tab is in front for this place (null = none left).
+   *  Sibling of `term_tab_names` rather than a `place_panels` field — see the
+   *  note on `term_tab_active` in settings.ts for why it cannot be one. */
   const setTermTab = (repo: string, slug: string, index: number | null) => {
     const key = placeKey(repo, slug);
     const all = { ...(settings.term_tab_active ?? {}) };
