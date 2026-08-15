@@ -766,6 +766,11 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .note-strip:focus { background: var(--bg-elev); }
 
 /* terminal hero */
+/* The find bar's anchor. `.term-host` cannot be it: xterm measures that box and
+   a ResizeObserver refits the pty from it, so making it `position: relative`
+   and hanging an overlay inside would put the bar inside the grid xterm is
+   measuring. The wrapper takes the flex role the host used to have. */
+.term-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
 .term-host { flex: 1; min-height: 0; padding: var(--s2); background: var(--bg-abyss); border-radius: var(--r-md); }
 .term-empty { flex: 1; display: grid; place-items: center; }
 .term-empty-card {
@@ -961,6 +966,51 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .viewer-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* the scroll box every renderer lives in */
 .scroll { flex: 1; min-height: 0; overflow: auto; background: var(--bg-abyss); }
+
+/* ── ⌘F find bar ──────────────────────────────────────────────────────────
+   One bar, two hosts. Over a terminal it FLOATS (`.term-wrap` is its anchor):
+   xterm sizes the pty from its host box, so a bar in the flow would resize the
+   grid every time it opened. In the file viewer it is a strip between the
+   header and the body instead — nothing to refit there, and a floating bar
+   would cover the first lines of the file you are trying to read. */
+.findbar {
+  position: absolute; top: var(--s3); right: var(--s3); z-index: 20;
+  /* The dock can be dragged narrower than the bar wants to be. Bounding it to
+     the host and letting the field shrink keeps the buttons reachable instead
+     of pushing them off the edge. */
+  max-width: calc(100% - var(--s3) * 2);
+  display: flex; align-items: center; gap: var(--s1);
+  padding: var(--s1) var(--s2);
+  background: var(--bg-panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-float);
+  animation: pop var(--dur-slow) var(--ease);
+}
+.viewer > .findbar {
+  position: static; flex: none; justify-content: flex-end;
+  border: 0; border-bottom: 1px solid var(--line);
+  border-radius: 0; box-shadow: none; background: var(--bg-panel);
+}
+.find-q {
+  width: 20ch; min-width: 5ch; flex: 0 1 auto; background: var(--bg-input); color: var(--txt-hi);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 2px var(--s2); font-family: inherit; font-size: var(--fs-label);
+}
+.find-q::placeholder { color: var(--txt-mute); }
+.find-q:focus { outline: none; border-color: var(--accent); }
+.find-n {
+  min-width: 7ch; flex: none; text-align: right; color: var(--txt-dim);
+  font-size: var(--fs-meta); font-variant-numeric: tabular-nums;
+}
+.findbar .ctrl { flex: none; }
+.find-n.none { color: var(--warn); }
+@media (prefers-reduced-motion: reduce) { .findbar { animation: none; } }
+
+/* Hits in the file viewer. Painted through the CSS Custom Highlight API, so
+   these two pseudo-elements are the ONLY styling hook — there is no <mark> in
+   the DOM to target (see Find.tsx for why). Priority is set on the Highlight
+   objects, not here, so the active hit wins where the ranges overlap. */
+::highlight(find-hit) { background-color: var(--find-hit); }
+::highlight(find-hit-on) { background-color: var(--find-on); color: var(--find-on-ink); }
 
 /* segmented Preview|Source control */
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }

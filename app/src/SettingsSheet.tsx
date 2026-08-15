@@ -533,6 +533,7 @@ export function SettingsSheet({
             <div className="shortcuts">
               {[
                 ["⌘B", "Toggle the nav"],
+                ["⌘J", "Toggle the dock (Files / Terminal)"],
                 ["⌘K", "Quick switcher"],
                 ["⌘,", "Open Settings"],
                 ["⌘1", "Home (briefing)"],
@@ -540,6 +541,9 @@ export function SettingsSheet({
                 ["⌘3", "Recent"],
                 ["⌘4", "Attention"],
                 ["⌘E", "Open selection in editor"],
+                ["⌘F", "Find — in the terminal, or in the open file"],
+                ["⌘⇧E", "Read the dock's file over the whole pane"],
+                ["⌘⇧T", "New terminal in the dock"],
                 ["Esc", "Close sheets & menus"],
               ].map(([key, desc]) => (
                 <div className="shortcut-row" key={key}>
