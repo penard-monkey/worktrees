@@ -18,6 +18,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { CodeBlock } from "./CodeView";
+import { FindBar, useFileFind } from "./Find";
 import { Markdown } from "./markdown";
 import { basename, fileInfo, humanSize, type FileKind } from "./filekind";
 import { MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom, type Settings } from "./settings";
@@ -412,6 +413,25 @@ class ViewErrorBoundary extends Component<{ resetKey: string; children: ReactNod
 
 // ── viewer ───────────────────────────────────────────────────────────────
 
+/** ⌘F over the open file. Mounted only while the bar is up, so a viewer with no
+ *  find open walks nothing and holds no Ranges; unmounting is also what clears
+ *  the highlight registry. */
+function FindInFile({ bodyRef, token, onClose, contentKey }: {
+  bodyRef: React.RefObject<HTMLElement | null>;
+  token: number; onClose?: () => void; contentKey: string;
+}) {
+  const f = useFileFind(bodyRef, true, contentKey);
+  return (
+    <FindBar
+      query={f.query} onQuery={f.setQuery}
+      index={f.index} count={f.count} capped={f.capped}
+      caseSensitive={f.caseSensitive} onCaseSensitive={f.setCaseSensitive}
+      onNext={f.next} onPrev={f.prev} onClose={() => onClose?.()}
+      focusToken={token} hint="Searches the file open in this viewer"
+    />
+  );
+}
+
 export type FileViewProps = {
   path: string;
   /** bumps on places:changed and on the dock's Refresh → re-read from disk
@@ -432,10 +452,16 @@ export type FileViewProps = {
   onMdZoom: (v: number) => void;
   expanded: boolean;
   onExpand: (v: boolean) => void;
+  /** ⌘F — App keeps exactly one find bar open across the whole window */
+  findOpen?: boolean;
+  /** bumps on every ⌘F, so a second press re-selects the field */
+  findToken?: number;
+  onFindClose?: () => void;
 };
 
 export function FileView(props: FileViewProps) {
-  const { path, reloadToken, onOpenEditor, onOpen, onError, wrap, onWrap, mdSource, onMdSource, mdZoom, onMdZoom, expanded, onExpand } = props;
+  const { path, reloadToken, onOpenEditor, onOpen, onError, wrap, onWrap, mdSource, onMdSource, mdZoom, onMdZoom, expanded, onExpand,
+    findOpen = false, findToken = 0, onFindClose } = props;
   const info = useMemo(() => fileInfo(path), [path]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [read, setRead] = useState<FileRead | null>(null);
@@ -595,6 +621,13 @@ export function FileView(props: FileViewProps) {
         </button>
         <button className="ctrl sm" onClick={() => onOpenEditor(path)}>Editor</button>
       </div>
+      {/* Between the header and the body, never INSIDE the body: the body is
+          the search root, so a bar within it would offer its own count ("3/12")
+          and button glyphs up as matches. */}
+      {findOpen && (
+        <FindInFile bodyRef={bodyRef} token={findToken} onClose={onFindClose}
+          contentKey={`${path}|${reloadToken}|${wrap}|${mdSource}|${loading}`} />
+      )}
       <div className="viewer-body" ref={bodyRef}>
         <ViewErrorBoundary resetKey={path}>{body}</ViewErrorBoundary>
       </div>

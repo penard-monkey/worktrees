@@ -17,6 +17,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   **Each place remembers its own size**, so a worktree full of wide tables can
   read small while the one you're writing docs in reads large. A place you have
   never set a size in inherits the last one you chose, then keeps its own.
+- **⌘F finds things.** In a terminal it searches the buffer — the place's tmux
+  pane or a dock shell tab — with every match tinted, the one you are on
+  brighter, and ⏎ / ⇧⏎ stepping through them. In the Files viewer it searches
+  the file you have open, in the rendered markdown as readily as in source, and
+  follows you when you switch files. Which one ⌘F opens depends on where you
+  were last working; Esc closes it and hands the keyboard back. The terminal
+  can only search what it has received since it attached — tmux keeps its own
+  scrollback and does not replay it — which the field says on hover.
+- Settings → Shortcuts lists ⌘J, ⌘⇧E and ⌘⇧T, which it had been leaving out.
 
 ## [0.13.0] - 2026-08-14
 

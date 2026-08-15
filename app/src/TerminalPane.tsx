@@ -1,7 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { FindBar, findColors } from "./Find";
 import "@xterm/xterm/css/xterm.css";
 
 // Two kinds of embedded terminal, one renderer.
@@ -104,6 +106,11 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const txRef = useRef<Transport | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
+  // Bumped whenever the terminal below is re-created. Refs cannot wake an
+  // effect, so anything that has to re-subscribe to THIS xterm (the find bar's
+  // results event) depends on this instead.
+  const [epoch, setEpoch] = useState(0);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -111,15 +118,31 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     let disposed = false;
 
     const { family, size, theme } = termOptions();
-    const term = new Terminal({ fontFamily: family, fontSize: size, cursorBlink: blinkWanted(), theme });
+    // allowProposedApi: the search addon paints its match highlights through
+    // `registerDecoration`, which xterm 5.5 still gates behind this flag — it
+    // throws without it, and only once you actually search, so the terminal
+    // looks fine right up until ⌘F.
+    const term = new Terminal({
+      fontFamily: family, fontSize: size, cursorBlink: blinkWanted(), theme,
+      allowProposedApi: true,
+    });
     liveTerms.add(term);
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
+    // ⌘F. Loaded AFTER open(): the addon subscribes to the render service, and
+    // activating it against a terminal that has not been opened yet leaves the
+    // viewport syncing against dimensions that do not exist. `highlightLimit`
+    // caps how many matches get a decoration; past it the addon reports
+    // resultIndex -1 rather than lying about where you are.
+    const search = new SearchAddon({ highlightLimit: 2000 });
+    term.loadAddon(search);
     const safeFit = () => { try { fit.fit(); } catch { /* renderer not measured yet */ } };
     safeFit();
     termRef.current = term;
     fitRef.current = fit;
+    searchRef.current = search;
+    setEpoch((v) => v + 1);
 
     const tx = makeTransport();
     txRef.current = tx;
@@ -156,9 +179,10 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       ro.disconnect();
       tx.close(); // detach, not kill — for either backend
       liveTerms.delete(term);
-      term.dispose();
+      term.dispose(); // disposes the loaded addons with it
       termRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
       txRef.current = null;
     };
     // makeTransport is re-created every render; `key` is the real identity
@@ -189,22 +213,156 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     txRef.current?.resize(term.cols, term.rows);
   }, [termVersion]);
 
-  return hostRef;
+  return { hostRef, termRef, searchRef, epoch };
 }
 
-export function TerminalPane({ session, termVersion = 0, focusToken = 0 }: { session: string; termVersion?: number; focusToken?: number }) {
-  const hostRef = useTerm(() => tmuxTransport(session), session, termVersion, focusToken);
-  return <div ref={hostRef} className="term-host" />;
+/** What ⌘F can and cannot see here. xterm only holds what the app RECEIVED:
+ *  attaching to tmux replays the visible screen, not tmux's scrollback, so a
+ *  fresh attach starts with almost nothing to search. Said out loud in the
+ *  field's tooltip rather than left to be discovered. */
+const TERM_HINT =
+  "Searches this terminal's output since it was attached (not tmux's own history)";
+
+/** Run a search-addon call without letting it take the pane down with it. The
+ *  addon throws for reasons that have nothing to do with the terminal being
+ *  usable (a proposed-API gate, a dispose landing mid-search), and an
+ *  unhandled throw inside an effect unmounts the whole surface — a blank
+ *  terminal because a search failed. Nothing is swallowed: it goes to the app
+ *  log the same way `fail()` does on the frontend. */
+function guard<T>(what: string, fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch (e) {
+    invoke("log_event", { level: "error", msg: `terminal find (${what}): ${e}` }).catch(() => {});
+    return undefined;
+  }
 }
 
-export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0 }: {
-  repo: string; slug: string; index: number; termVersion?: number; focusToken?: number;
-}) {
-  const hostRef = useTerm(
-    () => shellTransport(repo, slug, index),
-    `${repo}|${slug}|${index}`,
-    termVersion,
-    focusToken,
+export type TermFindProps = {
+  /** the find bar is showing on THIS pane — App keeps it exclusive */
+  findOpen?: boolean;
+  /** bumps on every ⌘F, so a second press re-selects the field */
+  findToken?: number;
+  onFindClose?: () => void;
+};
+
+/** The rendered pane: xterm plus its find bar. Both kinds of terminal share it,
+ *  so find behaves identically in the main pane and in a dock shell tab. */
+function TermSurface({ makeTransport, tkey, termVersion, focusToken, findOpen = false, findToken = 0, onFindClose }: {
+  makeTransport: () => Transport; tkey: string; termVersion: number; focusToken: number;
+} & TermFindProps) {
+  const { hostRef, termRef, searchRef, epoch } = useTerm(makeTransport, tkey, termVersion, focusToken);
+  const [query, setQuery] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [res, setRes] = useState({ index: 0, count: 0 });
+
+  // Search options, colours read live so they always match the current theme.
+  // Held in a REF as well: the effects below must fire on what actually changed
+  // (the query, the case flag, the theme) and not merely because this function
+  // has a new identity — every `findNext` moves the selection on, so an effect
+  // that re-runs for no reason silently advances the user a match.
+  const opts = useCallback(() => {
+    const c = findColors();
+    return {
+      caseSensitive,
+      decorations: {
+        matchBackground: c.hit,
+        matchOverviewRuler: c.hit,
+        activeMatchBackground: c.on,
+        activeMatchColorOverviewRuler: c.on,
+      },
+    };
+  }, [caseSensitive]);
+  const optsRef = useRef(opts);
+  optsRef.current = opts;
+
+  useEffect(() => {
+    const s = searchRef.current;
+    if (!s) return;
+    // resultIndex is -1 when the match count blew past the highlight limit.
+    const d = s.onDidChangeResults(({ resultIndex, resultCount }) =>
+      setRes({ index: resultIndex < 0 ? 0 : resultIndex + 1, count: resultCount }));
+    return () => d.dispose();
+  }, [searchRef, epoch]);
+
+  // Live search as the query changes. `incremental` keeps the selection anchored
+  // on the hit you are already on while you keep typing, instead of jumping.
+  useEffect(() => {
+    const s = searchRef.current;
+    if (!s) return;
+    if (!findOpen || !query) {
+      guard("clear", () => s.clearDecorations());
+      setRes({ index: 0, count: 0 });
+      return;
+    }
+    guard("type", () => s.findNext(query, { incremental: true, ...optsRef.current() }));
+  }, [searchRef, findOpen, query, caseSensitive, epoch]);
+
+  // Repaint the matches on a theme switch. Handing `findNext` the new colours is
+  // NOT enough: the addon re-highlights only when the TERM or
+  // case/regex/wholeWord changed — `_didOptionsChange` never looks at
+  // `decorations` — so every non-active match would keep the old theme's hex on
+  // the new theme's background. `clearDecorations()` drops the cached term,
+  // which forces the next search to lay them all down again. It also makes
+  // `_findNextAndSelect` measure from the selection's START rather than its
+  // end, so the user stays on the match they were on. Skipped on the first run:
+  // nothing is painted yet.
+  const themeSeen = useRef(false);
+  useEffect(() => {
+    if (!themeSeen.current) { themeSeen.current = true; return; }
+    const s = searchRef.current;
+    if (!s || !findOpen || !query) return;
+    guard("theme", () => { s.clearDecorations(); s.findNext(query, optsRef.current()); });
+    // Only the theme belongs here; the effect above owns query/case changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termVersion]);
+
+  const next = useCallback(() => {
+    if (query) guard("next", () => searchRef.current?.findNext(query, optsRef.current()));
+  }, [searchRef, query]);
+  const prev = useCallback(() => {
+    if (query) guard("prev", () => searchRef.current?.findPrevious(query, optsRef.current()));
+  }, [searchRef, query]);
+  const close = useCallback(() => {
+    guard("clear", () => searchRef.current?.clearDecorations());
+    onFindClose?.();
+    termRef.current?.focus();
+  }, [searchRef, termRef, onFindClose]);
+
+  return (
+    <div className="term-wrap">
+      <div ref={hostRef} className="term-host" />
+      {findOpen && (
+        <FindBar
+          query={query} onQuery={setQuery}
+          // index 0 with matches present means the addon gave up placing you
+          // (more matches than `highlightLimit`) — `capped` renders that as
+          // "2000+" instead of a nonsensical "0/2000".
+          index={res.index} count={res.count} capped={res.count > 0 && res.index === 0}
+          caseSensitive={caseSensitive} onCaseSensitive={setCaseSensitive}
+          onNext={next} onPrev={prev} onClose={close}
+          focusToken={findToken} hint={TERM_HINT}
+        />
+      )}
+    </div>
   );
-  return <div ref={hostRef} className="term-host" />;
+}
+
+export function TerminalPane({ session, termVersion = 0, focusToken = 0, ...find }: {
+  session: string; termVersion?: number; focusToken?: number;
+} & TermFindProps) {
+  return (
+    <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}
+      termVersion={termVersion} focusToken={focusToken} {...find} />
+  );
+}
+
+export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0, ...find }: {
+  repo: string; slug: string; index: number; termVersion?: number; focusToken?: number;
+} & TermFindProps) {
+  return (
+    <TermSurface makeTransport={() => shellTransport(repo, slug, index)}
+      tkey={`${repo}|${slug}|${index}`}
+      termVersion={termVersion} focusToken={focusToken} {...find} />
+  );
 }

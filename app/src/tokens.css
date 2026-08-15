@@ -45,6 +45,12 @@
   --idle: #7e8ab8;       /* dormant-but-recent */
   --sticky: #565f89;     /* closed/saved/archived/abandoned dot */
   --pin: #f2c97d;        /* pinned star */
+  /* ⌘F — literal hex, no color-mix(): xterm's search decorations only accept
+     #RRGGBB. `--find-hit` is a wash every match wears and must stay readable
+     UNDER the terminal's own foreground; `--find-on` is the one you are on. */
+  --find-hit: #4a3b23;
+  --find-on: #916418;
+  --find-on-ink: #f5f0e6;
 
   /* ── type: ONE knob (--ui-rem) scales everything below (rem) ── */
   --ui-rem: 15px;
@@ -174,6 +180,9 @@
   --idle: #68709a;
   --sticky: #848cb5;
   --pin: #a27629;
+  --find-hit: #dcc48a;
+  --find-on: #e8a33d;
+  --find-on-ink: #1a1b26;
   --guide: #c4c8da;
   --guide-hot: #8990b3;
   --guide-sel: rgba(46, 125, 233, 0.5);
@@ -229,6 +238,9 @@
   --idle: #7f849c;
   --sticky: #585b70;
   --pin: #f9e2af;
+  --find-hit: #4a3a2a;
+  --find-on: #9a6b3f;
+  --find-on-ink: #f5f0e6;
   --guide: #313244;
   --guide-hot: #45475a;
   --guide-sel: rgba(137, 180, 250, 0.5);
@@ -274,6 +286,9 @@
   --idle: #6c6f85;
   --sticky: #8c8fa1;
   --pin: #fe640b;
+  --find-hit: #e7d3ac;
+  --find-on: #e8963c;
+  --find-on-ink: #11111b;
   --guide: #ccd0da;
   --guide-hot: #9ca0b0;
   --guide-sel: rgba(30, 102, 245, 0.5);
@@ -330,6 +345,9 @@
   --idle: #5e81ac;
   --sticky: #4c566a;
   --pin: #d08770;
+  --find-hit: #4a4632;
+  --find-on: #a08b4a;
+  --find-on-ink: #eceff4;
   --guide: #3b4252;
   --guide-hot: #4c566a;
   --guide-sel: rgba(136, 192, 208, 0.5);
@@ -374,6 +392,9 @@
   --idle: #a89984;
   --sticky: #7c6f64;
   --pin: #fabd2f;
+  --find-hit: #4d3f22;
+  --find-on: #a3801f;
+  --find-on-ink: #fbf1c7;
   --guide: #3c3836;
   --guide-hot: #504945;
   --guide-sel: rgba(254, 128, 25, 0.5);

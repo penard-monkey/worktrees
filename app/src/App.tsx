@@ -98,6 +98,31 @@ const NAV_CHORDS: { home?: boolean; lens?: Lens }[] = [
 // sends "+"/"-" unshifted. ⌘0 resets.
 const ZOOM_KEYS = new Set(["+", "=", "-", "_", "0"]);
 
+/** Where ⌘F lands. Follows the surface the user last TOUCHED, not the one that
+ *  holds DOM focus: the file tree's rows are plain divs, so clicking a file to
+ *  read it leaves `document.activeElement` on `<body>` and a focus-based rule
+ *  would send ⌘F to the terminal while the user is looking at the file.
+ *
+ *  The reader wins outright when it is up (it covers everything else), and the
+ *  place's own terminal is the fallback. A dock showing Files with nothing open
+ *  is NOT a target — that viewer renders a hint, not a file. */
+function findTarget(s: {
+  reading: boolean; dockFile: string | null; dockShown: boolean;
+  dockTab: Settings["dock_tab"]; mainTermUp: boolean; last: Surface;
+}): null | "main" | "dock" | "read" {
+  if (s.reading && s.dockFile) return "read";
+  // The Terminal tab renders NO shell when the place's session is down (dock
+  // shells are swept with it), and a target that mounts no bar is worse than
+  // no target: every further ⌘F picks it again and the main pane is
+  // unreachable from the keyboard.
+  const dockOk = s.dockShown && (s.dockTab === "terminal" ? s.mainTermUp : !!s.dockFile);
+  if (s.last === "dock" && dockOk) return "dock";
+  if (s.mainTermUp) return "main";
+  return dockOk ? "dock" : null;
+}
+
+type Surface = "main" | "dock" | "read";
+
 const LIVE_TIERS = ["pinned", "active", "idle"] as const;
 const DORMANT_TIERS = ["saved", "closed", "archived", "abandoned"] as const;
 const GROUP_LABEL: Record<string, string> = {
@@ -691,12 +716,14 @@ function TermTabRename({ initial, onCommit, onCancel }: {
   );
 }
 
-function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError }: {
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError, findOpen, findToken, onFindClose }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
   names: Record<number, string>; onRename: (index: number, name: string | null) => void;
   tabs: number[]; onTabs: (ids: number[]) => void;
   activeTab: number | null; onActiveTab: (index: number | null) => void;
   onError: (e: unknown) => void;
+  /** ⌘F goes to whichever shell tab is showing — only that one is mounted */
+  findOpen?: boolean; findToken?: number; onFindClose?: () => void;
 }) {
   const [ids, setIds] = useState<number[] | null>(null); // null = restoring
   const [active, setActive] = useState<number | null>(null);
@@ -895,7 +922,8 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
           </div>
         ) : (
           <ShellPane key={repo + "|" + slug + ":" + active + ":" + restartToken} repo={repo} slug={slug}
-            index={active} termVersion={termVersion} focusToken={focusToken} />
+            index={active} termVersion={termVersion} focusToken={focusToken}
+            findOpen={findOpen} findToken={findToken} onFindClose={onFindClose} />
         )
       ) : (
         <div className="term-empty">
@@ -1319,6 +1347,38 @@ function App() {
   useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
   // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
   const [newTermToken, setNewTermToken] = useState(0);
+  // ⌘F — which surface owns the find bar. Exactly ONE at a time app-wide: the
+  // file side paints through the global CSS highlight registry, so two live
+  // bars would overwrite each other's hits, and a bar left open behind the
+  // reader would be highlighting a file nobody can see.
+  const [findOn, setFindOn] = useState<null | "main" | "dock" | "read">(null);
+  // bumps on every ⌘F so a second press re-focuses and selects the field
+  const [findToken, setFindToken] = useState(0);
+  const closeFind = useCallback(() => setFindOn(null), []);
+  // Which surface the user last interacted with — see findTarget.
+  //
+  // Deliberately NOT `focusin`: every terminal calls `term.focus()` when it
+  // mounts, so a focus-based rule is decided by mount order rather than by the
+  // user — open the dock's Terminal tab and it takes ⌘F away from the pane you
+  // are actually working in. Pointer and key events are things the user did.
+  // Capture phase so the mark is already right when the app's own keydown
+  // handler (a bubble-phase listener on the same window) reads it.
+  const lastSurface = useRef<Surface>("main");
+  useEffect(() => {
+    const mark = (e: Event) => {
+      const t = e.target;
+      if (!(t instanceof Element)) return;
+      if (t.closest(".reading")) lastSurface.current = "read";
+      else if (t.closest(".dock")) lastSurface.current = "dock";
+      else if (t.closest(".main")) lastSurface.current = "main";
+    };
+    window.addEventListener("pointerdown", mark, true);
+    window.addEventListener("keydown", mark, true);
+    return () => {
+      window.removeEventListener("pointerdown", mark, true);
+      window.removeEventListener("keydown", mark, true);
+    };
+  }, []);
   // bumps on places:changed → the dock's file viewer re-reads from disk when clean.
   const [placesToken, setPlacesToken] = useState(0);
   // Gates every periodic cost in the app — see useWindowAwake. Only the
@@ -1938,6 +1998,24 @@ function App() {
   // ⌘J that can't visibly do anything is at least honest about why.
   const dockFits = fitLayout({ ...eff, dock_open: true }, dockEligible, vw).dockShown;
 
+  // A find bar cannot outlive the thing it is searching. Closing the dock,
+  // flipping its tab, leaving reading mode or switching place all unmount the
+  // surface — without this the state would say "open" against nothing, and the
+  // next ⌘F on that surface would look like a no-op (same value, no re-render).
+  useEffect(() => { if (!dockShown) setFindOn((f) => (f === "dock" ? null : f)); }, [dockShown]);
+  useEffect(() => { setFindOn((f) => (f === "dock" ? null : f)); }, [eff.dock_tab]);
+  useEffect(() => { if (!reading) setFindOn((f) => (f === "read" ? null : f)); }, [reading]);
+  // The reader covers the dock, so a dock bar opened behind it is invisible —
+  // and its highlights would sit painted on a file nobody can see.
+  useEffect(() => { if (reading) setFindOn((f) => (f === "dock" ? null : f)); }, [reading]);
+  // The main pane unmounts when the session goes down. Without this `findOn`
+  // stays "main", and the next TerminalPane — a brand new session — mounts
+  // with a find bar already open on it.
+  useEffect(() => {
+    if (!selected?.tmux_session.up) setFindOn((f) => (f === "main" ? null : f));
+  }, [selected?.tmux_session.up]);
+  useEffect(() => { setFindOn(null); }, [sel?.repo, sel?.slug]);
+
   useLayoutEffect(() => {
     const root = document.documentElement.style;
     root.setProperty("--nav-w", `${fit.navW}px`);
@@ -2453,7 +2531,7 @@ function App() {
   }, []);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
-  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom });
+  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface });
   const filesTabOpen = eff.dock_open && eff.dock_tab === "files";
   keyRef.current = {
     selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
@@ -2465,6 +2543,8 @@ function App() {
     // The SELECTED place's size, not the global one — the chord must move the
     // same number the header shows, which is `eff`.
     mdZoom: eff.files_md_zoom,
+    // ⌘F: which surfaces can take the bar, and which one already has it.
+    dockShown, dockTab: eff.dock_tab, mainTermUp: !!selected?.tmux_session.up, findOn,
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -2476,6 +2556,19 @@ function App() {
         e.preventDefault();
         if (!keyRef.current.switchOpen) setNewTermToken((v) => v + 1);
         return;
+      }
+      // Esc closes the find bar before anything else — but NOT when the
+      // terminal has the keyboard, where Escape is the user's (vim, a menu, a
+      // prompt) and swallowing it would be a worse bug than a bar left open.
+      // The bar's own handler covers Escape while the field or its buttons are
+      // focused; this is the case where focus went back to the content.
+      if (e.key === "Escape" && keyRef.current.findOn && !keyRef.current.settingsOpen && !keyRef.current.switchOpen) {
+        const inTerm = e.target instanceof Element && e.target.closest(".term-host");
+        if (!inTerm) {
+          e.preventDefault();
+          setFindOn(null);
+          return;
+        }
       }
       // Esc leaves reading mode — but only when reading is the TOP surface.
       // The settings sheet and the ⌘K palette are above it and own Escape
@@ -2542,6 +2635,21 @@ function App() {
         // term-host (its passthrough concerns are ctrl-only). Esc already closes.
         e.preventDefault();
         setSettingsOpen((v) => !v);
+      } else if (e.metaKey && k === "f") {
+        // ⌘F — find. Which surface depends on where the user is (see findTarget);
+        // a second press re-selects the field rather than toggling the bar shut,
+        // which is what every other find bar does.
+        e.preventDefault();
+        if (keyRef.current.settingsOpen) return;
+        // `lastSurface` is read HERE, live. A copy taken during render goes
+        // stale the moment the user does something that changes no React state
+        // — clicking into a terminal to focus it, clicking the open file's
+        // text — and ⌘F would then open on whichever surface last happened to
+        // re-render.
+        const target = findTarget({ ...keyRef.current, last: lastSurface.current });
+        if (!target) return;
+        setFindOn(target);
+        setFindToken((v) => v + 1);
       } else if (e.metaKey && e.key >= "1" && e.key <= "9") {
         // ⌘1..N — jump to a nav view (Home / lenses). Always REVEALS (never
         // toggles). Meta-only chord is safe past the term-host.
@@ -3159,7 +3267,8 @@ function App() {
             {selected && sel ? (
               <>
                 {selected.tmux_session.up ? (
-                  <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus} />
+                  <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus}
+                    findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
                 ) : (
                   <div className="term-empty">
                     <div className="term-empty-card">
@@ -3287,6 +3396,9 @@ function App() {
                     onMdZoom={(v) => updatePanels({ files_md_zoom: v })}
                     expanded={false}
                     onExpand={(v) => setReading(v)}
+                    findOpen={findOn === "dock"}
+                    findToken={findToken}
+                    onFindClose={closeFind}
                   />
                 ) : (
                   <TerminalTabs key={sel.repo + "|" + sel.slug}
@@ -3298,7 +3410,8 @@ function App() {
                     onTabs={(ids) => setTermTabs(sel.repo, sel.slug, ids)}
                     activeTab={(settings.term_tab_active ?? {})[sel.repo + "|" + sel.slug] ?? null}
                     onActiveTab={(index) => setTermTab(sel.repo, sel.slug, index)}
-                    onError={fail} />
+                    onError={fail}
+                    findOpen={findOn === "dock"} findToken={findToken} onFindClose={closeFind} />
                 )}
               </div>
             </aside>
@@ -3329,6 +3442,9 @@ function App() {
                 onMdZoom={(v) => updatePanels({ files_md_zoom: v })}
                 expanded
                 onExpand={(v) => setReading(v)}
+                findOpen={findOn === "read"}
+                findToken={findToken}
+                onFindClose={closeFind}
               />
             </div>
           )}
