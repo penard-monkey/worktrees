@@ -1043,7 +1043,16 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .md-list li { margin: var(--md-s1) 0; }
 .md-list li > .md-p { margin: 0; }
 .md-task { list-style: none; margin-left: calc(var(--md-s5) * -1); padding-left: var(--md-s5); position: relative; }
-.md-check { position: absolute; left: var(--md-s2); top: 0.35em; margin: 0; accent-color: var(--accent); pointer-events: none; }
+/* A native checkbox stayed ~13px beside 200% text — a tick-box for ants. Sizing
+   it in `em` is not enough on its own: form controls do NOT inherit font, so
+   `1em` resolved against the UA's own 13.33px control font and both the box AND
+   its `top` offset ignored the zoom. `font-size: inherit` is what makes the em
+   here mean the prose's em. */
+.md-check {
+  position: absolute; left: var(--md-s2); top: 0.35em; margin: 0;
+  font-size: inherit; width: 1em; height: 1em;
+  accent-color: var(--accent); pointer-events: none;
+}
 .md-quote {
   margin: var(--md-s3) 0; padding: var(--md-s1) var(--md-s4);
   border-left: 2px solid var(--line-strong); color: var(--txt-dim);
@@ -1062,8 +1071,10 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   overflow: hidden;
 }
 /* A fence is part of the document, so it zooms with it — but off --term-size,
-   NOT the prose size: code in a doc stays the terminal's size at 100%. */
+   NOT the prose size: code in a doc stays the terminal's size at 100%. Its
+   INSET scales too, or 200% code sits in an 8px box and reads as cramped. */
 .md-fence .code { overflow-x: auto; font-size: calc(var(--term-size) * var(--md-z)); }
+.md-fence .code-text { padding: var(--md-s2) var(--md-s3); }
 /* In FLOW, not overlaying — an absolute badge sat on top of the first line of
    code, which is exactly where a fence's most important line is. */
 .md-fence-lang {

@@ -52,8 +52,14 @@ export type PlacePanels = {
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
    *  a size you just chose is the best guess for the next place's docs, and
-   *  unlike an open dock it changes nothing until you are actually reading. */
-  files_md_zoom: number;
+   *  unlike an open dock it changes nothing until you are actually reading.
+   *
+   *  OPTIONAL, and the only optional field here, because absent has to keep
+   *  meaning "still inheriting". The other three are written by acts you can
+   *  see (opening the dock, dragging it, switching tab); a place would acquire
+   *  a *frozen* reading size from any of them, and then hand that stale number
+   *  back to the global seed the next time its panels were touched. */
+  files_md_zoom?: number;
 };
 
 /** Key for the per-place records in `Settings` (`place_panels`,

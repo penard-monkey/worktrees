@@ -1770,15 +1770,26 @@ function App() {
       const key = s ? placeKey(s.repo, s.slug) : null;
       const cur = panelsFor(prev, key);
       const p = typeof patch === "function" ? patch(cur) : patch;
+      // The zoom is the one field that must NOT be filled in from `cur`, which
+      // falls back to the global: every dock toggle would freeze whatever the
+      // seed happened to be into a place you never chose a size in, and then —
+      // because the record is spread back over the globals — hand that stale
+      // number to the next place you visited. Carry the STORED value if there
+      // is one, otherwise leave the key out and let `panelsFor` keep inheriting.
+      const stored = key ? prev.place_panels?.[key] : undefined;
+      const zoom = p.files_md_zoom ?? stored?.files_md_zoom;
       const panels: PlacePanels = {
         dock_open: p.dock_open ?? cur.dock_open,
         dock_tab: p.dock_tab ?? cur.dock_tab,
         dock_width: p.dock_width ?? cur.dock_width,
-        files_md_zoom: p.files_md_zoom ?? cur.files_md_zoom,
+        ...(zoom !== undefined ? { files_md_zoom: zoom } : null),
       };
       const next: Settings = {
         ...prev,
         ...panels,
+        // …and the global only tracks a size you actually CHOSE, so it stays a
+        // "last used" seed rather than an echo of wherever you last clicked.
+        ...(p.files_md_zoom === undefined ? { files_md_zoom: prev.files_md_zoom } : null),
         ...(key ? { place_panels: { ...(prev.place_panels ?? {}), [key]: panels } } : null),
       };
       applySettings(next);
