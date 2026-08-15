@@ -5,6 +5,18 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Find is deliberately narrow in three places.** ⌘F on an image or binary
+  viewer opens a bar that can only ever answer "no results" — it should be
+  suppressed by file kind. Terminal find sees only what xterm received since it
+  attached (default `scrollback` 1000 lines); raising that widens it, while
+  reaching tmux's own history would mean driving copy-mode, which takes over the
+  user's pane and was deliberately not attempted. And the file side's
+  no-Highlight-API fallback — select the active hit instead of tinting all of
+  them — exists for WKWebView older than Safari 17.2 and has never been
+  exercised; there is no `minimumSystemVersion` in `tauri.conf.json` to say
+  whether anyone can reach it.
+  _From: [2026-08-14 cmd-f-find](docs/sessions/2026-08-14-cmd-f-find/summary.md)_
+
 - **No app chord is guarded against the surfaces above it except the palette and
   Settings.** The keydown handler checks `switchOpen`/`settingsOpen`, so ⌘J, ⌘B,
   ⌘1-9, ⌘E and now ⌘+/⌘−/⌘0 all still fire behind the What's-new scrim and the
@@ -23,7 +35,10 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   and `app/scripts/sandbox.sh --app` closes it in about 30 seconds. Worth folding
   into the next real-app run rather than making its own trip. The general gap is
   the known one: the mock harness cannot answer any question about what WKWebView
-  does with a key before the page sees it.
+  does with a key before the page sees it. **Partly answered since:** the ⌘F
+  session confirmed a ⌘-chord does reach the page in a real build (⌘F is the only
+  way to open the find bar, and it opened), so the remaining doubt is specific to
+  ⌘+/⌘−/⌘0, which browsers normally claim for zoom.
   _From: [2026-08-14 markdown-zoom](docs/sessions/2026-08-14-markdown-zoom/summary.md)_
 
 - **A tab index is an identity split across two files, and only one of them is
