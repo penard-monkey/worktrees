@@ -464,6 +464,36 @@ async fn remove_project(app: AppHandle, root: String) -> Result<Workspace, Strin
     list_workspace(app).await
 }
 
+/// Re-order the workspace's projects (nav drag). `projects.json` IS the order —
+/// there is no separate order field — so this rewrites the file.
+///
+/// The frontend's list is a snapshot that can be stale by the time the drop
+/// lands (another window added a project, a `remove_project` raced it), so the
+/// incoming list is treated as a PREFERENCE, not the truth: roots the file no
+/// longer has are dropped, and roots the frontend never saw are kept, appended
+/// in their existing order. A drag can reorder the workspace; it must not be
+/// able to delete from it.
+fn merge_project_order(current: &[String], want: Vec<String>) -> Vec<String> {
+    let known: std::collections::HashSet<&String> = current.iter().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut next: Vec<String> = want
+        .into_iter()
+        .filter(|r| known.contains(r) && seen.insert(r.clone()))
+        .collect();
+    next.extend(current.iter().filter(|r| !seen.contains(*r)).cloned());
+    next
+}
+
+#[tauri::command]
+async fn reorder_projects(app: AppHandle, roots: Vec<String>) -> Result<Workspace, String> {
+    let current = read_projects(&app);
+    let next = merge_project_order(&current, roots);
+    if next != current {
+        write_projects(&app, &next)?;
+    }
+    list_workspace(app).await
+}
+
 // ── UI settings (app-global; ui-state.json in app-config-dir) ────────────────
 // Kept SEPARATE from per-repo declared state (.worktrees.places.json). Free-form
 // JSON so the frontend owns the schema; a corrupt/absent file → null (defaults).
@@ -506,12 +536,22 @@ async fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(),
 
 const LIFECYCLE_LABELS: [&str; 4] = ["closed", "saved", "archived", "abandoned"];
 
+/// Set — or with an empty label CLEAR — a place's declared lifecycle.
+///
+/// Clearing exists because the nav's tier groups are draggable and two of them
+/// (Active, Idle) are DERIVED by `store::reconcile` rather than declared. There
+/// is no label that means "idle"; the closest true statement is "no declared
+/// label, let the live state speak", and that is what dropping a row on Idle
+/// writes. Faking it by stamping `last_opened_epoch` would lie to the Recent
+/// lens about when the place was last used.
 #[tauri::command]
 async fn set_lifecycle(repo: String, slug: String, label: String) -> Result<(), String> {
-    if !LIFECYCLE_LABELS.contains(&label.as_str()) {
+    if !label.is_empty() && !LIFECYCLE_LABELS.contains(&label.as_str()) {
         return Err(format!("invalid lifecycle label: {label}"));
     }
-    store::edit(&repo, &slug, |d| d.lifecycle = Some(label))
+    store::edit(&repo, &slug, |d| {
+        d.lifecycle = if label.is_empty() { None } else { Some(label) }
+    })
 }
 
 #[tauri::command]
@@ -3531,6 +3571,7 @@ pub fn run() {
             init_repo,
             create_initial_commit,
             remove_project,
+            reorder_projects,
             set_lifecycle,
             set_pin,
             set_note,
@@ -3619,6 +3660,39 @@ mod tests {
 
     fn v(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A nav drag sends the order it can SEE. The file is the truth, and the
+    /// window that dragged may be looking at a stale copy of it — so the merge
+    /// has to be lossless in both directions: nothing invented, nothing lost.
+    #[test]
+    fn reordering_projects_can_never_add_or_drop_one() {
+        let current = v(&["/a", "/b", "/c"]);
+        assert_eq!(
+            merge_project_order(&current, v(&["/c", "/a", "/b"])),
+            v(&["/c", "/a", "/b"]),
+            "a plain permutation applies verbatim",
+        );
+        assert_eq!(
+            merge_project_order(&current, v(&["/c", "/gone", "/a"])),
+            v(&["/c", "/a", "/b"]),
+            "a root the file no longer has is dropped, not written back",
+        );
+        assert_eq!(
+            merge_project_order(&current, v(&["/c"])),
+            v(&["/c", "/a", "/b"]),
+            "roots the dragger never saw keep their order, appended",
+        );
+        assert_eq!(
+            merge_project_order(&current, v(&["/b", "/b", "/a"])),
+            v(&["/b", "/a", "/c"]),
+            "a repeated root is taken once, at its first position",
+        );
+        assert_eq!(
+            merge_project_order(&current, vec![]),
+            current,
+            "an empty request is a no-op, not a wipe",
+        );
     }
 
     /// Real symlinks on a real filesystem — the whole point of the classifier is

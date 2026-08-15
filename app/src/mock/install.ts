@@ -555,10 +555,25 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "remove_project":
       ws.projects = ws.projects.filter((p) => p.root !== args.root);
       return clone(ws);
+    // Same contract as lib.rs: the incoming order is a preference over the
+    // roots that actually exist — unknown roots are dropped, unmentioned ones
+    // keep their place at the end, so a stale drag can never delete a project.
+    case "reorder_projects": {
+      const want: string[] = args.roots ?? [];
+      const seen = new Set<string>();
+      const first = want
+        .map((r) => ws.projects.find((p) => p.root === r))
+        .filter((p): p is NonNullable<typeof p> => !!p && !seen.has(p.root) && !!seen.add(p.root));
+      ws.projects = [...first, ...ws.projects.filter((p) => !seen.has(p.root))];
+      await sleep(mockListDelayMs);
+      return clone(ws);
+    }
 
+    // An empty label CLEARS the declared lifecycle (see lib.rs) — that is what
+    // dropping a row on the derived Idle group writes.
     case "set_lifecycle":
       editPlace(args.repo, args.slug, (p) => {
-        p.declared = { ...(p.declared ?? {}), lifecycle: args.label };
+        p.declared = { ...(p.declared ?? {}), lifecycle: args.label || undefined };
         reconcile(p);
       });
       return null;
