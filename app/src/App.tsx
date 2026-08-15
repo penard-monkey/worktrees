@@ -11,7 +11,8 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
-import { applySettings, clampDock, clampNav, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { fileInfo } from "./filekind";
+import { applySettings, clampDock, clampMdZoom, clampNav, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -91,6 +92,11 @@ const EXIT_NEEDS_CONFIRM = 4;
 const NAV_CHORDS: { home?: boolean; lens?: Lens }[] = [
   { home: true }, { lens: "places" }, { lens: "recent" }, { lens: "attention" },
 ];
+
+// Markdown reading-size chords. Both faces of each key: ⌘+ is ⌘⇧= on a US
+// layout ("+"), ⌘− is plain "-" but "_" when shifted, and the numeric keypad
+// sends "+"/"-" unshifted. ⌘0 resets.
+const ZOOM_KEYS = new Set(["+", "=", "-", "_", "0"]);
 
 const LIVE_TIERS = ["pinned", "active", "idle"] as const;
 const DORMANT_TIERS = ["saved", "closed", "archived", "abandoned"] as const;
@@ -1749,7 +1755,7 @@ function App() {
   /** Write dock panel state for the SELECTED place (and to the globals, which
    *  keep tracking "last used" so the next unvisited place inherits it).
    *
-   *  Always stores the FULL triple, never the patch it was handed. A partial
+   *  Always stores the FULL record, never the patch it was handed. A partial
    *  entry falls through to the globals for whatever it omits, which is exactly
    *  how another place's choice bleeds in: open the dock in A (storing only
    *  `dock_open`), flip to Terminal in B (moving the global `dock_tab`), come
@@ -1764,22 +1770,34 @@ function App() {
       const key = s ? placeKey(s.repo, s.slug) : null;
       const cur = panelsFor(prev, key);
       const p = typeof patch === "function" ? patch(cur) : patch;
-      const triple: PlacePanels = {
+      // The zoom is the one field that must NOT be filled in from `cur`, which
+      // falls back to the global: every dock toggle would freeze whatever the
+      // seed happened to be into a place you never chose a size in, and then —
+      // because the record is spread back over the globals — hand that stale
+      // number to the next place you visited. Carry the STORED value if there
+      // is one, otherwise leave the key out and let `panelsFor` keep inheriting.
+      const stored = key ? prev.place_panels?.[key] : undefined;
+      const zoom = p.files_md_zoom ?? stored?.files_md_zoom;
+      const panels: PlacePanels = {
         dock_open: p.dock_open ?? cur.dock_open,
         dock_tab: p.dock_tab ?? cur.dock_tab,
         dock_width: p.dock_width ?? cur.dock_width,
+        ...(zoom !== undefined ? { files_md_zoom: zoom } : null),
       };
       const next: Settings = {
         ...prev,
-        ...triple,
-        ...(key ? { place_panels: { ...(prev.place_panels ?? {}), [key]: triple } } : null),
+        ...panels,
+        // …and the global only tracks a size you actually CHOSE, so it stays a
+        // "last used" seed rather than an echo of wherever you last clicked.
+        ...(p.files_md_zoom === undefined ? { files_md_zoom: prev.files_md_zoom } : null),
+        ...(key ? { place_panels: { ...(prev.place_panels ?? {}), [key]: panels } } : null),
       };
       applySettings(next);
       if (hydrated.current) saveSettings(next);
       // Pre-hydration, record ONLY the fields the caller actually asked for —
-      // `p`, not `triple`. `preHydration` is SHALLOW-merged over the settings
+      // `p`, not `panels`. `preHydration` is SHALLOW-merged over the settings
       // read from disk and then saved, so every key present here overwrites the
-      // stored value. `triple` fills its gaps from `cur`, which pre-hydration is
+      // stored value. `panels` fills its gaps from `cur`, which pre-hydration is
       // DEFAULTS: stashing it would write default `dock_tab`/`dock_width` over
       // the user's real ones for a ⌘J that only meant to toggle `dock_open`.
       // (`place_panels` must stay out for the same reason, one level up: a
@@ -2435,8 +2453,19 @@ function App() {
   }, []);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
-  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false });
-  keyRef.current = { selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen, filesTabOpen: eff.dock_open && eff.dock_tab === "files" };
+  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom });
+  const filesTabOpen = eff.dock_open && eff.dock_tab === "files";
+  keyRef.current = {
+    selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
+    filesTabOpen,
+    // ⌘+/⌘−/⌘0 only mean something while a RENDERED markdown doc is on screen —
+    // in the dock's Files tab or in the reader. Anywhere else the chord is left
+    // alone rather than silently adjusting a size nobody can see.
+    mdPreview: (reading || filesTabOpen) && !!dockFile && fileInfo(dockFile).kind === "markdown" && !settings.files_md_source,
+    // The SELECTED place's size, not the global one — the chord must move the
+    // same number the header shows, which is `eff`.
+    mdZoom: eff.files_md_zoom,
+  };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // ⌘⇧T — new dock terminal. Handled BEFORE the meta-only guard (it needs
@@ -2465,6 +2494,24 @@ function App() {
         // for a stale path behind a modal, or over the Terminal tab, is noise.
         if (keyRef.current.switchOpen || keyRef.current.settingsOpen) return;
         setReading((v) => (v ? false : keyRef.current.filesTabOpen && !!keyRef.current.dockFile));
+        return;
+      }
+      // ⌘+ / ⌘− / ⌘0 — reading size of the rendered markdown. ABOVE the
+      // meta-only gate on purpose: on a US layout ⌘+ arrives as ⌘⇧= (key "+"),
+      // and the gate drops every shifted chord. Repeat is allowed here, unlike
+      // the toggles — holding the key to walk up the steps is the point.
+      if (e.metaKey && !e.ctrlKey && !e.altKey && ZOOM_KEYS.has(e.key)) {
+        const kr = keyRef.current;
+        if (!kr.mdPreview || kr.switchOpen || kr.settingsOpen) return;
+        e.preventDefault();
+        const cur = clampMdZoom(kr.mdZoom);
+        const next = e.key === "0" ? 100 : stepMdZoom(cur, e.key === "-" || e.key === "_" ? -1 : 1);
+        // keyRef is rebuilt on render; without this the second press of a fast
+        // double-tap would step from the value the FIRST one started at.
+        kr.mdZoom = next;
+        // updatePanels, not updateSettings: the size belongs to the place being
+        // read. (It is `useCallback([])`-stable, so this stale-closure-free.)
+        if (next !== cur) updatePanels({ files_md_zoom: next });
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
@@ -3236,6 +3283,8 @@ function App() {
                     onWrap={(v) => updateSettings({ files_wrap: v })}
                     mdSource={settings.files_md_source}
                     onMdSource={(v) => updateSettings({ files_md_source: v })}
+                    mdZoom={eff.files_md_zoom}
+                    onMdZoom={(v) => updatePanels({ files_md_zoom: v })}
                     expanded={false}
                     onExpand={(v) => setReading(v)}
                   />
@@ -3276,6 +3325,8 @@ function App() {
                 onWrap={(v) => updateSettings({ files_wrap: v })}
                 mdSource={settings.files_md_source}
                 onMdSource={(v) => updateSettings({ files_md_source: v })}
+                mdZoom={eff.files_md_zoom}
+                onMdZoom={(v) => updatePanels({ files_md_zoom: v })}
                 expanded
                 onExpand={(v) => setReading(v)}
               />

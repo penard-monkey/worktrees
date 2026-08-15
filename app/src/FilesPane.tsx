@@ -13,14 +13,14 @@
 //
 // Everything here is at MODULE scope per CLAUDE.md — components defined inside
 // App() get a new identity every render and would drop tree expansion state.
-import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { CodeBlock } from "./CodeView";
 import { Markdown } from "./markdown";
 import { basename, fileInfo, humanSize, type FileKind } from "./filekind";
-import type { Settings } from "./settings";
+import { MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom, type Settings } from "./settings";
 
 // `link` is the symlink target as written (relative stays relative);
 // `link_block` is why the backend will not follow it — absent when it will.
@@ -427,12 +427,15 @@ export type FileViewProps = {
   /** markdown starts rendered; the toggle flips to source */
   mdSource: boolean;
   onMdSource: (v: boolean) => void;
+  /** reading size of the RENDERED markdown, % of normal (see MD_ZOOM_STEPS) */
+  mdZoom: number;
+  onMdZoom: (v: number) => void;
   expanded: boolean;
   onExpand: (v: boolean) => void;
 };
 
 export function FileView(props: FileViewProps) {
-  const { path, reloadToken, onOpenEditor, onOpen, onError, wrap, onWrap, mdSource, onMdSource, expanded, onExpand } = props;
+  const { path, reloadToken, onOpenEditor, onOpen, onError, wrap, onWrap, mdSource, onMdSource, mdZoom, onMdZoom, expanded, onExpand } = props;
   const info = useMemo(() => fileInfo(path), [path]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [read, setRead] = useState<FileRead | null>(null);
@@ -497,6 +500,8 @@ export function FileView(props: FileViewProps) {
   }, [resolve]);
 
   const size = isImage ? null : read?.size;
+  const pct = clampMdZoom(mdZoom);
+  const zoom = String(pct / 100);
   const body = renderBody();
 
   function renderBody(): ReactNode {
@@ -522,12 +527,22 @@ export function FileView(props: FileViewProps) {
         </div>
       );
     if (info.kind === "markdown" && !mdSource)
-      return <div className="scroll"><Markdown src={read.content} onLink={onLink} renderImage={renderImage} /></div>;
+      // --md-zoom rides on the scroll box, not on `.md` itself: App.css reads it
+      // through `var(--md-zoom, 1)`, so an unset value is simply "normal" and
+      // the document keeps rendering if this ever mounts without a zoom.
+      return (
+        <div className="scroll" style={{ "--md-zoom": zoom } as CSSProperties}>
+          <Markdown src={read.content} onLink={onLink} renderImage={renderImage} />
+        </div>
+      );
     return <div className="scroll"><CodeBlock src={read.content} lang={info.lang} wrap={wrap} /></div>;
   }
 
   const showSourceToggle = info.kind === "markdown" || info.mime === "image/svg+xml";
   const showWrap = !isImage && info.kind !== "binary" && !(info.kind === "markdown" && !mdSource);
+  // Zoom belongs to the RENDERED document only: the Source view is code, sized
+  // by the terminal font like every other source file in this viewer.
+  const showZoom = info.kind === "markdown" && !mdSource;
 
   return (
     <div className="viewer">
@@ -543,6 +558,33 @@ export function FileView(props: FileViewProps) {
           <div className="seg">
             <button className={"seg-b" + (!mdSource ? " on" : "")} onClick={() => onMdSource(false)}>Preview</button>
             <button className={"seg-b" + (mdSource ? " on" : "")} onClick={() => onMdSource(true)}>Source</button>
+          </div>
+        )}
+        {showZoom && (
+          <div className="seg zoomseg" role="group" aria-label="Text size">
+            <button
+              className="seg-b"
+              disabled={pct <= MD_ZOOM_MIN}
+              title="Smaller text (⌘−)"
+              aria-label="Smaller text"
+              onClick={() => onMdZoom(stepMdZoom(pct, -1))}
+            >A−</button>
+            {/* The readout is the RESET: a percentage you cannot click back to
+                100 leaves the only way home as counting steps. */}
+            <button
+              className="seg-b zoom-val"
+              disabled={pct === 100}
+              title="Reset text size (⌘0)"
+              aria-label={`Text size ${pct}%. Reset to 100%.`}
+              onClick={() => onMdZoom(100)}
+            >{pct}%</button>
+            <button
+              className="seg-b"
+              disabled={pct >= MD_ZOOM_MAX}
+              title="Larger text (⌘+)"
+              aria-label="Larger text"
+              onClick={() => onMdZoom(stepMdZoom(pct, 1))}
+            >A+</button>
           </div>
         )}
         {showWrap && (
