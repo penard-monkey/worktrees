@@ -235,7 +235,56 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   quarantine on a checksum-verified install. The proper distribution tier is
   Developer ID signing + notarization so Gatekeeper passes without the
   workaround. (release.yml calls this "the later distribution tier".)
-  _From: [2026-07-26 themes session](docs/sessions/2026-07-26-themes-v0.2.4/summary.md)_
+  Shape: an Apple Developer membership ($99/yr) → a **Developer ID Application**
+  cert exported as `.p12` → `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+  `APPLE_SIGNING_IDENTITY` plus notarization credentials (`APPLE_ID` + an
+  app-specific password + `APPLE_TEAM_ID`, or an App Store Connect API key) as
+  repo secrets; tauri-action picks these up and runs `notarytool` itself. Note
+  `TAURI_SIGNING_PRIVATE_KEY` is NOT this — it is the minisign key for updater
+  artifacts, and the workflow's "signed" log lines refer to that.
+
+  Second reason to do it, found 2026-08-13: it is also the fix for macOS
+  **privacy** prompts. TCC keys an approval to the designated requirement, which
+  for an ad-hoc signature is the cdhash, so every upgrade voids every grant a
+  user has given. A Developer ID signature makes the requirement cert-based and
+  the grants durable — for everyone, not just whoever signs their own build.
+
+  **The Mac App Store is not an alternative route** (evaluated 2026-08-13,
+  rejected): MAS requires App Sandbox, and a sandboxed process may exec only
+  binaries inside its own bundle, with children inheriting the sandbox. That
+  forbids shelling out to `git`/`tmux` — the stated architecture — and
+  `fixup_gui_path()` exists precisely to reach homebrew's tmux, which a container
+  cannot read. Worse, the tmux server would live in the container: the CLI and
+  the user's own shell could no longer attach to the app's sessions, which is the
+  product. Also incompatible: spawning the user's `claude` binary, reaching
+  `~/.gitconfig` and `~/.ssh` for fetch/push, the self-updater (prohibited), and
+  the Settings → Version button that installs a CLI onto `PATH`. Sandboxing would
+  "fix" the privacy prompt by making the access impossible.
+  _From: [2026-07-26 themes session](docs/sessions/2026-07-26-themes-v0.2.4/summary.md),
+  expanded [2026-08-13 codesign session](docs/sessions/2026-08-13-codesign-privacy-prompts/summary.md)_
+
+- **A parked branch signs LOCAL installs** — `bug-fixes-codesign-local-installs`
+  (pushed; [PR #124](https://github.com/penard-monkey/worktrees/pull/124), closed
+  not merged). Adds `SIGN_ID` to the Makefile and `WORKTREES_SIGN_ID` to
+  install.sh: both re-sign what gets installed with a cert-backed identity, so
+  TCC approvals survive rebuilds. Gated and verified in three states each (see
+  the session summary). Parked because it fixes one machine and the same problem
+  is solved for everyone by the entry above — but the Makefile half stays useful
+  even after Developer ID lands, because a CI-signed release says nothing about
+  what `make install-app` puts in /Applications. Resurrect with `gh pr reopen 124`,
+  or fold it into the Developer ID work.
+  _From: [2026-08-13 codesign session](docs/sessions/2026-08-13-codesign-privacy-prompts/summary.md)_
+
+- **install.sh could mint a per-machine signing cert** — the zero-cost version of
+  the above, for users with no Apple membership: generate a self-signed Code
+  Signing cert once (`openssl req -x509` → `security import` into the login
+  keychain with `-T /usr/bin/codesign` → `security set-key-partition-list` so
+  codesign can use it without a GUI prompt), then sign every install with it.
+  TCC only checks that the requirement MATCHES, not that the cert is trusted, so
+  this makes privacy grants survive upgrades without Gatekeeper being involved at
+  all. Cost: it needs the user's keychain password once, which is a lot of
+  ceremony for an installer — worth doing only if Developer ID stalls.
+  _From: [2026-08-13 codesign session](docs/sessions/2026-08-13-codesign-privacy-prompts/summary.md)_
 
 - **Stale worktree/branch cleanup** — `New-icon` and `spike-demo` worktrees
   (and their branches) predate the current stream; decide merge/abandon and
