@@ -129,7 +129,25 @@ is invisible to the bats suite — there is no fake claude. Re-run
   so "port free" reads as true while a survivor serves the PRE-edit file and a
   test "verifies" the old code. Use `lsof -ti:PORT -sTCP:LISTEN` (plain `-ti`
   also returns Chrome's network-service helpers), then grep the served file for
-  something the edit added.
+  something the edit added — for CODE, never a comment: esbuild strips comments,
+  so `curl … | grep "the note I just wrote"` reports 0 on a server that is
+  serving the new file perfectly.
+  **And keep the harness OUT of a foreground shell's process group.** A vite
+  started with `nohup … &` inside a tool call is SIGTERM'd (exit 143) when a
+  later call's group is cleaned up. Its death mid-session is not quiet: HMR
+  drops, Fast Refresh resets App's state, and the app jumps to the Home screen —
+  which reads exactly like whatever chord you just pressed having cleared the
+  selection. A whole debugging detour came from that. Launch it as a real
+  background task and check `lsof` before believing any harness result.
+- **xterm's search addon fails only once you SEARCH.** Its decorations need
+  `allowProposedApi: true` on the `Terminal` — without it `registerDecoration`
+  throws on the first ⌘F, from inside an effect, taking the pane down with it;
+  the terminal looks perfect until then. It also CACHES the last search and
+  re-highlights only when the term or case/regex/wholeWord changed —
+  `_didOptionsChange` never looks at `decorations` — so a theme switch needs a
+  `clearDecorations()` first or the matches keep the old theme's hex. Load the
+  addon after `term.open(host)`, and route its calls through a guard: losing a
+  search is survivable, losing the terminal is not.
 - Assert layout in the harness (`getComputedStyle`), don't eyeball it — a CSS
   rule killed by a stray `*/` still renders a plausible-looking widget.
 - **portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL** (crate
