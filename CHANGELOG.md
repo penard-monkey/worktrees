@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.14.0] - 2026-08-14
 
 ### Added
 - **Markdown docs in the Files tab have their own text size.** A `A− 100% A+`
