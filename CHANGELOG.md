@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Markdown docs in the Files tab have their own text size.** A `A− 100% A+`
+  stepper sits in the viewer header whenever a document is being *read* (it is
+  absent in Source view, which is code and follows the terminal font), and
+  ⌘+ / ⌘− / ⌘0 do the same from the keyboard, in the dock and in the reader
+  (⌘⇧E) alike. The whole document scales together — headings, tables, code
+  fences and the spacing between them — so a README at 175% still looks like a
+  README. Deliberately separate from Settings → UI font size: enlarging one long
+  document should not move every column in the app.
+  **Each place remembers its own size**, so a worktree full of wide tables can
+  read small while the one you're writing docs in reads large. A place you have
+  never set a size in inherits the last one you chose, then keeps its own.
+
 ## [0.13.0] - 2026-08-14
 
 ### Added

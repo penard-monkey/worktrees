@@ -25,14 +25,22 @@ export function resolveTheme(s: Pick<Settings, "theme" | "theme_light" | "theme_
   return s.theme;
 }
 
-/** The panel state a SPACE owns — what is open, which tab, how wide.
+/** The panel state a SPACE owns — what is open, which tab, how wide, and how
+ *  big its documents read.
  *
- *  Deliberately just these three. The Files viewer's own preferences
- *  (`files_layout`, `files_split_pct`, `files_wrap`, `files_md_source`,
- *  `files_show_ignored`) stay GLOBAL: they are how you like to read a file, not
- *  which panel a place has open. The nav stays global for the same reason in
- *  reverse — it is how you LEAVE a space, so it must not move under you when
- *  you arrive somewhere.
+ *  The rest of the Files viewer's preferences (`files_layout`,
+ *  `files_split_pct`, `files_wrap`, `files_md_source`, `files_show_ignored`)
+ *  stay GLOBAL: they are how you like to read a file, not which panel a place
+ *  has open. `files_md_zoom` is the exception because it is not a preference
+ *  about files in general — it answers "how big does the prose in THIS repo need
+ *  to be", and repos differ (wide reference tables want small, a doc you are
+ *  writing wants large). The nav stays global for the opposite reason — it is
+ *  how you LEAVE a space, so it must not move under you when you arrive
+ *  somewhere.
+ *
+ *  Every key here must also exist as a global in `Settings` (`panelsFor`
+ *  returns `{...s, ...p}`), which doubles as the seed for a place that has none
+ *  — see `term_tab_active` for the case where that seeding is exactly wrong.
  *
  *  The open FILE is not here either. A remembered path can be deleted, renamed
  *  or gitignored between visits, which turns "restore what I left" into an
@@ -41,6 +49,11 @@ export type PlacePanels = {
   dock_open: boolean;
   dock_tab: "files" | "terminal";
   dock_width: number;
+  /** Markdown reading size for THIS place. Seeds from the flat last-used value
+   *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
+   *  a size you just chose is the best guess for the next place's docs, and
+   *  unlike an open dock it changes nothing until you are actually reading. */
+  files_md_zoom: number;
 };
 
 /** Key for the per-place records in `Settings` (`place_panels`,
@@ -52,7 +65,10 @@ export const placeKey = (repo: string, slug: string) => `${repo}|${slug}`;
  *  where present, and a place with no entry starts with the dock CLOSED. */
 export function panelsFor(s: Settings, key: string | null): Settings {
   const p = key ? s.place_panels?.[key] : undefined;
-  if (p) return { ...s, ...p };
+  // An entry written before `files_md_zoom` joined the record has no size in it,
+  // and `{...s, ...p}` would spread `undefined` OVER the global — every place
+  // set up by an older build would read as "no size" rather than inheriting one.
+  if (p) return { ...s, ...p, files_md_zoom: p.files_md_zoom ?? s.files_md_zoom };
   // A place you have never opened the dock in starts CLOSED — the global
   // `dock_open` is NOT a seed.
   //
@@ -93,6 +109,11 @@ export type Settings = {
   files_stack_pct: number; // 15–85, the tree's HEIGHT share when stacked
   files_wrap: boolean; // wrap long lines in the source view
   files_md_source: boolean; // markdown/SVG: show source instead of the render
+  // Reading size of the RENDERED markdown preview, as a percentage of its
+  // normal size (100 = unchanged). Deliberately separate from `ui_rem`: the
+  // chrome and a long document are read at different distances, and scaling the
+  // whole app to read one README moves every column boundary with it.
+  files_md_zoom: number; // MD_ZOOM_MIN–MD_ZOOM_MAX
   files_show_ignored: boolean; // list gitignored entries too (dimmed), .git aside; on by default
   // Dock terminal tab names: `repo|slug` → tab index → user-chosen label.
   // The name persists across restarts; the SHELL never does. A tab with no live
@@ -183,6 +204,7 @@ export const DEFAULTS: Settings = {
   files_stack_pct: 40,
   files_wrap: false,
   files_md_source: false,
+  files_md_zoom: 100,
   files_show_ignored: true,
   term_tab_names: {},
   term_tabs: {},
@@ -215,6 +237,28 @@ export type UpdateInfo = {
 
 export const clampRem = (v: number) => Math.max(13, Math.min(18, v));
 export const clampTerm = (v: number) => Math.max(10, Math.min(20, v));
+
+// ── markdown preview zoom ───────────────────────────────────────────────────
+// Discrete stops, not a free number: a reading size is chosen by pressing a key
+// until it looks right, and 1%-at-a-time makes that a dozen presses. The steps
+// widen as they climb because the difference between 175 and 180 is invisible
+// while the difference between 90 and 100 is not.
+export const MD_ZOOM_STEPS = [70, 80, 90, 100, 110, 125, 150, 175, 200] as const;
+export const MD_ZOOM_MIN = MD_ZOOM_STEPS[0];
+export const MD_ZOOM_MAX = MD_ZOOM_STEPS[MD_ZOOM_STEPS.length - 1];
+/** Snap to the nearest stop — a persisted value from an older/newer build (or a
+ *  hand-edited ui-state.json) must still land on something the buttons can move. */
+export const clampMdZoom = (v: number) => {
+  if (!Number.isFinite(v)) return DEFAULTS.files_md_zoom;
+  const bound = Math.max(MD_ZOOM_MIN, Math.min(MD_ZOOM_MAX, v));
+  return MD_ZOOM_STEPS.reduce((best, s) => (Math.abs(s - bound) < Math.abs(best - bound) ? s : best), MD_ZOOM_STEPS[0] as number);
+};
+/** Next stop up (`+1`) or down (`-1`); returns the same value at either end. */
+export function stepMdZoom(v: number, dir: 1 | -1): number {
+  const cur = clampMdZoom(v);
+  const i = MD_ZOOM_STEPS.indexOf(cur as (typeof MD_ZOOM_STEPS)[number]);
+  return MD_ZOOM_STEPS[Math.max(0, Math.min(MD_ZOOM_STEPS.length - 1, i + dir))];
+}
 
 // ── column geometry ─────────────────────────────────────────────────────────
 // The window is rail + nav + main + dock + rail. Only `main` is elastic, so

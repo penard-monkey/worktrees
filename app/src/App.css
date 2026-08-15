@@ -970,6 +970,15 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 }
 .seg-b:hover { color: var(--txt-hi); background: var(--bg-elev); }
 .seg-b.on { color: var(--accent-ink); background: var(--accent); }
+/* markdown text-size stepper: A− | 100% | A+ (the readout resets) */
+.seg-b:disabled { color: var(--txt-mute); background: transparent; cursor: default; }
+.zoomseg .zoom-val {
+  min-width: 4.2ch; text-align: center; font-variant-numeric: tabular-nums;
+  border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+}
+/* at 100% the readout is a state label, not a live button — dim, but not
+   greyed out of legibility (it is the only place the size is written down) */
+.zoomseg .zoom-val:disabled { color: var(--txt-dim); }
 .ctrl.sm.on { color: var(--accent); border-color: var(--line-strong); }
 .ctrl.sm.icon-only { padding: 2px 6px; font-family: var(--font-mono); }
 
@@ -1003,29 +1012,43 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .tk-attr { color: var(--syn-attr); }
 .tk-punc { color: var(--syn-punc); }
 
-/* ── markdown ── */
+/* ── markdown ──
+   ONE knob scales the rendered document: --md-zoom (unitless, 1 = normal),
+   written inline by the Files viewer from `files_md_zoom`. Every size below is
+   expressed against it, because a bare `font-size` on `.md` would move the
+   paragraphs and leave the headings (rem → root-relative), the tables (--fs-*)
+   and the code fences (--term-size, px) exactly where they were. Spacing is
+   scaled too: fixed px gaps around 200% text read as no gap at all.
+   The measure (78ch) needs no help — ch tracks font-size. */
 .md {
-  padding: var(--s4) var(--s5) var(--s6);
-  color: var(--txt); font-size: var(--fs-body); line-height: var(--lh-prose);
+  --md-z: var(--md-zoom, 1);
+  --md-s1: calc(var(--s1) * var(--md-z));
+  --md-s2: calc(var(--s2) * var(--md-z));
+  --md-s3: calc(var(--s3) * var(--md-z));
+  --md-s4: calc(var(--s4) * var(--md-z));
+  --md-s5: calc(var(--s5) * var(--md-z));
+  --md-s6: calc(var(--s6) * var(--md-z));
+  padding: var(--md-s4) var(--md-s5) var(--md-s6);
+  color: var(--txt); font-size: calc(var(--fs-body) * var(--md-z)); line-height: var(--lh-prose);
   max-width: 78ch; /* a reading measure, not the pane width */
 }
 .md > *:first-child { margin-top: 0; }
-.md-h { color: var(--txt-hi); font-weight: var(--fw-bold); line-height: 1.25; margin: var(--s5) 0 var(--s2); }
-.md-h1 { font-size: 1.5rem; border-bottom: 1px solid var(--line); padding-bottom: var(--s2); }
-.md-h2 { font-size: 1.2rem; border-bottom: 1px solid var(--line); padding-bottom: var(--s1); }
-.md-h3 { font-size: 1.05rem; }
-.md-h4, .md-h5, .md-h6 { font-size: var(--fs-body); color: var(--txt-dim); text-transform: none; }
-.md-p { margin: var(--s3) 0; }
-.md-list { margin: var(--s3) 0; padding-left: var(--s5); }
-.md-list li { margin: var(--s1) 0; }
+.md-h { color: var(--txt-hi); font-weight: var(--fw-bold); line-height: 1.25; margin: var(--md-s5) 0 var(--md-s2); }
+.md-h1 { font-size: 1.714em; border-bottom: 1px solid var(--line); padding-bottom: var(--md-s2); }
+.md-h2 { font-size: 1.371em; border-bottom: 1px solid var(--line); padding-bottom: var(--md-s1); }
+.md-h3 { font-size: 1.2em; }
+.md-h4, .md-h5, .md-h6 { font-size: 1em; color: var(--txt-dim); text-transform: none; }
+.md-p { margin: var(--md-s3) 0; }
+.md-list { margin: var(--md-s3) 0; padding-left: var(--md-s5); }
+.md-list li { margin: var(--md-s1) 0; }
 .md-list li > .md-p { margin: 0; }
-.md-task { list-style: none; margin-left: calc(var(--s5) * -1); padding-left: var(--s5); position: relative; }
-.md-check { position: absolute; left: var(--s2); top: 0.35em; margin: 0; accent-color: var(--accent); pointer-events: none; }
+.md-task { list-style: none; margin-left: calc(var(--md-s5) * -1); padding-left: var(--md-s5); position: relative; }
+.md-check { position: absolute; left: var(--md-s2); top: 0.35em; margin: 0; accent-color: var(--accent); pointer-events: none; }
 .md-quote {
-  margin: var(--s3) 0; padding: var(--s1) var(--s4);
+  margin: var(--md-s3) 0; padding: var(--md-s1) var(--md-s4);
   border-left: 2px solid var(--line-strong); color: var(--txt-dim);
 }
-.md-hr { border: 0; border-top: 1px solid var(--line); margin: var(--s5) 0; }
+.md-hr { border: 0; border-top: 1px solid var(--line); margin: var(--md-s5) 0; }
 .md-link { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
 .md-link:hover { border-bottom-color: var(--accent); }
 .md-code-inline {
@@ -1034,23 +1057,25 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   border-radius: var(--r-sm); padding: 0.05em 0.35em;
 }
 .md-fence {
-  position: relative; margin: var(--s3) 0;
+  position: relative; margin: var(--md-s3) 0;
   background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-md);
   overflow: hidden;
 }
-.md-fence .code { overflow-x: auto; }
+/* A fence is part of the document, so it zooms with it — but off --term-size,
+   NOT the prose size: code in a doc stays the terminal's size at 100%. */
+.md-fence .code { overflow-x: auto; font-size: calc(var(--term-size) * var(--md-z)); }
 /* In FLOW, not overlaying — an absolute badge sat on top of the first line of
    code, which is exactly where a fence's most important line is. */
 .md-fence-lang {
-  padding: 2px var(--s3); color: var(--txt-mute); font-size: var(--fs-micro);
+  padding: calc(2px * var(--md-z)) var(--md-s3); color: var(--txt-mute); font-size: 0.786em;
   font-family: var(--font-mono); background: var(--bg-elev);
   border-bottom: 1px solid var(--line);
 }
 .md-fence-body { overflow-x: auto; }
 /* tables scroll inside their own box — the page never scrolls sideways */
-.md-tablewrap { margin: var(--s3) 0; overflow-x: auto; }
-.md-table { border-collapse: collapse; font-size: var(--fs-label); }
-.md-table th, .md-table td { border: 1px solid var(--line); padding: var(--s1) var(--s3); text-align: left; }
+.md-tablewrap { margin: var(--md-s3) 0; overflow-x: auto; }
+.md-table { border-collapse: collapse; font-size: 0.929em; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: var(--md-s1) var(--md-s3); text-align: left; }
 .md-table th { background: var(--bg-elev); color: var(--txt-hi); font-weight: var(--fw-med); }
 .md-img img { max-width: 100%; border-radius: var(--r-sm); border: 1px solid var(--line); }
 .md-img-note, .md-rawhtml { color: var(--txt-mute); }
@@ -1058,9 +1083,9 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .md-link-blocked { color: var(--txt-dim); text-decoration: line-through dotted; cursor: help; }
 .inline-note { padding: 0 var(--s1); }
 .md-rawhtml-block {
-  margin: var(--s3) 0; padding: var(--s2) var(--s3); overflow-x: auto;
+  margin: var(--md-s3) 0; padding: var(--md-s2) var(--md-s3); overflow-x: auto;
   background: var(--bg-input); border: 1px dashed var(--line); border-radius: var(--r-sm);
-  color: var(--txt-mute); font-family: var(--term-family); font-size: var(--fs-meta);
+  color: var(--txt-mute); font-family: var(--term-family); font-size: 0.857em;
 }
 
 /* ── image viewer ── */
@@ -1107,7 +1132,7 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 }
 .reading .viewer-h { background: var(--bg-panel); padding: var(--s2) var(--s3); }
 /* wider measure with the whole pane to play with */
-.reading .md { max-width: 88ch; margin: 0 auto; padding: var(--s5) var(--s5) var(--s6); }
+.reading .md { max-width: 88ch; margin: 0 auto; padding: var(--md-s5) var(--md-s5) var(--md-s6); }
 @keyframes reading-in { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   .reading { animation: none; }
