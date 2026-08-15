@@ -148,6 +148,28 @@ is invisible to the bats suite — there is no fake claude. Re-run
   `clearDecorations()` first or the matches keep the old theme's hex. Load the
   addon after `term.open(host)`, and route its calls through a guard: losing a
   search is survivable, losing the terminal is not.
+- **A rule mirrored from Rust into TS needs a check that RE-READS the Rust.**
+  `dnd.ts::predictTier` reimplements `store::reconcile` so a drag can predict
+  which tier a row will land in; `app/scripts/dnd-check.mjs` parses `store.rs`
+  and `lib.rs` for `IDLE_WINDOW_SECS`, the sticky-label set and
+  `LIFECYCLE_LABELS` and fails if the mirror drifts. Without that, a change on
+  the Rust side leaves a frontend that is confidently wrong and passes every
+  test — the mirror's own unit tests keep testing the OLD rule. Same shape as
+  the version-vs-binary assertion in `test/misc.bats`.
+- **A synthetic pointer drag bypasses hit-testing on the way IN.** Dispatching
+  `pointerdown` on a row starts a drag even when a full-screen overlay
+  (`.menu-catch`) is up — which a real press could never do, because it would
+  hit the overlay — and then `elementFromPoint` answers with the overlay for
+  the whole drag, so every drop silently resolves nothing. Harness-only, but it
+  reads exactly like a broken drop target. `body.dragging .menu-catch {
+  pointer-events: none }` neutralises it.
+- **Check what a drag test ASKS for before believing it found a bug.** Two
+  "project reorder is broken" reports in one session were a drop onto a
+  position the row already occupied (a legitimate no-op) and a drop onto the
+  scroller's padding. The second was real — `closest('[data-project-root]')` is
+  null over `.nav-scroll`'s own padding, and the strip above the first project
+  is exactly where you aim to make one first — but it was found by reading the
+  test, not by debugging the code it accused.
 - Assert layout in the harness (`getComputedStyle`), don't eyeball it — a CSS
   rule killed by a stray `*/` still renders a plausible-looking widget.
 - **portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL** (crate

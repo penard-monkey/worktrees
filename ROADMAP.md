@@ -5,6 +5,36 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Smoke nav drag & drop in the real app.** Everything about it was verified in
+  the mock harness with synthetic pointer events, and the mock answers in a
+  microtask while the real `list_workspace` is a git fan-out of seconds — the
+  exact blind spot CLAUDE.md's three v0.12.x bugs came from. No tooling in the
+  session could drive a pointer in a native WKWebView window, so this is a hand
+  pass: `app/scripts/sandbox.sh --app`, then in order — (1) drag a place from
+  Active onto Pinned, it must stay pinned through the refresh that follows;
+  (2) drag a pinned place onto Idle, it should unpin, land in Active and say
+  why; (3) drop onto Active, nothing moves and the hint appears; (4) reorder two
+  projects and see the order survive the confirming `list_workspace`; (5) drag a
+  row to the nav's top/bottom edge for auto-scroll; (6) hover a collapsed group
+  mid-drag for spring-open; (7) undo once after a tier change. Items 1, 2 and 4
+  are the ones the harness structurally cannot express.
+  _From: [2026-08-14 drag-drop-nav](docs/sessions/2026-08-14-drag-drop-nav/summary.md)_
+
+- **The drag ghost re-renders all of App, once per frame.** `setDrag` on every
+  rAF re-renders a 3500-line component for the duration of a drag. Measured
+  acceptable on this machine and deliberately not optimised; a portal for the
+  ghost (and gap state kept out of App) is the fix if it ever bites on a bigger
+  workspace or a slower machine.
+  _From: [2026-08-14 drag-drop-nav](docs/sessions/2026-08-14-drag-drop-nav/summary.md)_
+
+- **A place dragged onto the nav's own padding does nothing, silently.** Project
+  drags now accept anywhere inside `.nav-scroll`, but a PLACE row dropped
+  between two groups (or below the last one) resolves no tier, so there is no
+  gap and no drop. That is honest — no group means no target — but the empty
+  space below a project's last group is a plausible place to aim for "the end of
+  that group". Worth deciding whether the nearest group should claim it.
+  _From: [2026-08-14 drag-drop-nav](docs/sessions/2026-08-14-drag-drop-nav/summary.md)_
+
 - **Find is deliberately narrow in three places.** ⌘F on an image or binary
   viewer opens a bar that can only ever answer "no results" — it should be
   suppressed by file kind. Terminal find sees only what xterm received since it
