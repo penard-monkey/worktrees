@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -13,6 +13,11 @@ import {
 } from "./ProjectSheet";
 import { fileInfo } from "./filekind";
 import { applySettings, clampDock, clampMdZoom, clampNav, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import {
+  alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
+  predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
+} from "./dnd";
+import { useNavDrag, type DragItem } from "./navdrag";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -1288,8 +1293,18 @@ function App() {
   const [termFocus, setTermFocus] = useState(0);
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [sortOpen, setSortOpen] = useState(false);
-  const [drag, setDrag] = useState<{ repo: string; slug: string } | null>(null);
-  const [dragOver, setDragOver] = useState<string | null>(null);
+  // ── nav drag & drop (see navdrag.ts for the gesture, dnd.ts for the rules) ──
+  const navScrollRef = useRef<HTMLDivElement | null>(null);
+  /** A row that has just been moved by a drag, lit for a moment. It is the only
+   *  honest answer when a drop lands somewhere other than the group it was
+   *  dropped on — which the derived tiers make routine. */
+  const [flash, setFlash] = useState<{ repo: string; slug: string } | null>(null);
+  /** A drag can change lifecycle with one slip of the wrist, and the row it
+   *  moves may leave the visible tree entirely (a hidden tier, a collapsed
+   *  group). The way back has to be one click, not a hunt. */
+  const [undo, setUndo] = useState<
+    { text: string; run: () => void } | null
+  >(null);
   const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
   const [projSheet, setProjSheet] = useState<string | null>(null);
   // Per-project doctor state. Structurally identical to busyPaths/waitingPaths
@@ -1796,19 +1811,28 @@ function App() {
     })();
   }, []);
 
-  const updateSettings = (patch: Partial<Settings>) => {
+  /** The functional form exists for patches that must be built from OTHER
+   *  keys' current value — undo restoring one repo's `manual_order` entry.
+   *  Building such a patch from a captured `settings` bakes in whatever that
+   *  closure saw, and a reorder made in between is silently reverted (the
+   *  saved blob is whole, so the loss reaches disk). Function patches never
+   *  touch the terminal keys, which is why the term-version bump below only
+   *  inspects object patches. */
+  const updateSettings = (patch: Partial<Settings> | ((prev: Settings) => Partial<Settings>)) => {
     setSettings((prev) => {
+      const p = typeof patch === "function" ? patch(prev) : patch;
       // resizing a hidden nav is dead UI — bring it back for live preview
-      const auto = patch.nav_width !== undefined && prev.nav_collapsed ? { nav_collapsed: false } : null;
-      const next = { ...prev, ...patch, ...auto };
+      const auto = p.nav_width !== undefined && prev.nav_collapsed ? { nav_collapsed: false } : null;
+      const next = { ...prev, ...p, ...auto };
       applySettings(next);
       if (hydrated.current) saveSettings(next);
-      else Object.assign(preHydration.current, patch, auto);
+      else Object.assign(preHydration.current, p, auto);
       return next;
     });
     // theme changes the terminal colors too (xterm reads CSS vars once per version)
-    if (patch.term_family !== undefined || patch.term_size !== undefined || patch.theme !== undefined ||
-        patch.theme_light !== undefined || patch.theme_dark !== undefined)
+    if (typeof patch !== "function" &&
+        (patch.term_family !== undefined || patch.term_size !== undefined || patch.theme !== undefined ||
+        patch.theme_light !== undefined || patch.theme_dark !== undefined))
       setTermVersion((v) => v + 1);
   };
 
@@ -2062,11 +2086,18 @@ function App() {
    *  JSON.stringify, so the next refresh always lands; the dedupe resumes on the
    *  one after it, which is the idle case it was written for.
    *
-   *  ⚠ Only for declared fields the backend copies through verbatim. NOT for
-   *  `lifecycle`: `lifecycle_effective` is reconciled server-side from the
-   *  declared label AND live tmux state, so patching the label alone would show
-   *  a row disagreeing with its own badge until the refresh landed. */
-  const patchDeclared = (repo: string, slug: string, patch: Partial<NonNullable<Declared>>) => {
+   *  ⚠ Declared fields the backend copies through verbatim need no more than
+   *  `patch`. `lifecycle` is the exception: `lifecycle_effective` is reconciled
+   *  server-side from the declared label AND live tmux state, so patching the
+   *  label ALONE would show a row disagreeing with its own badge until the
+   *  refresh landed. A lifecycle patch must therefore arrive together with
+   *  `effective` — the PREDICTED badge from dnd.ts `predictTier`, which mirrors
+   *  `store::reconcile` exactly (dnd-check.mjs re-reads store.rs and goes red
+   *  if the mirror drifts). The prediction, never the label: writing the label
+   *  into the badge is precisely the disagreement this warning prevents. */
+  const patchDeclared = (
+    repo: string, slug: string, patch: Partial<NonNullable<Declared>>, effective?: string,
+  ) => {
     // Outranks every read already in flight, the same way commitWs does. Those
     // reads were issued before the user typed this, so none of them can contain
     // it — letting one land would wipe the value back off the screen, and the
@@ -2084,7 +2115,11 @@ function App() {
                 snapshot: {
                   ...pv.snapshot,
                   places: pv.snapshot.places.map((p) =>
-                    p.slug !== slug ? p : { ...p, declared: { ...(p.declared ?? {}), ...patch } },
+                    p.slug !== slug ? p : {
+                      ...p,
+                      ...(effective === undefined ? null : { lifecycle_effective: effective }),
+                      declared: { ...(p.declared ?? {}), ...patch },
+                    },
                   ),
                 },
               },
@@ -2412,20 +2447,276 @@ function App() {
     if (flip) out.reverse();
     return out;
   };
-  const dropOnRow = (repo: string, targetSlug: string) => {
-    if (!drag || drag.repo !== repo || drag.slug === targetSlug) { setDrag(null); setDragOver(null); return; }
-    const pv = ws?.projects.find((v) => v.root === repo);
-    const slugs = (pv?.snapshot?.places ?? []).filter((p) => !p.is_main).map((p) => p.slug);
-    const existing = settings.manual_order[repo] ?? [];
-    const order = [...existing.filter((x) => slugs.includes(x)), ...slugs.filter((x) => !existing.includes(x))];
-    const from = order.indexOf(drag.slug);
-    if (from >= 0) order.splice(from, 1);
-    const to = order.indexOf(targetSlug);
-    order.splice(to < 0 ? order.length : to, 0, drag.slug);
-    updateSettings({ manual_order: { ...settings.manual_order, [repo]: order } });
-    setDrag(null);
-    setDragOver(null);
+
+  // ── nav drag & drop ────────────────────────────────────────────────────────
+  // Dragging a row between tier groups is a LIFECYCLE edit, not a sort: it works
+  // in every sort mode. Only the row's position inside the group it lands in is
+  // sort-mode-specific — the pointer chooses it under Manual, and under A–Z /
+  // last-used the list itself does, so the gap opens at the slot that mode will
+  // actually produce rather than wherever the cursor happens to be.
+  type DropTarget =
+    | { kind: "tier"; repo: string; tier: Tier; before: string | null; lands: Tier; patch: DeclPatch }
+    | { kind: "reject"; hint: string }
+    | { kind: "project"; before: string | null };
+
+  const placeAt = (repo: string, slug: string) =>
+    ws?.projects.find((v) => v.root === repo)?.snapshot?.places.find((p) => p.slug === slug) ?? null;
+  /** The rows a tier group is currently RENDERING, in render order — the same
+   *  derivation ProjectNode uses, filter included, so a landing slot computed
+   *  here names a row that is actually on screen. */
+  const tierRows = (repo: string, tier: Tier): Place[] => {
+    const places = (ws?.projects.find((v) => v.root === repo)?.snapshot?.places ?? []).filter(matchPlace);
+    return sortPlaces(repo, places.filter((p) => !p.is_main && bucketOf(p) === tier));
   };
+  /** Live geometry of the drop rows inside `zone`, with the open gap
+   *  arithmetically removed (dnd.ts `naturalTop` explains why measuring around
+   *  it is not optional). Returns rows in DOM order, minus the one being
+   *  dragged; place rows and project headers differ only in selector, identity
+   *  attribute, and which gap displaces them. */
+  const rowGeometry = (
+    zone: HTMLElement, y: number, dragging: string,
+    sel: string, keyOf: (el: HTMLElement) => string, gapSel = ".drop-gap",
+  ) => {
+    const gr = zone.querySelector<HTMLElement>(gapSel)?.getBoundingClientRect();
+    const gapTop = gr?.top ?? Infinity;
+    const gapH = gr?.height ?? 0;
+    const rows = [...zone.querySelectorAll<HTMLElement>(sel)]
+      .filter((el) => keyOf(el) !== dragging)
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return { slug: keyOf(el), top: naturalTop(r.top, gapTop, gapH), height: r.height };
+      });
+    return { rows, y: naturalTop(y, gapTop, gapH) };
+  };
+
+  const resolveDrop = (item: DragItem, x: number, y: number): DropTarget | null => {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (item.kind === "project") {
+      const list = navScrollRef.current;
+      // Anywhere in the list column counts, not just over a project node. The
+      // scroller's own padding is a real place to aim: the strip ABOVE the
+      // first project is how you make one first, and the empty space below the
+      // last is how you send one to the end. Requiring a project under the
+      // pointer made both of those silently do nothing — no gap, no drop.
+      if (!list || !el || !list.contains(el)) return null;
+      const { rows, y: ny } = rowGeometry(
+        list, y, item.root, "[data-project-root]", (n) => n.dataset.projectRoot!, ".drop-gap.proj",
+      );
+      const i = pointerIndex(rows, ny);
+      return { kind: "project", before: rows[i]?.slug ?? null };
+    }
+
+    const zone = el?.closest<HTMLElement>("[data-tier]");
+    if (!zone) return null;
+    if (zone.dataset.repo !== item.repo)
+      return { kind: "reject", hint: "a worktree belongs to its project — it can't move to another one" };
+    const p = placeAt(item.repo, item.slug);
+    if (!p) return null;
+    const tier = zone.dataset.tier as Tier;
+    const plan = dropIntent(p, tier, Math.floor(Date.now() / 1000), bucketOf(p) as Tier);
+    if (!plan.ok) return { kind: "reject", hint: plan.hint };
+    // The gap opens in the group the row will REALLY land in. For the derived
+    // tiers those differ often enough that showing it under the pointer would
+    // be a promise the list cannot keep.
+    const lands = plan.lands;
+    const rows = tierRows(item.repo, lands).filter((r) => r.slug !== item.slug);
+    let before: string | null;
+    if (settings.sort_mode === "manual" && lands === tier) {
+      const geo = rowGeometry(zone, y, item.slug, "[data-slug]", (n) => n.dataset.slug!);
+      before = geo.rows[pointerIndex(geo.rows, geo.y)]?.slug ?? null;
+    } else if (settings.sort_mode === "alpha") {
+      before = rows[alphaIndex(rows.map(nameOf), nameOf(p), settings.sort_dir === "desc")]?.slug ?? null;
+    } else if (settings.sort_mode === "recent") {
+      before = rows[recentIndex(rows.map(activityAt), activityAt(p), settings.sort_dir === "asc")]?.slug ?? null;
+    } else {
+      // Manual, but landing in a group the pointer is not over: the pointer has
+      // nothing to say about a position in a list it is not in. Land at the top,
+      // which is where the eye goes looking for what just moved.
+      before = rows[0]?.slug ?? null;
+    }
+    return { kind: "tier", repo: item.repo, tier, before, lands, patch: plan.patch };
+  };
+
+  /** Spring-open: a group that is collapsed can still be a drop target, but it
+   *  cannot show WHERE. Hovering it for a beat opens it. */
+  const springRef = useRef<{ key: string; timer: number } | null>(null);
+  const onDragZone = (zone: HTMLElement | null, item: DragItem | null) => {
+    if (springRef.current) { clearTimeout(springRef.current.timer); springRef.current = null; }
+    const key = zone?.dataset.gkey;
+    if (item?.kind !== "place" || !zone || !key || zone.dataset.open === "1") return;
+    springRef.current = {
+      key,
+      timer: window.setTimeout(() => { setGroupOpen((m) => ({ ...m, [key]: true })); }, 600),
+    };
+  };
+
+  const commitDrop = (item: DragItem, target: DropTarget | null) => {
+    if (!target || target.kind === "reject") {
+      if (target?.kind === "reject") setNotice(target.hint);
+      return;
+    }
+    if (item.kind === "project") {
+      if (target.before === item.root) return;
+      const roots = moveBefore((ws?.projects ?? []).map((pv) => pv.root), item.root, target.before);
+      reorderProjects(roots);
+      return;
+    }
+    if (target.kind !== "tier") return;
+    const p = placeAt(item.repo, item.slug);
+    if (!p) return;
+    const before = { pinned: !!p.declared?.pinned, lifecycle: p.declared?.lifecycle ?? null };
+    const after = {
+      pinned: target.patch.pinned ?? before.pinned,
+      lifecycle: target.patch.lifecycle !== undefined ? target.patch.lifecycle : before.lifecycle,
+    };
+    const moved = after.pinned !== before.pinned || after.lifecycle !== before.lifecycle;
+
+    // Position first: under Manual the drop is also a reorder, and a reorder is
+    // pure settings — no round trip, so it lands in the same frame as the gap
+    // closing. `manual_order` is one flat array per repo whose only job is
+    // within-group order, which is why a cross-group move splices into it too.
+    // Functional patch: the splice must read `manual_order` as it is NOW, not
+    // as the render that produced this callback saw it.
+    const prevOrder = settings.manual_order[item.repo];
+    if (settings.sort_mode === "manual") {
+      const slugs = (ws?.projects.find((v) => v.root === item.repo)?.snapshot?.places ?? [])
+        .filter((pl) => !pl.is_main).map((pl) => pl.slug);
+      updateSettings((prev) => ({
+        manual_order: {
+          ...prev.manual_order,
+          [item.repo]: spliceOrder(prev.manual_order[item.repo] ?? [], slugs, item.slug, target.before),
+        },
+      }));
+    }
+    if (!moved) return;
+
+    applyTier(item.repo, item.slug, before, after);
+    setFlash({ repo: item.repo, slug: item.slug });
+    // Two ways a drop can leave the row where the gesture cannot see it: it
+    // landed in a tier other than the one under the pointer (routine — half the
+    // groups are derived), or that tier is switched off in Settings, in which
+    // case the row does not just move, it DISAPPEARS. Both get said out loud.
+    const hidden = settings.hidden_tiers.includes(target.lands)
+      || (DORMANT_TIERS.includes(target.lands as (typeof DORMANT_TIERS)[number])
+        && settings.hidden_tiers.includes("dormant"));
+    const note = landingNote(target.tier, target.lands);
+    if (hidden) setNotice(`${nameOf(p)} → ${TIER_LABEL[target.lands]}, a tier you have hidden — it is out of the list until you show it again.`);
+    else if (note) setNotice(`${nameOf(p)} — ${note}`);
+    setUndo({
+      text: `Moved ${nameOf(p)} to ${TIER_LABEL[target.lands]}`,
+      run: () => {
+        applyTier(item.repo, item.slug, after, before);
+        // Restore ONLY this repo's order, merged into `manual_order` as it is
+        // NOW: this closure can be up to 8s old, a pure reorder in another repo
+        // does not replace the banner, and a captured-`settings` spread would
+        // write that reorder back out of existence. `prevOrder === undefined`
+        // means the repo had never been ordered — restored by DELETING the key,
+        // not by skipping (skipping leaves the drop's splice behind).
+        // `sort_mode` is deliberately the drop-time value: it decides whether
+        // the DROP spliced, not what mode the app is in when Undo is clicked.
+        if (settings.sort_mode === "manual")
+          updateSettings((prev) => {
+            const manual_order = { ...prev.manual_order };
+            if (prevOrder) manual_order[item.repo] = prevOrder;
+            else delete manual_order[item.repo];
+            return { manual_order };
+          });
+        setUndo(null);
+        setFlash({ repo: item.repo, slug: item.slug });
+      },
+    });
+  };
+
+  /** Write a tier change, optimistically on BOTH axes. Pin the backend copies
+   *  through verbatim. The lifecycle badge (`lifecycle_effective`) is
+   *  reconciled server-side from the label AND live tmux, and for that reason
+   *  it used to be off-limits to optimism — but `predictTier` now mirrors that
+   *  reconciliation exactly, and dnd-check.mjs re-reads store.rs so the mirror
+   *  cannot drift silently. So the badge is patched to the PREDICTION — never
+   *  to the label, which is the disagreement the old rule guarded against.
+   *  Do not "simplify" this back to label-only or non-optimistic: without the
+   *  badge patch the row sits in its old group for the whole git fan-out
+   *  (seconds in a real workspace) with the gap closed and the flash firing in
+   *  the group the row is LEAVING. The confirming refresh remains the source
+   *  of truth and corrects any misprediction.
+   *  Both writes go out as ONE promise: two `mutate` calls would race two
+   *  refreshes for one gesture. */
+  const applyTier = (
+    repo: string, slug: string,
+    from: { pinned: boolean; lifecycle: string | null },
+    to: { pinned: boolean; lifecycle: string | null },
+  ) => {
+    const p = placeAt(repo, slug);
+    const decl: Partial<NonNullable<Declared>> = {};
+    if (to.pinned !== from.pinned) decl.pinned = to.pinned;
+    if (to.lifecycle !== from.lifecycle) decl.lifecycle = to.lifecycle ?? undefined;
+    if (p && (to.pinned !== from.pinned || to.lifecycle !== from.lifecycle))
+      patchDeclared(repo, slug, decl,
+        to.lifecycle !== from.lifecycle
+          // `pinned: false` steps predictTier past its pin short-circuit: the
+          // badge under a pin is still the reconciled label, never "pinned" —
+          // pin lives in `declared`, and bucketOf ranks it separately.
+          ? predictTier(p, { pinned: false, lifecycle: to.lifecycle }, Math.floor(Date.now() / 1000))
+          : undefined);
+    mutate((async () => {
+      if (to.pinned !== from.pinned) await invoke("set_pin", { repo, slug, on: to.pinned });
+      if (to.lifecycle !== from.lifecycle)
+        await invoke("set_lifecycle", { repo, slug, label: to.lifecycle ?? "" });
+    })());
+  };
+
+  /** Optimistic re-order, then the backend's answer. The optimistic step
+   *  follows `patchDeclared`'s discipline (outrank in-flight reads, force the
+   *  confirming write to land) because the real `list_workspace` is a git
+   *  fan-out — seconds, during which the row would otherwise snap back. */
+  const reorderProjects = (roots: string[]) => {
+    refreshDone.current = ++refreshSeq.current;
+    lastSnap.current = "";
+    setWs((cur) =>
+      !cur ? cur : { projects: roots.map((r) => cur.projects.find((pv) => pv.root === r)!).filter(Boolean) },
+    );
+    invoke<Workspace>("reorder_projects", { roots })
+      .then(commitWs)
+      // mutate's rule — re-read either way: a failed write leaves the
+      // optimistic order on screen with `lastSnap` cleared, and without this
+      // nothing corrects it until the next poll happens to fire.
+      .catch((e) => { fail(e); refresh(); });
+  };
+
+  // No per-handler click guards anywhere below: the click that trails a drag
+  // is swallowed window-wide, capture-phase, inside navdrag.ts — a drop can
+  // release over ANY control, not just the handlers that remembered to check.
+  const { drag, arm } = useNavDrag<DropTarget>({
+    scrollRef: navScrollRef,
+    resolve: resolveDrop,
+    commit: commitDrop,
+    onZone: onDragZone,
+  });
+  /** The gap element, rendered at the landing slot of the group being hovered.
+   *  `before === null` means "at the end of that group". */
+  const gapAt = (repo: string, tier: Tier, before: string | null) =>
+    drag?.item.kind === "place" && drag.target?.kind === "tier"
+    && drag.target.repo === repo && drag.target.lands === tier && drag.target.before === before;
+  const projGapAt = (root: string | null) =>
+    drag?.item.kind === "project" && drag.target?.kind === "project" && drag.target.before === root;
+  /** Which tiers must exist as drop targets for the drag in flight, even empty:
+   *  an empty group renders nothing, and a tier you cannot see is a tier you
+   *  cannot drop on — the reason "pin the first place" was undraggable. */
+  const dragTiersFor = (repo: string): Tier[] =>
+    drag?.item.kind === "place" && drag.item.repo === repo
+      ? [...LIVE_TIERS, ...DORMANT_TIERS].filter((t) => t !== "active")
+      : [];
+
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 1600);
+    return () => clearTimeout(t);
+  }, [flash]);
+  useEffect(() => {
+    if (!undo) return;
+    const t = setTimeout(() => setUndo(null), 8000);
+    return () => clearTimeout(t);
+  }, [undo]);
 
   const createPlace = async (repo: string, branch: string, name: string, base: string) => {
     if (!branch) return;
@@ -2785,21 +3076,25 @@ function App() {
   // rows with a clock it does not order by reads as a broken sort.
   const PlaceRow = ({ repo, p, showProject }: { repo: string; p: Place; showProject?: boolean }) => {
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
+    // The main worktree is not in any tier group and cannot leave one, so it is
+    // the one row that never arms a drag. `showProject` marks the flat lenses
+    // (Recent / Attention), which mix projects and order by activity — there is
+    // no position there to drag a row into.
+    const draggable = !p.is_main && !showProject;
+    const isSource = drag?.item.kind === "place" && drag.item.slug === p.slug && drag.item.repo === repo;
     return (
       <li
         className={
           "row" +
           (sel?.repo === repo && sel?.slug === p.slug ? " sel" : "") +
-          (dragOver === p.slug && drag?.repo === repo ? " dragover" : "")
+          (isSource ? " drag-src" : "") +
+          (flash?.repo === repo && flash.slug === p.slug ? " flash" : "") +
+          (draggable ? " draggable" : "")
         }
+        data-slug={p.slug}
         onClick={() => enterPlace(repo, p)}
         onContextMenu={(e) => placeCtx(e, repo, p)}
-        draggable={settings.sort_mode === "manual" && !p.is_main}
-        onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDrag({ repo, slug: p.slug }); }}
-        onDragOver={(e) => { if (drag && drag.repo === repo && drag.slug !== p.slug && !p.is_main) { e.preventDefault(); setDragOver(p.slug); } }}
-        onDragLeave={() => { if (dragOver === p.slug) setDragOver(null); }}
-        onDrop={(e) => { e.preventDefault(); dropOnRow(repo, p.slug); }}
-        onDragEnd={() => { setDrag(null); setDragOver(null); }}
+        onPointerDown={draggable ? (e) => arm(e, { kind: "place", repo, slug: p.slug }) : undefined}
         title={p.declared?.title ? `${p.declared.title} — ${p.slug}` : p.slug}
       >
         <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
@@ -2857,10 +3152,33 @@ function App() {
     for (const k of Object.keys(buckets)) buckets[k] = sortPlaces(pv.root, buckets[k]);
     const hiddenTiers = new Set(settings.hidden_tiers);
     const dormant = DORMANT_TIERS.flatMap((t) => buckets[t] ?? []);
+    // Tiers this project must SHOW while a drag is in flight, so an empty
+    // group is still somewhere a row can be dropped.
+    const dragTiers = new Set(dragTiersFor(pv.root));
+    const liveShown = LIVE_TIERS.filter(
+      (g) => (buckets[g]?.length || dragTiers.has(g)) && !hiddenTiers.has(g),
+    );
+    const dormantShown = DORMANT_TIERS.filter((t) => buckets[t]?.length || dragTiers.has(t));
+    /** One tier group's rows plus the gap, in render order. */
+    const rowsWithGap = (g: Tier) => (
+      <ul className="places">
+        {(buckets[g] ?? []).map((p) => (
+          <Fragment key={p.slug}>
+            {gapAt(pv.root, g, p.slug) && <li className="drop-gap" />}
+            <PlaceRow repo={pv.root} p={p} />
+          </Fragment>
+        ))}
+        {gapAt(pv.root, g, null) && <li className="drop-gap" />}
+      </ul>
+    );
 
     return (
-      <div className="project">
-        <div className="project-h" onContextMenu={(e) => projectCtx(e, pv.root)}>
+      <div className="project" data-project-root={pv.root} data-drop="project">
+        <div
+          className="project-h"
+          onContextMenu={(e) => projectCtx(e, pv.root)}
+          onPointerDown={(e) => arm(e, { kind: "project", root: pv.root })}
+        >
           <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
           {pv.ok
             ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : rollup === "done" ? "a session just finished" : undefined}><FolderIcon /></span>
@@ -2910,21 +3228,26 @@ function App() {
             {ghosts.length > 0 && (
               <ul className="places">{ghosts.map((g) => <PendingRow key={g.id} label={g.label} />)}</ul>
             )}
-            {LIVE_TIERS.filter((g) => buckets[g]?.length && !hiddenTiers.has(g)).map((g) => {
+            {liveShown.map((g) => {
               const key = `${pv.root}|${g}`;
               const opened = isOpen(key, g !== "idle"); // idle collapsed by default
               return (
-                <div className="group" key={key}>
-                  <GroupHeader gkey={key} label={GROUP_LABEL[g]} count={buckets[g].length} open={opened} onToggle={() => toggleGroup(key, g !== "idle")} />
-                  {opened && <ul className="places">{buckets[g].map((p) => <PlaceRow key={p.slug} repo={pv.root} p={p} />)}</ul>}
+                <div
+                  className={"group" + (buckets[g]?.length ? "" : " group-empty")}
+                  key={key}
+                  data-drop="tier" data-tier={g} data-repo={pv.root}
+                  data-gkey={key} data-open={opened ? "1" : "0"}
+                >
+                  <GroupHeader gkey={key} label={GROUP_LABEL[g]} count={buckets[g]?.length ?? 0} open={opened} onToggle={() => toggleGroup(key, g !== "idle")} />
+                  {opened && rowsWithGap(g)}
                 </div>
               );
             })}
-            {dormant.length > 0 && !hiddenTiers.has("dormant") && (() => {
+            {(dormant.length > 0 || dormantShown.length > 0) && !hiddenTiers.has("dormant") && (() => {
               const key = `${pv.root}|dormant`;
               const opened = isOpen(key, false);
               return (
-                <div className="group dormant" key={key}>
+                <div className="group dormant" key={key} data-gkey={key} data-open={opened ? "1" : "0"} data-drop="dormant">
                   <div className="group-h dormant-h" onClick={() => toggleGroup(key, false)}>
                     {/* same SVG caret as every other group header — the ASCII
                         ▾/▸ was one more thing making the quietest row louder */}
@@ -2933,10 +3256,14 @@ function App() {
                   </div>
                   {opened && (
                     <div className="kids-d">
-                      {DORMANT_TIERS.filter((t) => buckets[t]?.length).map((t) => (
-                        <div className="subgroup" key={t}>
+                      {dormantShown.map((t) => (
+                        <div
+                          className={"subgroup" + (buckets[t]?.length ? "" : " group-empty")}
+                          key={t}
+                          data-drop="tier" data-tier={t} data-repo={pv.root}
+                        >
                           <div className="subdiv">{GROUP_LABEL[t]}</div>
-                          <ul className="places">{buckets[t].map((p) => <PlaceRow key={p.slug} repo={pv.root} p={p} />)}</ul>
+                          {rowsWithGap(t)}
                         </div>
                       ))}
                     </div>
@@ -3073,9 +3400,15 @@ function App() {
             />
           )
         )}
-        <div className="nav-scroll">
+        <div className="nav-scroll" ref={navScrollRef}>
           {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}
-          {lens === "places" && ws?.projects.map((pv) => <ProjectNode key={pv.root} pv={pv} />)}
+          {lens === "places" && ws?.projects.map((pv) => (
+            <Fragment key={pv.root}>
+              {projGapAt(pv.root) && <div className="drop-gap proj" />}
+              <ProjectNode pv={pv} />
+            </Fragment>
+          ))}
+          {lens === "places" && projGapAt(null) && <div className="drop-gap proj" />}
           {lens === "recent" && <FlatLens items={recentItems} />}
           {lens === "attention" && (
             <>
@@ -3472,9 +3805,38 @@ function App() {
         })}
       </nav>
 
-      {/* error surface lives OUTSIDE the nav — must stay visible in rail-only mode */}
-      {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
-      {!err && notice && <div className="err err-float notice" title="dismiss" onClick={() => setNotice("")}>{notice}</div>}
+      {/* error surface lives OUTSIDE the nav — must stay visible in rail-only
+          mode. ONE bottom-anchored stack: the undo banner and the landing note
+          routinely arrive from the same drop, and as two fixed elements at the
+          same coordinates the undo banner sat exactly on top of the note it
+          was supposed to accompany. Undo first in DOM = above on screen. */}
+      {(err || notice || undo) && (
+        <div className="float-stack">
+          {/* One click back from a slip of the wrist — a drag rewrites declared
+              state, and the row it moves can land in a collapsed group or a
+              hidden tier, i.e. out of sight of the gesture that moved it. */}
+          {undo && (
+            <div className="err err-float undo">
+              {undo.text}
+              <button className="undo-btn" onClick={undo.run}>Undo</button>
+            </div>
+          )}
+          {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
+          {!err && notice && <div className="err err-float notice" title="dismiss" onClick={() => setNotice("")}>{notice}</div>}
+        </div>
+      )}
+      {/* The dragged row's label, riding the pointer. Rendered at the app root
+          so it is never clipped by the nav's own overflow. */}
+      {drag && (
+        <div
+          className={"drag-ghost" + (drag.target?.kind === "reject" ? " no" : "")}
+          style={{ left: drag.x, top: drag.y }}
+        >
+          {drag.item.kind === "project" ? basename(drag.item.root) : nameOf({ slug: drag.item.slug, declared: placeAt(drag.item.repo, drag.item.slug)?.declared })}
+          {drag.target?.kind === "reject" && <span className="drag-why">{drag.target.hint}</span>}
+          {drag.target?.kind === "tier" && <span className="drag-why">→ {TIER_LABEL[drag.target.lands]}</span>}
+        </div>
+      )}
 
       {sortOpen && <div className="menu-catch" onClick={() => setSortOpen(false)} />}
 

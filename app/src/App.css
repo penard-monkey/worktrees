@@ -616,8 +616,78 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .sortpop { min-width: 180px; }
 .icon-btn.on { color: var(--accent); }
 .pop-item:disabled { opacity: 0.45; }
-.row.dragover { box-shadow: inset 0 2px 0 var(--accent); }
-.row[draggable="true"] { cursor: grab; }
+
+/* ── nav drag & drop ────────────────────────────────────────────────────────
+ * Pointer-driven (see navdrag.ts), so none of this hangs off :-drag pseudo
+ * classes. Three pieces: the row left behind, the gap that opens where it will
+ * land, and a label riding the pointer that says which group that is — the
+ * label is not decoration, it is the only way a drop onto a DERIVED tier can
+ * admit up front that the row is going somewhere else.
+ */
+.row.draggable { cursor: grab; }
+body.dragging { cursor: grabbing; user-select: none; }
+body.dragging .row:hover { background: none; }
+.row.drag-src { opacity: 0.4; }
+/* Hit-testing during a drag is one `elementFromPoint` per frame, so anything
+   stretched over the whole viewport answers INSTEAD of the drop zone under it.
+   A popover catcher normally swallows the pointerdown before a drag can start,
+   but that is an ordering accident, not a guarantee. */
+body.dragging .menu-catch { pointer-events: none; }
+/* The gap is a row-shaped hole, not a line: the drop is a MOVE into a list, and
+   a 2px rule between rows reads as an insertion caret in a text field. */
+.drop-gap {
+  /* the height a row occupies: one line plus its own vertical padding, so the
+     hole is exactly the shape of what will fill it, at any density */
+  height: calc(1.35em + 2 * var(--row-pad-v)); margin: 1px 0; border-radius: var(--r-md);
+  border: 1px dashed var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
+  animation: gap-open var(--dur) var(--ease);
+}
+.drop-gap.proj { height: 22px; margin: var(--s1) 0; }
+@keyframes gap-open { from { height: 0; opacity: 0; } }
+/* An empty tier exists only while a drag is in flight — without it there is no
+   way to pin the first place, or to reach a tier you have emptied. */
+.group-empty > .group-h, .group-empty > .subdiv { opacity: 0.6; }
+.group-empty .places { min-height: calc(1.35em + 2 * var(--row-pad-v)); }
+.drag-ghost {
+  position: fixed; z-index: 60; pointer-events: none;
+  transform: translate(12px, 8px);
+  display: flex; align-items: baseline; gap: var(--s2);
+  padding: 2px var(--s2); border-radius: var(--r-md);
+  background: var(--bg-elev); border: 1px solid var(--accent);
+  font-size: var(--fs-label); color: var(--txt-hi);
+  box-shadow: var(--shadow-float);
+}
+.drag-ghost.no { border-color: var(--danger, #e06c75); }
+.drag-why { font-size: var(--fs-meta); color: var(--txt-dim); }
+/* Where it went, when where it went is not where you dropped it. */
+.row.flash { animation: row-flash 1.6s var(--ease); }
+@keyframes row-flash {
+  0%, 60% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  100% { background: none; }
+}
+/* The floats are ONE bottom-anchored stack. Two fixed elements at the same
+   coordinates paint over each other — which put the undo banner exactly on top
+   of the landing note from the same drop. Children go static; DOM order is
+   screen order, undo above, err/notice at the edge. */
+.float-stack {
+  position: fixed; left: calc(var(--rail-w) + var(--s3)); bottom: var(--s3);
+  z-index: 80; display: flex; flex-direction: column; gap: var(--s2);
+  align-items: flex-start;
+}
+.float-stack .err-float { position: static; }
+.err-float.undo { display: flex; align-items: center; gap: var(--s3); cursor: default; }
+.undo-btn {
+  padding: 1px var(--s2); border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--bg-input);
+  color: var(--txt-hi); font-size: var(--fs-meta); cursor: pointer;
+}
+.undo-btn:hover { border-color: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  /* The gap must still APPEAR — it is the drop target, not an embellishment.
+     Only the growing is dropped. Same rule the afterglow tiers follow. */
+  .drop-gap { animation: none; }
+  .row.flash { animation: none; box-shadow: inset 0 0 0 1px var(--accent); }
+}
 .tier-toggles { display: flex; gap: var(--s3); }
 .tier-toggle {
   display: flex; align-items: center; gap: var(--s1);

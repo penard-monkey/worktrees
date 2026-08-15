@@ -26,6 +26,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   can only search what it has received since it attached — tmux keeps its own
   scrollback and does not replay it — which the field says on hover.
 - Settings → Shortcuts lists ⌘J, ⌘⇧E and ⌘⇧T, which it had been leaving out.
+- **Drag a place into another group to put it there.** Dragging used to be a
+  sorting gesture — only in Manual mode, only inside the group a row was already
+  in. Now dropping a row on Pinned pins it, on Saved/Closed/Archived/Abandoned
+  sets that lifecycle, in any sort mode, and a gap opens where the row will
+  land: at the pointer under Manual, at the slot the list will actually put it
+  in under A–Z and Activity. Empty groups appear while you drag, so you can pin
+  the first place in a project or reach a tier you have emptied.
+- **The gap tells the truth about where a row is going.** Active and Idle are
+  not labels — they are readings of whether a tmux session is up and how
+  recently a place was opened — so a row dropped on them lands wherever those
+  readings put it. The drop preview names that group before you let go, the row
+  is lit for a moment once it gets there, and if the landing tier is one you
+  have hidden the app says so rather than letting the row vanish. Dropping on
+  Active explains itself instead of doing nothing.
+- **Undo for a drag.** A drag now rewrites declared state, so a slip of the
+  wrist gets one click back — pin, lifecycle and manual position together.
+- **Projects reorder by dragging their headers.** The workspace order was the
+  order projects happened to be added in.
+- **Escape cancels a drag**, and the nav scrolls when you drag a row to its top
+  or bottom edge — a place could not previously be dragged past the visible
+  list.
 
 ## [0.13.0] - 2026-08-14
 
