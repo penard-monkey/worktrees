@@ -162,6 +162,24 @@ is invisible to the bats suite — there is no fake claude. Re-run
   WHOLE-BLOB by the frontend, so the backend must never write into it (its own
   update would be erased by the next settings save; that is why each dock shell
   tab's last directory lives in a separate backend-owned `shell-cwds.json`).
+- **A `place_panels` field whose global twin is a SEED must be optional.** Every
+  key in that record also exists as a flat `Settings` key, and `panelsFor` uses
+  the flat one as the seed for a place with no entry. `updatePanels` writes the
+  WHOLE record, so filling a field in from `cur` (which is already seeded) freezes
+  the seed into a place the user never set it in — and then spreads that stale
+  value back over the global for the next place to inherit. `dock_open`/`dock_tab`/
+  `dock_width` get away with it because each is written by an act you can SEE;
+  `files_md_zoom` is optional so that ABSENT keeps meaning "still inheriting".
+  Every test passed with the bug in: the value written was always correct at the
+  moment it was written.
+- **A `.md`-wide zoom means every size inside it must be relative.** `--md-zoom`
+  (inline on the scroll box) works because the whole `.md` block was converted —
+  headings from `rem`, tables/badges from `--fs-*`, fences from `--term-size`,
+  spacing from `--s*` — to `em` / `calc(… * var(--md-z))`. Two traps: a shared
+  class the block merely BORROWS keeps its own px padding (`.code-text` inside
+  `.md-fence`), and **form controls do not inherit font**, so `1em` on an
+  `<input>` resolves against WebKit's ~13.33px control font, not the prose —
+  `.md-check` needs `font-size: inherit` before `width: 1em` means anything.
 - Design tokens: `app/src/tokens.css` — everything scales off `--ui-rem`;
   terminal font is independent (`--term-*`). No UI libraries, plain CSS. "No UI
   libraries" means no COMPONENT/design-system libraries and no editor — a pure

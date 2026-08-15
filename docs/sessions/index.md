@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-14](2026-08-14-markdown-zoom/summary.html) | markdown docs read at whatever size you need — a per-place reading zoom for the Files viewer, one multiplier and a rem→em sweep |
 | [2026-08-14](2026-08-14-terminal-tab-memory/summary.html) | terminals come back as you left them — the tab strip, the front tab and each tab's directory all survive a restart → v0.13.0 |
 | [2026-08-11](2026-08-11-cmdk-activity-order/summary.html) | one clock for every list of places — ⌘K, Recent and Resume ranked three different ways, now all on the nav's activity date |
 | [2026-08-11](2026-08-11-v0-12-releases/summary.html) | the sandbox found what the mock harness could not — dock default, nav refresh race → v0.12.0, v0.12.1 |

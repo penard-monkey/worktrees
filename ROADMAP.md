@@ -5,6 +5,27 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **No app chord is guarded against the surfaces above it except the palette and
+  Settings.** The keydown handler checks `switchOpen`/`settingsOpen`, so ⌘J, ⌘B,
+  ⌘1-9, ⌘E and now ⌘+/⌘−/⌘0 all still fire behind the What's-new scrim and the
+  ProjectSheet — rearranging panels nobody can see. Long-standing and uniform,
+  which is why it keeps not being worth a one-chord fix; the fix is a single
+  "is a modal on top" predicate for all of them. Two smaller siblings from the
+  same session: a disabled stepper button never shows its `title`, so the
+  ⌘−/⌘+ hints vanish exactly at the ends of the range where a user is most
+  likely to hunt for them.
+  _From: [2026-08-14 markdown-zoom](docs/sessions/2026-08-14-markdown-zoom/summary.md)_
+
+- **The markdown zoom chord has never been pressed in a real build.** Every
+  ⌘+/⌘−/⌘0 assertion came from synthetic `KeyboardEvent`s in Chromium under
+  Playwright; the buttons are unaffected either way. Static evidence says the
+  chord reaches JS (no native menu, no `zoomHotkeysEnabled` in `tauri.conf.json`),
+  and `app/scripts/sandbox.sh --app` closes it in about 30 seconds. Worth folding
+  into the next real-app run rather than making its own trip. The general gap is
+  the known one: the mock harness cannot answer any question about what WKWebView
+  does with a key before the page sees it.
+  _From: [2026-08-14 markdown-zoom](docs/sessions/2026-08-14-markdown-zoom/summary.md)_
+
 - **A tab index is an identity split across two files, and only one of them is
   swept.** A dock tab's NAME and STRIP live in `ui-state.json` (frontend), its
   DIRECTORY in `shell-cwds.json` (backend), and the two halves are dropped by
