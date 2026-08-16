@@ -1249,6 +1249,144 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
   );
 }
 
+// ── sync (courier sync of a project through a mounted hub) ──────────────────
+// Backend: lib.rs `sync_status` / `sync_preview` / `sync_apply` over
+// worktrees_core::sync. Phase 3 is deliberately the minimum that is HONEST: a
+// preview you answer, and a result you can read. No progress streaming yet (the
+// apply is one awaited call), no hover popover — both phase 4.
+
+type SyncStatusView = {
+  scope: string;
+  name: string | null;
+  local_root: string | null;
+  hub: string | null;
+  hub_error: string | null;
+  branch: string | null;
+  dirty: number | null;
+  pushed_at: number | null;
+  pushed_host: string | null;
+  /** Non-null ⇒ this checkout arrived on a hub. Every sync item is disabled and
+   *  this message is the reason. */
+  hub_copy: string | null;
+};
+type SyncDir = "push" | "pull";
+type SyncPreview = {
+  name: string;
+  direction: SyncDir;
+  hub: string;
+  src: string;
+  dst: string;
+  plan: { sends: number; deletes: number; delete_paths: string[] };
+  skipped: [string, number][];
+  skipped_available: boolean;
+  live_sessions: string[];
+  with_sessions: boolean;
+  warnings: string[];
+};
+
+// Module scope with props (CLAUDE.md): a component defined inside App() is a new
+// identity every render, so the checkbox below would lose its state — and the
+// modal re-renders on every refresh tick while an apply runs.
+function SyncModal({ dir, project, preview, loading, busy, error, live, done, sessions, onSessions, onConfirm, onClose }: {
+  dir: SyncDir;
+  project: string;
+  preview: SyncPreview | null;
+  loading: boolean;
+  busy: boolean;
+  error: string;
+  /** Live tmux sessions in the destination — from the preview, then REPLACED by
+   *  the fresher list an apply answers with when one appeared in between. */
+  live: string[];
+  done: string;
+  sessions: boolean;
+  onSessions: (on: boolean) => void;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Esc cannot cancel a transfer that is already running — the rsync is not
+      // ours to stop, and a modal that vanishes mid-apply hides what happened.
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const plan = preview?.plan;
+  const deletes = plan?.deletes ?? 0;
+  const verb = dir === "push" ? "Push" : "Pull";
+  return (
+    <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
+      <div className="sync-modal" role="dialog" aria-label={`Sync ${dir}`} onClick={(e) => e.stopPropagation()}>
+        <header className="sync-h">
+          <b>Sync {dir} — {project}</b>
+          {preview && <span className="sync-hub">{preview.hub}</span>}
+        </header>
+        <div className="sync-body">
+          {loading && <div className="sync-pending" data-testid="sync-pending">Previewing…</div>}
+          {error && <div className="sync-err" data-testid="sync-error">{error}</div>}
+          {done && <div className="sync-done" data-testid="sync-done">{done}</div>}
+          {preview && !done && (
+            <>
+              <div className="sync-route" title={`${preview.src} → ${preview.dst}`}>
+                <span>{preview.src}</span>
+                <span className="sync-arrow">→</span>
+                <span>{preview.dst}</span>
+              </div>
+              <div className="sync-counts" data-testid="sync-counts">
+                <b>{plan!.sends}</b> to send/update
+                {deletes > 0 && <> · <b className="sync-del">{deletes}</b> to delete</>}
+              </div>
+              {plan!.delete_paths.length > 0 && (
+                <ul className="sync-dels">
+                  {plan!.delete_paths.map((p) => <li key={p}>{p}</li>)}
+                  {deletes > plan!.delete_paths.length && (
+                    <li className="sync-more">… and {deletes - plan!.delete_paths.length} more</li>
+                  )}
+                </ul>
+              )}
+              <div className="sync-skipped">
+                {!preview.skipped_available
+                  ? "skipped report unavailable (openrsync)"
+                  : preview.skipped.length === 0
+                    ? "excluded: nothing matched"
+                    : `excluded (rebuild locally): ${preview.skipped.map(([p, n]) => `${p} ×${n}`).join("  ")}`}
+              </div>
+              {preview.warnings.map((w) => <div className="sync-warn" key={w}>{w}</div>)}
+              {live.length > 0 && (
+                <div className="sync-live" data-testid="sync-live">
+                  <b>{live.length} live tmux session{live.length > 1 ? "s" : ""} in the destination</b>
+                  <ul>{live.map((s) => <li key={s}>● {s}</li>)}</ul>
+                  A pull mirrors with --delete over the tree they are using.
+                </div>
+              )}
+              <label className="sync-opt">
+                <input type="checkbox" checked={sessions} disabled={busy}
+                  onChange={(e) => onSessions(e.currentTarget.checked)} />
+                Include Claude sessions (additive — never deletes the other Mac's history)
+              </label>
+            </>
+          )}
+        </div>
+        <footer className="sync-foot">
+          <button className="ctrl" onClick={onClose} disabled={busy}>{done ? "Close" : "Cancel"}</button>
+          {!done && (
+            <button
+              className={"enter-btn" + (deletes > 0 ? " danger" : "")}
+              data-testid="sync-go"
+              disabled={busy || loading || !preview}
+              onClick={onConfirm}
+            >
+              {busy ? `${verb}ing…` : verb}
+            </button>
+          )}
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
@@ -1307,6 +1445,25 @@ function App() {
   >(null);
   const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
   const [projSheet, setProjSheet] = useState<string | null>(null);
+  // ── sync ──
+  // Cached per project, refreshed when the context menu OPENS (one cheap
+  // backend call) and again after an apply, so the menu can name the hub it
+  // would use and grey itself out when there is none.
+  const [syncStatus, setSyncStatus] = useState<Record<string, SyncStatusView>>({});
+  const [sync, setSync] = useState<{ root: string; dir: SyncDir } | null>(null);
+  const [syncPrev, setSyncPrev] = useState<SyncPreview | null>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncErr, setSyncErr] = useState("");
+  const [syncDone, setSyncDone] = useState("");
+  /** Live sessions the user has been SHOWN. Seeded from the preview, replaced by
+   *  the fresher list an apply answers with — confirming is only consent to what
+   *  is on screen. */
+  const [syncLive, setSyncLive] = useState<string[]>([]);
+  // Deliberately NOT persisted: ferrying transcripts is opt-in per sync (core's
+  // default too), and a remembered "yes" is a decision the user did not make for
+  // THIS transfer. Persisting it needs a settings key + its migration; phase 4.
+  const [syncSessions, setSyncSessions] = useState(false);
   // Per-project doctor state. Structurally identical to busyPaths/waitingPaths
   // (the house pattern for row decoration that is NOT in the snapshot) —
   // deliberately outside `Place`, because `Place.stack` is reserved for the infra
@@ -2415,6 +2572,60 @@ function App() {
       if (sel?.repo === repo && sel?.slug === slug) setSel(null);
     }
   };
+  // ── sync ──
+  // Cheap enough to fire on menu-open (one rsync --version, one manifest read,
+  // two git calls). Failures go through `fail` like every other invoke — a
+  // greyed-out sync group with no reason is exactly the silence CLAUDE.md bans.
+  const loadSyncStatus = (root: string) => {
+    invoke<SyncStatusView>("sync_status", { repo: root })
+      .then((s) => setSyncStatus((m) => ({ ...m, [root]: s })))
+      .catch((e) => fail(e));
+  };
+  const openSync = (root: string, dir: SyncDir) => {
+    closeCtx();
+    setSync({ root, dir });
+    setSyncPrev(null);
+    setSyncErr("");
+    setSyncDone("");
+    setSyncLive([]);
+    setSyncLoading(true);
+    invoke<SyncPreview>("sync_preview", { repo: root, direction: dir, withSessions: syncSessions })
+      .then((p) => { setSyncPrev(p); setSyncLive(p.live_sessions); })
+      // In the modal, not the banner: it is the answer to the question the modal
+      // just asked. Logged too — `fail`'s job — so it is never only on screen.
+      .catch((e) => { setSyncErr(String((e as { message?: string })?.message ?? e)); fail(e); })
+      .finally(() => setSyncLoading(false));
+  };
+  const closeSync = () => {
+    setSync(null);
+    setSyncPrev(null);
+    setSyncErr("");
+    setSyncDone("");
+    setSyncLive([]);
+  };
+  // `confirmed` says a HUMAN was shown the live sessions — the modal's warning
+  // block IS that showing. Core re-lists them at apply time, so a session that
+  // started since comes back as a fresh question rather than being mirrored over.
+  const confirmSync = async () => {
+    if (!sync || syncBusy) return;
+    setSyncBusy(true);
+    setSyncErr("");
+    const r = await runCmd("sync_apply", {
+      repo: sync.root, direction: sync.dir, withSessions: syncSessions,
+      confirmed: syncLive.length > 0, install: false,
+    });
+    setSyncBusy(false);
+    if (!r) { setSyncErr("sync could not start — see Settings → Logs."); return; }
+    if (r.code === EXIT_NEEDS_CONFIRM) {
+      // Sessions appeared between preview and apply: re-render the warning with
+      // the list core actually saw, and let the user answer THAT one.
+      setSyncLive((r.needs_confirm ?? "").split("\n").filter(Boolean));
+      return;
+    }
+    if (!r.ok) { setSyncErr(r.output || `sync ${sync.dir} failed (exit ${r.code})`); return; }
+    setSyncDone(r.output);
+    loadSyncStatus(sync.root); // the push stamp the next menu shows
+  };
   const placeCtx = (e: React.MouseEvent, repo: string, p: Place) => {
     e.preventDefault();
     e.stopPropagation();
@@ -2428,6 +2639,9 @@ function App() {
     setMenu(null);
     setConfirmRm(null);
     setCtx({ kind: "project", x: e.clientX, y: e.clientY, root });
+    // Re-read on every open rather than once: a hub is a drive someone plugs in
+    // and pulls out, so a cached "no hub" would outlive the truth.
+    if (ws?.projects.find((v) => v.root === root)?.ok) loadSyncStatus(root);
   };
 
   // ── nav sorting (Settings-persisted; Manual = drag) ──
@@ -3884,6 +4098,22 @@ function App() {
           </aside>
         </div>
       )}
+      {sync && (
+        <SyncModal
+          dir={sync.dir}
+          project={basename(sync.root)}
+          preview={syncPrev}
+          loading={syncLoading}
+          busy={syncBusy}
+          error={syncErr}
+          live={syncLive}
+          done={syncDone}
+          sessions={syncSessions}
+          onSessions={setSyncSessions}
+          onConfirm={confirmSync}
+          onClose={closeSync}
+        />
+      )}
       {menu && <div className="menu-catch" onClick={closeMenu} />}
 
       {/* ── right-click: place ── */}
@@ -3983,6 +4213,24 @@ function App() {
             {pv?.ok && (
               <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("fetch_origin", { root: ctx.root })); }}>Fetch origin</button>
             )}
+            {pv?.ok && (() => {
+              // The hub's basename is the name the user knows the drive by. While
+              // the status is still in flight the items say "hub" and stay live:
+              // the preview is where a missing hub would be reported anyway, and
+              // a menu that greys itself out for a moment reads as broken.
+              const st = syncStatus[ctx.root];
+              const hub = st?.hub ? basename(st.hub) : "hub";
+              const why = st?.hub_copy ?? st?.hub_error ?? "";
+              const off = !!st && (!!st.hub_copy || !st.hub);
+              return (
+                <>
+                  <button className="pop-item" disabled={off} title={why}
+                    onClick={() => openSync(ctx.root, "push")}>Push to {hub}…</button>
+                  <button className="pop-item" disabled={off} title={why}
+                    onClick={() => openSync(ctx.root, "pull")}>Pull from {hub}…</button>
+                </>
+              );
+            })()}
             {pv?.ok && (() => {
               // The badge is the SHEET's count (issueCount), not the row-glyph set:
               // those two answer different questions, and a placeless finding used

@@ -41,6 +41,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   over it: with tmux sessions open in that tree it lists them before asking, and
   `--yes` on its own is refused — blanket consent given by a script before it
   could know is not an answer to "something is working in there right now".
+- **Sync from the app.** Right-click a project → *Push to \<hub\>…* / *Pull from
+  \<hub\>…*. Both open a preview first: what would be sent, what would be
+  deleted (listed, in red), what is being skipped as rebuildable, and a checkbox
+  for ferrying this project's Claude sessions along. Confirming runs it and the
+  modal reports what landed. The items name the drive they found, and grey
+  themselves out with the reason when there is no hub mounted — or when the
+  checkout you right-clicked is itself a hub copy. A pull onto a tree with live
+  tmux sessions lists them before you confirm, and if one appears while you are
+  reading the preview, the transfer stops and asks again with the fresher list.
+  Progress is still all-or-nothing for now: the modal waits, it does not stream.
+
+### Fixed
+- The hub-copy guard now also covers the **app** and **`worktrees mcp`**. Both
+  drive the same core ops in-process and so never passed the CLI's dispatch
+  check — every op the app runs, and every non-read-only MCP tool, is refused
+  inside a tree that arrived on a sync hub, with the native path named.
 
 ## [0.14.0] - 2026-08-14
 

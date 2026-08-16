@@ -70,6 +70,28 @@ const mockListDelayMs = (() => {
   return m ? Number(m[1] ?? 1500) : 0;
 })();
 const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
+// ── sync (courier sync of a project through a mounted hub) ──────────────────
+// A real sync is rsync over an SSD: seconds at best, and the states worth
+// designing against are the ones you cannot reach by clicking. Same query-knob
+// idiom as ?slowlist:
+//   ?slowsync[=ms]  delay all three commands (the modal's pending state)
+//   ?nohub          nothing mounted — the menu items are disabled with a reason
+//   ?hubcopy        this checkout IS a hub copy — the whole group is disabled
+//   ?synclive       a live tmux session in the pull destination (Guard B)
+// plus `__mock.syncFail()` for an rsync error on the NEXT apply.
+const MOCK_HUB = "/Volumes/MockSSD";
+const mockNoHub = location.search.includes("nohub");
+const mockHubCopy = location.search.includes("hubcopy");
+let mockSyncLive = location.search.includes("synclive");
+let mockSyncFailNext = false;
+/** Push state per project root — `sync_status` reports it as the last push. */
+const mockPushed: Record<string, { at: number; host: string }> = {};
+const mockSyncDelayMs = (() => {
+  const m = /[?&]slowsync(?:=(\d+))?/.exec(location.search);
+  return m ? Number(m[1] ?? 1500) : 0;
+})();
+const HUB_MISSING = "no external volume mounted; plug in the SSD or pass --hub PATH";
+const syncName = (repo: string) => repo.split("/").filter(Boolean).pop() || repo;
 function dirKind(dir: string): "repo" | "empty" | "unborn" {
   if (mockInited.has(dir) || findProject(dir)) return "repo";
   const base = dir.split("/").pop() || dir;
@@ -1017,6 +1039,91 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       mockPortFindings = { ...mockPortFindings, [root]: kept };
       return { ok: true, code: 0, warnings: [], output: "═══ Provisioning kitchen-sink ═══\n▸ slot 3 — wrote .worktree.env (5 ports)" };
     }
+    // ── sync ───────────────────────────────────────────────────────────────
+    // Mirrors lib.rs: `sync_status` is a SyncStatusView (core's StatusJson
+    // flattened + hub_copy), `sync_preview` a SyncPreviewOut, `sync_apply` a
+    // CmdResult — including the needs_confirm shape core answers a pull with
+    // when something is live in the destination.
+    case "sync_status": {
+      await sleep(mockSyncDelayMs);
+      const repo = args.repo as string;
+      const pushed = mockPushed[repo];
+      return {
+        schema_version: 1,
+        scope: "project",
+        name: syncName(repo),
+        local_root: repo,
+        rsync: "/opt/homebrew/bin/rsync",
+        rsync_v3: true,
+        hub: mockNoHub ? null : MOCK_HUB,
+        hub_error: mockNoHub ? HUB_MISSING : null,
+        branch: "main",
+        dirty: 3,
+        pushed_at: pushed?.at ?? null,
+        pushed_host: pushed?.host ?? null,
+        hint: null,
+        projects: [],
+        hub_copy: mockHubCopy
+          ? "this is a hub copy (pushed from othermac) — run worktrees at the native path: /Users/other/workspace/demo"
+          : null,
+      };
+    }
+    case "sync_preview": {
+      await sleep(mockSyncDelayMs);
+      if (mockNoHub) throw new Error(HUB_MISSING);
+      const repo = args.repo as string;
+      const dir = args.direction as string;
+      const name = syncName(repo);
+      const hubTree = `${MOCK_HUB}/${name}/${name}`;
+      return {
+        name,
+        direction: dir,
+        hub: MOCK_HUB,
+        src: dir === "push" ? repo : hubTree,
+        dst: dir === "push" ? hubTree : repo,
+        plan: {
+          sends: 12,
+          deletes: 2,
+          delete_paths: ["docs/old-spec.md", "tools/gen.sh"],
+        },
+        skipped: [["node_modules/", 41], ["target/", 6], ["*.log", 3]],
+        skipped_available: true,
+        // Guard B is PULL-only, and OFF by default so the happy path stays the
+        // happy path (?synclive / __mock.syncLive(true) turns it on).
+        live_sessions: dir === "pull" && mockSyncLive ? ["wt-mock-a"] : [],
+        with_sessions: !!args.withSessions,
+        warnings: [],
+      };
+    }
+    case "sync_apply": {
+      await sleep(mockSyncDelayMs);
+      const repo = args.repo as string;
+      const dir = args.direction as string;
+      const name = syncName(repo);
+      if (mockSyncFailNext) {
+        mockSyncFailNext = false;
+        return {
+          ok: false, code: 1, warnings: [],
+          output: 'rsync failed (exit 23): rsync: [sender] send_files failed to open "/Volumes/MockSSD/.tmp": Permission denied (13)',
+        };
+      }
+      const live = dir === "pull" && mockSyncLive ? ["wt-mock-a"] : [];
+      if (live.length && !args.confirmed) {
+        return {
+          ok: false, code: 4, warnings: [],
+          needs_confirm: live.join("\n"),
+          output: `${live.length} live tmux session(s) in ${repo}: ${live.join(", ")} — a pull mirrors over the tree they are using.`,
+        };
+      }
+      if (dir === "push") mockPushed[repo] = { at: now(), host: "mock-mbp" };
+      // A pull rewrote the tree: same event lib.rs emits, so the nav re-pulls.
+      else emitEvent("places:changed", {});
+      return {
+        ok: true, code: 0, warnings: [],
+        output: `sync ${dir} — ${name}: 12 sent/updated, 2 deleted`,
+      };
+    }
+
     case "init_suggest":
       return clone(mockSuggestions[args.repo] ?? {
         path: `${args.repo}/.worktrees.toml`,
@@ -1315,6 +1422,19 @@ const healthyConfigs: Record<string, MockCfg> = {};
     emitEvent("sessions:done", { path, epoch });
     return epoch;
   },
+  /** The NEXT `sync_apply` fails the way rsync does. An apply error is a state
+   * no click can produce in the harness (every mock transfer succeeds), and it
+   * is the one that must never be swallowed. */
+  syncFail() {
+    mockSyncFailNext = true;
+    return true;
+  },
+  /** Put a live tmux session in the pull destination (Guard B) or take it away
+   * — `?synclive` sets it at load, this flips it mid-session. */
+  syncLive(on = true) {
+    mockSyncLive = on;
+    return mockSyncLive;
+  },
   fixConfig(root: string = CDV_ROOT) {
     if (!healthyConfigs[root]) return null;
     mockConfigs[root] = clone(healthyConfigs[root]);
@@ -1323,4 +1443,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/createFile/finishTask)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/createFile/finishTask/syncFail/syncLive)");
