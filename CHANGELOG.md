@@ -50,7 +50,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   checkout you right-clicked is itself a hub copy. A pull onto a tree with live
   tmux sessions lists them before you confirm, and if one appears while you are
   reading the preview, the transfer stops and asks again with the fresher list.
-  Progress is still all-or-nothing for now: the modal waits, it does not stream.
+- **A sync you can watch.** The modal now shows rsync's own progress while it
+  runs — a bar, the percentage, the transfer rate and the file it is on — instead
+  of a button frozen on *Pushing…*. The first push of a big project is minutes of
+  work, and minutes of no feedback is indistinguishable from a hang. On the
+  system `rsync` (openrsync), which cannot report progress at all, the bar says
+  so by staying indeterminate rather than inventing a number.
+- **Sync has its own button.** Hovering a project row reveals a ⇄ next to `+`
+  and `×`; it opens the same *Push to \<hub\>…* / *Pull from \<hub\>…* pair the
+  right-click menu has, headed by the drive it found (or the reason there is
+  none) and footed by when this project last went to the hub, from which machine.
+- The *Include Claude sessions* checkbox is **remembered** — it is the same
+  answer every time for a given person, and re-ticking it on every push is how a
+  checkbox teaches you to ignore it.
+- A pull offers to **run your rebuild** afterwards, as a checkbox that names the
+  command (`[sync.projects.<name>] install`), and only when you have registered
+  one. Unticked by default: running a build is an act, not a preference.
 
 ### Fixed
 - The hub-copy guard now also covers the **app** and **`worktrees mcp`**. Both

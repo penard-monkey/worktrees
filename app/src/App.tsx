@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -252,7 +252,10 @@ function CtxMenu({ x, y, onClose, children }: { x: number; y: number; onClose: (
 
 type Ctx =
   | { kind: "place"; x: number; y: number; repo: string; slug: string }
-  | { kind: "project"; x: number; y: number; root: string };
+  | { kind: "project"; x: number; y: number; root: string }
+  // The ⇄ popover. Same state machine as the right-click menus on purpose: only
+  // one of them can be open, and every dismissal path already clears it.
+  | { kind: "sync"; x: number; y: number; root: string };
 
 // Single-quote for pasting into a shell (the main session name carries parens).
 const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
@@ -1251,9 +1254,10 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
 
 // ── sync (courier sync of a project through a mounted hub) ──────────────────
 // Backend: lib.rs `sync_status` / `sync_preview` / `sync_apply` over
-// worktrees_core::sync. Phase 3 is deliberately the minimum that is HONEST: a
-// preview you answer, and a result you can read. No progress streaming yet (the
-// apply is one awaited call), no hover popover — both phase 4.
+// worktrees_core::sync. A preview you answer, a live bar while it runs, and a
+// result you can read. The bar is rsync's own `--info=progress2,name1` relayed
+// over a Channel (the `term_open` mechanism): an 8.5G first push is minutes
+// long, and a button frozen on "Pushing…" for four of them reads as a hang.
 
 type SyncStatusView = {
   scope: string;
@@ -1278,16 +1282,119 @@ type SyncPreview = {
   dst: string;
   plan: { sends: number; deletes: number; delete_paths: string[] };
   skipped: [string, number][];
+  /** rsync 3.x. Doubles as "this transfer can report progress": the openrsync
+   *  fallback has neither the hiding report nor `--info=progress2`, so the bar
+   *  stays indeterminate there rather than pretending to know. */
   skipped_available: boolean;
   live_sessions: string[];
   with_sessions: boolean;
+  /** The user's registered rebuild for this project, or null. Only a pull can
+   *  run it, and only if asked. */
+  install_cmd: string | null;
   warnings: string[];
 };
+/** One sample from the Channel while an apply runs (core's `SyncProgress`). */
+type SyncProgressEvt = { percent: number | null; rate: string | null; current: string | null };
+
+/** Middle-truncate a path: the head says which project, the tail says which
+ *  file, and the modal's width must not move when either grows. */
+function midTrunc(s: string, max = 52): string {
+  if (s.length <= max) return s;
+  const head = Math.ceil((max - 1) / 2);
+  return `${s.slice(0, head)}…${s.slice(-(max - 1 - head))}`;
+}
+
+/** The apply's live state. Determinate as soon as rsync has reported a
+ *  percentage AND this rsync can report one at all; indeterminate before the
+ *  first event and for the whole run on openrsync — an empty bar that never
+ *  moves is a worse lie than an honest "working". */
+function SyncBar({ progress, determinate, verb }: {
+  progress: SyncProgressEvt | null;
+  determinate: boolean;
+  verb: string;
+}) {
+  const pct = determinate && progress?.percent != null
+    ? Math.max(0, Math.min(100, Math.round(progress.percent)))
+    : null;
+  return (
+    <div className="sync-prog" data-testid="sync-prog">
+      {pct === null ? (
+        <>
+          <div className="sync-bar indet" data-testid="sync-bar-indet"><div className="sync-bar-fill" /></div>
+          <div className="sync-prog-line"><span>{verb}ing…</span></div>
+        </>
+      ) : (
+        <>
+          <div className="sync-bar" data-testid="sync-bar">
+            <div className="sync-bar-fill" data-testid="sync-bar-fill" data-pct={pct} style={{ width: `${pct}%` }} />
+          </div>
+          <div className="sync-prog-line">
+            <span data-testid="sync-pct" data-pct={pct}>{pct}%</span>
+            {progress?.rate && <span className="sync-rate" data-testid="sync-rate">{progress.rate}</span>}
+          </div>
+        </>
+      )}
+      {progress?.current && (
+        <div className="sync-file" data-testid="sync-file" title={progress.current}>{midTrunc(progress.current)}</div>
+      )}
+    </div>
+  );
+}
+
+/** The two sync actions, shared VERBATIM by the ⇄ popover and the project
+ *  context menu — one definition, so the two surfaces cannot come to disagree
+ *  about what the hub is or when the actions are unusable. */
+function SyncMenuItems({ status, root, onOpen }: {
+  status: SyncStatusView | undefined;
+  root: string;
+  onOpen: (root: string, dir: SyncDir) => void;
+}) {
+  // The hub's basename is the name the user knows the drive by. While the status
+  // is still in flight the items say "hub" and stay LIVE: the preview is where a
+  // missing hub would be reported anyway, and a menu that greys itself out for a
+  // moment reads as broken.
+  const hub = status?.hub ? basename(status.hub) : "hub";
+  const why = status?.hub_copy ?? status?.hub_error ?? "";
+  const off = !!status && (!!status.hub_copy || !status.hub);
+  return (
+    <>
+      <button className="pop-item" disabled={off} title={why} data-testid="sync-push"
+        onClick={() => onOpen(root, "push")}>Push to {hub}…</button>
+      <button className="pop-item" disabled={off} title={why} data-testid="sync-pull"
+        onClick={() => onOpen(root, "pull")}>Pull from {hub}…</button>
+    </>
+  );
+}
+
+/** The ⇄ popover: where this project syncs, the two actions, and when it last
+ *  went anywhere. The last-push line is the question the drive itself cannot
+ *  answer — "did I already push this from the other Mac?" */
+function SyncPopover({ status, root, onOpen }: {
+  status: SyncStatusView | undefined;
+  root: string;
+  onOpen: (root: string, dir: SyncDir) => void;
+}) {
+  const head = status?.hub_copy ? "hub copy" : status?.hub ? basename(status.hub) : status ? "no hub" : "sync";
+  const why = status?.hub_copy ?? status?.hub_error ?? "";
+  const when = status?.pushed_at ? ago(status.pushed_at) : "";
+  return (
+    <>
+      <div className="pop-hint">{head}</div>
+      {why && <div className="pop-note warn" data-testid="sync-pop-why">{why}</div>}
+      <SyncMenuItems status={status} root={root} onOpen={onOpen} />
+      <div className="pop-note" data-testid="sync-pop-last">
+        {status?.pushed_at
+          ? `last push: ${when === "now" ? "just now" : `${when} ago`} from ${status.pushed_host || "?"}`
+          : "never pushed"}
+      </div>
+    </>
+  );
+}
 
 // Module scope with props (CLAUDE.md): a component defined inside App() is a new
 // identity every render, so the checkbox below would lose its state — and the
 // modal re-renders on every refresh tick while an apply runs.
-function SyncModal({ dir, project, preview, loading, busy, error, live, done, sessions, onSessions, onConfirm, onClose }: {
+function SyncModal({ dir, project, preview, loading, busy, error, live, done, sessions, onSessions, install, onInstall, progress, onConfirm, onClose }: {
   dir: SyncDir;
   project: string;
   preview: SyncPreview | null;
@@ -1300,6 +1407,13 @@ function SyncModal({ dir, project, preview, loading, busy, error, live, done, se
   done: string;
   sessions: boolean;
   onSessions: (on: boolean) => void;
+  /** Pull only: run the user's registered rebuild afterwards. */
+  install: boolean;
+  onInstall: (on: boolean) => void;
+  /** Latest Channel sample, or null before the first one. Owned by App so a
+   *  refresh tick (every 3s, mid-transfer) cannot reset the bar — this
+   *  component is at module scope for the same reason. */
+  progress: SyncProgressEvt | null;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -1327,6 +1441,9 @@ function SyncModal({ dir, project, preview, loading, busy, error, live, done, se
           {loading && <div className="sync-pending" data-testid="sync-pending">Previewing…</div>}
           {error && <div className="sync-err" data-testid="sync-error">{error}</div>}
           {done && <div className="sync-done" data-testid="sync-done">{done}</div>}
+          {busy && (
+            <SyncBar progress={progress} determinate={!!preview?.skipped_available} verb={verb} />
+          )}
           {preview && !done && (
             <>
               <div className="sync-route" title={`${preview.src} → ${preview.dst}`}>
@@ -1366,6 +1483,18 @@ function SyncModal({ dir, project, preview, loading, busy, error, live, done, se
                   onChange={(e) => onSessions(e.currentTarget.checked)} />
                 Include Claude sessions (additive — never deletes the other Mac's history)
               </label>
+              {/* Only when a rebuild is REGISTERED, and it names what it would
+                  run: an offer to execute something the user cannot see is the
+                  shape ADR 0001 exists to prevent. The command is the user's own
+                  config (never the hub manifest's hint, which rode in on the
+                  drive and is printed only). */}
+              {dir === "pull" && preview.install_cmd && (
+                <label className="sync-opt" data-testid="sync-install-opt">
+                  <input type="checkbox" data-testid="sync-install" checked={install} disabled={busy}
+                    onChange={(e) => onInstall(e.currentTarget.checked)} />
+                  Run rebuild after pull: <code className="sync-cmd">{preview.install_cmd}</code>
+                </label>
+              )}
             </>
           )}
         </div>
@@ -1460,10 +1589,14 @@ function App() {
    *  the fresher list an apply answers with — confirming is only consent to what
    *  is on screen. */
   const [syncLive, setSyncLive] = useState<string[]>([]);
-  // Deliberately NOT persisted: ferrying transcripts is opt-in per sync (core's
-  // default too), and a remembered "yes" is a decision the user did not make for
-  // THIS transfer. Persisting it needs a settings key + its migration; phase 4.
-  const [syncSessions, setSyncSessions] = useState(false);
+  /** Rebuild after a pull. NOT persisted, unlike the sessions checkbox: running
+   *  a build command is an act with a cost, and consent to it belongs to the one
+   *  transfer you ticked it for. Reset on every open. */
+  const [syncInstall, setSyncInstall] = useState(false);
+  /** The last Channel sample of a running apply. Lives HERE, not in the modal:
+   *  the modal is re-rendered by every 3s refresh tick while a transfer runs, and
+   *  state that far down would be at the mercy of any remount. */
+  const [syncProg, setSyncProg] = useState<SyncProgressEvt | null>(null);
   // Per-project doctor state. Structurally identical to busyPaths/waitingPaths
   // (the house pattern for row decoration that is NOT in the snapshot) —
   // deliberately outside `Place`, because `Place.stack` is reserved for the infra
@@ -2581,15 +2714,33 @@ function App() {
       .then((s) => setSyncStatus((m) => ({ ...m, [root]: s })))
       .catch((e) => fail(e));
   };
+  /** The hover popover on the project header's ⇄. Anchored to the button and
+   *  rendered through `CtxMenu` rather than an in-flow `.popover`: the nav is a
+   *  scroller (`.nav-scroll { overflow-y: auto }`), which clips an absolutely
+   *  positioned child — a menu opened next to the last project would be half
+   *  invisible. Same `.menu-catch` backdrop, same Esc/click-away dismissal, same
+   *  `.pop-item` family. */
+  const openSyncPop = (e: React.MouseEvent, root: string) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setMenu(null);
+    setConfirmRm(null);
+    setCtx({ kind: "sync", x: r.left, y: r.bottom + 4, root });
+    // Re-read on every open: a hub is a drive someone plugs in and pulls out.
+    loadSyncStatus(root);
+  };
   const openSync = (root: string, dir: SyncDir) => {
+    // Also what closes the popover: an open menu must never survive under a
+    // modal (closeCtx's contract, which also disarms any two-click confirm).
     closeCtx();
     setSync({ root, dir });
     setSyncPrev(null);
     setSyncErr("");
     setSyncDone("");
     setSyncLive([]);
+    setSyncProg(null);
+    setSyncInstall(false);
     setSyncLoading(true);
-    invoke<SyncPreview>("sync_preview", { repo: root, direction: dir, withSessions: syncSessions })
+    invoke<SyncPreview>("sync_preview", { repo: root, direction: dir, withSessions: settings.sync_with_sessions })
       .then((p) => { setSyncPrev(p); setSyncLive(p.live_sessions); })
       // In the modal, not the banner: it is the answer to the question the modal
       // just asked. Logged too — `fail`'s job — so it is never only on screen.
@@ -2602,6 +2753,8 @@ function App() {
     setSyncErr("");
     setSyncDone("");
     setSyncLive([]);
+    setSyncProg(null);
+    setSyncInstall(false);
   };
   // `confirmed` says a HUMAN was shown the live sessions — the modal's warning
   // block IS that showing. Core re-lists them at apply time, so a session that
@@ -2610,9 +2763,16 @@ function App() {
     if (!sync || syncBusy) return;
     setSyncBusy(true);
     setSyncErr("");
+    setSyncProg(null);
+    // rsync's own progress, relayed by core through the same Channel mechanism
+    // the terminal uses for pty bytes. Throttled backend-side (~15/s), so every
+    // message that arrives here is worth a render.
+    const onProgress = new Channel<SyncProgressEvt>();
+    onProgress.onmessage = (p) => setSyncProg(p);
     const r = await runCmd("sync_apply", {
-      repo: sync.root, direction: sync.dir, withSessions: syncSessions,
-      confirmed: syncLive.length > 0, install: false,
+      repo: sync.root, direction: sync.dir, withSessions: settings.sync_with_sessions,
+      confirmed: syncLive.length > 0, install: sync.dir === "pull" && syncInstall,
+      onProgress,
     });
     setSyncBusy(false);
     if (!r) { setSyncErr("sync could not start — see Settings → Logs."); return; }
@@ -3410,6 +3570,14 @@ function App() {
               onClick={() => setProjSheet(pv.root)}
             >⚑</button>
           ) : null}
+          {/* The sync entry point David asked for on day one: hover-revealed,
+              next to + and ×, opening the popover the ctx menu duplicates.
+              `.mini` is a <button>, which navdrag's `arm` already declines to
+              start a drag from — no stopPropagation needed, same as +. */}
+          {pv.ok && (
+            <button className="mini" title="Sync" data-testid={`sync-mini|${pv.root}`}
+              onClick={(e) => openSyncPop(e, pv.root)}>⇄</button>
+          )}
           <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
           <button
             className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
@@ -4108,8 +4276,11 @@ function App() {
           error={syncErr}
           live={syncLive}
           done={syncDone}
-          sessions={syncSessions}
-          onSessions={setSyncSessions}
+          sessions={settings.sync_with_sessions}
+          onSessions={(on) => updateSettings({ sync_with_sessions: on })}
+          install={syncInstall}
+          onInstall={setSyncInstall}
+          progress={syncProg}
           onConfirm={confirmSync}
           onClose={closeSync}
         />
@@ -4201,6 +4372,13 @@ function App() {
         </CtxMenu>
       )}
 
+      {/* ── the ⇄ popover (anchored to the project header's mini button) ── */}
+      {ctx?.kind === "sync" && (
+        <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
+          <SyncPopover status={syncStatus[ctx.root]} root={ctx.root} onOpen={openSync} />
+        </CtxMenu>
+      )}
+
       {/* ── right-click: project ── */}
       {ctx?.kind === "project" && (() => {
         const pv = ws?.projects.find((v) => v.root === ctx.root);
@@ -4213,24 +4391,7 @@ function App() {
             {pv?.ok && (
               <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("fetch_origin", { root: ctx.root })); }}>Fetch origin</button>
             )}
-            {pv?.ok && (() => {
-              // The hub's basename is the name the user knows the drive by. While
-              // the status is still in flight the items say "hub" and stay live:
-              // the preview is where a missing hub would be reported anyway, and
-              // a menu that greys itself out for a moment reads as broken.
-              const st = syncStatus[ctx.root];
-              const hub = st?.hub ? basename(st.hub) : "hub";
-              const why = st?.hub_copy ?? st?.hub_error ?? "";
-              const off = !!st && (!!st.hub_copy || !st.hub);
-              return (
-                <>
-                  <button className="pop-item" disabled={off} title={why}
-                    onClick={() => openSync(ctx.root, "push")}>Push to {hub}…</button>
-                  <button className="pop-item" disabled={off} title={why}
-                    onClick={() => openSync(ctx.root, "pull")}>Pull from {hub}…</button>
-                </>
-              );
-            })()}
+            {pv?.ok && <SyncMenuItems status={syncStatus[ctx.root]} root={ctx.root} onOpen={openSync} />}
             {pv?.ok && (() => {
               // The badge is the SHEET's count (issueCount), not the row-glyph set:
               // those two answer different questions, and a placeless finding used
