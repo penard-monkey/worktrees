@@ -84,6 +84,27 @@ fn run() -> i32 {
 
     let sub = args.first().map(String::as_str).unwrap_or("ls");
     let rest = args.get(1..).unwrap_or(&[]);
+
+    // ONE choke point for the hub-copy guard, ahead of the dispatch that would
+    // otherwise carry it into eight cmd_* functions. A tree that arrived on a
+    // sync hub is another machine's mirror: its `.git` registers worktrees at
+    // paths that exist only there, so a prune here can unregister the wrong
+    // repo's worktrees. The read-only commands are deliberately absent from the
+    // list — `ls`, `doctor` and `sync status` are how you find out what this
+    // tree is, and `doctor` is where the finding is reported.
+    const MUTATING: &[&str] = &[
+        "new", "create", "co", "checkout", "switch", "sw", "branch", "open", "reopen", "attach",
+        "a", "close", "rm", "remove", "delete", "relink", "provision", "init",
+    ];
+    if MUTATING.contains(&sub) {
+        if let Some(msg) =
+            worktrees_core::sync::hub_copy_refusal(std::path::Path::new(&project.main_root))
+        {
+            eprintln!("{}", error_line(&msg));
+            return 1;
+        }
+    }
+
     let mut ui = CliUi;
     match sub {
         "ls" | "list" => {

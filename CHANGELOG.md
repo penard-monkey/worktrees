@@ -29,6 +29,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   0001's rule that a foreign file may not supply argv, applied to removable media.
   Optional config: `[sync] hub`, `[sync] with_sessions`, and per-project
   `extra_excludes`.
+- **Two guards keep a sync from eating what it is syncing.** A tree that arrived
+  on a hub is another machine's mirror — its `.git` registers worktrees at paths
+  that exist only there, so a prune inside it can unregister the wrong repo's —
+  and every mutating command (`new`, `switch`, `open`, `close`, `rm`, `relink`,
+  `provision`, `init`, and both sync directions) now refuses there and names the
+  native path to run at instead. `ls`, `doctor` and `sync status` still work,
+  because they are how you find out what the tree is; `doctor` reports the copy
+  (`hub-copy`) and where the project really lives.
+  And `sync pull` looks at what is *living* in the destination before it mirrors
+  over it: with tmux sessions open in that tree it lists them before asking, and
+  `--yes` on its own is refused — blanket consent given by a script before it
+  could know is not an answer to "something is working in there right now".
 
 ## [0.14.0] - 2026-08-14
 

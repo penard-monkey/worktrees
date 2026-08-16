@@ -1501,19 +1501,32 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     };
 
+    // A fact about the TREE rather than about its config, so it is resolved
+    // before the no-config branch below — which returns ahead of every other
+    // check, and a copy that arrived on an SSD is not a likely place to find a
+    // `.worktrees.toml`. One stat when the repo is an ordinary one.
+    let hub_copy = crate::sync::hub_copy_finding(Path::new(&p.main_root));
+
     let cfg = match load_project_config(p, ui) {
         Ok(c) => c,
         Err(code) => return code,
     };
     let Some((cfg, mut findings)) = cfg else {
         // No config is a healthy repo, not a broken one.
+        let report = Report::new(hub_copy.into_iter().collect());
         if json {
-            emit_report(ui, &Report::default());
-        } else {
+            emit_report(ui, &report);
+        } else if report.is_empty() {
             ui.info("No .worktrees.toml in this repo — nothing to check.");
+        } else {
+            report_findings(ui, &report.findings);
         }
-        return 0;
+        return report.exit_code();
     };
+    // First: it is the answer to "why is nothing I do in here allowed".
+    if let Some(f) = hub_copy {
+        findings.insert(0, f);
+    }
 
     // Config-vs-config, so it belongs in `--config-only` too: both sources are
     // COMMITTED files, present on a bare clone with no filesystem state.

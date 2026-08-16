@@ -28,6 +28,17 @@ write_hub_manifest() {   # $1 = name, $2 = local_root, $3.. = extra lines
     [ $# -gt 0 ] && printf '%s\n' "$@"; } > "$HUB/$name/$MF"
 }
 
+# What a push leaves on the hub: a REAL repo at <hub>/<name>/<name>, and the
+# manifest one level up saying the project natively lives on the other machine.
+# Echoes the copy's physical path (the CLI canonicalizes, so assertions must).
+make_hub_copy() {        # $1 = name, $2 = the native root on the other Mac
+  local name="$1" native="$2"
+  write_hub_manifest "$name" "$native" 'host = "othermac"'
+  git init -q "$HUB/$name/$name"
+  ( cd "$HUB/$name/$name" && echo hi > README.md && git add -A && git commit -qm init )
+  ( cd "$HUB/$name/$name" && pwd -P )
+}
+
 # ── grammar ──────────────────────────────────────────────────────────────────
 
 @test "sync: no subcommand prints the usage and exits 1" {
@@ -216,6 +227,107 @@ write_hub_manifest() {   # $1 = name, $2 = local_root, $3.. = extra lines
   [[ "$output" == *"proj"* ]]
   [[ "$output" == *"$BATS_TEST_TMPDIR/adopted"* ]]
   [[ "$output" == *"othermac"* ]]
+}
+
+# ── guards ───────────────────────────────────────────────────────────────────
+
+@test "sync guard: mutating ops refuse inside a hub copy and name the way out" {
+  local copy; copy="$(make_hub_copy proj "$BATS_TEST_TMPDIR/native")"
+
+  run_wt -C "$copy" new x
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"hub copy"* ]]
+  [[ "$output" == *"othermac"* ]]
+  [[ "$output" == *"$BATS_TEST_TMPDIR/native"* ]]
+  [ ! -d "$copy/.worktrees/x" ]
+
+  # reading the tree is how you find out WHAT it is — never refused
+  run_wt -C "$copy" ls
+  [ "$status" -eq 0 ]
+
+  # both directions: push from a copy is backwards, pull into one is hub→hub
+  run_wt -C "$copy" sync push --hub "$HUB"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"hub copy"* ]]
+  run_wt -C "$copy" sync pull --yes --hub "$HUB"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"hub copy"* ]]
+  # refused before rsync was even looked for — not so much as a --version probe
+  [ ! -s "$RSYNC_LOG" ]
+}
+
+@test "sync guard: a manifest about ANOTHER project leaves the tree alone" {
+  local copy; copy="$(make_hub_copy proj "$BATS_TEST_TMPDIR/native")"
+  printf 'schema = 1\nname = "other"\nlocal_root = "%s"\n' "$BATS_TEST_TMPDIR/native" \
+    > "$HUB/proj/$MF"
+  run_wt -C "$copy" new x
+  [ "$status" -eq 0 ]
+  [ -d "$copy/.worktrees/x" ]
+}
+
+@test "sync guard: a manifest naming THIS path is not a copy — the way out cannot be where you stand" {
+  # NOT what a hub looks like: on the hub the manifest names the OTHER machine's
+  # root, never the tree beside it. The equality case is a manifest that ended up
+  # next to the native tree (a whole hub dir copied home, a hand-written file) —
+  # and refusing there would tell the user to go to the path they are already in.
+  mkdir -p "$BATS_TEST_TMPDIR/host"
+  git init -q "$BATS_TEST_TMPDIR/host/proj"
+  ( cd "$BATS_TEST_TMPDIR/host/proj" && echo hi > README.md && git add -A && git commit -qm init )
+  local native; native="$(cd "$BATS_TEST_TMPDIR/host/proj" && pwd -P)"
+  printf 'schema = 1\nname = "proj"\nlocal_root = "%s"\n' "$native" \
+    > "$BATS_TEST_TMPDIR/host/$MF"
+  run_wt -C "$native" new x
+  [ "$status" -eq 0 ]
+  [ -d "$native/.worktrees/x" ]
+}
+
+@test "sync guard: doctor reports the hub copy even in a repo with no .worktrees.toml" {
+  local copy; copy="$(make_hub_copy proj "$BATS_TEST_TMPDIR/native")"
+  run_wt -C "$copy" doctor
+  [ "$status" -eq 2 ]                     # diag::EXIT_FINDINGS — an Error finding
+  [[ "$output" == *"hub copy"* ]]
+  [[ "$output" == *"$BATS_TEST_TMPDIR/native"* ]]
+
+  run_wt -C "$copy" doctor --json
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"code":"hub-copy"'* ]]
+  [[ "$output" == *'"severity":"error"'* ]]
+
+  # …and an ordinary repo's doctor is untouched by the check
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"hub copy"* ]]
+}
+
+@test "sync pull: a live session refuses --yes and is named, but a human may answer" {
+  run_wt sync push --yes --hub "$HUB"
+  [ "$status" -eq 0 ]
+  run_wt new feat
+  [ "$status" -eq 0 ]
+  tmux_session_exists "$NAME-feat"
+  : > "$RSYNC_LOG"
+
+  run_wt sync pull --yes --hub "$HUB"
+  [ "$status" -eq 4 ]                     # diag::EXIT_NEEDS_CONFIRM
+  [[ "$output" == *"$NAME-feat"* ]]
+  [[ "$output" == *"--yes"* ]]
+  ! has_apply
+  has_preview                             # it got as far as the preview, then asked
+
+  : > "$RSYNC_LOG"
+  wt_answer "y" sync pull --hub "$HUB"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$NAME-feat"* ]]
+  has_apply
+}
+
+@test "sync pull: adoption onto a machine with no such tree passes the session guard" {
+  local dest="$BATS_TEST_TMPDIR/not-here-yet"
+  write_hub_manifest proj "$dest" 'host = "othermac"'
+  [ ! -e "$dest" ]
+  run_wt -C "$BATS_TEST_TMPDIR" sync pull proj --yes --hub "$HUB"
+  [ "$status" -eq 0 ]
+  has_apply
 }
 
 @test "sync status: a hub this project was never pushed to is reported, not fatal" {
