@@ -19,7 +19,7 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{git, ops, store, sysclock, Project, Ui};
+use worktrees_core::{git, ops, store, sync, sysclock, Project, Ui};
 
 // ── app log ──────────────────────────────────────────────────────────────────
 // Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
@@ -617,6 +617,25 @@ fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F
         applog("error", &format!("{op} repo={repo}: discover failed: {}", e.msg));
         e.msg
     })?;
+    // Guard A for the app. The CLI refuses every mutating command inside a tree
+    // that arrived on a sync hub (main.rs's one dispatch choke point); the app
+    // calls the same `ops::cmd_*` IN-PROCESS and so never passes it. This is the
+    // app's equivalent choke point — every op-shaped command goes through here.
+    //
+    // Reported as a FAILED CmdResult rather than an Err: the frontend renders op
+    // failures from `output`, and an Err would surface as a thrown invoke with no
+    // banner of its own.
+    if let Some(msg) = sync::hub_copy_refusal(Path::new(&project.main_root)) {
+        applog("warn", &format!("{op} refused repo={repo}: {msg}"));
+        return Ok(CmdResult {
+            ok: false,
+            code: 1,
+            output: msg,
+            slug: None,
+            needs_confirm: None,
+            warnings: Vec::new(),
+        });
+    }
     let mut ui = CaptureUi::default();
     let code = f(&project, &mut ui);
     let warnings = ui.warnings();
@@ -1908,6 +1927,143 @@ async fn provision(repo: String, slug: Option<String>) -> Result<CmdResult, Stri
     let args: Vec<String> = vec![target.clone().unwrap_or_else(|| "--all".into())];
     let label = target.as_deref().unwrap_or("--all").to_string();
     run_op(&format!("provision {label}"), &repo, |p, ui| ops::cmd_provision(p, ui, &args))
+}
+
+// ── sync (courier sync of a project through a mounted hub) ───────────────────
+// The engine is `worktrees_core::sync`; these three commands are the app's whole
+// surface on it. They are `async fn` like every other command here — each one
+// shells out to rsync, and a sync handler runs on the main thread and freezes
+// the window for the duration (CLAUDE.md).
+//
+// The hub is deliberately NOT a parameter: it comes from the same chain the CLI
+// uses ($WORKTREES_SYNC_HUB → `[sync] hub` → a single mounted volume), so the
+// app and the terminal can never disagree about where a project is pushed.
+
+fn sync_request(repo: &str, direction: &str, with_sessions: bool) -> Result<sync::SyncRequest, String> {
+    let p = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
+    Ok(sync::SyncRequest {
+        root: PathBuf::from(&p.main_root),
+        direction: sync::SyncDirection::parse(direction)?,
+        hub: None,
+        with_sessions: Some(with_sessions),
+    })
+}
+
+/// `sync status` for one project, plus whether this checkout IS a hub copy —
+/// the menu disables the whole sync group there (pushing FROM a copy sends it
+/// back over the original; pulling INTO one is hub→hub).
+#[derive(Serialize)]
+struct SyncStatusView {
+    #[serde(flatten)]
+    status: sync::StatusJson,
+    hub_copy: Option<String>,
+}
+
+/// Cheap enough for a menu-open: one `rsync --version`, one hub resolve, one
+/// manifest read, two git calls. No rsync transfer of any kind.
+#[tauri::command]
+async fn sync_status(repo: String) -> Result<SyncStatusView, String> {
+    let p = Project::discover(Path::new(&repo)).map_err(|e| {
+        applog("error", &format!("sync_status repo={repo}: discover failed: {}", e.msg));
+        e.msg
+    })?;
+    let root = PathBuf::from(&p.main_root);
+    let mut ui = CaptureUi::default();
+    let status = sync::sync_status_data(&mut ui, Some(&root), None, true);
+    Ok(SyncStatusView { status, hub_copy: sync::hub_copy_refusal(&root) })
+}
+
+/// What a sync WOULD do — the modal's whole content. Two rsync dry passes plus
+/// (on a pull) the live-session lookup, so it is seconds on a real tree.
+#[tauri::command]
+async fn sync_preview(
+    repo: String,
+    direction: String,
+    with_sessions: bool,
+) -> Result<sync::SyncPreviewOut, String> {
+    let req = sync_request(&repo, &direction, with_sessions)?;
+    sync::sync_preview(&req).inspect_err(|e| {
+        applog("warn", &format!("sync_preview {direction} repo={repo}: {e}"));
+    })
+}
+
+/// Apply it. `confirmed` is the user's answer to the modal's live-session
+/// warning — core re-lists the sessions here and refuses again if the answer no
+/// longer covers what is running.
+///
+/// Mapped into `CmdResult` (not `Result::Err`) so the frontend's `runCmd` shows
+/// it the way it shows every other op: `needs_confirm` carries the live sessions
+/// NEWLINE-separated, structurally, so the modal names them without parsing prose.
+#[tauri::command]
+async fn sync_apply(
+    app: AppHandle,
+    repo: String,
+    direction: String,
+    with_sessions: bool,
+    confirmed: bool,
+    install: bool,
+) -> Result<CmdResult, String> {
+    let req = sync_request(&repo, &direction, with_sessions)?;
+    let op = format!("sync {direction}");
+    match sync::sync_apply(&req, confirmed, install) {
+        Err(e) => {
+            applog("warn", &format!("{op} rc=1 repo={repo}: {e}"));
+            Ok(CmdResult {
+                ok: false,
+                code: 1,
+                output: e,
+                slug: None,
+                needs_confirm: None,
+                warnings: Vec::new(),
+            })
+        }
+        Ok(out) if out.needs_confirm => {
+            let live = out.live_sessions.join(", ");
+            applog("info", &format!("{op} needs confirm repo={repo}: {live}"));
+            Ok(CmdResult {
+                ok: false,
+                code: worktrees_core::diag::EXIT_NEEDS_CONFIRM,
+                output: format!(
+                    "{} live tmux session(s) in {}: {live} — a pull mirrors over the tree they are using.",
+                    out.live_sessions.len(),
+                    out.dst
+                ),
+                slug: None,
+                needs_confirm: Some(out.live_sessions.join("\n")),
+                warnings: out.warnings,
+            })
+        }
+        Ok(out) => {
+            applog(
+                "info",
+                &format!(
+                    "{op} ok repo={repo}: {} sent/updated, {} deleted → {}",
+                    out.plan.sends, out.plan.deletes, out.dst
+                ),
+            );
+            if !out.warnings.is_empty() {
+                applog("warn", &format!("{op} warnings repo={repo}: {}", out.warnings.join(" | ")));
+            }
+            // A pull rewrites the tree under every place in it — branches, dirty
+            // counts and sessions are all potentially different now.
+            if req.direction == sync::SyncDirection::Pull {
+                let _ = app.emit("places:changed", ());
+            }
+            let mut lines = vec![format!(
+                "sync {} — {}: {} sent/updated, {} deleted",
+                out.direction, out.name, out.plan.sends, out.plan.deletes
+            )];
+            lines.extend(out.messages);
+            Ok(CmdResult {
+                ok: true,
+                code: 0,
+                output: lines.join("\n"),
+                slug: None,
+                needs_confirm: None,
+                warnings: out.warnings,
+            })
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -3593,6 +3749,9 @@ pub fn run() {
             doctor,
             relink,
             provision,
+            sync_status,
+            sync_preview,
+            sync_apply,
             init_suggest,
             init_write,
             diagnostics,

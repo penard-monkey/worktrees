@@ -22,7 +22,7 @@ use crate::diag::{Code, Finding};
 use crate::git;
 use crate::project::Project;
 use crate::sysclock;
-use crate::ui::Ui;
+use crate::ui::{CaptureUi, Ui};
 
 const SYNC_USAGE: &str = "\
 usage: worktrees sync push   [--hub PATH] [--dry-run|-n] [--yes|-y] [--with-sessions] [--json]
@@ -600,7 +600,7 @@ fn session_dirs(root: &Path, prefix: &str) -> Vec<PathBuf> {
 fn ferry_sessions(
     ui: &mut dyn Ui,
     rsync: &Rsync,
-    dir: Dir,
+    dir: SyncDirection,
     hub_proj: &Path,
     local_root: &Path,
     quiet: bool,
@@ -609,7 +609,7 @@ fn ferry_sessions(
     let projects = claude_projects_dir();
     let mut n = 0usize;
     match dir {
-        Dir::Push => {
+        SyncDirection::Push => {
             let prefix = escaped_prefix(&local_root.to_string_lossy());
             let dirs = session_dirs(&projects, &prefix);
             if !dirs.is_empty() {
@@ -623,7 +623,7 @@ fn ferry_sessions(
                 ui.info(&format!("claude sessions: {n} dir(s) → hub (additive, no delete)"));
             }
         }
-        Dir::Pull => {
+        SyncDirection::Pull => {
             if !store.is_dir() {
                 if !quiet {
                     ui.info("claude sessions: (hub has no sessions yet)");
@@ -651,17 +651,27 @@ fn ferry_sessions(
 
 // ── shared helpers ───────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Dir {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SyncDirection {
     Push,
     Pull,
 }
 
-impl Dir {
-    fn label(self) -> &'static str {
+impl SyncDirection {
+    pub fn label(self) -> &'static str {
         match self {
-            Dir::Push => "push",
-            Dir::Pull => "pull",
+            SyncDirection::Push => "push",
+            SyncDirection::Pull => "pull",
+        }
+    }
+
+    /// The wire form the app sends. Unknown strings are refused rather than
+    /// defaulted: guessing a direction picks which tree gets mirrored over.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "push" => Ok(SyncDirection::Push),
+            "pull" => Ok(SyncDirection::Pull),
+            other => Err(format!("unknown sync direction: {other}")),
         }
     }
 }
@@ -758,8 +768,8 @@ fn json_mode(flag: bool) -> bool {
 
 pub fn cmd_sync(ui: &mut dyn Ui, args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
-        Some("push") => run_direction(ui, Dir::Push, args.get(1..).unwrap_or(&[])),
-        Some("pull") => run_direction(ui, Dir::Pull, args.get(1..).unwrap_or(&[])),
+        Some("push") => run_direction(ui, SyncDirection::Push, args.get(1..).unwrap_or(&[])),
+        Some("pull") => run_direction(ui, SyncDirection::Pull, args.get(1..).unwrap_or(&[])),
         Some("status") => cmd_status(ui, args.get(1..).unwrap_or(&[])),
         Some(other) => {
             ui.error(&format!("Unknown sync command: {other}"));
@@ -774,8 +784,8 @@ pub fn cmd_sync(ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
 }
 
-fn run_direction(ui: &mut dyn Ui, dir: Dir, args: &[String]) -> i32 {
-    let is_pull = dir == Dir::Pull;
+fn run_direction(ui: &mut dyn Ui, dir: SyncDirection, args: &[String]) -> i32 {
+    let is_pull = dir == SyncDirection::Pull;
     let opts = match parse_opts(ui, args, is_pull, is_pull) {
         Ok(o) => o,
         Err(c) => return c,
@@ -804,21 +814,54 @@ struct PlanJson<'a> {
     applied: bool,
 }
 
-fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
-    let json = json_mode(opts.json);
-    let cfg = config::sync_cfg();
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let here = Project::discover(&cwd).ok();
+/// Everything a direction needs before rsync is spawned: which project, where it
+/// lives on THIS machine, and where on the hub it belongs.
+///
+/// Extracted so the CLI and the app resolve a sync exactly once, in one place:
+/// the hub-copy guard, the adoption rules and the strict manifest read are
+/// properties of `sync`, not of whoever called it. `sync_one` walks it in the
+/// same order it always did — the CLI's output is byte-for-byte what it was.
+struct Ctx {
+    rsync: Rsync,
+    hub: PathBuf,
+    name: String,
+    local_root: PathBuf,
+    hub_proj: PathBuf,
+    hub_copy: PathBuf,
+    manifest_path: PathBuf,
+    /// Read and STRICTLY parsed for a pull, before anything is transferred.
+    manifest: Option<Manifest>,
+    adopting: bool,
+    proj_cfg: config::SyncProject,
+    with_sessions: bool,
+}
+
+/// `from` is a directory to discover a project from — the cwd for the CLI, the
+/// project root for the app. `None` is "not standing anywhere", which only a
+/// pull (adoption) can survive.
+fn resolve_ctx(
+    ui: &mut dyn Ui,
+    dir: SyncDirection,
+    from: Option<&Path>,
+    name_arg: Option<&str>,
+    hub_flag: Option<&str>,
+    with_sessions: Option<bool>,
+    cfg: &SyncCfg,
+    quiet: bool,
+) -> Result<Ctx, String> {
+    let here = from.and_then(|d| Project::discover(d).ok());
 
     // push is cwd-scoped: refuse before anything else, so the message is about
     // the missing repo rather than a missing SSD.
-    if dir == Dir::Push && here.is_none() {
+    if dir == SyncDirection::Push && here.is_none() {
         return Err("sync push runs inside a project — cd into the repo you want to push.".into());
     }
 
     // Guard A, sync's half: a hub copy is a MIRROR. Pushing FROM one sends the
     // copy back over the original; pulling INTO one is hub→hub. Checked before
-    // rsync is even looked for, so a refused command spawns nothing.
+    // rsync is even looked for, so a refused command spawns nothing. It lives
+    // HERE rather than in each caller: the app reaches these paths without going
+    // through main.rs's dispatch guard at all.
     if let Some(p) = &here {
         if let Some(msg) = hub_copy_refusal(Path::new(&p.main_root)) {
             return Err(msg);
@@ -826,15 +869,15 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
     }
 
     let rsync = find_rsync()?;
-    let hub = resolve_hub(opts.hub.as_deref(), &cfg, ui, json)?;
+    let hub = resolve_hub(hub_flag, cfg, ui, quiet)?;
 
     // Who are we syncing, and where does it live on THIS machine?
     let (name, local_root, adopting) = match &here {
         Some(p) => {
             let root = PathBuf::from(&p.main_root);
             let name = basename(&root);
-            if let Some(n) = &opts.name {
-                if n != &name {
+            if let Some(n) = name_arg {
+                if n != name {
                     return Err(format!(
                         "this repo is '{name}', not '{n}' — cd out of it to adopt another project"
                     ));
@@ -843,7 +886,7 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
             (name, root, false)
         }
         None => {
-            let Some(n) = opts.name.clone() else {
+            let Some(n) = name_arg.map(str::to_string) else {
                 let avail = hub_manifests(&hub);
                 let list = if avail.is_empty() {
                     "  (none — push from the other Mac first)".to_string()
@@ -885,7 +928,7 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
 
     // A pull ALWAYS parses the manifest first: an unknown key is a hard error,
     // and it has to stop the transfer rather than be noticed after it.
-    let manifest = if dir == Dir::Pull {
+    let manifest = if dir == SyncDirection::Pull {
         if !manifest_path.is_file() {
             return Err(format!(
                 "hub has no push for '{name}' at {} — run `worktrees sync push` on the other Mac first",
@@ -911,7 +954,74 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
         None
     };
 
-    if adopting && !opts.yes && !opts.dry_run {
+    let proj_cfg = cfg.projects.get(&name).cloned().unwrap_or_default();
+    Ok(Ctx {
+        rsync,
+        hub,
+        name,
+        local_root,
+        hub_proj,
+        hub_copy,
+        manifest_path,
+        manifest,
+        adopting,
+        proj_cfg,
+        with_sessions: with_sessions.unwrap_or(cfg.with_sessions),
+    })
+}
+
+/// The rsync job for one direction, plus the exclude file that must outlive it
+/// (dropping `TempFile` deletes it, so it is held, not returned by value).
+struct Prepared<'a> {
+    job: Job<'a>,
+    _excl: TempFile,
+}
+
+fn prepare<'a>(ctx: &'a Ctx, dir: SyncDirection) -> Result<Prepared<'a>, String> {
+    let stamp = sysclock::stamp_now();
+    let (src, dst, bk_root) = match dir {
+        SyncDirection::Push => (
+            ctx.local_root.clone(),
+            ctx.hub_copy.clone(),
+            ctx.hub_proj.join(SYNC_DIR).join("backups").join(&stamp),
+        ),
+        SyncDirection::Pull => (
+            ctx.hub_copy.clone(),
+            ctx.local_root.clone(),
+            ctx.local_root.join(SYNC_DIR).join("backups").join(&stamp),
+        ),
+    };
+    if !src.is_dir() {
+        return Err(format!("source missing: {}", src.display()));
+    }
+    let excl = write_exclude_file(&ctx.proj_cfg.extra_excludes)?;
+    let job = Job {
+        rsync: &ctx.rsync,
+        src,
+        dst,
+        backup_dir: bk_root.join(&ctx.name),
+        excl: excl.0.clone(),
+    };
+    Ok(Prepared { job, _excl: excl })
+}
+
+fn sync_one(ui: &mut dyn Ui, dir: SyncDirection, opts: &Opts) -> Result<i32, String> {
+    let json = json_mode(opts.json);
+    let cfg = config::sync_cfg();
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let ctx = resolve_ctx(
+        ui,
+        dir,
+        Some(&cwd),
+        opts.name.as_deref(),
+        opts.hub.as_deref(),
+        opts.with_sessions,
+        &cfg,
+        json,
+    )?;
+    let Ctx { name, local_root, hub, hub_proj, manifest_path, manifest, proj_cfg, rsync, .. } = &ctx;
+
+    if ctx.adopting && !opts.yes && !opts.dry_run {
         ui.plain(&format!("Adopt '{name}' from {} → {}", hub_proj.display(), local_root.display()));
         if !ui.confirm(&format!("Write into {}? [y/N] ", local_root.display())) {
             ui.info(&format!("Skipped {name}."));
@@ -919,32 +1029,9 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
         }
     }
 
-    let stamp = sysclock::stamp_now();
-    let (src, dst, bk_root) = match dir {
-        Dir::Push => (
-            local_root.clone(),
-            hub_copy.clone(),
-            hub_proj.join(SYNC_DIR).join("backups").join(&stamp),
-        ),
-        Dir::Pull => (
-            hub_copy.clone(),
-            local_root.clone(),
-            local_root.join(SYNC_DIR).join("backups").join(&stamp),
-        ),
-    };
-    if !src.is_dir() {
-        return Err(format!("source missing: {}", src.display()));
-    }
-
-    let proj_cfg = cfg.projects.get(&name).cloned().unwrap_or_default();
-    let excl = write_exclude_file(&proj_cfg.extra_excludes)?;
-    let job = Job {
-        rsync: &rsync,
-        src: src.clone(),
-        dst: dst.clone(),
-        backup_dir: bk_root.join(&name),
-        excl: excl.0.clone(),
-    };
+    let prep = prepare(&ctx, dir)?;
+    let job = &prep.job;
+    let (src, dst) = (job.src.clone(), job.dst.clone());
 
     if !json {
         ui.header(&format!("sync {} — {name}", dir.label()));
@@ -952,7 +1039,7 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
         ui.info(&format!("rsync: {} (v3={})", rsync.path, u8::from(rsync.v3)));
     }
 
-    let plan = preview(&job)?;
+    let plan = preview(job)?;
     if !json {
         ui.plain(&format!("  {} to send/update, {} to delete", plan.sends, plan.deletes));
         for p in &plan.delete_paths {
@@ -963,7 +1050,7 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
             ui.info(&format!("    … and {} more deletions", plan.deletes - shown));
         }
         if rsync.v3 {
-            let pats = skipped(&job);
+            let pats = skipped(job);
             if pats.is_empty() {
                 ui.info("  skipped (excluded): nothing matched");
             } else {
@@ -983,7 +1070,7 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
         let j = PlanJson {
             schema_version: SCHEMA,
             direction: dir.label(),
-            name: &name,
+            name: name.as_str(),
             hub: hub.to_string_lossy().into_owned(),
             src: src.to_string_lossy().into_owned(),
             dst: dst.to_string_lossy().into_owned(),
@@ -1010,8 +1097,8 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
     // can answer — `--yes` is consent given by a script before it could know.
     // Nothing above this point writes, so `--dry-run` (which returned already)
     // never reaches it.
-    if dir == Dir::Pull {
-        let live = live_sessions_in(&local_root);
+    if dir == SyncDirection::Pull {
+        let live = live_sessions_in(local_root);
         if !live.is_empty() {
             if !json {
                 ui.warn(&format!(
@@ -1045,12 +1132,12 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
     }
 
     mkdir_p(&dst)?;
-    apply(&job)?;
+    apply(job)?;
     if !json {
         ui.info("done.");
     }
 
-    if dir == Dir::Push {
+    if dir == SyncDirection::Push {
         let m = Manifest {
             schema: SCHEMA,
             name: name.clone(),
@@ -1059,26 +1146,27 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
             host: hostname(),
             hint: proj_cfg.install.clone().unwrap_or_default(),
         };
-        std::fs::write(&manifest_path, render_manifest(&m))
+        std::fs::write(manifest_path, render_manifest(&m))
             .map_err(|e| format!("cannot write {}: {e}", manifest_path.display()))?;
     }
 
-    let with_sessions = opts.with_sessions.unwrap_or(cfg.with_sessions);
-    if with_sessions {
-        ferry_sessions(ui, &rsync, dir, &hub_proj, &local_root, json)?;
+    if ctx.with_sessions {
+        ferry_sessions(ui, rsync, dir, hub_proj, local_root, json)?;
     } else if !json {
         ui.info("claude sessions: skipped (pass --with-sessions to ferry them)");
     }
 
     match dir {
-        Dir::Push => {
+        SyncDirection::Push => {
             if !json {
                 ui.info("push complete — eject the hub, plug it into the other Mac, then: worktrees sync pull --install");
             }
         }
         // `--install` still RUNS under --json (it is the point of the flag); only
         // its prose is suppressed so the JSON stays one line.
-        Dir::Pull => after_pull(ui, opts, &name, &local_root, &proj_cfg, manifest.as_ref(), json),
+        SyncDirection::Pull => {
+            after_pull(ui, opts.install, name, local_root, proj_cfg, manifest.as_ref(), json)
+        }
     }
     if json {
         emit(&mut *ui, true);
@@ -1090,14 +1178,14 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
 /// arrived on removable media and is printed only).
 fn after_pull(
     ui: &mut dyn Ui,
-    opts: &Opts,
+    install: bool,
     name: &str,
     local_root: &Path,
     proj_cfg: &config::SyncProject,
     manifest: Option<&Manifest>,
     quiet: bool,
 ) {
-    if opts.install {
+    if install {
         if let Some(cmd) = proj_cfg.install.as_deref().filter(|s| !s.is_empty()) {
             if !quiet {
                 ui.info(&format!("rebuilding: {cmd}"));
@@ -1131,50 +1219,219 @@ fn after_pull(
     }
 }
 
+// ── programmatic API (the app) ───────────────────────────────────────────────
+// Data in, data out: no `Ui`, no prompts, no cwd discovery. The app knows the
+// project root, and a GUI answers a question with a modal rather than with
+// stdin. Everything below runs the SAME `resolve_ctx`/`prepare`/`preview`/
+// `apply` the CLI does, so a guard cannot hold on one surface and not the other.
+
+pub struct SyncRequest {
+    /// Project root. The app always knows it; nothing here reads the cwd.
+    pub root: PathBuf,
+    pub direction: SyncDirection,
+    /// `None` = the normal chain (`$WORKTREES_SYNC_HUB` → `[sync] hub` → autodetect).
+    pub hub: Option<String>,
+    /// `None` = the user's `[sync] with_sessions` default.
+    pub with_sessions: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct SyncPreviewOut {
+    pub name: String,
+    pub direction: &'static str,
+    pub hub: String,
+    pub src: String,
+    pub dst: String,
+    pub plan: SyncPlan,
+    /// Exclude patterns and how many paths each hid. Empty on openrsync, which
+    /// cannot report it at all — `skipped_available` is how a caller tells the
+    /// two apart instead of showing "nothing was skipped" for a missing report.
+    pub skipped: Vec<(String, u32)>,
+    pub skipped_available: bool,
+    /// Guard B's data — PULL only; a push never mirrors over a live tree.
+    pub live_sessions: Vec<String>,
+    pub with_sessions: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct SyncApplyOut {
+    pub name: String,
+    pub direction: &'static str,
+    pub hub: String,
+    pub src: String,
+    pub dst: String,
+    pub plan: SyncPlan,
+    /// Non-empty with `applied == false` means Guard B stopped the transfer.
+    pub live_sessions: Vec<String>,
+    pub needs_confirm: bool,
+    pub applied: bool,
+    pub messages: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// What a sync WOULD do. Runs the same two rsync dry passes the CLI prints, plus
+/// the live-session lookup a pull has to answer for.
+pub fn sync_preview(req: &SyncRequest) -> Result<SyncPreviewOut, String> {
+    let mut ui = CaptureUi::default();
+    let cfg = config::sync_cfg();
+    let ctx = resolve_ctx(
+        &mut ui,
+        req.direction,
+        Some(&req.root),
+        None,
+        req.hub.as_deref(),
+        req.with_sessions,
+        &cfg,
+        false,
+    )?;
+    let prep = prepare(&ctx, req.direction)?;
+    let plan = preview(&prep.job)?;
+    let skipped_pats = if ctx.rsync.v3 { skipped(&prep.job) } else { Vec::new() };
+    let live = match req.direction {
+        SyncDirection::Pull => live_sessions_in(&ctx.local_root),
+        SyncDirection::Push => Vec::new(),
+    };
+    Ok(SyncPreviewOut {
+        name: ctx.name.clone(),
+        direction: req.direction.label(),
+        hub: ctx.hub.to_string_lossy().into_owned(),
+        src: prep.job.src.to_string_lossy().into_owned(),
+        dst: prep.job.dst.to_string_lossy().into_owned(),
+        plan,
+        skipped: skipped_pats,
+        skipped_available: ctx.rsync.v3,
+        live_sessions: live,
+        with_sessions: ctx.with_sessions,
+        warnings: ui.warnings(),
+    })
+}
+
+/// Apply it. `confirmed` means a HUMAN was shown the live sessions and said yes
+/// — it is the GUI's spelling of the CLI's answered prompt, NOT of `--yes`
+/// (which the CLI refuses in exactly this case).
+///
+/// The session list is re-read HERE, not taken from the preview: the preview may
+/// be minutes old, and a session that started since is one this call has never
+/// shown anyone. So a fresh list means a fresh question.
+pub fn sync_apply(req: &SyncRequest, confirmed: bool, install: bool) -> Result<SyncApplyOut, String> {
+    let mut ui = CaptureUi::default();
+    let cfg = config::sync_cfg();
+    let ctx = resolve_ctx(
+        &mut ui,
+        req.direction,
+        Some(&req.root),
+        None,
+        req.hub.as_deref(),
+        req.with_sessions,
+        &cfg,
+        false,
+    )?;
+    let prep = prepare(&ctx, req.direction)?;
+    let job = &prep.job;
+    let plan = preview(job)?;
+
+    let out = |applied: bool, live: Vec<String>, ui: &CaptureUi| SyncApplyOut {
+        name: ctx.name.clone(),
+        direction: req.direction.label(),
+        hub: ctx.hub.to_string_lossy().into_owned(),
+        src: job.src.to_string_lossy().into_owned(),
+        dst: job.dst.to_string_lossy().into_owned(),
+        plan: plan.clone(),
+        needs_confirm: !applied,
+        applied,
+        live_sessions: live,
+        messages: ui.lines.clone(),
+        warnings: ui.warnings(),
+    };
+
+    if req.direction == SyncDirection::Pull {
+        let live = live_sessions_in(&ctx.local_root);
+        if !live.is_empty() && !confirmed {
+            return Ok(out(false, live, &ui));
+        }
+    }
+
+    mkdir_p(&job.dst)?;
+    apply(job)?;
+
+    if req.direction == SyncDirection::Push {
+        let m = Manifest {
+            schema: SCHEMA,
+            name: ctx.name.clone(),
+            local_root: ctx.local_root.to_string_lossy().into_owned(),
+            pushed_at: sysclock::now_epoch(),
+            host: hostname(),
+            hint: ctx.proj_cfg.install.clone().unwrap_or_default(),
+        };
+        std::fs::write(&ctx.manifest_path, render_manifest(&m))
+            .map_err(|e| format!("cannot write {}: {e}", ctx.manifest_path.display()))?;
+    }
+    if ctx.with_sessions {
+        ferry_sessions(&mut ui, &ctx.rsync, req.direction, &ctx.hub_proj, &ctx.local_root, false)?;
+    }
+    if req.direction == SyncDirection::Pull {
+        after_pull(
+            &mut ui,
+            install,
+            &ctx.name,
+            &ctx.local_root,
+            &ctx.proj_cfg,
+            ctx.manifest.as_ref(),
+            false,
+        );
+    }
+    Ok(out(true, Vec::new(), &ui))
+}
+
 // ── status ───────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct ManifestBrief {
-    name: String,
-    local_root: String,
-    pushed_at: i64,
-    host: String,
+pub struct ManifestBrief {
+    pub name: String,
+    pub local_root: String,
+    pub pushed_at: i64,
+    pub host: String,
 }
 
 #[derive(Serialize)]
-struct StatusJson {
-    schema_version: u32,
-    scope: &'static str,
-    name: Option<String>,
-    local_root: Option<String>,
-    rsync: Option<String>,
-    rsync_v3: bool,
-    hub: Option<String>,
-    hub_error: Option<String>,
-    branch: Option<String>,
-    dirty: Option<u32>,
-    pushed_at: Option<i64>,
-    pushed_host: Option<String>,
-    hint: Option<String>,
-    projects: Vec<ManifestBrief>,
+pub struct StatusJson {
+    pub schema_version: u32,
+    pub scope: &'static str,
+    pub name: Option<String>,
+    pub local_root: Option<String>,
+    pub rsync: Option<String>,
+    pub rsync_v3: bool,
+    pub hub: Option<String>,
+    pub hub_error: Option<String>,
+    pub branch: Option<String>,
+    pub dirty: Option<u32>,
+    pub pushed_at: Option<i64>,
+    pub pushed_host: Option<String>,
+    pub hint: Option<String>,
+    pub projects: Vec<ManifestBrief>,
 }
 
-fn cmd_status(ui: &mut dyn Ui, args: &[String]) -> i32 {
-    let opts = match parse_opts(ui, args, false, false) {
-        Ok(o) => o,
-        Err(c) => return c,
-    };
-    let json = json_mode(opts.json);
+/// The data half of `sync status`, for the CLI's printer and for the app.
+///
+/// `from` is a directory to discover a project from (the cwd for the CLI, the
+/// project root for the app); `None`, or a directory in no repo, gives the
+/// hub-level report. Nothing here is fatal — reporting a missing hub is most of
+/// what status is for.
+///
+/// ⚠ Takes a `Ui` (the brief's shape did not) only because `resolve_hub` prints
+/// `auto-detected SSD hub: …` through it, and dropping that line would change
+/// CLI output.
+pub fn sync_status_data(
+    ui: &mut dyn Ui,
+    from: Option<&Path>,
+    hub_flag: Option<&str>,
+    quiet: bool,
+) -> StatusJson {
     let cfg = config::sync_cfg();
-    let Ok(cwd) = std::env::current_dir() else {
-        ui.error("cannot read the current directory");
-        return 1;
-    };
-    let here = Project::discover(&cwd).ok();
+    let here = from.and_then(|d| Project::discover(d).ok());
     let rsync = find_rsync().ok();
-    // A missing hub is REPORTED by status, not fatal — that is most of what the
-    // command is for.
-    let hub = resolve_hub(opts.hub.as_deref(), &cfg, ui, json);
+    let hub = resolve_hub(hub_flag, &cfg, ui, quiet);
 
     let mut out = StatusJson {
         schema_version: SCHEMA,
@@ -1224,6 +1481,22 @@ fn cmd_status(ui: &mut dyn Ui, args: &[String]) -> i32 {
             }
         }
     }
+    out
+}
+
+fn cmd_status(ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let opts = match parse_opts(ui, args, false, false) {
+        Ok(o) => o,
+        Err(c) => return c,
+    };
+    let json = json_mode(opts.json);
+    let Ok(cwd) = std::env::current_dir() else {
+        ui.error("cannot read the current directory");
+        return 1;
+    };
+    // A missing hub is REPORTED by status, not fatal — that is most of what the
+    // command is for.
+    let out = sync_status_data(ui, Some(&cwd), opts.hub.as_deref(), json);
 
     if json {
         ui.plain(&serde_json::to_string(&out).unwrap_or_default());
@@ -1236,8 +1509,8 @@ fn cmd_status(ui: &mut dyn Ui, args: &[String]) -> i32 {
         (None, Some(e)) => format!("<none> ({})", e.lines().next().unwrap_or("")),
         (None, None) => "<none>".to_string(),
     };
-    match here {
-        Some(_) => {
+    match out.scope {
+        "project" => {
             ui.header(&format!("sync status — {}", out.name.clone().unwrap_or_default()));
             ui.plain(&format!(
                 "  rsync:      {}  (v3={})",
@@ -1264,7 +1537,7 @@ fn cmd_status(ui: &mut dyn Ui, args: &[String]) -> i32 {
                 None => ui.plain("  last push:  <never pushed to this hub>"),
             }
         }
-        None => {
+        _ => {
             ui.header("sync status — hub");
             ui.plain(&format!("  rsync:      {}  (v3={})",
                 out.rsync.clone().unwrap_or_else(|| "<none>".into()),
@@ -1568,6 +1841,42 @@ building file list
         assert!(f.message.contains("/Users/dp/work/proj"), "{}", f.message);
         assert_eq!(crate::diag::Report::new(vec![f]).exit_code(), crate::diag::EXIT_FINDINGS);
         assert!(hub_copy_finding(&d).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The app never passes main.rs's dispatch guard, so the refusal has to live
+    /// INSIDE the programmatic API rather than in whoever calls it. Both entry
+    /// points stop before rsync is even looked for, which is why this can assert
+    /// on the message without a shim: nothing is spawned to reach it.
+    #[test]
+    fn the_programmatic_api_refuses_a_hub_copy_before_it_touches_rsync() {
+        let d = tmp("apiguard");
+        let root = d.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .expect("git init")
+            .success());
+        std::fs::write(
+            d.join(MANIFEST),
+            "schema = 1\nname = \"proj\"\nlocal_root = \"/Users/dp/work/proj\"\nhost = \"othermac\"\n",
+        )
+        .unwrap();
+
+        for dir in [SyncDirection::Push, SyncDirection::Pull] {
+            let req = SyncRequest {
+                root: root.clone(),
+                direction: dir,
+                hub: Some(d.join("hub").to_string_lossy().into_owned()),
+                with_sessions: Some(false),
+            };
+            let e = sync_preview(&req).err().expect("preview refused");
+            assert!(e.contains("hub copy") && e.contains("/Users/dp/work/proj"), "{e}");
+            let e = sync_apply(&req, true, false).err().expect("apply refused");
+            assert!(e.contains("hub copy"), "{e}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

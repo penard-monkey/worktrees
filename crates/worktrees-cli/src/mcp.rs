@@ -313,13 +313,32 @@ impl Server {
 
         // A tool the server did not advertise must not be callable, or
         // `--mutations` would be advisory rather than a gate.
-        if !self.tools().iter().any(|t| t["name"] == name) {
+        let Some(advertised) = self.tools().into_iter().find(|t| t["name"] == name) else {
             let hint = if !self.mutations {
                 " (this server was started without --mutations)"
             } else {
                 ""
             };
             return Ok(text_err(&format!("unknown tool: {name}{hint}")));
+        };
+
+        // Guard A on this surface. The CLI refuses every mutating command inside
+        // a tree that arrived on a sync hub (one choke point in main.rs); this
+        // server never passes that point, and a model has no way to tell that the
+        // checkout it was launched in is another machine's mirror — where a
+        // `worktree prune` can unregister the WRONG repo's worktrees and every
+        // write is overwritten by the next pull.
+        //
+        // Keyed off the tool's own `readOnlyHint` rather than a second list of
+        // names: a list would drift, and the annotation is already the answer to
+        // "does this write?". Reads stay allowed — they are how you find out what
+        // the tree is.
+        if advertised["annotations"]["readOnlyHint"] != serde_json::json!(true) {
+            if let Some(msg) =
+                worktrees_core::sync::hub_copy_refusal(std::path::Path::new(&self.project.main_root))
+            {
+                return Ok(text_err(&msg));
+            }
         }
 
         match name {
@@ -585,6 +604,69 @@ mod tests {
         assert_eq!(t["annotations"]["readOnlyHint"], serde_json::json!(false));
         let r = tool("y", "d", serde_json::json!({}), true, false);
         assert_eq!(r["annotations"]["readOnlyHint"], serde_json::json!(true));
+    }
+
+    /// Guard A on the MCP surface. The CLI refuses every mutating command inside
+    /// a tree that rode in on a sync hub, at one dispatch choke point in main.rs;
+    /// `worktrees mcp` never passes that point, and a model driving this server
+    /// has no way to know which tree it is standing in.
+    ///
+    /// The loop is deliberate: it derives the mutating set from the server's OWN
+    /// `readOnlyHint` annotations, so a tool added later is covered without
+    /// editing this test — and cannot be added as "mutating but unguarded".
+    #[test]
+    fn a_mutating_tool_is_refused_inside_a_hub_copy() {
+        use serde_json::json;
+        // What a push leaves on the hub: <hub>/proj/.worktrees-sync.toml naming
+        // the OTHER machine's root, and the tree itself at <hub>/proj/proj.
+        let base = std::env::temp_dir().join(format!("wt-mcp-hubcopy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .expect("git init");
+        assert!(init.success());
+        std::fs::write(
+            base.join(worktrees_core::sync::MANIFEST),
+            "schema = 1\nname = \"proj\"\nlocal_root = \"/Users/dp/work/proj\"\nhost = \"othermac\"\n",
+        )
+        .unwrap();
+
+        let project = Project::discover(&root).expect("a git repo");
+        let mut server = Server { project, mutations: true };
+
+        // Reading is how you find out WHAT this tree is — never refused.
+        let r = server.call(&json!({ "name": "list_places", "arguments": {} })).unwrap();
+        assert_eq!(r["isError"], json!(false));
+
+        let mutating: Vec<String> = server
+            .tools()
+            .iter()
+            .filter(|t| t["annotations"]["readOnlyHint"] != json!(true))
+            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(mutating.len() >= 6, "expected the whole mutating set, got {mutating:?}");
+        for name in mutating {
+            let r = server
+                .call(&json!({
+                    "name": name,
+                    "arguments": {
+                        "slug": "(main)", "note": "x", "pinned": true,
+                        "lifecycle": "closed", "branch": "guard-test", "confirm": true
+                    }
+                }))
+                .unwrap();
+            let text = r["content"][0]["text"].as_str().unwrap_or_default();
+            assert_eq!(r["isError"], json!(true), "{name} ran in a hub copy: {text}");
+            assert!(
+                text.contains("hub copy") && text.contains("/Users/dp/work/proj"),
+                "{name} was refused for the wrong reason: {text}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
