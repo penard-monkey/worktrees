@@ -14,8 +14,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::{self, SyncCfg};
 use crate::diag::{Code, Finding};
@@ -438,6 +440,161 @@ pub fn parse_hiding(out: &str) -> Vec<(String, u32)> {
     v
 }
 
+// ── streaming progress ───────────────────────────────────────────────────────
+// What `rsync --info=progress2,name1` says while it works, parsed into something
+// a progress bar can render. Two shapes come down stdout:
+//
+//   src/App.tsx                                        ← name1: the file moving
+//   \r    1,048,576  10%    1.00MB/s  0:00:01 (xfr#12, to-chk=900/1000)
+//
+// progress2 REWRITES its single line, and it emits the `\r` BEFORE the line
+// rather than after it. Two consequences the parser is built around: a reader
+// that splits on `\n` alone sees one enormous line at EOF (i.e. no progress at
+// all, which is exactly the frozen "Pushing…" this phase exists to fix), and the
+// LAST line drawn has no terminator — it is flushed by `ProgressReader::finish`.
+
+/// One sample of a running transfer. Every field is optional because rsync
+/// answers in fragments: a name line carries no percentage, and a progress line
+/// carries no name.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct SyncProgress {
+    /// Overall completion, 0–100. `None` until rsync has said anything (and for
+    /// the whole run on openrsync, which cannot report it).
+    pub percent: Option<f32>,
+    /// As rsync printed it — `"12.34MB/s"`. Not re-derived: rsync's own average
+    /// is the number the user compares against the last transfer.
+    pub rate: Option<String>,
+    /// The most recent file name (`name1`).
+    pub current: Option<String>,
+}
+
+/// What one stdout fragment turned out to be.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProgressFragment {
+    Stats { percent: Option<f32>, rate: Option<String> },
+    Name(String),
+}
+
+/// Lines rsync prints AROUND the transfer. Without this filter each one would
+/// be taken for a file name (name1's contract is "anything that is not the
+/// progress line is a name"), and the modal would finish by reporting that it
+/// was copying a file called `sent 4,096 bytes  received 89 bytes`.
+fn is_trailer(l: &str) -> bool {
+    (l.starts_with("sent ") && l.contains(" bytes"))
+        || l.starts_with("total size is ")
+        || l.ends_with("incremental file list")
+        || l.starts_with("created directory ")
+}
+
+/// `"1,048,576"` → 1048576. Grouping commas are rsync's, not a locale's.
+fn comma_int(t: &str) -> Option<u64> {
+    let s: String = t.chars().filter(|c| *c != ',').collect();
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// `"56%"` → 56.0.
+fn pct_token(t: &str) -> Option<f32> {
+    t.strip_suffix('%')?.parse::<f32>().ok()
+}
+
+/// `"(xfr#12,"` / `"to-chk=900/1000)"` → the same percentage from the other end:
+/// files left over files total. The fallback for a progress line whose `%` token
+/// is missing or unparseable.
+fn chk_pct(t: &str) -> Option<f32> {
+    let v = t.trim_end_matches(')').trim_end_matches(',');
+    let rest = v.strip_prefix("to-chk=").or_else(|| v.strip_prefix("ir-chk="))?;
+    let (left, total) = rest.split_once('/')?;
+    let (left, total) = (left.parse::<f64>().ok()?, total.parse::<f64>().ok()?);
+    if total <= 0.0 || left > total {
+        return None;
+    }
+    Some((((total - left) / total) * 100.0) as f32)
+}
+
+/// One fragment (already split off at a `\r` or `\n`) → what it says, or `None`
+/// for blank lines and rsync's own trailers.
+pub fn parse_progress_fragment(frag: &str) -> Option<ProgressFragment> {
+    let l = frag.trim();
+    if l.is_empty() || is_trailer(l) {
+        return None;
+    }
+    let toks: Vec<&str> = l.split_whitespace().collect();
+    let pct = toks.iter().find_map(|t| pct_token(t));
+    let chk = toks.iter().find_map(|t| chk_pct(t));
+    // A progress line always OPENS with the byte count. Requiring that as well
+    // as a percentage keeps a file literally named `90% done` out of the bar.
+    if comma_int(toks[0]).is_some() && (pct.is_some() || chk.is_some()) {
+        let rate = toks.iter().find(|t| t.contains("/s")).map(|t| (*t).to_string());
+        return Some(ProgressFragment::Stats { percent: pct.or(chk), rate });
+    }
+    Some(ProgressFragment::Name(l.to_string()))
+}
+
+/// A stream with no separator in it at all must not grow a buffer forever.
+/// 8K is orders of magnitude past any line rsync draws.
+const PARTIAL_CAP: usize = 8192;
+
+/// rsync stdout → a rolling `SyncProgress`. Bytes in, because a chunk boundary
+/// can fall inside a multi-byte character; complete fragments are what get
+/// decoded (lossily — a mojibake file name is a cosmetic loss, a panic is not).
+#[derive(Default)]
+pub struct ProgressReader {
+    partial: Vec<u8>,
+    state: SyncProgress,
+}
+
+impl ProgressReader {
+    pub fn state(&self) -> &SyncProgress {
+        &self.state
+    }
+
+    /// Absorb a chunk of stdout; `true` if the rolling state moved.
+    pub fn feed(&mut self, chunk: &[u8]) -> bool {
+        self.partial.extend_from_slice(chunk);
+        let mut changed = false;
+        // BOTH separators. `\r` is the one that matters: it is the only thing
+        // progress2 ever terminates a line with mid-transfer.
+        while let Some(i) = self.partial.iter().position(|b| *b == b'\r' || *b == b'\n') {
+            let frag: Vec<u8> = self.partial.drain(..=i).collect();
+            let text = String::from_utf8_lossy(&frag[..frag.len() - 1]).into_owned();
+            changed |= self.absorb(&text);
+        }
+        if self.partial.len() > PARTIAL_CAP {
+            self.partial.clear();
+        }
+        changed
+    }
+
+    /// EOF: parse whatever never got a terminator (see the module note — that is
+    /// normally the final 100% line).
+    pub fn finish(&mut self) -> bool {
+        let rest = std::mem::take(&mut self.partial);
+        self.absorb(&String::from_utf8_lossy(&rest))
+    }
+
+    /// Fields MERGE: a name line must not blank the percentage, and a progress
+    /// line must not blank the name.
+    fn absorb(&mut self, frag: &str) -> bool {
+        let before = self.state.clone();
+        match parse_progress_fragment(frag) {
+            Some(ProgressFragment::Stats { percent, rate }) => {
+                if percent.is_some() {
+                    self.state.percent = percent;
+                }
+                if rate.is_some() {
+                    self.state.rate = rate;
+                }
+            }
+            Some(ProgressFragment::Name(n)) => self.state.current = Some(n),
+            None => {}
+        }
+        self.state != before
+    }
+}
+
 // ── exclude file ─────────────────────────────────────────────────────────────
 
 struct TempFile(PathBuf);
@@ -524,19 +681,61 @@ fn isatty_stdout() -> bool {
     unsafe { libc::isatty(1) == 1 }
 }
 
-fn apply(job: &Job) -> Result<(), String> {
-    let mut c = Command::new(&job.rsync.path);
-    c.args(["-a", "--delete"]).arg(format!("--exclude-from={}", job.excl.display()));
-    if isatty_stdout() {
-        c.arg(if job.rsync.v3 { "--info=progress2" } else { "--progress" });
+/// The APPLY argv, assembled in exactly one place. `info` is the only thing the
+/// two apply paths differ by, so the terminal's run and the app's streaming run
+/// cannot drift into being different transfers — which, with `--delete` in the
+/// argv, is the kind of drift that costs files rather than pixels.
+///
+/// Order is load-bearing: `test/sync.bats` matches the whole line as a regex.
+fn apply_argv(job: &Job, info: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = vec![
+        "-a".into(),
+        "--delete".into(),
+        format!("--exclude-from={}", job.excl.display()),
+    ];
+    v.extend(info.iter().map(|s| (*s).to_string()));
+    v.push("--backup".into());
+    v.push(format!("--backup-dir={}", job.backup_dir.display()));
+    v.push(slashed(&job.src));
+    v.push(slashed(&job.dst));
+    v
+}
+
+/// The CLI's progress flags: a TTY only, since the point is a human watching.
+fn tty_info(job: &Job) -> Vec<&'static str> {
+    if !isatty_stdout() {
+        return Vec::new();
     }
-    c.arg("--backup")
-        .arg(format!("--backup-dir={}", job.backup_dir.display()))
-        .arg(slashed(&job.src))
-        .arg(slashed(&job.dst));
+    vec![if job.rsync.v3 { "--info=progress2" } else { "--progress" }]
+}
+
+/// What the STREAMING apply adds — `progress2` for the overall percentage and
+/// `name1` for the file currently moving.
+///
+/// openrsync (v3=false) has no equivalent flag at all, so a non-v3 stream emits
+/// NOTHING and the app shows its indeterminate state. Faking it with `-v` was
+/// considered and refused: it changes the argv shape and the verbosity of a
+/// transfer for everyone, to win a progress bar on the one rsync that cannot
+/// report progress.
+const STREAM_INFO: &str = "--info=progress2,name1";
+
+fn stream_info(v3: bool) -> Vec<&'static str> {
+    if v3 { vec![STREAM_INFO] } else { Vec::new() }
+}
+
+/// One phrasing of an rsync failure for all three invocations — the exact string
+/// the CLI has always printed (bats asserts it).
+fn rsync_failure(code: Option<i32>, stderr: &[u8]) -> String {
+    let err = String::from_utf8_lossy(stderr);
+    let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("rsync failed");
+    format!("rsync failed (exit {}): {}", code.unwrap_or(-1), first.trim())
+}
+
+fn apply(job: &Job) -> Result<(), String> {
     // stdout INHERITED so progress reaches the terminal; stderr captured so a
     // failure can be reported rather than lost (git_status_captured's split).
-    let child = c
+    let child = Command::new(&job.rsync.path)
+        .args(apply_argv(job, &tty_info(job)))
         .stdout(Stdio::inherit())
         .stderr(Stdio::piped())
         .spawn()
@@ -545,9 +744,74 @@ fn apply(job: &Job) -> Result<(), String> {
     if out.status.success() {
         return Ok(());
     }
-    let err = String::from_utf8_lossy(&out.stderr);
-    let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("rsync failed");
-    Err(format!("rsync failed (exit {}): {}", out.status.code().unwrap_or(-1), first.trim()))
+    Err(rsync_failure(out.status.code(), &out.stderr))
+}
+
+/// At most ~15 progress events a second. `progress2` rewrites its line hundreds
+/// of times a second on a fast SSD, and every one of those crossing the IPC
+/// channel is jank of its own making — the transfer would be paid for twice.
+const PROGRESS_MIN_GAP: Duration = Duration::from_millis(66);
+
+/// The same transfer as `apply`, with stdout piped and parsed. Used only by
+/// `sync_apply`'s streaming caller (the app); the CLI keeps its inherited-stdout
+/// run, where rsync draws its own progress line better than we could relay it.
+///
+/// The sink is called at most every `PROGRESS_MIN_GAP` — and ALWAYS once at the
+/// end, whatever the clock says, because the final state is the one the modal is
+/// left showing. Coalescing happens here rather than at the IPC boundary because
+/// only this loop knows where a read chunk ends and when the last one arrived.
+fn apply_streaming(job: &Job, cb: &mut dyn FnMut(SyncProgress)) -> Result<(), String> {
+    let mut child = Command::new(&job.rsync.path)
+        .args(apply_argv(job, &stream_info(job.rsync.v3)))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("rsync failed to start: {e}"))?;
+    let mut out = child.stdout.take().ok_or("rsync stdout unavailable")?;
+    // stderr is drained on its OWN thread, not left for wait_with_output: this
+    // path holds TWO pipes, and a transfer that spams stderr (a permission-
+    // denied storm on a big pull) fills that pipe's buffer while this loop is
+    // still on stdout — rsync blocks on write, the loop blocks on read, and the
+    // modal freezes on the exact sync this streaming exists to make visible.
+    let mut errpipe = child.stderr.take().ok_or("rsync stderr unavailable")?;
+    let err_thread = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = errpipe.read_to_end(&mut v);
+        v
+    });
+
+    let mut rd = ProgressReader::default();
+    let mut buf = [0u8; 8192];
+    let mut last: Option<Instant> = None;
+    let mut pending = false;
+    loop {
+        match out.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if rd.feed(&buf[..n]) {
+                    pending = true;
+                }
+                if pending && last.is_none_or(|t| t.elapsed() >= PROGRESS_MIN_GAP) {
+                    cb(rd.state().clone());
+                    pending = false;
+                    last = Some(Instant::now());
+                }
+            }
+        }
+    }
+    // EOF: progress2 writes `\r` BEFORE each update, so the last line it drew
+    // never got a terminator and is still sitting in the buffer. Flushing it is
+    // the difference between finishing on 100% and finishing on whatever the
+    // second-to-last chunk said.
+    rd.finish();
+    cb(rd.state().clone());
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let stderr = err_thread.join().unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    Err(rsync_failure(status.code(), &stderr))
 }
 
 /// Additive copy — no `--delete`, no `--backup`. Used for the sessions ferry in
@@ -562,9 +826,7 @@ fn rsync_additive(rsync: &Rsync, src: &Path, dst: &Path) -> Result<(), String> {
     if out.status.success() {
         return Ok(());
     }
-    let err = String::from_utf8_lossy(&out.stderr);
-    let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("rsync failed");
-    Err(format!("rsync failed (exit {}): {}", out.status.code().unwrap_or(-1), first.trim()))
+    Err(rsync_failure(out.status.code(), &out.stderr))
 }
 
 // ── sessions ferry ───────────────────────────────────────────────────────────
@@ -1251,6 +1513,11 @@ pub struct SyncPreviewOut {
     /// Guard B's data — PULL only; a push never mirrors over a live tree.
     pub live_sessions: Vec<String>,
     pub with_sessions: bool,
+    /// The user's own `[sync.projects.<name>] install`, so a pull can OFFER to
+    /// run it and name what it would run. `None` = nothing registered, and the
+    /// app shows no checkbox rather than an unexplained one. Never the hub
+    /// manifest's `hint`, which arrived on removable media and is printed only.
+    pub install_cmd: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -1303,6 +1570,7 @@ pub fn sync_preview(req: &SyncRequest) -> Result<SyncPreviewOut, String> {
         skipped_available: ctx.rsync.v3,
         live_sessions: live,
         with_sessions: ctx.with_sessions,
+        install_cmd: ctx.proj_cfg.install.clone().filter(|s| !s.is_empty()),
         warnings: ui.warnings(),
     })
 }
@@ -1314,7 +1582,17 @@ pub fn sync_preview(req: &SyncRequest) -> Result<SyncPreviewOut, String> {
 /// The session list is re-read HERE, not taken from the preview: the preview may
 /// be minutes old, and a session that started since is one this call has never
 /// shown anyone. So a fresh list means a fresh question.
-pub fn sync_apply(req: &SyncRequest, confirmed: bool, install: bool) -> Result<SyncApplyOut, String> {
+///
+/// `progress` is the app's live bar. `None` is EXACTLY today's transfer — same
+/// argv, stdout inherited — which is what the CLI runs and what `test/sync.bats`
+/// pins; `Some(cb)` pipes stdout and adds `--info=progress2,name1` to the same
+/// assembled argv (`apply_argv`), so the two can never become different syncs.
+pub fn sync_apply(
+    req: &SyncRequest,
+    confirmed: bool,
+    install: bool,
+    progress: Option<&mut dyn FnMut(SyncProgress)>,
+) -> Result<SyncApplyOut, String> {
     let mut ui = CaptureUi::default();
     let cfg = config::sync_cfg();
     let ctx = resolve_ctx(
@@ -1353,7 +1631,10 @@ pub fn sync_apply(req: &SyncRequest, confirmed: bool, install: bool) -> Result<S
     }
 
     mkdir_p(&job.dst)?;
-    apply(job)?;
+    match progress {
+        Some(cb) => apply_streaming(job, cb)?,
+        None => apply(job)?,
+    }
 
     if req.direction == SyncDirection::Push {
         let m = Manifest {
@@ -1626,6 +1907,184 @@ building file list
         assert!(parse_hiding("nothing here").is_empty());
     }
 
+    // ── streaming progress ──────────────────────────────────────────────────
+
+    /// A real `--info=progress2` line, at four points in a transfer.
+    const P0: &str = "         98,304   0%   93.75kB/s    0:00:01 (xfr#1, to-chk=999/1000)";
+    const P50: &str = "      1,048,576  50%    1.00MB/s    0:00:01 (xfr#12, to-chk=500/1000)";
+    const P100: &str = "      2,097,152 100%    2.00MB/s    0:00:02 (xfr#25, to-chk=0/1000)";
+
+    #[test]
+    fn progress_fragment_reads_a_progress2_line() {
+        let got = parse_progress_fragment(P50).unwrap();
+        assert_eq!(
+            got,
+            ProgressFragment::Stats { percent: Some(50.0), rate: Some("1.00MB/s".into()) },
+            "percent from the % token, rate VERBATIM as rsync printed it"
+        );
+        assert_eq!(
+            parse_progress_fragment(P0).unwrap(),
+            ProgressFragment::Stats { percent: Some(0.0), rate: Some("93.75kB/s".into()) }
+        );
+    }
+
+    #[test]
+    fn progress_fragment_falls_back_to_to_chk_when_the_percent_token_is_gone() {
+        // Same line with the % token mangled — the transfer is still 40% done
+        // and the file counts say so.
+        let line = "      1,048,576  ??    1.00MB/s    0:00:01 (xfr#12, to-chk=600/1000)";
+        let ProgressFragment::Stats { percent, .. } = parse_progress_fragment(line).unwrap() else {
+            panic!("not a progress line");
+        };
+        assert_eq!(percent, Some(40.0));
+    }
+
+    #[test]
+    fn progress_fragment_treats_a_plain_line_as_a_file_name() {
+        assert_eq!(
+            parse_progress_fragment("app/src/App.tsx").unwrap(),
+            ProgressFragment::Name("app/src/App.tsx".into())
+        );
+        // name1 prints directories with the trailing slash, and paths with
+        // spaces are just paths
+        assert_eq!(
+            parse_progress_fragment("  docs/adr/my notes/ ").unwrap(),
+            ProgressFragment::Name("docs/adr/my notes/".into())
+        );
+    }
+
+    #[test]
+    fn progress_fragment_ignores_blanks_and_rsyncs_own_trailers() {
+        for l in [
+            "",
+            "   ",
+            "sent 4,096 bytes  received 89 bytes  8,370.00 bytes/sec",
+            "total size is 12,345,678  speedup is 9.99",
+            "sending incremental file list",
+            "receiving incremental file list",
+            "created directory /Volumes/SanDisk/worktrees",
+        ] {
+            assert!(
+                parse_progress_fragment(l).is_none(),
+                "a trailer must never be reported as the file being copied: {l:?}"
+            );
+        }
+        // …but a percentage-shaped thing that is NOT a progress line still reads
+        // as a name rather than moving the bar
+        assert_eq!(
+            parse_progress_fragment("notes/90% done.md").unwrap(),
+            ProgressFragment::Name("notes/90% done.md".into())
+        );
+    }
+
+    #[test]
+    fn progress_reader_splits_on_carriage_returns_and_merges_fields() {
+        let mut rd = ProgressReader::default();
+        // Exactly what rsync writes: a name terminated by \n, then progress
+        // lines each PRECEDED by \r (so the last one has no terminator).
+        rd.feed(b"src/main.rs\n");
+        assert_eq!(rd.state().current.as_deref(), Some("src/main.rs"));
+        assert_eq!(rd.state().percent, None);
+
+        rd.feed(format!("\r{P0}\r{P50}").as_bytes());
+        assert_eq!(rd.state().percent, Some(0.0), "only the FIRST line is terminated yet");
+        assert_eq!(rd.state().current.as_deref(), Some("src/main.rs"), "a progress line keeps the name");
+
+        rd.feed(format!("\rdocs/x.md\n\r{P100}").as_bytes());
+        assert_eq!(rd.state().percent, Some(50.0));
+        assert_eq!(rd.state().current.as_deref(), Some("docs/x.md"), "a name line keeps the percent");
+
+        // EOF flushes the 100% line that never got a terminator of its own —
+        // without it a finished sync is left showing 50%.
+        assert!(rd.finish());
+        assert_eq!(rd.state().percent, Some(100.0));
+        assert_eq!(rd.state().rate.as_deref(), Some("2.00MB/s"));
+    }
+
+    /// A verbatim slice of what rsync 3.4.4 actually wrote through a pipe
+    /// (captured 2026-08-16, `-a --delete --info=progress2,name1`): names are
+    /// `\n`-terminated, every progress line is `\r`-PREFIXED, the last line is
+    /// rewritten three times back-to-back with no separator between rewrites,
+    /// and the whole stream ends in a single `\n`. The canned tests above are
+    /// what we believe rsync does; this one is what it did.
+    #[test]
+    fn progress_reader_handles_a_real_rsync_capture() {
+        let real = b"f1.bin\n\
+            \r         32,768   0%    0.00kB/s    0:00:00  \
+            \r      3,145,728  12%  989.58MB/s    0:00:00 (xfr#1, to-chk=9/11)\n\
+            f2.bin\n\
+            \r      6,291,456  24%  994.79MB/s    0:00:00 (xfr#2, to-chk=8/11)\n\
+            sub/\n\
+            sub/nested file with spaces.txt\n\
+            \r     25,165,827 100%  887.73MB/s    0:00:00 (xfr#9, to-chk=0/11)\
+            \r     25,165,827 100%  856.03MB/s    0:00:00 (xfr#9, to-chk=0/11)\
+            \r     25,165,827 100%  856.03MB/s    0:00:00 (xfr#9, to-chk=0/11)\n";
+        // fed in awkward 7-byte chunks, the way a pipe is allowed to deliver it
+        let mut rd = ProgressReader::default();
+        for chunk in real.chunks(7) {
+            rd.feed(chunk);
+        }
+        rd.finish();
+        assert_eq!(rd.state().percent, Some(100.0));
+        assert_eq!(rd.state().rate.as_deref(), Some("856.03MB/s"));
+        assert_eq!(rd.state().current.as_deref(), Some("sub/nested file with spaces.txt"));
+    }
+
+    #[test]
+    fn progress_reader_survives_chunk_boundaries_and_junk() {
+        let mut rd = ProgressReader::default();
+        // one line delivered a byte at a time
+        for b in format!("\r{P50}\r").bytes() {
+            rd.feed(&[b]);
+        }
+        assert_eq!(rd.state().percent, Some(50.0));
+
+        // a stream with no separator at all must not grow forever
+        rd.feed(&vec![b'x'; PARTIAL_CAP * 2]);
+        assert!(rd.partial.len() <= PARTIAL_CAP, "unterminated garbage is dropped, not buffered");
+        // and the state it had is still the state it has
+        assert_eq!(rd.state().percent, Some(50.0));
+    }
+
+    #[test]
+    fn streaming_argv_is_the_apply_argv_plus_the_info_flags() {
+        // The whole point of `apply_argv`: the app's transfer and the
+        // terminal's are the same rsync run, one flag apart. If this ever
+        // fails, `--delete` is running somewhere it was not reviewed.
+        let rsync = Rsync { path: "/opt/homebrew/bin/rsync".into(), v3: true };
+        let job = Job {
+            rsync: &rsync,
+            src: PathBuf::from("/src"),
+            dst: PathBuf::from("/dst"),
+            backup_dir: PathBuf::from("/dst/.worktrees-sync/backups/ts/name"),
+            excl: PathBuf::from("/tmp/excl"),
+        };
+        let plain = apply_argv(&job, &[]);
+        let streamed = apply_argv(&job, &stream_info(true));
+        assert_eq!(streamed.len(), plain.len() + 1);
+        let extra: Vec<&String> = streamed.iter().filter(|a| !plain.contains(a)).collect();
+        assert_eq!(extra, vec![&STREAM_INFO.to_string()]);
+        // …and it is inserted, not appended: paths stay last, where rsync wants them
+        assert_eq!(streamed.last().unwrap(), "/dst/");
+        assert_eq!(
+            plain,
+            vec![
+                "-a",
+                "--delete",
+                "--exclude-from=/tmp/excl",
+                "--backup",
+                "--backup-dir=/dst/.worktrees-sync/backups/ts/name",
+                "/src/",
+                "/dst/",
+            ]
+        );
+        // openrsync gets NO progress flags — it has none, and inventing one
+        // (`-v`) would change the transfer for everybody.
+        let old = Rsync { path: "/usr/bin/rsync".into(), v3: false };
+        let job2 = Job { rsync: &old, ..job };
+        assert_eq!(apply_argv(&job2, &stream_info(false)), plain);
+    }
+
     #[test]
     fn hub_candidates_skip_the_denylist_and_symlinks() {
         let v = |n: &str, link: bool| (n.to_string(), link, PathBuf::from(format!("/Volumes/{n}")));
@@ -1874,7 +2333,7 @@ building file list
             };
             let e = sync_preview(&req).err().expect("preview refused");
             assert!(e.contains("hub copy") && e.contains("/Users/dp/work/proj"), "{e}");
-            let e = sync_apply(&req, true, false).err().expect("apply refused");
+            let e = sync_apply(&req, true, false, None).err().expect("apply refused");
             assert!(e.contains("hub copy"), "{e}");
         }
         let _ = std::fs::remove_dir_all(&d);

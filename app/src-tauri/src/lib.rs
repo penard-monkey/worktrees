@@ -2036,6 +2036,12 @@ async fn sync_preview(
 /// Mapped into `CmdResult` (not `Result::Err`) so the frontend's `runCmd` shows
 /// it the way it shows every other op: `needs_confirm` carries the live sessions
 /// NEWLINE-separated, structurally, so the modal names them without parsing prose.
+///
+/// `on_progress` streams rsync's own progress while the transfer runs — the same
+/// `Channel` mechanism `term_open` uses for pty bytes. An 8.5G first push is
+/// minutes long, and a button that says "Pushing…" for four minutes is
+/// indistinguishable from a hung one. Core throttles to ~15 events/sec and
+/// always sends the last one, so this end can simply forward.
 #[tauri::command]
 async fn sync_apply(
     app: AppHandle,
@@ -2044,10 +2050,25 @@ async fn sync_apply(
     with_sessions: bool,
     confirmed: bool,
     install: bool,
+    on_progress: Channel<sync::SyncProgress>,
 ) -> Result<CmdResult, String> {
     let req = sync_request(&repo, &direction, with_sessions)?;
     let op = format!("sync {direction}");
-    match sync::sync_apply(&req, confirmed, install) {
+    // A closed channel (the window went away mid-sync) is not a reason to stop
+    // the transfer or to lose the result — but it is not swallowed either: it is
+    // logged ONCE, then the sink goes quiet instead of logging per event.
+    let mut sink_dead = false;
+    let mut sink = |p: sync::SyncProgress| {
+        if sink_dead {
+            return;
+        }
+        if let Err(e) = on_progress.send(p) {
+            sink_dead = true;
+            applog("warn", &format!("{op} progress channel closed repo={repo}: {e}"));
+        }
+    };
+    let outcome = sync::sync_apply(&req, confirmed, install, Some(&mut sink));
+    match outcome {
         Err(e) => {
             applog("warn", &format!("{op} rc=1 repo={repo}: {e}"));
             Ok(CmdResult {

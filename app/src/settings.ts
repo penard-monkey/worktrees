@@ -162,6 +162,13 @@ export type Settings = {
   update_auto_check: boolean; // check for updates ~3s after launch (manual check always works)
   fetch_interval_min: number; // background `git fetch origin` cadence (0 = off, else 5 | 15 | 60)
   restore_last: boolean; // on launch, SELECT the most recently opened place (selection-only, never enters)
+  // Sync modal: ferry the Claude transcripts along with the tree. GLOBAL and
+  // flat, deliberately not part of `place_panels` — it is a property of how YOU
+  // move between two Macs, not of one worktree, and the seed trap `place_panels`
+  // documents does not apply to a value with no per-place meaning. It persists
+  // because the answer is the same every time for a given person, and re-ticking
+  // it on every push is how a checkbox teaches you to ignore it.
+  sync_with_sessions: boolean;
   lens: "places" | "recent" | "attention";
   collapsed: Record<string, boolean>; // per-project-root collapse
   hidden_tiers: string[]; // lifecycle tiers hidden in the Places lens (active/idle/dormant)
@@ -222,6 +229,7 @@ export const DEFAULTS: Settings = {
   update_auto_check: true,
   fetch_interval_min: 0,
   restore_last: false,
+  sync_with_sessions: false,
   lens: "places",
   collapsed: {},
   hidden_tiers: [],

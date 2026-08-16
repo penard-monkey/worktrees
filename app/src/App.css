@@ -553,6 +553,10 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 }
 .pop-item:hover { background: var(--bg-elev); color: var(--txt-hi); }
 .pop-item .check { width: 12px; color: var(--accent); }
+/* A dim line of FACT inside a popover (the ⇄ menu's "last push: 5m ago from
+   othermac"). Not a .pop-item: there is nothing to click. */
+.pop-note { padding: var(--s1) var(--s2); font-size: var(--fs-micro); color: var(--txt-mute); }
+.pop-note.warn { color: var(--warn); white-space: normal; max-width: 22em; }
 .pop-item.danger { color: var(--danger); }
 .pop-item.danger.armed { background: color-mix(in srgb, var(--danger) 18%, transparent); font-weight: var(--fw-bold); }
 
@@ -1433,6 +1437,42 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .sync-done { color: var(--ok); font-size: var(--fs-label); white-space: pre-wrap; }
 .sync-opt { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-label); color: var(--txt-dim); }
+.sync-cmd { font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt-hi); }
+/* ── live transfer ── rsync's own --info=progress2, relayed over a Channel.
+   Determinate when rsync can report (v3) and has; indeterminate otherwise. */
+.sync-prog { display: flex; flex-direction: column; gap: var(--s1); }
+.sync-bar {
+  height: 6px; border-radius: var(--r-full); overflow: hidden;
+  background: color-mix(in srgb, var(--txt-mute) 22%, transparent);
+}
+.sync-bar-fill {
+  height: 100%; width: 0; background: var(--accent); border-radius: var(--r-full);
+  transition: width var(--dur-slow) linear;
+}
+/* The indeterminate state must survive `prefers-reduced-motion`, which kills
+   every animation in the app (tokens.css) — so the fill is a VISIBLE band at
+   rest and the sweep is decoration on top of it. Frozen at frame 0 it still
+   reads as "something is happening", which an empty track never would. */
+.sync-bar.indet .sync-bar-fill {
+  width: 40%; opacity: 0.65;
+  animation: sync-sweep 1.4s var(--ease) infinite;
+}
+@keyframes sync-sweep {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.sync-prog-line {
+  display: flex; gap: var(--s3); align-items: baseline;
+  font-size: var(--fs-meta); color: var(--txt-dim); font-variant-numeric: tabular-nums;
+}
+.sync-rate { margin-left: auto; color: var(--txt-mute); }
+/* Middle-truncated in JS (midTrunc) so the head names the project and the tail
+   names the file; nowrap here is the belt to that pair of braces — the modal's
+   width must not move because a deep path scrolled by. */
+.sync-file {
+  font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--txt-mute);
+  white-space: nowrap; overflow: hidden;
+}
 .sync-foot {
   display: flex; justify-content: flex-end; gap: var(--s2);
   padding: var(--s3) var(--s4); border-top: 1px solid var(--line);

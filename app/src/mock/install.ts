@@ -74,14 +74,21 @@ const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : 
 // A real sync is rsync over an SSD: seconds at best, and the states worth
 // designing against are the ones you cannot reach by clicking. Same query-knob
 // idiom as ?slowlist:
-//   ?slowsync[=ms]  delay all three commands (the modal's pending state)
+//   ?slowsync[=ms]  delay all three commands (the modal's pending state) AND
+//                   spread the apply's progress events across that window
 //   ?nohub          nothing mounted — the menu items are disabled with a reason
 //   ?hubcopy        this checkout IS a hub copy — the whole group is disabled
 //   ?synclive       a live tmux session in the pull destination (Guard B)
+//   ?openrsync      the system rsync: no v3, so NO progress events at all and no
+//                   skipped report — the modal's indeterminate state, which is
+//                   otherwise unreachable by clicking
+//   ?noinstall      no registered rebuild — the pull modal shows no checkbox
 // plus `__mock.syncFail()` for an rsync error on the NEXT apply.
 const MOCK_HUB = "/Volumes/MockSSD";
 const mockNoHub = location.search.includes("nohub");
 const mockHubCopy = location.search.includes("hubcopy");
+const mockOpenRsync = location.search.includes("openrsync");
+const mockInstallCmd = location.search.includes("noinstall") ? null : "pnpm install && cargo build";
 let mockSyncLive = location.search.includes("synclive");
 let mockSyncFailNext = false;
 /** Push state per project root — `sync_status` reports it as the last push. */
@@ -90,6 +97,20 @@ const mockSyncDelayMs = (() => {
   const m = /[?&]slowsync(?:=(\d+))?/.exec(location.search);
   return m ? Number(m[1] ?? 1500) : 0;
 })();
+/** What a real `--info=progress2,name1` stream boils down to after core's
+ *  parser and throttle: a rising percentage, rsync's own rate string, and the
+ *  file it is on. The transfer the app has to survive is MINUTES long, so the
+ *  states worth designing against (a bar that moves, a name that changes under
+ *  it) are exactly the ones an instant mock cannot show — `?slowsync=3000`
+ *  spreads these six across three seconds. */
+const MOCK_PROGRESS: { percent: number; rate: string; current: string }[] = [
+  { percent: 4, rate: "8.12MB/s", current: "app/src/App.tsx" },
+  { percent: 23, rate: "31.40MB/s", current: "app/src-tauri/src/lib.rs" },
+  { percent: 48, rate: "44.02MB/s", current: "crates/worktrees-core/src/sync.rs" },
+  { percent: 71, rate: "39.87MB/s", current: ".worktrees/feat-redesign/docs/adr/0001-no-repo-supplied-argv.md" },
+  { percent: 92, rate: "41.55MB/s", current: "target/release/worktrees" },
+  { percent: 100, rate: "40.18MB/s", current: "README.md" },
+];
 const HUB_MISSING = "no external volume mounted; plug in the SSD or pass --hub PATH";
 const syncName = (repo: string) => repo.split("/").filter(Boolean).pop() || repo;
 function dirKind(dir: string): "repo" | "empty" | "unborn" {
@@ -1053,8 +1074,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         scope: "project",
         name: syncName(repo),
         local_root: repo,
-        rsync: "/opt/homebrew/bin/rsync",
-        rsync_v3: true,
+        rsync: mockOpenRsync ? "/usr/bin/rsync" : "/opt/homebrew/bin/rsync",
+        rsync_v3: !mockOpenRsync,
         hub: mockNoHub ? null : MOCK_HUB,
         hub_error: mockNoHub ? HUB_MISSING : null,
         branch: "main",
@@ -1086,17 +1107,34 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           deletes: 2,
           delete_paths: ["docs/old-spec.md", "tools/gen.sh"],
         },
-        skipped: [["node_modules/", 41], ["target/", 6], ["*.log", 3]],
-        skipped_available: true,
+        // openrsync can report neither the hiding list nor progress — one flag
+        // in the payload, two absences in the UI.
+        skipped: mockOpenRsync ? [] : ([["node_modules/", 41], ["target/", 6], ["*.log", 3]] as [string, number][]),
+        skipped_available: !mockOpenRsync,
         // Guard B is PULL-only, and OFF by default so the happy path stays the
         // happy path (?synclive / __mock.syncLive(true) turns it on).
         live_sessions: dir === "pull" && mockSyncLive ? ["wt-mock-a"] : [],
         with_sessions: !!args.withSessions,
+        install_cmd: mockInstallCmd,
         warnings: [],
       };
     }
     case "sync_apply": {
-      await sleep(mockSyncDelayMs);
+      // The progress Channel, mocked the way `term_open`'s is: the real object
+      // arrives intact (invoke passes args through), so calling its handler is
+      // what the backend's `Channel::send` amounts to. Events are STAGED across
+      // the delay — an apply that answers instantly can never show a bar, which
+      // is the whole class of bug the harness is blind to (CLAUDE.md).
+      const ch = args.onProgress as { onmessage?: (v: unknown) => void } | undefined;
+      if (mockOpenRsync) {
+        await sleep(mockSyncDelayMs); // no v3 ⇒ no progress flags ⇒ no events
+      } else {
+        const step = mockSyncDelayMs / MOCK_PROGRESS.length;
+        for (const p of MOCK_PROGRESS) {
+          await sleep(step);
+          try { ch?.onmessage?.(p); } catch { /* frontend gone */ }
+        }
+      }
       const repo = args.repo as string;
       const dir = args.direction as string;
       const name = syncName(repo);
