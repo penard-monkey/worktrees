@@ -255,7 +255,11 @@ type Ctx =
   | { kind: "project"; x: number; y: number; root: string }
   // The ⇄ popover. Same state machine as the right-click menus on purpose: only
   // one of them can be open, and every dismissal path already clears it.
-  | { kind: "sync"; x: number; y: number; root: string };
+  | { kind: "sync"; x: number; y: number; root: string }
+  // The nav footer's add menu. A project can arrive three ways now — created,
+  // added from disk, imported off the hub — and three footer buttons would be
+  // three permanent rows of chrome for an act performed a handful of times.
+  | { kind: "add"; x: number; y: number };
 
 // Single-quote for pasting into a shell (the main session name carries parens).
 const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
@@ -1274,6 +1278,17 @@ type SyncStatusView = {
   hub_copy: string | null;
 };
 type SyncDir = "push" | "pull";
+/** One project the hub has been pushed to, from any machine (core's
+ *  `ManifestBrief`). `local_root` is where it lives — on the Mac that pushed it,
+ *  and, because both Macs keep the same paths, where it will land here. */
+type HubProject = { name: string; local_root: string; pushed_at: number; host: string };
+/** `sync_hub_list` — the hub's own status, with no project involved. The one
+ *  sync call a machine with an EMPTY workspace can make. */
+type HubList = { hub: string | null; hub_error: string | null; projects: HubProject[] };
+/** An import in flight: the project being adopted and where it will land. Held
+ *  by App (not derived from the preview) so the modal can name the destination
+ *  from the first frame — before the preview returns, and even if it fails. */
+type Adopt = { name: string; dest: string };
 type SyncPreview = {
   name: string;
   direction: SyncDir;
@@ -1291,6 +1306,9 @@ type SyncPreview = {
   /** The user's registered rebuild for this project, or null. Only a pull can
    *  run it, and only if asked. */
   install_cmd: string | null;
+  /** This machine has no tree for the project yet — `dst` is about to become
+   *  one. Set only for an import (adoption). */
+  adopting: boolean;
   warnings: string[];
 };
 /** One sample from the Channel while an apply runs (core's `SyncProgress`). */
@@ -1391,12 +1409,189 @@ function SyncPopover({ status, root, onOpen }: {
   );
 }
 
+/** The name rule, mirrored from `lib.rs::valid_project_name` for the inline
+ *  hint. The BACKEND decides — it re-validates every field it is handed — so a
+ *  drift here can only make this message worse, never let a bad name through. */
+function nameProblem(n: string): string {
+  if (!n) return "";
+  if (n === "." || n === "..") return "'.' and '..' are not names";
+  if (n.startsWith(".")) return "a name starting with '.' would make a hidden folder";
+  if (n.includes("/")) return "a name cannot contain '/' — the folder above it goes in Location";
+  // eslint-disable-next-line no-control-regex -- control chars are exactly what this rejects
+  if (/[\s\u0000-\u001f\u007f]/.test(n)) return "a name cannot contain spaces or control characters";
+  return "";
+}
+
+/** "New project…" — a name, a place to put it, and the path that makes.
+ *
+ *  A native folder picker cannot express this: it can only choose something
+ *  that ALREADY exists, so creating meant making the folder in Finder first and
+ *  then pointing the app at it. Here the path is assembled in front of you and
+ *  the backend creates it, `git init`s it and adds it in one act.
+ *
+ *  Module scope (CLAUDE.md): this component owns two text inputs — inside App()
+ *  it would be a new identity on every 3s refresh tick, and typing would lose
+ *  both its state and the focus ring. */
+function NewProjectDialog({ defaultLocation, busy, error, onBrowse, onCreate, onClose }: {
+  defaultLocation: string;
+  busy: boolean;
+  /** The backend's refusal, verbatim (exists / not a name / mkdir failed). */
+  error: string;
+  /** Browse… fills the FIELD rather than submitting: the pick is one way to
+   *  answer the question, not a second way to ask it. */
+  onBrowse: () => Promise<string | null>;
+  onCreate: (location: string, name: string) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [loc, setLoc] = useState(defaultLocation);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => { nameRef.current?.focus(); }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+  const trimmedName = name.trim();
+  const trimmedLoc = loc.trim().replace(/\/+$/, "");
+  const problem = nameProblem(trimmedName);
+  const ready = !!trimmedName && !!trimmedLoc && !problem && !busy;
+  const full = `${trimmedLoc || "…"}/${trimmedName || "…"}`;
+  const submit = () => { if (ready) onCreate(trimmedLoc, trimmedName); };
+  return (
+    <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
+      <div className="sync-modal" role="dialog" aria-label="New project" data-testid="new-project-dialog"
+        onClick={(e) => e.stopPropagation()}>
+        <header className="sync-h"><b>New project</b></header>
+        <div className="sync-body">
+          <label className="np-field">
+            <span className="np-label">Project name</span>
+            <input ref={nameRef} className="np-input" data-testid="np-name" value={name} disabled={busy}
+              placeholder="my-project" spellCheck={false} autoCapitalize="off" autoCorrect="off"
+              onChange={(e) => setName(e.currentTarget.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
+          </label>
+          <label className="np-field">
+            <span className="np-label">Location</span>
+            <div className="np-row">
+              <input className="np-input" data-testid="np-location" value={loc} disabled={busy}
+                spellCheck={false} autoCapitalize="off" autoCorrect="off"
+                onChange={(e) => setLoc(e.currentTarget.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
+              <button className="ctrl" data-testid="np-browse" disabled={busy}
+                onClick={async () => { const d = await onBrowse(); if (d) setLoc(d); }}>Browse…</button>
+            </div>
+          </label>
+          {/* The path is the point: two fields, one folder, said out loud
+              before anything is written. */}
+          <div className="np-path" data-testid="np-path">
+            will create <code>{full}</code>
+          </div>
+          {problem && <div className="sync-err" data-testid="np-error">{problem}</div>}
+          {!problem && error && <div className="sync-err" data-testid="np-error">{error}</div>}
+        </div>
+        <footer className="sync-foot">
+          <button className="ctrl" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="enter-btn" data-testid="np-create" disabled={!ready} onClick={submit}>
+            {busy ? "Creating…" : "Create"}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+/** "Import from hub…" — the workspace-level picker.
+ *
+ *  Every other sync surface hangs off a project ROW, which a project that is
+ *  not in the workspace does not have. That is exactly the state a brand-new
+ *  Mac is in: the drive holds everything and the app can see none of it. This
+ *  lists what the hub has, says where each one would land, and hands the pick
+ *  to the same preview/confirm modal every other sync goes through.
+ *
+ *  Module scope (CLAUDE.md) — App re-renders on every 3s refresh tick. */
+function ImportPicker({ list, loading, error, known, onPick, onClose }: {
+  list: HubList | null;
+  loading: boolean;
+  error: string;
+  /** Roots already in the workspace — those rows are dead, with the reason on
+   *  them: importing one would mirror --delete over a tree the user is using. */
+  known: Set<string>;
+  onPick: (p: HubProject) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const projects = list?.projects ?? [];
+  return (
+    <div className="scrim scrim-center" onClick={onClose}>
+      <div className="sync-modal" role="dialog" aria-label="Import from hub" data-testid="import-picker"
+        onClick={(e) => e.stopPropagation()}>
+        <header className="sync-h">
+          <b>Import from hub</b>
+          {list?.hub && <span className="sync-hub">{list.hub}</span>}
+        </header>
+        <div className="sync-body">
+          {loading && <div className="sync-pending" data-testid="import-loading">Reading the hub…</div>}
+          {error && <div className="sync-err" data-testid="import-error">{error}</div>}
+          {/* No hub is not an error — it is a drive that is not plugged in. It
+              reads as the reason, dimmed, with nothing to click. */}
+          {list && !list.hub && (
+            <div className="sync-skipped" data-testid="import-nohub">
+              {list.hub_error || "no hub found"}
+            </div>
+          )}
+          {list?.hub && projects.length === 0 && (
+            <div className="sync-skipped" data-testid="import-empty">
+              nothing has been pushed to this hub yet — run a push on the other Mac first
+            </div>
+          )}
+          {projects.map((p) => {
+            const here = known.has(p.local_root);
+            return (
+              <button
+                key={p.name}
+                className="import-row"
+                data-testid="import-row"
+                data-name={p.name}
+                data-known={here ? "1" : "0"}
+                disabled={here}
+                title={here ? "already in workspace" : `import into ${p.local_root}`}
+                onClick={() => onPick(p)}
+              >
+                <span className="import-name">{p.name}</span>
+                {here && <span className="import-tag" data-testid="import-known">already in workspace</span>}
+                <span className="import-dest">{p.local_root}</span>
+                <span className="import-when">
+                  {p.pushed_at
+                    ? `pushed ${ago(p.pushed_at) === "now" ? "just now" : `${ago(p.pushed_at)} ago`} from ${p.host || "?"}`
+                    : "never pushed"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <footer className="sync-foot">
+          <button className="ctrl" onClick={onClose}>Close</button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 // Module scope with props (CLAUDE.md): a component defined inside App() is a new
 // identity every render, so the checkbox below would lose its state — and the
 // modal re-renders on every refresh tick while an apply runs.
-function SyncModal({ dir, project, preview, loading, busy, error, live, done, sessions, onSessions, install, onInstall, progress, onConfirm, onClose }: {
+function SyncModal({ dir, project, adopt, preview, loading, busy, error, live, done, sessions, onSessions, install, onInstall, progress, onConfirm, onClose }: {
   dir: SyncDir;
   project: string;
+  /** Non-null ⇒ this is an IMPORT: the project has no tree here, and `dest` is
+   *  the path the transfer is about to create. Known from the picker, so it is
+   *  on screen before the preview returns. */
+  adopt: Adopt | null;
   preview: SyncPreview | null;
   loading: boolean;
   busy: boolean;
@@ -1429,15 +1624,26 @@ function SyncModal({ dir, project, preview, loading, busy, error, live, done, se
 
   const plan = preview?.plan;
   const deletes = plan?.deletes ?? 0;
-  const verb = dir === "push" ? "Push" : "Pull";
+  const verb = adopt ? "Import" : dir === "push" ? "Push" : "Pull";
   return (
     <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
-      <div className="sync-modal" role="dialog" aria-label={`Sync ${dir}`} onClick={(e) => e.stopPropagation()}>
+      <div className="sync-modal" role="dialog" aria-label={adopt ? `Import ${adopt.name}` : `Sync ${dir}`}
+        data-testid={adopt ? "import-modal" : "sync-modal"} onClick={(e) => e.stopPropagation()}>
         <header className="sync-h">
-          <b>Sync {dir} — {project}</b>
+          <b>{adopt ? `Import ${adopt.name}` : `Sync ${dir} — ${project}`}</b>
           {preview && <span className="sync-hub">{preview.hub}</span>}
         </header>
         <div className="sync-body">
+          {/* The destination is the WHOLE of what an import asks consent for:
+              a folder this Mac has never had, about to be created and filled
+              from a drive. It leads the modal, it is on screen from the first
+              frame (the picker knew it), and the preview only confirms it. */}
+          {adopt && (
+            <div className="sync-dest" data-testid="sync-dest">
+              <span className="sync-dest-l">will be created at</span>
+              <code className="sync-dest-p" data-testid="sync-dest-path">{preview?.dst || adopt.dest}</code>
+            </div>
+          )}
           {loading && <div className="sync-pending" data-testid="sync-pending">Previewing…</div>}
           {error && <div className="sync-err" data-testid="sync-error">{error}</div>}
           {done && <div className="sync-done" data-testid="sync-done">{done}</div>}
@@ -1579,7 +1785,9 @@ function App() {
   // backend call) and again after an apply, so the menu can name the hub it
   // would use and grey itself out when there is none.
   const [syncStatus, setSyncStatus] = useState<Record<string, SyncStatusView>>({});
-  const [sync, setSync] = useState<{ root: string; dir: SyncDir } | null>(null);
+  /** `adopt` non-null ⇒ an IMPORT: there is no local root yet, so `root` is ""
+   *  and the backend is addressed by hub NAME instead. */
+  const [sync, setSync] = useState<{ root: string; dir: SyncDir; adopt: Adopt | null } | null>(null);
   const [syncPrev, setSyncPrev] = useState<SyncPreview | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
@@ -1597,6 +1805,19 @@ function App() {
    *  the modal is re-rendered by every 3s refresh tick while a transfer runs, and
    *  state that far down would be at the mercy of any remount. */
   const [syncProg, setSyncProg] = useState<SyncProgressEvt | null>(null);
+  /** The New-project dialog (name + location). Separate from `initAsk`, which
+   *  is the OFFER made when an added folder turns out not to be a repo — this
+   *  one is the deliberate act, and it creates the folder too. */
+  const [npOpen, setNpOpen] = useState(false);
+  const [npBusy, setNpBusy] = useState(false);
+  const [npErr, setNpErr] = useState("");
+  /** The import picker (workspace-level, no project). Its own small state: the
+   *  hub listing is a different question from any project's sync status, and a
+   *  machine with an empty workspace has no project to hang it off. */
+  const [importOpen, setImportOpen] = useState(false);
+  const [importList, setImportList] = useState<HubList | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importErr, setImportErr] = useState("");
   // Per-project doctor state. Structurally identical to busyPaths/waitingPaths
   // (the house pattern for row decoration that is NOT in the snapshot) —
   // deliberately outside `Place`, because `Place.stack` is reserved for the infra
@@ -2486,6 +2707,54 @@ function App() {
       commitWs(await invoke<Workspace>("add_project", { dir }));
     } catch (e) { fail(e); }
   };
+  const openNewProject = () => {
+    closeCtx();
+    setNpErr("");
+    setNpOpen(true);
+  };
+  /** Browse… inside the dialog: the native picker fills the LOCATION FIELD and
+   *  nothing else. It answers "which folder does this go in", never "create
+   *  this" — the field stays the thing the Create button reads. */
+  const browseLocation = async (): Promise<string | null> => {
+    try {
+      const dir = await open({ directory: true, title: "Where should the project live?" });
+      return typeof dir === "string" ? dir : null;
+    } catch (e) { fail(e); return null; }
+  };
+  /** `<location>/<name>` — created, `git init`-ed with a first commit and added
+   *  to the workspace by one backend command (which re-validates both fields,
+   *  refuses an existing target, and reuses the same `init_repo` path the
+   *  add-a-plain-folder offer runs). Errors stay IN the dialog: the fields that
+   *  caused them are still on screen and still editable. */
+  const createProject = async (location: string, name: string) => {
+    setNpBusy(true);
+    setNpErr("");
+    try {
+      setErr("");
+      commitWs(await invoke<Workspace>("create_project", { location, name }));
+      setNpOpen(false);
+    } catch (e) {
+      setNpErr(String((e as { message?: string })?.message ?? e));
+      fail(e);
+    } finally {
+      setNpBusy(false);
+    }
+  };
+  /** Where a new project should go, in order: the folder this workspace's
+   *  projects already share (one answer for most people, and the right one), or
+   *  `~/workspace` — a tilde path on purpose, since the backend expands it and
+   *  it reads as a path rather than as somebody's username. */
+  const defaultLocation = useMemo(() => {
+    const parents = (ws?.projects ?? [])
+      .map((p) => p.root.slice(0, p.root.lastIndexOf("/")))
+      .filter(Boolean);
+    const counts = new Map<string, number>();
+    for (const p of parents) counts.set(p, (counts.get(p) ?? 0) + 1);
+    let best = "";
+    let n = 0;
+    for (const [p, c] of counts) if (c > n) { best = p; n = c; }
+    return best || "~/workspace";
+  }, [ws]);
   const initRepo = async (dir: string) => {
     try {
       setErr("");
@@ -2728,11 +2997,15 @@ function App() {
     // Re-read on every open: a hub is a drive someone plugs in and pulls out.
     loadSyncStatus(root);
   };
-  const openSync = (root: string, dir: SyncDir) => {
+  /** Open the modal and fetch its preview. `adopt` non-null addresses the
+   *  backend by hub NAME (there is no local root yet); everything downstream —
+   *  the modal, the confirm, the progress bar — is the same code path, which is
+   *  the point: an import is a pull that happens to have no row yet. */
+  const openSyncFor = (root: string, dir: SyncDir, adopt: Adopt | null) => {
     // Also what closes the popover: an open menu must never survive under a
     // modal (closeCtx's contract, which also disarms any two-click confirm).
     closeCtx();
-    setSync({ root, dir });
+    setSync({ root, dir, adopt });
     setSyncPrev(null);
     setSyncErr("");
     setSyncDone("");
@@ -2740,14 +3013,24 @@ function App() {
     setSyncProg(null);
     setSyncInstall(false);
     setSyncLoading(true);
-    invoke<SyncPreview>("sync_preview", { repo: root, direction: dir, withSessions: settings.sync_with_sessions })
+    invoke<SyncPreview>("sync_preview", {
+      repo: adopt ? null : root,
+      name: adopt ? adopt.name : null,
+      direction: dir,
+      withSessions: settings.sync_with_sessions,
+    })
       .then((p) => { setSyncPrev(p); setSyncLive(p.live_sessions); })
       // In the modal, not the banner: it is the answer to the question the modal
       // just asked. Logged too — `fail`'s job — so it is never only on screen.
       .catch((e) => { setSyncErr(String((e as { message?: string })?.message ?? e)); fail(e); })
       .finally(() => setSyncLoading(false));
   };
+  const openSync = (root: string, dir: SyncDir) => openSyncFor(root, dir, null);
   const closeSync = () => {
+    // Cancelling an IMPORT goes back to the picker it came from — the reason to
+    // cancel is usually "wrong project", and the list is the answer to that.
+    // Never after a completed one: the project is in the nav now.
+    const back = !!sync?.adopt && !syncDone && !syncBusy;
     setSync(null);
     setSyncPrev(null);
     setSyncErr("");
@@ -2755,7 +3038,45 @@ function App() {
     setSyncLive([]);
     setSyncProg(null);
     setSyncInstall(false);
+    if (back) setImportOpen(true);
   };
+  // ── import from hub (adoption: a project the workspace has never had) ──
+  const openImport = () => {
+    closeCtx();
+    setImportOpen(true);
+    setImportList(null);
+    setImportErr("");
+    setImportLoading(true);
+    invoke<HubList>("sync_hub_list")
+      .then((l) => setImportList(l))
+      .catch((e) => { setImportErr(String((e as { message?: string })?.message ?? e)); fail(e); })
+      .finally(() => setImportLoading(false));
+  };
+  /** Pick one → the same modal every sync goes through, in adoption mode. The
+   *  picker closes: two stacked scrims would hide which question is being
+   *  answered. */
+  const pickImport = (p: HubProject) => {
+    setImportOpen(false);
+    openSyncFor("", "pull", { name: p.name, dest: p.local_root });
+  };
+  /** The nav footer's add menu — the one place a project arrives from, whichever
+   *  of the three ways it arrives by. Anchored to the button and rendered
+   *  through `CtxMenu`, which clamps it INTO the viewport: opened from a button
+   *  on the bottom edge that means it opens upward, over the footer, rather
+   *  than off the bottom of the window. */
+  const openAddMenu = (e: React.MouseEvent) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setMenu(null);
+    setConfirmRm(null);
+    setCtx({ kind: "add", x: r.left, y: r.top });
+  };
+  /** Roots the workspace already tracks — a hub project pointing at one of them
+   *  is not importable (it is already here, and importing would mirror
+   *  --delete over it). The row says so instead of failing later. */
+  const knownRoots = useMemo(
+    () => new Set((ws?.projects ?? []).map((p) => p.root)),
+    [ws],
+  );
   // `confirmed` says a HUMAN was shown the live sessions — the modal's warning
   // block IS that showing. Core re-lists them at apply time, so a session that
   // started since comes back as a fresh question rather than being mirrored over.
@@ -2770,7 +3091,9 @@ function App() {
     const onProgress = new Channel<SyncProgressEvt>();
     onProgress.onmessage = (p) => setSyncProg(p);
     const r = await runCmd("sync_apply", {
-      repo: sync.root, direction: sync.dir, withSessions: settings.sync_with_sessions,
+      repo: sync.adopt ? null : sync.root,
+      name: sync.adopt ? sync.adopt.name : null,
+      direction: sync.dir, withSessions: settings.sync_with_sessions,
       confirmed: syncLive.length > 0, install: sync.dir === "pull" && syncInstall,
       onProgress,
     });
@@ -2782,9 +3105,16 @@ function App() {
       setSyncLive((r.needs_confirm ?? "").split("\n").filter(Boolean));
       return;
     }
+    // A half-succeeded import lands here too (transfer ok, workspace add failed):
+    // the backend reports it as a failed CmdResult whose text says which half
+    // worked, and that text is what the modal shows.
     if (!r.ok) { setSyncErr(r.output || `sync ${sync.dir} failed (exit ${r.code})`); return; }
     setSyncDone(r.output);
-    loadSyncStatus(sync.root); // the push stamp the next menu shows
+    // An import's new project is now in the workspace (runCmd already refreshed,
+    // and `places:changed` re-pulls again): the picker's listing is stale, and
+    // the row it was offering is a row in the nav now.
+    if (sync.adopt) setImportOpen(false);
+    else loadSyncStatus(sync.root); // the push stamp the next menu shows
   };
   const placeCtx = (e: React.MouseEvent, repo: string, p: Place) => {
     e.preventDefault();
@@ -3724,7 +4054,10 @@ function App() {
         <button className="rail-icon" title={settings.nav_collapsed ? `show nav — ${lens} (⌘B)` : "hide nav (⌘B)"} onClick={toggleNav}>
           {settings.nav_collapsed ? <Icons.PanelLeftOpen size={17} /> : <Icons.PanelLeftClose size={17} />}
         </button>
-        <button className="rail-icon" title="add project" onClick={addProject}><Icons.FolderPlus size={17} /></button>
+        {/* The same three-way menu as the footer's: with the nav collapsed this
+            is the ONLY way in, and a shortcut that silently answers one of the
+            three questions is the inconsistency the menu exists to remove. */}
+        <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
         <button className={"rail-icon" + (updateAvail ? " upd" : "")} title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
       </nav>
 
@@ -3804,7 +4137,12 @@ function App() {
         {/* Claude plan usage — nav-only by design: no rail affordance, it rides
             out ⌘B inside the hidden nav (and keeps polling, one call/180s). */}
         <UsageWidget onError={fail} />
-        <button className="add-footer with-icon" onClick={addProject}><Icons.Plus size={13} /> Add project</button>
+        {/* One footer row, three ways in (menu below). It no longer picks a
+            folder on click: "add a project" is a question with three answers
+            now, and the folder pick is only one of them. */}
+        <button className="add-footer with-icon" data-testid="add-menu-open" onClick={openAddMenu}>
+          <Icons.Plus size={13} /> Add project<span className="add-caret">▾</span>
+        </button>
         <div className="nav-resizer" onMouseDown={onResize} />
       </aside>
 
@@ -4018,7 +4356,18 @@ function App() {
                     <div className="home-tag">a place for every work stream</div>
                   </div>
                 </div>
-                <button className="enter-btn big home-open with-icon" onClick={addProject}><Icons.Plus size={15} /> Open a project</button>
+                {/* The two moments a workspace starts from: a new user makes a
+                    project, a new MACHINE imports one it already owns. Adding a
+                    repo that is already on disk is the third way in and lives in
+                    the nav footer's menu, one click away, beside these. */}
+                <div className="home-actions">
+                  <button className="enter-btn big home-open with-icon" data-testid="new-project-home" onClick={openNewProject}>
+                    <Icons.Plus size={15} /> New project…
+                  </button>
+                  <button className="ctrl home-import with-icon" data-testid="import-open-home" onClick={openImport}>
+                    <Icons.Import size={13} /> Import from hub…
+                  </button>
+                </div>
                 <div className="chips">
                   <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
                   <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
@@ -4266,10 +4615,31 @@ function App() {
           </aside>
         </div>
       )}
+      {npOpen && (
+        <NewProjectDialog
+          defaultLocation={defaultLocation}
+          busy={npBusy}
+          error={npErr}
+          onBrowse={browseLocation}
+          onCreate={createProject}
+          onClose={() => { setNpOpen(false); setNpErr(""); }}
+        />
+      )}
+      {importOpen && (
+        <ImportPicker
+          list={importList}
+          loading={importLoading}
+          error={importErr}
+          known={knownRoots}
+          onPick={pickImport}
+          onClose={() => setImportOpen(false)}
+        />
+      )}
       {sync && (
         <SyncModal
           dir={sync.dir}
-          project={basename(sync.root)}
+          project={sync.adopt ? sync.adopt.name : basename(sync.root)}
+          adopt={sync.adopt}
           preview={syncPrev}
           loading={syncLoading}
           busy={syncBusy}
@@ -4369,6 +4739,22 @@ function App() {
               )}
             </>
           )}
+        </CtxMenu>
+      )}
+
+      {/* ── the nav footer's add menu (opens upward: CtxMenu clamps it in) ── */}
+      {ctx?.kind === "add" && (
+        <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
+          <div className="pop-hint">add a project</div>
+          {/* Each item closes the menu FIRST: the folder dialog is native and
+              modal, and a popover left open under it is still open when it
+              returns (closeMenu discipline). */}
+          <button className="pop-item" data-testid="add-new"
+            onClick={openNewProject}>New project…</button>
+          <button className="pop-item" data-testid="add-existing"
+            onClick={() => { closeCtx(); addProject(); }}>Add existing…</button>
+          <button className="pop-item" data-testid="add-import"
+            onClick={() => { closeCtx(); openImport(); }}>Import from hub…</button>
         </CtxMenu>
       )}
 

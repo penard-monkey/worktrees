@@ -76,7 +76,8 @@ const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : 
 // idiom as ?slowlist:
 //   ?slowsync[=ms]  delay all three commands (the modal's pending state) AND
 //                   spread the apply's progress events across that window
-//   ?nohub          nothing mounted — the menu items are disabled with a reason
+//   ?nohub          nothing mounted — the menu items are disabled with a reason,
+//                   and the import picker shows the reason with nothing to click
 //   ?hubcopy        this checkout IS a hub copy — the whole group is disabled
 //   ?synclive       a live tmux session in the pull destination (Guard B)
 //   ?openrsync      the system rsync: no v3, so NO progress events at all and no
@@ -113,6 +114,14 @@ const MOCK_PROGRESS: { percent: number; rate: string; current: string }[] = [
 ];
 const HUB_MISSING = "no external volume mounted; plug in the SSD or pass --hub PATH";
 const syncName = (repo: string) => repo.split("/").filter(Boolean).pop() || repo;
+/** What `sync_hub_list` reports: every project pushed to this drive, from any
+ *  machine. `worktrees` is already in the workspace fixture (its row is dead —
+ *  importing it would mirror over a tree that is here); `sidekick` is the one a
+ *  brand-new Mac would actually adopt. */
+const MOCK_HUB_PROJECTS = [
+  { name: "worktrees", local_root: "/Users/demo/workspace/worktrees", pushed_at: now() - 3600, host: "othermac" },
+  { name: "sidekick", local_root: "/Users/demo/workspace/sidekick", pushed_at: now() - 86400 * 2, host: "othermac" },
+];
 function dirKind(dir: string): "repo" | "empty" | "unborn" {
   if (mockInited.has(dir) || findProject(dir)) return "repo";
   const base = dir.split("/").pop() || dir;
@@ -570,6 +579,23 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       mockInited.add(args.repo as string);
       const pv = findProject(args.repo);
       if (pv?.snapshot) pv.snapshot.unborn = false;
+      return clone(ws);
+    }
+    // `<location>/<name>` created + git init + first commit + added, in one
+    // backend act (lib.rs::create_project). The refusals it can answer with are
+    // the reason the dialog has an inline error at all, so the one a harness can
+    // reach — the target already exists — is modelled: any fixture project's
+    // path, or a dir a previous create already made.
+    case "create_project": {
+      const loc = String(args.location ?? "").trim().replace(/\/+$/, "");
+      const name = String(args.name ?? "").trim();
+      const dir = `${loc}/${name}`;
+      if (findProject(dir) || mockInited.has(dir)) {
+        throw new Error(`${dir} already exists — pick another name or location.`);
+      }
+      mockInited.add(dir); // a real repo from here on (probe_dir/dirKind agree)
+      await mockInvoke("add_project", { dir });
+      emitEvent("places:changed", {});
       return clone(ws);
     }
     case "add_project": {
@@ -1089,12 +1115,39 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           : null,
       };
     }
+    // The hub's own listing — the ONE sync call with no project, and the only
+    // one an empty workspace can make. Mirrors core's StatusJson at hub scope.
+    case "sync_hub_list": {
+      await sleep(mockSyncDelayMs);
+      return {
+        schema_version: 1,
+        scope: "hub",
+        name: null,
+        local_root: null,
+        rsync: mockOpenRsync ? "/usr/bin/rsync" : "/opt/homebrew/bin/rsync",
+        rsync_v3: !mockOpenRsync,
+        hub: mockNoHub ? null : MOCK_HUB,
+        hub_error: mockNoHub ? HUB_MISSING : null,
+        branch: null,
+        dirty: null,
+        pushed_at: null,
+        pushed_host: null,
+        hint: null,
+        projects: mockNoHub ? [] : clone(MOCK_HUB_PROJECTS),
+      };
+    }
     case "sync_preview": {
       await sleep(mockSyncDelayMs);
       if (mockNoHub) throw new Error(HUB_MISSING);
-      const repo = args.repo as string;
-      const dir = args.direction as string;
-      const name = syncName(repo);
+      // An IMPORT addresses the backend by hub name: there is no local root
+      // yet, and the destination comes from the manifest (mocked as the
+      // fixture's local_root) rather than from anything already on screen.
+      const adoptName = args.repo ? null : (args.name as string | undefined) ?? null;
+      const adopted = adoptName ? MOCK_HUB_PROJECTS.find((p) => p.name === adoptName) : null;
+      if (adoptName && !adopted) throw new Error(`hub has no push for '${adoptName}'`);
+      const repo = adopted ? adopted.local_root : (args.repo as string);
+      const dir = adopted ? "pull" : (args.direction as string);
+      const name = adopted ? adopted.name : syncName(repo);
       const hubTree = `${MOCK_HUB}/${name}/${name}`;
       return {
         name,
@@ -1102,11 +1155,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         hub: MOCK_HUB,
         src: dir === "push" ? repo : hubTree,
         dst: dir === "push" ? hubTree : repo,
-        plan: {
-          sends: 12,
-          deletes: 2,
-          delete_paths: ["docs/old-spec.md", "tools/gen.sh"],
-        },
+        adopting: !!adopted,
+        // An adoption lands in a directory that does not exist yet, so EVERY
+        // file is a send and nothing can be deleted — the modal's danger
+        // styling must not fire on an import that cannot destroy anything.
+        plan: adopted
+          ? { sends: 214, deletes: 0, delete_paths: [] as string[] }
+          : { sends: 12, deletes: 2, delete_paths: ["docs/old-spec.md", "tools/gen.sh"] },
         // openrsync can report neither the hiding list nor progress — one flag
         // in the payload, two absences in the UI.
         skipped: mockOpenRsync ? [] : ([["node_modules/", 41], ["target/", 6], ["*.log", 3]] as [string, number][]),
@@ -1135,9 +1190,11 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           try { ch?.onmessage?.(p); } catch { /* frontend gone */ }
         }
       }
-      const repo = args.repo as string;
-      const dir = args.direction as string;
-      const name = syncName(repo);
+      const adoptName = args.repo ? null : (args.name as string | undefined) ?? null;
+      const adopted = adoptName ? MOCK_HUB_PROJECTS.find((p) => p.name === adoptName) : null;
+      const repo = adopted ? adopted.local_root : (args.repo as string);
+      const dir = adopted ? "pull" : (args.direction as string);
+      const name = adopted ? adopted.name : syncName(repo);
       if (mockSyncFailNext) {
         mockSyncFailNext = false;
         return {
@@ -1145,7 +1202,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           output: 'rsync failed (exit 23): rsync: [sender] send_files failed to open "/Volumes/MockSSD/.tmp": Permission denied (13)',
         };
       }
-      const live = dir === "pull" && mockSyncLive ? ["wt-mock-a"] : [];
+      const live = dir === "pull" && mockSyncLive && !adopted ? ["wt-mock-a"] : [];
       if (live.length && !args.confirmed) {
         return {
           ok: false, code: 4, warnings: [],
@@ -1156,10 +1213,20 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       if (dir === "push") mockPushed[repo] = { at: now(), host: "mock-mbp" };
       // A pull rewrote the tree: same event lib.rs emits, so the nav re-pulls.
       else emitEvent("places:changed", {});
-      return {
-        ok: true, code: 0, warnings: [],
-        output: `sync ${dir} — ${name}: 12 sent/updated, 2 deleted`,
-      };
+      const lines = [
+        adopted
+          ? `sync pull — ${name}: 214 sent/updated, 0 deleted`
+          : `sync ${dir} — ${name}: 12 sent/updated, 2 deleted`,
+      ];
+      // An adoption's second half, exactly as lib.rs does it: the imported tree
+      // is added to the workspace through the same `add_project` path the
+      // button uses, and only then does the nav have a row for it.
+      if (adopted) {
+        await mockInvoke("add_project", { dir: adopted.local_root });
+        lines.push(`added to the workspace: ${adopted.local_root}`);
+        emitEvent("places:changed", {});
+      }
+      return { ok: true, code: 0, warnings: [], output: lines.join("\n") };
     }
 
     case "init_suggest":

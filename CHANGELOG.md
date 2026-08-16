@@ -66,6 +66,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - A pull offers to **run your rebuild** afterwards, as a checkbox that names the
   command (`[sync.projects.<name>] install`), and only when you have registered
   one. Unticked by default: running a build is an act, not a preference.
+- **One way in for projects, three ways to arrive.** *Add project* (nav footer,
+  and the rail's folder button) now opens a menu: **New project…**, **Add
+  existing…** (today's pick-a-repo behaviour, one item deep) and **Import from
+  hub…**. The Home screen keeps the two that start a workspace — new project and
+  import — since a new *user* creates and a new *machine* imports.
+- **New project… makes the folder for you.** A name, a location you can type,
+  paste or *Browse…* to (prefilled with the folder your projects already share),
+  and the full path spelled out under the fields as you type it — then one act
+  creates the directory, `git init`s it with an empty first commit and adds it to
+  the workspace. A folder picker could only ever choose something that already
+  existed, so "new project" used to mean making the directory in Finder first.
+  Names that would steer a path (`/`, `..`, a leading dot, whitespace) are
+  refused as you type *and* again in the backend, and a target that already
+  exists is never written into — if it is a git repo the error says to use *Add
+  existing…* instead.
+- **Import a project from the hub — in the app.** *Import from hub…* lists every
+  project the drive holds: where each
+  one will land, when it was last pushed and from which Mac. Ones already in your
+  workspace are there but dead, labelled *already in workspace*. Picking one
+  opens the same preview/confirm modal every sync uses, headed by **the folder it
+  is about to create** — a path this Mac has never had, which is exactly why it
+  leads the modal — and confirming transfers it, with the same live progress bar,
+  then adds it to the workspace so a row appears in the nav. This is the flow a
+  brand-new Mac needs: until now the app's sync surface hung off a project row,
+  and a project that is not in the workspace has no row. If the transfer lands
+  but the workspace add fails, it says so — which half worked, and what to do —
+  instead of reporting a clean success or a clean failure. With no drive
+  mounted, the picker says why and offers nothing to click.
 
 ### Fixed
 - The hub-copy guard now also covers the **app** and **`worktrees mcp`**. Both

@@ -1487,14 +1487,51 @@ fn after_pull(
 // stdin. Everything below runs the SAME `resolve_ctx`/`prepare`/`preview`/
 // `apply` the CLI does, so a guard cannot hold on one surface and not the other.
 
+/// Which project a sync is about, and how the engine is meant to find it.
+///
+/// The two arms are the two situations that exist: a project that is HERE (the
+/// app knows its root), and a project that is only on the hub — a machine that
+/// has never seen it. The second is adoption, and it is the only case where a
+/// destination comes from the manifest rather than from something the user is
+/// already looking at.
+pub enum SyncSource {
+    /// A project on this machine. Nothing here reads the cwd.
+    Root(PathBuf),
+    /// Adoption by name: `<hub>/<name>/.worktrees-sync.toml` supplies the
+    /// destination. PULL only — see `SyncRequest::locate`.
+    HubName(String),
+}
+
 pub struct SyncRequest {
-    /// Project root. The app always knows it; nothing here reads the cwd.
-    pub root: PathBuf,
+    pub source: SyncSource,
     pub direction: SyncDirection,
     /// `None` = the normal chain (`$WORKTREES_SYNC_HUB` → `[sync] hub` → autodetect).
     pub hub: Option<String>,
     /// `None` = the user's `[sync] with_sessions` default.
     pub with_sessions: Option<bool>,
+}
+
+impl SyncRequest {
+    /// `resolve_ctx`'s first two arguments: a directory to discover a project
+    /// from, and a name to adopt. Exactly one of them is ever `Some`.
+    ///
+    /// Adoption is PULL ONLY. A push sends a tree that exists on this machine,
+    /// and a name with no tree here has none to send — so the refusal is here,
+    /// naming the actual problem, rather than one layer down in `resolve_ctx`
+    /// where the message ("cd into the repo you want to push") is written for
+    /// someone standing in a terminal.
+    fn locate(&self) -> Result<(Option<&Path>, Option<&str>), String> {
+        match &self.source {
+            SyncSource::Root(p) => Ok((Some(p.as_path()), None)),
+            SyncSource::HubName(n) if self.direction == SyncDirection::Pull => {
+                Ok((None, Some(n.as_str())))
+            }
+            SyncSource::HubName(n) => Err(format!(
+                "'{n}' is a project on the hub, not one on this machine — there is nothing here to push. \
+                 Import it first (pull), then push from the copy."
+            )),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1503,7 +1540,13 @@ pub struct SyncPreviewOut {
     pub direction: &'static str,
     pub hub: String,
     pub src: String,
+    /// Where the transfer LANDS. For an adoption that is the manifest's
+    /// `local_root` — a path this machine has never had a tree at, which is why
+    /// the app shows it prominently: it is the whole of what the user consents
+    /// to when they confirm.
     pub dst: String,
+    /// This project has no tree here yet; `dst` is about to become one.
+    pub adopting: bool,
     pub plan: SyncPlan,
     /// Exclude patterns and how many paths each hid. Empty on openrsync, which
     /// cannot report it at all — `skipped_available` is how a caller tells the
@@ -1527,7 +1570,11 @@ pub struct SyncApplyOut {
     pub direction: &'static str,
     pub hub: String,
     pub src: String,
+    /// Where it landed — the adoption destination for an adoption, and what the
+    /// app hands to "add this to the workspace".
     pub dst: String,
+    /// The tree at `dst` is NEW to this machine (adoption).
+    pub adopting: bool,
     pub plan: SyncPlan,
     /// Non-empty with `applied == false` means Guard B stopped the transfer.
     pub live_sessions: Vec<String>,
@@ -1542,11 +1589,12 @@ pub struct SyncApplyOut {
 pub fn sync_preview(req: &SyncRequest) -> Result<SyncPreviewOut, String> {
     let mut ui = CaptureUi::default();
     let cfg = config::sync_cfg();
+    let (from, name_arg) = req.locate()?;
     let ctx = resolve_ctx(
         &mut ui,
         req.direction,
-        Some(&req.root),
-        None,
+        from,
+        name_arg,
         req.hub.as_deref(),
         req.with_sessions,
         &cfg,
@@ -1565,6 +1613,7 @@ pub fn sync_preview(req: &SyncRequest) -> Result<SyncPreviewOut, String> {
         hub: ctx.hub.to_string_lossy().into_owned(),
         src: prep.job.src.to_string_lossy().into_owned(),
         dst: prep.job.dst.to_string_lossy().into_owned(),
+        adopting: ctx.adopting,
         plan,
         skipped: skipped_pats,
         skipped_available: ctx.rsync.v3,
@@ -1595,11 +1644,12 @@ pub fn sync_apply(
 ) -> Result<SyncApplyOut, String> {
     let mut ui = CaptureUi::default();
     let cfg = config::sync_cfg();
+    let (from, name_arg) = req.locate()?;
     let ctx = resolve_ctx(
         &mut ui,
         req.direction,
-        Some(&req.root),
-        None,
+        from,
+        name_arg,
         req.hub.as_deref(),
         req.with_sessions,
         &cfg,
@@ -1615,6 +1665,7 @@ pub fn sync_apply(
         hub: ctx.hub.to_string_lossy().into_owned(),
         src: job.src.to_string_lossy().into_owned(),
         dst: job.dst.to_string_lossy().into_owned(),
+        adopting: ctx.adopting,
         plan: plan.clone(),
         needs_confirm: !applied,
         applied,
@@ -2326,7 +2377,7 @@ building file list
 
         for dir in [SyncDirection::Push, SyncDirection::Pull] {
             let req = SyncRequest {
-                root: root.clone(),
+                source: SyncSource::Root(root.clone()),
                 direction: dir,
                 hub: Some(d.join("hub").to_string_lossy().into_owned()),
                 with_sessions: Some(false),
@@ -2336,6 +2387,98 @@ building file list
             let e = sync_apply(&req, true, false, None).err().expect("apply refused");
             assert!(e.contains("hub copy"), "{e}");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A hub layout as a push leaves it: `<hub>/<name>/.worktrees-sync.toml`
+    /// beside `<hub>/<name>/<name>/`. Returns (hub, destination) — the
+    /// destination deliberately does NOT exist, because a brand-new machine's
+    /// never does.
+    fn hub_with_one_project(d: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let hub = d.join("hub");
+        let dest = d.join("dest").join(name);
+        let tree = hub.join(name).join(name);
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        std::fs::write(tree.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(
+            hub.join(name).join(MANIFEST),
+            format!(
+                "schema = 1\nname = \"{name}\"\nlocal_root = \"{}\"\npushed_at = 1700000000\nhost = \"othermac\"\n",
+                dest.display()
+            ),
+        )
+        .unwrap();
+        (hub, dest)
+    }
+
+    /// Adoption's whole point: the machine has no tree, so the DESTINATION is
+    /// the manifest's `local_root` and nothing else knows it. The app puts that
+    /// path in front of the user before it writes there — a preview that did not
+    /// carry it would leave the modal asking for consent to an unnamed path.
+    #[test]
+    fn an_adoption_preview_carries_the_destination_from_the_manifest() {
+        let d = tmp("adoptpreview");
+        let (hub, dest) = hub_with_one_project(&d, "proj");
+        let req = SyncRequest {
+            source: SyncSource::HubName("proj".into()),
+            direction: SyncDirection::Pull,
+            hub: Some(hub.to_string_lossy().into_owned()),
+            with_sessions: Some(false),
+        };
+        let out = sync_preview(&req).expect("adoption preview");
+        assert!(out.adopting, "an adoption must say so");
+        assert_eq!(out.dst, dest.to_string_lossy(), "destination is the manifest's local_root");
+        assert_eq!(out.src, hub.join("proj").join("proj").to_string_lossy());
+        assert_eq!(out.name, "proj");
+        // the tree is entirely new here, so everything in it is a send
+        assert!(out.plan.sends >= 2, "sends={}", out.plan.sends);
+        assert_eq!(out.plan.deletes, 0);
+        assert!(!dest.exists(), "a preview writes nothing");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The app's import, end to end: `sync_apply` by hub NAME must create the
+    /// destination and fill it. The CLI's adoption is covered by `test/sync.bats`
+    /// against fake shims; this is the programmatic path with a real rsync, and
+    /// it is what the app's "add this to the workspace" step is handed.
+    #[test]
+    fn an_adoption_apply_creates_the_destination_and_fills_it() {
+        let d = tmp("adoptapply");
+        let (hub, dest) = hub_with_one_project(&d, "proj");
+        let req = SyncRequest {
+            source: SyncSource::HubName("proj".into()),
+            direction: SyncDirection::Pull,
+            hub: Some(hub.to_string_lossy().into_owned()),
+            with_sessions: Some(false),
+        };
+        let out = sync_apply(&req, false, false, None).expect("adoption apply");
+        assert!(out.applied && !out.needs_confirm);
+        assert!(out.adopting);
+        assert_eq!(out.dst, dest.to_string_lossy());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("src").join("main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Adoption is pull-only. Push-by-name is refused BEFORE rsync is looked for
+    /// or a hub is resolved (the hub path here does not exist), so the message
+    /// is the reason rather than a missing drive.
+    #[test]
+    fn a_push_by_hub_name_is_refused_because_there_is_nothing_here_to_push() {
+        let d = tmp("adoptpush");
+        let req = SyncRequest {
+            source: SyncSource::HubName("proj".into()),
+            direction: SyncDirection::Push,
+            hub: Some(d.join("no-such-hub").to_string_lossy().into_owned()),
+            with_sessions: Some(false),
+        };
+        let e = sync_preview(&req).err().expect("preview refused");
+        assert!(e.contains("nothing here to push"), "{e}");
+        assert!(e.contains("proj"), "{e}");
+        let e = sync_apply(&req, true, false, None).err().expect("apply refused");
+        assert!(e.contains("nothing here to push"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
