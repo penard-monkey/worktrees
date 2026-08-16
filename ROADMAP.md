@@ -306,6 +306,14 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   liveness are the untested-in-prod paths).
   _From: [2026-07-27 settings session](docs/sessions/2026-07-27-settings-and-audits/summary.md)_
 
+- **Does a parked `waiting` probe pin the amber dot too?** The park-residue fix
+  (#140) guards the `busy` arm of `claude_activity` only. If a session can be
+  parked while its status is `waiting`, the same stale-status residue would pin
+  an amber "needs input" dot forever — one word to fix (`"waiting" if
+  !delegated`), but no probe on this machine has ever shown that shape and it is
+  unknown whether the CLI even allows parking from a blocked prompt. Find out
+  before adding the guard; a wrong guess darkens a dot that should be lit.
+
 - **Nav / settings backlog (from 2026-07-27 audits)** — verified but not-yet-done
   items from the settings evaluation + ctx-menu audit. Full detail in that
   session's archived `findings.md` (`planning.tar.gz`). In rough priority:
