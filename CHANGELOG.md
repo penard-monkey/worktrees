@@ -61,9 +61,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Parking a turn that is mid-flight rewrites that session's probe file with the
   job id but leaves its status at `busy`, and nothing ever writes it again —
   two places here sat green for 22h and 32h next to sessions idling at a prompt.
-  A probe whose last write did not set the status it carries no longer lights the
-  dot; while the parked job really is running, its own session lights the same
-  place, and a new turn in a session that once parked a job lights it as before.
+  A parked session whose last write did not set the status it carries no longer
+  lights the dot; while the parked job really is running, its own session lights
+  the same place, and a new turn in a session that once parked a job lights it
+  as before.
 
 ## [0.14.0] - 2026-08-14
 
