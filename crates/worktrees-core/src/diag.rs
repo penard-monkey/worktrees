@@ -137,6 +137,16 @@ pub enum Code {
     /// see `ops::live_session`) — this is the finding that stops that adoption
     /// from being invisible magic.
     SessionDrift,
+    // sync — the tree you are standing in
+    /// This checkout is a COPY that rode in on a sync hub (`sync::hub_copy_of`):
+    /// the manifest beside it names another machine's path as the project's home.
+    /// Its `.git` registers worktrees at paths that exist only there, so mutating
+    /// it can act on the wrong repo — every mutating command refuses, and this is
+    /// how `doctor` says why. ⚠ Not in §7's slug list: §7 predates `sync`, and
+    /// every other code here is about drift WITHIN a repo, while this one is
+    /// about which repo you are in. Error, not Warn: there is nothing to route
+    /// around, and a clean report would read as "fine to work here".
+    HubCopy,
     /// An invariant this tool is supposed to guarantee did not hold. ⚠ Not in
     /// §7's slug list either: it exists so an internal inconsistency is REPORTED
     /// rather than turned into a silent skip, which is the failure class the
@@ -259,6 +269,7 @@ mod tests {
             (Code::UnknownKey, "unknown-key"),
             (Code::PrefixMismatch, "prefix-mismatch"),
             (Code::SessionDrift, "session-drift"),
+            (Code::HubCopy, "hub-copy"),
             (Code::Internal, "internal"),
         ] {
             assert_eq!(serde_json::to_string(&c).unwrap(), format!("\"{s}\""));

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::config::{self, SyncCfg};
+use crate::diag::{Code, Finding};
 use crate::git;
 use crate::project::Project;
 use crate::sysclock;
@@ -267,6 +268,101 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     parse_manifest(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+// ── guard A: this tree is a hub copy ─────────────────────────────────────────
+
+/// The manifest that proves `root` is a tree which ARRIVED on a hub —
+/// `<hub>/<name>/<name>`, with the push manifest sitting in its parent.
+///
+/// A hub copy is a mirror of another machine: its `.git` registers worktrees at
+/// that machine's absolute paths, so `worktree prune` inside it can unregister
+/// the wrong repo's worktrees (the source script's worst documented gotcha), and
+/// every other mutating op writes into a tree the next `pull` will overwrite.
+///
+/// The fast path is one failed read: a project whose parent holds no manifest is
+/// out before anything is parsed. All three conditions have to hold — the file
+/// parses, it is ABOUT this directory, and it says the project lives somewhere
+/// ELSE. The last one is not paranoia: without it a tree standing at its own
+/// declared native path would be refused with advice to go where it already is.
+pub fn hub_copy_of(root: &Path) -> Option<Manifest> {
+    let text = std::fs::read_to_string(root.parent()?.join(MANIFEST)).ok()?;
+    let m = parse_manifest(&text).ok()?;
+    (m.name == basename(root) && !same_dir(&m.local_root, root)).then_some(m)
+}
+
+fn same_dir(a: &str, b: &Path) -> bool {
+    a.trim_end_matches('/') == b.to_string_lossy().trim_end_matches('/')
+}
+
+fn pushed_from(m: &Manifest) -> &str {
+    if m.host.is_empty() {
+        "another machine"
+    } else {
+        &m.host
+    }
+}
+
+/// What a mutating command prints inside a hub copy: what this tree is, and the
+/// one way out — the path where the project natively lives.
+pub fn hub_copy_refusal(root: &Path) -> Option<String> {
+    hub_copy_of(root).map(|m| {
+        format!(
+            "this is a hub copy (pushed from {}) — run worktrees at the native path: {}",
+            pushed_from(&m),
+            m.local_root
+        )
+    })
+}
+
+/// `doctor`'s half of the same guard. `Error`, not `Warn`: this is not drift the
+/// tool routes around — every mutating command refuses here, so a clean report
+/// would be telling the user the tree is fine to work in.
+pub fn hub_copy_finding(root: &Path) -> Option<Finding> {
+    hub_copy_of(root).map(|m| {
+        Finding::error(
+            Code::HubCopy,
+            format!(
+                "this checkout is a hub copy (pushed from {}) — mutating commands are refused here; the project lives at {}",
+                pushed_from(&m),
+                m.local_root
+            ),
+        )
+    })
+}
+
+// ── guard B: something is living in the destination ──────────────────────────
+
+/// Live tmux sessions in the tree at `root` — the destination of a pull.
+///
+/// Resolved through `ops::place_session`, the same lookup `close` uses
+/// (canonical `<prefix>-<slug>` first, then adoption by pane cwd), so every name
+/// printed here is one the user can actually close by that name.
+///
+/// A destination that does not exist yet, or is not a git repo, has no sessions:
+/// adoption onto a machine that has never seen the project passes silently.
+fn live_sessions_in(root: &Path) -> Vec<String> {
+    let Ok(p) = Project::discover(root) else { return Vec::new() };
+    let mut slugs = vec!["(main)".to_string()];
+    if let Ok(rd) = std::fs::read_dir(p.wt_root_dir()) {
+        let mut wt: Vec<String> = rd
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        wt.sort();
+        slugs.append(&mut wt);
+    }
+    let mut out: Vec<String> = Vec::new();
+    for slug in slugs {
+        // One session can hold panes in two places; name it once.
+        if let Some(s) = crate::ops::place_session(&p, &slug) {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
 }
 
 /// Every project the hub has a readable manifest for, name-sorted.
@@ -720,6 +816,15 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
         return Err("sync push runs inside a project — cd into the repo you want to push.".into());
     }
 
+    // Guard A, sync's half: a hub copy is a MIRROR. Pushing FROM one sends the
+    // copy back over the original; pulling INTO one is hub→hub. Checked before
+    // rsync is even looked for, so a refused command spawns nothing.
+    if let Some(p) = &here {
+        if let Some(msg) = hub_copy_refusal(Path::new(&p.main_root)) {
+            return Err(msg);
+        }
+    }
+
     let rsync = find_rsync()?;
     let hub = resolve_hub(opts.hub.as_deref(), &cfg, ui, json)?;
 
@@ -764,6 +869,14 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
     };
     if !valid_name(&name) {
         return Err(format!("bad project name '{name}'"));
+    }
+    // Adoption resolves its destination from the manifest rather than from the
+    // cwd, so it needs the same check against the path it is about to mirror
+    // over — the guard above only saw the tree the user is standing in.
+    if adopting {
+        if let Some(msg) = hub_copy_refusal(&local_root) {
+            return Err(msg);
+        }
     }
 
     let hub_proj = hub.join(&name);
@@ -890,6 +1003,37 @@ fn sync_one(ui: &mut dyn Ui, dir: Dir, opts: &Opts) -> Result<i32, String> {
             ui.info("dry run — nothing was written.");
         }
         return Ok(0);
+    }
+
+    // Guard B: a pull mirrors with `--delete` over the destination. If something
+    // is LIVING in that tree, whether to do it anyway is a question only a human
+    // can answer — `--yes` is consent given by a script before it could know.
+    // Nothing above this point writes, so `--dry-run` (which returned already)
+    // never reaches it.
+    if dir == Dir::Pull {
+        let live = live_sessions_in(&local_root);
+        if !live.is_empty() {
+            if !json {
+                ui.warn(&format!(
+                    "{} live tmux session(s) in {}:",
+                    live.len(),
+                    local_root.display()
+                ));
+                for s in &live {
+                    ui.plain(&format!("    ● {s}"));
+                }
+                ui.warn("pull mirrors over a tree these sessions are using.");
+            }
+            if opts.yes {
+                // Named in the ERROR too: under --json the prose above is
+                // suppressed, and stderr is the one stream the JSON line is not on.
+                ui.error(&format!(
+                    "refusing to pull with --yes while {} is live — close the session(s) (worktrees close <name>) or run without --yes and answer the prompt.",
+                    live.join(", ")
+                ));
+                return Ok(crate::diag::EXIT_NEEDS_CONFIRM);
+            }
+        }
     }
 
     if !opts.yes && !ui.confirm(&format!("Apply to {name}? [y/N] ")) {
@@ -1359,6 +1503,71 @@ building file list
         let got = hub_manifests(&d);
         assert_eq!(got.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["alpha", "beta"]);
         assert_eq!(got[1].1.pushed_at, 7);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_hub_copy_is_a_manifest_in_the_parent_that_is_about_this_dir_and_points_elsewhere() {
+        let d = tmp("hubcopy");
+        let root = d.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let mf = d.join(MANIFEST);
+        let write = |body: &str| std::fs::write(&mf, body).unwrap();
+
+        // no manifest at all — the fast path, and the answer for every normal repo
+        assert!(hub_copy_of(&root).is_none());
+
+        // the shape a push leaves: <hub>/proj/.worktrees-sync.toml + <hub>/proj/proj
+        write("schema = 1\nname = \"proj\"\nlocal_root = \"/Users/dp/work/proj\"\nhost = \"othermac\"\n");
+        let m = hub_copy_of(&root).expect("a hub copy");
+        assert_eq!(m.local_root, "/Users/dp/work/proj");
+        assert!(hub_copy_refusal(&root).unwrap().contains("/Users/dp/work/proj"));
+        assert!(hub_copy_refusal(&root).unwrap().contains("othermac"));
+
+        // about ANOTHER project — this dir merely sits next to it
+        write("schema = 1\nname = \"other\"\nlocal_root = \"/Users/dp/work/other\"\n");
+        assert!(hub_copy_of(&root).is_none());
+
+        // local_root IS this dir: a native tree with a manifest beside it. Not a
+        // copy — the refusal's way out would be the path it is already standing in.
+        write(&format!("schema = 1\nname = \"proj\"\nlocal_root = \"{}\"\n", root.display()));
+        assert!(hub_copy_of(&root).is_none());
+        // …and a trailing slash is the same path, not a different one
+        write(&format!("schema = 1\nname = \"proj\"\nlocal_root = \"{}/\"\n", root.display()));
+        assert!(hub_copy_of(&root).is_none());
+
+        // unparseable, and strict-parse rejects (unknown key / bad schema): a file
+        // we cannot read is not evidence of anything, so the tree stays usable
+        write("this is not toml {{{");
+        assert!(hub_copy_of(&root).is_none());
+        write("schema = 1\nname = \"proj\"\nlocal_root = \"/elsewhere\"\ninstall_cmd = \"x\"\n");
+        assert!(hub_copy_of(&root).is_none());
+        write("schema = 99\nname = \"proj\"\nlocal_root = \"/elsewhere\"\n");
+        assert!(hub_copy_of(&root).is_none());
+
+        // a root with no parent can't be a copy either
+        assert!(hub_copy_of(Path::new("/")).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_hub_copy_finding_is_an_error_so_doctor_cannot_report_the_tree_as_fine() {
+        let d = tmp("hubcopyfinding");
+        let root = d.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            d.join(MANIFEST),
+            "schema = 1\nname = \"proj\"\nlocal_root = \"/Users/dp/work/proj\"\n",
+        )
+        .unwrap();
+        let f = hub_copy_finding(&root).expect("a finding");
+        assert_eq!(f.severity, crate::diag::Severity::Error);
+        assert!(matches!(f.code, Code::HubCopy));
+        // no host in the manifest ⇒ the message still reads as a sentence
+        assert!(f.message.contains("another machine"), "{}", f.message);
+        assert!(f.message.contains("/Users/dp/work/proj"), "{}", f.message);
+        assert_eq!(crate::diag::Report::new(vec![f]).exit_code(), crate::diag::EXIT_FINDINGS);
+        assert!(hub_copy_finding(&d).is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 
