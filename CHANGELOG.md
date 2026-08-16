@@ -57,6 +57,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   drive the same core ops in-process and so never passed the CLI's dispatch
   check — every op the app runs, and every non-read-only MCP tool, is refused
   inside a tree that arrived on a sync hub, with the native path named.
+- **A parked job no longer leaves the green "Claude working" dot on forever.**
+  Parking a turn that is mid-flight rewrites that session's probe file with the
+  job id but leaves its status at `busy`, and nothing ever writes it again —
+  two places here sat green for 22h and 32h next to sessions idling at a prompt.
+  A probe whose last write did not set the status it carries no longer lights the
+  dot; while the parked job really is running, its own session lights the same
+  place, and a new turn in a session that once parked a job lights it as before.
 
 ## [0.14.0] - 2026-08-14
 
