@@ -3,6 +3,33 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`worktrees sync` carries a project between Macs on an SSD.** `sync push`
+  mirrors the project root — worktrees, `.git`, and all the gitignored state a
+  `git push` cannot carry — onto a mounted hub; `sync pull` brings it back on the
+  other machine; `sync status` says what the hub holds. Rebuildable bulk
+  (`node_modules/`, `target/`, `Pods/`, …) is skipped and reported as it goes, so
+  the transfer is a fraction of the tree. Every direction previews first — *N to
+  send/update, M to delete*, with the deletions listed — and asks before it
+  mirrors; `--dry-run` stops at the preview, `--yes` skips the question, and
+  everything overwritten or deleted lands in `.worktrees-sync/backups/<stamp>/`
+  rather than nowhere.
+  It works **outside a repo** too: `sync pull <name>` on a machine that has never
+  seen the project reads the manifest the push left on the hub, shows you the
+  destination, and adopts it after you confirm. `sync status` with no repo around
+  lists every project on the hub.
+  `--with-sessions` additionally ferries this project's Claude Code transcripts
+  in **both** directions without deleting either machine's history, and
+  `pull --install` runs your own rebuild command from
+  `~/.config/worktrees/config.toml` (`[sync.projects.<name>] install`).
+  The hub manifest is **data**: it is parsed strictly, an unknown key is a hard
+  error, and the rebuild `hint` it carries is printed and never executed — ADR
+  0001's rule that a foreign file may not supply argv, applied to removable media.
+  Optional config: `[sync] hub`, `[sync] with_sessions`, and per-project
+  `extra_excludes`.
+
 ## [0.14.0] - 2026-08-14
 
 ### Added

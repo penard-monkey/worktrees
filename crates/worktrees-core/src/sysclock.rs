@@ -142,6 +142,16 @@ impl SysClock {
     }
 }
 
+/// `date +%Y%m%d-%H%M%S` — the backup-directory stamp `sync` names its
+/// `--backup-dir` after. Shelled out for this module's usual reason (bats can
+/// shim `date`); the format is identical on BSD and GNU, so there is no probe.
+/// Falls back to the epoch, so a backup directory is never nameless.
+pub fn stamp_now() -> String {
+    out("date", &["+%Y%m%d-%H%M%S"])
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| now_epoch().to_string())
+}
+
 pub fn now_epoch() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -163,6 +173,14 @@ mod tests {
         assert_eq!(c.ago(0, 5 * 86400), "5d");
         assert_eq!(c.ago(0, 2 * 604800), "2w");
         assert_eq!(c.ago(1000, 500), "0m"); // clamp negative
+    }
+
+    #[test]
+    fn stamp_is_shaped_like_a_directory_name() {
+        let s = stamp_now();
+        assert_eq!(s.len(), 15, "got {s}");
+        assert_eq!(&s[8..9], "-");
+        assert!(s.chars().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit()), "got {s}");
     }
 
     #[test]

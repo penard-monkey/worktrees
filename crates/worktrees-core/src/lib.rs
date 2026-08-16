@@ -20,6 +20,7 @@ pub mod provision;
 pub mod render;
 pub mod skillstore;
 pub mod store;
+pub mod sync;
 pub mod sysclock;
 pub mod tmux;
 pub mod ui;
