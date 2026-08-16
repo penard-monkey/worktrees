@@ -621,15 +621,31 @@ fn exclude_body(extra: &[String]) -> String {
     s
 }
 
+/// The name carries a counter as well as pid + stamp: the app drives syncs
+/// in-process, so two of them alive in the same SECOND would otherwise pick the
+/// identical path — and then one guard's drop deletes the file the other rsync
+/// is reading (`--exclude-from` is opened when rsync starts, not up front).
+/// `create_new` keeps a leftover from a previous run from being adopted or
+/// silently rewritten; nothing else may claim this name.
 fn write_exclude_file(extra: &[String]) -> Result<TempFile, String> {
+    use std::io::Write;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let p = std::env::temp_dir().join(format!(
-        "worktrees-sync-exclude-{}-{}",
+        "worktrees-sync-exclude-{}-{}-{uniq}",
         std::process::id(),
         sysclock::now_epoch()
     ));
-    std::fs::write(&p, exclude_body(extra))
+    let mut f = std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&p)
         .map_err(|e| format!("cannot write exclude file {}: {e}", p.display()))?;
-    Ok(TempFile(p))
+    // The guard exists from here on, so a failed write still cleans up.
+    let guard = TempFile(p.clone());
+    f.write_all(exclude_body(extra).as_bytes())
+        .map_err(|e| format!("cannot write exclude file {}: {e}", p.display()))?;
+    Ok(guard)
 }
 
 // ── the three rsync invocations ──────────────────────────────────────────────
@@ -2253,6 +2269,27 @@ building file list
             f.0.clone()
         };
         assert!(!p.exists());
+    }
+
+    /// Two syncs alive at once — the app runs them in ONE process — used to
+    /// name the same file: pid is shared and the stamp is whole seconds. The
+    /// first guard to drop then deleted the other's file mid-rsync (`failed to
+    /// open exclude file … No such file or directory`), and before that the
+    /// second write had already replaced the first one's BODY, which is the
+    /// quiet half: a sync excluding another project's extras.
+    #[test]
+    fn concurrent_exclude_files_do_not_share_a_path() {
+        let live: Vec<TempFile> = (0..8).map(|_| write_exclude_file(&[]).unwrap()).collect();
+        let paths: std::collections::HashSet<_> = live.iter().map(|f| f.0.clone()).collect();
+        assert_eq!(paths.len(), live.len(), "two live exclude files share a path");
+
+        let mine = write_exclude_file(&["mydata/".into()]).unwrap();
+        let theirs = write_exclude_file(&["*.bin".into()]).unwrap();
+        let body = std::fs::read_to_string(&mine.0).unwrap();
+        assert!(body.contains("mydata/"), "another sync overwrote this one's body");
+        assert!(!body.contains("*.bin"));
+        drop(theirs);
+        assert!(mine.0.is_file(), "another sync's guard deleted this one's file");
     }
 
     #[test]
