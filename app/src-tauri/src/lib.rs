@@ -415,6 +415,107 @@ async fn probe_dir(dir: String) -> Result<DirProbe, String> {
     Ok(DirProbe { exists, is_git, has_commits })
 }
 
+/// A project name becomes ONE path component under the chosen location, so it
+/// may not steer one — the same rule `worktrees_core::sync::valid_name` applies
+/// to a name that becomes a directory on a hub, plus a leading dot (nobody
+/// typing a project name means "make it hidden").
+///
+/// The frontend checks the same shapes live, for the inline hint. This is the
+/// one that decides: the field is a text box, and a text box is never evidence.
+fn valid_project_name(n: &str) -> Result<(), String> {
+    if n.is_empty() {
+        return Err("give the project a name".into());
+    }
+    if n == "." || n == ".." {
+        return Err("'.' and '..' are not names".into());
+    }
+    if n.starts_with('.') {
+        return Err("a name starting with '.' would make a hidden folder".into());
+    }
+    if n.contains('/') {
+        return Err("a name cannot contain '/' — the folder above it goes in Location".into());
+    }
+    if n.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("a name cannot contain spaces or control characters".into());
+    }
+    Ok(())
+}
+
+/// A LEADING `~` (alone or before `/`) → `$HOME`. The Location field is typed
+/// and pasted into, and `~/workspace` is what a person writes; `~user` is a
+/// shell feature this deliberately is not, so it stays a literal directory name
+/// rather than becoming a path to somebody else's home.
+fn expand_home(p: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return PathBuf::from(p);
+    }
+    if p == "~" {
+        return PathBuf::from(home);
+    }
+    match p.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(home).join(rest),
+        None => PathBuf::from(p),
+    }
+}
+
+/// Make a project that does not exist yet: `<location>/<name>`, created,
+/// `git init`-ed with a first commit, and added to the workspace.
+///
+/// The dialog's fields are re-validated HERE — name shape, `~` expansion, and
+/// the one refusal that matters: a target that already exists is never written
+/// into. "Exists and is a repo" is answered differently from "exists", because
+/// the first has an obvious next step (Add existing…) and the second is a
+/// collision the user has to resolve.
+///
+/// Everything after the mkdir is the EXISTING path: `init_repo` (git init +
+/// empty first commit + `add_project`), so a project created here is the same
+/// object as one added from disk.
+#[tauri::command]
+async fn create_project(app: AppHandle, location: String, name: String) -> Result<Workspace, String> {
+    let name = name.trim();
+    valid_project_name(name)?;
+    let loc = location.trim();
+    if loc.is_empty() {
+        return Err("give a location — the folder the project will be created in".into());
+    }
+    let base = expand_home(loc);
+    // A relative location would resolve against the APP PROCESS's cwd — `/` for
+    // a launchd GUI — and the resulting "permission denied" reads like a bug
+    // rather than a rule. The rule is the honest answer.
+    if !base.is_absolute() {
+        return Err(format!(
+            "location must be an absolute path (or start with ~) — got '{loc}'"
+        ));
+    }
+    let target = base.join(name);
+    if target.exists() {
+        return Err(if target.join(".git").exists() {
+            format!(
+                "{} already exists and is a git repo — add it with “Add existing…” instead.",
+                target.display()
+            )
+        } else {
+            format!("{} already exists — pick another name or location.", target.display())
+        });
+    }
+    std::fs::create_dir_all(&target).map_err(|e| {
+        applog("error", &format!("create_project mkdir {}: {e}", target.display()));
+        format!("cannot create {}: {e}", target.display())
+    })?;
+    let dir = target.to_string_lossy().into_owned();
+    applog("info", &format!("create_project {dir}"));
+    // A failure here leaves the (empty) directory behind ON PURPOSE: removing a
+    // path we have just been told we cannot fully write to is the wrong instinct,
+    // and the message says where it is so the user can finish or delete it.
+    let ws = init_repo(app.clone(), dir.clone()).await.map_err(|e| {
+        applog("error", &format!("create_project init {dir}: {e}"));
+        format!("created {dir}, but setting it up as a git repo failed: {e}")
+    })?;
+    let _ = app.emit("places:changed", ());
+    Ok(ws)
+}
+
 /// `git init` + an EMPTY first commit, then add the repo to the workspace. The
 /// commit is not optional politeness: without it HEAD is unborn and the very
 /// next thing the user does (new worktree) fails on an invalid object name.
@@ -1981,10 +2082,26 @@ async fn provision(repo: String, slug: Option<String>) -> Result<CmdResult, Stri
 // uses ($WORKTREES_SYNC_HUB → `[sync] hub` → a single mounted volume), so the
 // app and the terminal can never disagree about where a project is pushed.
 
-fn sync_request(repo: &str, direction: &str, with_sessions: bool) -> Result<sync::SyncRequest, String> {
-    let p = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
+/// `repo` = a project in the workspace; `name` = a project that exists only on
+/// the hub (adoption — the machine has no tree for it, so there is no root to
+/// pass). Exactly one is expected; `repo` wins if both arrive, since a caller
+/// that knows a root is not adopting.
+fn sync_request(
+    repo: Option<&str>,
+    name: Option<&str>,
+    direction: &str,
+    with_sessions: bool,
+) -> Result<sync::SyncRequest, String> {
+    let source = match (repo, name) {
+        (Some(r), _) => {
+            let p = Project::discover(Path::new(r)).map_err(|e| e.msg)?;
+            sync::SyncSource::Root(PathBuf::from(&p.main_root))
+        }
+        (None, Some(n)) => sync::SyncSource::HubName(n.to_string()),
+        (None, None) => return Err("sync needs a project: pass repo, or name to import one from the hub".into()),
+    };
     Ok(sync::SyncRequest {
-        root: PathBuf::from(&p.main_root),
+        source,
         direction: sync::SyncDirection::parse(direction)?,
         hub: None,
         with_sessions: Some(with_sessions),
@@ -2015,17 +2132,42 @@ async fn sync_status(repo: String) -> Result<SyncStatusView, String> {
     Ok(SyncStatusView { status, hub_copy: sync::hub_copy_refusal(&root) })
 }
 
+/// The hub's own status: what has been pushed to this drive, from anywhere.
+/// This is the ONE sync command with no project — the import picker calls it on
+/// a machine whose workspace may be empty, which is precisely the machine that
+/// needs it (`sync status` outside a repo, the CLI's adoption listing).
+///
+/// The walk is core's: `sync_status_data(from: None)` already lists every
+/// manifest on the hub, so nothing here re-implements it. `hub_error` carries
+/// the reason there is no hub, because "no projects" and "no drive" are
+/// different answers and the picker must not show them the same way.
+#[tauri::command]
+async fn sync_hub_list() -> Result<sync::StatusJson, String> {
+    let mut ui = CaptureUi::default();
+    let out = sync::sync_status_data(&mut ui, None, None, true);
+    if let Some(e) = &out.hub_error {
+        applog("info", &format!("sync_hub_list: no hub ({e})"));
+    }
+    Ok(out)
+}
+
 /// What a sync WOULD do — the modal's whole content. Two rsync dry passes plus
 /// (on a pull) the live-session lookup, so it is seconds on a real tree.
+///
+/// `name` (with no `repo`) is an adoption preview: the destination in the
+/// answer comes from the hub manifest, and it is the only thing telling the
+/// user where a tree they have never had is about to appear.
 #[tauri::command]
 async fn sync_preview(
-    repo: String,
+    repo: Option<String>,
+    name: Option<String>,
     direction: String,
     with_sessions: bool,
 ) -> Result<sync::SyncPreviewOut, String> {
-    let req = sync_request(&repo, &direction, with_sessions)?;
+    let req = sync_request(repo.as_deref(), name.as_deref(), &direction, with_sessions)?;
     sync::sync_preview(&req).inspect_err(|e| {
-        applog("warn", &format!("sync_preview {direction} repo={repo}: {e}"));
+        let who = repo.clone().or_else(|| name.clone()).unwrap_or_default();
+        applog("warn", &format!("sync_preview {direction} {who}: {e}"));
     })
 }
 
@@ -2045,14 +2187,16 @@ async fn sync_preview(
 #[tauri::command]
 async fn sync_apply(
     app: AppHandle,
-    repo: String,
+    repo: Option<String>,
+    name: Option<String>,
     direction: String,
     with_sessions: bool,
     confirmed: bool,
     install: bool,
     on_progress: Channel<sync::SyncProgress>,
 ) -> Result<CmdResult, String> {
-    let req = sync_request(&repo, &direction, with_sessions)?;
+    let req = sync_request(repo.as_deref(), name.as_deref(), &direction, with_sessions)?;
+    let repo = repo.or_else(|| name.clone()).unwrap_or_default();
     let op = format!("sync {direction}");
     // A closed channel (the window went away mid-sync) is not a reason to stop
     // the transfer or to lose the result — but it is not swallowed either: it is
@@ -2107,16 +2251,53 @@ async fn sync_apply(
             if !out.warnings.is_empty() {
                 applog("warn", &format!("{op} warnings repo={repo}: {}", out.warnings.join(" | ")));
             }
-            // A pull rewrites the tree under every place in it — branches, dirty
-            // counts and sessions are all potentially different now.
-            if req.direction == sync::SyncDirection::Pull {
-                let _ = app.emit("places:changed", ());
-            }
             let mut lines = vec![format!(
                 "sync {} — {}: {} sent/updated, {} deleted",
                 out.direction, out.name, out.plan.sends, out.plan.deletes
             )];
-            lines.extend(out.messages);
+            // An adoption just created a tree this workspace has never seen. The
+            // app's whole surface hangs off a project ROW, so a transfer that
+            // stopped here would leave the user with files and no way to reach
+            // them — the add is part of the import, not a follow-up.
+            //
+            // It goes through `add_project` itself (the same discover + dedupe +
+            // persist the "Add project" button runs), so an import cannot admit
+            // something the button would have refused.
+            if out.adopting {
+                match add_project(app.clone(), out.dst.clone()).await {
+                    Ok(_) => lines.push(format!("added to the workspace: {}", out.dst)),
+                    Err(e) => {
+                        // Half-success is the one outcome that must never read as
+                        // either a success or a plain failure: the FILES are
+                        // there, and only the bookkeeping failed. Say both, and
+                        // say what to do about it.
+                        applog(
+                            "error",
+                            &format!("{op} transferred but add_project failed dst={}: {e}", out.dst),
+                        );
+                        let _ = app.emit("places:changed", ());
+                        return Ok(CmdResult {
+                            ok: false,
+                            code: 1,
+                            output: format!(
+                                "{}\nThe transfer finished — the files are at {}.\nAdding it to the workspace failed: {e}\nAdd it by hand with “Add project” and pick that folder.",
+                                lines.join("\n"),
+                                out.dst
+                            ),
+                            slug: None,
+                            needs_confirm: None,
+                            warnings: out.warnings,
+                        });
+                    }
+                }
+            }
+            // A pull rewrites the tree under every place in it — branches, dirty
+            // counts and sessions are all potentially different now. Emitted
+            // AFTER the workspace add, so the refresh it triggers is the one
+            // that already contains the imported project.
+            if req.direction == sync::SyncDirection::Pull {
+                let _ = app.emit("places:changed", ());
+            }
             Ok(CmdResult {
                 ok: true,
                 code: 0,
@@ -3786,6 +3967,7 @@ pub fn run() {
             list_places,
             list_workspace,
             add_project,
+            create_project,
             probe_dir,
             init_repo,
             create_initial_commit,
@@ -3813,6 +3995,7 @@ pub fn run() {
             relink,
             provision,
             sync_status,
+            sync_hub_list,
             sync_preview,
             sync_apply,
             init_suggest,
@@ -3882,6 +4065,43 @@ mod tests {
 
     fn v(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The dialog validates as you type; this is the check that DECIDES. Every
+    /// rejected shape here is one that would otherwise become a path component
+    /// somewhere the user did not point at — or a folder they cannot see.
+    #[test]
+    fn a_new_projects_name_may_not_steer_a_path() {
+        for ok in ["worktrees", "casa-del-valle", "proj_2", "a"] {
+            assert!(valid_project_name(ok).is_ok(), "{ok} should be a name");
+        }
+        for bad in ["", ".", "..", ".hidden", "a/b", "/abs", "two words", "tab\there", "..\\x/y"] {
+            assert!(valid_project_name(bad).is_err(), "{bad:?} should be refused");
+        }
+        // the message is the UI's inline error, so it has to name the problem
+        assert!(valid_project_name("a/b").unwrap_err().contains("Location"));
+        assert!(valid_project_name(".x").unwrap_err().contains("hidden"));
+    }
+
+    /// The Location field is TYPED. `~/workspace` is what a person writes, and
+    /// it is also this dialog's own default — so the expansion is on the path
+    /// every created project goes through, not a convenience.
+    #[test]
+    fn a_typed_location_expands_only_its_own_leading_tilde() {
+        let home = std::env::var("HOME").expect("HOME");
+        assert_eq!(expand_home("~"), PathBuf::from(&home));
+        assert_eq!(expand_home("~/workspace"), PathBuf::from(&home).join("workspace"));
+        assert_eq!(expand_home("~/a/b"), PathBuf::from(&home).join("a/b"));
+        // NOT a shell: another user's home, and a tilde anywhere but the front,
+        // are literal directory names
+        assert_eq!(expand_home("~other/x"), PathBuf::from("~other/x"));
+        assert_eq!(expand_home("/tmp/~/x"), PathBuf::from("/tmp/~/x"));
+        assert_eq!(expand_home("/Users/dp/work"), PathBuf::from("/Users/dp/work"));
+        // …and everything that comes out relative (including those literals) is
+        // refused by create_project: a GUI process's cwd is `/`, and resolving a
+        // typed "workspace" against it turns a rule into a permission error.
+        assert!(!expand_home("workspace").is_absolute());
+        assert!(!expand_home("~other/x").is_absolute());
     }
 
     /// A nav drag sends the order it can SEE. The file is the truth, and the

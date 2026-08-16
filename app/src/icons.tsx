@@ -180,6 +180,16 @@ export const Plus = (p: IconProps) => (
     <path d="M12 5v14" />
   </Svg>
 );
+/** Import from the hub — a tree coming DOWN off the drive onto this machine.
+ *  Deliberately not the ⇄ the per-project sync popover uses: that one is a
+ *  round trip between two Macs, this one only ever arrives. */
+export const Import = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3v12" />
+    <path d="m7 10 5 5 5-5" />
+    <path d="M4 21h16" />
+  </Svg>
+);
 export const Check = (p: IconProps) => (
   <Svg {...p}>
     <path d="M20 6 9 17l-5-5" />

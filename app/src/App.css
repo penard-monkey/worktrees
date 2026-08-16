@@ -183,6 +183,9 @@ button { cursor: pointer; }
   font-size: var(--fs-label);
 }
 .add-footer:hover { color: var(--txt-hi); }
+/* The menu affordance: a project can arrive three ways, and the caret is what
+   says this button asks rather than acts. */
+.add-caret { margin-left: auto; padding-left: var(--s2); font-size: var(--fs-micro); }
 
 .nav-resizer {
   position: absolute; top: 0; right: -2px; width: 4px; height: 100%;
@@ -1324,7 +1327,12 @@ body.dragging .menu-catch { pointer-events: none; }
 .home-logo { width: 72px; height: 72px; border-radius: 16px; flex: none; }
 .home-id h1 { font-size: 1.6rem; font-weight: var(--fw-bold); color: var(--txt-hi); margin: 0 0 2px; }
 .home-tag { color: var(--txt-dim); font-size: var(--fs-body); }
-.home-open { margin-bottom: var(--s5); }
+/* Two ways in, weighted: opening a project is the primary act, importing from
+   the hub is the one a machine set up an hour ago needs — present, secondary. */
+.home-actions { display: flex; align-items: center; gap: var(--s3); margin-bottom: var(--s5); }
+.home-open { margin-bottom: 0; }
+.home-import { color: var(--txt-dim); }
+.home-import:hover { color: var(--txt-hi); }
 .chips { display: flex; gap: var(--s3); margin-bottom: var(--s6); }
 .chip {
   display: inline-flex; align-items: center; gap: var(--s2);
@@ -1473,6 +1481,58 @@ body.dragging .menu-catch { pointer-events: none; }
   font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--txt-mute);
   white-space: nowrap; overflow: hidden;
 }
+/* ── new project ── two fields and the path they make. Same modal shell as the
+   sync family (.sync-modal / .sync-body / .sync-foot); only the fields are new. */
+.np-field { display: flex; flex-direction: column; gap: var(--s1); }
+.np-label {
+  font-size: var(--fs-micro); letter-spacing: 0.06em; text-transform: uppercase; color: var(--txt-dim);
+}
+.np-row { display: flex; gap: var(--s2); align-items: stretch; }
+.np-row .np-input { flex: 1 1 auto; min-width: 0; }
+.np-input {
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-sm);
+  color: var(--txt-hi); padding: var(--s2) var(--s3);
+  font-family: var(--font-mono); font-size: var(--fs-label);
+}
+.np-input:focus { border-color: var(--line-strong); outline: none; }
+.np-path { font-size: var(--fs-meta); color: var(--txt-dim); word-break: break-all; }
+.np-path code { font-family: var(--font-mono); color: var(--txt-hi); }
+
+/* ── import from hub ── the picker's rows and the modal's destination block.
+   An import writes to a path this Mac has never had, so the path is the loudest
+   thing in the modal: boxed, monospaced, above the counts. */
+.sync-dest {
+  display: flex; flex-direction: column; gap: var(--s1);
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.sync-dest-l {
+  font-size: var(--fs-micro); letter-spacing: 0.06em; text-transform: uppercase; color: var(--txt-dim);
+}
+.sync-dest-p {
+  font-family: var(--font-mono); font-size: var(--fs-label); color: var(--txt-hi);
+  word-break: break-all;
+}
+.import-row {
+  display: grid; grid-template-columns: auto auto; gap: var(--s1) var(--s2);
+  text-align: left; padding: var(--s2) var(--s3); border-radius: var(--r-sm);
+  background: var(--bg-elev); border: 1px solid var(--line); color: var(--txt);
+}
+.import-row:hover:not(:disabled) { border-color: var(--line-strong); background: var(--bg-panel); }
+.import-row:disabled { opacity: 0.5; cursor: default; }
+.import-name { font-weight: var(--fw-med); color: var(--txt-hi); font-size: var(--fs-body); }
+.import-tag {
+  justify-self: start; align-self: center;
+  font-size: var(--fs-micro); color: var(--txt-mute);
+  border: 1px solid var(--line); border-radius: var(--r-full); padding: 0 var(--s2);
+}
+.import-dest {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt-dim); word-break: break-all;
+}
+.import-when { grid-column: 1 / -1; font-size: var(--fs-micro); color: var(--txt-mute); }
+
 .sync-foot {
   display: flex; justify-content: flex-end; gap: var(--s2);
   padding: var(--s3) var(--s4); border-top: 1px solid var(--line);
