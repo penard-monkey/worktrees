@@ -91,6 +91,67 @@ pub fn cfg_toml_get(path: &Path, key: &str) -> Option<String> {
     table.get(key)?.as_str().map(|s| s.to_string())
 }
 
+/// The `[sync]` section of `config.toml` (`sync.rs`'s schema), as data.
+///
+/// `cfg_toml_get` above reads top-level STRINGS only, and `sync` needs a table,
+/// a bool and an array — so this is a second, deliberately narrow reader rather
+/// than a general config framework. Same lenient posture as the rest of this
+/// file: a parse error, a missing section or a wrong type is an absent value,
+/// never a hard error.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SyncCfg {
+    /// Pin the hub instead of auto-detecting a mounted volume.
+    pub hub: Option<String>,
+    /// Default for `--with-sessions`.
+    pub with_sessions: bool,
+    /// Keyed by project name (the basename of its root).
+    pub projects: BTreeMap<String, SyncProject>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SyncProject {
+    /// What `sync pull --install` runs. USER tier, so it may name a program —
+    /// ADR 0001's line is about a CLONED REPO, and the hub manifest (which rode
+    /// in on removable media) carries only a printed hint.
+    pub install: Option<String>,
+    /// Appended to sync.rs's builtin exclude set.
+    pub extra_excludes: Vec<String>,
+}
+
+pub fn sync_cfg_from(path: &Path) -> SyncCfg {
+    let mut out = SyncCfg::default();
+    let Ok(text) = std::fs::read_to_string(path) else { return out };
+    let Ok(root) = toml::from_str::<BTreeMap<String, toml::Value>>(&text) else { return out };
+    let Some(sync) = root.get("sync").and_then(|v| v.as_table()) else { return out };
+    out.hub = sync.get("hub").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+    out.with_sessions = sync.get("with_sessions").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Some(projects) = sync.get("projects").and_then(|v| v.as_table()) {
+        for (name, v) in projects {
+            let Some(t) = v.as_table() else { continue };
+            out.projects.insert(
+                name.clone(),
+                SyncProject {
+                    install: t
+                        .get("install")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    extra_excludes: t
+                        .get("extra_excludes")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).map(str::to_string).collect())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+    }
+    out
+}
+
+pub fn sync_cfg() -> SyncCfg {
+    sync_cfg_from(&config_toml_path())
+}
+
 /// The user tier of the precedence chain: `config.toml` wins over the kv
 /// `config` when both define a key. Pure form for testing (`*_from` convention).
 pub fn user_cfg_from(toml_val: Option<&str>, kv_val: Option<&str>) -> Option<String> {
@@ -308,6 +369,46 @@ mod tests {
         // an empty value is not a value, in either tier
         assert_eq!(user_cfg_from(Some(""), Some("claude")).as_deref(), Some("claude"));
         assert_eq!(user_cfg_from(Some(""), Some("")), None);
+    }
+
+    #[test]
+    fn sync_cfg_reads_the_table_and_shrugs_at_anything_broken() {
+        let dir = std::env::temp_dir().join(format!("wtsynccfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+
+        std::fs::write(
+            &p,
+            "ai_cmd = \"codex\"\n\
+             [sync]\n\
+             hub = \"/Volumes/FastSSD\"\n\
+             with_sessions = true\n\
+             [sync.projects.worktrees]\n\
+             install = \"cargo build\"\n\
+             extra_excludes = [\"scratch/\", \"*.bin\"]\n\
+             [sync.projects.other]\n",
+        )
+        .unwrap();
+        let c = sync_cfg_from(&p);
+        assert_eq!(c.hub.as_deref(), Some("/Volumes/FastSSD"));
+        assert!(c.with_sessions);
+        let w = c.projects.get("worktrees").unwrap();
+        assert_eq!(w.install.as_deref(), Some("cargo build"));
+        assert_eq!(w.extra_excludes, vec!["scratch/", "*.bin"]);
+        // a section with nothing in it is a project with no overrides, not an error
+        assert_eq!(c.projects.get("other").unwrap(), &SyncProject::default());
+
+        // wrong types are absent values, exactly like cfg_toml_get's posture
+        std::fs::write(&p, "[sync]\nhub = 7\nwith_sessions = \"yes\"\nprojects = 3\n").unwrap();
+        let c = sync_cfg_from(&p);
+        assert_eq!(c, SyncCfg::default());
+
+        // no [sync] section, a broken file, and an absent file are all defaults
+        assert_eq!(sync_cfg_from(&dir.join("absent.toml")), SyncCfg::default());
+        std::fs::write(&p, "[sync\n").unwrap();
+        assert_eq!(sync_cfg_from(&p), SyncCfg::default());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

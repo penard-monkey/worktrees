@@ -27,6 +27,8 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
+  worktrees sync push|pull [name]       courier-sync this project to/from an SSD hub (rsync)
+  worktrees sync status                 hub + project sync state (--json; no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";
@@ -53,6 +55,13 @@ fn run() -> i32 {
         Some("skills") => {
             let mut ui = CliUi;
             return worktrees_core::skillstore::cmd_skills(&mut ui, args.get(1..).unwrap_or(&[]));
+        }
+        // Also ahead of the guards: a `pull` that ADOPTS a project, and a
+        // hub-level `status`, both run on a machine that does not have the repo
+        // yet — there is no git worktree to stand in.
+        Some("sync") => {
+            let mut ui = CliUi;
+            return worktrees_core::sync::cmd_sync(&mut ui, args.get(1..).unwrap_or(&[]));
         }
         _ => {}
     }

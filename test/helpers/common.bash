@@ -28,6 +28,14 @@ common_setup() {
   # that reaches the developer's real daemon is a suite that can delete their
   # volumes. Argv lands in $BATS_TEST_TMPDIR/docker.log.
   install_fake_cmd docker
+  # Fake rsync ALWAYS, for docker's reason and then some: `worktrees sync` shells
+  # out to `rsync -a --delete`, and a suite that reaches the real binary is a
+  # suite that can mirror-delete the developer's own files. Argv lands in
+  # $BATS_TEST_TMPDIR/rsync.log. WORKTREES_RSYNC pins it, because the PATH shim
+  # is NOT enough on its own: /opt/homebrew/bin/rsync exists on a developer's Mac
+  # and reports v3, and sync.rs::find_rsync prefers a v3 candidate outright.
+  install_fake_cmd rsync
+  export WORKTREES_RSYNC="$SHIMS/rsync"
   unset TMUX                      # don't inherit the developer's real tmux
   export BATS_TEST_TIMEOUT=120    # no single test may hang the suite (CI backstop)
   export WORKTREES_AI_CMD="fake-ai"
@@ -39,7 +47,10 @@ common_setup() {
   # WORKTREES_PROFILE is the top rung of the profile resolution chain — read on
   # every `ls` snapshot. An exported XDG_DATA_HOME (common on Linux and in
   # dotfile setups) would put the suite in the developer's real ~/.local/share.
-  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME WORKTREES_PROFILE || true
+  # WORKTREES_SYNC_HUB and CLAUDE_PROJECTS join the list for `sync`: the first is
+  # the env rung of hub resolution (an exported one would aim the suite at the
+  # developer's real SSD), the second is where the sessions ferry reads from.
+  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME WORKTREES_PROFILE WORKTREES_SYNC_HUB CLAUDE_PROJECTS || true
 
   make_repo
 }
