@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.15.0] - 2026-08-16
 
 ### Added
 - **`worktrees sync` carries a project between Macs on an SSD.** `sync push`
