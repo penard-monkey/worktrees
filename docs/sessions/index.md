@@ -18,6 +18,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 | [2026-08-14](2026-08-14-cmd-f-find/summary.html) | ⌘F finds — the xterm buffer in either terminal, the open file in the viewer, one bar routed by what you last touched |
 | [2026-08-14](2026-08-14-markdown-zoom/summary.html) | markdown docs read at whatever size you need — a per-place reading zoom for the Files viewer, one multiplier and a rem→em sweep |
 | [2026-08-14](2026-08-14-terminal-tab-memory/summary.html) | terminals come back as you left them — the tab strip, the front tab and each tab's directory all survive a restart → v0.13.0 |
+| [2026-08-13](2026-08-13-codesign-privacy-prompts/summary.html) | macOS privacy prompts and what signing them would cost — ad-hoc signing keys TCC to a cdhash; MAS ruled out, Developer ID scoped |
 | [2026-08-11](2026-08-11-cmdk-activity-order/summary.html) | one clock for every list of places — ⌘K, Recent and Resume ranked three different ways, now all on the nav's activity date |
 | [2026-08-11](2026-08-11-v0-12-releases/summary.html) | the sandbox found what the mock harness could not — dock default, nav refresh race → v0.12.0, v0.12.1 |
 | [2026-08-11](2026-08-11-files-changed-markers/summary.html) | the Files tab says what the branch changed — tinted names, cascading counts, ghost rows for deletions |

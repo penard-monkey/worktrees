@@ -259,6 +259,21 @@ is invisible to the bats suite — there is no fake claude. Re-run
 - CLI stable: `install.sh` (copies). `make install` SYMLINKS the clone's
   build — every rebuild silently becomes "stable"; don't use it for that.
 - App: `make install-app` → /Applications (local builds skip Gatekeeper).
+- **macOS re-asks its privacy prompts after every build, and that is signing,
+  not a bug.** TCC keys "worktrees would like to access data from other apps"
+  to the designated requirement; ad-hoc/linker-signed code (everything cargo
+  and tauri produce here) has `designated => cdhash H"…"`, a new identity per
+  build. `codesign -d -r- <path>` shows which you have. Grants are recorded per
+  TARGET app's data dir, so one build asks several times. Signing with any
+  cert-backed identity makes them stick — but re-signing does NOT affect a
+  RUNNING process (identity is fixed at exec) nor a tmux server it already
+  started (responsible-process attribution is inherited at spawn and outlives
+  reparenting to launchd), so a correct fix looks like a failed one until the
+  app is quit+reopened and the old server is gone: check `ps -o lstart` on the
+  tmux server before concluding otherwise. Don't try to diagnose from TCC.db —
+  reading it needs Full Disk Access on the TERMINAL, and the tccd log is
+  redacted. Releases stay ad-hoc; see ROADMAP for the distribution tier (and
+  why the Mac App Store is not it).
 
 ## Decisions
 
