@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.16.0] - 2026-08-17
 
 ### Added
 - **A pull that mirrors a source Mac which was behind origin — or dirty — now
@@ -27,6 +27,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   does not explain, is the other machine's intent and is left exactly as it
   arrived. Restored files come back at their last committed version; an
   uncommitted change to an excluded file never rode along in the first place.
+- **Emoji no longer shred the terminal.** tmux lays an emoji out as two cells
+  and the terminal was drawing it as one, so every partial repaint landed a
+  column off and interleaved with the paint before it — a running Claude Code
+  spinner turned that into permanently garbled lines (*Phase 15 DBacklo*, two
+  paints of *Phase 5: Backlog* on top of each other). Widths now match tmux,
+  variation-selector emoji (⚠️) and ZWJ clusters included.
 
 ## [0.15.0] - 2026-08-16
 
