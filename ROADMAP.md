@@ -697,3 +697,16 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   would cut nearly all of it — `list_places(repo)` already exists and returns
   exactly one project's snapshot; nothing calls it from the poll path.
   _From: [2026-08-11 v0-12-releases session](docs/sessions/2026-08-11-v0-12-releases/summary.md)_
+
+- **`make install-app` cannot complete unattended.** It builds and bundles fine,
+  then dies signing the updater artifact: `~/.tauri/worktrees-updater.key` is
+  password-protected and tauri prompts for it on a TTY, so any non-interactive
+  run (an agent, a script, CI-on-a-Mac) aborts *after* a full cargo build and
+  *before* the `ditto` into /Applications — a successful build with nothing
+  installed. Exporting `TAURI_SIGNING_PRIVATE_KEY` does not help; the password
+  prompt remains. A local install has no use for the updater artifact at all, so
+  the fix is either a `--no-bundle`-style path (or `createUpdaterArtifacts` off)
+  for the install-app target, or an unencrypted key kept out of the repo for
+  local use only. Today the workaround is running the `rm -rf` + `ditto` steps
+  by hand after the bundle lands.
+  _From: [2026-08-02 remove-place-delbranch session](docs/sessions/2026-08-02-remove-place-delbranch/summary.md)_
