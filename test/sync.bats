@@ -179,6 +179,80 @@ make_hub_copy() {        # $1 = name, $2 = the native root on the other Mac
   [ -f "$REPO/marker" ]
 }
 
+# ── post-pull heal + status note ─────────────────────────────────────────────
+# The field bug: the exclude list is "rebuildable bulk", but repos COMMIT files
+# matching it (`old-plans/*.tar.gz`, session tarballs). The transfer skips them,
+# so the copy's `.git` says they exist while the working files never arrive — a
+# fresh import opens on a wall of `deleted:`. The blobs ride along INSIDE `.git`,
+# so the pull restores the working copies from there.
+#
+# The fake rsync transfers nothing, which is exactly right for these: the heal
+# reads REAL git state, so the post-import tree is built by hand.
+
+commit_bulk() {   # a tracked *.tar.gz (excluded) beside a tracked plain file
+  ( cd "$REPO" && mkdir -p old-plans docs && echo tar > old-plans/data.tar.gz \
+      && echo keep > docs/keep.txt && git add -A && git commit -qm bulk )
+}
+
+@test "sync pull: an excluded TRACKED file is healed, a plain deletion is left alone" {
+  commit_bulk
+  write_hub_manifest "$NAME" "$REPO" 'host = "othermac"'
+  rm "$REPO/old-plans/data.tar.gz" "$REPO/docs/keep.txt"
+
+  run_wt sync pull --yes --hub "$HUB"
+  [ "$status" -eq 0 ]
+  [ -f "$REPO/old-plans/data.tar.gz" ]      # the transfer skips it; git carries it
+  [ ! -e "$REPO/docs/keep.txt" ]            # NOT excluded ⇒ mirrored intent, left alone
+  [[ "$output" == *"restored 1"* ]]
+  [[ "$output" == *"old-plans/data.tar.gz"* ]]
+  [[ "$output" != *"keep.txt"* ]]
+}
+
+@test "sync pull: a STAGED deletion is the source Mac's intent — the heal leaves it" {
+  commit_bulk
+  write_hub_manifest "$NAME" "$REPO" 'host = "othermac"'
+  ( cd "$REPO" && git rm -q old-plans/data.tar.gz )
+
+  run_wt sync pull --yes --hub "$HUB"
+  [ "$status" -eq 0 ]
+  [ ! -e "$REPO/old-plans/data.tar.gz" ]
+  [[ "$output" != *"restored"* ]]
+}
+
+@test "sync pull: a worktree under .worktrees/ is healed too" {
+  ( cd "$REPO" && echo log > x.log && git add -A && git commit -qm log )
+  git -C "$REPO" worktree add -q "$REPO/.worktrees/feat" -b feat
+  write_hub_manifest "$NAME" "$REPO" 'host = "othermac"'
+  rm "$REPO/.worktrees/feat/x.log"
+
+  run_wt sync pull --yes --hub "$HUB"
+  [ "$status" -eq 0 ]
+  [ -f "$REPO/.worktrees/feat/x.log" ]
+  [[ "$output" == *"restored 1"* ]]
+  [[ "$output" == *".worktrees/feat/x.log"* ]]
+}
+
+@test "sync pull: a clean, level tree gets neither a restored line nor a status note" {
+  write_hub_manifest "$NAME" "$REPO" 'host = "othermac"'
+  run_wt sync pull --yes --hub "$HUB"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"restored"* ]]
+  [[ "$output" != *"mirrors the source"* ]]
+}
+
+@test "sync pull: a tree behind its upstream reads as fidelity, not breakage" {
+  # The source Mac was behind origin; a faithful mirror is behind too, and
+  # nothing in the transfer explains that. $ORIGIN is a real bare repo here.
+  ( cd "$REPO" && echo more >> README.md && git add -A && git commit -qm second \
+      && git push -q origin main && git reset -q --hard HEAD~1 )
+  write_hub_manifest "$NAME" "$REPO" 'host = "othermac"'
+
+  run_wt sync pull --yes --hub "$HUB"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mirrors the source Mac"* ]]
+  [[ "$output" == *"main is 1 commit(s) behind"* ]]
+}
+
 # ── sessions ferry ───────────────────────────────────────────────────────────
 
 @test "sync push --with-sessions: ferries the project's claude dirs ADDITIVELY" {

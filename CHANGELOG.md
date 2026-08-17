@@ -3,6 +3,31 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **A pull that mirrors a source Mac which was behind origin — or dirty — now
+  says so.** A faithful mirror of a machine that was seven commits behind is
+  seven commits behind, and nothing about the transfer explained that: *imported
+  state mirrors the source Mac: main is 7 commit(s) behind its upstream (git pull
+  to advance), 2 uncommitted file(s) — mirrored state, not transfer damage.* The
+  line appears in the terminal and in the app's sync modal, and only when there
+  is something to explain; a tree that came back level and clean says nothing.
+
+### Fixed
+- **`sync pull` no longer lands a project full of `deleted:` files.** The exclude
+  list is rebuildable bulk — except repos *commit* files that match it
+  (`old-plans/*.tar.gz`, this repo's own session tarballs). The transfer skipped
+  those working files while the `.git` it ferries kept saying they exist, so a
+  fresh-machine import opened on a wall of deletions. Nothing was ever lost, and
+  a pull now restores exactly those files from the `.git` that just arrived — in
+  the project root and in every worktree under `.worktrees/` — and reports what
+  it did: *restored 3 tracked file(s) the transfer skips (excluded as
+  rebuildable): …*. A deletion **you** staged, and any deletion the exclude list
+  does not explain, is the other machine's intent and is left exactly as it
+  arrived. Restored files come back at their last committed version; an
+  uncommitted change to an excluded file never rode along in the first place.
+
 ## [0.15.0] - 2026-08-16
 
 ### Added
