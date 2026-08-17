@@ -37,6 +37,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 | [2026-08-05](2026-08-05-undeclared-drift/summary.html) | undeclared-file drift + ADR 0001 |
 | [2026-08-03](2026-08-03-files-viewer/summary.html) | dock Files tab — document rendering + layout |
 | [2026-08-02](2026-08-02-usage-widget/summary.html) | Claude plan-usage widget → v0.7.0 |
+| [2026-08-02](2026-08-02-remove-place-delbranch/summary.html) | remove was broken for every place (`delBranch`) + stale "Not configured" banner |
 | [2026-08-01](2026-08-01-ui-tweaks/summary.html) | UI batch — named terminal tabs, settings categories, guide-line toggle, log tail (+ v0.6.0 release) |
 | [2026-08-01](2026-08-01-single-pane-new/summary.html) | app-created places open single-pane |
 | [2026-07-30](2026-07-30-tmux-gate/summary.html) | tmux install gate + missing-tmux banner |
