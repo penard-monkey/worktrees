@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
+import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { FindBar, findColors } from "./Find";
 import "@xterm/xterm/css/xterm.css";
@@ -119,9 +120,9 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
 
     const { family, size, theme } = termOptions();
     // allowProposedApi: the search addon paints its match highlights through
-    // `registerDecoration`, which xterm 5.5 still gates behind this flag — it
-    // throws without it, and only once you actually search, so the terminal
-    // looks fine right up until ⌘F.
+    // `registerDecoration`, and the graphemes addon loads through the
+    // `term.unicode` getter — xterm 5.5 gates both behind this flag. Search
+    // throws only once you actually ⌘F; unicode throws at load.
     const term = new Terminal({
       fontFamily: family, fontSize: size, cursorBlink: blinkWanted(), theme,
       allowProposedApi: true,
@@ -129,6 +130,10 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     liveTerms.add(term);
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // tmux (utf8proc) lays out emoji as 2 cells; xterm's default Unicode 6 tables
+    // say 1 — the mismatch garbles every tmux partial repaint. Match tmux.
+    term.loadAddon(new UnicodeGraphemesAddon());
+    term.unicode.activeVersion = "15-graphemes";
     term.open(host);
     // ⌘F. Loaded AFTER open(): the addon subscribes to the render service, and
     // activating it against a terminal that has not been opened yet leaves the
