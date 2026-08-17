@@ -361,8 +361,14 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   (#49): now reads `~/.claude/sessions/*.json` (busy→green blink,
   waiting→amber). Validated via mock harness + screenshots; still not observed
   in the real Tauri app against a live claude session (probe-file read + PID
-  liveness are the untested-in-prod paths).
-  _From: [2026-07-27 settings session](docs/sessions/2026-07-27-settings-and-audits/summary.md)_
+  liveness are the untested-in-prod paths). **Now carries a second question**:
+  the park-residue guard (#140) has also never run against a real probe. Both
+  answer in one pass — write two probe files against live pids, one `busy` with
+  `parkedJobId` and skewed stamps (must stay dark) and one `busy` with equal
+  stamps (must light), then `app/scripts/sandbox.sh --app`. The natural sample
+  was deleted to unstick the dot before anyone thought to keep it.
+  _From: [2026-07-27 settings session](docs/sessions/2026-07-27-settings-and-audits/summary.md),
+  widened [2026-08-17 parked-busy-dot](docs/sessions/2026-08-17-parked-busy-dot/summary.md)_
 
 - **Does a parked `waiting` probe pin the amber dot too?** The park-residue fix
   (#140) guards the `busy` arm of `claude_activity` only. If a session can be
