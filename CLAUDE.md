@@ -238,6 +238,15 @@ is invisible to the bats suite — there is no fake claude. Re-run
 - **Never run the bundle's binary to probe it.**
   `target/release/bundle/macos/worktrees.app/Contents/MacOS/app --version` is the
   GUI entry point — it LAUNCHES a second instance instead of printing a version.
+- **A Claude session probe's `status` can be STALE BY DESIGN.**
+  `~/.claude/sessions/<pid>.json` is rewritten on status transitions — but ALSO
+  on a park, which moves `updatedAt` alone and carries a mid-flight `busy`
+  forward forever (upstream anthropics/claude-code#87131). `updatedAt >
+  statusUpdatedAt` means the last write did not set the status the file carries;
+  that, plus `parkedJobId`, is what `busy_is_delegated` keys on. Age is NOT a
+  substitute — a genuinely busy session can go minutes without a write, which is
+  why the dot has no expiry. Anything new read out of that file needs the same
+  question asked: which write set this field?
 - **`document.visibilityState` works here** — WKWebView fires `visibilitychange`
   on minimize, ⌘H, Space switch and full occlusion (confirmed on a real build via
   logged transitions). The Tauri issues claiming otherwise are Windows/WebView2.
@@ -321,6 +330,12 @@ the skill reads; edit that file, not the skill. Short version: scratch →
 `docs/sessions/<date>-<slug>/` + a row in `docs/sessions/index.md`
 (committed), stragglers → `ROADMAP.md`, one squash-merged PR, then a fresh
 branch off origin/main.
+
+**`gh pr merge` reports a failure it did not cause.** From a side worktree it
+dies with *fatal: 'main' is already used by worktree at …* — that is `gh`'s
+local checkout step, AFTER the merge landed on GitHub. Check
+`gh pr view <n> --json state,mergeCommit` before retrying, or you will re-merge
+a merged PR. Same shared-branch rule as below, from a new direction.
 
 **Tag the release from the worktree that already owns `main`** (the repo root).
 `git checkout -B main` inside a side worktree moves the SHARED branch ref out

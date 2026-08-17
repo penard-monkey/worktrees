@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-17](2026-08-17-parked-busy-dot/summary.html) | a parked job pinned the green dot on — the probe file keeps a mid-flight `busy` when a turn is parked, and nothing ever writes it again |
 | [2026-08-17](2026-08-17-emoji-width/summary.html) | emoji stopped shredding tmux output — tmux said 2 cells, xterm said 1; the graphemes addon aligns them, and the Node width probe lies |
 | [2026-08-16](2026-08-16-sync-macs/summary.html) | `worktrees sync` — courier sync between Macs on an SSD, plan to six merged PRs: CLI parity, guards on every surface, the app's modal + progress bar + import, and the heal for tracked files the transfer skips |
 | [2026-08-14](2026-08-14-drag-drop-nav/summary.html) | drag a place into another group to put it there — a drop sets the tier, the gap opens where it will really land, projects reorder too |
