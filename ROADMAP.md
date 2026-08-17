@@ -5,6 +5,24 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Sync v2: SSH targets, push-all, scheduling.** The hub abstraction was built
+  not to preclude `rsync -e ssh` (direct Mac→Mac without carrying the SSD); a
+  workspace-level "push every project" and a scheduled/auto sync are the other
+  two deliberately-parked asks. All three ride the existing engine — the work
+  is target plumbing and UX, not transfer logic.
+  _From: [2026-08-16 sync-macs session](docs/sessions/2026-08-16-sync-macs/summary.md)_
+- **The heal matcher skips patterns rsync would anchor.** A user
+  `extra_excludes` entry containing `/` (e.g. `docs/*.log`) is honored by rsync
+  but deliberately unmatched by the post-pull heal (conservative-by-choice), so
+  a tracked file it excluded stays "deleted" after an import. Fine for the
+  builtin set (no such shapes); becomes real the day someone writes one. Fix =
+  teach `excluded_path` transfer-root anchoring.
+  _From: [2026-08-16 sync-macs session](docs/sessions/2026-08-16-sync-macs/summary.md)_
+- **Two small sync leftovers.** `~/bin/sync-macs` still exists — David deletes
+  it manually (its retirement gate passed at phase 1). And the import picker
+  cannot reach the "destination exists locally but isn't a workspace project"
+  case; core's guards cover it, but it has never been walked by hand.
+  _From: [2026-08-16 sync-macs session](docs/sessions/2026-08-16-sync-macs/summary.md)_
 - **Glance at ⌘F highlights on emoji-bearing lines after the next release.**
   The emoji-width fix (graphemes addon) and the search addon landed in
   separate sessions and were only eyeballed apart — the sandbox pass for the
