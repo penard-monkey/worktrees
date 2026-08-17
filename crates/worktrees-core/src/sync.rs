@@ -605,20 +605,85 @@ impl Drop for TempFile {
     }
 }
 
+/// Every exclude pattern in effect for a project: the builtin set plus the
+/// user's `extra_excludes`, trimmed, blanks dropped.
+///
+/// ONE source of truth, and it has to stay that way: `exclude_body` writes these
+/// into the file rsync obeys, and `excluded_path` decides which of the deletions
+/// a pull leaves behind are that skipping's own doing (see the heal pass). A
+/// pattern in one list and not the other is a file the transfer drops and the
+/// heal never restores.
+fn exclude_patterns(extra: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = EXCLUDES.iter().map(|s| (*s).to_string()).collect();
+    v.extend(extra.iter().map(|e| e.trim().to_string()).filter(|e| !e.is_empty()));
+    v
+}
+
 fn exclude_body(extra: &[String]) -> String {
-    let mut s = String::new();
-    for e in EXCLUDES {
-        s.push_str(e);
-        s.push('\n');
-    }
-    for e in extra {
-        let t = e.trim();
-        if !t.is_empty() {
-            s.push_str(t);
-            s.push('\n');
+    exclude_patterns(extra).iter().map(|p| format!("{p}\n")).collect()
+}
+
+/// `*` and `?` against ONE path component. Not a general glob: character
+/// classes (`[abc]`) are matched literally, because no pattern in `EXCLUDES`
+/// has one and a half-implemented class is worse than an unsupported one.
+fn glob_match(pat: &str, s: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pat.chars().collect(), s.chars().collect());
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            pi += 1;
+            mark = ti;
+        } else if let Some(sp) = star {
+            // backtrack: the last `*` swallows one more character
+            pi = sp + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
         }
     }
-    s
+    p[pi..].iter().all(|c| *c == '*')
+}
+
+fn name_match(pat: &str, name: &str) -> bool {
+    if pat.contains('*') || pat.contains('?') { glob_match(pat, name) } else { pat == name }
+}
+
+/// Does a repo-relative path match the exclude set — i.e. would the transfer
+/// have skipped it?
+///
+/// **This is not an rsync pattern implementation**, and must not grow into one.
+/// It covers exactly the three shapes `EXCLUDES` uses, and is deliberately
+/// conservative everywhere else: a path this fails to match is simply not
+/// healed, which leaves the tree exactly as it is today.
+///
+/// * `name/` — an ANCESTOR component equals `name` (`a/node_modules/b.js` ✓).
+///   Ancestors only: rsync's trailing slash means "directory", so a tracked
+///   FILE called `build` is transferred normally and its deletion is the source
+///   machine's intent, not ours. A wildcard inside a directory pattern
+///   (`dir*/`) is globbed per component — our list has no such shape, a user's
+///   `extra_excludes` might.
+/// * anything with `*`/`?` — globbed against the BASENAME (`old-plans/x.tar.gz`
+///   ✓ for `*.tar.gz`). rsync would additionally anchor a pattern containing a
+///   `/` (`docs/*.log`) at the transfer root; we do not, so such a pattern
+///   matches nothing here.
+/// * bare `name` — basename equality (`.DS_Store` anywhere,
+///   `tsconfig.tsbuildinfo`).
+fn excluded_path(patterns: &[String], rel: &str) -> bool {
+    let comps: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
+    let Some((base, ancestors)) = comps.split_last() else { return false };
+    patterns.iter().any(|p| match p.trim() {
+        "" => false,
+        p => match p.strip_suffix('/') {
+            Some("") | None => name_match(p, base),
+            Some(dir) => ancestors.iter().any(|c| name_match(dir, c)),
+        },
+    })
 }
 
 /// The name carries a counter as well as pid + stamp: the app drives syncs
@@ -1415,6 +1480,12 @@ fn sync_one(ui: &mut dyn Ui, dir: SyncDirection, opts: &Opts) -> Result<i32, Str
         ui.info("done.");
     }
 
+    // Straight after the transfer, before the manifest/sessions/install lines,
+    // so the report reads in causal order: what landed, then what it means.
+    if dir == SyncDirection::Pull {
+        post_pull(ui, local_root, &proj_cfg.extra_excludes, json);
+    }
+
     if dir == SyncDirection::Push {
         let m = Manifest {
             schema: SCHEMA,
@@ -1494,6 +1565,246 @@ fn after_pull(
     } else {
         // The hint is a STRING FROM THE HUB. It is shown, never handed to a shell.
         ui.info(&format!("Next: cd {} && {hint}", local_root.display()));
+    }
+}
+
+// ── after a pull: heal the excluded-tracked files, then say what arrived ─────
+//
+// The exclude list is "rebuildable bulk" — except repos TRACK files that match
+// it (`old-plans/*.tar.gz`, this repo's committed session tarballs). The
+// transfer skips them, so the copy's `.git` says they exist while the working
+// files never arrive, and a fresh-machine import opens on a wall of `deleted:`.
+// Nothing is lost — `.git` ferries complete, so the blobs are right there — and
+// `git checkout --` is the whole repair.
+//
+// Both halves below run for the CLI and for the app through ONE `post_pull`:
+// the app's modal renders `SyncApplyOut.messages`, which is this same `Ui`.
+
+/// Paths per `git checkout` invocation. argv has a hard limit; the point of the
+/// batch is that a repo with thousands of skipped tarballs still heals.
+const HEAL_BATCH: usize = 200;
+/// How many restored paths the report names before "(+K more)".
+const HEAL_SAMPLE: usize = 5;
+
+/// `git status --porcelain -z` → the paths of UNSTAGED deletions.
+///
+/// `-z` rather than the plain form because it is the only one git never
+/// C-quotes: a path with a space, a quote or a newline arrives verbatim, and a
+/// path we mis-parse is a path we would hand to `git checkout`.
+///
+/// The rule is narrow on purpose. ` D` is "tracked, present in the index, gone
+/// from the working tree" — what a skipped transfer leaves. A STAGED deletion
+/// (`D `) is the source machine's own `git rm`, mirrored faithfully; an
+/// unmerged one (`UD`, `DD`) is a conflict nobody asked us to resolve. Both are
+/// left alone.
+///
+/// Rename/copy entries carry TWO NUL-terminated fields (`R  new\0old`), so the
+/// origin path is consumed here rather than being read as a status line of its
+/// own.
+fn unstaged_deletions(z: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = z.split('\0').filter(|e| !e.is_empty());
+    while let Some(entry) = it.next() {
+        let b = entry.as_bytes();
+        if b.len() < 4 || b[2] != b' ' {
+            continue; // not a status line (or an origin path we did not expect)
+        }
+        let (x, y) = (b[0], b[1]);
+        if x == b'R' || x == b'C' {
+            it.next(); // the rename/copy ORIGIN, not an entry
+        }
+        if y == b'D' && !matches!(x, b'D' | b'U' | b'?' | b'!') {
+            out.push(entry[3..].to_string());
+        }
+    }
+    out
+}
+
+/// Dirty-file count for the post-pull note: every porcelain entry EXCEPT sync's
+/// own backup directory, which this very transfer just created at the
+/// destination. Reporting it as "the state you imported" would be reporting our
+/// own footprint back to the user.
+fn dirty_count(z: &str) -> u32 {
+    let mut n = 0u32;
+    let mut it = z.split('\0').filter(|e| !e.is_empty());
+    while let Some(entry) = it.next() {
+        let b = entry.as_bytes();
+        if b.len() < 4 || b[2] != b' ' {
+            continue;
+        }
+        if matches!(b[0], b'R' | b'C') {
+            it.next();
+        }
+        let p = &entry[3..];
+        if p == SYNC_DIR || p.starts_with(&format!("{SYNC_DIR}/")) {
+            continue;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// The repos a pull has to heal: the project root, plus every LINKED worktree
+/// under `.worktrees/` — a directory whose `.git` is a FILE. Anything else in
+/// there (a leftover plain directory, a file) is skipped silently; this is a
+/// repair pass, not a lint.
+fn healable_repos(local_root: &Path) -> Vec<PathBuf> {
+    let mut out = vec![local_root.to_path_buf()];
+    let Ok(rd) = std::fs::read_dir(local_root.join(".worktrees")) else { return out };
+    let mut wt: Vec<PathBuf> =
+        rd.flatten().map(|e| e.path()).filter(|p| p.join(".git").is_file()).collect();
+    wt.sort();
+    out.append(&mut wt);
+    out
+}
+
+/// Restore `paths` (repo-relative) in `repo`, batched. Returns the ones that are
+/// back; a failed batch WARNS with git's own first line and is skipped, because
+/// a heal that cannot run is not a reason to fail a transfer that already
+/// succeeded.
+fn checkout_paths(ui: &mut dyn Ui, repo: &Path, paths: &[String]) -> Vec<String> {
+    let cwd = repo.to_string_lossy().into_owned();
+    let mut done: Vec<String> = Vec::new();
+    for chunk in paths.chunks(HEAL_BATCH) {
+        // `--` first: every path after it is a path, never a pattern or a rev.
+        let mut argv: Vec<&str> = vec!["checkout", "--"];
+        argv.extend(chunk.iter().map(String::as_str));
+        match git::git(&cwd, &argv) {
+            Ok(o) if o.status.success() => done.extend(chunk.iter().cloned()),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("git checkout failed");
+                ui.warn(&format!(
+                    "could not restore {} skipped file(s) in {}: {}",
+                    chunk.len(),
+                    repo.display(),
+                    first.trim()
+                ));
+            }
+            Err(e) => ui.warn(&format!("could not restore skipped files in {}: {e}", repo.display())),
+        }
+    }
+    done
+}
+
+/// The heal pass. Returns the restored paths RELATIVE TO `local_root`, so one
+/// report line can name files from the root repo and from a worktree without
+/// ambiguity.
+fn heal_excluded_deletions(
+    ui: &mut dyn Ui,
+    local_root: &Path,
+    patterns: &[String],
+) -> Vec<String> {
+    let mut healed: Vec<String> = Vec::new();
+    for repo in healable_repos(local_root) {
+        let Some(z) = git::git_out(&repo.to_string_lossy(), &["status", "--porcelain", "-z"])
+        else {
+            continue; // not a repo (an adoption destination that is still empty)
+        };
+        let mut want: Vec<String> =
+            unstaged_deletions(&z).into_iter().filter(|p| excluded_path(patterns, p)).collect();
+        if want.is_empty() {
+            continue;
+        }
+        want.sort();
+        let prefix = repo
+            .strip_prefix(local_root)
+            .ok()
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for p in checkout_paths(ui, &repo, &want) {
+            healed.push(if prefix.is_empty() { p } else { format!("{prefix}/{p}") });
+        }
+    }
+    healed
+}
+
+/// The heal's one line, or `None` when nothing was restored — silence is the
+/// report for a pull that had nothing to repair.
+fn heal_report(healed: &[String]) -> Option<String> {
+    if healed.is_empty() {
+        return None;
+    }
+    let shown = healed.iter().take(HEAL_SAMPLE).cloned().collect::<Vec<_>>().join(", ");
+    let more = healed.len().saturating_sub(HEAL_SAMPLE);
+    let tail = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+    Some(format!(
+        "restored {} tracked file(s) the transfer skips (excluded as rebuildable): {shown}{tail} — from this machine's .git, at their last committed version (an uncommitted change to an excluded file never rode along).",
+        healed.len()
+    ))
+}
+
+/// `git rev-list --left-right --count @{u}...HEAD` → `(behind, ahead)`. LEFT is
+/// the upstream side, so the first number is what we are missing.
+fn parse_left_right(s: &str) -> Option<(u32, u32)> {
+    let mut t = s.split_whitespace();
+    let behind = t.next()?.parse().ok()?;
+    let ahead = t.next()?.parse().ok()?;
+    Some((behind, ahead))
+}
+
+/// The post-pull note, or `None` when there is nothing to explain.
+///
+/// An import that faithfully mirrors a source Mac which was behind origin, or
+/// dirty, LOOKS broken — that is the whole reason this line exists. It fires
+/// only on the states a user would otherwise read as damage; a level, clean tree
+/// says nothing at all.
+fn status_note(branch: &str, ab: Option<(u32, u32)>, dirty: u32) -> Option<String> {
+    let (behind, ahead) = ab.unwrap_or((0, 0));
+    if behind == 0 && dirty == 0 {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if behind > 0 {
+        let b = if branch.is_empty() { "HEAD" } else { branch };
+        parts.push(match ahead {
+            0 => format!("{b} is {behind} commit(s) behind its upstream (git pull to advance)"),
+            a => format!(
+                "{b} is {behind} commit(s) behind and {a} ahead of its upstream (git pull to advance)"
+            ),
+        });
+    }
+    if dirty > 0 {
+        parts.push(format!("{dirty} uncommitted file(s)"));
+    }
+    Some(format!(
+        "imported state mirrors the source Mac: {} — mirrored state, not transfer damage.",
+        parts.join(", ")
+    ))
+}
+
+/// `status_note`'s data, read from the pulled ROOT repo. A missing upstream is
+/// not an error here: the clause is simply dropped.
+fn pull_status_note(root: &Path) -> Option<String> {
+    let r = root.to_string_lossy().into_owned();
+    let branch = git::git_out(&r, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let ab = git::git_out(&r, &["rev-list", "--left-right", "--count", "@{u}...HEAD"])
+        .and_then(|s| parse_left_right(&s));
+    let dirty = git::git_out(&r, &["status", "--porcelain", "-z"]).map(|z| dirty_count(&z))?;
+    status_note(&branch, ab, dirty)
+}
+
+/// Everything a successful PULL owes the tree it just mirrored over, in ONE
+/// place: the CLI (`sync_one`) and the app (`sync_apply`) both call it right
+/// after the transfer, so the two surfaces cannot drift into repairing
+/// different things.
+///
+/// `quiet` is the CLI's `--json` (a single JSON line has no room for prose). The
+/// repair itself still RUNS — suppressing the report must never suppress the
+/// fix — and a heal failure still warns, the same way `resolve_ctx` warns under
+/// `--json` today.
+fn post_pull(ui: &mut dyn Ui, local_root: &Path, extra_excludes: &[String], quiet: bool) {
+    let patterns = exclude_patterns(extra_excludes);
+    let healed = heal_excluded_deletions(ui, local_root, &patterns);
+    if quiet {
+        return;
+    }
+    if let Some(line) = heal_report(&healed) {
+        ui.info(&line);
+    }
+    // AFTER the heal, so the numbers describe the tree the user will look at.
+    if let Some(note) = pull_status_note(local_root) {
+        ui.info(&note);
     }
 }
 
@@ -1701,6 +2012,12 @@ pub fn sync_apply(
     match progress {
         Some(cb) => apply_streaming(job, cb)?,
         None => apply(job)?,
+    }
+
+    // Same repair, same order, same messages as the CLI — the modal renders
+    // `messages`, so this is the app's copy of the post-pull report.
+    if req.direction == SyncDirection::Pull {
+        post_pull(&mut ui, &ctx.local_root, &ctx.proj_cfg.extra_excludes, false);
     }
 
     if req.direction == SyncDirection::Push {
@@ -2290,6 +2607,214 @@ building file list
         assert!(!body.contains("*.bin"));
         drop(theirs);
         assert!(mine.0.is_file(), "another sync's guard deleted this one's file");
+    }
+
+    // ── post-pull heal ──────────────────────────────────────────────────────
+
+    #[test]
+    fn the_matcher_mirrors_the_patterns_rsync_was_handed() {
+        let pats = exclude_patterns(&["mydata/".into(), " *.bin ".into(), "  ".into()]);
+        // the field bug itself: a COMMITTED tarball matches `*.tar.gz`
+        assert!(excluded_path(&pats, "old-plans/x.tar.gz"));
+        // a directory pattern matches on an ancestor component, at any depth
+        assert!(excluded_path(&pats, "a/node_modules/b.js"));
+        assert!(excluded_path(&pats, "node_modules/b.js"));
+        // …but a tracked FILE named like one is transferred normally, so its
+        // deletion is the source machine's intent and must NOT be healed
+        assert!(!excluded_path(&pats, "build"));
+        assert!(excluded_path(&pats, "build/out.js"));
+        // basename rules
+        assert!(excluded_path(&pats, ".DS_Store"));
+        assert!(excluded_path(&pats, "a/b/.DS_Store"));
+        assert!(excluded_path(&pats, "tsconfig.tsbuildinfo"));
+        assert!(excluded_path(&pats, "app/tsconfig.tsbuildinfo"));
+        assert!(excluded_path(&pats, "debug.log"));
+        // the user's extras participate — they are in the SAME file rsync read
+        assert!(excluded_path(&pats, "a/mydata/f"));
+        assert!(excluded_path(&pats, "x.bin"));
+        // and everything else is mirrored state
+        assert!(!excluded_path(&pats, "docs/keep.txt"));
+        assert!(!excluded_path(&pats, "README.md"));
+        assert!(!excluded_path(&[], "x.tar.gz"));
+    }
+
+    #[test]
+    fn the_globs_the_exclude_list_uses_match_by_basename() {
+        assert!(name_match("*.tar.gz", "data.tar.gz"));
+        assert!(!name_match("*.tar.gz", "tar.gz.txt"));
+        assert!(name_match("*.log", "a.log.log"), "backtracking: the last dot wins");
+        assert!(name_match("*.tsbuildinfo", "x.tsbuildinfo"));
+        assert!(name_match("tsconfig.tsbuildinfo", "tsconfig.tsbuildinfo"));
+        assert!(!name_match("tsconfig.tsbuildinfo", "other.tsbuildinfo"), "no wildcard, no glob");
+        assert!(glob_match("a*c", "abbbc") && !glob_match("a*c", "abbb"));
+        assert!(glob_match("*", "") && glob_match("**", "anything"));
+        assert!(glob_match("?.log", "a.log") && !glob_match("?.log", "ab.log"));
+    }
+
+    /// Verbatim shapes from `git status --porcelain -z` (captured 2026-08-17).
+    #[test]
+    fn only_unstaged_deletions_are_healable() {
+        let z = concat!(
+            "D  gone.txt\0",                  // STAGED: the source Mac's own git rm
+            " D old-plans/a.tar.gz\0",        // what a skipped transfer leaves
+            " D old plans/my data.tar.gz\0",  // -z never quotes: spaces arrive intact
+            "MD staged-edit.bin\0",           // index has content, worktree does not
+            "UD conflict.txt\0",              // unmerged — not ours to resolve
+            "DD both.txt\0",
+            "?? untracked.txt\0",
+            " M edited.rs\0",
+        );
+        assert_eq!(
+            unstaged_deletions(z),
+            vec!["old-plans/a.tar.gz", "old plans/my data.tar.gz", "staged-edit.bin"]
+        );
+        // A rename carries TWO fields (new\0old). The origin is consumed, not
+        // read as an entry — here it is a path that would otherwise PARSE as an
+        // unstaged deletion, which is the whole reason the skip exists.
+        assert_eq!(unstaged_deletions("R  after.txt\0 D before.tar.gz\0"), Vec::<String>::new());
+        assert!(unstaged_deletions("").is_empty());
+        assert!(unstaged_deletions("junk\0x\0").is_empty(), "a malformed line is skipped, not fatal");
+    }
+
+    #[test]
+    fn the_dirty_count_ignores_syncs_own_backup_dir() {
+        let z = " M README.md\0?? .worktrees-sync/\0?? notes.txt\0R  b.txt\0a.txt\0";
+        assert_eq!(dirty_count(z), 3, "the rename counts once, the backup dir not at all");
+        assert_eq!(dirty_count(""), 0);
+        // a tree whose ONLY change is the footprint this transfer just made
+        // reads as clean, which is what it is
+        assert_eq!(dirty_count("?? .worktrees-sync/\0?? .worktrees-sync/backups/x\0"), 0);
+        assert_eq!(dirty_count("?? .worktrees-syncing/\0"), 1, "prefix, not substring");
+    }
+
+    #[test]
+    fn healable_repos_are_the_root_and_its_linked_worktrees() {
+        let d = tmp("healrepos");
+        let root = d.join("proj");
+        std::fs::create_dir_all(root.join(".worktrees/feat")).unwrap();
+        std::fs::create_dir_all(root.join(".worktrees/plain")).unwrap();
+        std::fs::create_dir_all(root.join(".worktrees/nested/.git")).unwrap();
+        // a linked worktree's `.git` is a FILE holding `gitdir: …`
+        std::fs::write(root.join(".worktrees/feat/.git"), "gitdir: /x\n").unwrap();
+        std::fs::write(root.join(".worktrees/loose.txt"), "x").unwrap();
+        assert_eq!(healable_repos(&root), vec![root.clone(), root.join(".worktrees/feat")]);
+        // no `.worktrees/` at all is the common case, and still heals the root
+        assert_eq!(healable_repos(&d.join("nothing")), vec![d.join("nothing")]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_heal_report_names_a_sample_counts_the_rest_and_stays_silent_at_zero() {
+        assert!(heal_report(&[]).is_none(), "nothing healed ⇒ nothing said");
+        let one = heal_report(&["old-plans/a.tar.gz".into()]).unwrap();
+        assert!(one.starts_with("restored 1 tracked file(s)"), "{one}");
+        assert!(one.contains("old-plans/a.tar.gz"), "{one}");
+        // the honest edge: what comes back is the COMMITTED version
+        assert!(one.contains("last committed version"), "{one}");
+        assert!(!one.contains(" more)"), "{one}");
+        let many: Vec<String> = (0..9).map(|i| format!("f{i}.tar.gz")).collect();
+        let m = heal_report(&many).unwrap();
+        assert!(m.contains("restored 9 tracked file(s)"), "{m}");
+        assert!(m.contains("f4.tar.gz") && !m.contains("f5.tar.gz"), "capped at {HEAL_SAMPLE}: {m}");
+        assert!(m.contains("(+4 more)"), "{m}");
+    }
+
+    // ── post-pull status note ───────────────────────────────────────────────
+
+    #[test]
+    fn left_right_counts_the_upstream_side_first() {
+        assert_eq!(parse_left_right("1\t0"), Some((1, 0)));
+        assert_eq!(parse_left_right("7\t2\n"), Some((7, 2)));
+        // a branch with no upstream: git fails and says so on stderr, so
+        // git_out gives None — but a stray line must not parse either
+        assert_eq!(parse_left_right("fatal: no upstream configured"), None);
+        assert_eq!(parse_left_right(""), None);
+        assert_eq!(parse_left_right("3"), None);
+    }
+
+    #[test]
+    fn the_status_note_speaks_only_when_the_mirror_looks_broken() {
+        // level and clean: the pull explains itself
+        assert_eq!(status_note("main", Some((0, 0)), 0), None);
+        assert_eq!(status_note("main", None, 0), None);
+        // ahead alone is not something a user reads as damage
+        assert_eq!(status_note("main", Some((0, 3)), 0), None);
+
+        let n = status_note("main", Some((7, 0)), 2).unwrap();
+        assert!(n.contains("mirrors the source Mac"), "{n}");
+        assert!(n.contains("main is 7 commit(s) behind its upstream"), "{n}");
+        assert!(n.contains("git pull to advance"), "{n}");
+        assert!(n.contains("2 uncommitted file(s)"), "{n}");
+
+        let n = status_note("main", Some((2, 3)), 0).unwrap();
+        assert!(n.contains("2 commit(s) behind and 3 ahead"), "{n}");
+        assert!(!n.contains("uncommitted"), "{n}");
+
+        // no upstream at all ⇒ the ahead/behind clause is simply dropped
+        let n = status_note("feat", None, 1).unwrap();
+        assert!(!n.contains("behind"), "{n}");
+        assert!(n.contains("1 uncommitted file(s)"), "{n}");
+    }
+
+    /// The field bug end to end, through the API the app calls: a repo that
+    /// COMMITS a `*.tar.gz`, a hub copy that (correctly) does not carry the
+    /// working file, and a fresh machine that must not open on `deleted:`.
+    /// Real rsync, real git — the bats suite's rsync is a shim that transfers
+    /// nothing, so this is the half it cannot reach.
+    #[test]
+    fn a_pull_heals_the_tracked_files_the_transfer_skipped() {
+        let d = tmp("healapi");
+        let src = d.join("src");
+        let dest = d.join("proj");
+        let sh = |cwd: &Path, args: &[&str]| {
+            assert!(
+                Command::new(args[0]).args(&args[1..]).current_dir(cwd).status().unwrap().success(),
+                "{args:?}"
+            );
+        };
+        std::fs::create_dir_all(&src).unwrap();
+        sh(&src, &["git", "init", "-q"]);
+        sh(&src, &["git", "config", "user.email", "t@t"]);
+        sh(&src, &["git", "config", "user.name", "t"]);
+        std::fs::create_dir_all(src.join("old-plans")).unwrap();
+        std::fs::write(src.join("old-plans/data.tar.gz"), "bulk").unwrap();
+        std::fs::write(src.join("keep.txt"), "keep").unwrap();
+        sh(&src, &["git", "add", "-A"]);
+        sh(&src, &["git", "commit", "-qm", "init"]);
+
+        // what a push leaves on the hub: the whole tree INCLUDING .git, minus
+        // the excluded (but tracked) tarball
+        let tree = d.join("hub/proj/proj");
+        std::fs::create_dir_all(tree.parent().unwrap()).unwrap();
+        sh(&d, &["cp", "-R", &src.to_string_lossy(), &tree.to_string_lossy()]);
+        std::fs::remove_file(tree.join("old-plans/data.tar.gz")).unwrap();
+        std::fs::write(
+            d.join("hub/proj").join(MANIFEST),
+            format!(
+                "schema = 1\nname = \"proj\"\nlocal_root = \"{}\"\nhost = \"othermac\"\n",
+                dest.display()
+            ),
+        )
+        .unwrap();
+
+        let req = SyncRequest {
+            source: SyncSource::HubName("proj".into()),
+            direction: SyncDirection::Pull,
+            hub: Some(d.join("hub").to_string_lossy().into_owned()),
+            with_sessions: Some(false),
+        };
+        let out = sync_apply(&req, false, false, None).expect("adoption apply");
+        assert!(out.applied);
+        // the transfer alone leaves a tree whose git says the tarball is deleted
+        assert!(dest.join("keep.txt").is_file());
+        assert!(dest.join("old-plans/data.tar.gz").is_file(), "the heal did not run");
+        assert_eq!(std::fs::read_to_string(dest.join("old-plans/data.tar.gz")).unwrap(), "bulk");
+        let msg = out.messages.join("\n");
+        assert!(msg.contains("restored 1 tracked file(s)"), "{msg}");
+        assert!(msg.contains("old-plans/data.tar.gz"), "{msg}");
+        // …and the tree it leaves behind is clean, so nothing else is said
+        assert!(!msg.contains("mirrors the source Mac"), "{msg}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
