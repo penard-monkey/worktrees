@@ -148,7 +148,16 @@ is invisible to the bats suite — there is no fake claude. Re-run
   `clearDecorations()` first or the matches keep the old theme's hex. Load the
   addon after `term.open(host)`, and route its calls through a guard: losing a
   search is survivable, losing the terminal is not.
-- **A rule mirrored from Rust into TS needs a check that RE-READS the Rust.**
+- **The terminal's glyph widths must MATCH TMUX, and the Node probe lies.**
+  tmux (utf8proc) lays out emoji as 2 cells; xterm 5.5's default Unicode 6
+  tables said 1, and every tmux partial repaint interleaved one column off —
+  Claude's spinner turned that into permanently shredded lines. The graphemes
+  addon (`activeVersion = "15-graphemes"`) aligns them, VS16 (⚠️) included,
+  which Unicode11Addon would NOT. Two traps: probing the addon's widths under
+  Node reports astral emoji as narrow (pooled-Buffer bug in its `_dec()`;
+  `delete globalThis.Buffer` first), and `tmux send-keys` mangles pasted
+  VS16/ZWJ — measure with UTF-8 byte escapes and `#{cursor_x}`. Clean
+  `capture-pane -p` + garbled pane = width mismatch, nothing else.
   `dnd.ts::predictTier` reimplements `store::reconcile` so a drag can predict
   which tier a row will land in; `app/scripts/dnd-check.mjs` parses `store.rs`
   and `lib.rs` for `IDLE_WINDOW_SECS`, the sticky-label set and

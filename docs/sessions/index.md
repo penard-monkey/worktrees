@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-17](2026-08-17-emoji-width/summary.html) | emoji stopped shredding tmux output — tmux said 2 cells, xterm said 1; the graphemes addon aligns them, and the Node width probe lies |
 | [2026-08-14](2026-08-14-drag-drop-nav/summary.html) | drag a place into another group to put it there — a drop sets the tier, the gap opens where it will really land, projects reorder too |
 | [2026-08-14](2026-08-14-cmd-f-find/summary.html) | ⌘F finds — the xterm buffer in either terminal, the open file in the viewer, one bar routed by what you last touched |
 | [2026-08-14](2026-08-14-markdown-zoom/summary.html) | markdown docs read at whatever size you need — a per-place reading zoom for the Files viewer, one multiplier and a rem→em sweep |

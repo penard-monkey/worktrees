@@ -5,6 +5,15 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Glance at ⌘F highlights on emoji-bearing lines after the next release.**
+  The emoji-width fix (graphemes addon) and the search addon landed in
+  separate sessions and were only eyeballed apart — the sandbox pass for the
+  width fix predated its rebase onto search. They are logically independent
+  (graphemes loads before `term.open`, search after), so this is a
+  one-minute confirmation, not an investigation: ⌘F for a word on a line
+  with ✅/⚠️ in tmux, decorations must sit on the match.
+  _From: [2026-08-17 emoji-width](docs/sessions/2026-08-17-emoji-width/summary.md)_
+
 - **Smoke nav drag & drop in the real app.** Everything about it was verified in
   the mock harness with synthetic pointer events, and the mock answers in a
   microtask while the real `list_workspace` is a git fan-out of seconds — the
