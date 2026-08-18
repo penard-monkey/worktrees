@@ -863,9 +863,26 @@ body.dragging .menu-catch { pointer-events: none; }
    ResizeObserver in TerminalPane observes THIS box — no shrink, no `fit()`, no
    `term_resize`, so tmux keeps painting columns that are now under the dock.
    `overflow: hidden` is the backstop: a frame where the grid is wider than its
-   box must clip, never paint over the neighbour. */
+   box must clip, never paint over the neighbour.
+
+   `box-sizing: content-box` is the OTHER half, and it is not a style choice —
+   it is the only way to tell the fit addon the truth. `proposeDimensions()`
+   takes its available width from `getComputedStyle(<the host>).width` and then
+   subtracts the padding of `term.element` (`.xterm`), which has none. Two
+   different elements: the host's own padding is never taken off. Under the
+   global `* { box-sizing: border-box }` that computed width INCLUDES the 16px
+   of padding here, so the terminal is sized for 16px it does not have, and the
+   last ~2 columns land under `.xterm-viewport`'s 15px scrollbar gutter — which
+   paints over them, slicing the final glyph down the middle (measured: a 1156px
+   host asked for 147 cols where 145 fit; screen 1151px over a 1141px scroll
+   area). Reporting the content box makes the addon's arithmetic come out right
+   on both axes; the layout is unchanged — but only because nothing here sets a
+   width/height/basis length for box-sizing to reinterpret (flex-basis 0%
+   floors at the padding either way). Add one — a max-height, say — and it
+   would move. */
 .term-host {
   flex: 1; min-width: 0; min-height: 0; overflow: hidden;
+  box-sizing: content-box;
   padding: var(--s2); background: var(--bg-abyss); border-radius: var(--r-md);
 }
 .term-empty { flex: 1; display: grid; place-items: center; }

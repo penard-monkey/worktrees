@@ -67,6 +67,28 @@ if (host) {
 
   if (/overflow:\s*hidden/.test(host)) ok(".term-host clips (overflow: hidden) — a wide grid can never paint over the dock");
   else fail(".term-host has no `overflow: hidden` — a mid-resize frame can paint the grid over its neighbour");
+
+  // The host is the box the fit addon MEASURES, and it measures it with
+  // `getComputedStyle(parent).width`. Under the global `* { box-sizing:
+  // border-box }` that value includes this rule's own padding, and the only
+  // padding `proposeDimensions()` subtracts is `term.element`'s (`.xterm`,
+  // which has none) — so the terminal gets sized for 16px that are not there
+  // and the last columns end up under `.xterm-viewport`'s scrollbar gutter,
+  // sliced down the middle. Only assert it while there IS padding to lie about
+  // — and "padding" must mean every spelling of it. The first version of this
+  // test matched only the `padding:` shorthand, so rewriting the rule as
+  // `padding-inline:` or `padding-left:` would have turned the whole check
+  // into a silent "ok — no padding" with the bug fully present: the guard gone
+  // vacuous, which this file exists to never be. The zero exemption tolerates
+  // a semicolon-free final declaration for the same reason.
+  const padded = /padding[-a-z]*\s*:/.test(host) && !/padding:\s*0(?:px)?\s*(?:;|$)/.test(host);
+  if (!padded) {
+    ok(".term-host has no padding — nothing for the fit addon's border-box read to over-count");
+  } else if (/box-sizing:\s*content-box/.test(host)) {
+    ok(".term-host reports its CONTENT box (box-sizing: content-box) — the fit addon sees the width it may actually paint in");
+  } else {
+    fail(".term-host has padding but not `box-sizing: content-box` — the fit addon reads the border-box width, oversizes the grid by the padding, and the scrollbar clips the last glyph");
+  }
 }
 
 console.log(failed ? `\n${failed} failed` : "\nall good");
