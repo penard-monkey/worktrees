@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-17](2026-08-17-gitignore-cmdt-replay/summary.html) | new projects start with a clean `git status`, ⌘T + a files right-click menu, and the shell tab that came back four prompts deep — the ring replays fine at its own width; one column off is what stacks it |
 | [2026-08-17](2026-08-17-parked-busy-dot/summary.html) | a parked job pinned the green dot on — the probe file keeps a mid-flight `busy` when a turn is parked, and nothing ever writes it again |
 | [2026-08-17](2026-08-17-emoji-width/summary.html) | emoji stopped shredding tmux output — tmux said 2 cells, xterm said 1; the graphemes addon aligns them, and the Node width probe lies |
 | [2026-08-16](2026-08-16-sync-macs/summary.html) | `worktrees sync` — courier sync between Macs on an SSD, plan to six merged PRs: CLI parity, guards on every surface, the app's modal + progress bar + import, and the heal for tracked files the transfer skips |
