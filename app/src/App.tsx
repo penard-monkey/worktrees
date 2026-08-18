@@ -329,47 +329,6 @@ function ReleaseNotes({ notes }: { notes: string }) {
   );
 }
 
-// New-worktree form. Module scope + OWN draft state: components defined inside
-// App get a fresh identity every render, which remounts their DOM and drops
-// input focus per keystroke — the form must live outside that churn.
-// `initialBranch`/`initialName` exist so a FAILED create can hand the user back
-// what they typed. The form is dismissed the moment it is submitted (the nav's
-// pending row takes over from there), so without this the three fields would die
-// with the unmount and a rejected branch name — a typo'd base, a branch already
-// checked out elsewhere — would cost a full retype to correct.
-function NewPlaceForm({ project, initialBranch, initialName, initialBase, onCreate, onCancel }: {
-  project: string;
-  initialBranch: string;
-  initialName: string;
-  initialBase: string;
-  onCreate: (branch: string, name: string, base: string) => void;
-  onCancel: () => void;
-}) {
-  const [branch, setBranch] = useState(initialBranch);
-  const [name, setName] = useState(initialName);
-  const [base, setBase] = useState(initialBase);
-  const submit = () => { if (branch.trim()) onCreate(branch.trim(), name.trim(), base.trim()); };
-  const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") submit();
-    if (e.key === "Escape") onCancel();
-  };
-  return (
-    <div className="newform nav-newform">
-      <div className="newform-h">
-        New worktree · <b>{basename(project)}</b>
-        <button className="mini" title="cancel (Esc)" onClick={onCancel}><Icons.X size={13} /></button>
-      </div>
-      <input placeholder="branch (e.g. feat/x)" value={branch} autoFocus
-        onChange={(e) => setBranch(e.currentTarget.value)} onKeyDown={onKey} />
-      <input placeholder="name (optional)" value={name}
-        onChange={(e) => setName(e.currentTarget.value)} onKeyDown={onKey} />
-      <input placeholder="base (default: main)" value={base}
-        onChange={(e) => setBase(e.currentTarget.value)} onKeyDown={onKey} />
-      <button onClick={submit} disabled={!branch.trim()}>Create</button>
-    </div>
-  );
-}
-
 // Rename-in-place for the space header's name.
 //
 // ⚠ MODULE SCOPE, and it has to be: a component defined inside App() gets a new
@@ -450,33 +409,6 @@ function InitRepoPrompt({ dir, onInit, onCancel }: {
         <code>{dir}</code> isn't a git repository. Initialize it with an empty first commit?
       </p>
       <button disabled={busy} onClick={run}>{busy ? "Initializing…" : "git init + first commit"}</button>
-    </div>
-  );
-}
-
-// Tracked repo, unborn HEAD: `new` cannot work until a commit exists, so the
-// new-worktree form is replaced by the one action that unblocks it.
-function UnbornPrompt({ project, onCommit, onCancel }: {
-  project: string;
-  onCommit: (repo: string) => Promise<void>;
-  onCancel: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const run = async () => {
-    setBusy(true);
-    await onCommit(project);
-    setBusy(false);
-  };
-  return (
-    <div className="newform nav-newform">
-      <div className="newform-h">
-        No commits yet · <b>{basename(project)}</b>
-        <button className="mini" title="cancel (Esc)" onClick={onCancel}><Icons.X size={13} /></button>
-      </div>
-      <p className="newform-note">
-        git can't branch off an unborn HEAD. Make the first commit, then create worktrees.
-      </p>
-      <button disabled={busy} onClick={run}>{busy ? "Committing…" : "Create initial commit"}</button>
     </div>
   );
 }
@@ -943,6 +875,7 @@ type BranchList = { branches: string[]; current: string; default_base: string };
 
 function BranchCombo({
   value, data, placeholder, exclude, inputClass, ariaLabel, testid,
+  drop = "up", allowCreate = true, disabled = false, autoFocus = false, openOnFocus = true,
   onChange, onOpen, onCommit,
 }: {
   value: string;
@@ -955,6 +888,20 @@ function BranchCombo({
   inputClass: string;
   ariaLabel: string;
   testid?: string;
+  /** Which way the popover grows. "up" for the status bar (last row of the
+   *  window); "down" inside a dialog, where up would leave the box off-screen. */
+  drop?: "up" | "down";
+  /** The DWIM "create X off base" row. Off for a field that must name something
+   *  that ALREADY resolves — a base is a start point, not a thing to invent. */
+  allowCreate?: boolean;
+  disabled?: boolean;
+  autoFocus?: boolean;
+  /** Whether merely focusing the field opens the list. True in the status bar,
+   *  where the field exists to be typed in and the pop has empty space above it.
+   *  False in a dialog: the branch field autofocuses on open, and a list dropped
+   *  over the fields below it before you have typed anything hides the very
+   *  things the dialog was built to show. Typing and the ▾ still open it. */
+  openOnFocus?: boolean;
   onChange: (v: string) => void;
   /** First open / first keystroke — the parent's cue to fetch lazily. */
   onOpen: () => void;
@@ -977,12 +924,18 @@ function BranchCombo({
     .filter((b) => b !== exclude && b.toLowerCase().includes(q.toLowerCase()))
     .slice(0, 50);
   const exact = matches.some((b) => b === q);
-  const creating = q.length > 0 && !exact;
+  const creating = allowCreate && q.length > 0 && !exact;
   // the create row is last, so ↓ from the top walks real branches first
   const options: { branch: string; create: boolean }[] = [
     ...matches.map((b) => ({ branch: b, create: false })),
     ...(creating ? [{ branch: q, create: true }] : []),
   ];
+
+  // One row, and it is the exact thing already typed: there is nothing to pick.
+  // Left visible it would cover whatever sits under the field — in the dialog
+  // that is the verdict line, i.e. the answer you typed the branch to get.
+  const useless = options.length === 1 && !options[0].create && options[0].branch === q;
+  const showPop = open && !useless;
 
   const commit = (branch: string) => {
     const b = branch.trim();
@@ -1003,16 +956,23 @@ function BranchCombo({
     return () => document.removeEventListener("mousedown", away);
   }, [open]);
 
+  // ⚠ Every branch below tests `showPop`, NEVER `open`. The suppression above
+  // leaves `open` true while nothing is on screen, and a key handler that
+  // believed `open` would let an INVISIBLE popover eat the keypress: Enter on
+  // the sole exact match (i.e. checking out an existing branch, the common
+  // case) silently committed the value it already had and swallowed the submit,
+  // and Escape closed a popover the user could not see instead of the dialog.
+  // Both then needed a second press that looked like the first had been ignored.
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      if (!open) { show(); return; }
+      if (!showPop) { show(); return; }
       const d = e.key === "ArrowDown" ? 1 : -1;
       setHi((i) => (options.length ? (i + d + options.length) % options.length : 0));
       return;
     }
-    if (e.key === "Escape" && open) {
-      // Only the OPEN pop is closed here, and the event stops: a dialog hosting
+    if (e.key === "Escape" && showPop) {
+      // Only a VISIBLE pop is closed here, and the event stops: a dialog hosting
       // this field must not also take the same Escape as "cancel".
       e.preventDefault();
       e.stopPropagation();
@@ -1022,30 +982,37 @@ function BranchCombo({
     if (e.key === "Enter") {
       // A highlighted row wins; otherwise the raw text does, so Enter still
       // works exactly as it did before the list existed.
-      commit(open && options[hi] ? options[hi].branch : value);
+      commit(showPop && options[hi] ? options[hi].branch : value);
+      // Picking from a VISIBLE list is the whole keypress. Without this the
+      // dialog hosting the field would also read it as "submit", so choosing a
+      // branch would create the worktree before you had touched base or name.
+      // No visible list lets it through, which is what makes Enter still submit.
+      if (showPop) e.stopPropagation();
     }
   };
 
   return (
-    <div className="combo" ref={boxRef}>
+    <div className={"combo" + (drop === "down" ? " down" : "") + (disabled ? " off" : "")} ref={boxRef}>
       <input
         ref={inputRef}
         className={inputClass}
         placeholder={placeholder}
         value={value}
         role="combobox"
-        aria-expanded={open}
+        aria-expanded={showPop}
         aria-label={ariaLabel}
         aria-autocomplete="list"
-        aria-controls={open ? listId : undefined}
+        aria-controls={showPop ? listId : undefined}
         // Focus never leaves the input, so WITHOUT this the arrow keys are
         // silent to a screen reader and Enter commits a row it never announced.
-        aria-activedescendant={open && options[hi] ? optId(hi) : undefined}
+        aria-activedescendant={showPop && options[hi] ? optId(hi) : undefined}
         data-testid={testid}
         spellCheck={false}
         autoCapitalize="off"
         autoCorrect="off"
-        onFocus={show}
+        disabled={disabled}
+        autoFocus={autoFocus}
+        onFocus={() => { if (openOnFocus) show(); else onOpen(); }}
         onChange={(e) => { onChange(e.currentTarget.value); setHi(0); show(); }}
         onKeyDown={onKey}
       />
@@ -1053,6 +1020,7 @@ function BranchCombo({
         className="combo-caret"
         type="button"
         tabIndex={-1}
+        disabled={disabled}
         title="show branches"
         aria-label="show branches"
         // Never let the caret take focus off the field — a click that blurs the
@@ -1062,7 +1030,7 @@ function BranchCombo({
       >
         <Icons.ChevronDown size={12} />
       </button>
-      {open && (
+      {showPop && (
         // The notes sit OUTSIDE the listbox: a `role="listbox"` may only contain
         // options, and "loading branches…" is not one.
         <div className="combo-pop">
@@ -1148,6 +1116,341 @@ function BranchSwitcher({ repo, slug, onSwitch, onError }: {
         setData(null);
       }}
     />
+  );
+}
+
+/** What is wrong with the folder a new worktree would land in.
+ *
+ *  NOT `nameProblem` — that one guards a PROJECT directory and rejects `/`,
+ *  which would be wrong here: core slugifies the name exactly as it slugifies
+ *  the branch, so `feat/x` is a fine name that becomes `feat-x`. What is left is
+ *  what the filesystem and the app's own selection model refuse. */
+function slugProblem(slug: string): string {
+  if (!slug) return "";
+  if (slug === "." || slug === "..") return "'.' and '..' are not names";
+  if (slug.startsWith(".")) return "a name starting with '.' would make a hidden folder";
+  if (slug === "(main)") return "'(main)' is the name of the main checkout";
+  // eslint-disable-next-line no-control-regex -- control chars are exactly what this rejects
+  if (/[\s\u0000-\u001f\u007f]/.test(slug)) return "a name cannot contain spaces or control characters";
+  return "";
+}
+
+/** What `new` is about to DO, said before it does it.
+ *
+ *  `outcome` is not decoration: it drives the Base field (live only where core
+ *  reads it) and the preview (which must not promise a path in a case that
+ *  reuses an existing one, or creates nothing at all). `at` is the place core
+ *  will actually land in, which for a reuse is NOT the derived slug.
+ *  `blocking` marks a case core refuses outright — Create is disabled rather
+ *  than letting the op fail into the error banner. */
+type Verdict = {
+  tone: "info" | "warn" | "error";
+  text: string;
+  /** create = a new directory · reuse/switch = an existing one · none = refused
+   *  · unknown = the branch list has not landed yet, so do not claim either. */
+  outcome: "create" | "reuse" | "switch" | "none" | "unknown";
+  blocking?: boolean;
+  usesBase?: boolean;
+  /** The existing place this resolves to — its real path and tmux session. */
+  at?: Place;
+  openSlug?: string;
+};
+
+/** "New worktree" — the `+` on a project header.
+ *
+ *  This was a card pinned to the TOP of the nav, which is not where the project
+ *  you clicked lives: with several projects on screen the only thing tying the
+ *  form to one of them was a line of 11px text, and it shoved the whole tree
+ *  down for as long as it was up. A dialog carries the project in its title,
+ *  dismisses by clicking away, and — the actual point — has room for the thing
+ *  the card could never fit: what this is going to do. `new` is DWIM (branch
+ *  exists → check it out, remote-only → track it, unknown → create it off a
+ *  base, already in another worktree → reuse that worktree), and none of that
+ *  was visible in three bare inputs whose base placeholder said "default: main"
+ *  on a repo whose default base is `master`.
+ *
+ *  Module scope (CLAUDE.md): it owns three fields, and App re-renders on the 3s
+ *  poll — defined inside App() it would remount and drop focus per keystroke. */
+function NewPlaceDialog({
+  project, prefix, places, unborn, initial, initialBase,
+  onCreate, onClose, onOpenPlace, onInitialCommit, onError,
+}: {
+  project: string;
+  prefix: string;
+  /** This project's places. The live snapshot is the only thing that knows which
+   *  worktree already holds a branch and which slugs are taken — no Rust rule is
+   *  reimplemented here, it is read. */
+  places: Place[];
+  unborn: boolean;
+  /** A REJECTED create, handed back so a typo costs one edit and not a retype. */
+  initial: { branch: string; name: string; base: string } | null;
+  /** ctx-menu "New worktree from this branch…" — a base, nothing else. */
+  initialBase: string;
+  onCreate: (branch: string, name: string, base: string) => void;
+  onClose: () => void;
+  onOpenPlace: (slug: string) => void;
+  onInitialCommit: (repo: string) => Promise<void>;
+  onError: (e: unknown) => void;
+}) {
+  const [branch, setBranch] = useState(initial?.branch ?? "");
+  const [base, setBase] = useState(initial?.base || initialBase);
+  const [name, setName] = useState(initial?.name ?? "");
+  // Until this flips, the folder name MIRRORS the branch. Emptying the field
+  // hands it back — which is what the hint under it says.
+  const [touched, setTouched] = useState(!!initial?.name);
+  const [data, setData] = useState<BranchList | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    // "(main)" resolves to the main checkout (project.rs `place_dir`), which is
+    // how a PROJECT-level branch list is asked for — there is no place yet.
+    invoke<BranchList>("list_branches", { repo: project, slug: "(main)" })
+      .then((d) => {
+        if (!alive) return;
+        setData(d);
+        // Seed the base ONCE, and only into an empty field: the real default is
+        // main → master → HEAD, which the old placeholder merely guessed at.
+        setBase((b) => b || d.default_base);
+      })
+      .catch((e) => { if (alive) onError(e); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per open
+  }, [project]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  // core strips a leading origin/ before anything else (ops.rs `strip_origin`)
+  const b = branch.trim().replace(/^origin\//, "");
+  const mirrored = b.replace(/\//g, "-");
+  const typed = touched ? name.trim() : "";
+  // ⚠ Send a name ONLY when it differs from what core would derive anyway. WITH
+  // a name core refuses a branch that already lives in another worktree; without
+  // one it reuses that worktree. A mirrored name sent unconditionally would
+  // silently turn the second case into the first (ops.rs:417-428).
+  const sendName = typed && typed !== mirrored ? typed : "";
+  const shownName = touched ? name : mirrored;
+  const slug = (sendName || b).replace(/\//g, "-");
+  const baseShown = base.trim() || data?.default_base || "";
+
+  // ⚠ The ORDER below is core's order, and it is not the obvious one.
+  // `cmd_new` reaches its holder logic only when the derived directory does NOT
+  // exist (ops.rs:417) — so an existing worktree at this slug decides the
+  // outcome BEFORE "who currently holds the branch" is even asked.
+  //
+  // `wt_for_branch` also looks only under `.worktrees/` (project.rs:468), so the
+  // MAIN checkout sitting on the branch is not a holder. It is not harmless
+  // either: core sails past its own pre-check and dies in `git worktree add`
+  // ("already checked out"), which is why it gets a verdict of its own.
+  const holder = places.find((p) => !p.is_main && p.branch === b);
+  const mainHolder = places.find((p) => p.is_main && p.branch === b);
+  const taken = places.find((p) => p.slug === slug);
+  const known = !!data?.branches.includes(b);
+  const problem = slugProblem(slug);
+
+  const verdict: Verdict | null =
+    !b ? null
+    : problem ? { tone: "error", text: problem, blocking: true, outcome: "none" }
+    // ── the slug's directory already exists: core never reaches holder logic ──
+    : taken && !taken.registered
+      ? {
+          tone: "error", blocking: true, outcome: "none",
+          text: `${slug} exists but is not a registered worktree — core refuses to touch it. Remove it or pick another folder name.`,
+        }
+    : taken && taken.branch === b
+      ? { tone: "warn", outcome: "reuse", at: taken, openSlug: taken.slug,
+          text: `${slug} already exists and is already on '${b}' — it will be reused as-is.` }
+    : taken && holder
+      ? {
+          tone: "error", blocking: true, outcome: "none", openSlug: holder.slug,
+          text: `${slug} already exists${taken.branch ? ` on '${taken.branch}'` : ""}, so it would be switched to '${b}' — but '${b}' is checked out in ${holder.slug}, and git refuses to check a branch out twice.`,
+        }
+    : taken
+      // do_switch creates the branch off `base` when it does not exist yet
+      // (ops.rs:320-333), so base is live here — the one case that used to be
+      // greyed out under a hint saying base did not apply.
+      ? { tone: "warn", outcome: "switch", at: taken, usesBase: true, openSlug: taken.slug,
+          // A place with no branch is detached, not unknown — "on '?'" reads
+          // like the app failed to look.
+          text: taken.branch
+            ? `${slug} already exists on '${taken.branch}' — it will be switched to '${b}'.`
+            : `${slug} already exists with no branch checked out — it will be switched to '${b}'.` }
+    // ── the directory does not exist: now the branch's current home matters ──
+    : holder && sendName
+      ? {
+          tone: "error", blocking: true, outcome: "none", openSlug: holder.slug,
+          text: `'${b}' is already checked out in ${holder.slug}, so it cannot also go in ${slug}. Clear the folder name to reuse ${holder.slug}.`,
+        }
+    : holder
+      // core lands in the HOLDER's directory and session, not the derived slug
+      ? { tone: "warn", outcome: "reuse", at: holder, openSlug: holder.slug,
+          text: `${holder.slug} is already on '${b}' — creating here reuses that worktree.` }
+    : mainHolder
+      ? {
+          tone: "error", blocking: true, outcome: "none", openSlug: mainHolder.slug,
+          text: `the main checkout is on '${b}', and git cannot check one branch out twice. Switch main off it first, or pick another branch.`,
+        }
+    // ⚠ Only the last two lines depend on the branch LIST, and until it lands
+    // `known` is false — which reads as "this branch is new" for a branch that
+    // exists. The mock answers in a microtask so that window is invisible there;
+    // the real read is a `git for-each-ref` fan-out. Say "still reading" instead
+    // of asserting the wrong one of the two (CLAUDE.md's mock-timing rule).
+    : data === null
+      ? { tone: "info", outcome: "unknown", text: `reading this project's branches…` }
+    : known
+      ? { tone: "info", outcome: "create", text: `'${b}' already exists — it will be checked out here.` }
+      : { tone: "info", outcome: "create", usesBase: true,
+          text: `'${b}' will be created off ${baseShown || "the default base"}.` };
+
+  // Base is consulted only where core actually reads it — which the verdict now
+  // knows, because it is the same decision. An EMPTY branch counts as used:
+  // nothing has been decided yet, and a field greyed out before you have typed
+  // anything reads as broken, not as inert.
+  const baseUsed = !b || !verdict || !!verdict.usesBase || verdict.outcome === "unknown";
+  const ready = !!b && !verdict?.blocking && !busy;
+  const submit = () => { if (ready) onCreate(b, sendName, base.trim()); };
+
+  return (
+    <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
+      <div className="sync-modal nw-modal" role="dialog" aria-label="New worktree" data-testid="new-place-dialog"
+        onClick={(e) => e.stopPropagation()}
+        // ⚠ Enter is taken at the DIALOG so it works from any field — but a
+        // keydown on a focused BUTTON bubbles here too, and Enter on a button
+        // already activates that button. Without this guard, tabbing to Cancel
+        // and pressing Enter created the worktree on the way out.
+        onKeyDown={(e) => {
+          if (e.key !== "Enter") return;
+          if ((e.target as HTMLElement).tagName === "BUTTON") return;
+          submit();
+        }}>
+        <header className="sync-h">
+          <b>New worktree</b>
+          <span className="sync-hub">{basename(project)}</span>
+        </header>
+
+        {unborn ? (
+          // `new` cannot work here at all — git will not branch off an unborn
+          // HEAD — so the fields give way to the one act that unblocks them.
+          <>
+            <div className="sync-body nw-body">
+              <div className="np-path" data-testid="nw-unborn">
+                <code>{project}</code> has no commits yet. git can't create a worktree off an
+                unborn HEAD — make the first commit, then create worktrees.
+              </div>
+            </div>
+            <footer className="sync-foot">
+              <button className="ctrl" onClick={onClose} disabled={busy}>Cancel</button>
+              <button className="enter-btn" data-testid="nw-commit" disabled={busy}
+                onClick={async () => { setBusy(true); await onInitialCommit(project); setBusy(false); }}>
+                {busy ? "Committing…" : "Create initial commit"}
+              </button>
+            </footer>
+          </>
+        ) : (
+          <>
+            <div className="sync-body nw-body">
+              <label className="np-field">
+                <span className="np-label">Branch</span>
+                <BranchCombo
+                  value={branch}
+                  data={data}
+                  placeholder="feat/checkout"
+                  inputClass="np-input"
+                  ariaLabel="branch for the new worktree"
+                  testid="nw-branch"
+                  drop="down"
+                  openOnFocus={false}
+                  autoFocus
+                  onChange={setBranch}
+                  onOpen={() => {}}
+                  onCommit={setBranch}
+                />
+              </label>
+              {verdict && (
+                <div className={"nw-verdict " + verdict.tone} data-testid="nw-verdict">
+                  <span>{verdict.text}</span>
+                  {verdict.openSlug && (
+                    <button className="ctrl sm" data-testid="nw-open-holder"
+                      onClick={() => onOpenPlace(verdict.openSlug!)}>Open {verdict.openSlug}</button>
+                  )}
+                </div>
+              )}
+
+              <label className="np-field">
+                <span className="np-label">Base</span>
+                <BranchCombo
+                  value={base}
+                  data={data}
+                  placeholder={data?.default_base ?? "main"}
+                  inputClass="np-input"
+                  ariaLabel="base branch"
+                  testid="nw-base"
+                  drop="down"
+                  openOnFocus={false}
+                  allowCreate={false}
+                  disabled={!baseUsed}
+                  onChange={setBase}
+                  onOpen={() => {}}
+                  onCommit={setBase}
+                />
+                <span className="np-hint">
+                  {baseUsed
+                    ? "start point for the new branch — a branch, tag or commit"
+                    : "only used when the branch has to be created"}
+                </span>
+              </label>
+
+              <label className="np-field">
+                <span className="np-label">Folder name</span>
+                <input className="np-input" data-testid="nw-name" value={shownName} disabled={busy}
+                  spellCheck={false} autoCapitalize="off" autoCorrect="off"
+                  onChange={(e) => {
+                    const v = e.currentTarget.value;
+                    setName(v);
+                    // Emptying it re-links the mirror; that is the way back.
+                    setTouched(v !== "");
+                  }} />
+                <span className="np-hint">
+                  {touched ? "clear this field to follow the branch again" : "follows the branch — edit to pin it"}
+                </span>
+              </label>
+
+              {/* The preview follows the VERDICT, not the fields. Saying "will
+                  create <derived slug>" under a verdict that says an existing
+                  worktree gets reused names a directory and a tmux session that
+                  will never exist — core lands in the holder's. */}
+              <div className="np-path" data-testid="nw-preview">
+                {verdict?.outcome === "none" ? (
+                  <i>nothing will be created until the above is resolved</i>
+                ) : verdict?.at ? (
+                  <>
+                    {verdict.outcome === "switch" ? "will switch" : "will use"}{" "}
+                    <code>{verdict.at.path}</code>
+                    <br />
+                    tmux session <code>{verdict.at.tmux_session.name}</code>
+                  </>
+                ) : (
+                  <>
+                    {verdict?.outcome === "unknown" ? "target" : "will create"}{" "}
+                    <code>{project}/.worktrees/{slug || "…"}</code>
+                    <br />
+                    tmux session <code>{`${prefix}-${slug || "…"}`.replace(/\./g, "-")}</code>
+                  </>
+                )}
+              </div>
+            </div>
+            <footer className="sync-foot">
+              <button className="ctrl" onClick={onClose} disabled={busy}>Cancel</button>
+              <button className="enter-btn" data-testid="nw-create" disabled={!ready} onClick={submit}>Create</button>
+            </footer>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -3033,11 +3336,13 @@ function App() {
     setSel({ repo, slug: p.slug });
     setTimeout(() => document.querySelector<HTMLInputElement>(".note-strip")?.focus(), 60);
   };
-  // the form lives in the nav — a ctx-menu path must first bring the nav back
+  // A dialog, so there is no nav to bring back — but the draft MUST be cleared:
+  // it belongs to the create that was rejected, and reopening for a different
+  // project would otherwise seed that project's fields with it.
   const openNewForm = (root: string, base: string) => {
     setNewFor(root);
     setNewBase(base);
-    if (settings.nav_collapsed) toggleNav();
+    setNewDraft(null);
   };
   const newFromBranch = (root: string, base: string) => {
     closeCtx();
@@ -4205,28 +4510,6 @@ function App() {
         {initAsk && (
           <InitRepoPrompt dir={initAsk} onInit={initRepo} onCancel={() => setInitAsk(null)} />
         )}
-        {newFor && (
-          unbornProjects.has(newFor) ? (
-            <UnbornPrompt
-              project={newFor}
-              onCommit={createInitialCommit}
-              onCancel={() => { setNewFor(null); setNewBase(""); setNewDraft(null); }}
-            />
-          ) : (
-            <NewPlaceForm
-              // the draft is part of the identity: a rejected create reopens the
-              // form for the same project, and without it in the key React would
-              // reuse the old instance and its now-stale field state
-              key={newFor + "|" + newBase + "|" + (newDraft?.branch ?? "")}
-              project={newFor}
-              initialBranch={newDraft?.branch ?? ""}
-              initialName={newDraft?.name ?? ""}
-              initialBase={newDraft?.base ?? newBase}
-              onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
-              onCancel={() => { setNewFor(null); setNewBase(""); setNewDraft(null); }}
-            />
-          )
-        )}
         <div className="nav-scroll" ref={navScrollRef}>
           {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}
           {lens === "places" && ws?.projects.map((pv) => (
@@ -4726,6 +5009,32 @@ function App() {
             </div>
           </aside>
         </div>
+      )}
+      {newFor && (
+        <NewPlaceDialog
+          // The draft is part of the identity: a REJECTED create reopens the
+          // dialog for the same project, and without it in the key React would
+          // reuse the old instance and its now-stale field state. `unborn` is in
+          // there for the same reason from the other direction: the branch list
+          // is read once per mount, and the one read while the repo had no
+          // commits describes a repo that no longer exists the moment its first
+          // commit lands under this very dialog.
+          key={newFor + "|" + newBase + "|" + (newDraft?.branch ?? "") + "|" + unbornProjects.has(newFor)}
+          project={newFor}
+          prefix={ws?.projects.find((p) => p.root === newFor)?.snapshot?.prefix ?? ""}
+          places={ws?.projects.find((p) => p.root === newFor)?.snapshot?.places ?? []}
+          unborn={unbornProjects.has(newFor)}
+          initial={newDraft}
+          initialBase={newBase}
+          onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
+          onClose={() => { setNewFor(null); setNewBase(""); setNewDraft(null); }}
+          onOpenPlace={(slug) => {
+            setNewFor(null); setNewBase(""); setNewDraft(null);
+            setSel({ repo: newFor, slug });
+          }}
+          onInitialCommit={createInitialCommit}
+          onError={fail}
+        />
       )}
       {npOpen && (
         <NewProjectDialog

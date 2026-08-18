@@ -1303,6 +1303,22 @@ body.dragging .menu-catch { pointer-events: none; }
   background: transparent; border: 0; padding: 0; color: var(--txt-mute);
 }
 .combo-caret:hover { color: var(--txt); }
+/* Inside a dialog the status bar's upward pop would run off the top of the box,
+ * so the direction is a prop rather than a fact about the control. */
+.combo.down .combo-pop {
+  top: calc(100% + 4px); bottom: auto;
+  /* match the field: a 240px popover under a full-width dialog input reads as
+   * belonging to something else */
+  left: 0; right: 0; width: auto; min-width: 0; max-width: none;
+  /* Shorter than the status bar's 300px on purpose: .sync-modal hides its own
+   * overflow, so a pop taller than the space under the field is CLIPPED by the
+   * modal rather than floating over it. 200px clears the footer from either
+   * field at this dialog's height. */
+  max-height: 200px;
+}
+.combo.down { flex: 1 1 auto; }
+.combo.down .np-input { flex: 1 1 auto; width: 100%; padding-right: 20px; }
+.combo.off { opacity: 0.5; }
 .combo-pop {
   position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 50;
   min-width: 240px; max-width: 380px; max-height: 300px; overflow-y: auto;
@@ -1506,6 +1522,35 @@ body.dragging .menu-catch { pointer-events: none; }
 .np-input:focus { border-color: var(--line-strong); outline: none; }
 .np-path { font-size: var(--fs-meta); color: var(--txt-dim); word-break: break-all; }
 .np-path code { font-family: var(--font-mono); color: var(--txt-hi); }
+/* per-field footnote — says what a field is FOR, or why it is inert */
+.np-hint { font-size: var(--fs-meta); color: var(--txt-mute); }
+/* New-worktree's body must NOT scroll: it hosts two comboboxes whose popovers
+ * are absolutely positioned, and `overflow-y: auto` clips them into the body's
+ * own scroll instead of letting them float over the fields below. The content
+ * here is fixed-height (three fields + a preview), so there is nothing to
+ * scroll — unlike the sync preview lists this class otherwise serves. */
+.sync-body.nw-body { overflow: visible; }
+/* ⚠ …but a non-scrolling body still has to fit. `.sync-modal` caps at 76vh and
+ * HIDES its overflow, so under ~450px of viewport the footer was pushed past
+ * that edge and clipped away: the Create button rendered, reported a sane
+ * bounding box, and was not clickable — elementFromPoint returned the scrim.
+ * Scrolling the whole dialog is the honest trade. It never engages at normal
+ * window sizes, and when it does, everything stays reachable. */
+.sync-modal.nw-modal { overflow-y: auto; }
+/* New-worktree: what `new` is about to do. The three tones are the three things
+ * that can be true — it will just work / it will reuse or switch something that
+ * already exists / core will refuse — so the colour carries the same weight the
+ * doctor severities do elsewhere. */
+.nw-verdict {
+  display: flex; align-items: center; gap: var(--s2);
+  margin-top: calc(var(--s2) * -1);
+  font-size: var(--fs-meta); line-height: 1.4;
+}
+.nw-verdict > span { flex: 1 1 auto; min-width: 0; }
+.nw-verdict > .ctrl { flex: 0 0 auto; }
+.nw-verdict.info { color: var(--txt-dim); }
+.nw-verdict.warn { color: var(--warn); }
+.nw-verdict.error { color: var(--danger); }
 
 /* ── import from hub ── the picker's rows and the modal's destination block.
    An import writes to a path this Mac has never had, so the path is the loudest

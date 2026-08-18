@@ -86,13 +86,17 @@ def record_flow(p, url, out):
     plus.click()
     time.sleep(0.5)
 
-    branch = page.locator('input[placeholder^="branch"]')
+    # the + opens a dialog now, not a card in the nav
+    page.wait_for_selector('[data-testid="new-place-dialog"]', timeout=5000)
+    branch = page.locator('[data-testid="nw-branch"]')
     move_to(branch, pause=0.2)
     branch.click()
     branch.type("feat/checkout", delay=85)
-    time.sleep(0.5)
+    time.sleep(0.8)  # let the verdict + folder-name mirror land in frame
+    branch.press("Escape")  # close the branch popover; the dialog stays up
+    time.sleep(0.4)
 
-    create = page.locator('button:has-text("Create")')
+    create = page.locator('[data-testid="nw-create"]')
     move_to(create, steps=14, pause=0.2)
     create.click()
     page.wait_for_selector(".term-host", timeout=8000)  # new place lands live
