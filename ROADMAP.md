@@ -17,15 +17,41 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   _From: [2026-08-18 terminal-dock-overlap](docs/sessions/2026-08-18-terminal-dock-overlap/summary.md)_
 
 - **The static check scripts run only when someone remembers.**
-  `termfit-check.mjs`, `dnd-check.mjs` and `relpath-check.mjs` guard invariants
-  the suites structurally cannot see (a CSS declaration, a Rust↔TS mirror, a
-  pure function) — and none is wired into `ci.yml`, the Makefile or
-  `app/package.json`. They are pure Node, no browser, no fixtures, sub-second:
-  one CI step running all three costs nothing. Raised in the #157 review as
-  informational and left out of that PR because it is a repo-wide call, not a
-  bug fix's business. Note `race-check.mjs` is NOT in this set — it drives real
-  source under controlled promise orders and is slower/noisier.
-  _From: [2026-08-18 terminal-dock-overlap](docs/sessions/2026-08-18-terminal-dock-overlap/summary.md)_
+  `termfit-check.mjs`, `dnd-check.mjs`, `relpath-check.mjs` and now
+  `ctxmenu-check.mjs` guard invariants the suites structurally cannot see (a CSS
+  declaration, a Rust↔TS mirror, a pure function, a layout effect's dep list) —
+  and none is wired into `ci.yml`, the Makefile or `app/package.json`. They are
+  pure Node, no browser, no fixtures, sub-second: one CI step running all four
+  costs nothing. Raised in the #157 review as informational and left out of that
+  PR because it is a repo-wide call, not a bug fix's business; #156 added a
+  fourth without changing that. Note `race-check.mjs` is NOT in this set — it
+  drives real source under controlled promise orders and is slower/noisier.
+  _From: [2026-08-18 terminal-dock-overlap](docs/sessions/2026-08-18-terminal-dock-overlap/summary.md),
+  [2026-08-18 remove-dialog-menu-clamp](docs/sessions/2026-08-18-remove-dialog-menu-clamp/summary.md)_
+
+- **`remove_place`'s `force` is two permissions wearing one flag, and that is a
+  core problem now that a UI exposes it.** `ops.rs:1014` reads it as "remove a
+  dirty tree"; `ops.rs:1055` reads the same bool to pick `git branch -D` over
+  `-d`. So force+`--branch` force-deletes an UNMERGED branch — the only
+  combination in the remove path that can destroy commits. The inline arm this
+  repo shipped for a year was immune only because it hardcoded `force: false`;
+  #156's dialog exposes force, and had to paper over the overload in COPY
+  (`forceDeletesBranch` re-words the checkbox) because nothing at the UI layer
+  can separate two meanings of one CLI flag. Splitting it (`--force` for the
+  tree, `--force-branch` for `-D`) would make the guarantee structural instead
+  of editorial. Nothing automated catches a regression here — bats models no
+  branch objects and the mock says so out loud.
+  _From: [2026-08-18 remove-dialog-menu-clamp](docs/sessions/2026-08-18-remove-dialog-menu-clamp/summary.md)_
+
+- **The remove dialog's reworded warnings have never been seen rendered.** The
+  harness pass covered the PRE-review copy; after the rewrite, verification was
+  gates + reading only (starting vite was blocked mid-session). Three
+  conditionals have never been on screen: the force-on branch label
+  ("force-deleted, merged or not"), and the detached-HEAD and force-delete
+  variants of the commits note. One `pnpm dev:mock` with a detached fixture and
+  both boxes ticked closes it — and the same pass can check the dialog against
+  #155's `.nw-*` sibling, which landed in the same shell mid-flight.
+  _From: [2026-08-18 remove-dialog-menu-clamp](docs/sessions/2026-08-18-remove-dialog-menu-clamp/summary.md)_
 
 - **Nothing checks the new-worktree verdict against `ops.rs`.** The dialog's
   verdict line reimplements `cmd_new`'s decision ORDER by hand — and that order
