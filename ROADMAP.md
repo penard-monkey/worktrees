@@ -5,6 +5,16 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **A layout change while a shell tab is detached still replays at the wrong
+  width.** PR #153 stops the pane attaching at a size that isn't its own, which
+  was the reproducible case — but a ring written at one width and replayed
+  after a REAL change (⌘B while flipped away, a window resize) is still raw
+  bytes laid out for a grid that no longer exists, and no byte log replays
+  faithfully across that. Ages out via the 256K cap. The full fix is
+  terminal-state serialization (a server-side screen model, replay state not
+  bytes) — parked because the degraded case is now rare and self-healing.
+  _From: [2026-08-17 gitignore-cmdt-replay](docs/sessions/2026-08-17-gitignore-cmdt-replay/summary.md)_
+
 - **Existing stores never get the `.git/info/exclude` entries.** PR #150 writes
   them only when `store::edit` CREATES the places file, so every repo that
   already had one keeps answering `git status` with an untracked
