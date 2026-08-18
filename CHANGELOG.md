@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.17.0] - 2026-08-18
 
 ### Added
 - **The Files tab can show you the diff, side by side.** A changed file could be
@@ -42,6 +42,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   ever appeared when the field was focused, so there was nothing to say the list
   existed at all. Same picker as the dialog's, and it still takes a name you
   type that no branch has yet.
+- **⌘T opens a new terminal from anywhere.** ⌘⇧T already asked for one, but it
+  did nothing unless the Terminal tab happened to be mounted — the one moment
+  you do not need a chord for it. With the Terminal tab up ⌘T adds a shell;
+  with the dock closed or on Files it brings the Terminal tab up and stops
+  there, since mounting it already restores the tabs you had. ⌘-only, mirroring
+  ⌘J, so plain Ctrl+T still reaches the shell itself; ⌘⇧T keeps working.
+- **The Files tree has a right-click menu** — Reveal in Finder, Open, Copy path,
+  Copy relative path. A row the tree already treats as inert (a symlink it
+  cannot follow, a ghost left by a deletion) offers only the two copies, because
+  the rest could do nothing but raise a banner.
 
 ### Changed
 - **Removing a worktree now asks in a dialog, and says what it will destroy.**
@@ -75,6 +85,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   never told to narrow. Both terminals were affected (the place's pane and the
   dock's own shells); both now follow their pane on every dock toggle, dock drag
   and window resize.
+- **A dock shell tab comes back the way you left it.** Flipping to a second tab
+  and closing it again brought the first one back scrolled to the bottom with
+  the line you had half-typed stacked four deep. Nothing was ever sent twice:
+  the pane was replaying its buffer at a width that buffer was not written for,
+  because it attached at xterm's 80×24 default before the layout had been
+  measured and was corrected a beat later — walking the shell through a resize
+  it then had to redraw for. A pane now waits to be measured before it attaches,
+  and a resize to the size it is already at costs nothing.
+- **A new project starts with a clean `git status`.** The app writes
+  `.worktrees.places.json` into every project it manages, so a project created
+  in the app answered its first `git status` with an untracked file the tool
+  itself had just made — per-machine state that was never meant to be
+  committed (`worktrees sync` carries it between Macs out of band). New projects
+  are created with a `.gitignore` covering it; a repo that already has history
+  gets the entries in `.git/info/exclude` instead, which is per-checkout and
+  never committed. An existing `.gitignore` is yours and is never appended to,
+  and nothing can hide a file you deliberately committed.
 
 ## [0.16.0] - 2026-08-17
 
