@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-18](2026-08-18-remove-dialog-menu-clamp/summary.html) | removing a worktree became a dialog that says what it will destroy, and a menu near the bottom edge stopped hiding its last item — a clamp keyed on frozen cursor coords, and `--force` turning out to mean `git branch -D` as well |
 | [2026-08-18](2026-08-18-side-by-side-diff/summary.html) | the Files tab shows what changed, not just what is there — git's full-context diff in two aligned columns, word-level marks, and a changed-files-only tree; `git -C ""` means *here*, and a sticky cell tinted over `transparent` is see-through |
 | [2026-08-18](2026-08-18-new-worktree-dialog/summary.html) | new worktree became a dialog that says what it will do — the branch picker gained a ▾ and got shared, and the verdict line had to learn `cmd_new`'s ordering, which is not the obvious one |
 | [2026-08-18](2026-08-18-terminal-dock-overlap/summary.html) | the terminal ran on under the Files dock — a row flex item with no `min-width: 0` is floored at xterm's painted grid, so the pane could grow and never shrink, and the resize observer watched the box that could not move |
