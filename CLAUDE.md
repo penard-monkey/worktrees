@@ -194,6 +194,23 @@ is invisible to the bats suite — there is no fake claude. Re-run
   test, not by debugging the code it accused.
 - Assert layout in the harness (`getComputedStyle`), don't eyeball it — a CSS
   rule killed by a stray `*/` still renders a plausible-looking widget.
+  **But a rect is not reachability: hit-test with `elementFromPoint`.** A
+  dialog's Create button, pushed past `.sync-modal`'s hidden overflow on a short
+  viewport, rendered with a perfectly plausible bounding box and was not
+  clickable — `elementFromPoint` at its centre returned the scrim.
+  `getComputedStyle`, visibility and `getBoundingClientRect` all called it fine,
+  and so would a screenshot. Anything inside a clipping ancestor (every modal
+  here) needs the hit test, not the box. Corollary for the `.sync-*` family: a
+  body with `overflow-y: auto` CLIPS an absolutely-positioned popover into its
+  own scrollbar, so a dialog hosting a combobox has to move the scrolling to the
+  modal (`.nw-modal`) rather than delete it.
+- **A frontend that mirrors a core DECISION needs a drift check, or it lies
+  quietly.** `dnd.ts::predictTier` has `dnd-check.mjs`; the new-worktree verdict
+  line has nothing, and it reimplements `cmd_new`'s *ordering* — which is not the
+  obvious one (the holder logic is reached only when the derived directory does
+  not exist, `ops.rs:417`). Four cases were wrong in the first version and every
+  test passed. When you touch `ops.rs`'s create path, walk `NewPlaceDialog`'s
+  chain against it by hand.
 - **portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL** (crate
   `lib.rs:347`), and an interactive `/bin/sh` on a pty whose master is still
   open SURVIVES it. The app only gets away with this because dropping the
