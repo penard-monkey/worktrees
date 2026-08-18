@@ -309,3 +309,35 @@ export function tokenize(src: string, lang: string): Tok[] {
 
 /** Lines in `src` — the gutter renders 1..countLines. */
 export const countLines = (src: string) => (src ? src.split("\n").length : 0);
+
+/**
+ * The same tokens, split so that none of them crosses a line: `out[n]` is line
+ * `n`'s tokens and contains no "\n".
+ *
+ * The scanner still runs over the WHOLE source, which is the entire point. A
+ * side-by-side diff needs one DOM row per line, and a token that spanned rows
+ * cannot exist there — but tokenizing each line on its own would lose every
+ * piece of state that opened above it (a block comment, a template literal, a
+ * docstring), so those lines would come back mis-coloured. Tokenize once, cut
+ * afterwards.
+ *
+ * `CodeBlock` deliberately does NOT use this: its gutter is a separate column,
+ * so it can leave the multi-line tokens whole and keep the DOM smaller.
+ */
+export function tokenizeLines(src: string, lang: string): Tok[][] {
+  const out: Tok[][] = [[]];
+  for (const t of tokenize(src, lang)) {
+    if (!t.s.includes("\n")) {
+      if (t.s) out[out.length - 1].push(t);
+      continue;
+    }
+    const parts = t.s.split("\n");
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) out.push([]);
+      // An empty piece is dropped rather than pushed: it carries no text, and a
+      // zero-length <span> per blank line is pure DOM for nothing.
+      if (parts[i]) out[out.length - 1].push({ s: parts[i], c: t.c });
+    }
+  }
+  return out;
+}

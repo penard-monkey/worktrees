@@ -60,6 +60,17 @@ export type PlacePanels = {
    *  a *frozen* reading size from any of them, and then hand that stale number
    *  back to the global seed the next time its panels were touched. */
   files_md_zoom?: number;
+  /** Show the DIFF rather than the file, for THIS place. Per-place for the same
+   *  reason as the zoom: it is not a preference about files in general, it is
+   *  what you are doing in this repo right now — reviewing a branch in one
+   *  worktree while reading docs in another is the normal case, and a global
+   *  flag would drag the diff into the place you went to read.
+   *
+   *  OPTIONAL, like `files_md_zoom` and for the identical reason: absent has to
+   *  keep meaning "still inheriting". Filling it in from `cur` (which falls back
+   *  to the global) would freeze the seed into a place on the next dock toggle,
+   *  and then spread that stale value back over the global. */
+  files_diff?: boolean;
 };
 
 /** Key for the per-place records in `Settings` (`place_panels`,
@@ -74,7 +85,7 @@ export function panelsFor(s: Settings, key: string | null): Settings {
   // An entry written before `files_md_zoom` joined the record has no size in it,
   // and `{...s, ...p}` would spread `undefined` OVER the global — every place
   // set up by an older build would read as "no size" rather than inheriting one.
-  if (p) return { ...s, ...p, files_md_zoom: p.files_md_zoom ?? s.files_md_zoom };
+  if (p) return { ...s, ...p, files_md_zoom: p.files_md_zoom ?? s.files_md_zoom, files_diff: p.files_diff ?? s.files_diff };
   // A place you have never opened the dock in starts CLOSED — the global
   // `dock_open` is NOT a seed.
   //
@@ -121,6 +132,21 @@ export type Settings = {
   // whole app to read one README moves every column boundary with it.
   files_md_zoom: number; // MD_ZOOM_MIN–MD_ZOOM_MAX
   files_show_ignored: boolean; // list gitignored entries too (dimmed), .git aside; on by default
+  // Show the diff instead of the file. Also a PER-PLACE key (see PlacePanels) —
+  // this flat one is only the seed for a place that has never been switched.
+  files_diff: boolean;
+  // What the diff's "before" is. Global, unlike `files_diff`: it is a question
+  // about diffs in general ("what did this branch do" vs "what have I not
+  // committed"), and the answer does not change because you walked to another
+  // worktree. `base` is the default because it is what the tree's change
+  // markers are computed against — a diff that disagreed with the tint that
+  // made you click the file would read as a bug in one of them.
+  files_diff_base: "base" | "head";
+  // Hide anything the branch did not touch: files with no status, directories
+  // with a zero count. The tree becomes the branch's diff list. Off by default —
+  // a filter you forget you left on looks exactly like a repo that lost its
+  // files, which is the trap `files_show_ignored` fell into (see `migrate`).
+  files_changed_only: boolean;
   // Dock terminal tab names: `repo|slug` → tab index → user-chosen label.
   // The name persists across restarts; the SHELL never does. A tab with no live
   // shell is seeded back into the strip (see `term_tabs`) and spawns a fresh one
@@ -219,6 +245,9 @@ export const DEFAULTS: Settings = {
   files_md_source: false,
   files_md_zoom: 100,
   files_show_ignored: true,
+  files_diff: false,
+  files_diff_base: "base",
+  files_changed_only: false,
   term_tab_names: {},
   term_tabs: {},
   term_tab_active: {},

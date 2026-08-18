@@ -23,6 +23,7 @@ import { openPath as openInDefaultApp, openUrl, revealItemInDir } from "@tauri-a
 import * as Icons from "./icons";
 import { CodeBlock } from "./CodeView";
 import { CtxMenu } from "./CtxMenu";
+import { DiffView, type FileDiffDto } from "./DiffView";
 import { FindBar, useFileFind } from "./Find";
 import { Markdown } from "./markdown";
 import { basename, fileInfo, humanSize, relPath, type FileKind } from "./filekind";
@@ -128,6 +129,15 @@ function withGhosts(dir: string, kids: FsEntry[], changes: Changes): FsEntry[] {
   return add.length ? [...kids, ...add].sort(cmpEntries) : kids;
 }
 
+/** Does this row survive the "changes only" filter? A FILE has to have a status
+ *  of its own; a DIRECTORY has to have something changed beneath it, which is
+ *  exactly the count the badge already renders.
+ *
+ *  Ghost rows pass without a special case: a deleted file IS in `files`, and the
+ *  vanished directory above it carries the count that put it there. */
+const changedRow = (e: FsEntry, changes: Changes) =>
+  e.is_dir ? (changes.dirs.get(e.path) ?? 0) > 0 : changes.files.has(e.path);
+
 /** The word the row's tooltip uses. `untracked` rather than "added" for a file
  *  git has never seen: both are new, but only one of them is staged. */
 const CHANGE_WHY: Record<ChangeKind, string> = {
@@ -144,12 +154,23 @@ type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number }
 // One lazy directory node. Files bubble a click up via onOpen; dirs toggle.
 // A right-click bubbles up too (onContext) — the menu itself belongs to the
 // pane, so only one can ever be open and the row keeps no state for it.
-function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, onOpen, onContext, onError }: {
+function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, changedOnly, onOpen, onContext, onError }: {
   entry: FsEntry; depth: number; openPath: string | null; showIgnored: boolean; reloadToken: number;
-  changes: Changes; onOpen: (path: string) => void; onContext: (e: React.MouseEvent, entry: FsEntry) => void;
+  changes: Changes; changedOnly: boolean;
+  onOpen: (path: string) => void; onContext: (e: React.MouseEvent, entry: FsEntry) => void;
   onError: (e: unknown) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Turning the filter on OPENS every surviving directory, and because a child
+  // only mounts once its parent is open, each newly mounted level runs this on
+  // ITS first render and the expansion cascades down to the changed files. A
+  // filter that left everything collapsed would hide the very rows it exists to
+  // show — you would see `crates/` and still have to click your way in.
+  //
+  // Turning it back OFF deliberately leaves them open: collapsing what the user
+  // can see is a bigger surprise than leaving it, and the tree has no record of
+  // what was open before the filter to restore anyway.
+  useEffect(() => { if (changedOnly) setOpen(true); }, [changedOnly]);
   const [kids, setKids] = useState<FsEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -233,9 +254,10 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, o
     entry.ignored ? "gitignored" : null,
   ].filter(Boolean).join(" — ");
   // A ghost dir's children are the change set's, not a listing's.
-  const shown = ghost
+  const listed = ghost
     ? changes.ghosts.get(entry.path) ?? []
     : kids && withGhosts(entry.path, kids, changes);
+  const shown = listed && (changedOnly ? listed.filter((k) => changedRow(k, changes)) : listed);
   return (
     <div className="tree-node">
       <button
@@ -264,10 +286,15 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, o
           {/* only while there is nothing to show — a reload must not add a
               spinner line under every open directory every few seconds */}
           {loading && kids === null && <div className="tree-note">…</div>}
-          {shown && shown.length === 0 && !loading && <div className="tree-note">empty</div>}
+          {shown && shown.length === 0 && !loading && (
+            // Under the filter "empty" would be a lie about the directory — it
+            // has entries, none of them changed. The count badge said there was
+            // something here, so the row has to explain why nothing is under it.
+            <div className="tree-note">{changedOnly && listed?.length ? "no changes here" : "empty"}</div>
+          )}
           {shown?.map((k) => (
             <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath}
-              showIgnored={showIgnored} reloadToken={reloadToken} changes={changes}
+              showIgnored={showIgnored} reloadToken={reloadToken} changes={changes} changedOnly={changedOnly}
               onOpen={onOpen} onContext={onContext} onError={onError} />
           ))}
         </div>
@@ -282,8 +309,8 @@ const KIND_GLYPH: Record<FileKind, string> = {
 };
 
 // Files tab tree. `root` = the place's worktree path; remount per place via key.
-function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onContext, onError }: {
-  root: string; openPath: string | null; showIgnored: boolean; reloadToken: number;
+function FileTree({ root, openPath, showIgnored, reloadToken, changedOnly, onOpen, onContext, onError }: {
+  root: string; openPath: string | null; showIgnored: boolean; reloadToken: number; changedOnly: boolean;
   onOpen: (path: string) => void; onContext: (e: React.MouseEvent, entry: FsEntry) => void;
   onError: (e: unknown) => void;
 }) {
@@ -334,13 +361,32 @@ function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onContext,
   // Keyed on the CANONICAL root the backend resolved, not the `root` prop: a
   // place path can run through a symlink, and the ghosts are filed under
   // resolved paths (as is every path `list_dir` returns).
-  const rows = withGhosts(changes.root || root, entries, changes);
+  const all = withGhosts(changes.root || root, entries, changes);
+  const rows = changedOnly ? all.filter((e) => changedRow(e, changes)) : all;
+  // Has the change set ever ARRIVED? `changed_files` always returns a root on
+  // success — the canonical repo top, or the cwd for a directory that is not a
+  // repo — so an empty one means the fan-out has not answered yet, or failed.
+  const changesLoaded = changes.root !== "";
   return (
     <div className="filetree">
       {err && <div className="tree-note err-note">{err}</div>}
+      {/* Not "empty worktree": the tree above already ruled that out, so under
+          the filter an empty result means the branch matches its base.
+          GATED on the set having landed, and that gate is the whole point. This
+          starts at NO_CHANGES and the real `changed_files` is a git fan-out over
+          the worktree — so for its first few hundred milliseconds, on every
+          mount (the tree remounts per place, and unmounts whenever the reader is
+          expanded), an unfiltered "nothing changed on this branch" would be
+          asserting the opposite of what is about to appear. Worse on failure:
+          the markers are additive, so a repo that cannot be read keeps
+          NO_CHANGES and the claim would stand forever. The mock cannot show
+          either — it answers in a microtask. */}
+      {changedOnly && !rows.length && (
+        <div className="tree-note">{changesLoaded ? "nothing changed on this branch" : "…"}</div>
+      )}
       {rows.map((e) => (
         <TreeNode key={e.path} entry={e} depth={0} openPath={openPath}
-          showIgnored={showIgnored} reloadToken={reloadToken} changes={changes}
+          showIgnored={showIgnored} reloadToken={reloadToken} changes={changes} changedOnly={changedOnly}
           onOpen={onOpen} onContext={onContext} onError={onError} />
       ))}
     </div>
@@ -460,6 +506,12 @@ export type FileViewProps = {
   /** markdown starts rendered; the toggle flips to source */
   mdSource: boolean;
   onMdSource: (v: boolean) => void;
+  /** show the two-column diff instead of the file. Per PLACE (see PlacePanels) */
+  diff: boolean;
+  onDiff: (v: boolean) => void;
+  /** what the diff's "before" is — the branch's base, or HEAD */
+  diffBase: "base" | "head";
+  onDiffBase: (v: "base" | "head") => void;
   /** reading size of the RENDERED markdown, % of normal (see MD_ZOOM_STEPS) */
   mdZoom: number;
   onMdZoom: (v: number) => void;
@@ -474,13 +526,19 @@ export type FileViewProps = {
 
 export function FileView(props: FileViewProps) {
   const { path, reloadToken, onOpenEditor, onOpen, onError, wrap, onWrap, mdSource, onMdSource, mdZoom, onMdZoom, expanded, onExpand,
-    findOpen = false, findToken = 0, onFindClose } = props;
+    diff, onDiff, diffBase, onDiffBase, findOpen = false, findToken = 0, onFindClose } = props;
   const info = useMemo(() => fileInfo(path), [path]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [read, setRead] = useState<FileRead | null>(null);
   const [loading, setLoading] = useState(true);
 
   const isImage = info.kind === "image";
+  // Only text has lines to line up. An image or a binary has no diff view, so
+  // the toggle is not offered and a place that arrives with `diff` already on
+  // falls back to the file — silently, because the alternative is an error
+  // banner every time you click a .png in a branch you are reviewing.
+  const diffable = !isImage && info.kind !== "binary" && !read?.binary;
+  const showDiff = diff && diffable;
 
   useEffect(() => {
     if (isImage) { setRead(null); setLoading(false); return; }
@@ -494,6 +552,28 @@ export function FileView(props: FileViewProps) {
     // reloadToken re-reads from disk — safe unconditionally now the viewer owns
     // no unsaved buffer.
   }, [path, reloadToken, isImage, onError]);
+
+  // The diff is fetched ONLY while it is being shown. It is a git spawn per
+  // file, and a viewer that pre-fetched one for every file you clicked would
+  // pay for it on a tab nobody has opened.
+  //
+  // `dstate` is cleared on the way in rather than left stale: the previous
+  // file's diff under the new file's name is worse than a blank frame, and the
+  // same goes for switching base — "vs HEAD" showing the base's patch is a
+  // wrong answer that looks right.
+  const [dstate, setDstate] = useState<FileDiffDto | null>(null);
+  const [dloading, setDloading] = useState(false);
+  useEffect(() => {
+    if (!showDiff) { setDstate(null); return; }
+    let alive = true;
+    setDstate(null);
+    setDloading(true);
+    invoke<FileDiffDto>("file_diff", { path, against: diffBase })
+      .then((d) => { if (alive) setDstate(d); })
+      .catch((e) => { if (alive) { setDstate(null); onError(e); } })
+      .finally(() => { if (alive) setDloading(false); });
+    return () => { alive = false; };
+  }, [path, reloadToken, showDiff, diffBase, onError]);
 
   // A relative link in a markdown doc resolves against the DOC's directory, so
   // [DESIGN.md](DESIGN.md) inside docs/ opens docs/DESIGN.md, not the root one.
@@ -546,6 +626,13 @@ export function FileView(props: FileViewProps) {
   function renderBody(): ReactNode {
     if (isImage && info.mime !== "image/svg+xml") return <ImageView path={path} mime={info.mime} onError={onError} />;
     if (loading) return <div className="tree-note">loading…</div>;
+    // Before the markdown/SVG branches on purpose: a diff of a README is a diff
+    // of its SOURCE. Rendering two columns of formatted prose would hide exactly
+    // the whitespace and link changes you opened the diff to see.
+    if (showDiff) {
+      if (dloading || !dstate) return <div className="tree-note">{dloading ? "diffing…" : "no diff"}</div>;
+      return <DiffView diff={dstate} content={read?.content ?? ""} lang={info.lang} wrap={wrap} />;
+    }
     // SVG: rendered unless the source toggle is on (it reuses the md toggle —
     // one "show me the markup" affordance, not two).
     if (isImage) {
@@ -577,11 +664,20 @@ export function FileView(props: FileViewProps) {
     return <div className="scroll"><CodeBlock src={read.content} lang={info.lang} wrap={wrap} /></div>;
   }
 
-  const showSourceToggle = info.kind === "markdown" || info.mime === "image/svg+xml";
-  const showWrap = !isImage && info.kind !== "binary" && !(info.kind === "markdown" && !mdSource);
+  const hasPreview = info.kind === "markdown" || info.mime === "image/svg+xml";
+  // One segmented control for "what am I looking at", not two: Preview and
+  // Source and Diff are three answers to the same question, and a separate Diff
+  // button beside a Preview/Source pair would let both read as "on".
+  const showViewSeg = hasPreview || diffable;
+  // Wrap stays available in the diff. It is the one place the grid earns its
+  // keep: a wrapped row still lines up, because the row takes the height of its
+  // tallest cell — where two independently scrolling panes would drift apart at
+  // the first long line.
+  const showWrap = !isImage && info.kind !== "binary" && !(info.kind === "markdown" && !mdSource && !showDiff);
   // Zoom belongs to the RENDERED document only: the Source view is code, sized
-  // by the terminal font like every other source file in this viewer.
-  const showZoom = info.kind === "markdown" && !mdSource;
+  // by the terminal font like every other source file in this viewer, and the
+  // diff is the same code twice.
+  const showZoom = info.kind === "markdown" && !mdSource && !showDiff;
 
   return (
     <div className="viewer">
@@ -593,10 +689,48 @@ export function FileView(props: FileViewProps) {
         {read?.truncated && <span className="viewer-tag">truncated</span>}
         {size ? <span className="viewer-size">{humanSize(size)}</span> : null}
         <span className="dock-spacer" />
-        {showSourceToggle && (
-          <div className="seg">
-            <button className={"seg-b" + (!mdSource ? " on" : "")} onClick={() => onMdSource(false)}>Preview</button>
-            <button className={"seg-b" + (mdSource ? " on" : "")} onClick={() => onMdSource(true)}>Source</button>
+        {showDiff && dstate && (dstate.untracked || dstate.base_label) && (
+          // The base is NAMED, not implied. Which ref "base" resolved to differs
+          // per repo (origin/main, master, or nothing at all), and a diff that
+          // does not say what it is against is a claim you cannot check.
+          // An untracked file gets a phrase of its own rather than a ref: it has
+          // no before, and "vs nothing" reads like a bug in the label.
+          <span
+            className="viewer-tag"
+            title={dstate.untracked
+              ? "git has never seen this file — every line is new"
+              : `Comparing the working file against ${dstate.base_label}`}
+          >
+            {dstate.untracked ? "new file" : `vs ${dstate.base_label}`}
+          </span>
+        )}
+        {showViewSeg && (
+          <div className="seg" role="group" aria-label="View">
+            {hasPreview && (
+              <button className={"seg-b" + (!mdSource && !showDiff ? " on" : "")}
+                onClick={() => { onMdSource(false); onDiff(false); }}>Preview</button>
+            )}
+            {/* `onMdSource` only where there IS a preview to turn off. On a .rs
+                file it would flip the GLOBAL markdown preference as a side
+                effect of leaving a diff, and the next README you opened would
+                come up as source for no reason you could trace. */}
+            <button className={"seg-b" + ((mdSource || !hasPreview) && !showDiff ? " on" : "")}
+              onClick={() => { if (hasPreview) onMdSource(true); onDiff(false); }}>Source</button>
+            {diffable && (
+              <button className={"seg-b" + (showDiff ? " on" : "")}
+                title="Show what this branch changed in this file"
+                onClick={() => onDiff(true)}>Diff</button>
+            )}
+          </div>
+        )}
+        {showDiff && (
+          <div className="seg" role="group" aria-label="Diff base">
+            <button className={"seg-b" + (diffBase === "base" ? " on" : "")}
+              title="Compare against the branch's base — what this branch changed, committed and not"
+              onClick={() => onDiffBase("base")}>Base</button>
+            <button className={"seg-b" + (diffBase === "head" ? " on" : "")}
+              title="Compare against HEAD — only what is not committed yet"
+              onClick={() => onDiffBase("head")}>HEAD</button>
           </div>
         )}
         {showZoom && (
@@ -639,7 +773,7 @@ export function FileView(props: FileViewProps) {
           and button glyphs up as matches. */}
       {findOpen && (
         <FindInFile bodyRef={bodyRef} token={findToken} onClose={onFindClose}
-          contentKey={`${path}|${reloadToken}|${wrap}|${mdSource}|${loading}`} />
+          contentKey={`${path}|${reloadToken}|${wrap}|${mdSource}|${loading}|${showDiff}|${diffBase}|${dloading}`} />
       )}
       <div className="viewer-body" ref={bodyRef}>
         <ViewErrorBoundary resetKey={path}>{body}</ViewErrorBoundary>
@@ -661,6 +795,8 @@ export type FilesPaneProps = Omit<FileViewProps, "path" | "expanded" | "onExpand
   openPath: string | null;
   /** list gitignored entries too, dimmed (the reader overlay has no tree) */
   showIgnored: boolean;
+  /** hide anything the branch did not touch — the tree becomes its diff list */
+  changedOnly: boolean;
   /** live dock width — decides the `auto` orientation */
   dockW: number;
   layout: Settings["files_layout"];
@@ -682,7 +818,7 @@ export function orientationFor(layout: Settings["files_layout"], dockW: number):
 
 export function FilesPane(props: FilesPaneProps) {
   const { root, openPath, dockW, layout, splitPct, stackPct, onSplitPct, onOpen, onError, expanded,
-    showIgnored, reloadToken } = props;
+    showIgnored, changedOnly, reloadToken } = props;
   const orient = expanded ? "split" : orientationFor(layout, dockW);
   const hostRef = useRef<HTMLDivElement>(null);
   // The drag reads BOTH of these live: the window can resize mid-drag (flipping
@@ -754,7 +890,8 @@ export function FilesPane(props: FilesPaneProps) {
         <>
           <div className="dock-tree" style={treeStyle}>
             <FileTree key={root} root={root} openPath={openPath} showIgnored={showIgnored}
-              reloadToken={reloadToken} onOpen={onOpen} onContext={onContext} onError={onError} />
+              changedOnly={changedOnly} reloadToken={reloadToken}
+              onOpen={onOpen} onContext={onContext} onError={onError} />
           </div>
           <div
             className="files-divider"
