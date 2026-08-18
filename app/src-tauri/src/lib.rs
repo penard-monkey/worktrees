@@ -516,10 +516,11 @@ async fn create_project(app: AppHandle, location: String, name: String) -> Resul
     Ok(ws)
 }
 
-/// `git init` + an EMPTY first commit, then add the repo to the workspace. The
-/// commit is not optional politeness: without it HEAD is unborn and the very
-/// next thing the user does (new worktree) fails on an invalid object name.
-/// `--allow-empty` keeps it a pure bootstrap — no file is added or touched.
+/// `git init` + a first commit, then add the repo to the workspace. The commit
+/// is not optional politeness: without it HEAD is unborn and the very next thing
+/// the user does (new worktree) fails on an invalid object name.
+/// `--allow-empty` keeps it a pure bootstrap — it permits an empty commit rather
+/// than demanding one, so the seeded `.gitignore` (below) rides along in it.
 #[tauri::command]
 async fn init_repo(app: AppHandle, dir: String) -> Result<Workspace, String> {
     if !Path::new(&dir).is_dir() {
@@ -532,6 +533,12 @@ async fn init_repo(app: AppHandle, dir: String) -> Result<Workspace, String> {
         })?;
     }
     if !git::has_commits(&dir) {
+        // Only on the bootstrap path: a repo we are about to make the FIRST
+        // commit in is one nobody has opinions about yet. A repo that already
+        // has history is the user's, and seeding files into it is uninvited.
+        if seed_gitignore(&dir)? {
+            git::git_status_captured(&dir, &["add", ".gitignore"])?;
+        }
         first_commit(&dir)?;
     }
     add_project(app, dir).await
@@ -547,8 +554,40 @@ async fn create_initial_commit(app: AppHandle, repo: String) -> Result<Workspace
     list_workspace(app).await
 }
 
-/// The empty bootstrap commit. Git refuses to commit without an identity, and
-/// its stderr says exactly which `git config` line is missing — pass it through
+/// The `.gitignore` a project created HERE starts with. Returns whether it was
+/// written — an existing `.gitignore` belongs to the user and is never touched,
+/// never appended to, so this is create-or-nothing.
+///
+/// The two app-state entries are not a preference: `.worktrees.places.json` is
+/// per-MACHINE declared state and `worktrees sync` exists to ferry it between
+/// machines out-of-band, so committing it is the wrong shape — and this repo's
+/// own `.gitignore` says the same. Without them a brand-new project's very first
+/// `git status` is dirty with a file the app itself just wrote. The planning
+/// docs ride along because they are working memory by construction.
+fn seed_gitignore(dir: &str) -> Result<bool, String> {
+    let path = Path::new(dir).join(".gitignore");
+    if path.exists() {
+        return Ok(false);
+    }
+    let body = "\
+# worktrees — per-machine app state (moved between machines by `worktrees sync`, not git)
+/.worktrees.places.json
+/.worktrees/
+
+# planning docs — local working memory
+/task_plan.md
+/findings.md
+/progress.md
+";
+    std::fs::write(&path, body).map_err(|e| {
+        applog("error", &format!("seeding .gitignore in {dir}: {e}"));
+        format!("cannot write {}: {e}", path.display())
+    })?;
+    Ok(true)
+}
+
+/// The bootstrap commit. Git refuses to commit without an identity, and its
+/// stderr says exactly which `git config` line is missing — pass it through
 /// rather than paraphrasing.
 fn first_commit(dir: &str) -> Result<(), String> {
     git::git_status_captured(dir, &["commit", "--allow-empty", "-m", "Initial commit"]).map_err(|e| {
@@ -4102,6 +4141,54 @@ mod tests {
         // typed "workspace" against it turns a rule into a permission error.
         assert!(!expand_home("workspace").is_absolute());
         assert!(!expand_home("~other/x").is_absolute());
+    }
+
+    /// A project created here should answer its first `git status` with
+    /// "nothing to commit" — the app writes `.worktrees.places.json` into it
+    /// moments later, and an untracked file the tool itself made is noise the
+    /// user did not choose. The entries are ANCHORED (`/…`) so they mean the
+    /// project root, not any nested directory that happens to share the name.
+    ///
+    /// The other half of the rule is restraint: seeding is create-or-nothing,
+    /// because an existing `.gitignore` is a file the user (or a template, or a
+    /// `git clone`) authored, and appending to it is a decision that is not
+    /// ours. `init_repo` is reachable for a directory that is already a repo.
+    #[test]
+    fn a_seeded_gitignore_is_written_once_and_never_over_the_users() {
+        let dir = std::env::temp_dir().join(format!("wt-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().to_string();
+        let path = dir.join(".gitignore");
+
+        assert!(seed_gitignore(&d).unwrap(), "an absent .gitignore is written");
+        let body = std::fs::read_to_string(&path).unwrap();
+        for entry in [
+            "/.worktrees.places.json",
+            "/.worktrees/",
+            "/task_plan.md",
+            "/findings.md",
+            "/progress.md",
+        ] {
+            assert!(body.lines().any(|l| l == entry), "missing {entry} in:\n{body}");
+        }
+
+        // second call: the file it finds is the one it wrote, and it still keeps
+        // its hands off — so bootstrapping twice cannot double the entries
+        assert!(!seed_gitignore(&d).unwrap(), "an existing .gitignore is left alone");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body, "idempotent");
+
+        // …and the same holds for a file we did NOT write, byte for byte
+        let mine = "node_modules\n";
+        std::fs::write(&path, mine).unwrap();
+        assert!(!seed_gitignore(&d).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            mine,
+            "the user's .gitignore is never touched or appended to",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A nav drag sends the order it can SEE. The file is the truth, and the

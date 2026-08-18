@@ -89,11 +89,61 @@ pub struct Store {
     pub extra: Map<String, serde_json::Value>,
 }
 
-/// `<repo>/.worktrees.places.json`, with `repo` canonicalized so the app (and any
-/// second window) resolve the SAME path/lock regardless of how the caller spelled it.
+/// The repo path every write derives from, canonicalized so the app (and any
+/// second window) resolve the SAME path/lock regardless of how the caller
+/// spelled it. `store_path` and `exclude_app_state` share it on purpose: two
+/// spellings of a symlinked repo must not write the store in one place and
+/// `.git/info/exclude` in another.
+fn store_base(repo: &str) -> PathBuf {
+    fs::canonicalize(repo).unwrap_or_else(|_| PathBuf::from(repo))
+}
+
+/// `<repo>/.worktrees.places.json`.
 fn store_path(repo: &str) -> PathBuf {
-    let base = fs::canonicalize(repo).unwrap_or_else(|_| PathBuf::from(repo));
-    base.join(STORE_FILE)
+    store_base(repo).join(STORE_FILE)
+}
+
+/// The first time this repo gets a store, teach the repo to ignore it.
+///
+/// `.worktrees.places.json` and `.worktrees/` are per-MACHINE state — `sync`
+/// ferries them between machines out-of-band — so a repo that just acquired one
+/// should not answer `git status` with an untracked file the tool itself wrote.
+/// `.git/info/exclude` rather than `.gitignore` because the choice is this
+/// checkout's, not the project's: it is never committed, and it never hides a
+/// TRACKED file, so a user who deliberately committed the store is unaffected.
+///
+/// Best-effort in the strongest sense — every failure is swallowed, and a repo
+/// whose `.git` is not a directory (a bats fake fixture, a plain dir) is skipped
+/// silently. Pure `std::fs`: this repo counts subprocesses, and a `git` call on
+/// the write path would show up in `spawn-count.sh`.
+fn exclude_app_state(base: &Path) {
+    let info = base.join(".git");
+    if !info.is_dir() {
+        return;
+    }
+    let info = info.join("info");
+    if fs::create_dir_all(&info).is_err() {
+        return;
+    }
+    let path = info.join("exclude");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let missing: Vec<&str> = ["/.worktrees.places.json", "/.worktrees/"]
+        .into_iter()
+        .filter(|want| !existing.lines().any(|l| l == *want))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("# worktrees — per-machine app state (moved by `worktrees sync`, not git)\n");
+    for line in missing {
+        out.push_str(line);
+        out.push('\n');
+    }
+    let _ = fs::write(&path, out);
 }
 
 /// Reconcile DECLARED (sticky) state with LIVE state → the effective label.
@@ -182,14 +232,22 @@ pub fn edit<F: FnOnce(&mut Declared)>(repo: &str, slug: &str, f: F) -> Result<()
         return Err("empty slug".into());
     }
     let _serial = WRITE_LOCK.lock().map_err(|_| "store lock poisoned")?;
-    let path = store_path(repo);
+    let base = store_base(repo);
+    let path = base.join(STORE_FILE);
     let _flock = DirLock::acquire(&path)?;
     let mut store = read_strict(&path)?;
     let entry = store.places.entry(slug.to_string()).or_default();
     f(entry);
     store.version = 1;
     store.updated_epoch = Some(now_epoch());
-    write_atomic(&path, &store)
+    // Asked under the locks, BEFORE the write that would make it false: this is
+    // the one moment we know the store is new to this repo.
+    let creating = !path.exists();
+    write_atomic(&path, &store)?;
+    if creating {
+        exclude_app_state(&base);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -281,5 +339,72 @@ mod tests {
         let now = 1_700_000_000;
         let d = Declared { last_worked_epoch: Some(now - 60), ..Default::default() };
         assert_eq!(reconcile(Some(&d), false, now), "closed");
+    }
+
+    /// The moment a repo acquires a store is the only moment we get to say
+    /// "don't report this file". It has to happen exactly once — a second
+    /// `edit()` writing the lines again would grow the file forever — and it
+    /// must not be the app's `.gitignore`: this is one checkout's opinion.
+    #[test]
+    fn a_repos_first_store_write_excludes_the_app_state() {
+        let t = tmp("exclude");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::create_dir_all(t.0.join(".git/info")).unwrap();
+        let exclude = t.0.join(".git/info/exclude");
+
+        edit(&repo, "alpha", |d| d.pinned = Some(true)).unwrap();
+        let after_first = fs::read_to_string(&exclude).unwrap();
+        assert!(
+            after_first.lines().any(|l| l == "/.worktrees.places.json"),
+            "the store itself must be excluded: {after_first}"
+        );
+        assert!(
+            after_first.lines().any(|l| l == "/.worktrees/"),
+            "the worktrees dir must be excluded: {after_first}"
+        );
+        assert!(
+            !after_first.contains("/task_plan.md"),
+            "planning docs are a personal workflow, not app state: {after_first}"
+        );
+
+        edit(&repo, "beta", |d| d.pinned = Some(true)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            after_first,
+            "later writes must not touch the file again",
+        );
+    }
+
+    /// `.git/info/exclude` is a file git ships with commentary in it, and a user
+    /// may have added their own lines. Appending is the only safe verb.
+    #[test]
+    fn an_existing_exclude_file_is_appended_to_not_replaced() {
+        let t = tmp("exclude-keep");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::create_dir_all(t.0.join(".git/info")).unwrap();
+        let exclude = t.0.join(".git/info/exclude");
+        fs::write(&exclude, "# git ls-files --others --exclude-from=…\n*.swp\n").unwrap();
+
+        edit(&repo, "alpha", |d| d.pinned = Some(true)).unwrap();
+
+        let body = fs::read_to_string(&exclude).unwrap();
+        assert!(body.starts_with("# git ls-files"), "existing content stays first: {body}");
+        assert!(body.lines().any(|l| l == "*.swp"), "the user's own rule survives: {body}");
+        assert!(body.lines().any(|l| l == "/.worktrees.places.json"), "{body}");
+        assert!(body.lines().any(|l| l == "/.worktrees/"), "{body}");
+    }
+
+    /// The store is written for things that are not repos at all — bats' fake
+    /// fixtures, a directory someone points the CLI at. Excluding is a courtesy;
+    /// failing to, or conjuring a `.git` to do it in, is not.
+    #[test]
+    fn a_dir_that_is_not_a_repo_gets_no_exclude_file() {
+        let t = tmp("exclude-norepo");
+        let repo = t.0.to_string_lossy().to_string();
+
+        edit(&repo, "alpha", |d| d.pinned = Some(true)).expect("the store write still succeeds");
+
+        assert_eq!(read_lenient(&repo).places["alpha"].pinned, Some(true));
+        assert!(!t.0.join(".git").exists(), "no .git may be created to hold an exclude file");
     }
 }
