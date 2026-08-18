@@ -39,3 +39,7 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
   should be empty — and check for untracked files and stashes, because the
   reflog will NOT show the move (it only records this tree's own checkouts).
   Give every tree its own `<tree>-next`.
+- **The archive PR is docs-only and CI skips it by design** (`ci.yml`
+  `paths-ignore`: `docs/**`, `ROADMAP.md`, `CLAUDE.md`, `.claude/**`, root
+  prose docs). Zero checks on the PR is the expected state — merge without
+  waiting for CI. The local gates in step 1 still run.
