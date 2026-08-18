@@ -5,6 +5,25 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Existing stores never get the `.git/info/exclude` entries.** PR #150 writes
+  them only when `store::edit` CREATES the places file, so every repo that
+  already had one keeps answering `git status` with an untracked
+  `.worktrees.places.json` until hand-ignored. Deliberate scope cut, not an
+  oversight — the candidate fix is a one-time sweep (app startup, or project
+  add) running the same best-effort append for every known project root; it is
+  idempotent and cannot hide a tracked file, so the only real question is where
+  to hang it.
+  _From: PR [#150](https://github.com/penard-monkey/worktrees/pull/150)_
+
+- **One real-app click on Files → Open for a dot-component path.** The mock
+  stubs `plugin:opener|*`, so PR #151's open-path grant (scoped permission +
+  `requireLiteralLeadingDot: false`) is proven by plugin-source reading and a
+  standalone glob probe, never end-to-end. `app/scripts/sandbox.sh --app`,
+  right-click a file under `.worktrees/…`, hit Open — one minute, and it
+  closes the only unverified edge of that PR. (The sandbox pass that followed
+  exercised the menu's copies, not Open.)
+  _From: PR [#151](https://github.com/penard-monkey/worktrees/pull/151)_
+
 - **Sync v2: SSH targets, push-all, scheduling.** The hub abstraction was built
   not to preclude `rsync -e ssh` (direct Mac→Mac without carrying the SSD); a
   workspace-level "push every project" and a scheduled/auto sync are the other

@@ -96,10 +96,31 @@ const shellTransport = (repo: string, slug: string, index: number): Transport =>
       gen = await invoke<number>("shell_open", { repo, slug, index, cols, rows, onBytes });
     },
     write: (data) => { invoke("shell_write", { repo, slug, index, data }); },
-    resize: (cols, rows) => { invoke("shell_resize", { repo, slug, index, cols, rows }); },
+    // gated on the attach, like the tmux transport's `id` — before `shell_open`
+    // has answered there is no shell to resize, and the reject would be silent
+    resize: (cols, rows) => { if (gen != null) invoke("shell_resize", { repo, slug, index, cols, rows }); },
     close: () => { if (gen != null) invoke("shell_detach", { repo, slug, index, gen }); gen = null; },
   };
 };
+
+/** Has the pane been laid out yet? The fit addon needs a real box: given a host
+ *  with none (`display:none`, or one not yet through a layout pass) it reads
+ *  no usable width/height and returns without resizing, leaving the terminal on
+ *  xterm's 80×24 default. Attaching there is not cosmetic — the backend sizes
+ *  the PTY to whatever the attach asks for, and the ResizeObserver then corrects
+ *  it, so the shell is walked real → 80×24 → real. Every one of those steps is a
+ *  SIGWINCH, zsh answers each by redrawing the prompt and any half-typed line
+ *  into the replay ring, and the ring is then rendered into an 80-column
+ *  terminal it was never written for: the redraws stop overwriting each other
+ *  and the pasted line stacks up, pane scrolled to the bottom. */
+const measured = (host: HTMLElement) => host.clientWidth > 0 && host.clientHeight > 0;
+
+/** How long to wait for that layout before attaching anyway. A shell that never
+ *  attaches because its pane stayed hidden is worse than one attached at the
+ *  wrong size, so the wait is bounded. In wall-clock, not frames: the retry
+ *  rides `requestAnimationFrame` and the frame rate is not ours to predict
+ *  (a headless Chromium runs it at ~200Hz, an occluded window barely at all). */
+const ATTACH_WAIT_MS = 1000;
 
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
 function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number) {
@@ -155,21 +176,41 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     const onBytes = new Channel<ArrayBuffer>();
     onBytes.onmessage = (msg) => term.write(new Uint8Array(msg));
 
-    (async () => {
-      try {
-        await tx.open(term.cols, term.rows, onBytes);
-        if (disposed) {
-          tx.close();
-          return;
-        }
-        term.onData((data) => tx.write(Array.from(new TextEncoder().encode(data))));
-        term.focus();
-      } catch (e) {
-        term.writeln(`\r\n\x1b[31m[worktrees] ${e}\x1b[0m\r\n`);
+    // Attach at the pane's REAL grid, never at xterm's default (see `measured`).
+    // Re-fit each frame while we wait, so the size we finally hand over is the
+    // one the host settled on — and give up eventually rather than strand a
+    // shell that can never be measured.
+    const giveUp = performance.now() + ATTACH_WAIT_MS;
+    let raf = 0;
+    const attach = () => {
+      if (disposed) return;
+      safeFit();
+      if (!measured(host) && performance.now() < giveUp) {
+        raf = requestAnimationFrame(attach);
+        return;
       }
-    })();
+      void (async () => {
+        try {
+          await tx.open(term.cols, term.rows, onBytes);
+          if (disposed) {
+            tx.close();
+            return;
+          }
+          term.onData((data) => tx.write(Array.from(new TextEncoder().encode(data))));
+          term.focus();
+        } catch (e) {
+          term.writeln(`\r\n\x1b[31m[worktrees] ${e}\x1b[0m\r\n`);
+        }
+      })();
+    };
+    attach();
 
     const ro = new ResizeObserver(() => {
+      // An unmeasured host has nothing true to report — it is the pane on its
+      // way out (unmount detaches the node before this observer is disconnected)
+      // or on its way in. Reporting it anyway walks the PTY through a size
+      // nobody is looking at, and the shell redraws for each one.
+      if (!measured(host)) return;
       try {
         fit.fit();
       } catch {
@@ -181,6 +222,7 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
 
     return () => {
       disposed = true;
+      cancelAnimationFrame(raf);
       ro.disconnect();
       tx.close(); // detach, not kill — for either backend
       liveTerms.delete(term);

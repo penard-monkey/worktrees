@@ -3628,6 +3628,45 @@ struct Shell {
     /// clear the new sink and freeze a live pane (the tmux design was immune:
     /// every attach had its own id).
     gen: u64,
+    /// The size the pty is actually at, so a request to be the size it already
+    /// is can be dropped. See `next_pty_size`.
+    size: PtySize,
+}
+
+/// The size to hand `MasterPty::resize`, or `None` when the pty is already
+/// there. `cur` is updated on the way through, so the next request is compared
+/// against what was actually applied.
+///
+/// Resizing a pty to its own size is not the harmless no-op it looks like. It
+/// is at best a wasted ioctl; on any platform whose TIOCSWINSZ does not compare
+/// first (macOS and Linux both do, today) it is a SIGWINCH — and zsh answers
+/// every SIGWINCH by redrawing the prompt and whatever half-typed line is
+/// sitting on it, which lands in the replay ring. Measured on a real login
+/// zsh: one full redraw per size CHANGE, nothing at all for a repeat.
+///
+/// That matters because the ring is raw bytes replayed into a FRESH xterm on
+/// every re-attach, and those redraws are cursor-relative — rendered at a width
+/// other than the one they were computed for they stop overwriting each other
+/// and stack up instead. One column off already leaves residue; replaying a
+/// 174-column ring into an 80-column terminal stacked a pasted path four deep
+/// and left the pane scrolled to the bottom, which is the bug this guards.
+fn next_pty_size(cur: &mut PtySize, cols: u16, rows: u16) -> Option<PtySize> {
+    let want = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    if *cur == want {
+        return None;
+    }
+    *cur = want;
+    Some(want)
+}
+
+impl Shell {
+    /// Resize the pty unless it is already that size.
+    fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
+        match next_pty_size(&mut self.size, cols, rows) {
+            Some(want) => self.master.resize(want).map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
+    }
 }
 
 /// (repo, slug, 1-based tab index) — the webview never names a shell, same rule
@@ -3696,7 +3735,11 @@ async fn shell_open(
         *sink = Some(on_bytes);
         drop(sink);
         drop(ring);
-        let _ = sh.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        // Replay THEN resize, and only if the size really moved. The order is
+        // the ring/sink one above (a resize before the snapshot would let the
+        // SIGWINCH redraw land in neither); the suppression is what keeps a tab
+        // flip from feeding the ring a redraw per attach.
+        let _ = sh.resize(cols, rows);
         sh.gen += 1;
         return Ok(sh.gen);
     }
@@ -3710,9 +3753,8 @@ async fn shell_open(
         worktrees_core::tmux::kill_shell_sidecars(&session);
     }
 
-    let pair = native_pty_system()
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| e.to_string())?;
+    let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
 
     // A LOGIN shell, like Terminal.app: it sources the user's profile, so the
     // shell has the real PATH even though this process was launched by launchd
@@ -3773,7 +3815,7 @@ async fn shell_open(
         }
     });
 
-    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1 });
+    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1, size });
     Ok(1)
 }
 
@@ -3787,11 +3829,9 @@ async fn shell_write(repo: String, slug: String, index: u32, data: Vec<u8>, shel
 
 #[tauri::command]
 async fn shell_resize(repo: String, slug: String, index: u32, cols: u16, rows: u16, shells: State<'_, Shells>) -> Result<(), String> {
-    let map = shells.0.lock().unwrap();
-    let sh = map.get(&(repo, slug, index)).ok_or("no such shell")?;
-    sh.master
-        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| e.to_string())
+    let mut map = shells.0.lock().unwrap();
+    let sh = map.get_mut(&(repo, slug, index)).ok_or("no such shell")?;
+    sh.resize(cols, rows)
 }
 
 /// Stop streaming; the shell keeps running. This is the unmount path — a tab
@@ -4771,6 +4811,108 @@ mod tests {
         hard_kill(&mut *child); // the reap — try_wait in list_shell_sessions does the same
         assert!(child.process_id().is_some(), "portable-pty still hands back the dangling pid");
         assert_eq!(live_pid(&mut *child), None, "a reaped shell must never be sampled");
+    }
+
+    // ── dock shell resizes ───────────────────────────────────────────────────
+
+    /// The decision, and the bookkeeping that goes with it. A pane re-attaching
+    /// asks to be the size it already is on every tab flip, and the
+    /// ResizeObserver's first fire repeats whatever the attach just said — so
+    /// "already that size" is the common case, not the corner one. Forgetting to
+    /// record what WAS applied is the subtler half: every later request would
+    /// then be compared against the size the pty had two resizes ago, and a
+    /// repeat would sail through as a change.
+    #[test]
+    fn a_resize_to_the_size_the_pty_already_has_is_dropped() {
+        let mut cur = PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 };
+        let applied: Vec<Option<(u16, u16)>> = [(120, 40), (80, 24), (80, 24), (120, 40), (120, 40)]
+            .iter()
+            .map(|(c, r)| next_pty_size(&mut cur, *c, *r).map(|s| (s.cols, s.rows)))
+            .collect();
+        assert_eq!(
+            applied,
+            vec![None, Some((80, 24)), None, Some((120, 40)), None],
+            "only the requests that MOVE the pty may reach it"
+        );
+        assert_eq!((cur.cols, cur.rows), (120, 40), "the record follows what was applied");
+    }
+
+    /// …and the same decision on a real PTY, through the method `shell_resize`
+    /// and `shell_open`'s re-attach both call. A shell that traps SIGWINCH says
+    /// whether the ioctl actually happened.
+    ///
+    /// Note what this can and cannot catch. macOS (and Linux) compare the new
+    /// winsize against the old one inside TIOCSWINSZ and signal only on a
+    /// change, so a suppression bug does NOT show up here as a spurious W — the
+    /// kernel hides it. What it does catch is the opposite and worse failure:
+    /// suppression that swallows a size change, leaving the shell laying its
+    /// prompt out for a terminal that is no longer that shape.
+    #[test]
+    fn a_real_size_change_still_reaches_the_shell() {
+        let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        let pair = native_pty_system().openpty(size).unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        // `R` once the handler is installed: a resize sent before that is simply
+        // lost, and the test would blame the code for the race.
+        cmd.arg("trap 'printf W' WINCH; printf R; while :; do sleep 0.05; done");
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+
+        // Drains the master AND is the assertion's eyes — production always has
+        // exactly one such reader (see `drain`).
+        let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mine = seen.clone();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => mine.lock().unwrap().extend_from_slice(&buf[..n]),
+                }
+            }
+        });
+        let writer = pair.master.take_writer().unwrap();
+        let mut sh = Shell {
+            master: pair.master,
+            writer,
+            child,
+            stop: Arc::new(AtomicBool::new(false)),
+            ring: Arc::new(Mutex::new(VecDeque::new())),
+            sink: Arc::new(Mutex::new(None)),
+            gen: 1,
+            size,
+        };
+        // Poll rather than sleep a guessed amount; bounded so a shell that never
+        // answers fails the test instead of hanging it.
+        let count_of = |c: u8| seen.lock().unwrap().iter().filter(|b| **b == c).count();
+        let winches = || count_of(b'W');
+        let wait = |f: &dyn Fn() -> usize, n: usize| {
+            for _ in 0..60 {
+                if f() >= n {
+                    return true;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            false
+        };
+        let wait_for = |n: usize| wait(&winches, n);
+
+        assert!(wait(&|| count_of(b'R'), 1), "the trap shell never came up");
+        assert!(sh.resize(100, 30).is_ok());
+        assert!(wait_for(1), "a genuine resize must reach the shell as SIGWINCH");
+        assert!(sh.resize(120, 40).is_ok());
+        assert!(wait_for(2), "and so must the next one — the recorded size has to move with it");
+        assert_eq!((sh.size.cols, sh.size.rows), (120, 40));
+
+        // The repeat: nothing more may arrive. (The kernel would swallow it even
+        // without the guard — this pins the assumption, it does not test it.)
+        assert!(sh.resize(120, 40).is_ok());
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(winches(), 2, "resizing to the size it already has must be silent");
+
+        hard_kill(&mut *sh.child);
     }
 
     /// Round-trip through the real file, including the two rules a plain
