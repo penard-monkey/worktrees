@@ -3902,6 +3902,15 @@ pub fn run() {
         &format!("startup v{} PATH={}", env!("CARGO_PKG_VERSION"), std::env::var("PATH").unwrap_or_default()),
     );
     tauri::Builder::default()
+        // `open_path` (the Files tab's right-click → Open) needs BOTH halves,
+        // and JSON cannot carry the reason: `opener:allow-open-path` in
+        // capabilities/default.json plus a path scope, because the plugin's
+        // `is_path_allowed` ANDs the fs scope with "some allowed entry names a
+        // path" — the permission on its own allows nothing. The scope is `**`,
+        // and tauri.conf.json turns `requireLiteralLeadingDot` off so that
+        // pattern also covers a path with a dot component: every worktree this
+        // app opens lives under `.worktrees/`, and with the unix default the
+        // invoke would reject exactly those — silently.
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

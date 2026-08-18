@@ -542,8 +542,8 @@ export function SettingsSheet({
                 ["⌘4", "Attention"],
                 ["⌘E", "Open selection in editor"],
                 ["⌘F", "Find — in the terminal, or in the open file"],
+                ["⌘T", "New terminal in the dock"],
                 ["⌘⇧E", "Read the dock's file over the whole pane"],
-                ["⌘⇧T", "New terminal in the dock"],
                 ["Esc", "Close sheets & menus"],
               ].map(([key, desc]) => (
                 <div className="shortcut-row" key={key}>

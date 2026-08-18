@@ -15,12 +15,17 @@
 // App() get a new identity every render and would drop tree expansion state.
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+// `openPath` is aliased: this module already has an `openPath` — the prop
+// naming the file the viewer has open — and the two would silently shadow each
+// other inside FilesPane (tsc catches it as "String has no call signatures",
+// which reads like a typing problem rather than a collision).
+import { openPath as openInDefaultApp, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { CodeBlock } from "./CodeView";
+import { CtxMenu } from "./CtxMenu";
 import { FindBar, useFileFind } from "./Find";
 import { Markdown } from "./markdown";
-import { basename, fileInfo, humanSize, type FileKind } from "./filekind";
+import { basename, fileInfo, humanSize, relPath, type FileKind } from "./filekind";
 import { MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom, type Settings } from "./settings";
 
 // `link` is the symlink target as written (relative stays relative);
@@ -137,9 +142,12 @@ type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number }
 // ── tree ─────────────────────────────────────────────────────────────────
 
 // One lazy directory node. Files bubble a click up via onOpen; dirs toggle.
-function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, onOpen, onError }: {
+// A right-click bubbles up too (onContext) — the menu itself belongs to the
+// pane, so only one can ever be open and the row keeps no state for it.
+function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, onOpen, onContext, onError }: {
   entry: FsEntry; depth: number; openPath: string | null; showIgnored: boolean; reloadToken: number;
-  changes: Changes; onOpen: (path: string) => void; onError: (e: unknown) => void;
+  changes: Changes; onOpen: (path: string) => void; onContext: (e: React.MouseEvent, entry: FsEntry) => void;
+  onError: (e: unknown) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [kids, setKids] = useState<FsEntry[] | null>(null);
@@ -236,6 +244,8 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, o
           + (status ? ` chg chg-${status}` : "") + (count ? " chg chg-dir" : "") + (ghost ? " ghost" : "")}
         style={{ paddingLeft: `calc(var(--s2) + ${depth} * var(--s3))` }}
         onClick={toggle}
+        onContextMenu={(e) => onContext(e, entry)}
+        data-tree-path={entry.path}
         aria-disabled={inert || undefined}
         title={title}
       >
@@ -257,7 +267,8 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, o
           {shown && shown.length === 0 && !loading && <div className="tree-note">empty</div>}
           {shown?.map((k) => (
             <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath}
-              showIgnored={showIgnored} reloadToken={reloadToken} changes={changes} onOpen={onOpen} onError={onError} />
+              showIgnored={showIgnored} reloadToken={reloadToken} changes={changes}
+              onOpen={onOpen} onContext={onContext} onError={onError} />
           ))}
         </div>
       )}
@@ -271,9 +282,10 @@ const KIND_GLYPH: Record<FileKind, string> = {
 };
 
 // Files tab tree. `root` = the place's worktree path; remount per place via key.
-function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onError }: {
+function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onContext, onError }: {
   root: string; openPath: string | null; showIgnored: boolean; reloadToken: number;
-  onOpen: (path: string) => void; onError: (e: unknown) => void;
+  onOpen: (path: string) => void; onContext: (e: React.MouseEvent, entry: FsEntry) => void;
+  onError: (e: unknown) => void;
 }) {
   const [entries, setEntries] = useState<FsEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -328,7 +340,8 @@ function FileTree({ root, openPath, showIgnored, reloadToken, onOpen, onError }:
       {err && <div className="tree-note err-note">{err}</div>}
       {rows.map((e) => (
         <TreeNode key={e.path} entry={e} depth={0} openPath={openPath}
-          showIgnored={showIgnored} reloadToken={reloadToken} changes={changes} onOpen={onOpen} onError={onError} />
+          showIgnored={showIgnored} reloadToken={reloadToken} changes={changes}
+          onOpen={onOpen} onContext={onContext} onError={onError} />
       ))}
     </div>
   );
@@ -709,6 +722,27 @@ export function FilesPane(props: FilesPaneProps) {
     window.addEventListener("blur", up); // release outside the OS window
   };
 
+  // ── right-click menu ──────────────────────────────────────────────────────
+  // One menu for the whole pane, keyed off the row that opened it. CtxMenu is
+  // the same shell the nav's place/project menus use (App.tsx), so this is the
+  // frame, the clamping and all three dismissal paths for free.
+  const [ctx, setCtx] = useState<{ x: number; y: number; entry: FsEntry } | null>(null);
+  const onContext = useCallback((e: React.MouseEvent, entry: FsEntry) => {
+    e.preventDefault();
+    setCtx({ x: e.clientX, y: e.clientY, entry });
+  }, []);
+  const closeCtx = useCallback(() => setCtx(null), []);
+  // Every verb closes the menu FIRST and reports through onError — a rejected
+  // opener invoke (a missing permission is one, and it rejects SILENTLY) must
+  // reach the banner, not the void.
+  const copyText = (text: string) => {
+    setCtx(null);
+    if (!navigator.clipboard) { onError("clipboard unavailable"); return; }
+    navigator.clipboard.writeText(text).catch(onError);
+  };
+  const reveal = (path: string) => { setCtx(null); revealItemInDir(path).catch(onError); };
+  const openIn = (path: string) => { setCtx(null); openInDefaultApp(path).catch(onError); };
+
   const pct = orient === "split" ? splitPct : stackPct;
   const treeStyle = orient === "split"
     ? { flex: `0 0 ${pct}%`, minWidth: 0 }
@@ -720,7 +754,7 @@ export function FilesPane(props: FilesPaneProps) {
         <>
           <div className="dock-tree" style={treeStyle}>
             <FileTree key={root} root={root} openPath={openPath} showIgnored={showIgnored}
-              reloadToken={reloadToken} onOpen={onOpen} onError={onError} />
+              reloadToken={reloadToken} onOpen={onOpen} onContext={onContext} onError={onError} />
           </div>
           <div
             className="files-divider"
@@ -755,6 +789,35 @@ export function FilesPane(props: FilesPaneProps) {
           ? <FileView {...props} path={openPath} />
           : <div className="tree-note viewer-hint">select a file to view</div>}
       </div>
+
+      {/* Same `.pop-item` / `.ctx-sep` markup as the nav's menus — one look for
+          every right-click in the window. A row the tree has already made
+          INERT (a symlink it will not follow, a ghost left by a deletion) is
+          not on disk or not ours to open, so it gets the two facts that are
+          still true — its path — and nothing that could only raise a banner. */}
+      {ctx && (() => {
+        const { entry } = ctx;
+        const inert = !!entry.link_block || (!!entry.ghost && !entry.is_dir);
+        return (
+          <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
+            <div className="pop-hint">{entry.name}</div>
+            {!inert && (entry.is_dir ? (
+              <>
+                <button className="pop-item" onClick={() => openIn(entry.path)}>Open in Finder</button>
+                <button className="pop-item" onClick={() => reveal(entry.path)}>Reveal in Finder</button>
+              </>
+            ) : (
+              <>
+                <button className="pop-item" onClick={() => reveal(entry.path)}>Reveal in Finder</button>
+                <button className="pop-item" onClick={() => openIn(entry.path)}>Open</button>
+              </>
+            ))}
+            {!inert && <div className="ctx-sep" />}
+            <button className="pop-item" onClick={() => copyText(entry.path)}>Copy path</button>
+            <button className="pop-item" onClick={() => copyText(relPath(root, entry.path))}>Copy relative path</button>
+          </CtxMenu>
+        );
+      })()}
     </div>
   );
 }
