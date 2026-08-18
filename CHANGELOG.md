@@ -5,17 +5,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
-### Fixed
-- **The terminal no longer runs on under the Files dock.** Opening or widening
-  the dock took width away from the terminal, and the terminal kept it: the
-  rightmost columns carried on painting *behind* the dock, so tmux's status line
-  and anything reaching the right margin were cut off mid-glyph at the seam. It
-  could only ever get wider — the pane grew with the window and never shrank
-  back, because the box the resize watcher measures could not shrink, so tmux was
-  never told to narrow. Both terminals were affected (the place's pane and the
-  dock's own shells); both now follow their pane on every dock toggle, dock drag
-  and window resize.
-
 ### Added
 - **The Files tab can show you the diff, side by side.** A changed file could be
   marked but only ever read as it is *now*; a **Diff** button beside
@@ -35,6 +24,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   branch's own list of work. Off by default, and its toolbar glyph is filled
   while the filter is on — a filter you forget you left on looks exactly like a
   repo that lost its files, so the state has to be readable at a glance.
+- **New worktree is a dialog now, and it says what it will do before it does
+  it.** The `+` on a project used to open a card pinned to the top of the nav —
+  not next to the project you clicked — with three bare fields and no way to
+  tell whether the branch would be created, checked out, tracked, or land in a
+  worktree that already has it. The dialog names the project, and a line under
+  the branch field names the outcome: a branch another worktree already holds
+  says so and offers to open it; a branch the main checkout is on is refused
+  with the reason, instead of failing inside git. **Base** is a dropdown of the
+  project's branches, filled in from the real default base (`main`, `master`, or
+  whatever HEAD is) rather than a placeholder guessing "main", and it greys out
+  wherever it would be ignored. **Folder name** follows the branch as you type
+  and stops the moment you edit it; clearing it starts following again. Below
+  both, the exact directory and tmux session that will result — which are not
+  always the same string, since a session name replaces dots.
+- **The branch switcher in the status bar has a ▾.** Its list of branches only
+  ever appeared when the field was focused, so there was nothing to say the list
+  existed at all. Same picker as the dialog's, and it still takes a name you
+  type that no branch has yet.
+
+### Fixed
+- **The terminal no longer runs on under the Files dock.** Opening or widening
+  the dock took width away from the terminal, and the terminal kept it: the
+  rightmost columns carried on painting *behind* the dock, so tmux's status line
+  and anything reaching the right margin were cut off mid-glyph at the seam. It
+  could only ever get wider — the pane grew with the window and never shrank
+  back, because the box the resize watcher measures could not shrink, so tmux was
+  never told to narrow. Both terminals were affected (the place's pane and the
+  dock's own shells); both now follow their pane on every dock toggle, dock drag
+  and window resize.
 
 ## [0.16.0] - 2026-08-17
 

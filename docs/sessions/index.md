@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-18](2026-08-18-new-worktree-dialog/summary.html) | new worktree became a dialog that says what it will do — the branch picker gained a ▾ and got shared, and the verdict line had to learn `cmd_new`'s ordering, which is not the obvious one |
 | [2026-08-18](2026-08-18-terminal-dock-overlap/summary.html) | the terminal ran on under the Files dock — a row flex item with no `min-width: 0` is floored at xterm's painted grid, so the pane could grow and never shrink, and the resize observer watched the box that could not move |
 | [2026-08-17](2026-08-17-gitignore-cmdt-replay/summary.html) | new projects start with a clean `git status`, ⌘T + a files right-click menu, and the shell tab that came back four prompts deep — the ring replays fine at its own width; one column off is what stacks it |
 | [2026-08-17](2026-08-17-parked-busy-dot/summary.html) | a parked job pinned the green dot on — the probe file keeps a mid-flight `busy` when a turn is parked, and nothing ever writes it again |

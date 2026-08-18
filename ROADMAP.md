@@ -27,6 +27,35 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   source under controlled promise orders and is slower/noisier.
   _From: [2026-08-18 terminal-dock-overlap](docs/sessions/2026-08-18-terminal-dock-overlap/summary.md)_
 
+- **Nothing checks the new-worktree verdict against `ops.rs`.** The dialog's
+  verdict line reimplements `cmd_new`'s decision ORDER by hand — and that order
+  is not the obvious one (core reaches its holder logic only when the derived
+  directory does not exist, `ops.rs:417`), so the first version got four cases
+  wrong before review caught them. This is the same exposure `dnd-check.mjs`
+  exists to cover for `store::reconcile`, minus the checker: a change to core's
+  create path leaves a frontend that is confidently wrong and passes every test.
+  A parser-based check over `cmd_new`'s branches is the obvious fix if the chain
+  grows again.
+  _From: [2026-08-18 new-worktree-dialog](docs/sessions/2026-08-18-new-worktree-dialog/summary.md)_
+
+- **`remote_only` on `BranchList`, so the verdict can say "tracking".**
+  `branch_names()` unions local heads with origin-only branches and strips the
+  prefix, so the frontend cannot distinguish "this branch exists locally" from
+  "this will be tracked from `origin/`" — two different acts that currently read
+  identically ("already exists — it will be checked out here"). One extra field
+  on the struct; the switcher's create row would get the same benefit.
+  _From: [2026-08-18 new-worktree-dialog](docs/sessions/2026-08-18-new-worktree-dialog/summary.md)_
+
+- **One real-app pass over the new-worktree dialog.** Merged without it: the
+  sandbox app is a native WKWebView window and Playwright speaks CDP, so the
+  interactive pass needs a person. Every state was asserted in the mock harness
+  and the one real-timing risk (a slow `list_branches` making the verdict guess)
+  was found and fixed by simulating the delay — but the harness cannot express
+  what the real git fan-out does. `app/scripts/sandbox.sh --app`, hit `+`, and
+  try: a new branch, an existing one, a branch another worktree holds, and
+  `main`.
+  _From: [2026-08-18 new-worktree-dialog](docs/sessions/2026-08-18-new-worktree-dialog/summary.md)_
+
 - **A layout change while a shell tab is detached still replays at the wrong
   width.** PR #153 stops the pane attaching at a size that isn't its own, which
   was the reproducible case — but a ring written at one width and replayed
