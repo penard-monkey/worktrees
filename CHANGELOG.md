@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The terminal's last column is no longer sliced in half.** A line that
+  reached the right margin lost part of its final glyph — the `e` of "line", the
+  `x` of "px" — cut vertically where the scrollbar begins. The terminal was
+  being sized 16px wider than the box it lives in, so its last two columns were
+  painted underneath the scrollbar, which covers them. It is not the overhang
+  fixed in 0.17.0: that one ran the terminal *out* under the Files dock, this one
+  is inside the terminal's own frame — an older, smaller error that fix left
+  standing. Both terminals were affected, at every width.
+
 ## [0.17.0] - 2026-08-18
 
 ### Added

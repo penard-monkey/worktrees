@@ -184,6 +184,26 @@ is invisible to the bats suite — there is no fake claude. Re-run
   seam like this with `getBoundingClientRect` in the harness (`.term-host`'s
   right edge vs `.dock`'s left), never by eye — the clipping looks like a font
   or repaint bug.
+- **The fit addon reads the host's BORDER box and subtracts `.xterm`'s padding —
+  two different elements.** `proposeDimensions()` takes its available size from
+  `getComputedStyle(term.element.parentElement)` and its padding from
+  `getComputedStyle(term.element)`, and the app's global
+  `* { box-sizing: border-box }` makes the first of those *include* the host's
+  own `padding: var(--s2)`. Nothing ever takes it off: the grid is sized for
+  16px it does not have, and the last ~2 columns land under
+  `.xterm-viewport`'s 15px scrollbar gutter, which paints over them and slices
+  the final glyph down the middle. `box-sizing: content-box` on `.term-host` is
+  what makes the addon's arithmetic true, on both axes; the layout does not
+  move, but ONLY because the rule sets no width/height/basis length for
+  box-sizing to reinterpret (flex-basis 0% floors at the padding either way — a
+  `max-height` would not). This survived the `min-width: 0` fix above and reads
+  exactly like it (a cut glyph at the right edge), so check WHICH box is wrong
+  before assuming a regression: derive
+  `floor((borderBox − scrollbar) / cell)` and `floor((content − scrollbar) /
+  cell)` and see which one the live `cols` matches. Do not "fix" it by hiding
+  the scrollbar — xterm caches `scrollBarWidth` in the Viewport constructor as
+  `offsetWidth − scrollArea.offsetWidth || 15`, so a 0-width gutter still costs
+  15px.
 - **The terminal's glyph widths must MATCH TMUX, and the Node probe lies.**
   tmux (utf8proc) lays out emoji as 2 cells; xterm 5.5's default Unicode 6
   tables said 1, and every tmux partial repaint interleaved one column off —
