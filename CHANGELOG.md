@@ -16,6 +16,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   dock's own shells); both now follow their pane on every dock toggle, dock drag
   and window resize.
 
+### Added
+- **The Files tab can show you the diff, side by side.** A changed file could be
+  marked but only ever read as it is *now*; a **Diff** button beside
+  Preview/Source puts the two versions in aligned columns, with the changed
+  words inside a changed line picked out. It compares against the branch's base
+  by default — the same base the tree's change markers use, so the diff agrees
+  with the tint that made you click the file — and names the ref it resolved to
+  rather than leaving you to guess; a **Base / HEAD** toggle answers the other
+  question, "what have I not committed yet". The whole file is there, not just
+  the changed hunks, so you can read around a change. Wrapping is supported and
+  the two sides stay in step; a narrow dock falls back to a single-column diff
+  with `−`/`+` markers. Which view you are in is remembered per place, so a
+  worktree you are reviewing keeps the diff and one you are reading docs in
+  does not.
+- **A "changed files only" toggle for the tree.** Hides anything the branch did
+  not touch and expands the way down to what is left, turning the tree into the
+  branch's own list of work. Off by default, and its toolbar glyph is filled
+  while the filter is on — a filter you forget you left on looks exactly like a
+  repo that lost its files, so the state has to be readable at a glance.
+
 ## [0.16.0] - 2026-08-17
 
 ### Added

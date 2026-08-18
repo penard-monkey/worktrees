@@ -2716,6 +2716,26 @@ struct FileChange {
     status: ChangeKind,
 }
 
+/// Base-branch candidates, most authoritative first — the remote's view before
+/// the local one, since `origin/main` is what moves on fetch.
+///
+/// Shared by `changed_files` and `file_diff` ON PURPOSE, so the two can never
+/// resolve different BASES. Verified across eight repo shapes (committed-only,
+/// uncommitted-only, base moved on, no origin, no main/master, unrelated
+/// histories, rename): the loops always settle on the same candidate, even
+/// though one breaks on the first `diff <cand>...HEAD` that succeeds and the
+/// other on the first `merge-base` that does — they fail under identical
+/// conditions.
+///
+/// A shared base is NOT a promise the two always agree on a given file, and one
+/// case makes that visible: a file committed on the branch and then changed BACK
+/// in the working tree. `changed_files` marks it (the worktree differs from
+/// HEAD) while `file_diff` vs base correctly finds nothing, so a lit row sits
+/// above "no changes". Both are true — the branch touched it, and it now equals
+/// the base — and the HEAD toggle shows the revert. The set semantics genuinely
+/// differ: commit-range ∪ working-tree status here, merge-base vs worktree there.
+const BASE_CANDS: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
+
 /// Everything in one worktree that differs from its branch's base.
 #[derive(Serialize)]
 struct ChangeSet {
@@ -2927,7 +2947,7 @@ async fn changed_files(app: AppHandle, root: String) -> Result<ChangeSet, String
     // (the remote's view first, since `origin/main` is what moves on fetch); the
     // first range git can resolve wins, and a repo with none of them — an unborn
     // HEAD, a repo with no main/master — just gets the uncommitted half.
-    for cand in ["origin/main", "origin/master", "main", "master"] {
+    for cand in BASE_CANDS {
         if let Some(out) = git::git_out(&cwd, &["diff", "--name-status", "-z", &format!("{cand}...HEAD")]) {
             for (p, k) in parse_name_status_z(&out) {
                 map.insert(p, k);
@@ -3028,6 +3048,160 @@ fn parse_name_status_z(out: &str) -> Vec<(String, ChangeKind)> {
         }
     }
     v
+}
+
+/// One file's diff, as the viewer's two-column renderer consumes it.
+#[derive(Serialize)]
+struct FileDiff {
+    /// Echo of what was asked for ("base" | "head").
+    ///
+    /// Informational only — the toggle's race is handled on the frontend by the
+    /// fetch effect's `alive` flag, which cleanup trips when `diffBase` changes,
+    /// so a stale response is dropped before it can be stored. This field is NOT
+    /// what does that; it is here so a logged or inspected response says which
+    /// question it answered.
+    against: String,
+    /// The ref the base resolved to, for the header. "vs base" without saying
+    /// WHICH base is a claim the reader has to take on faith, and the answer
+    /// differs per repo (`origin/main`, `master`, or nothing at all).
+    base_label: String,
+    /// git's unified diff at full context. EMPTY means the file is identical to
+    /// the base — deliberately distinct from a patch that parses to no rows.
+    patch: String,
+    /// There is no BEFORE for this path, so every line of it is new: either git
+    /// has never seen it, or the repo has no commits yet (an unborn HEAD, where
+    /// a staged file is tracked but has no committed version to diff against).
+    /// No git output at all in that case — the frontend builds all-added rows
+    /// from the content it already read. Spawning `git diff --no-index
+    /// /dev/null` would be a second process for something we derive for free.
+    untracked: bool,
+    binary: bool,
+    /// The patch hit the byte cap below and is cut short at a line boundary.
+    truncated: bool,
+}
+
+/// Byte cap on a patch. Full context means the payload is roughly BOTH copies of
+/// the file, so this is the pair-wise twin of `read_file`'s 1 MiB — and it
+/// crosses the IPC bridge as one string.
+const DIFF_MAX: usize = 2_000_000;
+
+/// Cut `patch` to at most `DIFF_MAX` bytes, at a LINE boundary. Mid-line would
+/// hand the parser half a line of source and it would render as real content.
+fn trim_patch(patch: &str) -> (String, bool) {
+    if patch.len() <= DIFF_MAX {
+        return (patch.to_string(), false);
+    }
+    let mut cut = DIFF_MAX;
+    while cut > 0 && !patch.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &patch[..cut];
+    // No newline in the first 2 MB means one enormous line; there is no boundary
+    // to fall back to, so the char boundary is the best available cut.
+    let end = head.rfind('\n').map(|i| i + 1).unwrap_or(cut);
+    (patch[..end].to_string(), true)
+}
+
+/// Does this patch say "binary" rather than showing lines?
+fn patch_is_binary(patch: &str) -> bool {
+    patch.lines().any(|l| l.starts_with("Binary files ") || l == "GIT binary patch")
+}
+
+/// One file's diff against its branch's base (or against HEAD).
+///
+/// `--unified=1000000` is the whole design: full context means ONE payload
+/// carries both complete versions of the file *and* their alignment, so the
+/// frontend needs no diff algorithm and can syntax-highlight each side as a
+/// whole file. Hunk-sized context would mis-colour every line whose block
+/// comment or string opened above the hunk.
+///
+/// A path outside a repo, or with no git, returns an empty diff rather than an
+/// error: the tree listed the file perfectly well, and a banner over it would
+/// be reporting the absence of a feature as a failure.
+#[tauri::command]
+async fn file_diff(app: AppHandle, path: String, against: Option<String>) -> Result<FileDiff, String> {
+    let f = guard_under_projects(&app, &path)?;
+    if !f.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    file_diff_for(&f, against.as_deref() == Some("head"))
+}
+
+/// The git half of `file_diff`, split out from the command so it can be tested
+/// against real repos: the command itself needs an `AppHandle` for the path
+/// guard, which a unit test has no way to build. Both of the states worth
+/// pinning here — an unborn HEAD, and a git invocation that genuinely fails —
+/// used to render as "no changes", so they get tests rather than trust.
+fn file_diff_for(f: &Path, want_head: bool) -> Result<FileDiff, String> {
+    let against = if want_head { "head" } else { "base" }.to_string();
+    let none = |label: &str, untracked: bool| FileDiff {
+        against: against.clone(),
+        base_label: label.to_string(),
+        patch: String::new(),
+        untracked,
+        binary: false,
+        truncated: false,
+    };
+    let dir = f.parent().unwrap_or(f).to_string_lossy().to_string();
+    let top = match git::git_out(&dir, &["rev-parse", "--show-toplevel"]) {
+        Some(t) if !t.is_empty() => std::fs::canonicalize(&t).unwrap_or_else(|_| PathBuf::from(t)),
+        _ => return Ok(none("", false)),
+    };
+    let cwd = top.to_string_lossy().to_string();
+    // Relative to the repo TOP, because that is where `-C` points below. A place
+    // one level down from the worktree root would otherwise ask git about a path
+    // that does not exist and get an empty diff for a file that clearly differs.
+    let rel = f.strip_prefix(&top).unwrap_or(f).to_string_lossy().to_string();
+
+    if !git::git_ok(&cwd, &["ls-files", "--error-unmatch", "--", &rel]) {
+        // No label: there is no ref to name, and the viewer says "new file"
+        // rather than trying to phrase the absence of one.
+        return Ok(none("", true));
+    }
+    // An unborn HEAD is the other way to have no BEFORE, and it does not look
+    // like one: a `git add`ed file in a fresh repo IS tracked, so the check
+    // above passes, every `merge-base` then fails, the fallback lands on `HEAD`
+    // — and `git diff HEAD` exits 128 on `fatal: bad revision 'HEAD'`. That used
+    // to arrive as an empty patch and render as "no changes vs HEAD" for a file
+    // the tree had just tinted `added`. Every line of it is new; say so.
+    if !git::has_commits(&cwd) {
+        return Ok(none("", true));
+    }
+
+    // `merge-base`, not the `cand...HEAD` range syntax `changed_files` uses:
+    // that range compares two COMMITS, and what the viewer needs is the base
+    // against the WORKING TREE, so the uncommitted half shows up too. Same
+    // candidates, same precedence, so the two always agree on which base.
+    let (base_rev, base_label) = if want_head {
+        ("HEAD".to_string(), "HEAD".to_string())
+    } else {
+        BASE_CANDS
+            .iter()
+            .find_map(|cand| {
+                git::git_out(&cwd, &["merge-base", cand, "HEAD"])
+                    .filter(|s| !s.is_empty())
+                    .map(|sha| (sha, (*cand).to_string()))
+            })
+            // No main/master anywhere: HEAD is the only base there is, and
+            // saying so beats silently diffing against something else.
+            .unwrap_or_else(|| ("HEAD".to_string(), "HEAD".to_string()))
+    };
+
+    // `None` is a NON-ZERO EXIT, and it must not become an empty patch: empty is
+    // documented and rendered as "identical to the base", so collapsing the two
+    // turns any git failure into a confident, wrong "no changes". `git diff`
+    // without `--exit-code` returns 0 whether or not there are differences, so a
+    // non-zero exit here is always a real failure and belongs in a banner.
+    let patch = git::git_out(
+        &cwd,
+        &["diff", "--no-ext-diff", "--no-color", "--unified=1000000", &base_rev, "--", &rel],
+    )
+    .ok_or_else(|| format!("could not diff {rel} against {base_label}"))?;
+    if patch_is_binary(&patch) {
+        return Ok(FileDiff { against, base_label, patch: String::new(), untracked: false, binary: true, truncated: false });
+    }
+    let (patch, truncated) = trim_patch(&patch);
+    Ok(FileDiff { against, base_label, patch, untracked: false, binary: false, truncated })
 }
 
 /// File contents for the viewer. Capped (default 1 MiB) and binary-guarded
@@ -4099,6 +4273,7 @@ pub fn run() {
             open_terminal,
             list_dir,
             changed_files,
+            file_diff,
             read_file,
             read_file_base64,
             write_file,
@@ -4271,6 +4446,109 @@ mod tests {
             current,
             "an empty request is a no-op, not a wipe",
         );
+    }
+
+    /// A cut patch must end on a line boundary. Half a line of source is
+    /// indistinguishable from a real line once it reaches the grid — it renders
+    /// as content, with a line number, and nothing says it is a fragment.
+    #[test]
+    fn trim_patch_cuts_on_a_line_boundary() {
+        let small = "@@ -1,1 +1,1 @@\n-a\n+b\n";
+        let (out, cut) = trim_patch(small);
+        assert_eq!(out, small, "a patch under the cap is returned untouched");
+        assert!(!cut);
+
+        // One line per 12 bytes, so the cap lands mid-line rather than on a
+        // boundary by luck — a cap that happened to fall on "\n" would pass
+        // whether or not the boundary logic existed.
+        let big: String = std::iter::repeat(" 0123456789\n").take(DIFF_MAX / 12 + 200).collect();
+        let (out, cut) = trim_patch(&big);
+        assert!(cut, "past the cap it reports truncation");
+        assert!(out.len() <= DIFF_MAX, "never longer than the cap: {}", out.len());
+        assert!(out.ends_with('\n'), "cut on a boundary, not mid-line");
+        assert!(big.starts_with(&out), "the kept part is a prefix of the original");
+    }
+
+    /// Multi-byte characters must not be split. `is_char_boundary` is the guard;
+    /// without it `&patch[..DIFF_MAX]` panics instead of returning a short patch.
+    #[test]
+    fn trim_patch_respects_utf8_boundaries() {
+        // The fixture only tests the guard if the cap lands INSIDE a character,
+        // and whether it does is pure arithmetic on the line length: the first
+        // version of this test used a 7-byte line, `DIFF_MAX % 7 == 2` fell on a
+        // boundary, and the test passed with the guard deleted. Hence the
+        // assertion below — it fails loudly if a future DIFF_MAX makes the
+        // fixture stop straddling.
+        let big: String = std::iter::repeat(" …abcd\n").take(DIFF_MAX / 9 + 200).collect();
+        assert!(
+            !big.is_char_boundary(DIFF_MAX),
+            "fixture no longer straddles a character at the cap — it would pass without the guard",
+        );
+        let (out, cut) = trim_patch(&big);
+        assert!(cut);
+        assert!(out.len() <= DIFF_MAX);
+        assert!(out.ends_with('\n'), "still cut on a line boundary");
+        assert!(big.starts_with(&out));
+    }
+
+    /// Real repos, because the whole question is what git exits with — a fake
+    /// would be asserting my own assumptions back at me. Both cases below
+    /// rendered as "no changes" before the fix, over a row the tree had lit.
+    #[test]
+    fn a_repo_with_no_commits_reports_every_line_as_new() {
+        let base = std::env::temp_dir().join(format!("wt-unborn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let cwd = base.to_string_lossy().to_string();
+        assert!(git::git_ok(&cwd, &["init", "-q"]), "git init");
+        let f = base.join("f.txt");
+        std::fs::write(&f, "hello\n").unwrap();
+        // STAGED, so `ls-files --error-unmatch` succeeds and the untracked arm
+        // above does NOT catch it — that is exactly what made this reachable.
+        assert!(git::git_ok(&cwd, &["add", "f.txt"]), "git add");
+        assert!(!git::has_commits(&cwd), "fixture must have an unborn HEAD");
+        assert!(
+            git::git_ok(&cwd, &["ls-files", "--error-unmatch", "--", "f.txt"]),
+            "fixture must be TRACKED, or it proves nothing",
+        );
+
+        let d = file_diff_for(&f, false).expect("must not error");
+        assert!(d.untracked, "no commits means no before: every line is new");
+        assert!(d.patch.is_empty(), "the frontend builds the rows from content");
+        assert!(!d.binary);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A tracked file in a normal repo still diffs — the guard above must not
+    /// have swallowed the ordinary path.
+    #[test]
+    fn a_committed_change_still_produces_a_patch() {
+        let base = std::env::temp_dir().join(format!("wt-diffok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let cwd = base.to_string_lossy().to_string();
+        assert!(git::git_ok(&cwd, &["init", "-q"]));
+        let f = base.join("f.txt");
+        std::fs::write(&f, "one\n").unwrap();
+        assert!(git::git_ok(&cwd, &["add", "-A"]));
+        assert!(git::git_ok(&cwd, &["-c", "user.email=s@s", "-c", "user.name=s", "commit", "-qm", "base"]));
+        std::fs::write(&f, "one\ntwo\n").unwrap();
+
+        let d = file_diff_for(&f, true).expect("must not error");
+        assert!(!d.untracked, "the file is tracked and has a committed version");
+        assert!(d.patch.contains("+two"), "the working-tree change must be in the patch: {:?}", d.patch);
+        assert_eq!(d.against, "head");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn binary_patches_are_recognised() {
+        assert!(patch_is_binary("diff --git a/x b/x\nBinary files a/x and b/x differ\n"));
+        assert!(patch_is_binary("diff --git a/x b/x\nGIT binary patch\nliteral 12\n"));
+        // A source line that merely mentions the phrase is not a marker: the
+        // test is on the LINE, and this one is a diff body line, so it starts
+        // with a marker character.
+        assert!(!patch_is_binary("@@ -1 +1 @@\n+// Binary files are skipped here\n"));
     }
 
     /// Real symlinks on a real filesystem — the whole point of the classifier is

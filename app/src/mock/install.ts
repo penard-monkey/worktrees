@@ -549,6 +549,35 @@ const MOCK_CHANGED: Array<[string, "modified" | "added" | "untracked" | "deleted
   ["tools/gen.sh", "deleted"], // ghost row AND a ghost directory
 ];
 
+/** A full-context unified patch for `content`, in exactly the shape
+ *  `git diff --unified=1000000` emits: one hunk, every line of the file in it.
+ *
+ *  The synthetic edit is a REPLACEMENT that keeps most of the line — one word
+ *  swapped — because that is what exercises the word-level intra-line diff. A
+ *  wholly different line would only ever light up as "the whole line changed",
+ *  and the interesting renderer path would go untested.
+ *
+ *  `small` is the vs-HEAD variant: the replacement only, without the insertion. */
+function mockPatch(content: string, small: boolean): string {
+  const lines = (content.endsWith("\n") ? content.slice(0, -1) : content).split("\n");
+  if (!lines.length) return "";
+  // A line with at least two words, so the swap is visibly partial.
+  const hit = Math.max(0, lines.findIndex((l) => l.trim().split(/\s+/).length > 2));
+  const before = lines[hit].replace(/[A-Za-z_][A-Za-z0-9_]*/, (w) => `${w}_old`);
+  const out: string[] = [];
+  const oldN = lines.length;
+  const newN = lines.length + (small ? 0 : 1);
+  out.push(`@@ -1,${oldN} +1,${newN} @@`);
+  lines.forEach((l, i) => {
+    if (i === hit) { out.push(`-${before}`); out.push(`+${l}`); return; }
+    out.push(` ${l}`);
+    // A pure insertion a few lines down, so the grid has to render an empty
+    // left cell — the one row shape a replacement never produces.
+    if (!small && i === Math.min(hit + 2, lines.length - 1)) out.push(`+// inserted on this branch`);
+  });
+  return out.join("\n");
+}
+
 type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
   switch (cmd) {
@@ -924,6 +953,44 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "changed_files": {
       const root = args.root as string;
       return { root, files: MOCK_CHANGED.map(([rel, status]) => ({ path: `${root}/${rel}`, status })) };
+    }
+    // Backend parity: full-context unified diff, so the frontend can rebuild
+    // both complete sides from one payload. The fixture patch is generated from
+    // the file's CURRENT content (see mockPatch) rather than stored, so a file
+    // created mid-session by __mock.createFile diffs too.
+    case "file_diff": {
+      const path = args.path as string;
+      const against = (args.against as string) === "head" ? "head" : "base";
+      const rel = MOCK_CHANGED.find(([r]) => path.endsWith(`/${r}`));
+      const f = fsFile(path);
+      // Backend parity: a path that is not a file is an ERROR there
+      // (`not a file: …`), not a cheerful "no changes". A mock that is more
+      // permissive than the command it stands in for hides exactly the bug the
+      // harness exists to catch.
+      if (!f) throw new Error(`not a file: ${path}`);
+      // …and `untracked` is decided BEFORE `binary`, as in lib.rs: the tracked
+      // check runs first there, so an untracked binary answers
+      // `{untracked: true, binary: false}`. The reverse order here would have
+      // the harness disagree with the backend on a shape it can produce.
+      if (rel && rel[1] === "untracked")
+        return { against, base_label: "", patch: "", untracked: true, binary: false, truncated: false };
+      if (!rel || f.binary)
+        return { against, base_label: "origin/main", patch: "", untracked: false, binary: !!f.binary, truncated: false };
+      // `?nodiff` forces the identical-to-base branch, which is otherwise
+      // unreachable: every fixture path in MOCK_CHANGED differs by construction.
+      if (path.includes("nodiff"))
+        return { against, base_label: "origin/main", patch: "", untracked: false, binary: false, truncated: false };
+      return {
+        against,
+        base_label: against === "head" ? "HEAD" : "origin/main",
+        // vs HEAD is the UNCOMMITTED half only, so it is deliberately smaller —
+        // that difference is the whole point of the toggle and a mock that
+        // returned the same patch for both would make it untestable.
+        patch: mockPatch(f.content, against === "head"),
+        untracked: false,
+        binary: false,
+        truncated: false,
+      };
     }
     case "read_file": {
       const f = fsFile(args.path as string);

@@ -754,19 +754,26 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   is a one-line generalisation away from covering both.
   _From: [2026-08-11 space-workbench session](docs/sessions/2026-08-11-space-workbench/summary.md)_
 
-- **A "changes only" view of the Files tab, and auto-expand to changed files.**
-  Both were offered when the changed-file markers were scoped and both were
-  deliberately left out, so the first slice stayed one clean thing. The tree now
-  already knows everything either would need: `Changes.dirs` in `FilesPane.tsx`
-  holds the count of changed files beneath every directory, so a filter is
-  "hide any file without a status and any directory whose count is 0", and
-  auto-expand is "open the path to each `files` key on first load". The open
-  question is not the mechanism, it is whether either earns a control — a filter
-  turns the tree into the branch's diff list (which may be what you want most of
-  the time, or may be a mode you forget you left on, the way show-ignored was),
-  and auto-expand is noisy on a branch that touched a dozen directories. Worth
-  living with the markers first.
-  _From: [2026-08-11 files-changed-markers session](docs/sessions/2026-08-11-files-changed-markers/summary.md)_
+- **The diff has no manual side-by-side / unified pin.** `DiffView` picks by
+  measured body width (`DIFF_SIDE_AT`, 560px) and that is the whole rule, where
+  the tree beside it gives `files_layout` an explicit auto → stacked → side-by-
+  side cycle. The two are the same question asked about different panes, so a
+  wide dock that the user nonetheless wants read as one column has no answer.
+  Deliberately left out of the first slice rather than forgotten: a second
+  layout control in the same header, next to a Preview/Source/Diff seg and a
+  Base/HEAD seg, needs a reason better than symmetry.
+
+- **The diff's add/del edge is under 3:1 on two light themes.** Measured against
+  the code surface, `box-shadow: inset 2px` runs 7:1–12:1 on the four dark
+  themes but ~2.4:1 for deletions on Tokyo Day and additions on Catppuccin Latte,
+  where `--ok`/`--danger` are darkened for a light nav. It is a supporting cue —
+  position carries side-by-side and a sign column carries unified — so nothing is
+  unreadable, but a light-theme user gets one channel fewer than a dark-theme
+  one. Wants either per-appearance diff tokens or a wider edge on light themes.
+  While measuring it: **`--syn-com` is ALREADY below 4.5:1 against `--bg-abyss`
+  on all four dark themes** (Nord 3.13, gruvbox-dark 3.52, Catppuccin Mocha 4.02,
+  Tokyo Night 4.09) — pre-existing and unrelated to the diff, but `tokens.css`
+  claims the ramp is ≥ 4.5:1 and that comment is only true of the light pair.
 
 - **The nav's dirty count and the tree's change badge answer different
   questions, and nothing on screen says so.** `dirty_files` (the nav's badge,

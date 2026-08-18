@@ -2761,11 +2761,17 @@ function App() {
       // is one, otherwise leave the key out and let `panelsFor` keep inheriting.
       const stored = key ? prev.place_panels?.[key] : undefined;
       const zoom = p.files_md_zoom ?? stored?.files_md_zoom;
+      // `files_diff` gets the identical treatment, and for the identical reason:
+      // it is a seeded optional, so filling it from `cur` would freeze the
+      // global into a place on the next dock toggle and then hand that value
+      // back to the global for the next place to inherit.
+      const dif = p.files_diff ?? stored?.files_diff;
       const panels: PlacePanels = {
         dock_open: p.dock_open ?? cur.dock_open,
         dock_tab: p.dock_tab ?? cur.dock_tab,
         dock_width: p.dock_width ?? cur.dock_width,
         ...(zoom !== undefined ? { files_md_zoom: zoom } : null),
+        ...(dif !== undefined ? { files_diff: dif } : null),
       };
       const next: Settings = {
         ...prev,
@@ -2773,6 +2779,7 @@ function App() {
         // …and the global only tracks a size you actually CHOSE, so it stays a
         // "last used" seed rather than an echo of wherever you last clicked.
         ...(p.files_md_zoom === undefined ? { files_md_zoom: prev.files_md_zoom } : null),
+        ...(p.files_diff === undefined ? { files_diff: prev.files_diff } : null),
         ...(key ? { place_panels: { ...(prev.place_panels ?? {}), [key]: panels } } : null),
       };
       applySettings(next);
@@ -4821,6 +4828,29 @@ function App() {
                           IS hiding entries — which is the state that misleads. */}
                       {settings.files_show_ignored ? "◉" : "◌"}
                     </button>
+                    {/* Beside show-ignored because they are the same kind of
+                        control — both decide what the listing WITHHOLDS — and
+                        both say so with a filled/hollow glyph rather than a
+                        tint, because a tree that is hiding entries looks
+                        identical to a tree that has none.
+                        Their POLARITY is deliberately opposite, though: this one
+                        fills when the filter is ON, show-ignored fills when it
+                        is withholding NOTHING. Each glyph is filled in the state
+                        its own label describes — "changed files only" is a thing
+                        you switch on, "gitignored files shown" is a thing you
+                        switch off — and filling both on "withholding" would make
+                        this one read as inactive exactly when it is doing most. */}
+                    <button
+                      className={"ctrl sm icon-only" + (settings.files_changed_only ? " on" : "")}
+                      aria-label={`Changed files only: ${settings.files_changed_only ? "on" : "off"}. Click to toggle.`}
+                      aria-pressed={settings.files_changed_only}
+                      title={settings.files_changed_only
+                        ? "Show every file again"
+                        : "Show only what this branch changed"}
+                      onClick={() => updateSettings({ files_changed_only: !settings.files_changed_only })}
+                    >
+                      {settings.files_changed_only ? "◆" : "◇"}
+                    </button>
                     <button
                       className="ctrl sm icon-only"
                       aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
@@ -4843,6 +4873,7 @@ function App() {
                     stackPct={settings.files_stack_pct}
                     onSplitPct={(v, o) => updateSettings(o === "split" ? { files_split_pct: v } : { files_stack_pct: v })}
                     showIgnored={settings.files_show_ignored}
+                    changedOnly={settings.files_changed_only}
                     reloadToken={placesToken}
                     onOpen={setDockFile}
                     onOpenEditor={editIn}
@@ -4853,6 +4884,10 @@ function App() {
                     onMdSource={(v) => updateSettings({ files_md_source: v })}
                     mdZoom={eff.files_md_zoom}
                     onMdZoom={(v) => updatePanels({ files_md_zoom: v })}
+                    diff={eff.files_diff}
+                    onDiff={(v) => updatePanels({ files_diff: v })}
+                    diffBase={settings.files_diff_base}
+                    onDiffBase={(v) => updateSettings({ files_diff_base: v })}
                     expanded={false}
                     onExpand={(v) => setReading(v)}
                     findOpen={findOn === "dock"}
@@ -4899,6 +4934,10 @@ function App() {
                 onMdSource={(v) => updateSettings({ files_md_source: v })}
                 mdZoom={eff.files_md_zoom}
                 onMdZoom={(v) => updatePanels({ files_md_zoom: v })}
+                diff={eff.files_diff}
+                onDiff={(v) => updatePanels({ files_diff: v })}
+                diffBase={settings.files_diff_base}
+                onDiffBase={(v) => updateSettings({ files_diff_base: v })}
                 expanded
                 onExpand={(v) => setReading(v)}
                 findOpen={findOn === "read"}
