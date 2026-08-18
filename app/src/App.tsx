@@ -1235,6 +1235,13 @@ function NewPlaceDialog({
       ? { tone: "warn", text: `${slug} already exists and is already on '${b}' — it will be reused as-is.` }
     : taken
       ? { tone: "warn", text: `${slug} already exists on '${taken.branch ?? "?"}' — it will be switched to '${b}'.` }
+    // ⚠ Only the last two lines depend on the branch LIST, and until it lands
+    // `known` is false — which reads as "this branch is new" for a branch that
+    // exists. The mock answers in a microtask so that window is invisible there;
+    // the real read is a `git for-each-ref` fan-out. Say "still reading" instead
+    // of asserting the wrong one of the two (CLAUDE.md's mock-timing rule).
+    : data === null
+      ? { tone: "info", text: `reading this project's branches…` }
     : known
       ? { tone: "info", text: `'${b}' already exists — it will be checked out here.` }
       : { tone: "info", text: `'${b}' will be created off ${baseShown || "the default base"}.` };
