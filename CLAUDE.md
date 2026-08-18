@@ -206,6 +206,17 @@ is invisible to the bats suite — there is no fake claude. Re-run
   `opener:default` has open-url + reveal-item-in-dir but NOT open-path —
   a missing permission rejects the invoke silently. Never swallow errors:
   route failures through `fail()` (frontend) / `applog` (backend).
+  **A path permission is only half of one.** `opener:allow-open-path` allows
+  NOTHING on its own: the plugin's `is_path_allowed` ANDs the fs scope with
+  "some allowed entry names a path", and a permission with no scope has no such
+  entry — so the invoke rejects exactly as if it were missing. It needs the
+  object form, `{"identifier": "opener:allow-open-path", "allow": [{"path":
+  "**"}]}`. And `**` does not mean everything: glob runs with
+  `require_literal_leading_dot`, which is TRUE by default on unix, so a dot
+  COMPONENT never matches a wildcard — `**` covers `/Users/x/repo/f.ts` and
+  rejects `/Users/x/repo/.worktrees/tree/f.ts`, which is every path this app
+  exists to open. `plugins.opener.requireLiteralLeadingDot: false` in
+  tauri.conf.json is what makes the scope mean what it reads as.
 - App log: `~/Library/Logs/net.casadelvalle.worktrees/app.log` (Settings →
   Logs). Persisted UI settings: `ui-state.json` in the app config dir — written
   WHOLE-BLOB by the frontend, so the backend must never write into it (its own

@@ -94,6 +94,24 @@ const BINARY: Record<string, string> = {
 
 export const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 
+/** `path` written relative to `root` — what the Files tab's "Copy relative
+ *  path" puts on the clipboard.
+ *
+ *  A path that is NOT under `root` keeps its absolute form rather than being
+ *  forced into one: the tree's rows come back from the backend already
+ *  resolved, so a place reached through a symlink can hand us a path whose
+ *  prefix is not the `root` prop at all. A relative path computed from the
+ *  wrong base still LOOKS like a valid one and pastes into the wrong repo;
+ *  an absolute path is merely more than was asked for.
+ *
+ *  The separator is part of the test (`root + "/"`, never a bare prefix), so a
+ *  sibling `…/app-old` next to root `…/app` is not read as being inside it. */
+export function relPath(root: string, path: string): string {
+  const base = root.replace(/\/+$/, "");
+  if (path === root || path === base) return ".";
+  return path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path;
+}
+
 /** Lowercased extension without the dot ("" when the name has none). */
 export function ext(path: string): string {
   const n = basename(path);

@@ -1,9 +1,10 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
+import { CtxMenu } from "./CtxMenu";
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
@@ -218,36 +219,6 @@ function glyphs(p: Place, drift?: boolean) {
   const MAX = 4;
   if (g.length > MAX) return [...g.slice(0, MAX), { cls: "g-more", text: `+${g.length - MAX}`, title: "more" }];
   return g;
-}
-
-// Right-click context menu shell: fixed at the cursor, clamped to the viewport,
-// Esc / click-away / right-click-away all close. Top-level (NOT nested in App)
-// so its position state survives App re-renders.
-function CtxMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: ReactNode }) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [pos, setPos] = useState({ left: x, top: y });
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setPos({
-      left: Math.max(4, Math.min(x, window.innerWidth - r.width - 8)),
-      top: Math.max(4, Math.min(y, window.innerHeight - r.height - 8)),
-    });
-  }, [x, y]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-  return (
-    <>
-      <div className="menu-catch" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
-      <div ref={ref} className="ctxmenu" style={pos} onContextMenu={(e) => e.preventDefault()}>
-        {children}
-      </div>
-    </>
-  );
 }
 
 type Ctx =
@@ -884,7 +855,10 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [commitIds, pick]);
 
-  // ⌘⇧T → add a tab. Skip the initial token value so mounting doesn't add one.
+  // ⌘T / ⌘⇧T → add a tab. Skip the initial token value so mounting doesn't add
+  // one — which is also what lets ⌘T bump the token in the same render that
+  // MOUNTS this component (opening the dock on the Terminal tab) without the
+  // restore and the bump both producing a tab.
   const firstTok = useRef(true);
   useEffect(() => {
     if (firstTok.current) { firstTok.current = false; return; }
@@ -922,7 +896,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
             <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}><Icons.X size={11} /></button>
           </span>
         ))}
-        <button className="termtab-add" title="new terminal (⌘⇧T)" onClick={addTab}><Icons.Plus size={13} /></button>
+        <button className="termtab-add" title="new terminal (⌘T)" onClick={addTab}><Icons.Plus size={13} /></button>
       </div>
       {active != null ? (
         dead.includes(active) ? (
@@ -3543,10 +3517,14 @@ function App() {
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // ⌘⇧T — new dock terminal. Handled BEFORE the meta-only guard (it needs
-      // shift). ⌘ only (not ctrl) so Ctrl+Shift+T still reaches the embedded
-      // shell; swallowed while the ⌘K palette owns the keyboard. No-op unless
-      // the dock's Terminal tab is mounted (it ignores the token otherwise).
+      // ⌘⇧T — new dock terminal. The chord this started as; ⌘T (in the
+      // meta-only section below) is the advertised one now and ⌘⇧T is kept as
+      // a silent alias, since it costs nothing and fingers remember.
+      // Handled BEFORE the meta-only guard (it needs shift). ⌘ only (not ctrl)
+      // so Ctrl+Shift+T still reaches the embedded shell; swallowed while the
+      // ⌘K palette owns the keyboard. No-op unless the dock's Terminal tab is
+      // mounted (it ignores the token otherwise) — which is exactly the gap
+      // ⌘T closes.
       if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "t") {
         e.preventDefault();
         if (!keyRef.current.switchOpen) setNewTermToken((v) => v + 1);
@@ -3625,6 +3603,29 @@ function App() {
         // the embedded terminal, like ⌘B.
         e.preventDefault();
         toggleDock();
+      } else if (e.metaKey && k === "t") {
+        // ⌘T — new terminal, macOS Terminal's chord and the ADVERTISED one now
+        // (⌘⇧T, handled above, stays as a silent alias). ⌘-only like ⌘J, so
+        // plain Ctrl+T keeps reaching the embedded shell: no branch in this
+        // chain but ⌘B answers a ctrl-only chord, and nothing here calls
+        // preventDefault for one.
+        //
+        // Two jobs, never both at once. With the Terminal tab already on
+        // screen the chord adds a shell; anywhere else (dock closed, or open
+        // on Files) it brings the tab up and stops — MOUNTING TerminalTabs
+        // already restores the remembered tabs (or spawns the first one), so
+        // adding on top of that would double up. The token consumer skips its
+        // initial value precisely so a bump in the same render as the mount
+        // does nothing; this branch doesn't fight that, it relies on it.
+        e.preventDefault();
+        const kr = keyRef.current;
+        if (kr.dockShown && kr.dockTab === "terminal") setNewTermToken((v) => v + 1);
+        else {
+          // The same write the right rail makes (pickDockTab) — one
+          // updatePanels carrying only the two fields this act chose, so no
+          // seeded value gets frozen into a place that never set it.
+          updatePanels({ dock_tab: "terminal", dock_open: true });
+        }
       } else if (e.metaKey && e.key === ",") {
         // ⌘, opens Settings (macOS convention) — a meta chord is safe past the
         // term-host (its passthrough concerns are ctrl-only). Esc already closes.
@@ -3663,7 +3664,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleNav, toggleDock, fail, settings.nav_collapsed]);
+  }, [toggleNav, toggleDock, updatePanels, fail, settings.nav_collapsed]);
 
   // lens click: collapsed → expand into that lens; active lens again → collapse (VS Code style)
   const changeLens = (l: Lens) => {
