@@ -569,6 +569,11 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   background: var(--bg-panel); border: 1px solid var(--line);
   border-radius: var(--r-md); box-shadow: var(--shadow-float); padding: var(--s1);
   animation: pop var(--dur-slow) var(--ease);
+  /* Belt to CtxMenu's ResizeObserver braces: the clamp can only slide a menu
+     that FITS. A place menu with every optional row present is taller than a
+     short window, and without these it clamps to top:4 and spills its tail off
+     the bottom edge unreachably. 8px top + 8px bottom = the clamp's own margin. */
+  max-height: calc(100vh - 16px); overflow-y: auto; overscroll-behavior: contain;
 }
 .ctx-sep { height: 1px; margin: var(--s1) var(--s2); background: var(--line); }
 .ctx-life { display: flex; gap: 4px; padding: 0 var(--s2) var(--s2); }
@@ -1731,6 +1736,38 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .sync-foot .enter-btn.danger { background: var(--danger); }
 .sync-foot .enter-btn:disabled { opacity: 0.45; cursor: default; filter: none; }
+
+/* ── remove worktree ── the same modal shell as the sync family, narrower: it
+   asks one question and lists what answering yes destroys. Nothing here is a
+   new colour — the risk block borrows .sync-live (warn) and the irreversible
+   line borrows --danger, which every theme block already defines. */
+.rm-modal { width: min(460px, 92%); }
+.rm-id { display: flex; flex-direction: column; gap: 2px; }
+.rm-name { font-size: var(--fs-body); font-weight: var(--fw-bold); color: var(--txt-hi); }
+.rm-path, .rm-branch {
+  font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt-mute);
+  word-break: break-all;
+}
+.rm-warn {
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  color: var(--danger); font-size: var(--fs-label); line-height: var(--lh-prose);
+}
+.rm-warn b { font-weight: var(--fw-bold); }
+/* Unpushed commits are a FACT, not a risk — the branch keeps them and `-d`
+   will not delete it while unmerged. Dim prose, no ⚠, no coloured box: mixing
+   it into .sync-live would make the two real warnings above it cheaper. */
+.rm-note { font-size: var(--fs-label); color: var(--txt-dim); line-height: var(--lh-prose); }
+.rm-note code { font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt); }
+/* The checkbox row wraps: a long branch name must not push "(only if merged)"
+   out of the modal, and that note is the whole truth of what the box does. */
+.rm-modal .sync-opt { flex-wrap: wrap; }
+.rm-opt-note { color: var(--txt-mute); font-size: var(--fs-micro); }
+/* "(force-deleted, merged or not)" — the same --force that discards the working
+   tree turns `branch -d` into `-D` (ops.rs:1055). A muted aside is the wrong
+   weight for the one combination here that can destroy commits. */
+.rm-opt-note.danger { color: var(--danger); }
 
 .settings-sheet {
   width: min(560px, 92%); height: 100%; background: var(--bg-tree);

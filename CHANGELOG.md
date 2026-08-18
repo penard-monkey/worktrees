@@ -43,7 +43,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   existed at all. Same picker as the dialog's, and it still takes a name you
   type that no branch has yet.
 
+### Changed
+- **Removing a worktree now asks in a dialog, and says what it will destroy.**
+  The old confirmation was a pair of danger buttons that appeared *inside* the
+  menu you clicked from, which is also how it broke (below). The dialog names
+  the worktree, its path and its branch, and warns only about what is actually
+  at risk: a running tmux session (it gets killed), and uncommitted changes —
+  which core *refuses* to remove over, so the dialog says that and offers the
+  `--force` tick rather than claiming the files are already doomed. Commits that
+  are not in the base branch are a plain note while the branch survives to hold
+  them, and become a warning in the two cases where it does not: a detached
+  HEAD, and ticking discard *and* delete-branch together — one `--force` covers
+  both, so that pair force-deletes an unmerged branch, and the checkbox says so
+  instead of still reading "(only if merged)". The old two-step arm is gone from
+  both the nav's right-click menu and the topbar ⋯, which now open the same
+  dialog. A refusal keeps the dialog open with the reason in it.
+
 ### Fixed
+- **A right-click menu near the bottom of the window no longer hides its last
+  item.** The menu was clamped into the viewport once, when it opened — so any
+  menu that grew afterwards (the old "Remove worktree…" arming into two
+  buttons) pushed its new last row off the bottom edge, with no scrollbar and
+  no way to reach it. The clamp now re-runs whenever the menu resizes, and a
+  menu too tall for the window scrolls instead of overflowing.
 - **The terminal no longer runs on under the Files dock.** Opening or widening
   the dock took width away from the terminal, and the terminal kept it: the
   rightmost columns carried on painting *behind* the dock, so tmux's status line

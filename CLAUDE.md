@@ -178,6 +178,28 @@ is invisible to the bats suite — there is no fake claude. Re-run
   the Rust side leaves a frontend that is confidently wrong and passes every
   test — the mirror's own unit tests keep testing the OLD rule. Same shape as
   the version-vs-binary assertion in `test/misc.bats`.
+- **`remove_place`'s `force` is TWO permissions wearing one flag.** `ops.rs:1014`
+  reads it as "remove a dirty tree"; `ops.rs:1055` reads the same bool to pick
+  `git branch -D` over `-d`. So force+`--branch` force-deletes an UNMERGED
+  branch — the only combination in the remove path that can destroy commits. The
+  inline arm this repo shipped for a year was immune only because it hardcoded
+  `force: false`, and the docstring's "del_branch is safe by construction" was
+  true *of that call site*, not of the command. Any UI that exposes force must
+  re-word what it says about the branch; `RemoveDialog` does it with
+  `forceDeletesBranch`. Nothing in bats or the mock catches this — the mock
+  models no branch objects (`install.ts`: "delBranch is state-invisible here").
+- **A menu's clamp must re-run when the menu RESIZES, not when the cursor
+  moves.** `CtxMenu` clamped in a `useLayoutEffect` keyed `[x, y]` — coords that
+  are frozen for the menu's whole life — so a menu that grew after opening (an
+  item arming into two) kept the `top` computed for its old height and pushed
+  its new last row off the bottom edge, unreachable and with no scrollbar to
+  admit it. A `ResizeObserver` covers callers that do not exist yet; `.ctxmenu`
+  carries `max-height`/`overflow-y` as the belt for a menu taller than the
+  window. Measure with `offsetWidth/Height`, NOT `getBoundingClientRect()`,
+  which measures through the `pop` keyframe's `scale(0.98)` and reports a box 2%
+  small on the first frame. `app/scripts/ctxmenu-check.mjs` evaluates the real
+  CtxMenu source under DOM stubs and fails on the pre-fix version (same
+  slice-the-real-source shape as `race-check.mjs`).
 - **A synthetic pointer drag bypasses hit-testing on the way IN.** Dispatching
   `pointerdown` on a row starts a drag even when a full-screen overlay
   (`.menu-catch`) is up — which a real press could never do, because it would

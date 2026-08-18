@@ -77,9 +77,10 @@ type Lens = "places" | "recent" | "attention";
 type ProjectHealth = { slugs: Set<string>; issues: number; error: string | null };
 
 // Arm keys for the topbar Close (bare control) and the ctx-menu "Close session"
-// (popover). Namespaced so they never collide with the remove arms sharing
-// `confirmRm`. The menu's own dismissal clears `closectx|` too, but it is not
-// the only thing that may — see isBareArm.
+// (popover). Namespaced so they never collide with the PROJECT remove arms
+// (`hdr|`, `proj|`) sharing `confirmRm` — removing a worktree is a dialog now
+// (RemoveDialog) and holds no arm at all. The menu's own dismissal clears
+// `closectx|` too, but it is not the only thing that may — see isBareArm.
 const closeKey = (repo: string, slug: string) => `close|${repo}|${slug}`;
 const closeCtxKey = (repo: string, slug: string) => `closectx|${repo}|${slug}`;
 /** Arms that TIME OUT rather than waiting to be dismissed. The header ✕ has no
@@ -1797,6 +1798,160 @@ function SyncPopover({ status, root, onOpen }: {
   );
 }
 
+/** "Remove worktree" — the one confirmation for the one destructive command.
+ *
+ *  Replaces the armed two-button pair that both the nav's right-click menu and
+ *  the topbar ⋯ used to render inline. Two reasons it is a dialog now: an armed
+ *  pair inside a menu can be pushed off the bottom of the window by its own
+ *  growth (the bug this fixes — see CtxMenu's clamp), and "remove" deserves to
+ *  say what it is about to destroy rather than being one twitchy click from a
+ *  menu item.
+ *
+ *  What it says comes from the `Place` the caller already holds — no extra git
+ *  fan-out. Both modifiers are CHECKBOXES rather than extra danger buttons: one
+ *  act, two flags.
+ *
+ *  Every line here is pinned to what `ops.rs::remove_one` ACTUALLY does, which
+ *  is both narrower and wider than "remove destroys everything":
+ *
+ *  - **dirty** (ops.rs:1014) — core REFUSES a dirty tree unless `--force`. So
+ *    uncommitted changes are not "lost" by a plain remove; the remove does not
+ *    happen. Saying "will be lost" there would be crying wolf, and it would also
+ *    hide the only thing the user needs to know: they have to tick force.
+ *  - **`force` is OVERLOADED, and this is the trap** (ops.rs:1055:
+ *    `let flag = if force { "-D" } else { "-d" }`). One flag means both "remove
+ *    a dirty tree" AND "force-delete the branch". So force+branch together run
+ *    `git branch -D` and WILL strand unmerged commits. The old inline arm was
+ *    immune only because it hardcoded `force: false`; adding a force checkbox
+ *    is what put this in reach, so the branch label and the commits note both
+ *    change wording under `force` instead of promising `-d` semantics.
+ *  - **ahead** (project.rs:359-373) — divergence from the repo's BASE ref, NOT
+ *    `@{u}`. A fully-pushed unmerged branch still counts, so "not pushed to
+ *    origin" would be false; it says "not in the base branch".
+ *  - **no branch** (detached) — nothing holds those commits once the tree goes,
+ *    so the reassurance flips to a warning. `ops.rs:999` clears the branch for a
+ *    detached tree, and `del_branch` then no-ops (ops.rs:1054 needs a name).
+ *  - **live tmux session** (ops.rs:1040) — genuinely killed. That one is a ⚠.
+ *
+ *  Module scope (CLAUDE.md): App re-renders on every 3s refresh tick, and a
+ *  component defined inside it would remount — resetting the checkboxes
+ *  mid-read, including a `force` the user had just ticked. */
+function RemoveDialog({ place, busy, error, onConfirm, onClose }: {
+  place: Place;
+  busy: boolean;
+  /** The backend's refusal, verbatim. Stays on screen with the dialog open. */
+  error: string;
+  onConfirm: (opts: { delBranch: boolean; force: boolean }) => void;
+  onClose: () => void;
+}) {
+  const [delBranch, setDelBranch] = useState(false);
+  const [force, setForce] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+  // The force checkbox only RENDERS while the place is dirty, but `force` is
+  // this component's state and the component stays mounted across refresh ticks
+  // — so a tree that gets committed underneath an open dialog would hide the
+  // checkbox while keeping the flag set, unturnoffable, and (with the branch box
+  // also ticked) silently upgrade `git branch -d` to `-D`. Clearing it with the
+  // control that expresses it keeps the two in step. If the tree goes dirty
+  // again the box comes back UNCHECKED, which is the honest default for files
+  // it was never ticked for.
+  useEffect(() => { if (!place.dirty) setForce(false); }, [place.dirty]);
+  const dirtyN = place.dirty ? (place.dirty_files ?? 0) : 0;
+  const files = dirtyN > 0 ? `${dirtyN} uncommitted ${dirtyN === 1 ? "file" : "files"}` : "uncommitted changes";
+  const ahead = place.ahead ?? 0;
+  // force+branch is `git branch -D` (ops.rs:1055) — the one combination that can
+  // destroy commits. It changes what the branch checkbox and the commits note
+  // are allowed to claim, so it is named once here rather than re-derived.
+  const forceDeletesBranch = force && delBranch && !!place.branch;
+  // `place.dirty` is this refresh tick's answer, up to 3s old — so it decides
+  // what to SAY, never whether the button works. The backend is the authority
+  // on a refusal, and disabling here would block a tree the user just committed.
+  return (
+    <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
+      <div className="sync-modal rm-modal" role="dialog" aria-label={`Remove worktree ${nameOf(place)}`}
+        data-testid="remove-dialog" onClick={(e) => e.stopPropagation()}>
+        <header className="sync-h"><b>Remove worktree</b></header>
+        <div className="sync-body">
+          <div className="rm-id">
+            <div className="rm-name">{nameOf(place)}</div>
+            <div className="rm-path">{place.path}</div>
+            {place.branch && <div className="rm-branch">↗ {place.branch}</div>}
+          </div>
+          {/* Only what is TRUE for this place is drawn — a clean, sessionless
+              tree gets no warning block at all, which is the honest answer. */}
+          {(place.dirty || place.tmux_session.up) && (
+            <div className="sync-live" data-testid="rm-risks">
+              {place.dirty && (
+                <div>⚠ {files} — the remove is refused unless you discard them.</div>
+              )}
+              {place.tmux_session.up && (
+                <div>⚠ tmux session <code>{place.tmux_session.name}</code> is running — it will be killed.</div>
+              )}
+            </div>
+          )}
+          {/* Three different truths about the same `ahead` count, because what
+              holds those commits after the remove differs: a branch that
+              survives, a branch about to be -D'd, or (detached) nothing. */}
+          {ahead > 0 && (
+            !place.branch ? (
+              <div className="sync-live" data-testid="rm-note">
+                ⚠ {ahead} {ahead === 1 ? "commit is" : "commits are"} not in the base branch, and this
+                worktree is on a detached HEAD — no branch keeps them once it is removed.
+              </div>
+            ) : forceDeletesBranch ? (
+              <div className="sync-live" data-testid="rm-note">
+                ⚠ {ahead} {ahead === 1 ? "commit is" : "commits are"} not in the base branch. Force-deleting
+                <> <code>{place.branch}</code></> discards {ahead === 1 ? "it" : "them"}.
+              </div>
+            ) : (
+              <div className="rm-note" data-testid="rm-note">
+                {ahead} {ahead === 1 ? "commit is" : "commits are"} not in the base branch. They stay on
+                <> <code>{place.branch}</code></>, which this does not delete.
+              </div>
+            )
+          )}
+          <div className="rm-warn" data-testid="rm-warn">
+            This deletes the worktree directory from disk. <b>It cannot be undone.</b>
+          </div>
+          {place.dirty && (
+            <label className="sync-opt">
+              <input type="checkbox" data-testid="rm-force" checked={force} disabled={busy}
+                onChange={(e) => setForce(e.currentTarget.checked)} />
+              discard {files} <span className="rm-opt-note">(--force)</span>
+            </label>
+          )}
+          {place.branch && (
+            <label className="sync-opt">
+              <input type="checkbox" data-testid="rm-del-branch" checked={delBranch} disabled={busy}
+                onChange={(e) => setDelBranch(e.currentTarget.checked)} />
+              also delete branch <code className="sync-cmd">{place.branch}</code>
+              {/* The SAME --force that discards the files also turns `branch -d`
+                  into `-D`. Ticking discard rewrites this note rather than
+                  leaving "(only if merged)" standing next to a -D. */}
+              <span className={"rm-opt-note" + (force ? " danger" : "")}>
+                {force ? "(force-deleted, merged or not)" : "(only if merged)"}
+              </span>
+            </label>
+          )}
+          {error && <div className="sync-err" data-testid="rm-error">{error}</div>}
+        </div>
+        <footer className="sync-foot">
+          <button className="ctrl" data-testid="rm-cancel" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="enter-btn danger" data-testid="rm-confirm" disabled={busy}
+            onClick={() => onConfirm({ delBranch, force })}>
+            {busy ? "Removing…"
+              : `${force ? "Discard + remove" : "Remove"}${delBranch && place.branch ? " + branch" : ""}`}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 /** The name rule, mirrored from `lib.rs::valid_project_name` for the inline
  *  hint. The BACKEND decides — it re-validates every field it is handed — so a
  *  drift here can only make this message worse, never let a bad name through. */
@@ -2199,6 +2354,13 @@ function App() {
   const [npOpen, setNpOpen] = useState(false);
   const [npBusy, setNpBusy] = useState(false);
   const [npErr, setNpErr] = useState("");
+  /** The remove-worktree confirmation. Identified by `repo`+`slug` rather than
+   *  by holding the `Place`: the 3s refresh replaces every Place object, and a
+   *  captured one would go stale while the dialog sits open — the render looks
+   *  it up fresh, so the risks it lists stay true. */
+  const [rm, setRm] = useState<{ repo: string; slug: string } | null>(null);
+  const [rmBusy, setRmBusy] = useState(false);
+  const [rmErr, setRmErr] = useState("");
   /** The import picker (workspace-level, no project). Its own small state: the
    *  hub listing is a different question from any project's sync status, and a
    *  machine with an empty workspace has no project to hang it off. */
@@ -2957,9 +3119,26 @@ function App() {
     ctx?.kind === "place"
       ? ws?.projects.find((v) => v.root === ctx.repo)?.snapshot?.places.find((pl) => pl.slug === ctx.slug) ?? null
       : null;
+  // Same rule for the remove dialog, which outlives the menu that opened it and
+  // sits open across refresh ticks: the risks it lists (dirty count, unpushed
+  // commits, live session) are only honest if the Place is this tick's.
+  const rmSnap = rm ? ws?.projects.find((v) => v.root === rm.repo)?.snapshot ?? null : null;
+  const rmPlace: Place | null = rmSnap?.places.find((pl) => pl.slug === rm!.slug) ?? null;
+  // The target disappeared under the dialog (the CLI removed it, or another
+  // Mac's sync did). Drop the dialog rather than leaving a modal about nothing.
+  //
+  // Keyed on "the snapshot LISTS this project and the slug is not in it", never
+  // on `!rmPlace` alone: `list_workspace` returns a null snapshot for ANY failed
+  // sweep (lib.rs) and refresh commits that wholesale, so one errored tick would
+  // otherwise dismiss an open destructive-action dialog — wiping the checkboxes
+  // and any refusal text mid-read, which reads as the app deciding for you.
+  useEffect(() => {
+    if (rm && rmSnap && !rmPlace) { setRm(null); setRmErr(""); }
+  }, [rm, rmSnap, rmPlace]);
 
   // if a refresh removes the ctx target, finalize the close (else a stale ctx
-  // resurrects the menu — with its armed remove — when the target reappears)
+  // resurrects the menu — with its armed Close session — when the target
+  // reappears; the project branch below still guards an armed remove)
   useEffect(() => {
     if (!ctx || !ws) return;
     // BOTH branches must clear the arm (closeCtx's contract, inlined here to keep
@@ -3177,8 +3356,9 @@ function App() {
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
-  // Two-click arm for the project ctx-menu item (shares confirmRm with the
-  // place-remove; key namespaced "proj|" so it never collides).
+  // Two-click arm for the project ctx-menu item (shares confirmRm with the two
+  // Close-session arms; key namespaced "proj|" so it never collides). Removing a
+  // PLACE holds no arm at all any more — that one is RemoveDialog.
   const removeProjectCtx = (root: string) => {
     const key = `proj|${root}`;
     if (confirmRm !== key) { setConfirmRm(key); return; } // arm; menu stays open
@@ -3198,8 +3378,7 @@ function App() {
   // arms ("close|" bare, "closectx|" in the menu). The first two have no popover
   // to dismiss them at all; the ctx one does, but a menu can sit open for hours
   // and an armed whole-session kill must expire like any other offer. The
-  // remaining popover arms ("proj|", `repo|slug`) are cleared by their own close
-  // paths.
+  // remaining popover arm ("proj|") is cleared by its own close path.
   // `closeSess` is a dep so a re-arm that names a DIFFERENT session (the one
   // that took the place while the first arm sat) gets a full window of its own
   // rather than the remainder of the window raised for the session that is gone.
@@ -3250,8 +3429,8 @@ function App() {
   // whose it is). When core reports the session was ADOPTED (found by pane cwd:
   // started by hand, or left behind by a prefix change) it answers
   // needs_confirm instead of killing, and we arm a second click — the same
-  // shape as the remove confirms, sharing `confirmRm` so every dismissal path
-  // disarms it. `armed` is the user's word, forwarded as `yes`.
+  // shape as the project remove confirm, sharing `confirmRm` so every dismissal
+  // path disarms it. `armed` is the user's word, forwarded as `yes`.
   //
   // The armed click sends BACK the session the arm displayed: consent is bound
   // to that name, and core kills nothing else. Between arming and clicking the
@@ -3355,20 +3534,49 @@ function App() {
     closeCtx();
     openNewForm(root, base);
   };
-  // Unarmed click arms (menu stays open, showing the two danger buttons below).
-  const armRemovePlaceCtx = (repo: string, slug: string) => {
-    setConfirmRm(`ctx|${repo}|${slug}`); // namespaced: never matches the topbar's key
-  };
-  // Armed confirm. `delBranch` picks the button: false = remove only, true =
-  // remove + branch. With force:false the core uses `git branch -d`, so only a
-  // MERGED branch is deleted; an unmerged one degrades to a warning while the
-  // remove still succeeds — del_branch is safe by construction.
-  const confirmRemovePlaceCtx = async (repo: string, slug: string, delBranch: boolean) => {
+  /** Both remove entry points — the nav's right-click menu and the topbar ⋯ —
+   *  land here. They used to arm an inline two-button pair in their own popover;
+   *  a modal says what will be destroyed BEFORE the click that does it, and it
+   *  cannot be clipped by the menu it was opened from. */
+  const openRemove = (repo: string, slug: string) => {
     closeCtx();
-    // Arg keys are camelCase: Tauri renames Rust snake_case params over IPC.
-    if ((await runCmd("remove_place", { repo, slug, delBranch, force: false }))?.ok) {
-      dropPanels((k) => k === placeKey(repo, slug));
-      if (sel?.repo === repo && sel?.slug === slug) setSel(null);
+    closeMenu();
+    setRmErr("");
+    setRm({ repo, slug });
+  };
+  /** Both flags come from the dialog's checkboxes.
+   *
+   *  `delBranch` alone is safe: core runs `git branch -d`, so only a MERGED
+   *  branch is deleted and an unmerged one degrades to a warning while the
+   *  remove still succeeds.
+   *
+   *  `force` is the ONLY way a dirty tree is removed at all (ops.rs:1014 refuses
+   *  without it) — but it is NOT scoped to the working tree. ops.rs:1055 reads
+   *  the same flag to pick `-D` over `-d`, so force+delBranch force-deletes an
+   *  unmerged branch. Nothing here can separate them (core takes one `--force`),
+   *  so RemoveDialog says which of the two the tick is buying. Neither flag is
+   *  ever inferred from state; the user ticks both.
+   *
+   *  A failure keeps the dialog OPEN with the reason inline. `runCmd` has
+   *  already put the same text in the app-wide banner; the inline copy is the
+   *  one you can act on — the force checkbox is right above it. */
+  const doRemove = async ({ delBranch, force }: { delBranch: boolean; force: boolean }) => {
+    if (!rm || rmBusy) return;
+    const { repo, slug } = rm;
+    setRmBusy(true);
+    setRmErr("");
+    try {
+      // Arg keys are camelCase: Tauri renames Rust snake_case params over IPC.
+      const r = await runCmd("remove_place", { repo, slug, delBranch, force });
+      if (r?.ok) {
+        dropPanels((k) => k === placeKey(repo, slug));
+        if (sel?.repo === repo && sel?.slug === slug) setSel(null);
+        setRm(null);
+      } else {
+        setRmErr(r?.output?.trim() || `remove failed${r ? ` (exit ${r.code})` : ""}`);
+      }
+    } finally {
+      setRmBusy(false);
     }
   };
   // ── sync ──
@@ -3857,21 +4065,10 @@ function App() {
     if (!b) return false;
     return !!(await runCmd("switch_place", { repo: sel.repo, slug: sel.slug, branch: b, base: null }))?.ok;
   };
-  // Topbar ⋯ remove — same armed two-button pair as the ctx menu (arm key
-  // `repo|slug`). Unarmed click arms; the armed state renders "Confirm remove"
-  // (del_branch:false) + "Confirm remove + branch" (del_branch:true).
-  const armRemove = () => {
-    if (!sel) return;
-    setConfirmRm(`${sel.repo}|${sel.slug}`);
-  };
-  const confirmRemove = async (delBranch: boolean) => {
-    if (!sel) return;
-    closeMenu();
-    if ((await runCmd("remove_place", { repo: sel.repo, slug: sel.slug, delBranch, force: false }))?.ok) {
-      dropPanels((k) => k === placeKey(sel.repo, sel.slug));
-      setSel(null);
-    }
-  };
+  // Topbar ⋯ remove — the same one dialog the ctx menu opens (`openRemove`), so
+  // there is exactly one confirmation for this command and one place to read
+  // what it will destroy.
+  const removeSelected = () => { if (sel) openRemove(sel.repo, sel.slug); };
 
   const toggleProject = (root: string) => {
     setCollapsed((c) => {
@@ -4688,14 +4885,9 @@ function App() {
                       )}
                       <button className="pop-item" onClick={() => copyText(selected.path)}>Copy path</button>
                       {!selected.is_main && (
-                        confirmRm === `${sel.repo}|${sel.slug}` ? (
-                          <>
-                            <button className="pop-item danger armed" onClick={() => confirmRemove(false)}>Confirm remove</button>
-                            <button className="pop-item danger armed" onClick={() => confirmRemove(true)}>Confirm remove + branch</button>
-                          </>
-                        ) : (
-                          <button className="pop-item danger" onClick={armRemove}>Remove worktree…</button>
-                        )
+                        <button className="pop-item danger" data-testid="topbar-remove" onClick={removeSelected}>
+                          Remove worktree…
+                        </button>
                       )}
                     </div>
                   )}
@@ -5115,6 +5307,20 @@ function App() {
           onClose={closeSync}
         />
       )}
+      {/* Looked up per render, not captured when the dialog opened: the 3s
+          refresh swaps every Place, and a stale one would let the dialog claim
+          "4 uncommitted files" about a tree that has since been committed. If
+          the place vanishes from a snapshot that DID list its project (removed
+          on another machine, or by the CLI), the effect above closes it out. */}
+      {rm && rmPlace && (
+        <RemoveDialog
+          place={rmPlace}
+          busy={rmBusy}
+          error={rmErr}
+          onConfirm={doRemove}
+          onClose={() => { setRm(null); setRmErr(""); }}
+        />
+      )}
       {menu && <div className="menu-catch" onClick={closeMenu} />}
 
       {/* ── right-click: place ── */}
@@ -5183,20 +5389,10 @@ function App() {
           {!ctxPlace.is_main && (
             <>
               <div className="ctx-sep" />
-              {confirmRm === `ctx|${ctx.repo}|${ctxPlace.slug}` ? (
-                <>
-                  <button className="pop-item danger armed" onClick={() => confirmRemovePlaceCtx(ctx.repo, ctxPlace.slug, false)}>
-                    Confirm remove
-                  </button>
-                  <button className="pop-item danger armed" onClick={() => confirmRemovePlaceCtx(ctx.repo, ctxPlace.slug, true)}>
-                    Confirm remove + branch
-                  </button>
-                </>
-              ) : (
-                <button className="pop-item danger" onClick={() => armRemovePlaceCtx(ctx.repo, ctxPlace.slug)}>
-                  Remove worktree…
-                </button>
-              )}
+              <button className="pop-item danger" data-testid="ctx-remove"
+                onClick={() => openRemove(ctx.repo, ctxPlace.slug)}>
+                Remove worktree…
+              </button>
             </>
           )}
         </CtxMenu>
