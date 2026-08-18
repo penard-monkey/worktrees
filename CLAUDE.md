@@ -34,6 +34,14 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 
 CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 
+**Docs-only PRs skip CI by design.** `ci.yml` `paths-ignore` covers `docs/**`,
+`ROADMAP.md`, `CLAUDE.md`, `DESIGN.md`, `MIGRATION.md`, `README.md` and
+`.claude/**` — a close-out archive PR shows ZERO checks, which is correct, not
+a hung run, and nothing blocks the merge (main has no required status checks).
+The skip applies only when EVERY changed file matches the list; mix in one code
+file and the full suite runs. `CHANGELOG.md` is deliberately NOT on the list —
+it ships inside the app binary via `include_str!`.
+
 **A stale release binary does not only make bats FAIL — it can make it PASS.**
 The note above says "fail mysteriously", which is the friendlier half. Edit a
 crate *after* the release build and `make test` happily green-lights the OLD
