@@ -3,6 +3,19 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The terminal no longer runs on under the Files dock.** Opening or widening
+  the dock took width away from the terminal, and the terminal kept it: the
+  rightmost columns carried on painting *behind* the dock, so tmux's status line
+  and anything reaching the right margin were cut off mid-glyph at the seam. It
+  could only ever get wider — the pane grew with the window and never shrank
+  back, because the box the resize watcher measures could not shrink, so tmux was
+  never told to narrow. Both terminals were affected (the place's pane and the
+  dock's own shells); both now follow their pane on every dock toggle, dock drag
+  and window resize.
+
 ## [0.16.0] - 2026-08-17
 
 ### Added

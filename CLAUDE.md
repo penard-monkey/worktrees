@@ -148,6 +148,19 @@ is invisible to the bats suite — there is no fake claude. Re-run
   `clearDecorations()` first or the matches keep the old theme's hex. Load the
   addon after `term.open(host)`, and route its calls through a guard: losing a
   search is survivable, losing the terminal is not.
+- **An xterm host is a RATCHET without `min-width: 0`.** `.term-host` is a row
+  flex item, so its automatic minimum size is its min-content width — and xterm
+  writes an explicit `width: <cols × cell>px` onto `.xterm-screen`, which makes
+  that floor the grid it is painting *right now*. The host then only ever grows:
+  open the dock and `.main` narrows while the host keeps its old width,
+  overhanging the dock by 354px, tmux still painting columns that are now behind
+  it. Nothing self-corrects, because `TerminalPane`'s ResizeObserver watches that
+  same box — no shrink, no `fit()`, no `term_resize`. Invisible to every suite:
+  the size is correct when written and only wrong once something else takes
+  width away. `app/scripts/termfit-check.mjs` guards the declaration; measure a
+  seam like this with `getBoundingClientRect` in the harness (`.term-host`'s
+  right edge vs `.dock`'s left), never by eye — the clipping looks like a font
+  or repaint bug.
 - **The terminal's glyph widths must MATCH TMUX, and the Node probe lies.**
   tmux (utf8proc) lays out emoji as 2 cells; xterm 5.5's default Unicode 6
   tables said 1, and every tmux partial repaint interleaved one column off —

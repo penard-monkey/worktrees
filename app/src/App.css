@@ -848,7 +848,21 @@ body.dragging .menu-catch { pointer-events: none; }
    and hanging an overlay inside would put the bar inside the grid xterm is
    measuring. The wrapper takes the flex role the host used to have. */
 .term-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
-.term-host { flex: 1; min-height: 0; padding: var(--s2); background: var(--bg-abyss); border-radius: var(--r-md); }
+/* `min-width: 0` is what lets the terminal ever get NARROWER, and without it the
+   pane grows into the dock. The host is a ROW flex item, so its automatic
+   minimum size is its min-content width — and xterm writes an explicit
+   `width: <cols × cell>px` onto `.xterm-screen`, so that floor is the grid it is
+   currently painting. The host can then only grow: open or widen the dock and
+   `.main` shrinks while the host keeps its old width, overhanging the dock by
+   hundreds of px (measured: 354). Nothing corrects it, because the
+   ResizeObserver in TerminalPane observes THIS box — no shrink, no `fit()`, no
+   `term_resize`, so tmux keeps painting columns that are now under the dock.
+   `overflow: hidden` is the backstop: a frame where the grid is wider than its
+   box must clip, never paint over the neighbour. */
+.term-host {
+  flex: 1; min-width: 0; min-height: 0; overflow: hidden;
+  padding: var(--s2); background: var(--bg-abyss); border-radius: var(--r-md);
+}
 .term-empty { flex: 1; display: grid; place-items: center; }
 .term-empty-card {
   display: flex; flex-direction: column; align-items: center; gap: var(--s4);
