@@ -27,7 +27,7 @@ const css = fs.readFileSync(CSS_PATH, "utf8");
 
 /** The declaration block for an exact selector, comments stripped. Anchored on
  *  the selector standing alone before its `{` so `.term-host` does not match
- *  `.dock-body .term-host` (a real, separate rule two dozen lines below). */
+ *  `.dock-body .term-host` (a real, separate rule 38 lines below). */
 function block(selector) {
   const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const m = new RegExp(`(?:^|\\n)\\s*${esc}\\s*\\{([^}]*)\\}`).exec(css);
@@ -51,7 +51,10 @@ if (!wrap) fail(".term-wrap rule not found in App.css — did the selector get r
 if (wrap) {
   if (!/display:\s*flex/.test(wrap)) {
     fail(".term-wrap is no longer `display: flex` — re-derive what floors .term-host's width");
-  } else if (/flex-direction:\s*column/.test(wrap)) {
+    // `flex-flow` too: the shorthand sets the direction just as well, and a
+    // check that only knows the longhand green-lights the very drift it exists
+    // to catch.
+  } else if (/flex-(?:direction|flow):\s*column/.test(wrap)) {
     fail(".term-wrap became a COLUMN — .term-host's width is now a cross-axis size; re-check this guard");
   } else {
     ok(".term-wrap is still a row flex container (so .term-host's width has a min-content floor)");
