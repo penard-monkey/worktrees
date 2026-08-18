@@ -956,16 +956,23 @@ function BranchCombo({
     return () => document.removeEventListener("mousedown", away);
   }, [open]);
 
+  // ⚠ Every branch below tests `showPop`, NEVER `open`. The suppression above
+  // leaves `open` true while nothing is on screen, and a key handler that
+  // believed `open` would let an INVISIBLE popover eat the keypress: Enter on
+  // the sole exact match (i.e. checking out an existing branch, the common
+  // case) silently committed the value it already had and swallowed the submit,
+  // and Escape closed a popover the user could not see instead of the dialog.
+  // Both then needed a second press that looked like the first had been ignored.
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      if (!open) { show(); return; }
+      if (!showPop) { show(); return; }
       const d = e.key === "ArrowDown" ? 1 : -1;
       setHi((i) => (options.length ? (i + d + options.length) % options.length : 0));
       return;
     }
-    if (e.key === "Escape" && open) {
-      // Only the OPEN pop is closed here, and the event stops: a dialog hosting
+    if (e.key === "Escape" && showPop) {
+      // Only a VISIBLE pop is closed here, and the event stops: a dialog hosting
       // this field must not also take the same Escape as "cancel".
       e.preventDefault();
       e.stopPropagation();
@@ -975,12 +982,12 @@ function BranchCombo({
     if (e.key === "Enter") {
       // A highlighted row wins; otherwise the raw text does, so Enter still
       // works exactly as it did before the list existed.
-      commit(open && options[hi] ? options[hi].branch : value);
-      // Picking from an OPEN list is the whole keypress. Without this the
+      commit(showPop && options[hi] ? options[hi].branch : value);
+      // Picking from a VISIBLE list is the whole keypress. Without this the
       // dialog hosting the field would also read it as "submit", so choosing a
       // branch would create the worktree before you had touched base or name.
-      // A CLOSED pop lets it through, which is what makes Enter still submit.
-      if (open) e.stopPropagation();
+      // No visible list lets it through, which is what makes Enter still submit.
+      if (showPop) e.stopPropagation();
     }
   };
 
@@ -1128,10 +1135,26 @@ function slugProblem(slug: string): string {
   return "";
 }
 
-/** What `new` is about to DO, said before it does it. `blocking` marks the one
- *  case core refuses outright — Create is disabled on it rather than letting the
- *  op fail into the error banner. */
-type Verdict = { tone: "info" | "warn" | "error"; text: string; blocking?: boolean; openSlug?: string };
+/** What `new` is about to DO, said before it does it.
+ *
+ *  `outcome` is not decoration: it drives the Base field (live only where core
+ *  reads it) and the preview (which must not promise a path in a case that
+ *  reuses an existing one, or creates nothing at all). `at` is the place core
+ *  will actually land in, which for a reuse is NOT the derived slug.
+ *  `blocking` marks a case core refuses outright — Create is disabled rather
+ *  than letting the op fail into the error banner. */
+type Verdict = {
+  tone: "info" | "warn" | "error";
+  text: string;
+  /** create = a new directory · reuse/switch = an existing one · none = refused
+   *  · unknown = the branch list has not landed yet, so do not claim either. */
+  outcome: "create" | "reuse" | "switch" | "none" | "unknown";
+  blocking?: boolean;
+  usesBase?: boolean;
+  /** The existing place this resolves to — its real path and tmux session. */
+  at?: Place;
+  openSlug?: string;
+};
 
 /** "New worktree" — the `+` on a project header.
  *
@@ -1214,51 +1237,96 @@ function NewPlaceDialog({
   const slug = (sendName || b).replace(/\//g, "-");
   const baseShown = base.trim() || data?.default_base || "";
 
-  // `wt_for_branch` only looks under `.worktrees/`, so the main checkout being
-  // on the branch is NOT a holder — and must not be reported as one.
+  // ⚠ The ORDER below is core's order, and it is not the obvious one.
+  // `cmd_new` reaches its holder logic only when the derived directory does NOT
+  // exist (ops.rs:417) — so an existing worktree at this slug decides the
+  // outcome BEFORE "who currently holds the branch" is even asked.
+  //
+  // `wt_for_branch` also looks only under `.worktrees/` (project.rs:468), so the
+  // MAIN checkout sitting on the branch is not a holder. It is not harmless
+  // either: core sails past its own pre-check and dies in `git worktree add`
+  // ("already checked out"), which is why it gets a verdict of its own.
   const holder = places.find((p) => !p.is_main && p.branch === b);
+  const mainHolder = places.find((p) => p.is_main && p.branch === b);
   const taken = places.find((p) => p.slug === slug);
   const known = !!data?.branches.includes(b);
   const problem = slugProblem(slug);
 
   const verdict: Verdict | null =
     !b ? null
-    : problem ? { tone: "error", text: problem, blocking: true }
+    : problem ? { tone: "error", text: problem, blocking: true, outcome: "none" }
+    // ── the slug's directory already exists: core never reaches holder logic ──
+    : taken && !taken.registered
+      ? {
+          tone: "error", blocking: true, outcome: "none",
+          text: `${slug} exists but is not a registered worktree — core refuses to touch it. Remove it or pick another folder name.`,
+        }
+    : taken && taken.branch === b
+      ? { tone: "warn", outcome: "reuse", at: taken, openSlug: taken.slug,
+          text: `${slug} already exists and is already on '${b}' — it will be reused as-is.` }
+    : taken && holder
+      ? {
+          tone: "error", blocking: true, outcome: "none", openSlug: holder.slug,
+          text: `${slug} already exists${taken.branch ? ` on '${taken.branch}'` : ""}, so it would be switched to '${b}' — but '${b}' is checked out in ${holder.slug}, and git refuses to check a branch out twice.`,
+        }
+    : taken
+      // do_switch creates the branch off `base` when it does not exist yet
+      // (ops.rs:320-333), so base is live here — the one case that used to be
+      // greyed out under a hint saying base did not apply.
+      ? { tone: "warn", outcome: "switch", at: taken, usesBase: true, openSlug: taken.slug,
+          // A place with no branch is detached, not unknown — "on '?'" reads
+          // like the app failed to look.
+          text: taken.branch
+            ? `${slug} already exists on '${taken.branch}' — it will be switched to '${b}'.`
+            : `${slug} already exists with no branch checked out — it will be switched to '${b}'.` }
+    // ── the directory does not exist: now the branch's current home matters ──
     : holder && sendName
       ? {
-          tone: "error", blocking: true, openSlug: holder.slug,
+          tone: "error", blocking: true, outcome: "none", openSlug: holder.slug,
           text: `'${b}' is already checked out in ${holder.slug}, so it cannot also go in ${slug}. Clear the folder name to reuse ${holder.slug}.`,
         }
     : holder
-      ? { tone: "warn", openSlug: holder.slug, text: `${holder.slug} is already on '${b}' — creating here reuses that worktree.` }
-    : taken && taken.branch === b
-      ? { tone: "warn", text: `${slug} already exists and is already on '${b}' — it will be reused as-is.` }
-    : taken
-      ? { tone: "warn", text: `${slug} already exists on '${taken.branch ?? "?"}' — it will be switched to '${b}'.` }
+      // core lands in the HOLDER's directory and session, not the derived slug
+      ? { tone: "warn", outcome: "reuse", at: holder, openSlug: holder.slug,
+          text: `${holder.slug} is already on '${b}' — creating here reuses that worktree.` }
+    : mainHolder
+      ? {
+          tone: "error", blocking: true, outcome: "none", openSlug: mainHolder.slug,
+          text: `the main checkout is on '${b}', and git cannot check one branch out twice. Switch main off it first, or pick another branch.`,
+        }
     // ⚠ Only the last two lines depend on the branch LIST, and until it lands
     // `known` is false — which reads as "this branch is new" for a branch that
     // exists. The mock answers in a microtask so that window is invisible there;
     // the real read is a `git for-each-ref` fan-out. Say "still reading" instead
     // of asserting the wrong one of the two (CLAUDE.md's mock-timing rule).
     : data === null
-      ? { tone: "info", text: `reading this project's branches…` }
+      ? { tone: "info", outcome: "unknown", text: `reading this project's branches…` }
     : known
-      ? { tone: "info", text: `'${b}' already exists — it will be checked out here.` }
-      : { tone: "info", text: `'${b}' will be created off ${baseShown || "the default base"}.` };
+      ? { tone: "info", outcome: "create", text: `'${b}' already exists — it will be checked out here.` }
+      : { tone: "info", outcome: "create", usesBase: true,
+          text: `'${b}' will be created off ${baseShown || "the default base"}.` };
 
-  // Base is consulted ONLY when the branch has to be created (ops.rs:511).
-  // Leaving it live in the other cases invites a value that is then ignored.
-  // An EMPTY branch counts as used: nothing has been decided yet, and a field
-  // greyed out before you have typed anything reads as broken, not as inert.
-  const baseUsed = !b || (!known && !holder && !taken);
+  // Base is consulted only where core actually reads it — which the verdict now
+  // knows, because it is the same decision. An EMPTY branch counts as used:
+  // nothing has been decided yet, and a field greyed out before you have typed
+  // anything reads as broken, not as inert.
+  const baseUsed = !b || !verdict || !!verdict.usesBase || verdict.outcome === "unknown";
   const ready = !!b && !verdict?.blocking && !busy;
   const submit = () => { if (ready) onCreate(b, sendName, base.trim()); };
 
   return (
     <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
-      <div className="sync-modal" role="dialog" aria-label="New worktree" data-testid="new-place-dialog"
+      <div className="sync-modal nw-modal" role="dialog" aria-label="New worktree" data-testid="new-place-dialog"
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => { if (e.key === "Enter") submit(); }}>
+        // ⚠ Enter is taken at the DIALOG so it works from any field — but a
+        // keydown on a focused BUTTON bubbles here too, and Enter on a button
+        // already activates that button. Without this guard, tabbing to Cancel
+        // and pressing Enter created the worktree on the way out.
+        onKeyDown={(e) => {
+          if (e.key !== "Enter") return;
+          if ((e.target as HTMLElement).tagName === "BUTTON") return;
+          submit();
+        }}>
         <header className="sync-h">
           <b>New worktree</b>
           <span className="sync-hub">{basename(project)}</span>
@@ -1351,14 +1419,24 @@ function NewPlaceDialog({
                 </span>
               </label>
 
-              {/* Suppressed while blocked: a path promised next to the reason
-                  it cannot be written is the one line here that would be a lie. */}
+              {/* The preview follows the VERDICT, not the fields. Saying "will
+                  create <derived slug>" under a verdict that says an existing
+                  worktree gets reused names a directory and a tmux session that
+                  will never exist — core lands in the holder's. */}
               <div className="np-path" data-testid="nw-preview">
-                {verdict?.blocking ? (
+                {verdict?.outcome === "none" ? (
                   <i>nothing will be created until the above is resolved</i>
+                ) : verdict?.at ? (
+                  <>
+                    {verdict.outcome === "switch" ? "will switch" : "will use"}{" "}
+                    <code>{verdict.at.path}</code>
+                    <br />
+                    tmux session <code>{verdict.at.tmux_session.name}</code>
+                  </>
                 ) : (
                   <>
-                    will create <code>{project}/.worktrees/{slug || "…"}</code>
+                    {verdict?.outcome === "unknown" ? "target" : "will create"}{" "}
+                    <code>{project}/.worktrees/{slug || "…"}</code>
                     <br />
                     tmux session <code>{`${prefix}-${slug || "…"}`.replace(/\./g, "-")}</code>
                   </>
@@ -4936,8 +5014,12 @@ function App() {
         <NewPlaceDialog
           // The draft is part of the identity: a REJECTED create reopens the
           // dialog for the same project, and without it in the key React would
-          // reuse the old instance and its now-stale field state.
-          key={newFor + "|" + newBase + "|" + (newDraft?.branch ?? "")}
+          // reuse the old instance and its now-stale field state. `unborn` is in
+          // there for the same reason from the other direction: the branch list
+          // is read once per mount, and the one read while the repo had no
+          // commits describes a repo that no longer exists the moment its first
+          // commit lands under this very dialog.
+          key={newFor + "|" + newBase + "|" + (newDraft?.branch ?? "") + "|" + unbornProjects.has(newFor)}
           project={newFor}
           prefix={ws?.projects.find((p) => p.root === newFor)?.snapshot?.prefix ?? ""}
           places={ws?.projects.find((p) => p.root === newFor)?.snapshot?.places ?? []}

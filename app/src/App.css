@@ -1530,6 +1530,13 @@ body.dragging .menu-catch { pointer-events: none; }
  * here is fixed-height (three fields + a preview), so there is nothing to
  * scroll — unlike the sync preview lists this class otherwise serves. */
 .sync-body.nw-body { overflow: visible; }
+/* ⚠ …but a non-scrolling body still has to fit. `.sync-modal` caps at 76vh and
+ * HIDES its overflow, so under ~450px of viewport the footer was pushed past
+ * that edge and clipped away: the Create button rendered, reported a sane
+ * bounding box, and was not clickable — elementFromPoint returned the scrim.
+ * Scrolling the whole dialog is the honest trade. It never engages at normal
+ * window sizes, and when it does, everything stays reachable. */
+.sync-modal.nw-modal { overflow-y: auto; }
 /* New-worktree: what `new` is about to do. The three tones are the three things
  * that can be true — it will just work / it will reuse or switch something that
  * already exists / core will refuse — so the colour carries the same weight the
