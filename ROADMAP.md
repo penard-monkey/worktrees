@@ -783,6 +783,20 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   is a one-line generalisation away from covering both.
   _From: [2026-08-11 space-workbench session](docs/sessions/2026-08-11-space-workbench/summary.md)_
 
+- **The side-by-side diff has never been run in the real app.** It was built and
+  verified entirely against the mock harness plus direct git probes, and
+  CLAUDE.md is explicit that the mock cannot express real timing — its invokes
+  resolve in a microtask, where `file_diff` is a git spawn per file on top of the
+  `changed_files` fan-out. One bug already found in review lived exactly there
+  (the changed-only filter asserting "nothing changed on this branch" during the
+  window before the change set lands, which the mock has no window for), so the
+  class is not hypothetical. `sandbox.sh --app` cannot be driven from an agent —
+  it `exec`s `tauri dev` into a native WKWebView and its scratch repo has no
+  changed files to diff — so this wants a human pass on a real repo before the
+  next release: a large file, a rename, a binary, and the diff open while a
+  `git checkout` changes the tree underneath it.
+  _From: [2026-08-18 side-by-side-diff session](docs/sessions/2026-08-18-side-by-side-diff/summary.md)_
+
 - **The diff has no manual side-by-side / unified pin.** `DiffView` picks by
   measured body width (`DIFF_SIDE_AT`, 560px) and that is the whole rule, where
   the tree beside it gives `files_layout` an explicit auto → stacked → side-by-
@@ -791,6 +805,7 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   Deliberately left out of the first slice rather than forgotten: a second
   layout control in the same header, next to a Preview/Source/Diff seg and a
   Base/HEAD seg, needs a reason better than symmetry.
+  _From: [2026-08-18 side-by-side-diff session](docs/sessions/2026-08-18-side-by-side-diff/summary.md)_
 
 - **The diff's add/del edge is under 3:1 on two light themes.** Measured against
   the code surface, `box-shadow: inset 2px` runs 7:1–12:1 on the four dark
@@ -803,6 +818,7 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   on all four dark themes** (Nord 3.13, gruvbox-dark 3.52, Catppuccin Mocha 4.02,
   Tokyo Night 4.09) — pre-existing and unrelated to the diff, but `tokens.css`
   claims the ramp is ≥ 4.5:1 and that comment is only true of the light pair.
+  _From: [2026-08-18 side-by-side-diff session](docs/sessions/2026-08-18-side-by-side-diff/summary.md)_
 
 - **The nav's dirty count and the tree's change badge answer different
   questions, and nothing on screen says so.** `dirty_files` (the nav's badge,

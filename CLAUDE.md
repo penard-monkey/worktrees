@@ -49,6 +49,11 @@ like a crate with no tests. Use `grep -E "^running|^test result"`. Related shell
 trap when scripting gates: `grep -c` **exits non-zero on a count of 0**, so
 `... | grep -c "^not ok" && next-gate` silently skips everything after it — a
 gate that never ran looks identical to a gate with no output.
+Its twin: **`… | grep -q X` under `set -o pipefail` reports FAILURE on a
+MATCH.** `-q` exits at the first hit, the upstream stage takes SIGPIPE, and
+pipefail promotes that to the pipeline's status — so "found" reads as "not
+found". Two probe results were misread as product bugs before this was spotted.
+Write to a file, then grep the file.
 
 **A pipeline's exit status is the LAST stage's.** `make test | tail -15` exits 0
 because `tail` did, and a mid-stream `not ok` scrolls off a 15-line window — so
@@ -58,6 +63,16 @@ grep traps above, and the reason to run gates with `make -C <repo-root>`: the
 Bash tool's cwd persists between calls, so an earlier `cd app` turns a later
 `make test` into "No rule to make target `test`" — a failure that looks like the
 change broke the build.
+
+**A throwaway git script needs a guard, because `git -C ""` means HERE.** A
+probe let a repo path come back empty and aimed `branch -M main` and
+`push origin main` at the live worktree; git refused both (the worktree guard on
+the rename, non-fast-forward on the push) and nothing was lost, but neither
+refusal was the script's doing. Route every call through one helper that
+hard-exits unless the directory is non-empty and under `$TMP`. The cause is
+worth knowing too: **bash expands every assignment on a `local a=1 b="$a"` line
+before binding any of them**, so `b` is empty — and under `set -u` the function
+dies mid-way inside a command substitution, leaving the caller with "".
 
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
@@ -211,6 +226,19 @@ is invisible to the bats suite — there is no fake claude. Re-run
   not exist, `ops.rs:417`). Four cases were wrong in the first version and every
   test passed. When you touch `ops.rs`'s create path, walk `NewPlaceDialog`'s
   chain against it by hand.
+- **Read what `getComputedStyle` hands back before doing arithmetic on it.** A resolved
+  `color-mix()` comes back as `color(srgb 0-1 / a)` while plain colours come
+  back as `rgb(0-255)`; parsing both on the 0-255 scale made an added row and a
+  deleted row measure IDENTICAL, which read as a real bug for a while. Once
+  fixed, the same measurement found the actual defect (a "no line here" cell
+  sitting 7–12 RGB units from context — invisible).
+- **A `position: sticky` cell whose tint REPLACES an opaque background is
+  see-through.** `.dg` set an opaque `--bg-tree` and the higher-specificity
+  `.dg.del` swapped in a 14%-over-`transparent` mix, on the one column pinned
+  inside a horizontally scrolling `max-content` grid — so code slid under the
+  pinned line numbers, and only on CHANGED rows, i.e. exactly the rows being
+  read. A sticky cell's background must be composited over a surface colour
+  (`color-mix(… , var(--bg-tree))`), never over `transparent`.
 - **portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL** (crate
   `lib.rs:347`), and an interactive `/bin/sh` on a pty whose master is still
   open SURVIVES it. The app only gets away with this because dropping the
