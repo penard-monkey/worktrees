@@ -5,6 +5,28 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The dock-overlap fix has not been seen on WKWebView.** PR #157 is verified
+  exhaustively in the mock harness (four resize paths, `getBoundingClientRect`,
+  overhang 0) — but the bug was REPORTED from the real app, and every
+  measurement behind the fix is Chromium's. Low risk: the flex
+  automatic-minimum-size rule and xterm's inline `.xterm-screen` width are
+  engine-independent, and both engines agreed on the broken behaviour. Still
+  unobserved. One `app/scripts/sandbox.sh --app`, open the dock, look at the
+  seam — and the same pass can close the Files → Open item above, which wants
+  the same sandbox for a different click.
+  _From: [2026-08-18 terminal-dock-overlap](docs/sessions/2026-08-18-terminal-dock-overlap/summary.md)_
+
+- **The static check scripts run only when someone remembers.**
+  `termfit-check.mjs`, `dnd-check.mjs` and `relpath-check.mjs` guard invariants
+  the suites structurally cannot see (a CSS declaration, a Rust↔TS mirror, a
+  pure function) — and none is wired into `ci.yml`, the Makefile or
+  `app/package.json`. They are pure Node, no browser, no fixtures, sub-second:
+  one CI step running all three costs nothing. Raised in the #157 review as
+  informational and left out of that PR because it is a repo-wide call, not a
+  bug fix's business. Note `race-check.mjs` is NOT in this set — it drives real
+  source under controlled promise orders and is slower/noisier.
+  _From: [2026-08-18 terminal-dock-overlap](docs/sessions/2026-08-18-terminal-dock-overlap/summary.md)_
+
 - **A layout change while a shell tab is detached still replays at the wrong
   width.** PR #153 stops the pane attaching at a size that isn't its own, which
   was the reproducible case — but a ring written at one width and replayed
