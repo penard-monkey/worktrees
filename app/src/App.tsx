@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -923,43 +923,58 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   );
 }
 
-// Status-bar branch switcher. A combobox, NOT a <select>: `switch` is DWIM —
-// local branch → switch, remote-only → track it, anything else → create it off
-// the default base — so a picker that only offered existing branches would
-// delete the create path. Typing stays first-class; the list just means you no
-// longer have to remember the name.
+// ── branch combobox ──
+//
+// A combobox, NOT a <select>: `switch` is DWIM — local branch → switch,
+// remote-only → track it, anything else → create it off the default base — so a
+// picker that only offered existing branches would delete the create path.
+// Typing stays first-class; the list just means you no longer have to remember
+// the name.
+//
+// The ▾ is not decoration. Without it this is an input with a placeholder and
+// nothing anywhere says a list exists — the popover opened on FOCUS, which you
+// can only discover by clicking into a box you believe you have to type into.
 //
 // Module scope with props, per CLAUDE.md: it holds local state and input focus,
 // both of which a component defined inside App() would lose on every render.
+// The TEXT is deliberately the parent's: the switcher clears it only on a
+// SUCCESSFUL switch, which is knowledge this component does not have.
 type BranchList = { branches: string[]; current: string; default_base: string };
 
-function BranchSwitcher({ repo, slug, onSwitch, onError }: {
-  repo: string; slug: string;
-  onSwitch: (branch: string) => Promise<boolean>;
-  onError: (e: unknown) => void;
+function BranchCombo({
+  value, data, placeholder, exclude, inputClass, ariaLabel, testid,
+  onChange, onOpen, onCommit,
+}: {
+  value: string;
+  /** null = not loaded yet (the pop says so). The PARENT owns the fetch: one
+   *  list can back two fields, and only the parent knows when to invalidate. */
+  data: BranchList | null;
+  placeholder: string;
+  /** A branch to drop from the list — the switcher hides the one you are on. */
+  exclude?: string;
+  inputClass: string;
+  ariaLabel: string;
+  testid?: string;
+  onChange: (v: string) => void;
+  /** First open / first keystroke — the parent's cue to fetch lazily. */
+  onOpen: () => void;
+  /** Enter, or a row picked with the mouse. */
+  onCommit: (v: string) => void;
 }) {
-  const [text, setText] = useState("");
   const [open, setOpen] = useState(false);
-  const [data, setData] = useState<BranchList | null>(null);
   const [hi, setHi] = useState(0);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  // Per-INSTANCE ids: two combos can be on screen at once (the dialog's Branch
+  // and Base), and a duplicated id would point every input's activedescendant
+  // at the same list.
+  const uid = useId();
+  const listId = `${uid}-list`;
+  const optId = (i: number) => `${uid}-opt-${i}`;
 
-  // Reset when the place changes — a half-typed branch belongs to the place it
-  // was typed in.
-  useEffect(() => { setText(""); setOpen(false); setData(null); }, [repo, slug]);
-
-  // Lazy: one `git for-each-ref` when the switcher is first used, not on every
-  // place selection.
-  const load = () => {
-    if (data) return;
-    invoke<BranchList>("list_branches", { repo, slug })
-      .then(setData)
-      .catch(onError);
-  };
-
-  const q = text.trim();
+  const q = value.trim();
   const matches = (data?.branches ?? [])
-    .filter((b) => b !== data?.current && b.toLowerCase().includes(q.toLowerCase()))
+    .filter((b) => b !== exclude && b.toLowerCase().includes(q.toLowerCase()))
     .slice(0, 50);
   const exact = matches.some((b) => b === q);
   const creating = q.length > 0 && !exact;
@@ -969,12 +984,14 @@ function BranchSwitcher({ repo, slug, onSwitch, onError }: {
     ...(creating ? [{ branch: q, create: true }] : []),
   ];
 
-  const submit = async (branch: string) => {
+  const commit = (branch: string) => {
     const b = branch.trim();
     if (!b) return;
     setOpen(false);
-    if (await onSwitch(b)) setText("");
+    onCommit(b);
   };
+
+  const show = () => { setOpen(true); onOpen(); };
 
   // click-away — the popover floats over the terminal, so it must not linger
   useEffect(() => {
@@ -989,54 +1006,148 @@ function BranchSwitcher({ repo, slug, onSwitch, onError }: {
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      if (!open) { setOpen(true); load(); return; }
+      if (!open) { show(); return; }
       const d = e.key === "ArrowDown" ? 1 : -1;
       setHi((i) => (options.length ? (i + d + options.length) % options.length : 0));
       return;
     }
-    if (e.key === "Escape" && open) { e.preventDefault(); setOpen(false); return; }
+    if (e.key === "Escape" && open) {
+      // Only the OPEN pop is closed here, and the event stops: a dialog hosting
+      // this field must not also take the same Escape as "cancel".
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+      return;
+    }
     if (e.key === "Enter") {
       // A highlighted row wins; otherwise the raw text does, so Enter still
       // works exactly as it did before the list existed.
-      submit(open && options[hi] ? options[hi].branch : text);
+      commit(open && options[hi] ? options[hi].branch : value);
     }
   };
 
   return (
     <div className="combo" ref={boxRef}>
       <input
-        className="switchto"
-        placeholder="switch branch…"
-        value={text}
-        onFocus={() => { setOpen(true); load(); }}
-        onChange={(e) => { setText(e.currentTarget.value); setHi(0); setOpen(true); load(); }}
+        ref={inputRef}
+        className={inputClass}
+        placeholder={placeholder}
+        value={value}
+        role="combobox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        aria-autocomplete="list"
+        aria-controls={open ? listId : undefined}
+        // Focus never leaves the input, so WITHOUT this the arrow keys are
+        // silent to a screen reader and Enter commits a row it never announced.
+        aria-activedescendant={open && options[hi] ? optId(hi) : undefined}
+        data-testid={testid}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        onFocus={show}
+        onChange={(e) => { onChange(e.currentTarget.value); setHi(0); show(); }}
         onKeyDown={onKey}
       />
+      <button
+        className="combo-caret"
+        type="button"
+        tabIndex={-1}
+        title="show branches"
+        aria-label="show branches"
+        // Never let the caret take focus off the field — a click that blurs the
+        // input while opening its own popover reads as the list flickering.
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => { if (open) { setOpen(false); return; } show(); inputRef.current?.focus(); }}
+      >
+        <Icons.ChevronDown size={12} />
+      </button>
       {open && (
+        // The notes sit OUTSIDE the listbox: a `role="listbox"` may only contain
+        // options, and "loading branches…" is not one.
         <div className="combo-pop">
           {data === null && <div className="combo-note">loading branches…</div>}
           {data !== null && options.length === 0 && (
             <div className="combo-note">{data.branches.length ? "no branch matches" : "no other branches"}</div>
           )}
-          {options.map((o, i) => (
-            <button
-              key={(o.create ? "new:" : "b:") + o.branch}
-              className={"combo-item" + (i === hi ? " hi" : "") + (o.create ? " create" : "")}
-              // mousedown, not click: the input's blur would tear the row out
-              // from under the click
-              onMouseDown={(e) => { e.preventDefault(); submit(o.branch); }}
-              onMouseEnter={() => setHi(i)}
-            >
-              {o.create ? (
-                <>create <b>{o.branch}</b> off {data?.default_base}</>
-              ) : (
-                o.branch
-              )}
-            </button>
-          ))}
+          <div role="listbox" id={listId} aria-label={ariaLabel}>
+            {options.map((o, i) => (
+              <button
+                key={(o.create ? "new:" : "b:") + o.branch}
+                id={optId(i)}
+                className={"combo-item" + (i === hi ? " hi" : "") + (o.create ? " create" : "")}
+                role="option"
+                aria-selected={i === hi}
+                // mousedown, not click: the input's blur would tear the row out
+                // from under the click
+                onMouseDown={(e) => { e.preventDefault(); commit(o.branch); }}
+                onMouseEnter={() => setHi(i)}
+              >
+                {o.create ? (
+                  <>create <b>{o.branch}</b> off {data?.default_base}</>
+                ) : (
+                  o.branch
+                )}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+// Status-bar branch switcher — the combo above plus the one thing it cannot
+// know: whether the switch it just asked for actually landed (the text is
+// cleared only if it did).
+function BranchSwitcher({ repo, slug, onSwitch, onError }: {
+  repo: string; slug: string;
+  onSwitch: (branch: string) => Promise<boolean>;
+  onError: (e: unknown) => void;
+}) {
+  const [text, setText] = useState("");
+  const [data, setData] = useState<BranchList | null>(null);
+  // In flight, so `data` is still null — without this the caret's first click
+  // fires TWO `git for-each-ref`: opening the pop calls load(), and the focus()
+  // that follows it synchronously re-enters onFocus before the first invoke has
+  // resolved. Cleared in `finally` so a FAILED read is retried on the next open.
+  const loading = useRef(false);
+
+  // Reset when the place changes — a half-typed branch belongs to the place it
+  // was typed in.
+  useEffect(() => { setText(""); setData(null); }, [repo, slug]);
+
+  // Lazy: one `git for-each-ref` when the switcher is first used, not on every
+  // place selection.
+  const load = () => {
+    if (data || loading.current) return;
+    loading.current = true;
+    invoke<BranchList>("list_branches", { repo, slug })
+      .then(setData)
+      .catch(onError)
+      .finally(() => { loading.current = false; });
+  };
+
+  return (
+    <BranchCombo
+      value={text}
+      data={data}
+      placeholder="switch branch…"
+      exclude={data?.current}
+      inputClass="switchto"
+      ariaLabel="switch branch"
+      testid="switch-branch"
+      onChange={setText}
+      onOpen={load}
+      onCommit={async (b) => {
+        if (!(await onSwitch(b))) return;
+        setText("");
+        // The list is now stale in the one way that shows: `current` still names
+        // the branch we just LEFT, so reopening would hide it and offer the
+        // branch we are on. Drop it and let the next open re-read.
+        setData(null);
+      }}
+    />
   );
 }
 

@@ -1293,7 +1293,16 @@ body.dragging .menu-catch { pointer-events: none; }
 
 /* branch combobox — opens UPWARD; the status bar is the last row of the window */
 .combo { position: relative; flex: 0 1 240px; min-width: 0; display: flex; }
-.combo .switchto { flex: 1 1 auto; }
+.combo .switchto { flex: 1 1 auto; padding-right: 18px; }
+/* The ▾ is the only thing that says this field HAS a list — it opens on focus,
+ * which is undiscoverable on a box that looks like plain text entry. Overlaid
+ * rather than a sibling so the input keeps the full width of the control. */
+.combo-caret {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 18px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 0; padding: 0; color: var(--txt-mute);
+}
+.combo-caret:hover { color: var(--txt); }
 .combo-pop {
   position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 50;
   min-width: 240px; max-width: 380px; max-height: 300px; overflow-y: auto;
