@@ -2474,8 +2474,12 @@ function App() {
   useEffect(() => {
     const onSelectStart = (e: Event) => {
       if (e.target !== document.body) return;
-      // A sheet or dialog owns the screen and its own text (Settings ▸ Logs is
-      // the one people copy from) — leave the default alone under one.
+      // Under a sheet or dialog, leave the chord exactly as it was. Redirecting
+      // it would select a file the user cannot currently see, and the text they
+      // ARE looking at (Settings ▸ Logs is the one people copy from) is not in
+      // a `.viewer-body`. This does NOT scope the selection to the sheet — it
+      // keeps the pre-existing document-wide default, which is the lesser wrong
+      // of the two. Every modal in the app wraps itself in `.scrim`.
       if (document.querySelector(".scrim")) return;
       // Reading mode is the top surface when it is open, so it wins the file.
       const body = document.querySelector(".reading .viewer-body")

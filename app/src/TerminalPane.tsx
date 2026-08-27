@@ -150,6 +150,13 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
   const fitRef = useRef<FitAddon | null>(null);
   const txRef = useRef<Transport | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
+  // The grid the backend has been told about, and the baseline the coalescing
+  // below dedups against. A REF rather than an effect-local because the
+  // termVersion effect resizes on its own too, and a baseline only one of the
+  // two writers can update is a baseline that lies — it would suppress a resize
+  // the pty actually needs. `{ 0, 0 }` means "nothing known", and no real grid
+  // can collide with it: the fit addon floors at 2 cols and 1 row.
+  const sentRef = useRef({ cols: 0, rows: 0 });
   // Bumped whenever the terminal below is re-created. Refs cannot wake an
   // effect, so anything that has to re-subscribe to THIS xterm (the find bar's
   // results event) depends on this instead.
@@ -159,6 +166,9 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     const host = hostRef.current;
     if (!host) return;
     let disposed = false;
+    // A new terminal knows nothing about any backend yet, and the ref outlives
+    // the effect that re-created it.
+    sentRef.current = { cols: 0, rows: 0 };
 
     const { family, size, theme } = termOptions();
     // allowProposedApi: the search addon paints its match highlights through
@@ -204,9 +214,6 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     const giveUp = performance.now() + ATTACH_WAIT_MS;
     let raf = 0;
 
-    // The grid the backend has been told about. Seeded by the attach, so the
-    // first settled resize does not re-state the size the pty already opened at.
-    let sent = { cols: 0, rows: 0 };
     let settle: ReturnType<typeof setTimeout> | undefined;
     const applySize = () => {
       settle = undefined;
@@ -216,8 +223,9 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       } catch {
         /* host detached mid-resize */
       }
+      const sent = sentRef.current;
       if (term.cols === sent.cols && term.rows === sent.rows) return;
-      sent = { cols: term.cols, rows: term.rows };
+      sentRef.current = { cols: term.cols, rows: term.rows };
       tx.resize(term.cols, term.rows);
     };
 
@@ -230,16 +238,24 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       }
       void (async () => {
         try {
-          await tx.open(term.cols, term.rows, onBytes);
+          // Captured BEFORE the await: this is the grid the pty is sized to, and
+          // it is the only honest baseline. Reading `term.cols/rows` again after
+          // the await reads whatever the terminal drifted to meanwhile — and
+          // recording THAT as the backend's size masks the very resize the
+          // transport dropped while there was no attach to carry it, leaving the
+          // pty on the opened grid and the canvas on another, with nothing to
+          // correct it until the next gesture. `open` shells out to tmux, so the
+          // window is wide enough to hit by mounting while the window animates.
+          const opened = { cols: term.cols, rows: term.rows };
+          await tx.open(opened.cols, opened.rows, onBytes);
           if (disposed) {
             tx.close();
             return;
           }
-          sent = { cols: term.cols, rows: term.rows };
-          // The pane can have moved while `open` was in flight, and a resize
-          // that landed in that window found no pty to talk to (both transports
-          // gate `resize` on the attach). Settle once more now that there is
-          // one; `applySize` is a no-op if the grid is still what we opened at.
+          sentRef.current = opened;
+          // Settle once more now that there IS an attach: this re-sends anything
+          // that moved while `open` was in flight, and is a no-op if the grid is
+          // still what we opened at.
           applySize();
           term.onData((data) => tx.write(Array.from(new TextEncoder().encode(data))));
           term.focus();
@@ -302,6 +318,13 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       /* ignore */
     }
     txRef.current?.resize(term.cols, term.rows);
+    // INVALIDATE the coalescing baseline rather than writing this size into it.
+    // Writing would claim the backend has a grid this send may never have
+    // reached — the transports drop a resize made before the attach answers —
+    // and an over-claiming baseline suppresses a resize the pty needs. Clearing
+    // it can only ever cost one redundant resize on the next gesture, and the
+    // attach overwrites it with the truth if one is still in flight.
+    sentRef.current = { cols: 0, rows: 0 };
   }, [termVersion]);
 
   return { hostRef, termRef, searchRef, epoch };
