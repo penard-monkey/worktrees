@@ -147,6 +147,18 @@ pub enum Code {
     /// about which repo you are in. Error, not Warn: there is nothing to route
     /// around, and a clean report would read as "fine to work here".
     HubCopy,
+    /// Tracked files that match sync's "rebuildable bulk" exclude set are absent
+    /// from the working tree — the damage a transfer leaves when a repo COMMITS
+    /// something the transfer skips (`docs/sessions/*/planning.tar.gz`). ⚠ Not in
+    /// §7's slug list either, and it exists because the repair is edge-triggered:
+    /// `sync`'s heal runs on a sync, so damage in a tree nobody has synced since
+    /// sits there indefinitely, and the only symptom is a wall of `deleted:` in
+    /// `git status` that reads as lost work.
+    ///
+    /// Warn, not Error: the blobs rode along inside `.git`, so nothing is lost
+    /// and the tree still functions — and the fix is automatic on the next
+    /// `sync push`/`sync pull` of the project, which is what the message says.
+    SyncSkippedFiles,
     /// An invariant this tool is supposed to guarantee did not hold. ⚠ Not in
     /// §7's slug list either: it exists so an internal inconsistency is REPORTED
     /// rather than turned into a silent skip, which is the failure class the
@@ -270,6 +282,7 @@ mod tests {
             (Code::PrefixMismatch, "prefix-mismatch"),
             (Code::SessionDrift, "session-drift"),
             (Code::HubCopy, "hub-copy"),
+            (Code::SyncSkippedFiles, "sync-skipped-files"),
             (Code::Internal, "internal"),
         ] {
             assert_eq!(serde_json::to_string(&c).unwrap(), format!("\"{s}\""));

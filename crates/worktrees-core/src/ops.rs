@@ -1507,13 +1507,34 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // `.worktrees.toml`. One stat when the repo is an ordinary one.
     let hub_copy = crate::sync::hub_copy_finding(Path::new(&p.main_root));
 
+    // Also a fact about the TREE, and resolved here for the same reason: a
+    // project that `sync` ferries need not own a `.worktrees.toml`, and this
+    // damage is exactly what a user staring at a wall of `deleted:` needs told.
+    //
+    // Whole-project runs only (`undeclared_findings`' rule): it covers main AND
+    // every linked worktree, so it is not about the one place a name asks about.
+    // Never in `--config-only`, which reads no filesystem state at all — on the
+    // bare clone that mode is built for, every tracked file is absent. And never
+    // beside the hub-copy finding: a hub copy is missing every excluded-tracked
+    // file BY CONSTRUCTION (the push skipped them), so absence there is the
+    // pushed state, not damage — the remedy this finding names is exactly what
+    // the hub-copy guard refuses, and the copy's ferried `.worktrees/*/.git`
+    // files point at the origin machine's repo, so the per-worktree status
+    // probes would be reading a stranger.
+    let skipped = if config_only || !names.is_empty() || hub_copy.is_some() {
+        None
+    } else {
+        let root = Path::new(&p.main_root);
+        crate::sync::skipped_files_finding(root, &crate::sync::project_extra_excludes(root))
+    };
+
     let cfg = match load_project_config(p, ui) {
         Ok(c) => c,
         Err(code) => return code,
     };
     let Some((cfg, mut findings)) = cfg else {
         // No config is a healthy repo, not a broken one.
-        let report = Report::new(hub_copy.into_iter().collect());
+        let report = Report::new(hub_copy.into_iter().chain(skipped).collect());
         if json {
             emit_report(ui, &report);
         } else if report.is_empty() {
@@ -1523,7 +1544,13 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         return report.exit_code();
     };
-    // First: it is the answer to "why is nothing I do in here allowed".
+    // Both go to the front, hub-copy first: one is the answer to "why is nothing
+    // I do in here allowed", the other to "why is my git status full of
+    // deletions" — and a user reading a doctor report is usually holding one of
+    // those two questions.
+    if let Some(f) = skipped {
+        findings.insert(0, f);
+    }
     if let Some(f) = hub_copy {
         findings.insert(0, f);
     }

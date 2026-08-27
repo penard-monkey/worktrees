@@ -253,6 +253,97 @@ commit_bulk() {   # a tracked *.tar.gz (excluded) beside a tracked plain file
   [[ "$output" == *"main is 1 commit(s) behind"* ]]
 }
 
+# ── the heal runs on every sync EDGE, not just a successful pull ─────────────
+# The repair used to be pull-only, so damage in a tree nobody pulled into sat
+# there indefinitely (the field case: 8 of 10 worktrees, months old). A push
+# heals before it transfers, and a pull heals even when the transfer failed.
+
+# rsync that fails the APPLY — the only invocation carrying --backup-dir — and
+# answers the preview normally: an interrupted transfer, not a broken setup.
+install_failing_apply_rsync() {
+  cat > "$SHIMS/rsync" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$BATS_TEST_TMPDIR/rsync.log"
+for a in "\$@"; do
+  case "\$a" in --backup-dir=*) echo "rsync: connection unexpectedly closed" >&2; exit 12;; esac
+done
+exit 0
+EOF
+  chmod +x "$SHIMS/rsync"
+}
+
+@test "sync push: the damaged tree is healed BEFORE the transfer" {
+  commit_bulk
+  rm "$REPO/old-plans/data.tar.gz" "$REPO/docs/keep.txt"
+
+  run_wt sync push --yes --hub "$HUB"
+  [ "$status" -eq 0 ]
+  has_apply
+  [ -f "$REPO/old-plans/data.tar.gz" ]      # excluded + tracked ⇒ ours to repair
+  [ ! -e "$REPO/docs/keep.txt" ]            # not excluded ⇒ the user's own deletion
+  [[ "$output" == *"restored 1"* ]]
+  [[ "$output" == *"old-plans/data.tar.gz"* ]]
+  # push heals only — the mirrored-state note is a sentence only an import says
+  [[ "$output" != *"mirrors the source Mac"* ]]
+}
+
+@test "sync push --dry-run: a damaged tree is previewed, never repaired" {
+  commit_bulk
+  rm "$REPO/old-plans/data.tar.gz"
+
+  run_wt sync push --dry-run --hub "$HUB"
+  [ "$status" -eq 0 ]
+  ! has_apply
+  [ ! -e "$REPO/old-plans/data.tar.gz" ]    # --dry-run writes NOTHING, here included
+  [[ "$output" != *"restored"* ]]
+
+  # …and a declined confirmation is the same promise
+  wt_answer "n" sync push --hub "$HUB"
+  [ "$status" -eq 0 ]
+  [ ! -e "$REPO/old-plans/data.tar.gz" ]
+  [[ "$output" != *"restored"* ]]
+}
+
+@test "sync pull: a transfer that FAILS still heals, and still reports the failure" {
+  commit_bulk
+  write_hub_manifest "$NAME" "$REPO" 'host = "othermac"'
+  rm "$REPO/old-plans/data.tar.gz"
+  install_failing_apply_rsync
+
+  run_wt sync pull --yes --hub "$HUB"
+  [ "$status" -eq 1 ]                       # the transfer's error is the outcome
+  [[ "$output" == *"rsync failed (exit 12)"* ]]
+  [[ "$output" != *"done."* ]]
+  [ -f "$REPO/old-plans/data.tar.gz" ]      # …and the repair happened anyway
+  [[ "$output" == *"restored 1"* ]]
+}
+
+@test "doctor: skipped-file damage is reported between syncs, as a warning" {
+  commit_bulk
+  rm "$REPO/old-plans/data.tar.gz" "$REPO/docs/keep.txt"
+
+  run_wt doctor
+  [ "$status" -eq 0 ]                       # Warn never fails a run (§7)
+  [[ "$output" == *"old-plans/data.tar.gz"* ]]
+  [[ "$output" == *"nothing is lost"* ]]
+  [[ "$output" == *"sync push"* ]]          # the remedy, named
+  [[ "$output" != *"docs/keep.txt"* ]]      # not excluded ⇒ not ours to report
+
+  run_wt doctor --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"code":"sync-skipped-files"'* ]]
+  [[ "$output" == *'"severity":"warn"'* ]]
+
+  # doctor DETECTS, it never repairs — the tree is exactly as it was
+  [ ! -e "$REPO/old-plans/data.tar.gz" ]
+
+  # …and a healed tree says nothing at all
+  ( cd "$REPO" && git checkout -- old-plans/data.tar.gz )
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"tracked file(s) are missing"* ]]
+}
+
 # ── sessions ferry ───────────────────────────────────────────────────────────
 
 @test "sync push --with-sessions: ferries the project's claude dirs ADDITIVELY" {
@@ -366,6 +457,17 @@ commit_bulk() {   # a tracked *.tar.gz (excluded) beside a tracked plain file
   [ "$status" -eq 2 ]
   [[ "$output" == *'"code":"hub-copy"'* ]]
   [[ "$output" == *'"severity":"error"'* ]]
+
+  # …and never the skipped-files warning beside it: a hub copy is missing every
+  # excluded-tracked file BY CONSTRUCTION (the push skipped them), so absence
+  # there is the pushed state, not damage — and the remedy that finding names is
+  # exactly what the hub-copy guard refuses
+  ( cd "$copy" && mkdir -p old-plans && echo t > old-plans/data.tar.gz \
+    && git add -A && git commit -qm bulk && rm old-plans/data.tar.gz )
+  run_wt -C "$copy" doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"hub copy"* ]]
+  [[ "$output" != *"tracked file(s) are missing"* ]]
 
   # …and an ordinary repo's doctor is untouched by the check
   run_wt doctor

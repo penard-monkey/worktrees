@@ -5,7 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **`doctor` now spots the files a sync left behind.** The exclude list sync
+  calls "rebuildable bulk" (`*.tar.gz`, `build/`, `node_modules/`) covers files
+  some repos deliberately COMMIT — session tarballs, fixtures — so a transfer
+  skips them and the tree opens on a wall of `deleted:` that reads as lost work.
+  The repair has always been automatic, but only on the next successful *pull*
+  of that project, so damage in a worktree nobody has synced since could sit
+  there for months: eight of ten worktrees on one machine were carrying it.
+  `doctor` reports it now — one line per project, with a count, a few of the
+  paths and the remedy — as a **warning**, because nothing is lost: the blobs
+  rode along inside `.git` the whole time. `doctor` still only ever reports;
+  the repair belongs to sync.
+
+### Changed
+- **Every sync now repairs, not just a pull that worked.** A push heals the
+  tree before it transfers, and a pull whose transfer *failed* heals anyway —
+  an interrupted sync is exactly when this damage lingers. The transfer's own
+  error is still what you get back; a repair can neither hide it nor cause one.
+
 ### Fixed
+- **`.worktrees-sync/` stops showing up as untracked.** The backup directory a
+  pull leaves inside the tree it mirrored over was answering every `git status`
+  with `??` forever. It is now excluded the same way the app's own state is —
+  in this checkout's `.git/info/exclude`, never a committed `.gitignore`, and
+  never over a tracked file. As before, this is written when a repo first
+  acquires a store, so repos that already have one keep their untracked entry
+  until it is added by hand.
 - **The terminal's last column is no longer sliced in half.** A line that
   reached the right margin lost part of its final glyph — the `e` of "line", the
   `x` of "px" — cut vertically where the scrollbar begins. The terminal was
