@@ -122,6 +122,27 @@ const measured = (host: HTMLElement) => host.clientWidth > 0 && host.clientHeigh
  *  (a headless Chromium runs it at ~200Hz, an occluded window barely at all). */
 const ATTACH_WAIT_MS = 1000;
 
+/** How long the pane must hold still before the backend is told its new size.
+ *
+ *  Every DISTINCT grid handed to the pty is a `TIOCSWINSZ`, so a SIGWINCH, and
+ *  the shell answers each one by reprinting its prompt. A 240px drag of the
+ *  pane walked the terminal through 17 different row counts and left 17 stacked
+ *  prompt lines behind — one truncated `~/workspace/…` plus a full-width rule
+ *  per step, in BOTH panes at once (screenshots, 2026-08-27). It also spent 120
+ *  `term_resize` invokes to do it, 103 of them re-stating a size that had not
+ *  changed at all: `fit()` skips `term.resize` when the grid is the same, but
+ *  the invoke after it was unconditional.
+ *
+ *  A window drag is ONE intent, so it should cost one resize. Anything above a
+ *  frame's worth of delay collapses a drag; 80ms is still well under where a
+ *  discrete change (⌘B, ⌘J, dragging the dock's edge) reads as lag.
+ *
+ *  `fit()` waits with it on purpose. Refitting every frame while the pty keeps
+ *  the old grid means tmux is painting a screen that no longer matches the
+ *  canvas — garbled for the whole drag, instead of a strip of host background
+ *  at the edge that closes when the drag stops. */
+const RESIZE_SETTLE_MS = 80;
+
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
 function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -129,6 +150,13 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
   const fitRef = useRef<FitAddon | null>(null);
   const txRef = useRef<Transport | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
+  // The grid the backend has been told about, and the baseline the coalescing
+  // below dedups against. A REF rather than an effect-local because the
+  // termVersion effect resizes on its own too, and a baseline only one of the
+  // two writers can update is a baseline that lies — it would suppress a resize
+  // the pty actually needs. `{ 0, 0 }` means "nothing known", and no real grid
+  // can collide with it: the fit addon floors at 2 cols and 1 row.
+  const sentRef = useRef({ cols: 0, rows: 0 });
   // Bumped whenever the terminal below is re-created. Refs cannot wake an
   // effect, so anything that has to re-subscribe to THIS xterm (the find bar's
   // results event) depends on this instead.
@@ -138,6 +166,9 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     const host = hostRef.current;
     if (!host) return;
     let disposed = false;
+    // A new terminal knows nothing about any backend yet, and the ref outlives
+    // the effect that re-created it.
+    sentRef.current = { cols: 0, rows: 0 };
 
     const { family, size, theme } = termOptions();
     // allowProposedApi: the search addon paints its match highlights through
@@ -182,6 +213,22 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     // shell that can never be measured.
     const giveUp = performance.now() + ATTACH_WAIT_MS;
     let raf = 0;
+
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const applySize = () => {
+      settle = undefined;
+      if (!measured(host)) return;
+      try {
+        fit.fit();
+      } catch {
+        /* host detached mid-resize */
+      }
+      const sent = sentRef.current;
+      if (term.cols === sent.cols && term.rows === sent.rows) return;
+      sentRef.current = { cols: term.cols, rows: term.rows };
+      tx.resize(term.cols, term.rows);
+    };
+
     const attach = () => {
       if (disposed) return;
       safeFit();
@@ -191,11 +238,25 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       }
       void (async () => {
         try {
-          await tx.open(term.cols, term.rows, onBytes);
+          // Captured BEFORE the await: this is the grid the pty is sized to, and
+          // it is the only honest baseline. Reading `term.cols/rows` again after
+          // the await reads whatever the terminal drifted to meanwhile — and
+          // recording THAT as the backend's size masks the very resize the
+          // transport dropped while there was no attach to carry it, leaving the
+          // pty on the opened grid and the canvas on another, with nothing to
+          // correct it until the next gesture. `open` shells out to tmux, so the
+          // window is wide enough to hit by mounting while the window animates.
+          const opened = { cols: term.cols, rows: term.rows };
+          await tx.open(opened.cols, opened.rows, onBytes);
           if (disposed) {
             tx.close();
             return;
           }
+          sentRef.current = opened;
+          // Settle once more now that there IS an attach: this re-sends anything
+          // that moved while `open` was in flight, and is a no-op if the grid is
+          // still what we opened at.
+          applySize();
           term.onData((data) => tx.write(Array.from(new TextEncoder().encode(data))));
           term.focus();
         } catch (e) {
@@ -211,18 +272,17 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       // or on its way in. Reporting it anyway walks the PTY through a size
       // nobody is looking at, and the shell redraws for each one.
       if (!measured(host)) return;
-      try {
-        fit.fit();
-      } catch {
-        /* host detached mid-resize */
-      }
-      tx.resize(term.cols, term.rows);
+      // Coalesce: one settled size per gesture, not one per frame. See
+      // RESIZE_SETTLE_MS for what the per-frame version cost.
+      clearTimeout(settle);
+      settle = setTimeout(applySize, RESIZE_SETTLE_MS);
     });
     ro.observe(host);
 
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      clearTimeout(settle);
       ro.disconnect();
       tx.close(); // detach, not kill — for either backend
       liveTerms.delete(term);
@@ -258,6 +318,13 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       /* ignore */
     }
     txRef.current?.resize(term.cols, term.rows);
+    // INVALIDATE the coalescing baseline rather than writing this size into it.
+    // Writing would claim the backend has a grid this send may never have
+    // reached — the transports drop a resize made before the attach answers —
+    // and an over-claiming baseline suppresses a resize the pty needs. Clearing
+    // it can only ever cost one redundant resize on the next gesture, and the
+    // attach overwrites it with the truth if one is still in flight.
+    sentRef.current = { cols: 0, rows: 0 };
   }, [termVersion]);
 
   return { hostRef, termRef, searchRef, epoch };

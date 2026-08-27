@@ -880,10 +880,20 @@ body.dragging .menu-catch { pointer-events: none; }
    width/height/basis length for box-sizing to reinterpret (flex-basis 0%
    floors at the padding either way). Add one — a max-height, say — and it
    would move. */
+/* `--term-bg`, not `--bg-abyss`: the grid is a whole number of CELLS, so the
+   host is always taller and wider than the terminal it holds by
+   `content % cell` — 0 to cell-1 px, on both axes, changing with every resize
+   (measured: 11px under the last row at one height, 3px right of the last
+   column). Those strips are the host's own background, and in tokyo-DAY and
+   catppuccin-latte `--bg-abyss` is a different colour from `--term-bg`
+   (#c1c9df vs #e1e2e7, #dce0e8 vs #eff1f5) — so the remainder reads as a stray
+   line along the bottom edge that thickens and thins as the window moves. The
+   host is the terminal's frame; it should be the terminal's colour. The dark
+   themes only hid this by having the two tokens agree. */
 .term-host {
   flex: 1; min-width: 0; min-height: 0; overflow: hidden;
   box-sizing: content-box;
-  padding: var(--s2); background: var(--bg-abyss); border-radius: var(--r-md);
+  padding: var(--s2); background: var(--term-bg); border-radius: var(--r-md);
 }
 .term-empty { flex: 1; display: grid; place-items: center; }
 .term-empty-card {

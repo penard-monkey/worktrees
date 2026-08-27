@@ -204,6 +204,33 @@ is invisible to the bats suite — there is no fake claude. Re-run
   the scrollbar — xterm caches `scrollBarWidth` in the Viewport constructor as
   `offsetWidth − scrollArea.offsetWidth || 15`, so a 0-width gutter still costs
   15px.
+- **Every DISTINCT grid handed to the pty is a SIGWINCH, and the shell reprints
+  its prompt for each.** `TerminalPane`'s ResizeObserver used to `tx.resize()`
+  per callback: a 240px drag sent 120 `term_resize` invokes carrying 17 distinct
+  sizes, and both panes filled with stacked truncated prompts + full-width rules
+  — the "lines" a resize left behind. `RESIZE_SETTLE_MS` coalesces a gesture into
+  one resize; `fit()` waits WITH it, because refitting per frame while the pty
+  holds the old grid has tmux painting a screen that no longer matches the canvas
+  (garbled for the whole drag, versus a strip of host background that closes when
+  you let go). Two traps in the coalescing itself, both locked down by
+  `app/scripts/termresize-check.mjs` (which evaluates the real `useTerm` under
+  stubs on a VIRTUAL clock — on real timers a scheduler stall mid-drag
+  fails it while blaming the component): the baseline it
+  dedups against must be seeded from **the grid passed to `open`**, captured
+  before the await — read it back afterwards and you record a size the pty never
+  got, masking the resize the transport dropped while the attach was in flight
+  (both transports gate `resize` on it; the DROP pre-dates the coalescing, which
+  only removed the accident that hid it — an unconditional re-send on the next
+  observer callback) — and the `termVersion` effect resizes on
+  its own, so it must INVALIDATE that baseline rather than write to it. An
+  over-claiming baseline suppresses a resize the pty needs; a cleared one costs
+  at most one redundant send.
+- **`.term-host` paints `--term-bg`, not `--bg-abyss`.** The grid is whole cells,
+  so the host is always bigger than the terminal by `content % cell` — 0..cell−1
+  px per axis, changing with every resize. That strip is the host's background,
+  and the two tokens differ in tokyo-day and catppuccin-latte, where it reads as
+  a stray line along the bottom edge that thickens and thins as the window moves.
+  The dark themes only hid it by having the tokens agree.
 - **The terminal's glyph widths must MATCH TMUX, and the Node probe lies.**
   tmux (utf8proc) lays out emoji as 2 cells; xterm 5.5's default Unicode 6
   tables said 1, and every tmux partial repaint interleaved one column off —

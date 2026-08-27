@@ -2455,6 +2455,54 @@ function App() {
       window.removeEventListener("keydown", mark, true);
     };
   }, []);
+  // ⌘A — select the FILE, not the app.
+  //
+  // Not a keydown handler, and it cannot be one: `lib.rs` never calls `menu()`,
+  // so Tauri installs its default macOS menu (tauri/src/menu/menu.rs:225) whose
+  // Edit ▸ Select All owns ⌘A as an NSMenu key equivalent — macOS resolves
+  // those in `performKeyEquivalent`, BEFORE the web view's first responder sees
+  // a key at all, so no JS keydown ever fires for the chord. What arrives is
+  // `selectAll:`, and WebKit answers it with `FrameSelection::selectAll()`,
+  // which dispatches a CANCELABLE `selectstart` on `document.body` and bails if
+  // it is prevented. That event is the only hook there is. Left alone, ⌘A
+  // selected the sidebar, the header and the status bar: 1199 characters of
+  // chrome starting "Home / PLACES / …", against 298 of the open file.
+  //
+  // A drag selection dispatches `selectstart` too, but on the node it started
+  // from — and `#root` covers the body, so a real drag can never start there.
+  // `document.body` therefore isolates the document-wide case on its own.
+  useEffect(() => {
+    const onSelectStart = (e: Event) => {
+      if (e.target !== document.body) return;
+      // Under a sheet or dialog, leave the chord exactly as it was. Redirecting
+      // it would select a file the user cannot currently see, and the text they
+      // ARE looking at (Settings ▸ Logs is the one people copy from) is not in
+      // a `.viewer-body`. This does NOT scope the selection to the sheet — it
+      // keeps the pre-existing document-wide default, which is the lesser wrong
+      // of the two. Every modal in the app wraps itself in `.scrim`.
+      if (document.querySelector(".scrim")) return;
+      // Reading mode is the top surface when it is open, so it wins the file.
+      const body = document.querySelector(".reading .viewer-body")
+        ?? document.querySelector(".dock .viewer-body");
+      // No file open: nothing to scope to. Still worth swallowing — selecting
+      // the chrome is not a thing anyone asked for.
+      if (!body) { e.preventDefault(); return; }
+      const sel = window.getSelection();
+      if (!sel) return;
+      e.preventDefault();
+      const range = document.createRange();
+      // One root covers source, markdown preview AND the diff: both line-number
+      // gutters (`.code-gutter`, `.diff-grid .dg`) already carry
+      // `user-select: none`, so nothing drags "1 2 3 …" down the left of the
+      // copy (verified: selecting the body yields exactly the `.code-text`
+      // length).
+      range.selectNodeContents(body);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    };
+    document.addEventListener("selectstart", onSelectStart, true);
+    return () => document.removeEventListener("selectstart", onSelectStart, true);
+  }, []);
   // bumps on places:changed → the dock's file viewer re-reads from disk when clean.
   const [placesToken, setPlacesToken] = useState(0);
   // Gates every periodic cost in the app — see useWindowAwake. Only the

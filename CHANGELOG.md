@@ -14,6 +14,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   fixed in 0.17.0: that one ran the terminal *out* under the Files dock, this one
   is inside the terminal's own frame — an older, smaller error that fix left
   standing. Both terminals were affected, at every width.
+- **Resizing the window no longer leaves lines behind in the terminal.** Every
+  size the terminal was told about reached the shell as a resize signal, and a
+  shell answers each one by reprinting its prompt — so dragging a window edge
+  walked the terminal through a dozen or more sizes and left a stacked prompt,
+  ruled off across the pane, for every one of them. Both terminals did it at
+  once, which is what filled a pane with them. A drag is one intent now, so it
+  costs one resize, sent when the pane stops moving. Fixed in the same place: a
+  terminal resized while it was still attaching could be left painting at the
+  wrong size until the next time you moved something.
+- **⌘A in the Files tab selects the file, not the whole window.** With a file
+  open, Select All took the sidebar, the header and the status bar with it —
+  everything except the text you were reading. It now selects the open file's
+  contents, without the line numbers, in Preview, Source and Diff alike. A text
+  field keeps its own Select All, and a settings sheet or dialog is left alone.
+- **The terminal's frame matches the terminal on the light themes.** Tokyo Day
+  and Catppuccin Latte drew the frame around the grid in the app's backdrop
+  colour rather than the terminal's own. Because the grid is a whole number of
+  character cells, the leftover strip along the bottom and right edges changes
+  thickness with every resize — so that mismatch read as a stray line that grew
+  and shrank as you dragged. The dark themes only ever agreed by coincidence.
 
 ## [0.17.0] - 2026-08-18
 
