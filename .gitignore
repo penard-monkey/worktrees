@@ -5,6 +5,8 @@ dist/
 # app declared-store / worktrees created while dogfooding THIS repo in the app
 /.worktrees.places.json
 /.worktrees/
+# the backups `worktrees sync pull` leaves in the tree it mirrored over
+/.worktrees-sync/
 
 # design-review artifacts (browser harness screenshots + playwright output)
 .playwright-mcp/

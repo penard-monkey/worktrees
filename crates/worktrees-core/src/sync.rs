@@ -1475,7 +1475,24 @@ fn sync_one(ui: &mut dyn Ui, dir: SyncDirection, opts: &Opts) -> Result<i32, Str
     }
 
     mkdir_p(&dst)?;
-    apply(job)?;
+    // A PUSH heals before it transfers: the damage is in the tree the user works
+    // in, so the first sync op of any kind is the right moment to clear it —
+    // waiting for the next successful pull is what let it sit for months. The
+    // restored files match the exclude set, so nothing about the transfer
+    // changes. Below the hub-copy guard and the dry-run/confirm returns, so a
+    // refused or declined command still writes nothing.
+    if dir == SyncDirection::Push {
+        heal_pass(ui, local_root, &proj_cfg.extra_excludes, json);
+    }
+    let transfer = apply(job);
+    // A FAILED pull heals too. An interrupted transfer is exactly the state
+    // damage lingers in, and the repair reads the tree as it now is. The
+    // transfer's own error is still what the command returns: a heal must never
+    // mask it, and it cannot fail the sync either.
+    if dir == SyncDirection::Pull && transfer.is_err() {
+        heal_pass(ui, local_root, &proj_cfg.extra_excludes, json);
+    }
+    transfer?;
     if !json {
         ui.info("done.");
     }
@@ -1687,15 +1704,16 @@ fn checkout_paths(ui: &mut dyn Ui, repo: &Path, paths: &[String]) -> Vec<String>
     done
 }
 
-/// The heal pass. Returns the restored paths RELATIVE TO `local_root`, so one
-/// report line can name files from the root repo and from a worktree without
-/// ambiguity.
-fn heal_excluded_deletions(
-    ui: &mut dyn Ui,
-    local_root: &Path,
-    patterns: &[String],
-) -> Vec<String> {
-    let mut healed: Vec<String> = Vec::new();
+/// The damage itself, read-only: per repo (the root and each linked worktree),
+/// the paths of tracked files the exclude set covers that are gone from the
+/// working tree. Sorted, and a repo with nothing to say is absent.
+///
+/// ONE scan behind both users — the heal, which checks the paths out per repo,
+/// and `doctor`'s finding, which only counts and names them. A second
+/// implementation of "which deletions are ours" would be a second answer, and
+/// the two surfaces would disagree the day one of them was edited.
+fn skipped_deletions(local_root: &Path, patterns: &[String]) -> Vec<(PathBuf, Vec<String>)> {
+    let mut out: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for repo in healable_repos(local_root) {
         let Some(z) = git::git_out(&repo.to_string_lossy(), &["status", "--porcelain", "-z"])
         else {
@@ -1707,16 +1725,83 @@ fn heal_excluded_deletions(
             continue;
         }
         want.sort();
-        let prefix = repo
-            .strip_prefix(local_root)
-            .ok()
-            .map(|r| r.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        out.push((repo, want));
+    }
+    out
+}
+
+/// A repo-relative path re-based on `local_root`, so one report line can name
+/// files from the root repo and from a worktree without ambiguity.
+fn rebase(local_root: &Path, repo: &Path, rel: &str) -> String {
+    match repo.strip_prefix(local_root).ok().map(|r| r.to_string_lossy().into_owned()) {
+        Some(prefix) if !prefix.is_empty() => format!("{prefix}/{rel}"),
+        _ => rel.to_string(),
+    }
+}
+
+/// The heal pass. Returns the restored paths RELATIVE TO `local_root`.
+fn heal_excluded_deletions(
+    ui: &mut dyn Ui,
+    local_root: &Path,
+    patterns: &[String],
+) -> Vec<String> {
+    let mut healed: Vec<String> = Vec::new();
+    for (repo, want) in skipped_deletions(local_root, patterns) {
         for p in checkout_paths(ui, &repo, &want) {
-            healed.push(if prefix.is_empty() { p } else { format!("{prefix}/{p}") });
+            healed.push(rebase(local_root, &repo, &p));
         }
     }
     healed
+}
+
+/// How many paths `doctor`'s finding names before "(+N more)".
+const SKIPPED_SAMPLE: usize = 5;
+
+/// `doctor`'s read-only half of the heal — the same damage, seen BETWEEN syncs.
+///
+/// The repair is edge-triggered (it runs on a sync), so a tree nobody has synced
+/// since the damage happened keeps it indefinitely: eight of ten linked
+/// worktrees on one machine carried walls of `deleted: docs/sessions/*.tar.gz`
+/// dating from before the heal existed, and nothing ever said so. This is the
+/// detection half, and it stays a REPORT: `doctor` never writes (`relink` is the
+/// applier), and the remedy it names is a sync — which now heals on every edge.
+///
+/// One finding for the whole project, not one per file: the field shape is
+/// dozens of paths across many worktrees, and a report that long is one nobody
+/// reads. `extra_excludes` is the project's own `[sync.projects.<name>]` list,
+/// so the judgement matches the transfer's (`project_extra_excludes`).
+pub fn skipped_files_finding(root: &Path, extra_excludes: &[String]) -> Option<Finding> {
+    let patterns = exclude_patterns(extra_excludes);
+    let hits: Vec<String> = skipped_deletions(root, &patterns)
+        .into_iter()
+        .flat_map(|(repo, want)| {
+            want.into_iter().map(move |p| rebase(root, &repo, &p)).collect::<Vec<_>>()
+        })
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    let shown = hits.iter().take(SKIPPED_SAMPLE).cloned().collect::<Vec<_>>().join(", ");
+    let more = hits.len().saturating_sub(SKIPPED_SAMPLE);
+    let tail = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+    Some(Finding::warn(
+        Code::SyncSkippedFiles,
+        format!(
+            "{} tracked file(s) are missing from the working tree because a sync transfer skips them (excluded as rebuildable bulk): {shown}{tail} — nothing is lost, the blobs are in .git; any `worktrees sync push` or `worktrees sync pull` of this project restores them.",
+            hits.len()
+        ),
+    ))
+}
+
+/// The project's own `[sync.projects.<name>] extra_excludes`, keyed the way
+/// `resolve_ctx` keys it (the root's basename) — so a caller outside `sync`
+/// judges a tree by the SAME exclude set the transfer would use.
+pub fn project_extra_excludes(root: &Path) -> Vec<String> {
+    config::sync_cfg()
+        .projects
+        .get(&basename(root))
+        .map(|p| p.extra_excludes.clone())
+        .unwrap_or_default()
 }
 
 /// The heal's one line, or `None` when nothing was restored — silence is the
@@ -1784,16 +1869,16 @@ fn pull_status_note(root: &Path) -> Option<String> {
     status_note(&branch, ab, dirty)
 }
 
-/// Everything a successful PULL owes the tree it just mirrored over, in ONE
-/// place: the CLI (`sync_one`) and the app (`sync_apply`) both call it right
-/// after the transfer, so the two surfaces cannot drift into repairing
-/// different things.
+/// The repair on its own — every sync EDGE runs this, in ONE implementation: a
+/// push before it transfers, a pull after it lands, and a pull whose transfer
+/// FAILED. Damage that used to wait for the next successful pull of the project
+/// now meets the first sync op of any kind.
 ///
 /// `quiet` is the CLI's `--json` (a single JSON line has no room for prose). The
 /// repair itself still RUNS — suppressing the report must never suppress the
 /// fix — and a heal failure still warns, the same way `resolve_ctx` warns under
 /// `--json` today.
-fn post_pull(ui: &mut dyn Ui, local_root: &Path, extra_excludes: &[String], quiet: bool) {
+fn heal_pass(ui: &mut dyn Ui, local_root: &Path, extra_excludes: &[String], quiet: bool) {
     let patterns = exclude_patterns(extra_excludes);
     let healed = heal_excluded_deletions(ui, local_root, &patterns);
     if quiet {
@@ -1801,6 +1886,19 @@ fn post_pull(ui: &mut dyn Ui, local_root: &Path, extra_excludes: &[String], quie
     }
     if let Some(line) = heal_report(&healed) {
         ui.info(&line);
+    }
+}
+
+/// Everything a successful PULL owes the tree it just mirrored over, in ONE
+/// place: the CLI (`sync_one`) and the app (`sync_apply`) both call it right
+/// after the transfer, so the two surfaces cannot drift into repairing
+/// different things. The heal is `heal_pass`; the note is pull-only, because
+/// "what you imported mirrors the source Mac" is a sentence only an import can
+/// say.
+fn post_pull(ui: &mut dyn Ui, local_root: &Path, extra_excludes: &[String], quiet: bool) {
+    heal_pass(ui, local_root, extra_excludes, quiet);
+    if quiet {
+        return;
     }
     // AFTER the heal, so the numbers describe the tree the user will look at.
     if let Some(note) = pull_status_note(local_root) {
@@ -2009,10 +2107,23 @@ pub fn sync_apply(
     }
 
     mkdir_p(&job.dst)?;
-    match progress {
-        Some(cb) => apply_streaming(job, cb)?,
-        None => apply(job)?,
+    // The CLI's edges, verbatim (`sync_one`): heal before a push, and heal after
+    // a pull whose transfer failed. Same helper, so the two surfaces cannot
+    // repair different things.
+    if req.direction == SyncDirection::Push {
+        heal_pass(&mut ui, &ctx.local_root, &ctx.proj_cfg.extra_excludes, false);
     }
+    let transfer = match progress {
+        Some(cb) => apply_streaming(job, cb),
+        None => apply(job),
+    };
+    if req.direction == SyncDirection::Pull && transfer.is_err() {
+        // The repair happens; its lines go with the `Err` (this API's failure
+        // channel is a String), which is the same trade the CLI makes — the
+        // transfer's error is the outcome, not the heal's report.
+        heal_pass(&mut ui, &ctx.local_root, &ctx.proj_cfg.extra_excludes, false);
+    }
+    transfer?;
 
     // Same repair, same order, same messages as the CLI — the modal renders
     // `messages`, so this is the app's copy of the post-pull report.
@@ -2717,6 +2828,66 @@ building file list
         assert!(m.contains("restored 9 tracked file(s)"), "{m}");
         assert!(m.contains("f4.tar.gz") && !m.contains("f5.tar.gz"), "capped at {HEAL_SAMPLE}: {m}");
         assert!(m.contains("(+4 more)"), "{m}");
+    }
+
+    /// A real repo, because the finding reads REAL git state: one tracked file
+    /// the exclude set covers (`*.tar.gz`) and one it does not.
+    fn repo_with_bulk(d: &Path) -> PathBuf {
+        let root = d.join("proj");
+        std::fs::create_dir_all(root.join("old-plans")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("old-plans/data.tar.gz"), "tar").unwrap();
+        std::fs::write(root.join("docs/keep.txt"), "keep").unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").arg("-C").arg(&root).args(args).output().expect("git");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "bulk"]);
+        root
+    }
+
+    #[test]
+    fn the_skipped_files_finding_warns_about_exactly_the_damage_the_heal_repairs() {
+        let d = tmp("skippedfinding");
+        let root = repo_with_bulk(&d);
+
+        // a clean tree is silent — doctor must not invent a problem
+        assert!(skipped_files_finding(&root, &[]).is_none());
+
+        // a deletion the excludes do NOT cover is the user's own doing
+        std::fs::remove_file(root.join("docs/keep.txt")).unwrap();
+        assert!(
+            skipped_files_finding(&root, &[]).is_none(),
+            "a tracked deletion that matches no exclude pattern is not ours to report"
+        );
+
+        // …and one they do is #146's damage class
+        std::fs::remove_file(root.join("old-plans/data.tar.gz")).unwrap();
+        let f = skipped_files_finding(&root, &[]).expect("a finding");
+        assert_eq!(f.severity, crate::diag::Severity::Warn, "the blobs are safe in .git");
+        assert!(matches!(f.code, Code::SyncSkippedFiles));
+        assert!(f.message.starts_with("1 tracked file(s)"), "{}", f.message);
+        assert!(f.message.contains("old-plans/data.tar.gz"), "{}", f.message);
+        assert!(!f.message.contains("keep.txt"), "{}", f.message);
+        // the remedy, and the reason it is not an emergency
+        assert!(f.message.contains("sync push"), "{}", f.message);
+        assert!(f.message.contains("nothing is lost"), "{}", f.message);
+        // Warn alone never fails a run (§7) — doctor still exits 0
+        assert_eq!(crate::diag::Report::new(vec![f]).exit_code(), 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_finding_judges_by_the_projects_own_extra_excludes() {
+        let d = tmp("skippedextra");
+        let root = repo_with_bulk(&d);
+        std::fs::remove_file(root.join("docs/keep.txt")).unwrap();
+        // `docs/` is nobody's builtin exclude; a project that added it gets the
+        // same verdict the transfer would reach — one exclude set, both surfaces.
+        let f = skipped_files_finding(&root, &["docs/".to_string()]).expect("a finding");
+        assert!(f.message.contains("docs/keep.txt"), "{}", f.message);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     // ── post-pull status note ───────────────────────────────────────────────

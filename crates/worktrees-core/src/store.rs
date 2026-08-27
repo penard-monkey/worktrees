@@ -105,9 +105,11 @@ fn store_path(repo: &str) -> PathBuf {
 
 /// The first time this repo gets a store, teach the repo to ignore it.
 ///
-/// `.worktrees.places.json` and `.worktrees/` are per-MACHINE state — `sync`
-/// ferries them between machines out-of-band — so a repo that just acquired one
-/// should not answer `git status` with an untracked file the tool itself wrote.
+/// `.worktrees.places.json`, `.worktrees/` and `.worktrees-sync/` (the backups a
+/// pull leaves behind) are per-MACHINE state — `sync` ferries them between
+/// machines out-of-band, and excludes its own directory from the transfer — so a
+/// repo that just acquired one should not answer `git status` with an untracked
+/// file the tool itself wrote.
 /// `.git/info/exclude` rather than `.gitignore` because the choice is this
 /// checkout's, not the project's: it is never committed, and it never hides a
 /// TRACKED file, so a user who deliberately committed the store is unaffected.
@@ -127,7 +129,7 @@ fn exclude_app_state(base: &Path) {
     }
     let path = info.join("exclude");
     let existing = fs::read_to_string(&path).unwrap_or_default();
-    let missing: Vec<&str> = ["/.worktrees.places.json", "/.worktrees/"]
+    let missing: Vec<&str> = ["/.worktrees.places.json", "/.worktrees/", "/.worktrees-sync/"]
         .into_iter()
         .filter(|want| !existing.lines().any(|l| l == *want))
         .collect();
@@ -362,6 +364,12 @@ mod tests {
             after_first.lines().any(|l| l == "/.worktrees/"),
             "the worktrees dir must be excluded: {after_first}"
         );
+        // sync's own backup dir: the tool writes it into the tree on every pull,
+        // and it showed as `??` forever.
+        assert!(
+            after_first.lines().any(|l| l == "/.worktrees-sync/"),
+            "sync's backup dir must be excluded: {after_first}"
+        );
         assert!(
             !after_first.contains("/task_plan.md"),
             "planning docs are a personal workflow, not app state: {after_first}"
@@ -392,6 +400,27 @@ mod tests {
         assert!(body.lines().any(|l| l == "*.swp"), "the user's own rule survives: {body}");
         assert!(body.lines().any(|l| l == "/.worktrees.places.json"), "{body}");
         assert!(body.lines().any(|l| l == "/.worktrees/"), "{body}");
+        assert!(body.lines().any(|l| l == "/.worktrees-sync/"), "{body}");
+    }
+
+    /// The append is line-exact and idempotent: a file that already names some of
+    /// the entries gains only the ones it lacks, and never a duplicate. This is
+    /// the shape a repo whose store predates a new entry will meet.
+    #[test]
+    fn an_exclude_file_that_has_some_entries_gains_only_the_missing_ones() {
+        let t = tmp("exclude-partial");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::create_dir_all(t.0.join(".git/info")).unwrap();
+        let exclude = t.0.join(".git/info/exclude");
+        fs::write(&exclude, "/.worktrees.places.json\n/.worktrees/\n").unwrap();
+
+        edit(&repo, "alpha", |d| d.pinned = Some(true)).unwrap();
+
+        let body = fs::read_to_string(&exclude).unwrap();
+        let count = |want: &str| body.lines().filter(|l| *l == want).count();
+        assert_eq!(count("/.worktrees.places.json"), 1, "no duplicate: {body}");
+        assert_eq!(count("/.worktrees/"), 1, "no duplicate: {body}");
+        assert_eq!(count("/.worktrees-sync/"), 1, "the one it lacked, once: {body}");
     }
 
     /// The store is written for things that are not repos at all — bats' fake
