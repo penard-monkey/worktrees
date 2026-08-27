@@ -122,6 +122,27 @@ const measured = (host: HTMLElement) => host.clientWidth > 0 && host.clientHeigh
  *  (a headless Chromium runs it at ~200Hz, an occluded window barely at all). */
 const ATTACH_WAIT_MS = 1000;
 
+/** How long the pane must hold still before the backend is told its new size.
+ *
+ *  Every DISTINCT grid handed to the pty is a `TIOCSWINSZ`, so a SIGWINCH, and
+ *  the shell answers each one by reprinting its prompt. A 240px drag of the
+ *  pane walked the terminal through 17 different row counts and left 17 stacked
+ *  prompt lines behind — one truncated `~/workspace/…` plus a full-width rule
+ *  per step, in BOTH panes at once (screenshots, 2026-08-27). It also spent 120
+ *  `term_resize` invokes to do it, 103 of them re-stating a size that had not
+ *  changed at all: `fit()` skips `term.resize` when the grid is the same, but
+ *  the invoke after it was unconditional.
+ *
+ *  A window drag is ONE intent, so it should cost one resize. Anything above a
+ *  frame's worth of delay collapses a drag; 80ms is still well under where a
+ *  discrete change (⌘B, ⌘J, dragging the dock's edge) reads as lag.
+ *
+ *  `fit()` waits with it on purpose. Refitting every frame while the pty keeps
+ *  the old grid means tmux is painting a screen that no longer matches the
+ *  canvas — garbled for the whole drag, instead of a strip of host background
+ *  at the edge that closes when the drag stops. */
+const RESIZE_SETTLE_MS = 80;
+
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
 function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -182,6 +203,24 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     // shell that can never be measured.
     const giveUp = performance.now() + ATTACH_WAIT_MS;
     let raf = 0;
+
+    // The grid the backend has been told about. Seeded by the attach, so the
+    // first settled resize does not re-state the size the pty already opened at.
+    let sent = { cols: 0, rows: 0 };
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const applySize = () => {
+      settle = undefined;
+      if (!measured(host)) return;
+      try {
+        fit.fit();
+      } catch {
+        /* host detached mid-resize */
+      }
+      if (term.cols === sent.cols && term.rows === sent.rows) return;
+      sent = { cols: term.cols, rows: term.rows };
+      tx.resize(term.cols, term.rows);
+    };
+
     const attach = () => {
       if (disposed) return;
       safeFit();
@@ -196,6 +235,12 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
             tx.close();
             return;
           }
+          sent = { cols: term.cols, rows: term.rows };
+          // The pane can have moved while `open` was in flight, and a resize
+          // that landed in that window found no pty to talk to (both transports
+          // gate `resize` on the attach). Settle once more now that there is
+          // one; `applySize` is a no-op if the grid is still what we opened at.
+          applySize();
           term.onData((data) => tx.write(Array.from(new TextEncoder().encode(data))));
           term.focus();
         } catch (e) {
@@ -211,18 +256,17 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       // or on its way in. Reporting it anyway walks the PTY through a size
       // nobody is looking at, and the shell redraws for each one.
       if (!measured(host)) return;
-      try {
-        fit.fit();
-      } catch {
-        /* host detached mid-resize */
-      }
-      tx.resize(term.cols, term.rows);
+      // Coalesce: one settled size per gesture, not one per frame. See
+      // RESIZE_SETTLE_MS for what the per-frame version cost.
+      clearTimeout(settle);
+      settle = setTimeout(applySize, RESIZE_SETTLE_MS);
     });
     ro.observe(host);
 
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      clearTimeout(settle);
       ro.disconnect();
       tx.close(); // detach, not kill — for either backend
       liveTerms.delete(term);
