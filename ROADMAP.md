@@ -5,6 +5,42 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The status-check stream (#171–#174) shipped with its manual passes still
+  owed.** Two things the mock cannot express: one `app/scripts/sandbox.sh
+  --app` pass on main (click-select feel, the row ▸ hover, ⋯ Close, the
+  status sheet, ONE real Ask Claude run against real latency), and
+  `docs/ai-profiles-manual-checks.md` **§11** — six checks for the repo's
+  first headless claude spawn, of which fail-closed (no spawn, clean error)
+  and timeout (no orphan; proves the `exec` in the sh line) are the
+  load-bearing pair.
+  _From: [2026-08-29 status-check](docs/sessions/2026-08-29-status-check/summary.md)_
+
+- **Watch the nav tiers now that clicks don't spawn sessions.** Auto-open was
+  why everything read "active" and pinned/active/dormant felt useless. If
+  Active/Idle don't regain meaning after living with #171, the fallback is
+  grouping by activity buckets (Pinned / Recent / Stale / Dormant off
+  `activityAt`, ignoring tmux) — design sketch in the archived spec. Related
+  cheap follow-ups from the same spec, all deferred deliberately: fold the
+  health verdict into the MCP `place_status` tool; `worktrees status --ai`
+  (headless report from the CLI — the seam exists now); a workspace-wide
+  triage sweep ("all my worktrees, one claude -p").
+  _From: [2026-08-29 status-check](docs/sessions/2026-08-29-status-check/summary.md)_
+
+- **The recorded media still teaches single-click-opens.** The three
+  `app/scripts/record-*.py` / `shoot-profiles.py` scripts were fixed to
+  double-click in #172, but the README/feature-page media they produced
+  predates click-select — regenerate next time media is touched.
+  _From: [2026-08-29 status-check](docs/sessions/2026-08-29-status-check/summary.md)_
+
+- **The mock harness throws an xterm `'dimensions'` error when a mock
+  terminal mounts** (`Uncaught TypeError: Cannot read properties of
+  undefined (reading 'dimensions')`, from addon-fit). Pre-existing — proven
+  identical on base during #172 with the change stashed and the served file
+  verified token-free. Harmless to the checks so far, but it pollutes every
+  console assertion with a known-noise entry; worth killing next time
+  someone is in the harness terminal path.
+  _From: [2026-08-29 status-check](docs/sessions/2026-08-29-status-check/summary.md)_
+
 - **The dock-overlap fix has not been seen on WKWebView.** PR #157 is verified
   exhaustively in the mock harness (four resize paths, `getBoundingClientRect`,
   overhang 0) — but the bug was REPORTED from the real app, and every

@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-08-29](2026-08-29-status-check/summary.html) | clicking a worktree stopped spawning sessions (the root cause of "everything reads active"), the header stopped saying things twice, ↓ became main-only, stale rows dim, and right-click grew a status check — a verdict computed once in core, with an Ask Claude button that is the repo's first headless spawn; four stacked PRs, an adversarial spec pass that caught a guard built on an invented fact, and a merge train whose only conflicts were three parallel `[Unreleased]` sections |
 | [2026-08-29](2026-08-29-app-zoom/summary.html) | ⌘+/⌘− became an overall-size knob that finally reaches the terminal and its tmux pane — WKWebView page zoom, because `--ui-rem` deliberately never touched the xterm grid; and ⌥ chords cannot be matched on `e.key`, since macOS composes ⌥- into an en dash |
 | [2026-08-18](2026-08-18-remove-dialog-menu-clamp/summary.html) | removing a worktree became a dialog that says what it will destroy, and a menu near the bottom edge stopped hiding its last item — a clamp keyed on frozen cursor coords, and `--force` turning out to mean `git branch -D` as well |
 | [2026-08-18](2026-08-18-side-by-side-diff/summary.html) | the Files tab shows what changed, not just what is there — git's full-context diff in two aligned columns, word-level marks, and a changed-files-only tree; `git -C ""` means *here*, and a sticky cell tinted over `transparent` is see-through |
