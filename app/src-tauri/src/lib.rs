@@ -4450,43 +4450,64 @@ pub fn run() {
             // one added method, our instances only, no Apple class touched.
             #[cfg(target_os = "macos")]
             for (_, win) in app.webview_windows() {
-                let _ = win.with_webview(|pw| unsafe {
-                    let view = &*(pw.inner() as *mut objc2::runtime::AnyObject);
-                    // Skip the KVO subclass AppKit swizzles in: it can be torn
-                    // down when the last observer goes, taking the override with
-                    // it. wry's own class is the stable place for it.
-                    let mut cls = Some(view.class());
-                    while let Some(c) = cls {
-                        let name = c.name().to_string_lossy().to_string();
-                        if name.contains("WryWebView") && !name.contains("NSKVONotifying") {
-                            break;
-                        }
-                        cls = c.superclass();
-                    }
-                    match cls {
-                        Some(c) => {
-                            extern "C" fn no(
-                                _this: &objc2::runtime::AnyObject,
-                                _sel: objc2::runtime::Sel,
-                            ) -> objc2::runtime::Bool {
-                                objc2::runtime::Bool::NO
+                // Every webview shares the one registered wry class, so the
+                // method goes on once per process: a second window's add would
+                // fail (the class implements it by then) and warn about a fix
+                // that is in place and working.
+                static AFFORDANCE: std::sync::Once = std::sync::Once::new();
+                let r = win.with_webview(|pw| unsafe {
+                    AFFORDANCE.call_once(|| {
+                        let view = &*(pw.inner() as *mut objc2::runtime::AnyObject);
+                        // Step past the KVO subclass AppKit swizzles in (wry
+                        // observes the document title): the instance's isa
+                        // reverts to the original class when observation ends,
+                        // and a method added on the notifying class goes out of
+                        // reach with it. wry's own class is the stable place —
+                        // a KVO subclass made later inherits the override.
+                        let mut cls = Some(view.class());
+                        while let Some(c) = cls {
+                            let name = c.name().to_string_lossy().to_string();
+                            if name.contains("WryWebView") && !name.contains("NSKVONotifying") {
+                                break;
                             }
-                            let added = objc2::ffi::class_addMethod(
-                                c as *const objc2::runtime::AnyClass as *mut objc2::runtime::AnyClass,
-                                objc2::sel!(allowsWritingToolsAffordance),
-                                std::mem::transmute::<
-                                    extern "C" fn(&objc2::runtime::AnyObject, objc2::runtime::Sel) -> objc2::runtime::Bool,
-                                    unsafe extern "C-unwind" fn(),
-                                >(no),
-                                c"c@:".as_ptr(),
-                            );
-                            if !added.as_bool() {
-                                applog("warn", "writing-tools affordance: class_addMethod failed");
-                            }
+                            cls = c.superclass();
                         }
-                        None => applog("warn", "writing-tools affordance: wry webview class not found"),
-                    }
+                        let Some(c) = cls else {
+                            applog("warn", "writing-tools affordance: wry webview class not found");
+                            return;
+                        };
+                        extern "C" fn no(
+                            _this: &objc2::runtime::AnyObject,
+                            _sel: objc2::runtime::Sel,
+                        ) -> objc2::runtime::Bool {
+                            objc2::runtime::Bool::NO
+                        }
+                        // BOOL encodes as `B` on arm64 and `c` on x86_64 — take
+                        // it from objc2 rather than picking one.
+                        let types = std::ffi::CString::new(format!(
+                            "{}@:",
+                            <objc2::runtime::Bool as objc2::encode::Encode>::ENCODING
+                        ))
+                        .expect("no interior nul in an objc type encoding");
+                        let added = objc2::ffi::class_addMethod(
+                            c as *const objc2::runtime::AnyClass as *mut objc2::runtime::AnyClass,
+                            objc2::sel!(allowsWritingToolsAffordance),
+                            std::mem::transmute::<
+                                extern "C" fn(&objc2::runtime::AnyObject, objc2::runtime::Sel) -> objc2::runtime::Bool,
+                                unsafe extern "C-unwind" fn(),
+                            >(no),
+                            types.as_ptr(),
+                        );
+                        if !added.as_bool() {
+                            applog("warn", "writing-tools affordance: class_addMethod failed");
+                        }
+                    });
                 });
+                // A failure here leaves the app crashing on a selection with a
+                // log that looks exactly like the fix landed — say so instead.
+                if let Err(e) = r {
+                    applog("warn", &format!("writing-tools affordance: with_webview failed: {e}"));
+                }
             }
             // Live-refresh, change-gated. The tmux session set is a cheap
             // fingerprint that shifts whenever a place is opened/closed (even from a
