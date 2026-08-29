@@ -30,20 +30,22 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   the pre-hydration window records into `preHydration` and overwrites the loaded
   value, so ⌘+ at launch can land you BELOW a persisted 2×. One fast IPC wide,
   and shared by every pre-hydration chord (⌘B has it too).
-  _From: PR #169 review (fable), 2026-08-29_
+  _From: [2026-08-29 app-zoom](docs/sessions/2026-08-29-app-zoom/summary.md)_
 
 - **The static check scripts run only when someone remembers.**
   `termfit-check.mjs`, `dnd-check.mjs`, `relpath-check.mjs`, `ctxmenu-check.mjs`
-  and now `zoom-check.mjs` guard invariants the suites structurally cannot see (a CSS
-  declaration, a Rust↔TS mirror, a pure function, a layout effect's dep list) —
-  and none is wired into `ci.yml`, the Makefile or `app/package.json`. They are
-  pure Node, no browser, no fixtures, sub-second: one CI step running all four
-  costs nothing. Raised in the #157 review as informational and left out of that
-  PR because it is a repo-wide call, not a bug fix's business; #156 added a
-  fourth without changing that. Note `race-check.mjs` is NOT in this set — it
+  and now `zoom-check.mjs` guard invariants the suites structurally cannot see
+  (a CSS declaration, a Rust↔TS mirror, a pure function, a layout effect's dep
+  list, a chord's modifier routing) — and none is wired into `ci.yml`, the
+  Makefile or `app/package.json`. They are pure Node, no browser, no fixtures,
+  sub-second: one CI step running all five costs nothing. Raised in the #157
+  review as informational and left out of that PR because it is a repo-wide
+  call, not a bug fix's business; #156 added a fourth without changing that, and
+  #169 a fifth. Note `race-check.mjs` is NOT in this set — it
   drives real source under controlled promise orders and is slower/noisier.
   _From: [2026-08-18 terminal-dock-overlap](docs/sessions/2026-08-18-terminal-dock-overlap/summary.md),
-  [2026-08-18 remove-dialog-menu-clamp](docs/sessions/2026-08-18-remove-dialog-menu-clamp/summary.md)_
+  [2026-08-18 remove-dialog-menu-clamp](docs/sessions/2026-08-18-remove-dialog-menu-clamp/summary.md),
+  [2026-08-29 app-zoom](docs/sessions/2026-08-29-app-zoom/summary.md)_
 
 - **`remove_place`'s `force` is two permissions wearing one flag, and that is a
   core problem now that a UI exposes it.** `ops.rs:1014` reads it as "remove a
