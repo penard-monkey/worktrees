@@ -327,6 +327,21 @@ is invisible to the bats suite — there is no fake claude. Re-run
   impl is an unconditional `Some(self.id())`, and `list_shell_sessions` reaps on
   every dock mount — so anything sampling by pid needs a `try_wait` liveness
   check first, or it eventually reads a stranger's process).
+- **A Rust panic that never happened is an ObjC exception.** `panic in a
+  function that cannot unwind` with **no** panic line before it is not our bug:
+  the app's hook logs every real panic, so the missing line IS the evidence. An
+  NSException raised inside AppKit unwinds through tao's `sendEvent:` override
+  — `extern "C"`, therefore nounwind — and Rust converts the foreign unwind into
+  an abort. The crash report will not name it either (`asi` is just `abort()
+  called`, no `lastExceptionBacktrace`); the assertion text is in the unified
+  log: `/usr/bin/log show --predicate 'process == "app"'` over the crash minute,
+  and note `log` is not a zsh builtin, so a bare `log show …` dies with "too
+  many arguments" and reads as "nothing was logged". This is how the
+  select-text-and-die crash was found (`NSCampoLightweightUIController.m:1429`,
+  macOS 26's Writing Tools affordance), and why the app now answers
+  `allowsWritingToolsAffordance` with NO — added to wry's OWN WKWebView
+  subclass, never the `NSKVONotifying_` one, whose methods go out of reach when
+  the instance's isa reverts.
 - **⌘+/⌘−/⌘0 is WKWebView page zoom, not a CSS multiplier.** `set_zoom` in
   lib.rs → `setPageZoom`; the frontend owns the step table (`ZOOM_STEPS`) and
   persists it. Page zoom is the only mechanism that reaches everything — the

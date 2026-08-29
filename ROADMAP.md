@@ -5,6 +5,17 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The Writing Tools override is a workaround for an OS bug.** The app adds
+  `allowsWritingToolsAffordance` → NO to wry's WKWebView subclass because
+  macOS 26 asserts inside the affordance it would otherwise float over a
+  selection. Two ways this stops being ours: Apple fixes the assertion (re-test
+  by deleting the block and selecting text — the Campo lines in the unified log
+  are the tell), or wry/tauri exposes
+  `WKWebViewConfiguration.writingToolsBehavior`, at which point one config line
+  replaces the added method. Until then, leave it: the failure mode is the app
+  aborting mid-keystroke.
+  _From: [2026-08-29 writing-tools-crash](docs/sessions/2026-08-29-writing-tools-crash/summary.md)_
+
 - **The status-check stream (#171–#174) shipped with its manual passes still
   owed.** Two things the mock cannot express: one `app/scripts/sandbox.sh
   --app` pass on main (click-select feel, the row ▸ hover, ⋯ Close, the
