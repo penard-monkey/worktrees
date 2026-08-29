@@ -104,9 +104,17 @@ export function panelsFor(s: Settings, key: string | null): Settings {
 }
 
 export type Settings = {
-  ui_rem: number; // 13–18
+  ui_rem: number; // 13–22 — the BASE chrome size (see `app_zoom` for the overall knob)
+  // Overall app zoom — WKWebView page zoom, ⌘+ / ⌘− / ⌘0 (see ZOOM_STEPS).
+  // Deliberately a DIFFERENT knob from `ui_rem`: `ui_rem` is a typographic
+  // preference that leaves the terminal grid alone (tokens.css keeps
+  // `--term-size` independent on purpose), while this scales the whole page —
+  // chrome, the px-sized icons, the markdown viewer AND the terminal, which then
+  // refits and re-cols the tmux pane. It is what makes the app legible on a
+  // headset's virtual display, where every base size is simply too small.
+  app_zoom: number; // ZOOM_STEPS[0]–ZOOM_STEPS[last]
   term_family: string;
-  term_size: number; // 10–20
+  term_size: number; // 10–24
   theme: ThemeSetting;
   theme_light: ThemeId; // the pair "system" flips between
   theme_dark: ThemeId;
@@ -226,6 +234,7 @@ export const SETTINGS_REV = 1;
 
 export const DEFAULTS: Settings = {
   ui_rem: 15,
+  app_zoom: 1,
   term_family: '"SF Mono", Menlo, Monaco, monospace',
   term_size: 13,
   theme: "tokyo-night",
@@ -278,8 +287,46 @@ export type UpdateInfo = {
   latest: string | null; // release tag, e.g. "v0.2.0"; null offline / no releases
 };
 
-export const clampRem = (v: number) => Math.max(13, Math.min(18, v));
-export const clampTerm = (v: number) => Math.max(10, Math.min(20, v));
+export const clampRem = (v: number) => Math.max(13, Math.min(22, v));
+export const clampTerm = (v: number) => Math.max(10, Math.min(24, v));
+
+// ── app zoom ─────────────────────────────────────────────────────────────
+// A STEP TABLE, not a linear range: browser zoom is multiplicative, so a fixed
+// +0.1 is a big jump at 0.8 and an invisible one at 3.0. Coarser as it climbs,
+// matching what Safari/Chrome do. 1 is always a member so ⌘0 lands on a step.
+export const ZOOM_STEPS = [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3] as const;
+const ZOOM_MIN = ZOOM_STEPS[0];
+const ZOOM_MAX = ZOOM_STEPS[ZOOM_STEPS.length - 1];
+
+/** Nearest legal zoom step. Also the guard against a garbage persisted value —
+ *  a NaN reaching `set_zoom` is a window nobody can zoom back out of. */
+export function clampZoom(v: number): number {
+  if (!Number.isFinite(v)) return DEFAULTS.app_zoom;
+  const bound = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v));
+  return ZOOM_STEPS.reduce((best, s) => (Math.abs(s - bound) < Math.abs(best - bound) ? s : best), ZOOM_STEPS[0] as number);
+}
+
+/** One step up (`dir` 1) or down (-1); saturates at the ends. */
+export function stepZoom(v: number, dir: 1 | -1): number {
+  const cur = clampZoom(v);
+  const i = ZOOM_STEPS.indexOf(cur as (typeof ZOOM_STEPS)[number]);
+  return ZOOM_STEPS[Math.max(0, Math.min(ZOOM_STEPS.length - 1, i + dir))];
+}
+
+/** Push the zoom to the webview. Unlike `applySettings` this is an IPC round
+ *  trip, so it is NOT folded into it: it is called once at startup and again
+ *  only when the factor actually CHANGES. Failure is logged, never thrown —
+ *  a webview that refuses to zoom must not take the app down with it, and in
+ *  the browser harness there is no webview at all. */
+let zoomApplied: number | null = null;
+export function applyZoom(v: number): void {
+  const factor = clampZoom(v);
+  if (zoomApplied === factor) return;
+  zoomApplied = factor;
+  invoke("set_zoom", { factor }).catch(() => {
+    /* harness / older backend — the page simply stays at 1 */
+  });
+}
 
 // ── markdown preview zoom ───────────────────────────────────────────────────
 // Discrete stops, not a free number: a reading size is chosen by pressing a key

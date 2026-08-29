@@ -813,6 +813,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       if (args.refresh && !mockTmuxStuck) mockTmux = true;
       return mockTmux;
 
+    // App zoom. There is no webview to zoom in a browser harness, so this is a
+    // sink — but it must exist, or `applyZoom` logs a rejected invoke on every
+    // ⌘+ and the harness's console reads as broken. `document.body.style.zoom`
+    // is a deliberate NON-goal: it is not what the real path does, and a
+    // half-faithful mock of a layout mechanism is worse than an honest no-op.
+    case "set_zoom":
+      return null;
+
     // Claude plan usage → the nav-footer bars. Mirrors the oauth shape from
     // lib.rs: a Fable bucket at severity "warning" so the amber tier is
     // exercisable, and `?usage=stale` / `?usage=off` for the two degraded

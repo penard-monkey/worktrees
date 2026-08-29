@@ -13,7 +13,7 @@ import {
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
 import { fileInfo } from "./filekind";
-import { applySettings, clampDock, clampMdZoom, clampNav, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
@@ -100,10 +100,23 @@ const NAV_CHORDS: { home?: boolean; lens?: Lens }[] = [
   { home: true }, { lens: "places" }, { lens: "recent" }, { lens: "attention" },
 ];
 
-// Markdown reading-size chords. Both faces of each key: ⌘+ is ⌘⇧= on a US
-// layout ("+"), ⌘− is plain "-" but "_" when shifted, and the numeric keypad
-// sends "+"/"-" unshifted. ⌘0 resets.
-const ZOOM_KEYS = new Set(["+", "=", "-", "_", "0"]);
+// Size chords. ⌘+/⌘−/⌘0 is the OVERALL app size (page zoom); add ⌥ for the
+// rendered markdown's reading size. `zoomDir` answers 1 / -1 / 0 (reset), or
+// undefined when the key is not a size chord at all.
+//
+// `e.key` covers both faces of each key: ⌘+ is ⌘⇧= on a US layout ("+"), ⌘− is
+// plain "-" but "_" when shifted, and the numeric keypad sends "+"/"-"
+// unshifted. `e.code` is the fallback, and it is what the ⌥ variants NEED:
+// macOS composes Option with the keyboard layout, so ⌥- arrives as "–" (an en
+// dash) and ⌥= as "≠". Keyed on `e.key` alone, ⌘⌥+/⌘⌥− would be silently dead
+// on exactly the layouts that compose — the chord fires, matches nothing, and
+// the reader never resizes. `e.code` is the physical key, so it is immune.
+const ZOOM_BY_KEY: Record<string, 1 | -1 | 0> = { "+": 1, "=": 1, "-": -1, "_": -1, "0": 0 };
+const ZOOM_BY_CODE: Record<string, 1 | -1 | 0> = {
+  Equal: 1, NumpadAdd: 1, Minus: -1, NumpadSubtract: -1, Digit0: 0, Numpad0: 0,
+};
+// `??`, not `||`: 0 is a legal direction (reset) and would fall through `||`.
+const zoomDir = (e: KeyboardEvent): 1 | -1 | 0 | undefined => ZOOM_BY_KEY[e.key] ?? ZOOM_BY_CODE[e.code];
 
 /** Where ⌘F lands. Follows the surface the user last TOUCHED, not the one that
  *  holds DOM focus: the file tree's rows are plain divs, so clicking a file to
@@ -3100,6 +3113,13 @@ function App() {
     updateSettings({ term_tab_active: all });
   };
 
+  // Push the app zoom to the webview. Its own effect rather than a line in
+  // `applySettings`: that one is a synchronous handful of CSS-var writes called
+  // on every settings change, this is an IPC round trip. `applyZoom` no-ops when
+  // the factor is unchanged, so this covers hydration and every later step with
+  // one invoke each.
+  useEffect(() => { applyZoom(settings.app_zoom); }, [settings.app_zoom]);
+
   // theme "system": re-apply when macOS appearance flips
   useEffect(() => {
     if (settings.theme !== "system") return;
@@ -4168,7 +4188,7 @@ function App() {
   }, []);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
-  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface });
+  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface });
   const filesTabOpen = eff.dock_open && eff.dock_tab === "files";
   keyRef.current = {
     selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
@@ -4180,6 +4200,8 @@ function App() {
     // The SELECTED place's size, not the global one — the chord must move the
     // same number the header shows, which is `eff`.
     mdZoom: eff.files_md_zoom,
+    // App zoom is global by nature — one window, one page zoom.
+    appZoom: settings.app_zoom,
     // ⌘F: which surfaces can take the bar, and which one already has it.
     dockShown, dockTab: eff.dock_tab, mainTermUp: !!selected?.tmux_session.up, findOn,
   };
@@ -4230,22 +4252,51 @@ function App() {
         setReading((v) => (v ? false : keyRef.current.filesTabOpen && !!keyRef.current.dockFile));
         return;
       }
-      // ⌘+ / ⌘− / ⌘0 — reading size of the rendered markdown. ABOVE the
-      // meta-only gate on purpose: on a US layout ⌘+ arrives as ⌘⇧= (key "+"),
-      // and the gate drops every shifted chord. Repeat is allowed here, unlike
-      // the toggles — holding the key to walk up the steps is the point.
-      if (e.metaKey && !e.ctrlKey && !e.altKey && ZOOM_KEYS.has(e.key)) {
+      // ⌘+ / ⌘− / ⌘0 — OVERALL app size; ⌘⌥ the same keys — the rendered
+      // markdown's reading size. ABOVE the meta-only gate on purpose: on a US
+      // layout ⌘+ arrives as ⌘⇧= (key "+"), and the gate drops every shifted
+      // chord (and every ⌥ one). Repeat is allowed here, unlike the toggles —
+      // holding the key to walk up the steps is the point.
+      //
+      // The unmodified chord is the APP's because that is what it means in every
+      // other Mac app, and because it is the one that reaches the terminal:
+      // `--ui-rem` deliberately leaves the xterm grid alone, so before this the
+      // only way to make a tmux pane legible was a second, separate slider.
+      // Markdown reading size keeps its header +/− buttons either way.
+      // The `dir === undefined` case FALLS THROUGH to the meta-only section
+      // rather than returning: ⌘ plus anything that is not a size key is still
+      // somebody else's chord.
+      const dir = e.metaKey && !e.ctrlKey ? zoomDir(e) : undefined;
+      if (dir !== undefined) {
         const kr = keyRef.current;
-        if (!kr.mdPreview || kr.switchOpen || kr.settingsOpen) return;
+        if (e.altKey) {
+          if (!kr.mdPreview || kr.switchOpen || kr.settingsOpen) return;
+          e.preventDefault();
+          const cur = clampMdZoom(kr.mdZoom);
+          const next = dir === 0 ? DEFAULTS.files_md_zoom : stepMdZoom(cur, dir);
+          // keyRef is rebuilt on render; without this the second press of a fast
+          // double-tap would step from the value the FIRST one started at.
+          kr.mdZoom = next;
+          // updatePanels, not updateSettings: the size belongs to the place being
+          // read. (It is `useCallback([])`-stable, so this stale-closure-free.)
+          if (next !== cur) updatePanels({ files_md_zoom: next });
+          return;
+        }
+        // Deliberately NOT gated on the ⌘K palette or the Settings sheet, unlike
+        // every other chord in here: "make everything bigger" is exactly what
+        // you reach for while squinting at a sheet, and page zoom cannot disturb
+        // what either of them is holding.
         e.preventDefault();
-        const cur = clampMdZoom(kr.mdZoom);
-        const next = e.key === "0" ? 100 : stepMdZoom(cur, e.key === "-" || e.key === "_" ? -1 : 1);
-        // keyRef is rebuilt on render; without this the second press of a fast
-        // double-tap would step from the value the FIRST one started at.
-        kr.mdZoom = next;
-        // updatePanels, not updateSettings: the size belongs to the place being
-        // read. (It is `useCallback([])`-stable, so this stale-closure-free.)
-        if (next !== cur) updatePanels({ files_md_zoom: next });
+        const cur = clampZoom(kr.appZoom);
+        const next = dir === 0 ? DEFAULTS.app_zoom : stepZoom(cur, dir);
+        kr.appZoom = next; // same fast-double-tap reason as mdZoom above
+        // `updateSettings` is re-created every render, and this effect re-registers
+        // only on its own deps — so the copy captured here is from an ARBITRARY
+        // past render, not necessarily the latest. Safe anyway, and deliberately
+        // not in the deps: it reads state exclusively through the functional
+        // `setSettings` and refs, so every copy of it behaves identically. Do not
+        // reuse that reasoning for a value read out of a render closure.
+        if (next !== cur) updateSettings({ app_zoom: next });
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;

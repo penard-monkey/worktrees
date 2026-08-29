@@ -327,6 +327,24 @@ is invisible to the bats suite — there is no fake claude. Re-run
   impl is an unconditional `Some(self.id())`, and `list_shell_sessions` reaps on
   every dock mount — so anything sampling by pid needs a `try_wait` liveness
   check first, or it eventually reads a stranger's process).
+- **⌘+/⌘−/⌘0 is WKWebView page zoom, not a CSS multiplier.** `set_zoom` in
+  lib.rs → `setPageZoom`; the frontend owns the step table (`ZOOM_STEPS`) and
+  persists it. Page zoom is the only mechanism that reaches everything — the
+  px-sized `Icons` props and the terminal, whose ResizeObserver refit re-cols
+  the tmux pane; `--ui-rem` deliberately cannot (tokens.css keeps `--term-size`
+  independent). Do NOT switch to tauri's `zoomHotkeysEnabled`: it injects a
+  `window` listener that ignores `defaultPrevented`, so it fires ALONGSIDE the
+  app's own handler, keeps a script-local level that desyncs from any
+  programmatic call, and forgets it on restart.
+- **An ⌥ chord cannot be matched on `e.key`.** macOS composes Option with the
+  layout: ⌥- arrives as "–" (en dash), ⌥= as "≠", ⌥0 as "º". A handler keyed on
+  the character is silently dead on every US Mac — the chord fires and matches
+  nothing. `e.code` (`Minus`/`Equal`/`Digit0`) is the physical key and is
+  immune; `zoomDir` in App.tsx tries `e.key` first and falls back to it. Merge
+  the two tables with `??`, never `||` — 0 is a legal direction (reset).
+  `app/scripts/zoom-check.mjs` guards both, and also that `ZOOM_STEPS` stays
+  inside the Rust clamp; it slices the real handler out of App.tsx the way
+  `race-check.mjs` does, so it tests the edit and not a paraphrase.
 - **Playwright: a two-click arm needs BOTH clicks in one `browser_evaluate`.**
   The arm expires in 4s — longer than one MCP round-trip — and the button's
   `title` CHANGES when armed, so selecting on the unarmed title silently hits a

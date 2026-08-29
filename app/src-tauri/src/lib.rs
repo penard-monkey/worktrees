@@ -4086,6 +4086,35 @@ async fn tmux_check(refresh: bool) -> Result<bool, String> {
     Ok(after)
 }
 
+/// App-wide zoom — WKWebView's `setPageZoom`, driven by ⌘+ / ⌘− / ⌘0.
+///
+/// This is deliberately NOT tauri's `zoomHotkeysEnabled`. That option injects a
+/// script (`tauri/src/webview/scripts/zoom-hotkey.js`) whose `window` keydown
+/// listener never checks `defaultPrevented` — so it would fire ALONGSIDE the
+/// frontend's own handler — keeps the level in a script-local variable that
+/// desyncs from any programmatic call, steps by a coarse 0.2, and forgets the
+/// level on every restart. The frontend owns the step table and persists it in
+/// `ui-state.json`; this command is the one line of platform underneath.
+///
+/// Page zoom is what makes the knob reach the TERMINAL: it shrinks the CSS-px
+/// viewport, TerminalPane's ResizeObserver refits, and the tmux pane is resized
+/// to the new cols/rows. `--ui-rem` alone can never do that (tokens.css keeps
+/// `--term-size` independent on purpose).
+#[tauri::command]
+async fn set_zoom(window: tauri::WebviewWindow, factor: f64) -> Result<(), String> {
+    // A NaN or a wild factor here is a blank window the user cannot zoom back
+    // out of — the clamp is the frontend's, repeated because this is an IPC
+    // boundary and the frontend is not the only possible caller.
+    if !factor.is_finite() {
+        return Err("zoom factor is not a finite number".into());
+    }
+    let factor = factor.clamp(0.5, 3.0);
+    window.set_zoom(factor).map_err(|e| {
+        applog("error", &format!("set_zoom({factor}): {e}"));
+        e.to_string()
+    })
+}
+
 /// Same launchd-bare-env problem as PATH, but for locale: GUI-launched apps
 /// have no LC_ALL/LC_CTYPE/LANG, so everything we spawn (tmux server via the
 /// engine's shell-outs, shells inside sessions) runs locale-less. The embedded
@@ -4264,6 +4293,7 @@ pub fn run() {
             init_write,
             diagnostics,
             tmux_check,
+            set_zoom,
             claude_usage,
             log_info,
             log_event,
