@@ -399,6 +399,13 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   font-size: var(--fs-row); font-weight: var(--fw-med); color: var(--txt-hi);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Untouched for two weeks (App.tsx STALE_DAYS). Only the NAME dims: the ★ pin
+   prefix lives inside `.row-name`, so a pinned place keeps its position and
+   loses its shout in one rule, while `.row-age` beside it stays full strength —
+   the age is the explanation for the dim, not part of it. Declared BEFORE
+   `.row.sel` (equal specificity, so source order decides): the row you are
+   actually looking at is never the dim one. */
+.row.stale .row-name { color: var(--txt-mute); }
 .row.sel .row-name { color: var(--accent); font-weight: var(--fw-bold); }
 .row-proj { color: var(--txt-mute); font-weight: var(--fw-body); font-size: var(--fs-meta); margin-left: var(--s2); }
 .row-branch { font-size: var(--fs-meta); color: var(--branch-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

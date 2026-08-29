@@ -105,7 +105,7 @@ def main():
         page.wait_for_timeout(600)
 
         # 1. The app with a profiled session live — the topbar badge in place.
-        page.locator(".row", has_text="messaging").first.click()
+        page.locator(".row", has_text="messaging").first.dblclick()  # click selects; double opens
         page.wait_for_selector(".term-host", timeout=8000)
         page.wait_for_timeout(500)
         shot(page, args.raw, "01-badge-stale")

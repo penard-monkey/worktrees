@@ -119,7 +119,7 @@ def main():
         page.wait_for_timeout(600)
         row = page.locator(".row", has_text="messaging").first
         glide(page, row, 0.4)
-        row.click()
+        row.dblclick()  # a single click only selects — opening is the double
         page.wait_for_timeout(2000)
 
         ctx.close()   # flushes the video

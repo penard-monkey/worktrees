@@ -161,7 +161,12 @@ const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
  *  is rendered the slug must stay reachable rather than be replaced outright. */
 const nameOf = (p: { slug: string; declared?: Declared }) => p.declared?.title?.trim() || p.slug;
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
-const hasAttention = (p: Place) => !!p.dirty || !!p.ahead || !!p.behind;
+/** Worth a look. `behind` counts only for `(main)`, where the base ref IS
+ *  origin/main and ↓ means "pull" — on a worktree it only says the base moved
+ *  under you, which is not something the worktree did wrong and not something
+ *  the lens should collect. `dirty` and `ahead` are work that exists nowhere
+ *  else yet; those are the signals. */
+const hasAttention = (p: Place) => !!p.dirty || !!p.ahead || (p.is_main && !!p.behind);
 
 // nav icons live in ./icons now — inline SVG, inheriting currentColor per theme
 const FolderIcon = Icons.Folder16;
@@ -228,12 +233,24 @@ function glyphs(p: Place, drift?: boolean) {
   if (drift) g.push({ cls: "g-drift", text: "⚑", title: "config drift — right-click the project → Project settings…" });
   if (p.dirty) g.push({ cls: "g-dirty", text: `●${p.dirty_files ?? ""}`, title: `${p.dirty_files ?? "dirty"} uncommitted` });
   if (p.ahead) g.push({ cls: "g-ahead", text: `↑${p.ahead}`, title: `${p.ahead} ahead of the base branch` });
-  if (p.behind) g.push({ cls: "g-behind", text: `↓${p.behind}`, title: `${p.behind} behind the base branch` });
+  // ↓ is main-only. For `(main)` the base ref IS origin/main, so behind is the
+  // app's one honest "you need to pull". On a worktree the same number means
+  // "the base moved" — true, unactionable, and printed on nearly every row once
+  // main advances, which is what made the nav read as a wall of alarm.
+  if (p.is_main && p.behind) g.push({ cls: "g-behind", text: `↓${p.behind}`, title: `${p.behind} to pull` });
   if (p.detached) g.push({ cls: "g-det", text: "⑂", title: "detached HEAD" });
   const MAX = 4;
   if (g.length > MAX) return [...g.slice(0, MAX), { cls: "g-more", text: `+${g.length - MAX}`, title: "more" }];
   return g;
 }
+
+/** How long a place may sit untouched before its row dims. Two weeks is the
+ *  same horizon `crates/worktrees-core`'s health checking will mirror as
+ *  `STALE_SECS` — keep the two in sync; the nav and a `worktrees status`
+ *  verdict disagreeing about what "stale" means would be worse than either
+ *  number being wrong. Aging is a DIM, never a reorder: a pinned place keeps
+ *  the spot you put it in and just stops pretending it is current. */
+const STALE_DAYS = 14;
 
 type Ctx =
   | { kind: "place"; x: number; y: number; repo: string; slug: string }
@@ -2312,7 +2329,10 @@ function App() {
   // replaced). A red banner for a question is what this whole path exists to
   // stop, so it does not share the error register.
   const [notice, setNotice] = useState("");
-  const [menu, setMenu] = useState<"life" | "more" | null>(null);
+  // Which topbar popover is open. One member since the Lifecycle ▾ popover left
+  // — kept as a union rather than a boolean because the state machine (one
+  // popover at a time, every dismissal path through closeMenu) is the point.
+  const [menu, setMenu] = useState<"more" | null>(null);
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
@@ -3541,9 +3561,18 @@ function App() {
     setConfirmRm((c) => (c === key ? null : c));
     return true;
   };
-  // Topbar Close (bare control, "close|" key — auto-disarms, see isBareArm).
+  // Topbar Close ("close|" key — auto-disarms, see isBareArm). It lives in the
+  // ⋯ popover now rather than standing in the header as its own control.
   const closeTopbar = (repo: string, slug: string, armed: boolean) =>
     doClose(repo, slug, closeKey(repo, slug), armed);
+  // …and because it is in a popover, the popover has to go when the session
+  // does — `closeSession`'s shape. On the ARMING click doClose returns false and
+  // the menu stays open holding the offer; anything that dismisses the menu
+  // (closeMenu, the .menu-catch backdrop) clears the arm, so re-opening ⋯ can
+  // never show a pre-armed one-click kill.
+  const closeFromMenu = async (repo: string, slug: string, armed: boolean) => {
+    if (await closeTopbar(repo, slug, armed)) closeMenu();
+  };
   // ── context-menu verbs ──
   // ctx-menu "Close session": same two-click arm, popover key. On the arming
   // click the menu STAYS open (removeProjectCtx's shape); it closes once the
@@ -4526,6 +4555,11 @@ function App() {
     // no position there to drag a row into.
     const draggable = !p.is_main && !showProject;
     const isSource = drag?.item.kind === "place" && drag.item.slug === p.slug && drag.item.repo === repo;
+    // Aging, off the same clock the row already prints (`activityAt`) — so the
+    // dim and the "23d" beside it are the same statement, and rows refresh it
+    // on every poll for free. `(main)` never dims: it is the anchor of the
+    // project, not a cleanup candidate, and an untouched main is normal.
+    const stale = !p.is_main && Date.now() / 1000 - activityAt(p) > STALE_DAYS * 86400;
     return (
       <li
         className={
@@ -4533,7 +4567,8 @@ function App() {
           (sel?.repo === repo && sel?.slug === p.slug ? " sel" : "") +
           (isSource ? " drag-src" : "") +
           (flash?.repo === repo && flash.slug === p.slug ? " flash" : "") +
-          (draggable ? " draggable" : "")
+          (draggable ? " draggable" : "") +
+          (stale ? " stale" : "")
         }
         data-slug={p.slug}
         // Click SELECTS; opening is always an explicit gesture (double-click, the
@@ -4773,7 +4808,7 @@ function App() {
   const RAIL = [
     { key: "places" as Lens, icon: <Icons.ListTree size={17} />, title: "Places — the full tree" },
     { key: "recent" as Lens, icon: <Icons.History size={17} />, title: "Recent — resurface dormant places" },
-    { key: "attention" as Lens, icon: <Icons.TriangleAlert size={17} />, title: "Attention — dirty / ahead-behind / broken" },
+    { key: "attention" as Lens, icon: <Icons.TriangleAlert size={17} />, title: "Attention — dirty / unpushed / unpulled main / broken" },
   ];
   const DOCK_RAIL = [
     { key: "files" as Settings["dock_tab"], icon: <Icons.Folder size={17} />, title: "Files" },
@@ -4928,13 +4963,30 @@ function App() {
                   </span>
                 )}
                 {/* squeezed window: the badges go, not the name — every fact
-                    here is also in the nav row and the status bar */}
+                    here is also in the nav row.
+                    No "live" badge here: the controls carry one already (it
+                    doubles as the Close affordance), and the header said it
+                    twice, a hand's width apart.
+                    ↓ is main-only, for the same reason as the nav glyphs: on a
+                    worktree "the base moved" is not news. `is_main && behind`
+                    also decides whether the badge renders at all, so a clean
+                    worktree whose base advanced shows nothing rather than "↑0".
+                    The lifecycle chip only speaks when it disagrees with the
+                    dot — "active" beside a live session is a label for a fact
+                    already on screen. */}
                 {!fit.tight && (
                   <span className="status-cluster">
-                    {selected.tmux_session.up && <span className="s ok" title="tmux live"><span className="status-dot on" /> live</span>}
                     {selected.dirty && <span className="s dirty">● {selected.dirty_files ?? ""}</span>}
-                    {(selected.ahead || selected.behind) && <span className="s ab" title="vs the base branch">↑{selected.ahead ?? 0} ↓{selected.behind ?? 0}</span>}
-                    <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
+                    {(!!selected.ahead || (selected.is_main && !!selected.behind)) && (
+                      <span className="s ab" title="vs the base branch">
+                        {selected.ahead ? `↑${selected.ahead}` : ""}
+                        {selected.ahead && selected.is_main && selected.behind ? " " : ""}
+                        {selected.is_main && selected.behind ? `↓${selected.behind}` : ""}
+                      </span>
+                    )}
+                    {selected.lifecycle_effective !== "active" && (
+                      <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
+                    )}
                   </span>
                 )}
               </div>
@@ -4968,14 +5020,6 @@ function App() {
                         {selected.profile_stale ? " · restart to apply" : ""}
                       </span>
                     ) : null}
-                    {confirmRm === closeKey(sel.repo, sel.slug) ? (
-                      <button className="ctrl danger armed"
-                        title={`${closeSess} was adopted, not opened under this repo's name — killing it takes the WHOLE session, every window and pane in it`}
-                        onClick={() => closeTopbar(sel.repo, sel.slug, true)}>Kill {closeSess} — whole session?</button>
-                    ) : (
-                      <button className="ctrl" title="end the tmux session — the worktree stays"
-                        onClick={() => closeTopbar(sel.repo, sel.slug, false)}>Close</button>
-                    )}
                   </>
                 ) : (
                   <button className="enter-btn with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /></button>
@@ -4989,30 +5033,31 @@ function App() {
                   <Icons.Pin filled={!!selected.declared?.pinned} />
                 </button>
 
-                <div className="menu-wrap">
-                  <button className="ctrl with-icon" onClick={() => (menu === "life" ? closeMenu() : (setConfirmRm(null), setMenu("life")))}>
-                    Lifecycle <Icons.ChevronDown size={13} />
-                  </button>
-                  {menu === "life" && (
-                    <div className="popover right">
-                      <div className="pop-hint">active / idle are derived</div>
-                      {SETTABLE.map((s) => (
-                        <button key={s.value} className="pop-item" onClick={() => { mutate(invoke("set_lifecycle", { repo: sel.repo, slug: sel.slug, label: s.value })); closeMenu(); }}>
-                          <span className="check">{selected.declared?.lifecycle === s.value && <Icons.Check size={12} />}</span>{s.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
                 {/* The menu is no longer gated on `!is_main`: Rename and Copy
                     path apply to the main checkout too — its slug is the
                     literal "(main)", which is exactly where a real name helps
-                    most. Only Remove stays main-only. */}
+                    most. Only Remove stays main-only.
+                    It also absorbed Close, which used to be a permanent control
+                    beside the live badge: ending a session is deliberate and
+                    rare, and a destructive button standing in the header is one
+                    slip away from taking the session you are reading. The
+                    Lifecycle ▾ popover that sat here went entirely — the same
+                    four states are one right-click away on the row, which is
+                    where a lifecycle decision has the place in front of it. */}
                 <div className="menu-wrap">
                   <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
                   {menu === "more" && (
                     <div className="popover right">
+                      {selected.tmux_session.up && (
+                        confirmRm === closeKey(sel.repo, sel.slug) ? (
+                          <button className="pop-item danger armed"
+                            title={`${closeSess} was adopted, not opened under this repo's name — killing it takes the WHOLE session, every window and pane in it`}
+                            onClick={() => closeFromMenu(sel.repo, sel.slug, true)}>Kill {closeSess} — whole session?</button>
+                        ) : (
+                          <button className="pop-item" title="end the tmux session — the worktree stays"
+                            onClick={() => closeFromMenu(sel.repo, sel.slug, false)}>Close session</button>
+                        )
+                      )}
                       <button className="pop-item" onClick={() => { closeMenu(); setRenaming(true); }}>
                         {selected.declared?.title ? "Rename…" : "Name this place…"}
                       </button>

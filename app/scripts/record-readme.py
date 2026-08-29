@@ -102,13 +102,14 @@ def record_flow(p, url, out):
     page.wait_for_selector(".term-host", timeout=8000)  # new place lands live
     time.sleep(2.2)
 
-    # beat 3: open — attach to another existing place
+    # beat 3: open — attach to another existing place. DOUBLE-click: a single
+    # click only selects, and this beat is teaching the gesture that opens.
     move_to(page.locator(".home-item").first, pause=0.2)
     page.locator(".home-item").first.click()
     time.sleep(0.9)
     other = page.locator(".row", has_text="feat-redesign").first
     move_to(other, pause=0.25)
-    other.click()
+    other.dblclick()
     page.wait_for_selector(".term-host", timeout=8000)
     time.sleep(2.4)
 
@@ -125,7 +126,7 @@ def capture_stills(p, url, out):
     page.wait_for_selector(".row")
     time.sleep(0.8)
     page.screenshot(path=f"{out}/shot_home.png")
-    page.locator(".row", has_text="messaging").first.click()
+    page.locator(".row", has_text="messaging").first.dblclick()  # click selects; double opens
     page.wait_for_selector(".term-host")
     time.sleep(1.0)
     page.screenshot(path=f"{out}/shot_session.png")
