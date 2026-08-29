@@ -22,6 +22,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   13–18), Terminal size 10–**24**px (was 10–20). These set the base that
   Overall size then multiplies; the UI one still deliberately leaves the
   terminal grid alone.
+- **Clicking a worktree in the sidebar now just selects it.** Nothing launches:
+  no tmux session is started, no AI is resumed, and the place's "last opened"
+  clock stays where it was. Opening is a thing you ask for — double-click the
+  row, press the **▸** button that appears on it when you hover or select it,
+  use **Enter** in the header, or pick Enter from the right-click menu. Browsing
+  the tree to see where you left something no longer leaves a trail of live
+  sessions behind it, and "this place is active" goes back to meaning you were
+  working there rather than passing through. The Resume list on the Home screen
+  is unchanged — those rows still open on a single click, which is what Resume
+  means.
 
 ## [0.18.0] - 2026-08-28
 
