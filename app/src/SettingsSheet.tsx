@@ -6,7 +6,7 @@ import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
-import { clampNav, clampRem, clampTerm, THEMES } from "./settings";
+import { clampNav, clampRem, clampTerm, clampZoom, THEMES, ZOOM_STEPS } from "./settings";
 
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
@@ -158,7 +158,9 @@ export function SettingsSheet({
         `\nUI settings\n-----------\n` +
         `theme   : ${settings.theme}\n` +
         `density : ${settings.density}\n` +
-        `ui_rem  : ${settings.ui_rem}px\n`;
+        `ui_rem  : ${settings.ui_rem}px\n` +
+        `app_zoom: ${Math.round(clampZoom(settings.app_zoom) * 100)}%\n` +
+        `term    : ${settings.term_size}px\n`;
       await navigator.clipboard.writeText(back + ui);
       setDiagCopied(true);
       setTimeout(() => setDiagCopied(false), 2000);
@@ -265,7 +267,7 @@ export function SettingsSheet({
             />
             <label className="sub">Terminal size <span className="val">{settings.term_size}px</span></label>
             <input
-              type="range" min={10} max={20} step={1} value={settings.term_size}
+              type="range" min={10} max={24} step={1} value={settings.term_size}
               onChange={(e) => onChange({ term_size: clampTerm(+e.currentTarget.value) })}
             />
           </section>
@@ -311,13 +313,29 @@ export function SettingsSheet({
           </>}
 
           {cat === "appearance" && <>
+          {/* Overall size first: it is the knob that moves EVERYTHING, and the
+              two below it are then a preference within it. The slider walks
+              ZOOM_STEPS by index rather than taking a percentage directly, so
+              it can only ever land on a legal step (browser zoom is
+              multiplicative — a linear range gives useless 1% moves at 3×). */}
+          <section className="setting">
+            <label>Overall size <span className="val">{Math.round(clampZoom(settings.app_zoom) * 100)}%</span></label>
+            <input
+              type="range" min={0} max={ZOOM_STEPS.length - 1} step={1}
+              value={Math.max(0, ZOOM_STEPS.indexOf(clampZoom(settings.app_zoom) as (typeof ZOOM_STEPS)[number]))}
+              onChange={(e) => onChange({ app_zoom: ZOOM_STEPS[+e.currentTarget.value] })}
+            />
+            <div className="hint">⌘+ / ⌘− / ⌘0 anywhere in the app. Scales the whole window — chrome, icons, files and the terminal, which re-fits its tmux pane to the new size. (⌘⌥+ / ⌘⌥− is the markdown reader's own size.)</div>
+          </section>
+
           <section className="setting">
             <label>UI font size <span className="val">{settings.ui_rem}px</span></label>
             <input
-              type="range" min={13} max={18} step={1} value={settings.ui_rem}
+              type="range" min={13} max={22} step={1} value={settings.ui_rem}
               onChange={(e) => onChange({ ui_rem: clampRem(+e.currentTarget.value) })}
             />
             <div className="preview">The quick brown fox jumps</div>
+            <div className="hint">The chrome's base size, before Overall size multiplies it. Does not touch the terminal — that has its own size below.</div>
           </section>
 
           <section className="setting">
@@ -544,6 +562,9 @@ export function SettingsSheet({
                 ["⌘F", "Find — in the terminal, or in the open file"],
                 ["⌘T", "New terminal in the dock"],
                 ["⌘⇧E", "Read the dock's file over the whole pane"],
+                ["⌘+ / ⌘−", "Overall size — the whole window, terminal included"],
+                ["⌘0", "Overall size back to 100%"],
+                ["⌘⌥+ / ⌘⌥−", "Reading size of a rendered markdown file"],
                 ["Esc", "Close sheets & menus"],
               ].map(([key, desc]) => (
                 <div className="shortcut-row" key={key}>

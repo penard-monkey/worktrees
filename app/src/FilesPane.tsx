@@ -738,7 +738,7 @@ export function FileView(props: FileViewProps) {
             <button
               className="seg-b"
               disabled={pct <= MD_ZOOM_MIN}
-              title="Smaller text (⌘−)"
+              title="Smaller text (⌘⌥−)"
               aria-label="Smaller text"
               onClick={() => onMdZoom(stepMdZoom(pct, -1))}
             >A−</button>
@@ -747,14 +747,14 @@ export function FileView(props: FileViewProps) {
             <button
               className="seg-b zoom-val"
               disabled={pct === 100}
-              title="Reset text size (⌘0)"
+              title="Reset text size (⌘⌥0)"
               aria-label={`Text size ${pct}%. Reset to 100%.`}
               onClick={() => onMdZoom(100)}
             >{pct}%</button>
             <button
               className="seg-b"
               disabled={pct >= MD_ZOOM_MAX}
-              title="Larger text (⌘+)"
+              title="Larger text (⌘⌥+)"
               aria-label="Larger text"
               onClick={() => onMdZoom(stepMdZoom(pct, 1))}
             >A+</button>

@@ -3,6 +3,26 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **⌘+ / ⌘− / ⌘0 — overall size.** One knob that scales the *whole window*:
+  chrome, the icons (which are px-sized SVGs and never moved with the UI-font
+  slider), the markdown viewer and — the point of the exercise — the terminal,
+  which re-fits and re-cols its tmux pane to the new size. It is WebKit page
+  zoom, so nothing is left behind. Ten steps from 80% to 300%, persisted, with
+  an **Overall size** row at the top of Settings → Appearance. Reported from an
+  Apple Vision Pro virtual display, where every base size in the app is simply
+  too small to read.
+
+### Changed
+- **Markdown reading size moves to ⌘⌥+ / ⌘⌥− / ⌘⌥0.** ⌘+/⌘− now means what it
+  means in every other Mac app. The reader's own +/− buttons are unchanged.
+- **The two base-size sliders reach further.** UI font size 13–**22**px (was
+  13–18), Terminal size 10–**24**px (was 10–20). These set the base that
+  Overall size then multiplies; the UI one still deliberately leaves the
+  terminal grid alone.
+
 ## [0.18.0] - 2026-08-28
 
 ### Added
