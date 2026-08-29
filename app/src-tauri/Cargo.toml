@@ -34,3 +34,8 @@ tauri-plugin-process = "2"
 # lock tree transitively. macOS + Linux.
 libc = "0.2"
 
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# One raw selector at startup: turn Writing Tools off for the webview, so
+# macOS's selection affordance can't take the app down. See `run`'s setup.
+objc2 = "0.6"

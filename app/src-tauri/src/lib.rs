@@ -4428,6 +4428,66 @@ pub fn run() {
         .manage(Terminals::default())
         .manage(Shells::default())
         .setup(|app| {
+            // macOS 26 floats a Writing Tools affordance (AppKit's Campo
+            // lightweight UI) over any selection, and hovering the one it puts
+            // over the webview trips an assertion inside AppKit —
+            // NSCampoLightweightUIController.m:1429, three times in app.log.
+            // The NSException that assertion raises unwinds out through tao's
+            // `sendEvent:` override, which is `extern "C"` and therefore
+            // nounwind, so Rust turns the foreign unwind into an abort: SIGABRT
+            // mid-keystroke, tmux sessions untouched. The only trace is a bare
+            // "panic in a function that cannot unwind" with NO panic line before
+            // it — because no Rust panic ever happened.
+            //
+            // Selecting text is routine here (the tab-rename box selects on
+            // focus, the terminal selects on drag), so take the affordance away.
+            // AppKit asks the view for `allowsWritingToolsAffordance`; WKWebView
+            // answers YES and offers no setter, and the settable knob
+            // (`WKWebViewConfiguration.writingToolsBehavior`) only exists before
+            // the webview is built — tauri creates this window from
+            // tauri.conf.json, so we never hold that configuration. Overriding
+            // the getter on wry's own WKWebView subclass is the small version:
+            // one added method, our instances only, no Apple class touched.
+            #[cfg(target_os = "macos")]
+            for (_, win) in app.webview_windows() {
+                let _ = win.with_webview(|pw| unsafe {
+                    let view = &*(pw.inner() as *mut objc2::runtime::AnyObject);
+                    // Skip the KVO subclass AppKit swizzles in: it can be torn
+                    // down when the last observer goes, taking the override with
+                    // it. wry's own class is the stable place for it.
+                    let mut cls = Some(view.class());
+                    while let Some(c) = cls {
+                        let name = c.name().to_string_lossy().to_string();
+                        if name.contains("WryWebView") && !name.contains("NSKVONotifying") {
+                            break;
+                        }
+                        cls = c.superclass();
+                    }
+                    match cls {
+                        Some(c) => {
+                            extern "C" fn no(
+                                _this: &objc2::runtime::AnyObject,
+                                _sel: objc2::runtime::Sel,
+                            ) -> objc2::runtime::Bool {
+                                objc2::runtime::Bool::NO
+                            }
+                            let added = objc2::ffi::class_addMethod(
+                                c as *const objc2::runtime::AnyClass as *mut objc2::runtime::AnyClass,
+                                objc2::sel!(allowsWritingToolsAffordance),
+                                std::mem::transmute::<
+                                    extern "C" fn(&objc2::runtime::AnyObject, objc2::runtime::Sel) -> objc2::runtime::Bool,
+                                    unsafe extern "C-unwind" fn(),
+                                >(no),
+                                c"c@:".as_ptr(),
+                            );
+                            if !added.as_bool() {
+                                applog("warn", "writing-tools affordance: class_addMethod failed");
+                            }
+                        }
+                        None => applog("warn", "writing-tools affordance: wry webview class not found"),
+                    }
+                });
+            }
             // Live-refresh, change-gated. The tmux session set is a cheap
             // fingerprint that shifts whenever a place is opened/closed (even from a
             // bare terminal); emit only when it changes, so the UI's full re-pull (a

@@ -80,6 +80,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   pinning one. The main checkout never fades: it is the anchor, not something
   to clean up.
 
+### Fixed
+- **The app no longer dies when you select text.** macOS 26 floats a Writing
+  Tools affordance over any selection in the webview — the tab-rename box
+  selects itself on focus, and a drag across terminal output does it too — and
+  hovering that affordance trips an assertion *inside AppKit*
+  (`NSCampoLightweightUIController.m:1429`). The exception it raises unwinds out
+  through tao's `sendEvent:`, which is `extern "C"` and cannot unwind, so the
+  process aborts: the window vanishes mid-keystroke, leaving `panic in a
+  function that cannot unwind` in the log and no panic of ours anywhere near it.
+  Work survived only because the shells live in tmux. Writing Tools has nothing
+  to offer a terminal, so the webview now declines the affordance outright.
+
 ## [0.18.0] - 2026-08-28
 
 ### Added
