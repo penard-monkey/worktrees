@@ -414,6 +414,25 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .g-drift { color: var(--warn); }
 .g-more { color: var(--txt-mute); background: var(--bg-panel); padding: 0 4px; border-radius: var(--r-full); }
 .row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; }
+/* The enter affordance rides in the age's slot. Both children occupy grid cell
+   1/1, so the slot is sized by the WIDER of them and the hover swap cannot
+   change the row's width — the name beside it never shifts. `visibility` rather
+   than `display` for the same reason: the age has to keep reserving its box
+   while the button is over it (and a hidden button is out of the tab order). */
+.row-slot { display: grid; align-items: center; justify-items: end; }
+.row-slot > * { grid-area: 1 / 1; }
+.row-enter {
+  visibility: hidden;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 0; color: var(--txt-dim);
+  border-radius: var(--r-sm); padding: 0 2px; min-width: 2em; font-size: var(--fs-micro);
+  transition: color var(--dur-fast), background var(--dur-fast);
+}
+.row-enter:hover { color: var(--accent); background: var(--bg-panel); }
+.row:hover .row-enter, .row.sel .row-enter { visibility: visible; }
+/* scoped to .row-slot: PendingRow prints "creating…" in a bare .row-age and must
+   keep saying so while the pointer is over it. */
+.row:hover .row-slot .row-age, .row.sel .row-slot .row-age { visibility: hidden; }
 
 /* ── space ──
  * One grid cell holding the selected place's whole workbench: the header on

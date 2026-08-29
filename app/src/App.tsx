@@ -3476,10 +3476,30 @@ function App() {
     setConfirmRm(null);
   };
 
+  // Browsing verb: point at a place, change nothing about it.
+  //
+  // CONTRACT: selecting must NEVER create a tmux session and must NEVER stamp
+  // recency. That is the whole reason it exists apart from `enterPlace` — a
+  // click that opened a session made every browsed place "active" and pushed
+  // `last_opened_epoch` to now, so the two signals the app reasons with (is a
+  // session up, when was I last here) recorded browsing rather than working.
+  // Keeping this select-only is what makes `last_opened_epoch` an honest "I was
+  // there"; the health check reads it. No `setTermFocus` bump either: there may
+  // be no terminal to hand the keyboard to, and selection alone should not steal
+  // focus from the nav you are arrowing through.
+  const selectPlace = (repo: string, p: Place) => {
+    setSel({ repo, slug: p.slug });
+    setMenu(null);
+    closeCtx();
+  };
+
   // THE primary verb: inhabit a place — stamp recency, ensure its session, select it.
   // `fresh` skips the AI auto-resume. Explicit opts.fresh (right-click override)
   // wins; otherwise the ai_auto_resume setting decides — OFF → default opens are
   // fresh. (Backend no-ops resume unless the AI command is claude anyway.)
+  // Only EXPLICIT gestures reach here: double-click or the ▸ button on a nav row,
+  // the topbar/empty-state Enter, the ctx-menu entries, quick-switch, and the
+  // home Resume rows. A plain nav click goes to `selectPlace` above.
   const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
     setSel({ repo, slug: p.slug });
     setMenu(null);
@@ -4516,7 +4536,12 @@ function App() {
           (draggable ? " draggable" : "")
         }
         data-slug={p.slug}
-        onClick={() => enterPlace(repo, p)}
+        // Click SELECTS; opening is always an explicit gesture (double-click, the
+        // ▸ button below, the topbar/empty-state Enter, or the ctx menu). The
+        // first click of a double-click selects and the second enters — enterPlace
+        // selects as well, so the pair lands on the same place either way.
+        onClick={() => selectPlace(repo, p)}
+        onDoubleClick={() => enterPlace(repo, p)}
         onContextMenu={(e) => placeCtx(e, repo, p)}
         onPointerDown={draggable ? (e) => arm(e, { kind: "place", repo, slug: p.slug }) : undefined}
         title={p.declared?.title ? `${p.declared.title} — ${p.slug}` : p.slug}
@@ -4534,7 +4559,21 @@ function App() {
           {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
-          <span className="row-age">{ago(activityAt(p))}</span>
+          {/* Age and the enter button share ONE grid cell, stacked: the slot is
+              always as wide as the wider of the two, so swapping them on hover
+              cannot move the name beside it. Visibility (not display) does the
+              swap — a hidden button is out of the tab order either way, and the
+              age keeps reserving its width. */}
+          <span className="row-slot">
+            <span className="row-age">{ago(activityAt(p))}</span>
+            <button
+              className="row-enter"
+              title="Enter — open the session"
+              onClick={(e) => { e.stopPropagation(); enterPlace(repo, p); }}
+            >
+              <Icons.ChevronRight size={12} />
+            </button>
+          </span>
         </span>
       </li>
     );
