@@ -2098,6 +2098,29 @@ struct HealthReport {
     error: Option<String>,
 }
 
+/// Run the REAL `cmd_status --json` in-process for one place and parse the line
+/// it emits → `(exit code, report, the captured lines)`.
+///
+/// Factored out because TWO commands need the same verdict and must not each
+/// grow their own parse: `place_health` renders it, and `ai_status_report`
+/// embeds its JSON in the prompt it hands claude. A second copy would be a
+/// second answer to "what did the check say" — the same reason `place_health`
+/// shells through core at all instead of re-assembling facts here.
+///
+/// `None` for the report means `cmd_status` exited on a guard before emitting
+/// any JSON (unknown or unregistered place); the lines ARE the diagnosis then.
+fn status_of(project: &Project, slug: &str) -> (i32, Option<worktrees_core::health::Report>, String) {
+    let args: Vec<String> = vec![slug.to_string(), "--json".into()];
+    let mut ui = CaptureUi::default();
+    let code = ops::cmd_status(project, &mut ui, &args);
+    let parsed = ui
+        .lines
+        .iter()
+        .rev()
+        .find_map(|l| serde_json::from_str::<worktrees_core::health::Report>(l).ok());
+    (code, parsed, ui.lines.join("\n"))
+}
+
 /// Health verdict for one place. Runs the REAL `cmd_status` in `--json` mode
 /// in-process and parses the line it emits, for the same reason `doctor` does:
 /// the CLI and the app must never disagree about what "at risk" means.
@@ -2107,28 +2130,226 @@ async fn place_health(repo: String, slug: String) -> Result<HealthReport, String
         applog("error", &format!("place_health repo={repo}: discover failed: {}", e.msg));
         e.msg
     })?;
-    let args: Vec<String> = vec![slug.clone(), "--json".into()];
-    let mut ui = CaptureUi::default();
-    let code = ops::cmd_status(&project, &mut ui, &args);
-    let parsed = ui
-        .lines
-        .iter()
-        .rev()
-        .find_map(|l| serde_json::from_str::<worktrees_core::health::Report>(l).ok());
+    let (code, parsed, lines) = status_of(&project, &slug);
     match parsed {
         Some(r) => Ok(HealthReport { code, report: Some(r), error: None }),
         None => {
             // rc 1 before the report was emitted (an unknown or unregistered
             // place). The captured lines ARE the diagnosis.
-            let msg = ui.lines.join("\n");
-            applog("warn", &format!("place_health rc={code} repo={repo} slug={slug}: {msg}"));
+            applog("warn", &format!("place_health rc={code} repo={repo} slug={slug}: {lines}"));
             Ok(HealthReport {
                 code,
                 report: None,
-                error: Some(if msg.is_empty() { format!("status exited {code}") } else { msg }),
+                error: Some(if lines.is_empty() { format!("status exited {code}") } else { lines }),
             })
         }
     }
+}
+
+// ── "Ask Claude": the headless one-shot status report ────────────────────────
+// The app's FIRST headless AI path. Every other launch in this codebase goes
+// through tmux (`ops::launch`), which means a pane, an interactive shell and a
+// human at the other end. This one reuses the profile seam and bypasses the
+// pane entirely — so the two things a pane gave us for free (you can SEE what
+// was launched, and you can Ctrl-C it) have to be replaced by the guard below
+// and by `run_deadline`'s hard 180s.
+
+/// What the frontend caches under `declared.status_report`.
+#[derive(Serialize)]
+struct AiStatusReport {
+    text: String,
+    epoch: i64,
+    /// The verdict from the SAME `cmd_status` run whose JSON went into the
+    /// prompt — so a cached read can say what the machine thought at the time,
+    /// beside what claude thought about it.
+    verdict: String,
+}
+
+/// Is this launch really claude, and was it really prepared?
+///
+/// ⚠ NOT `ai.match_word`. `ops::ai_launch_for` fails CLOSED when a profile
+/// cannot be materialized: it replaces `cmd` with a `printf '…' >&2` sentinel
+/// that explains itself in the pane — while keeping `match_word` as `"claude"`
+/// (that branch is only reachable after the match_word == "claude" early
+/// return). So a match_word check passes for a broken profile, and we would run
+/// `printf`, get its message on stdout, and cache THAT as claude's read of the
+/// worktree. `ai_word_of` looks at the COMPOSED command's first word instead:
+/// `printf` for the sentinel, `claude` for both plain and profiled launches,
+/// and the real tool for a non-claude `ai_cmd` — one check, all three cases.
+///
+/// Returns the user-facing refusal, which has to distinguish the two causes:
+/// "your profile is broken" and "you don't run claude" need different fixes.
+fn claude_launch_check(cmd: &str, match_word: &str) -> Result<(), String> {
+    // `ai_cmd = none` — a plain shell. `ai_word_of("")` defaults to "claude",
+    // so this case must be caught BEFORE the word check or it would pass.
+    if cmd.trim().is_empty() {
+        return Err("the status report needs the claude CLI, and this project's ai_cmd is `none`".into());
+    }
+    let word = worktrees_core::profile::ai_word_of(cmd);
+    if word == "claude" {
+        return Ok(());
+    }
+    if match_word == "claude" {
+        return Err(
+            "your AI profile could not be prepared, so claude was not launched — see the app log (Settings → Logs)"
+                .into(),
+        );
+    }
+    Err(format!("the status report needs the claude CLI, and this project's ai_cmd runs `{word}`"))
+}
+
+/// The prompt, composed from the health report and the worktree's path.
+///
+/// Pure and unit-tested because it is the whole interface to the model: the JSON
+/// goes in VERBATIM (claude must not have to re-derive facts the check already
+/// measured), and the ban on running commands is what keeps a headless run —
+/// which cannot answer a permission prompt — from stalling on a tool it will
+/// never be granted. Reads are allowed, which is why the planning files are
+/// named: they are where a worktree says what it was FOR, and no git fact does.
+fn status_prompt(report_json: &str, path: &str) -> String {
+    format!(
+        "{report_json}\n\
+         \n\
+         You are reporting on the git worktree at {path}. The JSON above is its \
+         measured state. If task_plan.md, findings.md, progress.md or ROADMAP.md \
+         exist there, read them.\n\
+         \n\
+         Answer in under 250 words:\n\
+         (1) what was this worktree for,\n\
+         (2) what state did the work end in,\n\
+         (3) recommend exactly one of: resume / push-then-abandon / abandon, with \
+         one line of justification.\n\
+         \n\
+         Do not run commands; the git facts are already in the JSON."
+    )
+}
+
+/// Last `n` lines of a subprocess's stderr, for an error the user has to read.
+/// Whole-stderr in a toast is unreadable and whole-stderr in an `Err` string is
+/// worse; the tail is where a CLI puts the reason.
+fn stderr_tail(bytes: &[u8], n: usize) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// Hand this worktree's measured state to the repo's AI profile, headless, and
+/// cache the paragraph that comes back.
+///
+/// App-only on purpose: there is no CLI verb for it (the seam would support one
+/// — see the spec's out-of-scope list — but a headless spawn with a 180s
+/// deadline is a very different contract from a CLI that a user can Ctrl-C).
+/// NEVER runs on its own: the sheet has a button, and nothing else calls this.
+#[tauri::command]
+async fn ai_status_report(repo: String, slug: String) -> Result<AiStatusReport, String> {
+    let project = Project::discover(Path::new(&repo)).map_err(|e| {
+        applog("error", &format!("ai_status_report repo={repo}: discover failed: {}", e.msg));
+        e.msg
+    })?;
+    // `place_dir`, not `wt_root.join(slug)`: `(main)` is a place too, and it
+    // lives at the main checkout rather than under `.worktrees/`.
+    let wt_path = project.place_dir(&slug);
+
+    // THE seam (ops.rs): the same call every interactive launch makes, so this
+    // report runs under exactly the profile a session in this place would.
+    let mut ui = CaptureUi::default();
+    let ai = ops::ai_launch_for(
+        &project,
+        &mut ui,
+        &wt_path,
+        &worktrees_core::config::resolve_ai_cmd(None),
+    );
+    // The seam's own voice — a skipped skill, or the fail-closed reason. Never
+    // swallowed: without this, a broken profile's guard message below would be
+    // the ONLY trace, and it deliberately points at this log.
+    for w in ui.warnings() {
+        applog("warn", &format!("ai_status_report repo={repo} slug={slug}: {w}"));
+    }
+    if let Err(msg) = claude_launch_check(&ai.cmd, &ai.match_word) {
+        applog("error", &format!("ai_status_report repo={repo} slug={slug}: {msg}"));
+        return Err(msg);
+    }
+
+    let (code, report, lines) = status_of(&project, &slug);
+    let Some(report) = report else {
+        let why = if lines.is_empty() { format!("status exited {code}") } else { lines };
+        applog("error", &format!("ai_status_report repo={repo} slug={slug}: no status report: {why}"));
+        return Err(format!("could not read this worktree's status: {why}"));
+    };
+    let verdict = report.verdict.clone();
+    let json = serde_json::to_string(&report).map_err(|e| {
+        applog("error", &format!("ai_status_report repo={repo} slug={slug}: encode failed: {e}"));
+        e.to_string()
+    })?;
+    let prompt = status_prompt(&json, &wt_path);
+
+    // ⚠ `exec` is load-bearing. `run_deadline` kills its DIRECT child and only
+    // that (one pid, no process group). Without `exec` the direct child is
+    // `sh`, and a timed-out claude survives it as an orphan — still burning
+    // turns, still holding any MCP servers the profile started. `exec` makes sh
+    // replace itself, so the deadline's kill lands on claude.
+    //
+    // `sh -c` because `ai.cmd` is an already-composed, shell-quoted flag string
+    // (profile::claude_launch). Env goes through `Command::env`, NOT inlined as
+    // a `K=V ` prefix: that separation is the point of `AiLaunch`.
+    let line = format!("exec {} -p {} --max-turns 12", ai.cmd, worktrees_core::tmux::sq(&prompt));
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", &line]).current_dir(&wt_path);
+    for (k, v) in &ai.env {
+        cmd.env(k, v); // CLAUDE_CONFIG_DIR, when a profile applies
+    }
+    let out = run_deadline(cmd, 180).map_err(|e| {
+        let msg = if e.kind() == std::io::ErrorKind::TimedOut {
+            "claude timed out after 180s".to_string()
+        } else {
+            format!("could not run claude: {e}")
+        };
+        applog("error", &format!("ai_status_report repo={repo} slug={slug}: {msg}"));
+        msg
+    })?;
+
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() {
+        let tail = stderr_tail(&out.stderr, 12);
+        let rc = out.status.code().unwrap_or(-1);
+        applog("error", &format!("ai_status_report repo={repo} slug={slug}: claude rc={rc}: {tail}"));
+        return Err(if tail.is_empty() { format!("claude exited {rc}") } else { format!("claude exited {rc}:\n{tail}") });
+    }
+    // A real failure shape, not a curiosity: claude can exit 0 having printed
+    // nothing (a denied tool, an empty turn budget). Caching that would leave a
+    // blank "Claude's read" section that looks like a successful answer, and the
+    // Re-run button would be the only way to discover it was not one.
+    if text.is_empty() {
+        let tail = stderr_tail(&out.stderr, 12);
+        applog("error", &format!("ai_status_report repo={repo} slug={slug}: claude exited 0 with no output: {tail}"));
+        return Err(if tail.is_empty() {
+            "claude exited 0 but printed nothing".into()
+        } else {
+            format!("claude exited 0 but printed nothing:\n{tail}")
+        });
+    }
+
+    let epoch = sysclock::now_epoch();
+    // The declared sidecar, via the same locked + atomic edit every other
+    // declared write uses. `extra` round-trips unknown keys by design, so this
+    // needs no schema surgery — and it is NOT `ui-state.json`, which the
+    // frontend owns whole-blob (a backend write there is erased by the next
+    // settings save).
+    //
+    // ⚠ `last_worked_epoch` is deliberately untouched. That stamp means "claude
+    // finished a task HERE", and it drives the nav's afterglow; a report ABOUT a
+    // worktree is not work IN it, and stamping it would relight a cold place.
+    let stamp = serde_json::json!({ "text": text, "epoch": epoch, "verdict": verdict });
+    store::edit(&repo, &slug, |d| {
+        d.extra.insert("status_report".into(), stamp);
+    })
+    .map_err(|e| {
+        applog("error", &format!("ai_status_report repo={repo} slug={slug}: store write failed: {e}"));
+        e
+    })?;
+    applog("info", &format!("ai_status_report repo={repo} slug={slug}: {} chars, verdict={verdict}", text.len()));
+    Ok(AiStatusReport { text, epoch, verdict })
 }
 
 /// Re-apply the file plan (`relink [<wt>|--all] [--force]`). `force` is the
@@ -4330,6 +4551,7 @@ pub fn run() {
             project_config_read,
             doctor,
             place_health,
+            ai_status_report,
             relink,
             provision,
             sync_status,
@@ -5367,5 +5589,90 @@ mod tests {
             place
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── "Ask Claude" (ai_status_report) — the two pure pieces ────────────────
+    // The spawn itself cannot be tested here: there is no fake `claude` anywhere
+    // in this repo (the bats harness fakes tmux and git, never the AI), which is
+    // why docs/ai-profiles-manual-checks.md §11 exists. What IS testable is the
+    // text we hand the model and the check that decides whether to spawn at all.
+
+    /// The prompt is the WHOLE interface to the model, and every clause in it is
+    /// load-bearing: drop the JSON and claude re-derives facts the check already
+    /// measured; drop the ban on commands and a headless run — which cannot
+    /// answer a permission prompt — stalls on a tool it will never be granted;
+    /// drop the path and it reports on whatever directory it guessed.
+    #[test]
+    fn the_status_prompt_carries_the_facts_the_questions_and_the_ban() {
+        let json = r#"{"schema_version":1,"verdict":"at-risk","reasons":["3 commits not on origin/main"]}"#;
+        let p = status_prompt(json, "/tmp/wt/feat-x");
+
+        // VERBATIM — not re-serialized, not summarized. The report the sheet
+        // renders and the report claude reads have to be the same bytes.
+        assert!(p.contains(json), "the health JSON must appear verbatim");
+        assert!(p.contains("/tmp/wt/feat-x"), "the worktree path must be named");
+
+        // The three questions, in order.
+        assert!(p.contains("what was this worktree for"));
+        assert!(p.contains("what state did the work end in"));
+        assert!(p.contains("resume / push-then-abandon / abandon"));
+        let (q1, q3) = (p.find("what was this worktree for"), p.find("push-then-abandon"));
+        assert!(q1 < q3, "the questions must stay in order");
+
+        // The reading list, the budget, and the ban.
+        for planning in ["task_plan.md", "findings.md", "progress.md", "ROADMAP.md"] {
+            assert!(p.contains(planning), "the prompt should point at {planning}");
+        }
+        assert!(p.contains("under 250 words"));
+        assert!(p.contains("Do not run commands"));
+    }
+
+    /// The guard that decides whether anything is spawned at all.
+    ///
+    /// The case that matters most is the third: `ops::ai_launch_for` fails
+    /// CLOSED by swapping in a `printf … >&2` sentinel while KEEPING
+    /// `match_word: "claude"`. A guard written against `match_word` — the
+    /// obvious choice, and what every other caller in the codebase reads — waves
+    /// that through, and the app then caches printf's error message as claude's
+    /// considered read of the worktree.
+    #[test]
+    fn the_guard_reads_the_composed_command_not_the_match_word() {
+        // plain claude
+        assert!(claude_launch_check("claude", "claude").is_ok());
+        // profiled claude — claude_launch appends flags to the same first word
+        assert!(claude_launch_check(
+            "claude --append-system-prompt-file '/x/rules.md' --settings '/x/s.json' --strict-mcp-config",
+            "claude",
+        )
+        .is_ok());
+        // an absolute path still basenames to claude
+        assert!(claude_launch_check("/opt/homebrew/bin/claude -r", "claude").is_ok());
+
+        // fail-closed sentinel: match_word STILL says claude, the command does not
+        let sentinel = "printf '%s\\n' 'profile could not be prepared' >&2";
+        let e = claude_launch_check(sentinel, "claude").expect_err("the printf sentinel must be refused");
+        assert!(e.contains("could not be prepared"), "say WHICH failure it was: {e}");
+        assert!(e.contains("app log"), "point at where the reason is: {e}");
+
+        // a different AI tool — a different fix, so a different message
+        let e = claude_launch_check("aider --model x", "aider").expect_err("non-claude ai_cmd must be refused");
+        assert!(e.contains("ai_cmd"), "{e}");
+        assert!(e.contains("aider"), "name the tool it found: {e}");
+
+        // ai_cmd = none (plain shell). ⚠ `ai_word_of("")` DEFAULTS to "claude",
+        // so an empty command passes the word check and has to be caught first.
+        let e = claude_launch_check("", "claude").expect_err("an empty command must be refused");
+        assert!(e.contains("none"), "{e}");
+        assert!(claude_launch_check("   ", "claude").is_err(), "whitespace is empty too");
+    }
+
+    /// The tail is what the user reads when a run fails, so it has to survive
+    /// the two shapes a CLI's stderr actually takes: nothing at all, and pages.
+    #[test]
+    fn the_stderr_tail_keeps_the_end_and_drops_the_blanks() {
+        assert_eq!(stderr_tail(b"", 3), "");
+        assert_eq!(stderr_tail(b"\n\n  \n", 3), "", "blank lines are not a reason");
+        assert_eq!(stderr_tail(b"one\ntwo\nthree", 5), "one\ntwo\nthree");
+        assert_eq!(stderr_tail(b"one\ntwo\nthree\nfour", 2), "three\nfour", "the END is the reason");
     }
 }

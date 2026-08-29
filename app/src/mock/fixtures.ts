@@ -10,6 +10,9 @@ export type Declared = {
   note?: string;
   last_opened_epoch?: number;
   last_worked_epoch?: number;
+  /** The cached "Ask Claude" read (`ai_status_report`). Round-trips through the
+   *  Rust store's `extra`, so on the wire it is a plain declared key. */
+  status_report?: { text: string; epoch: number; verdict?: string } | null;
 } | null;
 
 export type Place = {
@@ -165,7 +168,30 @@ function cdv(): ProjectView {
     place(P, root, {
       slug: "legacy-migration", branch: "chore/knex-to-prisma",
       last_commit_epoch: NOW - 40 * DAY,
-      last_commit_subject: "migrate users table", declared: { lifecycle: "archived", note: "resume Q3", last_opened_epoch: NOW - 40 * DAY },
+      last_commit_subject: "migrate users table",
+      declared: {
+        lifecycle: "archived", note: "resume Q3", last_opened_epoch: NOW - 40 * DAY,
+        // The ONE fixture that already has a cached "Ask Claude" read, so the
+        // remembered state of that section is reachable without waiting out the
+        // deliberately-slow mock spawn — and so a design pass sees the shape a
+        // 250-word answer actually makes in the sheet.
+        status_report: {
+          text:
+            "This worktree was cut to move the data layer off Knex and onto Prisma. " +
+            "The plan in task_plan.md lists six tables; progress.md has three of them " +
+            "checked off, and the last commit (\"migrate users table\") is the third.\n\n" +
+            "It ended mid-migration. The schema and the users/sessions/accounts migrations " +
+            "are committed and pushed, but the query call sites for the remaining three " +
+            "tables were never touched, so the branch does not build against the new client. " +
+            "Nothing is uncommitted — the work stopped at a clean point rather than being " +
+            "abandoned mid-edit.\n\n" +
+            "Recommend: resume. The unfinished half is mechanical and the plan that describes " +
+            "it is still in the tree, which is a much cheaper restart than rediscovering the " +
+            "schema decisions from the diff.",
+          epoch: NOW - 6 * 3600,
+          verdict: "cold",
+        },
+      },
       lifecycle_effective: "archived",
     }),
     place(P, root, {

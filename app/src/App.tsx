@@ -12,7 +12,7 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
-import { StatusSheet } from "./StatusSheet";
+import { StatusSheet, type StatusReport } from "./StatusSheet";
 import { fileInfo } from "./filekind";
 import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
@@ -35,6 +35,10 @@ type Declared = {
   /// When Claude last FINISHED a task here (see store.rs). Opening a session
   /// never sets it — only work does.
   last_worked_epoch?: number;
+  /// The cached "Ask Claude" read of this place (`ai_status_report`, lib.rs).
+  /// Not a known key of `Declared` in Rust — it round-trips through `extra`,
+  /// which is why it shows up here as a plain key on the declared JSON.
+  status_report?: StatusReport | null;
 } | null;
 
 type Place = {
@@ -5456,6 +5460,18 @@ function App() {
           openRemove(repo, slug);
         }}
         onCopy={copyText}
+        declared={statusPlace?.declared ?? null}
+        // patchDeclared FIRST, refresh second. `status_report` is a declared
+        // field the backend copies through verbatim, so the ⚠ above (which
+        // forbids patching `lifecycle`, reconciled server-side) does not apply —
+        // and the patch is what stops a `list_workspace` sweep that was already
+        // in flight when the backend wrote the store from landing afterwards
+        // with pre-write declared state and blanking the report for a poll.
+        onReport={(r) => {
+          if (!statusSheet) return;
+          patchDeclared(statusSheet.repo, statusSheet.slug, { status_report: r });
+          refresh();
+        }}
       />
 
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}

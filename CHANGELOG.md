@@ -14,6 +14,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   an **Overall size** row at the top of Settings → Appearance. Reported from an
   Apple Vision Pro virtual display, where every base size in the app is simply
   too small to read.
+- **Ask Claude what a worktree was for.** The status check knows what is in a
+  place; it cannot know what you were doing there. So the sheet has a button
+  that hands the facts it just measured to your repo's AI profile and asks for a
+  short read back: what this worktree was for, what state the work ended in, and
+  whether to resume it, push it somewhere safe and let it go, or simply abandon
+  it — with one line of why. It reads your `task_plan.md`, `findings.md`,
+  `progress.md` and `ROADMAP.md` if they are there, which is usually where the
+  answer to "what was this?" actually lives. It runs only when you press the
+  button — never on its own, never in the background — takes about thirty to
+  ninety seconds, and the answer is kept with the place until you re-run it, so
+  reopening the sheet costs nothing. If your profile is broken or you do not run
+  claude, it says so and starts nothing.
 - **Right-click a worktree → Status check.** It answers the question a folder of
   half-finished branches never does: is anything in here still mine? You get one
   verdict — **active**, **parked**, **work at risk**, or **cold** — and the

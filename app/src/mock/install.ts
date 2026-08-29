@@ -1226,6 +1226,47 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       const { verdict, reasons } = mockAssess(facts, Math.floor(Date.now() / 1000));
       return { code: 0, report: clone({ schema_version: 1, verdict, reasons, facts }), error: null };
     }
+    // ── "Ask Claude" (lib.rs ai_status_report) ──────────────────────────────
+    // DELIBERATELY SLOW. The real command spawns claude headless and waits up to
+    // 180s; an instant mock would render "Asking Claude…" for a single frame,
+    // which is the class of thing this harness exists to stop hiding (CLAUDE.md).
+    // 1500ms is long enough to see, short enough to iterate against.
+    //
+    // It also WRITES the report into the fixture's declared state, so the
+    // resolve → patchDeclared → refresh path lands on a backend that agrees with
+    // the patch. A mock that only returned text would leave the confirming
+    // refresh blanking the report — the exact bug the patch exists to prevent,
+    // made invisible by the harness that was supposed to prove it gone.
+    case "ai_status_report": {
+      await new Promise((r) => setTimeout(r, 1500));
+      const p = findProject(args.repo)?.snapshot?.places.find((x) => x.slug === args.slug);
+      if (!p) throw new Error(`No worktree '${args.slug}' under .worktrees/. See: worktrees ls`);
+      // The refusal path, reachable by clicking. `spike-graphql` stands in for a
+      // repo whose `ai_cmd` is not claude — the real guard (claude_launch_check,
+      // lib.rs) rejects BEFORE any spawn, and the message is copied from it so
+      // the sheet's error row is styled against what actually arrives.
+      if (p.slug === "spike-graphql") {
+        throw new Error("the status report needs the claude CLI, and this project's ai_cmd is `none`");
+      }
+      const facts = mockFacts(p);
+      const { verdict } = mockAssess(facts, now());
+      const report = {
+        text:
+          `This worktree was cut for ${p.branch ?? "an unnamed branch"}${p.declared?.note ? ` — the note on it says "${p.declared.note}"` : ""}. ` +
+          `Its last commit was "${p.last_commit_subject ?? "wip"}", and there is no task_plan.md here to say more.\n\n` +
+          `It ended ${facts.dirty_files > 0 ? `mid-edit: ${facts.dirty_files} file${plural(facts.dirty_files)} are uncommitted` : "at a clean tree"}` +
+          `${facts.ahead > 0 ? `, with ${facts.ahead} commit${plural(facts.ahead)} that are not on ${facts.base}` : ", with nothing ahead of the base"}` +
+          `${facts.upstream ? `. The branch tracks ${facts.upstream}` : ". The branch has no upstream, so those commits exist only on this machine"}.\n\n` +
+          `Recommend: ${facts.ahead > 0 || facts.dirty_files > 0 ? (facts.upstream ? "push-then-abandon — the work is worth keeping but not worth reopening; get it off this machine and let the place go" : "resume — this is the only copy of it, and the shape of the change suggests it was close") : "abandon — there is nothing here that does not already exist on the base branch"}.\n\n` +
+          `(canned text from the mock harness — the real command runs your repo's AI profile)`,
+        epoch: now(),
+        verdict,
+      };
+      editPlace(args.repo, args.slug, (pl) => {
+        pl.declared = { ...(pl.declared ?? {}), status_report: report };
+      });
+      return clone(report);
+    }
     case "relink": {
       // Stateful, and faithful to materialize::plan_one — which is the WHOLE
       // point of the harness. A plain relink NEVER touches an existing regular
