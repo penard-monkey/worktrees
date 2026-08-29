@@ -158,5 +158,19 @@ eq([ctrl.sets, ctrl.prevented, ctrl.through], [[], false, true], "ctrl+ falls th
 const other = press("k", { code: "KeyK" });
 eq([other.sets, other.prevented, other.through], [[], false, true], "⌘K falls through to its own handler");
 
+// ── the wiring the chord hangs off ─────────────────────────────────────────
+// Everything above can pass with the feature entirely disconnected: delete the
+// effect that pushes the factor to the webview, or drop `set_zoom` from
+// `generate_handler!`, and tsc, cargo and every assertion here stay green —
+// `applyZoom`'s `.catch()` swallows the rejected invoke, so the app is silent
+// too. Three presence checks, because presence is all a static pass can know.
+if (!/useEffect\(\(\) => \{ applyZoom\(settings\.app_zoom\); \}, \[settings\.app_zoom\]\);/.test(fs.readFileSync(APP, "utf8")))
+  fail("App.tsx: the effect pushing app_zoom to the webview is gone — the chord would update a setting nothing applies");
+if (!/\n\s+set_zoom,\n/.test(rs))
+  fail("lib.rs: `set_zoom` is not in generate_handler! — every invoke rejects, and applyZoom swallows it");
+const mock = read("../src/mock/install.ts");
+if (!/case "set_zoom":/.test(mock))
+  fail("mock/install.ts: no `set_zoom` case — the harness logs a rejected invoke on every ⌘+ (CLAUDE.md: the mock must track every command in lib.rs)");
+
 if (bad) { console.error(`\nzoom-check: ${bad} failure(s)`); process.exit(1); }
-console.log(`zoom-check: chord ok — ${BLOCK.split("\n").length}L of App.tsx driven`);
+console.log(`zoom-check: chord ok — ${BLOCK.split("\n").length}L of App.tsx driven, wiring present`);

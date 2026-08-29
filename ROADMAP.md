@@ -16,9 +16,25 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   the same sandbox for a different click.
   _From: [2026-08-18 terminal-dock-overlap](docs/sessions/2026-08-18-terminal-dock-overlap/summary.md)_
 
+- **The column floors are px constants, and page zoom moves the viewport under
+  them.** `RAILS_W 88 + NAV_MIN 220 + MAIN_MIN 420` needs 728 CSS px; ⌘+ (PR
+  #169) shrinks the CSS-px viewport, so 3× wants a ~2200px physical window and
+  `fitLayout` degrades by dropping the dock but never the nav — below that,
+  `mainW` goes negative and the topbar piles up. Recoverable (⌘− is ungated, so
+  no zoom level can trap you) and unreachable on the display this was built for,
+  which is why #169 shipped without it. Same family: `ui_rem` now reaches 22px
+  and `term_size` 24px inside the same unchanged floors, with no
+  `getComputedStyle` assertion for the new maxima. Wants one decision about what
+  the floors mean when the viewport is elastic — probably deriving them from
+  `--ui-rem` — not a patch per symptom. Also noted there: a chord pressed during
+  the pre-hydration window records into `preHydration` and overwrites the loaded
+  value, so ⌘+ at launch can land you BELOW a persisted 2×. One fast IPC wide,
+  and shared by every pre-hydration chord (⌘B has it too).
+  _From: PR #169 review (fable), 2026-08-29_
+
 - **The static check scripts run only when someone remembers.**
-  `termfit-check.mjs`, `dnd-check.mjs`, `relpath-check.mjs` and now
-  `ctxmenu-check.mjs` guard invariants the suites structurally cannot see (a CSS
+  `termfit-check.mjs`, `dnd-check.mjs`, `relpath-check.mjs`, `ctxmenu-check.mjs`
+  and now `zoom-check.mjs` guard invariants the suites structurally cannot see (a CSS
   declaration, a Rust↔TS mirror, a pure function, a layout effect's dep list) —
   and none is wired into `ci.yml`, the Makefile or `app/package.json`. They are
   pure Node, no browser, no fixtures, sub-second: one CI step running all four

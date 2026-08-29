@@ -4290,9 +4290,12 @@ function App() {
         const cur = clampZoom(kr.appZoom);
         const next = dir === 0 ? DEFAULTS.app_zoom : stepZoom(cur, dir);
         kr.appZoom = next; // same fast-double-tap reason as mdZoom above
-        // updateSettings is re-created every render and this effect is registered
-        // once, so this is a first-render capture — safe, because it reads state
-        // only through the functional `setSettings` and refs.
+        // `updateSettings` is re-created every render, and this effect re-registers
+        // only on its own deps — so the copy captured here is from an ARBITRARY
+        // past render, not necessarily the latest. Safe anyway, and deliberately
+        // not in the deps: it reads state exclusively through the functional
+        // `setSettings` and refs, so every copy of it behaves identically. Do not
+        // reuse that reasoning for a value read out of a render closure.
         if (next !== cur) updateSettings({ app_zoom: next });
         return;
       }
