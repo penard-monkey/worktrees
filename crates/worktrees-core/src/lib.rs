@@ -9,6 +9,7 @@ pub mod config;
 pub mod diag;
 pub mod error;
 pub mod git;
+pub mod health;
 pub mod init;
 pub mod materialize;
 pub mod model;

@@ -14,6 +14,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   an **Overall size** row at the top of Settings → Appearance. Reported from an
   Apple Vision Pro virtual display, where every base size in the app is simply
   too small to read.
+- **Right-click a worktree → Status check.** It answers the question a folder of
+  half-finished branches never does: is anything in here still mine? You get one
+  verdict — **active**, **parked**, **work at risk**, or **cold** — and the
+  receipts underneath it. At risk means the place has sat untouched for two
+  weeks and is still holding something that exists nowhere else: it names the
+  commits that are not on your base branch, the uncommitted files, and whether
+  any of it has been pushed anywhere. Parked and cold both mean the opposite —
+  nothing here is unique — so you can let the place go without opening it to
+  check. Being **behind** the base branch is reported as a fact and never
+  counted against a worktree: the base moved, the worktree did nothing wrong.
+  The actions are right there beside the verdict — Enter, Abandon, Archive,
+  Remove, Copy branch — so the decision and the doing are one stop. The same
+  check is in the terminal as `worktrees status <name>`, with `--json` for
+  scripts; the app and the CLI compute it from the same code, so they can never
+  tell you different things.
 
 ### Changed
 - **Markdown reading size moves to ⌘⌥+ / ⌘⌥− / ⌘⌥0.** ⌘+/⌘− now means what it

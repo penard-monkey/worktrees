@@ -827,6 +827,45 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .dx-mode.copy { color: var(--dirty); background: color-mix(in srgb, var(--dirty) 14%, transparent); }
 
+/* ── Status sheet (one place's health verdict) ── */
+/* The verdict is the loudest thing in the sheet, so it gets a left rule in its
+   own colour rather than a filled banner: a solid amber block reads as an ERROR
+   the app is raising, and "at risk" is a judgement about a worktree, not a
+   failure of the tool. Every colour below is an existing token — see the
+   verdict/colour mapping in StatusSheet.tsx. */
+.hs-verdict {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--s2) var(--s3);
+  border-left: 3px solid var(--txt-mute);
+  background: var(--bg-elev); border-radius: var(--r-sm);
+}
+.hs-label { font-size: var(--fs-title); font-weight: var(--fw-bold); color: var(--txt-mute); }
+.hs-blurb { font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt-dim); }
+.hs-verdict.active { border-left-color: var(--ok); }
+.hs-verdict.active .hs-label { color: var(--ok); }
+.hs-verdict.parked { border-left-color: var(--txt-dim); }
+.hs-verdict.parked .hs-label { color: var(--txt-dim); }
+.hs-verdict.at-risk { border-left-color: var(--warn); }
+.hs-verdict.at-risk .hs-label { color: var(--warn); }
+.hs-verdict.cold { border-left-color: var(--txt-mute); }
+.hs-verdict.cold .hs-label { color: var(--txt-mute); }
+
+.hs-reasons { display: flex; flex-direction: column; gap: var(--s1); }
+.hs-reason {
+  font-size: var(--fs-meta); line-height: var(--lh-prose); color: var(--txt-dim);
+  padding-left: var(--s3); text-indent: calc(-1 * var(--s2));
+}
+.hs-reason::before { content: "▸ "; color: var(--txt-mute); }
+
+/* Label/value grid. A fixed first column keeps the values aligned down the
+   whole table — a flex row with a shrinking label wanders as soon as one key is
+   longer than the rest ("last claude work" is). */
+.hs-row { display: grid; grid-template-columns: 8.5em 1fr; gap: var(--s2); align-items: baseline; }
+.hs-k { color: var(--txt-mute); font-size: var(--fs-meta); }
+.hs-v { color: var(--txt); min-width: 0; overflow-wrap: anywhere; }
+.hs-info { color: var(--txt-mute); font-size: var(--fs-micro); font-style: normal; }
+.hs-actions { flex-wrap: wrap; }
+
 /* §9's init nudge — box treatment copied from .nav-newform, amber-edged */
 .init-banner {
   display: flex; flex-direction: column; gap: var(--s2);

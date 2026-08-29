@@ -50,7 +50,11 @@ common_setup() {
   # WORKTREES_SYNC_HUB and CLAUDE_PROJECTS join the list for `sync`: the first is
   # the env rung of hub resolution (an exported one would aim the suite at the
   # developer's real SSD), the second is where the sessions ferry reads from.
-  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME WORKTREES_PROFILE WORKTREES_SYNC_HUB CLAUDE_PROJECTS || true
+  # WORKTREES_STATUS_NOW joins the list for `status`: it is that command's clock
+  # override (ops::cmd_status), so a value left exported by status.bats — or by a
+  # developer debugging one case — would age every OTHER test's freshly made
+  # commit past STALE_SECS and turn "active" into "cold" suite-wide.
+  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME WORKTREES_PROFILE WORKTREES_SYNC_HUB CLAUDE_PROJECTS WORKTREES_STATUS_NOW || true
 
   make_repo
 }

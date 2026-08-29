@@ -578,6 +578,93 @@ function mockPatch(content: string, small: boolean): string {
   return out.join("\n");
 }
 
+// ── status check (place_health) ──────────────────────────────────────────────
+// A faithful port of `health::assess` (crates/worktrees-core/src/health.rs),
+// verdict AND reason strings. Canned prose would let the sheet be developed
+// against sentences the backend never emits — the harness exists precisely so
+// what is built here is what ships. Keep the two in sync; the constants below
+// are the same ones.
+const STALE_SECS = 14 * 24 * 3600;
+const plural = (n: number) => (n === 1 ? "" : "s");
+
+function mockAssess(f: any, now: number): { verdict: string; reasons: string[] } {
+  const activity = Math.max(
+    f.last_commit_epoch ?? 0, f.last_opened_epoch ?? 0, f.last_worked_epoch ?? 0,
+    f.claude_last_epoch ?? 0, f.created_epoch ?? 0,
+  );
+  if (activity > 0 && now - activity < STALE_SECS) return { verdict: "active", reasons: [] };
+  const hasUniqueWork = f.dirty_files > 0 || f.ahead > 0;
+  if (!hasUniqueWork) {
+    if (f.tmux_up) {
+      return {
+        verdict: "parked",
+        reasons: [
+          `clean and nothing ahead of the base — this worktree holds no unique work; behind ${f.behind} is just the base moving.`,
+        ],
+      };
+    }
+    return { verdict: "cold", reasons: [] };
+  }
+  const reasons: string[] = [];
+  const n = f.not_on_base_total > 0 ? f.not_on_base_total : Math.max(0, f.ahead);
+  if (n > 0) {
+    let s = `${n} commit${plural(n)} not on ${f.base}`;
+    if (f.last_commit_epoch) s += `, newest from ${new Date(f.last_commit_epoch * 1000).toISOString().slice(0, 10)}`;
+    if (f.last_commit_subject) s += `: ${f.last_commit_subject}`;
+    reasons.push(s);
+  }
+  if (f.dirty_files > 0) reasons.push(`${f.dirty_files} uncommitted file${plural(f.dirty_files)}`);
+  if (n > 0) {
+    if (!f.upstream) reasons.push("no upstream — this work exists nowhere but this machine");
+    else if (f.true_unpushed > 0) reasons.push(`${f.true_unpushed} of them not pushed to ${f.upstream}`);
+    else reasons.push(`all pushed to ${f.upstream} — safe, but not on ${f.base}`);
+  }
+  if (f.maybe_merged > 0) {
+    reasons.push(
+      `${f.maybe_merged} commit${plural(f.maybe_merged)} match patches already on ${f.base} (patch-id — unreliable across squash merges)`,
+    );
+  }
+  return { verdict: "at-risk", reasons };
+}
+
+/** `health::HealthFacts` for a fixture place — the gather step of cmd_status. */
+function mockFacts(p: any) {
+  const ahead = p.ahead ?? 0;
+  return {
+    slug: p.slug,
+    branch: p.branch,
+    base: "origin/main",
+    created_epoch: p.created_epoch ?? null,
+    last_commit_epoch: p.last_commit_epoch ?? null,
+    last_commit_subject: p.last_commit_subject ?? null,
+    last_opened_epoch: p.declared?.last_opened_epoch ?? null,
+    last_worked_epoch: p.declared?.last_worked_epoch ?? null,
+    // The fixtures carry no claude session dir; `claude_session_present` is the
+    // nearest honest stand-in for "something wrote in here".
+    claude_last_epoch: p.claude_session_present ? p.declared?.last_opened_epoch ?? null : null,
+    dirty_files: p.dirty_files ?? 0,
+    ahead,
+    behind: p.behind ?? 0,
+    upstream: p.upstream ?? null,
+    tmux_up: !!p.tmux_session?.up,
+    lifecycle_effective: p.lifecycle_effective,
+    note: p.declared?.note ?? null,
+    title: p.declared?.title ?? null,
+    // `git log --oneline base..HEAD`, shaped like the real thing (short sha +
+    // subject) so the sheet's mono list is laid out against realistic widths.
+    not_on_base: Array.from({ length: Math.min(ahead, 20) }, (_, i) =>
+      `${(0xc0ffee + i * 7919).toString(16).slice(0, 7)} ${i === 0 ? p.last_commit_subject ?? "wip" : `earlier work (${ahead - i})`}`),
+    not_on_base_total: ahead,
+    // A tracked branch that is partly pushed — one straggler, so the "K of them
+    // not pushed" reason has a value the harness can assert.
+    true_unpushed: p.upstream ? Math.max(0, ahead - 1) : null,
+    // Demo shape, not a real patch-id run: a place that is both ahead AND behind
+    // is the situation where `git cherry` would plausibly find an already-landed
+    // patch, and it is the only way to reach the caveat line from the harness.
+    maybe_merged: ahead > 0 && (p.behind ?? 0) > 0 ? 1 : 0,
+  };
+}
+
 type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
   switch (cmd) {
@@ -1121,6 +1208,23 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         findings: clone(findings),
         error: null,
       };
+    }
+    // ── Status sheet: one place's health verdict (lib.rs place_health) ──
+    // Shaped as the Tauri wrapper, error path included: an unknown slug is how
+    // cmd_status exits 1 without emitting any JSON, and a sheet that assumes a
+    // report is always there breaks against the real backend, not here.
+    case "place_health": {
+      const p = findProject(args.repo)?.snapshot?.places.find((x) => x.slug === args.slug);
+      if (!p) {
+        return {
+          code: 1,
+          report: null,
+          error: `No worktree '${args.slug}' under .worktrees/. See: worktrees ls`,
+        };
+      }
+      const facts = mockFacts(p);
+      const { verdict, reasons } = mockAssess(facts, Math.floor(Date.now() / 1000));
+      return { code: 0, report: clone({ schema_version: 1, verdict, reasons, facts }), error: null };
     }
     case "relink": {
       // Stateful, and faithful to materialize::plan_one — which is the WHOLE

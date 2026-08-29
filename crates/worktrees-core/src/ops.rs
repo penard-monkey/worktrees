@@ -1903,6 +1903,263 @@ fn emit_report(ui: &mut dyn Ui, report: &Report) {
     ui.plain(&serde_json::to_string(report).unwrap_or_default());
 }
 
+// ── status ───────────────────────────────────────────────────────────────────
+/// `worktrees status <name> [--json]` — one place's health verdict.
+///
+/// GATHERING lives here (git + the declared store); the JUDGEMENT is
+/// `health::assess`, which is pure. The app runs THIS function in-process
+/// (`CaptureUi` + `--json`) and deserializes the line it emits, so the CLI and
+/// the app can never disagree about what a verdict means.
+///
+/// ⚠ `WORKTREES_STATUS_NOW` (epoch seconds) overrides the clock. It is a TEST
+/// SEAM, not user surface: `test/status.bats` has to age a just-made commit past
+/// `STALE_SECS`, and `test/helpers/common.bash` unsets it in `common_setup` so a
+/// leaked export cannot warp the rest of the suite. ONE `now` is resolved here
+/// and threaded into BOTH `store::reconcile` and `assess` — two clocks would let
+/// the lifecycle label and the verdict disagree about what time it is.
+///
+/// Exit: `0` a report was emitted (ANY verdict — this is a report, not a gate),
+/// `1` usage / unknown / unregistered place. There is no exit-2 tier: that is
+/// `doctor`'s findings contract, and a health verdict is not a finding.
+pub fn cmd_status(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let mut json = false;
+    let mut names: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--json" => json = true,
+            s if s.starts_with('-') => {
+                ui.error(&format!("Unknown flag: {s}"));
+                return 1;
+            }
+            s => names.push(s.to_string()),
+        }
+    }
+    // Unlike `doctor`, a name is REQUIRED: a health report is about one place,
+    // and "the whole project is at risk" is not a sentence this tool can mean.
+    if names.len() != 1 {
+        ui.error("usage: worktrees status <name> [--json]");
+        return 1;
+    }
+    // Same env override as `ls --json` / `doctor --json`, so a JSON-mode caller
+    // sets it once for every command.
+    let json = json || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
+
+    // Resolve exactly like `close` does — the slug DIR wins first (a worktree
+    // literally named "main" is its own place), then bare `main` falls through
+    // to the checkout, then the branch's holder worktree. `(main)` is a legal
+    // target here (unlike `relink`/`doctor`'s resolve_place, which refuses it):
+    // main is a place with a health story too, and it is the one place where
+    // `behind` means "you need to pull". Bare `main` matters because unquoted
+    // parens are a shell syntax error.
+    let name = &names[0];
+    let s = slugify(name);
+    if name != "(main)" && (s.is_empty() || s == "." || s == "..") {
+        ui.error(&format!("Invalid worktree name '{name}'."));
+        return 1;
+    }
+    let slug = if name == "(main)" {
+        "(main)".to_string()
+    } else if Path::new(&format!("{}/{}", p.wt_root_dir(), s)).is_dir() {
+        s
+    } else if name == "main" {
+        "(main)".to_string()
+    } else if let Some(holder) = p.wt_for_branch(strip_origin(name)) {
+        basename(&holder)
+    } else {
+        ui.error(&format!("No worktree '{s}' under .worktrees/. See: worktrees ls"));
+        return 1;
+    };
+
+    let now = std::env::var("WORKTREES_STATUS_NOW")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or_else(crate::sysclock::now_epoch);
+
+    // ONE snapshot: every derived fact this report needs (divergence vs the base,
+    // dirty count, last commit, tmux, the claude dir) is already computed there,
+    // so there is no second git plumbing layer to drift out of sync with `ls`.
+    let ls = p.ls();
+    let Some(place) = ls.places.iter().find(|x| x.slug == slug) else {
+        ui.error(&format!("No worktree '{slug}' under .worktrees/. See: worktrees ls"));
+        return 1;
+    };
+    // An unregistered place has NO git facts (ls emits nulls). Mapping those to
+    // zero would fabricate a clean, in-sync "parked" for a directory git has
+    // never heard of — so refuse instead of inventing a verdict.
+    if !place.registered {
+        ui.error(&format!(
+            "'{slug}' exists but is not a registered worktree — refusing. Clean it up: worktrees rm {slug}"
+        ));
+        return 1;
+    }
+
+    let store = crate::store::read_lenient(&p.main_root);
+    let decl = store.places.get(&slug);
+    // `ls --json` emits LIVE-ONLY lifecycle (model.rs) — recompute with the
+    // declared state merged in, the same way the app does.
+    let lifecycle_effective = crate::store::reconcile(decl, place.tmux_session.up, now);
+
+    let base_ref = p.base_ref();
+    let dir = place.path.as_str();
+    let ahead = place.ahead.unwrap_or(0);
+    let mut not_on_base: Vec<String> = Vec::new();
+    let mut not_on_base_total = 0u32;
+    let mut maybe_merged = 0u32;
+    let mut true_unpushed: Option<u32> = None;
+    // Only when there is something ahead to explain. A place with nothing on top
+    // of the base pays three git spawns for three guaranteed-empty answers, and
+    // this command is also the app's, run per click. Every failure below reads as
+    // "nothing found", never as an error: a health report must still print.
+    if ahead > 0 {
+        if let Some(out) = git::git_out(dir, &["log", "--oneline", &format!("{base_ref}..HEAD")]) {
+            let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+            not_on_base_total = lines.len() as u32;
+            not_on_base = lines.iter().take(20).map(|l| l.to_string()).collect();
+        }
+        if let Some(out) = git::git_out(dir, &["cherry", &base_ref]) {
+            maybe_merged = out.lines().filter(|l| l.starts_with("- ")).count() as u32;
+        }
+        if place.upstream.is_some() {
+            // ⚠ A CONFIGURED upstream is not a RESOLVING one: `status
+            // --porcelain=v2` reports `branch.<x>.merge`, so a branch set to
+            // track origin/feat-x that has never been pushed still names an
+            // upstream here while `@{u}` does not resolve. Reading that failure
+            // as "all of them unpushed" is the honest answer — the alternative
+            // is telling the user their work is "all pushed — safe" to a ref
+            // that does not exist.
+            true_unpushed = Some(
+                git::git_out(dir, &["rev-list", "--count", "@{u}..HEAD"])
+                    .and_then(|v| v.trim().parse::<u32>().ok())
+                    .unwrap_or(not_on_base_total),
+            );
+        }
+    }
+
+    let facts = crate::health::HealthFacts {
+        slug: slug.clone(),
+        branch: place.branch.clone(),
+        base: base_ref.clone(),
+        created_epoch: place.created_epoch.filter(|e| *e > 0),
+        last_commit_epoch: place.last_commit_epoch,
+        last_commit_subject: place.last_commit_subject.clone(),
+        last_opened_epoch: decl.and_then(|d| d.last_opened_epoch),
+        last_worked_epoch: decl.and_then(|d| d.last_worked_epoch),
+        claude_last_epoch: place
+            .claude_session_dir
+            .as_deref()
+            .and_then(crate::health::claude_last_epoch),
+        dirty_files: place.dirty_files.unwrap_or(0),
+        ahead,
+        behind: place.behind.unwrap_or(0),
+        upstream: place.upstream.clone(),
+        tmux_up: place.tmux_session.up,
+        lifecycle_effective,
+        note: decl.and_then(|d| d.note.clone()),
+        title: decl.and_then(|d| d.title.clone()),
+        not_on_base,
+        not_on_base_total,
+        true_unpushed,
+        maybe_merged,
+    };
+
+    let clock = crate::sysclock::SysClock::detect();
+    let (verdict, reasons) = crate::health::assess(&facts, now, &|e| clock.fmt_date(e));
+    let report = crate::health::Report {
+        schema_version: crate::health::SCHEMA_VERSION,
+        verdict,
+        reasons,
+        facts,
+    };
+
+    if json {
+        // Same template as `doctor --json` / `ls --json`: ONE compact line.
+        ui.plain(&serde_json::to_string(&report).unwrap_or_default());
+        return 0;
+    }
+    emit_status_human(ui, &report, &clock, now);
+    0
+}
+
+/// The human face of `status`: the verdict, then why, then the receipts.
+fn emit_status_human(
+    ui: &mut dyn Ui,
+    r: &crate::health::Report,
+    clock: &crate::sysclock::SysClock,
+    now: i64,
+) {
+    let f = &r.facts;
+    let headline = match r.verdict.as_str() {
+        "active" => "active",
+        "parked" => "parked",
+        "at-risk" => "work at risk",
+        _ => "cold",
+    };
+    ui.header(&format!("{} — {headline}", f.title.as_deref().unwrap_or(&f.slug)));
+    for reason in &r.reasons {
+        ui.info(reason);
+    }
+    // A verdict with nothing to explain still deserves a sentence — an empty gap
+    // under the header reads as a report that failed to run.
+    if r.reasons.is_empty() {
+        ui.info(match r.verdict.as_str() {
+            "active" => "touched recently — this is live work.",
+            "cold" => "no session, nothing uncommitted, nothing ahead of the base — nothing here is unique to this worktree.",
+            _ => "nothing to report.",
+        });
+    }
+
+    // Aligned label/value facts. `when` renders "date (age)" for the epochs, so
+    // a reader never has to subtract two dates in their head.
+    let when = |e: Option<i64>| match e {
+        Some(e) if e > 0 => format!("{} ({} ago)", clock.fmt_date(e), clock.ago(e, now)),
+        _ => "-".to_string(),
+    };
+    let mut row = |label: &str, value: String| ui.plain(&format!("  {label:<14}{value}"));
+    row("branch", f.branch.clone().unwrap_or_else(|| "(detached)".into()));
+    row("created", when(f.created_epoch));
+    row(
+        "last commit",
+        match (&f.last_commit_epoch, &f.last_commit_subject) {
+            (Some(_), Some(s)) => format!("{}  {s}", when(f.last_commit_epoch)),
+            _ => when(f.last_commit_epoch),
+        },
+    );
+    // Whichever of the two claude signals is newer — "when did anything think in
+    // here", which is not the same question as "when was this opened".
+    row("last claude", when(f.claude_last_epoch.max(f.last_worked_epoch)));
+    row("last entered", when(f.last_opened_epoch));
+    row("uncommitted", f.dirty_files.to_string());
+    row("ahead", format!("{} not on {}", f.ahead, f.base));
+    // Named "base moved", never "behind": the number describes the base, not a
+    // failing of this worktree, and the verdict above never counted it.
+    row("base moved", format!("{} (informational)", f.behind));
+    row(
+        "upstream",
+        match (&f.upstream, f.true_unpushed) {
+            (Some(u), Some(k)) if k > 0 => format!("{u} ({k} not pushed)"),
+            (Some(u), _) => u.clone(),
+            (None, _) => "none — nothing pushed".to_string(),
+        },
+    );
+    row("session", if f.tmux_up { "up".into() } else { "down".to_string() });
+    row("lifecycle", f.lifecycle_effective.clone());
+    if let Some(n) = f.note.as_deref().filter(|n| !n.is_empty()) {
+        row("note", n.to_string());
+    }
+
+    if !f.not_on_base.is_empty() {
+        ui.plain("");
+        ui.plain(&format!("  commits not on {}:", f.base));
+        for line in &f.not_on_base {
+            ui.plain(&format!("    {line}"));
+        }
+        let shown = f.not_on_base.len() as u32;
+        if f.not_on_base_total > shown {
+            ui.plain(&format!("    …and {} more", f.not_on_base_total - shown));
+        }
+    }
+}
+
 // ── init — the suggestion flow (proposal §9) ─────────────────────────────────
 
 /// `worktrees init [--print] [--diff] [-y] [--force]`.
