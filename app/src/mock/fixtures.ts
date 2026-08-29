@@ -36,12 +36,15 @@ export type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?:
 export type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 export type Workspace = { projects: ProjectView[] };
 
-const NOW = 1784332800; // ~2026-07-21
+/** The fixture workspace's "now" — the WALL CLOCK, never a frozen date. Every
+ *  age the app renders is measured against `Date.now()`: the afterglow tiers
+ *  (`doneTier`), the row age (`ago`), and the `.row.stale` dim. A pinned epoch
+ *  drifts past all three, so the harness boots with no embers, a "40d" on rows
+ *  their author wrote as "yesterday", and — since the header calm-down — an
+ *  entirely dimmed workspace. It is also what makes the recorded media
+ *  deterministic: offsets below are exactly what a reader sees, every run. */
+const NOW = Math.floor(Date.now() / 1000);
 const DAY = 86400;
-/** Afterglow ages must be relative to the WALL CLOCK, not the frozen `NOW`:
- *  `doneTier` measures against `Date.now()`, so a fixed epoch would age out of
- *  every tier and the harness would boot showing no embers at all. */
-const REAL_NOW = Math.floor(Date.now() / 1000);
 const MIN = 60;
 
 /** The canonical tmux session name for a place — `Project::session_name`
@@ -85,8 +88,15 @@ function cdv(): ProjectView {
   const P = "cdv";
   const places: Place[] = [
     place(P, root, {
+      // `behind` on MAIN is the one ↓ the app still draws — main's base ref is
+      // origin/main, so this is the classic "you have commits to pull". It is
+      // also what puts main in the Attention lens.
+      // The old commit date is deliberate too: main sits untouched while the
+      // work happens in worktrees, so this is the row that proves `(main)` is
+      // exempt from the stale dim rather than merely young enough to escape it.
       slug: "(main)", branch: "main", is_main: true,
-      tmux_session: { name: `${P}-(main)`, up: true }, ahead: 0, behind: 0,
+      tmux_session: { name: `${P}-(main)`, up: true }, ahead: 0, behind: 2,
+      last_commit_epoch: NOW - 45 * DAY,
       last_commit_subject: "chore: bump deps", lifecycle_effective: "active",
       // The topbar profile badge, in its ordinary state.
       profile_name: "Work", profile_stale: false,
@@ -98,8 +108,12 @@ function cdv(): ProjectView {
       // …and in its stale state, so "restart to apply" is reachable by clicking
       // rather than only existing in the backend.
       profile_name: "Work", profile_stale: true,
-      last_commit_subject: "wire up SSE reconnect", last_commit_epoch: NOW - DAY,
-      declared: { lifecycle: "saved", pinned: true, note: "auth refactor place", last_opened_epoch: NOW - DAY },
+      // The aging pin: nothing has happened here in a month, so the row dims —
+      // but it keeps its place at the top of Pinned, because that is what the
+      // user asked for. Also the sticky-lifecycle case: "saved" is a declared
+      // state, so the header chip still says it even though the session is up.
+      last_commit_subject: "wire up SSE reconnect", last_commit_epoch: NOW - 31 * DAY,
+      declared: { lifecycle: "saved", pinned: true, note: "auth refactor place", last_opened_epoch: NOW - 31 * DAY },
       lifecycle_effective: "saved",
     }),
     place(P, root, {
@@ -120,26 +134,30 @@ function cdv(): ProjectView {
       lifecycle_effective: "active",
     }),
     place(P, root, {
+      // Behind-only and clean: the base moved, this worktree did not. Nothing
+      // to see — no ↓ glyph, no ↓ in the header, and it stays out of Attention.
       slug: "search-index", branch: "feat/search-opensearch",
       ahead: 0, behind: 3, last_commit_subject: "index mapping draft",
       // afterglow t1 — freshest tier, full ember + halo
-      declared: { last_opened_epoch: NOW - 2 * DAY, last_worked_epoch: REAL_NOW - 4 * MIN, note: "waiting on infra ticket" },
+      declared: { last_opened_epoch: NOW - 2 * DAY, last_worked_epoch: NOW - 4 * MIN, note: "waiting on infra ticket" },
       lifecycle_effective: "idle",
     }),
     place(P, root, {
       slug: "hotfix-login", branch: "fix/login-loop", dirty: true, dirty_files: 1,
       // afterglow t2 — worked this block, session since closed
       last_commit_subject: "guard null session",
-      declared: { lifecycle: "closed", last_opened_epoch: NOW - 20 * DAY, last_worked_epoch: REAL_NOW - 45 * MIN },
+      declared: { lifecycle: "closed", last_opened_epoch: NOW - 20 * DAY, last_worked_epoch: NOW - 45 * MIN },
       lifecycle_effective: "closed",
     }),
     place(P, root, {
       slug: "legacy-migration", branch: "chore/knex-to-prisma",
+      last_commit_epoch: NOW - 40 * DAY,
       last_commit_subject: "migrate users table", declared: { lifecycle: "archived", note: "resume Q3", last_opened_epoch: NOW - 40 * DAY },
       lifecycle_effective: "archived",
     }),
     place(P, root, {
       slug: "spike-graphql", branch: "spike/graphql",
+      last_commit_epoch: NOW - 60 * DAY,
       last_commit_subject: "throwaway resolver", declared: { lifecycle: "abandoned", last_opened_epoch: NOW - 60 * DAY },
       lifecycle_effective: "abandoned",
     }),
@@ -156,7 +174,7 @@ function worktreesRepo(): ProjectView {
       tmux_session: { name: `${P}-(main)`, up: false }, last_commit_subject: "docs: readme",
       // main glows too — a session run in the repo root stamps under the `(main)`
       // store key, same as any other place (lib.rs place_key_for)
-      declared: { last_worked_epoch: REAL_NOW - 30 * MIN },
+      declared: { last_worked_epoch: NOW - 30 * MIN },
       lifecycle_effective: "closed",
     }),
     place(P, root, {
@@ -169,7 +187,7 @@ function worktreesRepo(): ProjectView {
       slug: "fix-flaky-ci", branch: "fix/flaky-ci",
       // afterglow t3 — this morning's work, nearly out
       last_commit_subject: "retry tmux smoke",
-      declared: { lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY, last_worked_epoch: REAL_NOW - 5 * 3600 },
+      declared: { lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY, last_worked_epoch: NOW - 5 * 3600 },
       lifecycle_effective: "closed",
     }),
   ];

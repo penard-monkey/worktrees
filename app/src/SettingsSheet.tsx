@@ -411,7 +411,7 @@ export function SettingsSheet({
               <option value={15}>Every 15 min</option>
               <option value={60}>Every 60 min</option>
             </select>
-            <div className="hint">Keeps ahead/behind counts fresh. Fetches each project's origin in the background.</div>
+            <div className="hint">Keeps the divergence counts fresh. Fetches each project's origin in the background.</div>
           </section>
           </>}
 

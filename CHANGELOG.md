@@ -32,6 +32,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   working there rather than passing through. The Resume list on the Home screen
   is unchanged — those rows still open on a single click, which is what Resume
   means.
+- **The place header stopped saying things twice.** It used to show "live" in
+  two badges a hand's width apart, and a lifecycle label that read "active"
+  beside a session you could plainly see was running. Now there is one live
+  badge, and the lifecycle chip appears only when it has something to add —
+  idle, saved, closed, archived, abandoned. The **↓ behind** count is gone from
+  worktree rows and from the header: on a worktree it only ever said "the main
+  branch moved", which is true of nearly every worktree by Friday and is not
+  something you can act on. It stays on **(main)**, where it means what you
+  expect — commits waiting to be pulled — and that is also the only ↓ the
+  Attention lens collects now. Nothing was lost: the counts are still measured,
+  and `worktrees ls --json` still reports them. The header also lost its
+  `Lifecycle ▾` menu (the same four states are one right-click away on the row)
+  and its permanent **Close** button, which moved into the **⋯** menu beside it
+  — ending a session is deliberate, and it no longer sits one slip from the
+  session you are reading.
+- **Places you have not touched in two weeks fade in the sidebar.** The row's
+  name dims; its age beside it stays bright, because the age is the reason.
+  Pinned places dim too — and keep their position, which is the point of
+  pinning one. The main checkout never fades: it is the anchor, not something
+  to clean up.
 
 ## [0.18.0] - 2026-08-28
 
