@@ -51,6 +51,14 @@ export type HealthBody = {
  *  `cmd_status` exited on a guard before it emitted any JSON. */
 export type HealthReport = { code: number; report: HealthBody | null; error: string | null };
 
+/** What `ai_status_report` returns, and what it caches under the place's
+ *  `status_report` declared key (store.rs `extra` round-trips it verbatim).
+ *
+ *  Exported so App's `Declared` can name THIS type rather than re-describe it:
+ *  the shape crosses three boundaries (Rust → declared JSON → this sheet) and a
+ *  second declaration is a second thing to keep in step. */
+export type StatusReport = { text: string; epoch: number; verdict?: string };
+
 /** What each verdict is CALLED, and the one sentence that says what it means.
  *  `at-risk` is the only one whose label differs from its wire value; keeping
  *  the wire value machine-shaped and the label human-shaped is deliberate. */
@@ -89,6 +97,13 @@ function when(epoch?: number | null): string {
   return `${new Date(epoch * 1000).toLocaleDateString()} · ${ago(epoch)}`;
 }
 
+/** "just now" / "3d ago" — `ago`'s compact form reads as a label beside a row
+ *  key, but as a sentence ("as of now") it says the wrong thing. */
+function asOf(epoch: number): string {
+  const a = ago(epoch);
+  return a === "now" ? "just now" : `${a} ago`;
+}
+
 function Row({ k, v, title }: { k: string; v: React.ReactNode; title?: string }) {
   return (
     <div className="ver-row hs-row" title={title}>
@@ -110,6 +125,8 @@ export function StatusSheet({
   onLifecycle,
   onRemove,
   onCopy,
+  declared,
+  onReport,
 }: {
   open: boolean;
   repo: string;
@@ -125,10 +142,26 @@ export function StatusSheet({
    *  the dialog is where a remove is confirmed, and it says what it destroys. */
   onRemove: () => void;
   onCopy: (text: string) => void;
+  /** THIS tick's declared state for the place — where a previous "Ask Claude"
+   *  was cached. Handed down rather than read here so the sheet keeps having
+   *  exactly one source of truth for the place, the one App refreshes. */
+  declared: { status_report?: StatusReport | null } | null;
+  /** A report just came back. App patches it into the workspace in hand and
+   *  THEN refreshes — both halves in one callback so the order is App's to
+   *  guarantee: a `list_workspace` sweep already in flight when the backend
+   *  wrote the store carries pre-write declared state, and letting it land
+   *  after the resolve would blank a report the user is reading. */
+  onReport: (r: StatusReport) => void;
 }) {
   const [rep, setRep] = useState<HealthBody | null>(null);
   const [checking, setChecking] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+  // The report this sheet just fetched. Belt AND braces with the `declared`
+  // prop: the optimistic patch normally puts it there within a render, but the
+  // place can vanish from the snapshot under a sheet that outlives its menu, and
+  // an answer the user waited 90s for must not depend on a list still listing.
+  const [fresh, setFresh] = useState<StatusReport | null>(null);
 
   // Errors are NEVER swallowed: they surface in this sheet's own error area AND
   // land in app.log (same shape as ProjectSheet — no fail() out here).
@@ -153,6 +186,29 @@ export function StatusSheet({
     }
   }, [repo, slug, note]);
 
+  // ⚠ NEVER automatic. `refresh` (place_health) is local git and runs on open;
+  // this spawns claude, costs tokens and takes ~30–90s, so it happens only when
+  // someone presses the button. There is no effect that calls it.
+  const ask = useCallback(async () => {
+    setAsking(true);
+    setErr(null);
+    try {
+      const r = await invoke<StatusReport | null>("ai_status_report", { repo, slug });
+      if (!r || !r.text) {
+        // The backend Errs on an empty answer rather than caching one, so this
+        // is the mock's unmocked-command null — still not a report.
+        note(`ask claude ${slug}: no report came back`);
+        return;
+      }
+      setFresh(r);
+      onReport(r);
+    } catch (e) {
+      note(`ask claude ${slug} failed: ${String(e)}`);
+    } finally {
+      setAsking(false);
+    }
+  }, [repo, slug, note, onReport]);
+
   useEffect(() => {
     if (!open) return;
     refresh();
@@ -176,6 +232,9 @@ export function StatusSheet({
   const claudeAt = Math.max(f?.claude_last_epoch ?? 0, f?.last_worked_epoch ?? 0);
   const shown = f?.not_on_base.length ?? 0;
   const more = (f?.not_on_base_total ?? 0) - shown;
+  // This run first, then the cache. They are the same value once the patch
+  // lands; in the gap before it does, this run is the newer of the two.
+  const read = fresh ?? declared?.status_report ?? null;
 
   return (
     <div className="scrim" onClick={onClose}>
@@ -275,6 +334,40 @@ export function StatusSheet({
               )}
             </section>
           )}
+
+          {/* The facts above say what IS here. This says what it was FOR — the
+              one question no git fact answers, and the reason a stale worktree
+              is hard to let go of. On demand only, and cached until re-run:
+              it costs tokens and a minute of waiting. */}
+          <section className="setting">
+            <label>Claude's read</label>
+            {read ? (
+              <>
+                <pre className="update-log hs-read" data-testid="status-ai-text">{read.text}</pre>
+                <div className="hint" data-testid="status-ai-age">
+                  as of {asOf(read.epoch)}
+                  {read.verdict ? ` · on a "${read.verdict}" verdict` : ""}
+                </div>
+              </>
+            ) : (
+              <div className="hint" data-testid="status-ai-hint">
+                Hand these facts to your repo's AI profile and get back what this worktree was
+                for, where it ended up, and whether to resume it, push it and let it go, or
+                drop it. Runs your repo's AI profile headless — ~30–90s.
+              </div>
+            )}
+            <div className="ver-actions">
+              <button
+                className="ctrl sm"
+                data-testid="status-ask"
+                onClick={ask}
+                disabled={asking}
+                title={read ? "ask again — this replaces the cached read" : "runs claude once, headless"}
+              >
+                {asking ? "Asking Claude…" : read ? "Re-run" : "Ask Claude"}
+              </button>
+            </div>
+          </section>
 
           <section className="setting">
             <label>Act on it</label>

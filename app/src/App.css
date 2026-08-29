@@ -866,6 +866,16 @@ body.dragging .menu-catch { pointer-events: none; }
 .hs-info { color: var(--txt-mute); font-size: var(--fs-micro); font-style: normal; }
 .hs-actions { flex-wrap: wrap; }
 
+/* Claude's read is PROSE, and `.update-log` is styled for a command trace.
+   Three of its rules are wrong for a paragraph: a mono face at micro size,
+   `word-break: break-all` (which breaks mid-word rather than at spaces), and a
+   9rem clip that would hide most of 250 words behind a scrollbar. The recessed
+   box and `white-space: pre-wrap` are exactly right, so they stay. */
+.update-log.hs-read {
+  font-family: inherit; font-size: var(--fs-meta); line-height: var(--lh-prose);
+  word-break: normal; overflow-wrap: anywhere; max-height: 24rem;
+}
+
 /* §9's init nudge — box treatment copied from .nav-newform, amber-edged */
 .init-banner {
   display: flex; flex-direction: column; gap: var(--s2);

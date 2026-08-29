@@ -67,7 +67,10 @@ Sections 1, 2, 3, 5, 6, 7, 8 and 9 are all reachable from the sandboxed CLI
 app running at all. **Do those first** — they are also the sections covering the
 silent failures.
 
-Only §4 (the "restart to apply" badge) needs the desktop app. Two options:
+Two sections need the desktop app: §4 (the "restart to apply" badge) and §11
+(the headless status report). §11 is app-only by construction — `ai_status_report`
+is a Tauri command with no CLI verb behind it, so there is nothing in the
+sandboxed CLI to reach it with. Two options:
 
 ```sh
 app/scripts/sandbox.sh --app
@@ -200,6 +203,54 @@ upgrade can change the shape or the write timing and the dot degrades in silence
       inflate it.)
 - [ ] `kill -9` a busy session → it stamps "finished". Known and accepted: the
       busy-exit edge cannot tell completion from death.
+
+## 11. Headless status report ("Ask Claude")
+
+The first path in this codebase that launches claude WITHOUT a tmux pane
+(`ai_status_report`, lib.rs). Everything a pane gave for free is gone here: you
+cannot see what was launched, and you cannot Ctrl-C it — so the guard and the
+180s deadline are the only things standing between a broken profile and a
+process nobody can find. Neither is reachable from bats: there is no fake
+`claude`, and no CLI verb for this at all.
+
+Open the sheet with right-click a worktree → **Status check…**, then the
+**Ask Claude** button under the facts.
+
+- [ ] **Profiled repo.** Set a profile with distinctive rules (§1's MARKER-7734
+      trick works: "when reporting on a worktree, end with MARKER-7734"). Ask
+      Claude → the marker is in the answer, i.e. the run picked up
+      `CLAUDE_CONFIG_DIR` and `--append-system-prompt-file`. (`claude --version`
+      parity between the profile dir and your global one is the weaker check if
+      you would rather not edit rules.)
+- [ ] **It is cached, and it survives a restart.** After a successful run,
+      `.worktrees.places.json` has a `status_report` key under that place with
+      `text` / `epoch` / `verdict` — and NO new `last_worked_epoch` (a report
+      *about* a worktree is not work *in* it; stamping it would relight the
+      afterglow dot on a cold place). Quit and relaunch the app, reopen the
+      sheet → the same text is there without a second spawn.
+- [ ] **Unprofiled repo.** Same thing in a repo with no profile: plain env, no
+      `CLAUDE_CONFIG_DIR`, still answers.
+- [ ] **Fail-closed profile.** Break the profile so `materialize` fails (point
+      its rules file at a path that does not exist). Ask Claude → a clean
+      *"your AI profile could not be prepared"* error in the sheet, and **no
+      spawn at all** (`pgrep -f 'claude -p'` finds nothing while it is running).
+      ⚠ This is the check that pays for the guard reading the COMPOSED command
+      instead of `match_word`: the fail-closed launch keeps `match_word:
+      "claude"` while swapping the command for a `printf … >&2` sentinel, so a
+      match_word guard would run printf and cache its error text as claude's
+      considered read of the worktree.
+- [ ] **Timeout, and no orphan.** Put a shim NAMED `claude` (`#!/bin/sh` /
+      `sleep 999`) in a dir prepended to `PATH`, relaunch the app so
+      `fixup_gui_path` picks it up. ⚠ It must be named `claude` — an `ai_cmd`
+      wrapper under another name trips the guard instead and you will have
+      tested the wrong thing. Ask Claude → an error after 180s reading
+      *"claude timed out after 180s"*, then `pgrep -f 'sleep 999'` finds
+      **nothing**. (That is the `exec ` in the composed `sh -c` line doing its
+      job: `run_deadline` kills one pid, so without `exec` the kill lands on
+      `sh` and the real process outlives it.)
+- [ ] **No planning files.** Run it on a worktree with no task_plan.md /
+      findings.md / progress.md / ROADMAP.md → it still answers, from the git
+      facts in the JSON alone, and does not claim to have read anything.
 
 ---
 
