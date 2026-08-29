@@ -23,6 +23,8 @@ export type Place = {
   dirty_files?: number | null;
   ahead: number | null;
   behind: number | null;
+  upstream?: string | null;
+  created_epoch?: number | null;
   last_commit_subject?: string | null;
   last_commit_epoch?: number | null;
   tmux_session: { name: string; up: boolean };
@@ -67,8 +69,14 @@ function place(prefix: string, root: string, o: Opt): Place {
     dirty_files: o.dirty_files ?? (o.dirty ? 3 : 0),
     ahead: o.ahead ?? 0,
     behind: o.behind ?? 0,
+    upstream: o.upstream ?? null,
     last_commit_subject: o.last_commit_subject ?? "wip",
     last_commit_epoch: o.last_commit_epoch ?? NOW - DAY,
+    // Defaults to the commit date rather than to `NOW`: `created_epoch` is a rung
+    // of the status check's activity max (health.rs), so a fixture that was born
+    // "now" would read `active` no matter how old everything else about it is —
+    // and the stale verdicts would be unreachable in the harness.
+    created_epoch: o.created_epoch ?? o.last_commit_epoch ?? NOW - DAY,
     tmux_session: o.tmux_session ?? { name: sessionName(prefix, o.slug), up: false },
     claude_session_present: o.claude_session_present ?? false,
     declared: o.declared ?? null,
@@ -104,6 +112,11 @@ function cdv(): ProjectView {
     place(P, root, {
       slug: "messaging", branch: "feat/messaging-sse",
       dirty: true, dirty_files: 4, ahead: 2, behind: 0,
+      // An upstream that has SOME of the commits: the status check's third
+      // at-risk reason has three faces (no upstream / K unpushed / all pushed
+      // but unmerged), and without a tracked fixture the middle one is
+      // unreachable from the harness.
+      upstream: "origin/feat/messaging-sse",
       tmux_session: { name: `${P}-messaging`, up: true }, claude_session_present: true,
       // …and in its stale state, so "restart to apply" is reachable by clicking
       // rather than only existing in the backend.

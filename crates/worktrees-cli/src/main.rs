@@ -24,6 +24,7 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees relink [<name>|--all]       re-apply .worktrees.toml's files (--force to overwrite)
   worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
   worktrees doctor [<name>]             report file drift, declared and un- (--json --strict --config-only)
+  worktrees status <name>               health verdict for one worktree (--json)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
@@ -125,6 +126,9 @@ fn run() -> i32 {
         "relink" => ops::cmd_relink(&project, &mut ui, rest),
         "provision" => ops::cmd_provision(&project, &mut ui, rest),
         "doctor" => ops::cmd_doctor(&project, &mut ui, rest),
+        // Read-only, so deliberately absent from MUTATING above — a health
+        // verdict is part of finding out what a tree is, like `ls` and `doctor`.
+        "status" => ops::cmd_status(&project, &mut ui, rest),
         "init" => ops::cmd_init(&project, &mut ui, rest),
         // Note: not routed through `ui` — this speaks JSON-RPC on stdout, and
         // anything else written there corrupts the transport.

@@ -12,6 +12,7 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
+import { StatusSheet } from "./StatusSheet";
 import { fileInfo } from "./filekind";
 import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
@@ -47,6 +48,12 @@ type Place = {
   dirty_files?: number | null;
   ahead: number | null;
   behind: number | null;
+  /// All three are already in the backend's `ls --json` (model.rs) and were
+  /// simply dropped at the TS boundary. The status check reads them, and a row
+  /// that has them can render a commit subject without a second round trip.
+  upstream?: string | null;
+  created_epoch?: number | null;
+  last_commit_subject?: string | null;
   tmux_session: { name: string; up: boolean };
   last_commit_epoch?: number | null;
   claude_session_present: boolean;
@@ -2356,6 +2363,10 @@ function App() {
   >(null);
   const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
   const [projSheet, setProjSheet] = useState<string | null>(null);
+  /** The per-place status check (right-click → Status check…, or the topbar ⋯).
+   *  Holds `{repo, slug}` rather than a Place: the 3s refresh swaps every Place
+   *  object, and the sheet re-fetches its own report anyway. */
+  const [statusSheet, setStatusSheet] = useState<{ repo: string; slug: string } | null>(null);
   // ── sync ──
   // Cached per project, refreshed when the context menu OPENS (one cheap
   // backend call) and again after an apply, so the menu can name the hub it
@@ -3207,6 +3218,12 @@ function App() {
     ctx?.kind === "place"
       ? ws?.projects.find((v) => v.root === ctx.repo)?.snapshot?.places.find((pl) => pl.slug === ctx.slug) ?? null
       : null;
+  // Same rule for the status sheet: it outlives the menu that opened it, and its
+  // action row acts on the place — so it must act on THIS tick's Place, not the
+  // one that happened to be under the cursor when the menu was raised.
+  const statusPlace: Place | null = statusSheet
+    ? ws?.projects.find((v) => v.root === statusSheet.repo)?.snapshot?.places.find((pl) => pl.slug === statusSheet.slug) ?? null
+    : null;
   // Same rule for the remove dialog, which outlives the menu that opened it and
   // sits open across refresh ticks: the risks it lists (dirty count, unpushed
   // commits, live session) are only honest if the Place is this tick's.
@@ -3660,6 +3677,15 @@ function App() {
     closeMenu();
     setRmErr("");
     setRm({ repo, slug });
+  };
+  /** Both status entry points — the nav's right-click menu and the topbar ⋯.
+   *  BOTH dismissals are mandatory, not tidiness: `closeCtx`/`closeMenu` are
+   *  what clear an armed `confirmRm`, and an arm that survived into a sheet
+   *  would sit waiting behind it as a one-click destructive action. */
+  const openStatus = (repo: string, slug: string) => {
+    closeCtx();
+    closeMenu();
+    setStatusSheet({ repo, slug });
   };
   /** Both flags come from the dialog's checkboxes.
    *
@@ -5058,6 +5084,8 @@ function App() {
                             onClick={() => closeFromMenu(sel.repo, sel.slug, false)}>Close session</button>
                         )
                       )}
+                      <button className="pop-item" data-testid="topbar-status"
+                        onClick={() => openStatus(sel.repo, sel.slug)}>Status check…</button>
                       <button className="pop-item" onClick={() => { closeMenu(); setRenaming(true); }}>
                         {selected.declared?.title ? "Rename…" : "Name this place…"}
                       </button>
@@ -5394,6 +5422,42 @@ function App() {
         onConfigWritten={(root) => { probeSuggest(root); refresh(); }}
       />
 
+      {/* Per-place status check (right-click a worktree → Status check…, or the
+          topbar ⋯). Keyed by target so switching places remounts it with fresh
+          state — ProjectSheet's `key={projSheet ?? "none"}` trick. Mounted here,
+          BEFORE the ctx menus, because DOM order is z-order in this tree. */}
+      <StatusSheet
+        // ⚠ The closed-sentinel is namespaced. ProjectSheet's sibling key is a
+        // bare "none", and two siblings keyed "none" is a React duplicate-key
+        // error — which it reports as a warning and then punishes by reusing one
+        // component's state for the other.
+        key={statusSheet ? "status|" + statusSheet.repo + "|" + statusSheet.slug : "status|none"}
+        open={!!statusSheet}
+        repo={statusSheet?.repo ?? ""}
+        slug={statusSheet?.slug ?? ""}
+        placeName={statusPlace ? nameOf(statusPlace) : statusSheet?.slug ?? ""}
+        onClose={() => setStatusSheet(null)}
+        onEnter={() => {
+          if (!statusSheet || !statusPlace) return;
+          setStatusSheet(null);
+          enterPlace(statusSheet.repo, statusPlace);
+        }}
+        // ⚠ set_lifecycle, never patchDeclared: `lifecycle_effective` is
+        // reconciled server-side, so an optimistic patch here would show a label
+        // the backend may not agree with. The ctx menu obeys the same rule.
+        onLifecycle={(label) => {
+          if (!statusSheet) return;
+          mutate(invoke("set_lifecycle", { repo: statusSheet.repo, slug: statusSheet.slug, label }));
+        }}
+        onRemove={() => {
+          if (!statusSheet) return;
+          const { repo, slug } = statusSheet;
+          setStatusSheet(null);
+          openRemove(repo, slug);
+        }}
+        onCopy={copyText}
+      />
+
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset}
@@ -5564,6 +5628,11 @@ function App() {
               )}
             </>
           )}
+          {/* ⚠ Deliberately OUTSIDE the !is_main block above: `(main)` gets a
+              status check too. The CLI accepts it, and main is the one place
+              where `behind` is a real "you need to pull" rather than noise. */}
+          <button className="pop-item" data-testid="ctx-status"
+            onClick={() => openStatus(ctx.repo, ctxPlace.slug)}>Status check…</button>
           <button className="pop-item" onClick={() => openOnRemote(ctx.repo, ctxPlace.slug)}>Open on GitHub</button>
           <button className="pop-item" onClick={() => revealPlace(ctxPlace.path)}>Reveal in Finder</button>
           <button className="pop-item" onClick={() => editIn(ctxPlace.path)}>Open in editor</button>

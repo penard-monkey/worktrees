@@ -2085,6 +2085,52 @@ async fn doctor(repo: String, slug: Option<String>) -> Result<DoctorReport, Stri
     }
 }
 
+/// One place's health verdict — `doctor`'s shape, for `status`.
+///
+/// `report` is `health::Report` verbatim, so the sheet's vocabulary of verdicts
+/// and reasons is the CLI's by construction; `error` carries the guard message
+/// when `cmd_status` exited before emitting any JSON (never swallowed).
+#[derive(Serialize)]
+struct HealthReport {
+    /// `0` a report was emitted · `1` usage / unknown / unregistered place.
+    code: i32,
+    report: Option<worktrees_core::health::Report>,
+    error: Option<String>,
+}
+
+/// Health verdict for one place. Runs the REAL `cmd_status` in `--json` mode
+/// in-process and parses the line it emits, for the same reason `doctor` does:
+/// the CLI and the app must never disagree about what "at risk" means.
+#[tauri::command]
+async fn place_health(repo: String, slug: String) -> Result<HealthReport, String> {
+    let project = Project::discover(Path::new(&repo)).map_err(|e| {
+        applog("error", &format!("place_health repo={repo}: discover failed: {}", e.msg));
+        e.msg
+    })?;
+    let args: Vec<String> = vec![slug.clone(), "--json".into()];
+    let mut ui = CaptureUi::default();
+    let code = ops::cmd_status(&project, &mut ui, &args);
+    let parsed = ui
+        .lines
+        .iter()
+        .rev()
+        .find_map(|l| serde_json::from_str::<worktrees_core::health::Report>(l).ok());
+    match parsed {
+        Some(r) => Ok(HealthReport { code, report: Some(r), error: None }),
+        None => {
+            // rc 1 before the report was emitted (an unknown or unregistered
+            // place). The captured lines ARE the diagnosis.
+            let msg = ui.lines.join("\n");
+            applog("warn", &format!("place_health rc={code} repo={repo} slug={slug}: {msg}"));
+            Ok(HealthReport {
+                code,
+                report: None,
+                error: Some(if msg.is_empty() { format!("status exited {code}") } else { msg }),
+            })
+        }
+    }
+}
+
 /// Re-apply the file plan (`relink [<wt>|--all] [--force]`). `force` is the
 /// documented escape hatch for a shadowing regular file — core writes a `.bak`
 /// alongside before it touches one (§7), so the drifted content is never the
@@ -4283,6 +4329,7 @@ pub fn run() {
             get_ai_config,
             project_config_read,
             doctor,
+            place_health,
             relink,
             provision,
             sync_status,
