@@ -1250,15 +1250,22 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       }
       const facts = mockFacts(p);
       const { verdict } = mockAssess(facts, now());
+      // MARKDOWN-SHAPED on purpose. `status_prompt` (lib.rs) asks three numbered
+      // questions and a recommendation, so a real answer comes back as a list
+      // with bold lead-ins — and the sheet renders it through `Markdown`. Canned
+      // text that was flat prose would exercise only the degenerate case (one
+      // paragraph) and hide every spacing decision the markdown host makes.
       const report = {
         text:
-          `This worktree was cut for ${p.branch ?? "an unnamed branch"}${p.declared?.note ? ` — the note on it says "${p.declared.note}"` : ""}. ` +
-          `Its last commit was "${p.last_commit_subject ?? "wip"}", and there is no task_plan.md here to say more.\n\n` +
-          `It ended ${facts.dirty_files > 0 ? `mid-edit: ${facts.dirty_files} file${plural(facts.dirty_files)} are uncommitted` : "at a clean tree"}` +
-          `${facts.ahead > 0 ? `, with ${facts.ahead} commit${plural(facts.ahead)} that are not on ${facts.base}` : ", with nothing ahead of the base"}` +
-          `${facts.upstream ? `. The branch tracks ${facts.upstream}` : ". The branch has no upstream, so those commits exist only on this machine"}.\n\n` +
-          `Recommend: ${facts.ahead > 0 || facts.dirty_files > 0 ? (facts.upstream ? "push-then-abandon — the work is worth keeping but not worth reopening; get it off this machine and let the place go" : "resume — this is the only copy of it, and the shape of the change suggests it was close") : "abandon — there is nothing here that does not already exist on the base branch"}.\n\n` +
-          `(canned text from the mock harness — the real command runs your repo's AI profile)`,
+          `1. **What it was for.** This worktree was cut for \`${p.branch ?? "an unnamed branch"}\`` +
+          `${p.declared?.note ? ` — the note on it says "${p.declared.note}"` : ""}. ` +
+          `Its last commit was "${p.last_commit_subject ?? "wip"}", and there is no \`task_plan.md\` here to say more.\n\n` +
+          `2. **Where it ended up.** It ended ${facts.dirty_files > 0 ? `mid-edit: ${facts.dirty_files} file${plural(facts.dirty_files)} are uncommitted` : "at a clean tree"}` +
+          `${facts.ahead > 0 ? `, with ${facts.ahead} commit${plural(facts.ahead)} that are not on \`${facts.base}\`` : ", with nothing ahead of the base"}` +
+          `${facts.upstream ? `. The branch tracks \`${facts.upstream}\`` : ". The branch has **no upstream**, so those commits exist only on this machine"}.\n\n` +
+          `3. **What to do with it.** ${facts.ahead > 0 || facts.dirty_files > 0 ? (facts.upstream ? "The work is worth keeping but not worth reopening: get it off this machine and let the place go." : "This is the only copy of it, and the shape of the change suggests it was close.") : "Nothing here does not already exist on the base branch."}\n\n` +
+          `**Recommend: ${facts.ahead > 0 || facts.dirty_files > 0 ? (facts.upstream ? "push-then-abandon" : "resume") : "abandon"}.**\n\n` +
+          `*(canned text from the mock harness — the real command runs your repo's AI profile)*`,
         epoch: now(),
         verdict,
       };

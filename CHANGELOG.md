@@ -3,6 +3,31 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **A worktree with no session now opens onto its own status check.** That space
+  used to hold one line — "No live session for X" — and an Enter button, which
+  is the least useful thing to show at the exact moment you are deciding whether
+  a place is still worth your time. Now the whole check is there under the
+  Enter button: the verdict, the receipts, the facts, the commits that are not
+  on your base branch, and the actions. It runs by itself when you select the
+  place, because it is only local git and it is over before you have read the
+  title. Come back to a place you looked at earlier and the last verdict is
+  already on screen while the new one is fetched behind it. Asking Claude what
+  the worktree was for is still a button, and still runs nothing until you
+  press it.
+- **Claude's read is rendered, not printed.** The answer comes back as
+  markdown — it is three numbered questions and a recommendation — and it was
+  being shown verbatim, asterisks and all. It now renders: headings, lists,
+  bold, inline code, at the size of the prose around it. Reads that were saved
+  before this change still read fine.
+- **"Status check…" leaves the menus when the check is already on screen.** For
+  the place you have selected and are looking at, the menu item would only open
+  a sheet over a copy of itself. Everywhere else it stays exactly where it was —
+  the Home screen's resume rows included, which is where you most often ask the
+  question about a place you have not opened.
+
 ## [0.19.0] - 2026-08-29
 
 ### Added

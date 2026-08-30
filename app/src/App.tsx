@@ -12,7 +12,7 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
-import { StatusSheet, type StatusReport } from "./StatusSheet";
+import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { fileInfo } from "./filekind";
 import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
@@ -3228,6 +3228,20 @@ function App() {
   const statusPlace: Place | null = statusSheet
     ? ws?.projects.find((v) => v.root === statusSheet.repo)?.snapshot?.places.find((pl) => pl.slug === statusSheet.slug) ?? null
     : null;
+  // A status sheet is about the place you were looking AT. Moving the selection
+  // (⌘K, a nav click, Home, a place created or removed) moves on from it, so the
+  // sheet goes with it rather than hanging over a different worktree's window
+  // still titled with the old one — which is also how the sheet and the inline
+  // panel below it would end up mounted for two different places at once. Keyed
+  // on the two primitives, never on `sel` itself: `setSel` writes a fresh object
+  // and this would then fire on every identity change.
+  //
+  // Session DEATH under an open sheet is deliberately not handled here — the
+  // sheet stays, because yanking a check mid-read is worse than the duplicate
+  // it would avoid, and the inline host suppresses its own body instead.
+  useEffect(() => {
+    setStatusSheet(null);
+  }, [sel?.repo, sel?.slug]);
   // Same rule for the remove dialog, which outlives the menu that opened it and
   // sits open across refresh ticks: the risks it lists (dirty count, unpushed
   // commits, live session) are only honest if the Place is this tick's.
@@ -5088,8 +5102,14 @@ function App() {
                             onClick={() => closeFromMenu(sel.repo, sel.slug, false)}>Close session</button>
                         )
                       )}
-                      <button className="pop-item" data-testid="topbar-status"
-                        onClick={() => openStatus(sel.repo, sel.slug)}>Status check…</button>
+                      {/* Live sessions only. A session-less place shows the same
+                          check inline in the main window (it is all that is
+                          there), so the item would open a sheet over a copy of
+                          itself. */}
+                      {selected.tmux_session.up && (
+                        <button className="pop-item" data-testid="topbar-status"
+                          onClick={() => openStatus(sel.repo, sel.slug)}>Status check…</button>
+                      )}
                       <button className="pop-item" onClick={() => { closeMenu(); setRenaming(true); }}>
                         {selected.declared?.title ? "Rename…" : "Name this place…"}
                       </button>
@@ -5132,10 +5152,72 @@ function App() {
                   <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus}
                     findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
                 ) : (
-                  <div className="term-empty">
-                    <div className="term-empty-card">
-                      <div className="te-title">No live session for <b>{selected.slug}</b></div>
-                      <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
+                  /* No session, so nothing is competing for this space — and the
+                     one question a place with no session raises is whether it is
+                     still worth having. So the whole status check lives here,
+                     under the Enter hero, rather than behind a menu item: this
+                     IS the check, so the menu item that would open a second copy
+                     of it drops out (the topbar ⋯, and the nav/Home right-click
+                     menu — the latter only for THIS place, since that menu also
+                     opens over places whose check is nowhere on screen). Places
+                     WITH a session keep the sheet, which is right when the
+                     terminal owns the window. */
+                  /* `term-empty-scroll` is the modifier that turns `.term-empty`
+                     into a scroller. The base class is shared with the dock's
+                     two shell empty-states, where the card must stay small and
+                     centred on both axes — so the scrolling belongs to this
+                     instance, not to the class. */
+                  <div className="term-empty term-empty-scroll">
+                    {/* Keyed by place: switching selection remounts the body, so
+                        its per-place state (report, the read it fetched) can
+                        never be carried over onto a different worktree. Same
+                        trick as the StatusSheet's key below. */}
+                    <div className="term-status" key={sel.repo + "|" + sel.slug}>
+                      <div className="term-empty-card">
+                        <div className="te-title">No live session for <b>{selected.slug}</b></div>
+                        <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
+                      </div>
+                      {/* ONE StatusBody on screen at a time, and the sheet wins
+                          while it is open. `statusSheet` is tied to neither the
+                          selection nor session liveness, so it can be up over
+                          this host — the sheet's own place lost its session
+                          under it, or it was opened from another place's
+                          right-click menu — and two mounted bodies mean every
+                          `status-*` testid twice (the harness selects on them),
+                          two concurrent place_health fan-outs and two Ask
+                          Claude buttons for one place. Suppressing THIS one is
+                          the cheap half: it is behind a scrim and unreadable
+                          anyway, it remounts from `healthCache` the instant the
+                          sheet closes, and an "Ask Claude" it had in flight is
+                          not lost — `ai_status_report` writes the read to the
+                          store, so the next sweep returns it as `declared`. */}
+                      {!statusSheet && <StatusBody
+                        repo={sel.repo}
+                        slug={sel.slug}
+                        // The hero above is Enter; the act-on-it row drops its own.
+                        hideEnter
+                        onEnter={() => enterPlace(sel.repo, selected)}
+                        // ⚠ set_lifecycle, never patchDeclared: `lifecycle_effective`
+                        // is reconciled server-side, so an optimistic patch here would
+                        // show a label the backend may not agree with. Same rule as the
+                        // sheet below and the ctx menu.
+                        onLifecycle={(label) => {
+                          mutate(invoke("set_lifecycle", { repo: sel.repo, slug: sel.slug, label }));
+                        }}
+                        onRemove={() => openRemove(sel.repo, sel.slug)}
+                        onCopy={copyText}
+                        declared={selected.declared ?? null}
+                        // patchDeclared FIRST, refresh second — the ordering is
+                        // load-bearing for the same reason it is at the sheet's render
+                        // site below: the patch is what stops a `list_workspace` sweep
+                        // that was already in flight when the backend wrote the store
+                        // from landing afterwards with pre-write declared state and
+                        // blanking the report for a poll.
+                        onReport={(r) => {
+                          patchDeclared(sel.repo, sel.slug, { status_report: r });
+                          refresh();
+                        }}
+                      />}
                     </div>
                   </div>
                 )}
@@ -5646,9 +5728,19 @@ function App() {
           )}
           {/* ⚠ Deliberately OUTSIDE the !is_main block above: `(main)` gets a
               status check too. The CLI accepts it, and main is the one place
-              where `behind` is a real "you need to pull" rather than noise. */}
-          <button className="pop-item" data-testid="ctx-status"
-            onClick={() => openStatus(ctx.repo, ctxPlace.slug)}>Status check…</button>
+              where `behind` is a real "you need to pull" rather than noise.
+              Dropped only when the check is ALREADY on screen for this exact
+              place — the item would open a sheet over a second copy of it.
+              That is narrower than "session-less", and the difference is the
+              whole point: right-click does NOT select (placeCtx), and this same
+              menu backs the Home briefing's resume rows, where there is no
+              inline panel at all and the row's left-click ENTERS the place. A
+              blanket gate would have taken the check away at exactly the
+              "should I resume this?" moment it exists for. */}
+          {!(!ctxPlace.tmux_session.up && !!selected && sel?.repo === ctx.repo && selected.slug === ctxPlace.slug) && (
+            <button className="pop-item" data-testid="ctx-status"
+              onClick={() => openStatus(ctx.repo, ctxPlace.slug)}>Status check…</button>
+          )}
           <button className="pop-item" onClick={() => openOnRemote(ctx.repo, ctxPlace.slug)}>Open on GitHub</button>
           <button className="pop-item" onClick={() => revealPlace(ctxPlace.path)}>Reveal in Finder</button>
           <button className="pop-item" onClick={() => editIn(ctxPlace.path)}>Open in editor</button>
