@@ -866,15 +866,33 @@ body.dragging .menu-catch { pointer-events: none; }
 .hs-info { color: var(--txt-mute); font-size: var(--fs-micro); font-style: normal; }
 .hs-actions { flex-wrap: wrap; }
 
-/* Claude's read is PROSE, and `.update-log` is styled for a command trace.
-   Three of its rules are wrong for a paragraph: a mono face at micro size,
-   `word-break: break-all` (which breaks mid-word rather than at spaces), and a
-   9rem clip that would hide most of 250 words behind a scrollbar. The recessed
-   box and `white-space: pre-wrap` are exactly right, so they stay. */
+/* Claude's read is PROSE — now MARKDOWN prose — and `.update-log` is styled for
+   a command trace. What is borrowed from it is the recessed box: the inset
+   background, the border, the radius and the 24rem scroll clip below. What is
+   overridden is everything that assumes a `<pre>` of command output: a mono
+   face at micro size, `word-break: break-all` (which breaks mid-word rather
+   than at spaces), and the 9rem height, which would hide most of 250 words.
+   `.hs-read` on its own still dresses a plain-text render; `.hs-read-md` is the
+   markdown host, and it exists because `.md` brings its own page-sized padding
+   and body font size, which are right in the dock's document view and far too
+   generous for a panel section. `white-space: normal` is the load-bearing one:
+   `pre-wrap` is correct for text printed verbatim and wrong for block elements
+   that already carry their own margins — under it every blank line between
+   markdown blocks would render as an extra empty line. */
 .update-log.hs-read {
   font-family: inherit; font-size: var(--fs-meta); line-height: var(--lh-prose);
   word-break: normal; overflow-wrap: anywhere; max-height: 24rem;
 }
+.hs-read-md { white-space: normal; }
+.hs-read-md .md { padding: 0; max-width: none; font-size: var(--fs-meta); }
+/* The font-size above rescales every em-based size in the block — but a fence's
+   code sizes off `--term-size`, an ABSOLUTE length (see `.md-fence .code`), so
+   it does not reach it: a suggested git command in Claude's read painted at
+   13px inside prose set at ~11.25px, the bigger the smaller. The inverse of the
+   .md-zoom lesson — that conversion made sizes relative to the zoom knob, not
+   to the container — so this host has to say so itself. The dock's document
+   view, where 13px code IS the intent, is untouched. */
+.hs-read-md .md-fence .code { font-size: inherit; }
 
 /* §9's init nudge — box treatment copied from .nav-newform, amber-edged */
 .init-banner {
@@ -970,7 +988,50 @@ body.dragging .menu-catch { pointer-events: none; }
   box-sizing: content-box;
   padding: var(--s2); background: var(--term-bg); border-radius: var(--r-md);
 }
+/* THREE hosts share this class, and only one of them holds the status check:
+   the dock's shell tabs render it for "process exited" and "No shells"
+   (App.tsx), where `.term-empty-card` is a DIRECT child and wants what this
+   base rule gives it — a small card, shrink-to-fit, centred on both axes. */
 .term-empty { flex: 1; display: grid; place-items: center; }
+/* The main window's instance only. A place with no session hosts the whole
+   status check there (App.tsx), so that one stopped being a box to centre one
+   card in and became a SCROLLER: the check is taller than most windows once the
+   facts and Claude's read are in it. `place-items: center` would have fought
+   that — a grid item taller than its track centres by overflowing BOTH edges,
+   putting the top of the panel above the scroll origin where it cannot be
+   reached. Centring is horizontal only (`justify-content`), and the hero card
+   stays first in the flow rather than pinned mid-height.
+
+   `align-items: flex-start` is not decoration: the default `stretch` clamps the
+   column to the container's height, so once the content overflowed, the
+   column's bottom padding sat at the container edge near the scroll ORIGIN
+   instead of after the last section — scrolled to the end, "Act on it" finished
+   flush against the statusbar. At flex-start the item takes its content height
+   and its whole padding box is part of the overflow. Nothing moves when the
+   content is short: the column is top-aligned in flow either way. */
+.term-empty.term-empty-scroll {
+  min-height: 0; overflow-y: auto;
+  display: flex; align-items: flex-start; justify-content: center;
+}
+/* A reading measure, not the pane width — the facts table and the prose of
+   Claude's read are both worse across a full-width window. */
+.term-status {
+  width: min(64ch, 100%);
+  padding: var(--s6) var(--s4);
+  display: flex; flex-direction: column; gap: var(--s5);
+}
+/* `.update-log`'s recessed background is `--bg-abyss` — which is ALSO `.main`'s
+   background, the surface this host sits directly on. So the three boxes the
+   check borrows it for (the error pre, the commits-not-on-base list, Claude's
+   read) had zero background contrast here in every theme, leaving only the 1px
+   `--line` border to define them; in tokyo-day that border is ~5 RGB units off
+   the surface — inside the band this repo has already recorded as invisible —
+   and the prose floated unframed. The sheet never showed it because
+   `.settings-sheet` is a different surface. Same lesson as the sticky-cell
+   rule: composite a recessed box over a token that cannot equal the surface it
+   is drawn on. `--bg-panel` differs from `--bg-abyss` in all six themes
+   (`--bg-input` does not — it is identical in catppuccin-mocha). */
+.term-status .update-log { background: var(--bg-panel); }
 .term-empty-card {
   display: flex; flex-direction: column; align-items: center; gap: var(--s4);
   padding: var(--s6); background: var(--bg-panel); border: 1px solid var(--line);
