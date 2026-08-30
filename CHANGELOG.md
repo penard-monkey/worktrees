@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.19.1] - 2026-08-30
 
 ### Changed
 - **A worktree with no session now opens onto its own status check.** That space
