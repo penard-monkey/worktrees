@@ -316,6 +316,38 @@ is invisible to the bats suite — there is no fake claude. Re-run
   pinned line numbers, and only on CHANGED rows, i.e. exactly the rows being
   read. A sticky cell's background must be composited over a surface colour
   (`color-mix(… , var(--bg-tree))`), never over `transparent`.
+- **A recessed box is only recessed against a surface it does not EQUAL, and
+  moving a component to a new host re-asks that question.** `.update-log`
+  paints `--bg-abyss`; so does `.main`. Mounting the status check there gave
+  its three boxes (error pre, commits list, Claude's read) a background
+  distance of exactly **0 in all six themes**, leaving a 1px `--line` border to
+  carry them — which tokyo-day cannot, at ~5 RGB units (the band this file
+  already calls invisible two rules up). The sheet never showed it because
+  `.settings-sheet` is a different surface, so the bug is not in the component
+  or in the class, but in the PAIRING. `--bg-input` was the plausible wrong
+  fix: identical to `--bg-abyss` in catppuccin-mocha and under 7 units off in
+  five of six. Check a borrowed surface token against the host in EVERY theme,
+  and prefer `--bg-panel`, which differs everywhere.
+  Three more from the same move, none visible to any suite:
+  **a shared class restyled for one host restyles the others** — `.term-empty`
+  also dresses the dock's "process exited" and "No shells" cards, so a scroller
+  belongs in a `.term-empty-scroll` modifier the one host carries, leaving the
+  base rule byte-identical; **`place-items: center` cannot host a scroller**,
+  because an item taller than its track centres by overflowing BOTH edges and
+  puts its own top above the scroll origin, unreachable; and **`align-items`
+  default `stretch` eats a scrolled column's trailing padding** — the column
+  clamps to the container, so its bottom padding sits at the scroll origin and
+  the last section finishes flush against whatever is below (exactly `--s6`,
+  32px, measured), which `flex-start` fixes while moving nothing when the
+  content is short. That last one reads as decoration in review; it is not.
+- **A container that rescales prose with `font-size` does NOT reach a child
+  sized in an absolute length.** `.hs-read-md .md { font-size: var(--fs-meta) }`
+  rescales every `em` in the block, but `.md-fence .code` sizes off
+  `--term-size` (px), so a fence in Claude's read painted at 13px inside
+  11.25px prose — the bigger the smaller. The inverse of the `--md-zoom`
+  lesson: that conversion made sizes relative to the ZOOM knob, not to a
+  container, so a new host has to re-state `font-size: inherit` itself (and
+  scope it, or the dock's document view loses the 13px it means).
 - **portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL** (crate
   `lib.rs:347`), and an interactive `/bin/sh` on a pty whose master is still
   open SURVIVES it. The app only gets away with this because dropping the

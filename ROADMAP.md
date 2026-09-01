@@ -16,15 +16,25 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   aborting mid-keystroke.
   _From: [2026-08-29 writing-tools-crash](docs/sessions/2026-08-29-writing-tools-crash/summary.md)_
 
-- **The status-check stream (#171–#174) shipped with its manual passes still
-  owed.** Two things the mock cannot express: one `app/scripts/sandbox.sh
+- **The status-check stream (#171–#174, #179) shipped with its manual passes
+  still owed.** Two things the mock cannot express: one `app/scripts/sandbox.sh
   --app` pass on main (click-select feel, the row ▸ hover, ⋯ Close, the
   status sheet, ONE real Ask Claude run against real latency), and
   `docs/ai-profiles-manual-checks.md` **§11** — six checks for the repo's
   first headless claude spawn, of which fail-closed (no spawn, clean error)
   and timeout (no orphan; proves the `exec` in the sh line) are the
   load-bearing pair.
-  _From: [2026-08-29 status-check](docs/sessions/2026-08-29-status-check/summary.md)_
+  **#179 (v0.19.1) added to the debt rather than paying it**, and its share is
+  the timing-shaped half: select a session-less place and watch the inline
+  panel arrive under a real git fan-out (the mock resolves in a microtask, so
+  the gap does not exist there); re-select to confirm the `healthCache` seed
+  beats a real refetch; and one real Ask Claude, which is the ONLY way the
+  `patchDeclared`-then-`refresh` ordering in the new inline host ever meets the
+  in-flight `list_workspace` sweep it exists to beat — nothing in the harness
+  distinguishes that order from the wrong one. Same sandbox session covers all
+  of it.
+  _From: [2026-08-29 status-check](docs/sessions/2026-08-29-status-check/summary.md),
+  [2026-08-30 status-inline](docs/sessions/2026-08-30-status-inline/summary.md)_
 
 - **Watch the nav tiers now that clicks don't spawn sessions.** Auto-open was
   why everything read "active" and pinned/active/dormant felt useless. If
