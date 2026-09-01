@@ -164,8 +164,28 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   oversight — the candidate fix is a one-time sweep (app startup, or project
   add) running the same best-effort append for every known project root; it is
   idempotent and cannot hide a tracked file, so the only real question is where
-  to hang it.
-  _From: PR [#150](https://github.com/penard-monkey/worktrees/pull/150)_
+  to hang it. #167 widened the gap by one entry (`/.worktrees-sync/`, sync's
+  backup dir) — the sweep covers it for free, and the origin Mac's live
+  instance was closed by a hand-append at the 2026-08-28 close-out.
+  _From: PR [#150](https://github.com/penard-monkey/worktrees/pull/150),
+  [2026-08-28 sync-doctor-heal](docs/sessions/2026-08-28-sync-doctor-heal/summary.md)_
+
+- **Doctor's skipped-files scan is one `git status --porcelain -z` per repo per
+  whole-project run** — root plus every linked worktree, including each
+  app-side `doctor` invoke in the badge path. Same order as the checks already
+  there and identical to what the heal spends on a pull, but it is new
+  per-project work on a hot path; worth measuring if workspace sweeps ever read
+  slow.
+  _From: [2026-08-28 sync-doctor-heal](docs/sessions/2026-08-28-sync-doctor-heal/summary.md)_
+
+- **The skipped-files finding cannot tell deliberate deletion from damage.** A
+  user who unstages-deletes a tracked file the exclude set matches (a committed
+  `*.log`, a tarball being retired) is told it is sync damage — and the next
+  sync will resurrect it, because the heal has always taken the same view. The
+  finding is consistent with the repair, but this is the one place both can be
+  wrong; the honest fix (staged/`git rm` deletions are already respected as
+  intent) may just be documentation.
+  _From: [2026-08-28 sync-doctor-heal](docs/sessions/2026-08-28-sync-doctor-heal/summary.md)_
 
 - **One real-app click on Files → Open for a dot-component path.** The mock
   stubs `plugin:opener|*`, so PR #151's open-path grant (scoped permission +
