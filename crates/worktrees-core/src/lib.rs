@@ -5,6 +5,7 @@
 //! wrappers, error). Later increments add project/place discovery, ops, the
 //! declared store, and rendering. See MIGRATION.md.
 
+pub mod agent;
 pub mod config;
 pub mod diag;
 pub mod error;

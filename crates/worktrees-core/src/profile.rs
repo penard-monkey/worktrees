@@ -462,6 +462,11 @@ pub struct AiLaunch {
     pub cmd: String,
     /// Basename of the real program, for adoption/session matching. `claude`.
     pub match_word: String,
+    /// An initial prompt handed to claude as its positional argument — how a
+    /// brief reaches the agent (`ops::BRIEF_OPENER`). Appended by
+    /// `launch_cmd`, after `--name`, and only for claude: another AI tool
+    /// would read it as something else entirely.
+    pub opener: Option<String>,
 }
 
 /// Compose the profiled launch for claude: the config-dir swap plus the flags
@@ -511,6 +516,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         // Unchanged, and that is the whole point of the type: tmux adoption and
         // the app's auto-resume gate match the PROGRAM, never this string.
         match_word: base.match_word.clone(),
+        opener: base.opener.clone(),
     }
 }
 
@@ -537,6 +543,7 @@ impl AiLaunch {
             env: Vec::new(),
             cmd: ai_cmd.to_string(),
             match_word: ai_word_of(ai_cmd),
+            opener: None,
         }
     }
 
@@ -568,6 +575,45 @@ impl AiLaunch {
     /// whole suite).
     pub fn pane0_body(&self, keep: &str) -> String {
         format!("{}{}; {}", self.shell_prefix(), self.cmd, keep)
+    }
+
+    /// The command as launched in `session`: `cmd`, then `--name <session>`,
+    /// then the opener — claude only, by the same word adoption matches on.
+    ///
+    /// `--name` is what makes an agent ADDRESSABLE: claude's cross-session
+    /// messaging (`ListAgents`/`SendMessage`) finds a session by name, and the
+    /// derived default (`<cwd basename>-<2 hex>`) is stable for nobody. Naming
+    /// it after the tmux session gives the orchestrator the one string it
+    /// already knows for the place. FULL session name, not the slug: several
+    /// projects run at once, and claude suffixes a colliding name into
+    /// something nobody predicted.
+    ///
+    /// Order matters: `-r` (resume) takes an OPTIONAL session id, so the opener
+    /// can never follow it directly — `--name` sits between them, and an option
+    /// is never consumed as `-r`'s value.
+    ///
+    /// The fail-closed launch (`printf … >&2`) and a non-claude `--ai` tool get
+    /// neither: `ai_word_of(cmd)` is the program actually run, and `match_word`
+    /// alone would say `claude` for the printf case too.
+    pub fn launch_cmd(&self, session: &str) -> String {
+        if self.cmd.is_empty() || ai_word_of(&self.cmd) != "claude" {
+            return self.cmd.clone();
+        }
+        let mut cmd = self.cmd.clone();
+        if !session.is_empty() {
+            cmd.push_str(" --name ");
+            cmd.push_str(&shell_quote(session));
+        }
+        if let Some(o) = self.opener.as_deref().filter(|o| !o.trim().is_empty()) {
+            cmd.push(' ');
+            cmd.push_str(&shell_quote(o));
+        }
+        cmd
+    }
+
+    /// `pane0_body` for a NAMED session: what `ops::launch` actually runs.
+    pub fn pane0_body_for(&self, keep: &str, session: &str) -> String {
+        format!("{}{}; {}", self.shell_prefix(), self.launch_cmd(session), keep)
     }
 }
 
@@ -1496,6 +1542,7 @@ mod tests {
             env: vec![("CLAUDE_CONFIG_DIR".into(), "/data/profiles/work".into())],
             cmd: "claude --append-system-prompt-file /data/profiles/work/rules.md".into(),
             match_word: ai_word_of("claude"),
+            opener: None,
         };
         assert_eq!(l.match_word, "claude", "adoption matches the program, not the env prefix");
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/data/profiles/work' ");
@@ -1522,11 +1569,52 @@ mod tests {
             env: vec![("CLAUDE_CONFIG_DIR".into(), "/d/p/work".into())],
             cmd: "claude -r".into(),
             match_word: "claude".into(),
+            opener: None,
         };
         assert_eq!(
             l.pane0_body(keep),
             "CLAUDE_CONFIG_DIR='/d/p/work' claude -r; exec \"${SHELL:-/bin/sh}\""
         );
+    }
+
+    #[test]
+    fn launch_cmd_names_the_session_and_appends_the_opener_for_claude_only() {
+        let keep = "exec \"${SHELL:-/bin/sh}\"";
+        // The name rides after everything the launch already carried…
+        assert_eq!(AiLaunch::plain("claude").launch_cmd("proj-feat"), "claude --name 'proj-feat'");
+        // …including the resume arg, which must NOT be followed by the opener:
+        // `-r` takes an optional session id and would swallow it.
+        let mut l = AiLaunch::plain("claude -r");
+        l.opener = Some("Read .planning/brief.md and begin.".into());
+        assert_eq!(
+            l.pane0_body_for(keep, "proj-feat"),
+            "claude -r --name 'proj-feat' 'Read .planning/brief.md and begin.'; exec \"${SHELL:-/bin/sh}\""
+        );
+        // A profiled launch keeps the profile's flags first, name after.
+        let prof = AiLaunch {
+            profile: None,
+            env: vec![("CLAUDE_CONFIG_DIR".into(), "/d/p/work".into())],
+            cmd: "claude --model 'opus'".into(),
+            match_word: "claude".into(),
+            opener: None,
+        };
+        assert_eq!(
+            prof.pane0_body_for(keep, "proj-x"),
+            "CLAUDE_CONFIG_DIR='/d/p/work' claude --model 'opus' --name 'proj-x'; exec \"${SHELL:-/bin/sh}\""
+        );
+        // A path to claude still counts as claude (adoption's own rule).
+        assert_eq!(AiLaunch::plain("/opt/bin/claude").launch_cmd("s"), "/opt/bin/claude --name 's'");
+        // Another tool, a plain shell, and the fail-closed printf get nothing —
+        // even with an opener set.
+        let mut other = AiLaunch::plain("fake-ai");
+        other.opener = Some("hello".into());
+        assert_eq!(other.launch_cmd("s"), "fake-ai");
+        assert_eq!(AiLaunch::plain("").launch_cmd("s"), "");
+        let closed = AiLaunch { match_word: "claude".into(), cmd: "printf '%s\\n' 'x' >&2".into(), ..AiLaunch::plain("claude") };
+        assert_eq!(closed.launch_cmd("s"), closed.cmd);
+        // An empty name adds no flag; a quote in the name is quoted, not injected.
+        assert_eq!(AiLaunch::plain("claude").launch_cmd(""), "claude");
+        assert_eq!(AiLaunch::plain("claude").launch_cmd("a'b"), "claude --name 'a'\\''b'");
     }
 
     #[test]
@@ -1549,6 +1637,7 @@ mod tests {
             env: vec![("CLAUDE_CONFIG_DIR".into(), "/tmp/a dir/it's".into())],
             cmd: "claude".into(),
             match_word: "claude".into(),
+            opener: None,
         };
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");
     }

@@ -391,6 +391,64 @@ setup() {
   ! grep -qE 'attach|switch-client' "$TMUX_LOG"
 }
 
+# ── agents: --name and --brief ───────────────────────────────────────────────
+
+@test "new: claude is launched with --name <tmux session>; another AI tool is not" {
+  # The FULL session name, not the slug: claude's cross-session messaging finds
+  # a session by name, and this is the one string the orchestrator already has.
+  WORKTREES_AI_CMD=claude run_wt new feat-nm
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd repo-feat-nm)" == *"claude --name"*"repo-feat-nm"* ]]
+  run_wt new feat-nn                 # fake-ai, the suite default
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd repo-feat-nn)" != *"--name"* ]]
+}
+
+@test "new --brief: writes .planning/brief.md and opens claude on it" {
+  WORKTREES_AI_CMD=claude run_wt new feat-br --brief $'# Task\n- do x\n- then y'
+  [ "$status" -eq 0 ]
+  [ "$(cat "$REPO/.worktrees/feat-br/.planning/brief.md")" = $'# Task\n- do x\n- then y' ]
+  [[ "$output" == *"brief: .planning/brief.md"* ]]
+  # the brief itself never travels through argv — only the pointer to it does
+  [[ "$(tmux_pane0_cmd repo-feat-br)" == *"--name"*"repo-feat-br"*"Read .planning/brief.md and begin."* ]]
+  [[ "$(tmux_pane0_cmd repo-feat-br)" != *"do x"* ]]
+  # this throwaway repo does not ignore .planning/ — say so, once, in the output
+  [[ "$output" == *"not ignored by git"* ]]
+}
+
+@test "new --brief: -r stays adjacent to the AI word and the opener comes last" {
+  # `-r` takes an OPTIONAL session id; the opener must never follow it directly.
+  WORKTREES_AI_CMD=claude run_wt new feat-rb -r --brief 'go'
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd repo-feat-rb)" == *"claude -r --name"*"repo-feat-rb"*"Read .planning/brief.md and begin."* ]]
+}
+
+@test "new --brief: a markdown list is a brief, a flag-shaped brief is a FILE" {
+  # A list starts with `- `, the most natural brief there is. And a value that
+  # looks like a flag is consumed whole — it lands in brief.md, never in argv.
+  run_wt new feat-bl --brief $'- first\n- second'
+  [ "$status" -eq 0 ]
+  [ "$(cat "$REPO/.worktrees/feat-bl/.planning/brief.md")" = $'- first\n- second' ]
+  run_wt new feat-bf --brief "--ai=touch $BATS_TEST_TMPDIR/PWNED"
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/PWNED" ]
+  [ "$(cat "$REPO/.worktrees/feat-bf/.planning/brief.md")" = "--ai=touch $BATS_TEST_TMPDIR/PWNED" ]
+  [[ "$(tmux_pane0_cmd repo-feat-bf)" == *fake-ai* ]]
+}
+
+@test "new --brief: no gitignore nag when .planning/ is ignored; other tools get no opener" {
+  make_secret_repo '.planning/'
+  run_wt new feat-bi --brief 'hi'
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"not ignored"* ]]
+  [ -f "$REPO/.worktrees/feat-bi/.planning/brief.md" ]
+  # fake-ai is not claude: the file is written, the pane command is untouched
+  [[ "$(tmux_pane0_cmd repo-feat-bi)" != *"brief.md"* ]]
+  run_wt new feat-bx --brief
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--brief needs a value"* ]]
+}
+
 # ── co alias ─────────────────────────────────────────────────────────────────
 
 @test "co: alias behaves like new (remote branch checkout with tracking)" {

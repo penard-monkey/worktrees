@@ -253,12 +253,17 @@ impl Server {
             t.push(tool(
                 "create_worktree",
                 "Create a worktree for a branch (creating the branch off base if needed) and \
-                 open its tmux session.",
+                 open its tmux session: a single pane running the AI, named after the \
+                 session so other sessions can message it. Pass `brief` to hand the agent \
+                 its task: it is written to .planning/brief.md in the worktree and claude \
+                 opens on it.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "branch": { "type": "string" },
-                        "base": { "type": "string", "description": "Base ref for a new branch. Optional." }
+                        "base": { "type": "string", "description": "Base ref for a new branch. Optional." },
+                        "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; claude is launched on it. Optional." },
+                        "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." }
                     },
                     "required": ["branch"],
                     "additionalProperties": false
@@ -353,7 +358,18 @@ impl Server {
                 };
                 let ls = self.project.ls();
                 match ls.places.iter().find(|p| p.slug == slug) {
-                    Some(p) => Ok(text_ok(&serde_json::to_string_pretty(p).unwrap_or_default())),
+                    Some(p) => {
+                        // The place, plus WHO is working in it: the claude
+                        // session(s) whose cwd is this worktree, most active
+                        // first, each with the name another session messages
+                        // it by. `agent_state` is the one-word answer to "is
+                        // anyone on this?" — `none` when the pane has no claude.
+                        let mut v = serde_json::to_value(p).unwrap_or_default();
+                        let agents = worktrees_core::agent::agents_at(&worktrees_core::agent::live_probes(), &p.path);
+                        v["agent_state"] = serde_json::json!(agents.first().map(|a| a.state.as_str()).unwrap_or("none"));
+                        v["agents"] = serde_json::json!(agents);
+                        Ok(text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default()))
+                    }
                     None => Ok(text_err(&format!("no such place: {slug}"))),
                 }
             }
@@ -403,6 +419,30 @@ impl Server {
                         Ok(b) => args.insert(1, b),
                         Err(e) => return Ok(text_err(&e)),
                     }
+                }
+                // Single pane unless asked: an agent's place has no one at the
+                // keyboard to use a spare shell, and the pane it would take is
+                // width claude reads by. Typed strictly, like set_pin's bool.
+                match a.get("spare") {
+                    None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => {
+                        args.push("--no-spare".to_string())
+                    }
+                    Some(serde_json::Value::Bool(true)) => {}
+                    Some(_) => return Ok(text_err("spare must be true or false")),
+                }
+                // The brief is free text and never a flag: it rides as the value
+                // of `--brief`, which core's parser consumes whole — so it needs
+                // no `safe_arg`, only to be a string.
+                match a.get("brief") {
+                    None | Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::String(b)) if b.trim().is_empty() => {
+                        return Ok(text_err("brief is empty — leave it out, or say what the agent is to do"))
+                    }
+                    Some(serde_json::Value::String(b)) => {
+                        args.push("--brief".to_string());
+                        args.push(b.clone());
+                    }
+                    Some(_) => return Ok(text_err("brief must be a string")),
                 }
                 Ok(self.run_op(move |p, ui| ops::cmd_new(p, ui, &args)))
             }

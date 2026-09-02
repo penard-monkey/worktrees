@@ -1110,123 +1110,22 @@ async fn fetch_origin(root: String) -> Result<(), String> {
 }
 
 // ── Claude working state (nav busy/waiting dots) ─────────────────────────────
-// Claude Code writes ONE probe file per live session at
-// `~/.claude/sessions/<pid>.json` — { pid, cwd, status, waitingFor, updatedAt, … }.
-// `status` ∈ { busy, idle, waiting, shell, (missing) }; `cwd` is the session's
-// working dir = the worktree directory (the app launches pane-0 claude in the
-// place path), so it maps 1:1 to a place's `path`. The file is rewritten on
-// status TRANSITIONS only — `updatedAt` can be minutes old while genuinely still
-// busy — so we DO NOT expire by age. Liveness guard is PID-alive (stale files for
-// dead pids are never cleaned on crash). Everything degrades to "no dot":
-// missing/unreadable dir → empty; unparseable/incomplete file → skipped;
-// dead pid → skipped.
+// The probe reader lives in core (`worktrees_core::agent`) so the MCP server's
+// `place_status` and these dots read ONE truth. This is the app's projection of
+// it: which worktree PATHS have a busy / waiting claude right now.
 
-//
-// PARKED JOBS are the one place `status` lies. Parking a turn (handing it to a
-// background session) rewrites the interactive probe with `parkedJobId` set —
-// and if the turn was MID-FLIGHT, that rewrite leaves `status: "busy"` behind
-// and no further write ever clears it. Observed on claude 2.1.220: two sessions
-// sat green for 22h and 32h at 0% CPU. `busy_is_delegated` below is the guard.
-#[derive(serde::Deserialize)]
-struct ClaudeProbe {
-    pid: i32,
-    cwd: String,
-    status: String,
-    /// Set when this session handed its turn to a background job. `Option` is
-    /// what keeps the three park fields optional (serde maps a missing field on
-    /// an Option to None); the type matters, because a probe written before the
-    /// park feature carries none of them and a hard parse error would drop that
-    /// session from the scan entirely — its dot with it.
-    #[serde(default, rename = "parkedJobId")]
-    parked_job_id: Option<String>,
-    /// Time of the LAST write of any kind (a park write moves this alone).
-    #[serde(default, rename = "updatedAt")]
-    updated_at: Option<i64>,
-    /// Time of the last write that CHANGED `status`.
-    #[serde(default, rename = "statusUpdatedAt")]
-    status_updated_at: Option<i64>,
-}
-
-/// True when this probe's `busy` is residue from PARKING rather than live work.
-///
-/// The discriminator is `updated_at > status_updated_at`: the probe's last write
-/// did not set the status it is carrying. A park write moves `updated_at` alone
-/// (observed +15s and +891s past the busy transition on the two stuck sessions),
-/// while a genuine busy transition writes both stamps in one go — every truly
-/// working probe sampled had `updated_at == status_updated_at`. So a NEW turn in
-/// a session that once parked a job still lights its dot, which is why this is
-/// not simply "`parkedJobId` present → never busy": nothing proves Claude clears
-/// that field, and a place whose dot goes permanently dark is the worse failure.
-///
-/// No cross-probe join with the background session, deliberately. While a parked
-/// job is genuinely running its OWN probe carries the same `cwd` (it is a fork of
-/// this session), so the dot stays lit through that probe — and this stays a pure
-/// per-probe predicate that also covers the case where the bg probe is gone.
-/// Cost: a parked job running with no local session at all (a purely remote
-/// bridge) shows no dot, which is the honest answer for a pane sitting idle.
-fn busy_is_delegated(p: &ClaudeProbe) -> bool {
-    p.parked_job_id.is_some()
-        && matches!((p.updated_at, p.status_updated_at), (Some(u), Some(s)) if u > s)
-}
-
-/// True when `pid` is a live process. `kill(pid, 0)` sends no signal but runs the
-/// permission/existence checks: 0 → alive; -1 with errno ESRCH → dead. EPERM
-/// (exists but not ours) still means alive. Never mutates the target.
-fn pid_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    // SAFETY: kill with signal 0 performs no action beyond error checking.
-    let rc = unsafe { libc::kill(pid, 0) };
-    if rc == 0 {
-        return true;
-    }
-    // rc == -1: alive iff the failure is EPERM (exists, not permitted), not ESRCH.
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-/// Scan `~/.claude/sessions/*.json`, keeping only LIVE-pid probes, and bucket
-/// their `cwd`s by status. Returns (busy_cwds, waiting_cwds). Paths are pushed
-/// as-is (the probe cwd and a place's `path` both derive from the same worktree
-/// dir, so the frontend matches raw). Any I/O or parse failure degrades to empty.
+/// Scan the live probes and bucket their `cwd`s by state. Returns
+/// (busy_cwds, waiting_cwds). Paths are pushed as-is (the probe cwd and a
+/// place's `path` both derive from the same worktree dir, so the frontend
+/// matches raw). Any I/O or parse failure degrades to empty.
 fn claude_activity() -> (Vec<String>, Vec<String>) {
     let mut busy = Vec::new();
     let mut waiting = Vec::new();
-    // Scan EVERY config root, not just `~/.claude`: a profiled session writes its
-    // probes under the profile's own dir, so a $HOME-only scan would leave the
-    // busy/waiting dots permanently dark for profiled places — a silent
-    // degradation with nothing in the log to explain it.
-    //
-    // Union is safe because each probe carries its own `cwd` and `pid`, so it is
-    // self-describing: we never need to know which profile a place is bound to,
-    // and a place whose profile changed mid-session still lights up.
-    for root in worktrees_core::profile::claude_config_dirs_all() {
-        let entries = match std::fs::read_dir(root.join("sessions")) {
-            Ok(e) => e,
-            Err(_) => continue, // dir missing/unreadable → no dots from this root
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let bytes = match std::fs::read(&path) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
-                Ok(p) => p,          // missing pid/cwd/status → parse fails → skip
-                Err(_) => continue,
-            };
-            if probe.cwd.is_empty() || !pid_alive(probe.pid) {
-                continue; // dead pid (or crashed-session stale file) → no dot
-            }
-            let delegated = busy_is_delegated(&probe);
-            match probe.status.as_str() {
-                "busy" if !delegated => busy.push(probe.cwd),
-                "waiting" => waiting.push(probe.cwd),
-                _ => {} // idle / shell / parked-away busy → no dot
-            }
+    for probe in worktrees_core::agent::live_probes() {
+        match worktrees_core::agent::effective_state(&probe).as_str() {
+            "busy" => busy.push(probe.cwd),
+            "waiting" => waiting.push(probe.cwd),
+            _ => {} // idle / shell / parked-away busy (`delegated`) → no dot
         }
     }
     (busy, waiting)
@@ -5018,63 +4917,6 @@ mod tests {
         let mut t = HashMap::new();
         completion_edges(&mut t, &v(&["/a", "/a"]));
         assert_eq!(t["/a"], 2, "documents WHY the caller must dedup before this");
-    }
-
-    /// The stuck-green bug, verbatim: the two probes that sat `busy` for 22h and
-    /// 32h with their sessions at an idle prompt, next to the two genuinely-busy
-    /// probes sampled at the same moment. The park write moves `updatedAt` alone;
-    /// a real busy transition writes both stamps together.
-    #[test]
-    fn a_parked_away_busy_probe_does_not_light_the_dot() {
-        let probe = |s: &str| serde_json::from_str::<ClaudeProbe>(s).expect("probe must parse");
-
-        // nautiseven: parked mid-turn, +15s between the busy write and the park.
-        let stuck = probe(
-            r#"{"pid":16304,"cwd":"/w/nautiseven","status":"busy",
-                "parkedJobId":"d8d56f6f","updatedAt":1786804861210,
-                "statusUpdatedAt":1786804845800}"#,
-        );
-        assert!(busy_is_delegated(&stuck));
-
-        // geant4: same shape, +891s.
-        let stuck2 = probe(
-            r#"{"pid":28024,"cwd":"/w/geant4","status":"busy","parkedJobId":"449d44a7",
-                "updatedAt":1786767105635,"statusUpdatedAt":1786766214904}"#,
-        );
-        assert!(busy_is_delegated(&stuck2));
-
-        // Genuinely working, never parked — the dot must stay lit.
-        let working = probe(
-            r#"{"pid":36804,"cwd":"/w/sync-macs","status":"busy","parkedJobId":null,
-                "updatedAt":1786884619732,"statusUpdatedAt":1786884619732}"#,
-        );
-        assert!(!busy_is_delegated(&working));
-
-        // A NEW turn in a session that once parked a job: `parkedJobId` may well
-        // linger, so only the stamps can tell this from the stuck case above.
-        let working_after_park = probe(
-            r#"{"pid":5387,"cwd":"/w/white-label","status":"busy","parkedJobId":"2b899e3a",
-                "updatedAt":1786884619732,"statusUpdatedAt":1786884619732}"#,
-        );
-        assert!(!busy_is_delegated(&working_after_park));
-    }
-
-    /// The three park fields are additions to a file Claude Code owns. A probe
-    /// written without them must still parse — a hard error here would drop that
-    /// session from the scan and take its dot with it.
-    #[test]
-    fn a_probe_without_the_park_fields_still_parses_and_stays_busy() {
-        let old: ClaudeProbe =
-            serde_json::from_str(r#"{"pid":1,"cwd":"/w/x","status":"busy"}"#).unwrap();
-        assert_eq!(old.parked_job_id, None);
-        assert!(!busy_is_delegated(&old), "unknown stamps must never suppress");
-
-        // Half-written is the same story: no pair of stamps, no judgement.
-        let partial: ClaudeProbe = serde_json::from_str(
-            r#"{"pid":1,"cwd":"/w/x","status":"busy","parkedJobId":"abc","updatedAt":9}"#,
-        )
-        .unwrap();
-        assert!(!busy_is_delegated(&partial));
     }
 
     /// The backfill's only judgement call: which history lines are WORK. Slash

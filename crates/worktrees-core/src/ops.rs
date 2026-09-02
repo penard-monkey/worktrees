@@ -141,6 +141,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
                 env: Vec::new(),
                 cmd: format!("printf '%s\\n' {} >&2", crate::profile::shell_quote(&msg)),
                 match_word: plain.match_word,
+                opener: None,
             }
         }
     }
@@ -193,7 +194,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         // first also keeps the program itself as pane0's foreground process, so
         // `pane_current_command` stays `claude`.
         let pane0 = if !ai_cmd.is_empty() {
-            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&ai.pane0_body(keep)))
+            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&ai.pane0_body_for(keep, &session)))
         } else {
             keep.to_string()
         };
@@ -335,9 +336,35 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
 }
 
 // ── new / co ─────────────────────────────────────────────────────────────────
+
+/// Where a place's brief lives, relative to the worktree. `.planning/` is the
+/// planning-with-files working dir every repo of ours already gitignores, and
+/// the close-out ritual archives it — so the task an agent was given is kept
+/// with the rest of that session's working memory.
+pub const BRIEF_PATH: &str = ".planning/brief.md";
+/// The prompt claude is launched on when a brief was written. Fixed text: the
+/// brief itself never travels through argv, only this pointer to it does.
+pub const BRIEF_OPENER: &str = "Read .planning/brief.md and begin.";
+
+fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
+    let path = Path::new(wt).join(BRIEF_PATH);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut body = text.to_string();
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    std::fs::write(path, body)
+}
+
 pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut do_install, mut do_tmux, mut do_attach, mut do_fetch, mut resume) = (true, true, true, true, false);
     let (mut branch, mut base, mut name, mut ai_flag) = (String::new(), String::new(), None::<String>, None::<String>);
+    // `--brief <text>`: the agent's task, written to BRIEF_PATH in the new
+    // worktree; claude then opens on BRIEF_OPENER. This is how an orchestrator
+    // (the MCP `create_worktree` tool) hands a place its work.
+    let mut brief: Option<String> = None;
     // Default keeps the CLI's spare shell (pane 1) — that's where deps install.
     // The app passes --no-spare so its embedded view is single-pane (Claude
     // full-width); deps install by hand in the dock's Terminal tab.
@@ -345,13 +372,17 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut expect = "";
     for arg in args {
         if !expect.is_empty() {
-            if arg.starts_with('-') {
+            // A brief is prose and is consumed WHOLE as the value — a markdown
+            // list starts with `- `, and refusing it would refuse the most
+            // natural brief there is. Nothing in it is ever read as a flag.
+            if arg.starts_with('-') && expect != "brief" {
                 ui.error(&format!("--{expect} needs a value (got '{arg}')"));
                 return 1;
             }
             match expect {
                 "name" => name = Some(arg.clone()),
                 "ai" => ai_flag = Some(arg.clone()),
+                "brief" => brief = Some(arg.clone()),
                 _ => {}
             }
             expect = "";
@@ -368,6 +399,8 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s if s.starts_with("--name=") => name = Some(s["--name=".len()..].to_string()),
             "--ai" => expect = "ai",
             s if s.starts_with("--ai=") => ai_flag = Some(s["--ai=".len()..].to_string()),
+            "--brief" => expect = "brief",
+            s if s.starts_with("--brief=") => brief = Some(s["--brief=".len()..].to_string()),
             s if s.starts_with('-') => {
                 ui.error(&format!("Unknown flag: {s}"));
                 return 1;
@@ -550,6 +583,24 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     };
 
+    // The brief, once the worktree exists and its declared files are in place.
+    // Written on a reused worktree too: a second `--brief` is a re-brief, and
+    // the file says what the agent was last told. A failure here is loud and
+    // fatal — a session launched on "read the brief" with no brief would sit
+    // asking what to do, which is exactly the silent shape this exists to end.
+    if let Some(text) = brief.as_deref() {
+        if let Err(e) = write_brief(&wt, text) {
+            ui.error(&format!("could not write {BRIEF_PATH}: {e}"));
+            return 1;
+        }
+        ui.info(&format!("brief: {BRIEF_PATH}"));
+        // Belongs to the session, never to the branch. Real git answers this
+        // (the bats harness runs real git), so the warning is exact, not a guess.
+        if !git::git_ok(&wt, &["check-ignore", "-q", BRIEF_PATH]) {
+            ui.warn(".planning/ is not ignored by git in this repo — add `.planning/` to .gitignore (or .git/info/exclude) so the brief never lands in a commit");
+        }
+    }
+
     let install_cmd = if do_install && !already { detect_install_cmd(&wt) } else { String::new() };
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
     if resume && !ai_cmd.is_empty() {
@@ -576,7 +627,10 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         ui.info(&format!("then: {install_cmd}"));
     }
     let pane1_install = if spare_shell { install_cmd.as_str() } else { "" };
-    let ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    if brief.is_some() && !ai.cmd.is_empty() {
+        ai.opener = Some(BRIEF_OPENER.to_string());
+    }
     let rc = launch(p, ui, &wt, &session, pane1_install, &ai, do_attach, spare_shell);
     if rc != 0 {
         rc

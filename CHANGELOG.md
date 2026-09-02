@@ -3,6 +3,28 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **A place can be handed a brief.** `worktrees new <branch> --brief <text>`
+  writes the task to `.planning/brief.md` in the new worktree and launches
+  claude on "Read .planning/brief.md and begin." — the brief itself never
+  travels through argv. The MCP `create_worktree` tool takes the same `brief`,
+  which is how an orchestrating session in `(main)` gives a worktree's agent its
+  work. The tool now opens a single pane by default (`spare: true` for the old
+  layout): an agent's place has nobody at the keyboard for a spare shell.
+- **Agents are addressable.** Pane-0 claude is launched with `--name <tmux
+  session>` (`valleos-communications`, not the derived `communications-61`), so
+  another claude session finds it by the one name the place already has —
+  `SendMessage`/`@valleos-communications` just work. Claude only; another
+  `--ai` tool gets no flag.
+- **`place_status` says who is working there.** The MCP tool's reply gains
+  `agent_state` (`busy` · `waiting` · `idle` · `delegated` · `none`) and
+  `agents` — every claude session whose cwd is the place, most active first,
+  with its peer `name`, pid and tmux pane. Read from the same probe files the
+  app's dots use (`worktrees_core::agent`, moved out of the app so both read
+  one truth).
+
 ## [0.19.1] - 2026-08-30
 
 ### Changed

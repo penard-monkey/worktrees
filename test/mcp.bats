@@ -120,6 +120,67 @@ print("ok")
   [ ! -d "$REPO/.worktrees/pwned" ]
 }
 
+@test "create_worktree opens a single pane by default; spare:true keeps the split" {
+  # An agent's place has nobody at the keyboard for a spare shell.
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-a"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  tmux_session_exists repo-agent-a
+  [ -z "$(tmux_pane1_cmd repo-agent-a)" ]
+  ! grep -q 'split-window' "$TMUX_LOG"
+  mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-b","spare":true}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  [ -n "$(tmux_pane1_cmd repo-agent-b)" ]
+  mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-c","spare":"yes"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [ ! -d "$REPO/.worktrees/agent-c" ]
+}
+
+@test "create_worktree with a brief writes .planning/brief.md and launches claude on it" {
+  export WORKTREES_AI_CMD=claude
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-d","brief":"# Task\n- do x\n- then y"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  [ "$(cat "$REPO/.worktrees/agent-d/.planning/brief.md")" = $'# Task\n- do x\n- then y' ]
+  [[ "$(tmux_pane0_cmd repo-agent-d)" == *"--name"*"repo-agent-d"*"Read .planning/brief.md and begin."* ]]
+  [[ "$(tmux_pane0_cmd repo-agent-d)" != *"do x"* ]]
+  # a flag-shaped brief is a file, never a command line (the `base` guard's twin)
+  mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-e","brief":"--ai=touch '"$BATS_TEST_TMPDIR"'/PWNED"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/PWNED" ]
+  [[ "$(tmux_pane0_cmd repo-agent-e)" == *"claude --name"* ]]
+  # blank and non-string briefs are refused before anything is created
+  mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-f","brief":"  "}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [ ! -d "$REPO/.worktrees/agent-f" ]
+  mcp --mutations '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-g","brief":7}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [ ! -d "$REPO/.worktrees/agent-g" ]
+}
+
+@test "place_status reports the claude session(s) working in the place" {
+  run_wt new feat-ag --no-tmux
+  local q='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"feat-ag"}}}'
+  local pick='
+import sys, json
+frames = [json.loads(l) for l in sys.stdin.read().splitlines() if l.strip()]
+p = json.loads(frames[-1]["result"]["content"][0]["text"])
+a = p["agents"][0] if p["agents"] else {}
+print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-"))'
+  mcp "" "$q"
+  [ "$(jq_out "$pick")" = "none 0 - -" ]
+  # A live probe (our own pid) whose cwd is this place: the app's dot and the
+  # orchestrator now read the same file.
+  mkdir -p "$HOME/.claude/sessions"
+  local wt="$REPO/.worktrees/feat-ag"
+  printf '{"pid":%s,"cwd":"%s","status":"idle","name":"feat-ag-1a","tmux":"repo-feat-ag:@1.%%1","updatedAt":5,"statusUpdatedAt":5}' "$$" "$wt" > "$HOME/.claude/sessions/$$.json"
+  # …plus a busy one for the same place, a dead pid, and a probe elsewhere
+  printf '{"pid":%s,"cwd":"%s","status":"busy","name":"feat-ag-2b","updatedAt":5,"statusUpdatedAt":5}' "$PPID" "$wt" > "$HOME/.claude/sessions/$PPID.json"
+  printf '{"pid":2147483000,"cwd":"%s","status":"busy","name":"ghost"}' "$wt" > "$HOME/.claude/sessions/2147483000.json"
+  printf '{"pid":%s,"cwd":"%s","status":"busy","name":"main-1"}' "$$" "$REPO" > "$HOME/.claude/sessions/other.json"
+  mcp "" "$q"
+  # most active first; the dead pid and the other place are not counted
+  [ "$(jq_out "$pick")" = "busy 2 feat-ag-2b -" ]
+}
+
 @test "metadata tools refuse a slug that names no place" {
   # store::edit creates the entry it is given, so an unchecked slug left a ghost
   # record for a place that never existed.
