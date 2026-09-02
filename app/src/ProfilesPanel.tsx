@@ -22,6 +22,7 @@ export type Profile = {
   mcp_servers?: Record<string, unknown>;
   inherit_global_mcp?: boolean;
   worktrees_mcp?: boolean;
+  worktrees_mcp_mutations?: boolean;
   model?: string | null;
   settings?: unknown;
   updated_epoch?: number;
@@ -482,6 +483,15 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
                 onChange={(e) => patch({ worktrees_mcp: e.target.checked })}
               />
               Expose the worktrees MCP server (read-only tools for this repo)
+            </label>
+            <label className="setting-check" style={{ marginLeft: "var(--s4)" }}>
+              <input
+                type="checkbox"
+                disabled={!draft.worktrees_mcp}
+                checked={!!draft.worktrees_mcp && !!draft.worktrees_mcp_mutations}
+                onChange={(e) => patch({ worktrees_mcp_mutations: e.target.checked })}
+              />
+              …with its mutating tools too (create, close and remove worktrees) — what an orchestrating session needs
             </label>
             <label className="setting-check">
               <input

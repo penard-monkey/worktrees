@@ -72,7 +72,9 @@ type Place = {
 /** `unborn`: the repo was `git init`ed but has no commits — it lists fine, yet
  *  no worktree can be created off an unborn branch. The nav offers the first
  *  commit rather than letting `new_place` fail on an invalid object name. */
-type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean };
+/** A worktree git registers outside `.worktrees/` — `model::Stray`. */
+type Stray = { path: string; branch: string | null; slug: string };
+type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean; strays?: Stray[] };
 type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 type Workspace = { projects: ProjectView[] };
 /** `needs_confirm` (close only): core stopped because killing this session needs
@@ -4738,6 +4740,19 @@ function App() {
               onClick={() => setProjSheet(pv.root)}
             >⚑</button>
           ) : null}
+          {/* Also project-level: worktrees git registers OUTSIDE .worktrees/
+              (made by hand, or by another tool). No row can carry one — the
+              whole point is that it has no row. Comes with every snapshot
+              (`ls --json`'s `strays`), so it is known the moment the project
+              loads, without a doctor run. */}
+          {pv.ok && (pv.snapshot?.strays?.length ?? 0) > 0 ? (
+            <button
+              className="mini pstray"
+              data-testid={`stray-mini|${pv.root}`}
+              title={`${pv.snapshot!.strays!.length} worktree${pv.snapshot!.strays!.length === 1 ? "" : "s"} registered outside .worktrees/ — this app can't see ${pv.snapshot!.strays!.length === 1 ? "it" : "them"}. Open the project sheet for the adopt command.`}
+              onClick={() => setProjSheet(pv.root)}
+            >⊟</button>
+          ) : null}
           {/* The sync entry point David asked for on day one: hover-revealed,
               next to + and ×, opening the popover the ctx menu duplicates.
               `.mini` is a <button>, which navdrag's `arm` already declines to
@@ -5503,6 +5518,7 @@ function App() {
         root={projSheet ?? ""}
         editorCmd={settings.editor_cmd}
         suggestion={projSheet ? suggest[projSheet] ?? null : null}
+        strays={projSheet ? ws?.projects.find((p) => p.root === projSheet)?.snapshot?.strays ?? [] : []}
         onClose={() => setProjSheet(null)}
         onReport={takeReport}
         onConfigWritten={(root) => { probeSuggest(root); refresh(); }}

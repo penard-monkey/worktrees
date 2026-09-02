@@ -178,6 +178,25 @@ JSON
   [ "$(field feat-x 'p["lifecycle_effective"]')" = "closed" ]    # live-only (no session)
 }
 
+@test "ls --json: a worktree registered outside .worktrees/ is listed under strays" {
+  run_wt new feat-x --no-tmux
+  run_wt ls --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | python3 -c 'import sys,json;print(json.load(sys.stdin)["strays"])')" = "[]" ]
+  # made by hand, the way another tool (or a person) would
+  git -C "$REPO" worktree add -q -b side/feature "$BATS_TEST_TMPDIR/elsewhere" main
+  run_wt ls --json
+  [ "$status" -eq 0 ]
+  assert_valid_json
+  local strays
+  strays="$(printf '%s' "$output" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+s = d["strays"]
+print(len(s), s[0]["path"].endswith("/elsewhere"), s[0]["branch"], s[0]["slug"], [p["slug"] for p in d["places"]])')"
+  [ "$strays" = "1 True side/feature side-feature ['(main)', 'feat-x']" ]
+}
+
 @test "WORKTREES_JSON=1 makes a plain ls emit JSON" {
   run_wt new feat-x --no-tmux
   export WORKTREES_JSON=1

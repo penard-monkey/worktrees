@@ -257,6 +257,9 @@ button { cursor: pointer; }
    must survive .mini's hover-only opacity. --warn is the drift colour already
    (.g-drift), and exists in all six theme blocks — no new token. */
 .mini.pbroken { opacity: 1; color: var(--warn); }
+/* a stray worktree: same attention colour, always visible for the same reason */
+.mini.pstray { opacity: 1; color: var(--warn); }
+.mini.pstray:hover { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
 .mini.pbroken:hover { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
 /* armed: stays visible past hover, reads as destructive (two-click remove) */
 .mini.armed {

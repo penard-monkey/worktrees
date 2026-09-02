@@ -47,6 +47,21 @@ pub struct Place {
     pub lifecycle_effective: String,
 }
 
+/// A worktree git registers for this repo that lives OUTSIDE `.worktrees/` —
+/// made by hand, or by another tool (`.dmux/worktrees/…`). Everything this
+/// tool does is keyed on the place dir, so a stray is invisible to `ls`, `open`,
+/// `rm`, doctor's per-place checks and the app, while still holding a branch
+/// (and possibly uncommitted work). Reported, never moved: tmux sessions and
+/// editors hold its cwd.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Stray {
+    pub path: String,
+    /// `None` when detached.
+    pub branch: Option<String>,
+    /// The slug adopting it would land on: `slugify(branch)`, else the dir name.
+    pub slug: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LsJson {
     pub schema_version: u32,
@@ -54,4 +69,7 @@ pub struct LsJson {
     pub prefix: String,
     pub places_file: String,
     pub places: Vec<Place>,
+    /// Additive (v0.20): older consumers that deserialize this ignore it.
+    #[serde(default)]
+    pub strays: Vec<Stray>,
 }

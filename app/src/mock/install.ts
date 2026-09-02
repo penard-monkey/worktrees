@@ -153,7 +153,7 @@ type MockCfg = {
 // editor can be driven end-to-end headlessly (Playwright) without a backend.
 type MockProfile = {
   id: string; name: string; rules?: string; skills?: string[];
-  inherit_global_skills?: boolean; inherit_global_mcp?: boolean; worktrees_mcp?: boolean;
+  inherit_global_skills?: boolean; inherit_global_mcp?: boolean; worktrees_mcp?: boolean; worktrees_mcp_mutations?: boolean;
   model?: string | null; updated_epoch?: number;
 };
 const mockProfiles: Record<string, MockProfile> = {
