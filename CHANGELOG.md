@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.20.0] - 2026-09-02
 
 ### Added
 - **A place can be handed a brief.** `worktrees new <branch> --brief <text>`
