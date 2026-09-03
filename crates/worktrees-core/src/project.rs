@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::resolve_prefix_from;
 use crate::error::{Result, WtError};
-use crate::model::{LsJson, Place, TmuxSession, SCHEMA_VERSION};
+use crate::model::{LsJson, Place, Stray, TmuxSession, SCHEMA_VERSION};
 use crate::projcfg;
 use crate::render::{self, Row};
 use crate::sysclock::{now_epoch, SysClock};
@@ -88,14 +88,23 @@ impl Project {
         claude_session_present_in(&self.claude_config_root(), dir)
     }
 
-    fn registrations(&self) -> HashSet<String> {
+    /// Every worktree git registers for this repo, as `git worktree list
+    /// --porcelain` reports it: `(path, branch)`, branch `None` when detached
+    /// (or bare). ONE spawn; `registrations` and `stray_worktrees` are both
+    /// views of it, and `ls()` takes both from a single call.
+    fn worktree_list(&self) -> Vec<(String, Option<String>)> {
         git::git_out(&self.main_root, &["worktree", "list", "--porcelain"])
-            .map(|s| {
-                s.lines()
-                    .filter_map(|l| l.strip_prefix("worktree ").map(String::from))
-                    .collect()
-            })
+            .map(|s| parse_worktree_list(&s))
             .unwrap_or_default()
+    }
+
+    fn registrations(&self) -> HashSet<String> {
+        self.worktree_list().into_iter().map(|(p, _)| p).collect()
+    }
+
+    /// Registered worktrees this tool cannot see — see `model::Stray`.
+    pub fn stray_worktrees(&self) -> Vec<Stray> {
+        strays_from(&self.worktree_list(), &self.main_root, &self.wt_root)
     }
 
     /// Sorted (glob-order) worktree subdirs of `.worktrees/`.
@@ -254,7 +263,9 @@ impl Project {
     /// Typed snapshot — the app consumes this directly (core-as-lib); the CLI
     /// serializes it via `ls_json`.
     pub fn ls(&self) -> LsJson {
-        let reg = self.registrations();
+        let list = self.worktree_list();
+        let reg: HashSet<String> = list.iter().map(|(p, _)| p.clone()).collect();
+        let strays = strays_from(&list, &self.main_root, &self.wt_root);
         // Prefetch the live tmux panes ONCE per snapshot (one `list-panes -a`),
         // so place_json can detect an ADOPTED (foreign-named) session per place
         // without shelling out per place — the app polls this every ~3s.
@@ -286,6 +297,7 @@ impl Project {
             prefix: self.prefix.clone(),
             places_file: format!("{}/.worktrees.places.json", self.main_root),
             places,
+            strays,
         }
     }
 
@@ -657,4 +669,94 @@ fn claude_has_session(cdir: &str) -> bool {
     std::fs::read_dir(p)
         .map(|rd| rd.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with(".jsonl")))
         .unwrap_or(false)
+}
+
+/// Parse `git worktree list --porcelain`: one stanza per worktree, blank-line
+/// separated — `worktree <path>`, `HEAD <sha>`, then `branch refs/heads/<b>` or
+/// `detached`, or `bare` for a bare main. Pure, so the shapes are testable
+/// without a repo.
+pub fn parse_worktree_list(text: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut cur: Option<(String, Option<String>)> = None;
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            if let Some(c) = cur.take() {
+                out.push(c);
+            }
+            cur = Some((p.to_string(), None));
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            if let Some(c) = cur.as_mut() {
+                c.1 = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+            }
+        }
+    }
+    if let Some(c) = cur {
+        out.push(c);
+    }
+    out
+}
+
+/// The registered worktrees that are neither MAIN nor under `<wt_root>/`.
+/// Pure form of `Project::stray_worktrees`.
+pub fn strays_from(list: &[(String, Option<String>)], main_root: &str, wt_root: &str) -> Vec<Stray> {
+    let under = format!("{}/", wt_root.trim_end_matches('/'));
+    list.iter()
+        .filter(|(p, _)| p != main_root && !p.starts_with(&under))
+        .map(|(p, b)| Stray {
+            path: p.clone(),
+            branch: b.clone(),
+            // Same rule as `cmd_new`: a branch's `/` becomes `-`; a detached
+            // tree has only its directory name to go by.
+            slug: match b {
+                Some(b) => b.replace('/', "-"),
+                None => basename(p),
+            },
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod stray_tests {
+    use super::*;
+
+    const PORCELAIN: &str = "worktree /w/repo\nHEAD aaa\nbranch refs/heads/main\n\n\
+worktree /w/repo/.worktrees/feat-x\nHEAD bbb\nbranch refs/heads/feat/x\n\n\
+worktree /w/repo/.dmux/worktrees/dmux-1781998195357\nHEAD ccc\nbranch refs/heads/feature/api-default-deny-auth\n\n\
+worktree /w/repo-design-skills\nHEAD ddd\ndetached\n";
+
+    #[test]
+    fn porcelain_parses_branches_and_detached_heads() {
+        let l = parse_worktree_list(PORCELAIN);
+        assert_eq!(l.len(), 4);
+        assert_eq!(l[0], ("/w/repo".to_string(), Some("main".to_string())));
+        assert_eq!(l[1].1.as_deref(), Some("feat/x"));
+        assert_eq!(l[3], ("/w/repo-design-skills".to_string(), None));
+        assert!(parse_worktree_list("").is_empty());
+        // a bare main: no branch line at all
+        assert_eq!(parse_worktree_list("worktree /w/bare.git\nbare\n"), vec![("/w/bare.git".to_string(), None)]);
+    }
+
+    /// Main and everything under `.worktrees/` are places; the dmux tree and
+    /// the sibling checkout are strays — and `/w/repo-design-skills` must NOT be
+    /// mistaken for something under `/w/repo` by a prefix test without the `/`.
+    #[test]
+    fn strays_are_the_registered_worktrees_outside_the_place_root() {
+        let l = parse_worktree_list(PORCELAIN);
+        let s = strays_from(&l, "/w/repo", "/w/repo/.worktrees");
+        assert_eq!(
+            s,
+            vec![
+                Stray {
+                    path: "/w/repo/.dmux/worktrees/dmux-1781998195357".into(),
+                    branch: Some("feature/api-default-deny-auth".into()),
+                    slug: "feature-api-default-deny-auth".into(),
+                },
+                Stray { path: "/w/repo-design-skills".into(), branch: None, slug: "repo-design-skills".into() },
+            ]
+        );
+        // a trailing slash on wt_root changes nothing
+        assert_eq!(strays_from(&l, "/w/repo", "/w/repo/.worktrees/").len(), 2);
+        // nothing registered beyond main + places → empty, never a phantom
+        assert!(strays_from(&l[..2], "/w/repo", "/w/repo/.worktrees").is_empty());
+    }
 }

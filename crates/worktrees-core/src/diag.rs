@@ -159,6 +159,18 @@ pub enum Code {
     /// and the tree still functions — and the fix is automatic on the next
     /// `sync push`/`sync pull` of the project, which is what the message says.
     SyncSkippedFiles,
+    // registry — worktrees this tool cannot see
+    /// A worktree git registers for this repo lives outside `.worktrees/` (made
+    /// by hand, or by another tool: `.dmux/worktrees/…`). Every command here is
+    /// keyed on the place dir, so it is invisible to `ls`/`open`/`rm`, to the
+    /// per-place checks above and to the app — while holding a branch and
+    /// possibly uncommitted work. ⚠ Not in §7's slug list: §7 is about drift
+    /// within a place, and this is a place that does not exist. Warn, never
+    /// Error, and never promoted by `--strict`: nothing is broken, the tree is
+    /// simply unmanaged — and the remedy (`git worktree move` into the place
+    /// root) is in the message. `ls --json` carries the same list as `strays`,
+    /// which is how the app flags it without running doctor.
+    StrayWorktree,
     /// An invariant this tool is supposed to guarantee did not hold. ⚠ Not in
     /// §7's slug list either: it exists so an internal inconsistency is REPORTED
     /// rather than turned into a silent skip, which is the failure class the
@@ -265,6 +277,7 @@ mod tests {
         );
         for (c, s) in [
             (Code::MissingSource, "missing-source"),
+            (Code::StrayWorktree, "stray-worktree"),
             (Code::NotLinked, "not-linked"),
             (Code::UnsafePath, "unsafe-path"),
             (Code::Shadowed, "shadowed"),

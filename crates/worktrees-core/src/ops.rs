@@ -1582,13 +1582,24 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         crate::sync::skipped_files_finding(root, &crate::sync::project_extra_excludes(root))
     };
 
+    // A third fact about the TREE, under the same rules: whole-project runs
+    // only (a stray belongs to no place), never `--config-only` (it reads git's
+    // registry, which a bare clone has none of), never beside the hub-copy
+    // finding (a copy's registry names paths on another machine — every one
+    // would read as a stray).
+    let strays = if config_only || !names.is_empty() || hub_copy.is_some() {
+        Vec::new()
+    } else {
+        stray_findings(p)
+    };
+
     let cfg = match load_project_config(p, ui) {
         Ok(c) => c,
         Err(code) => return code,
     };
     let Some((cfg, mut findings)) = cfg else {
         // No config is a healthy repo, not a broken one.
-        let report = Report::new(hub_copy.into_iter().chain(skipped).collect());
+        let report = Report::new(hub_copy.into_iter().chain(skipped).chain(strays).collect());
         if json {
             emit_report(ui, &report);
         } else if report.is_empty() {
@@ -1652,6 +1663,8 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         findings.extend(session_findings(p, &scanned));
     }
 
+    findings.extend(strays);
+
     if strict {
         // `--strict` is what lets a copy the source has moved past — or a
         // credential the config never learned about — fail a run; both stay
@@ -1683,6 +1696,28 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
     report.exit_code()
+}
+
+/// One warning per registered worktree outside `.worktrees/`, carrying the
+/// exact move that adopts it. `path` is left unset: a stray is by definition
+/// not repo-relative, and the absolute path is in the message.
+fn stray_findings(p: &Project) -> Vec<Finding> {
+    p.stray_worktrees()
+        .into_iter()
+        .map(|s| {
+            let what = match &s.branch {
+                Some(b) => format!("on '{b}'"),
+                None => "detached".to_string(),
+            };
+            Finding::warn(
+                Code::StrayWorktree,
+                format!(
+                    "worktree {} ({what}) is registered outside .worktrees/ — this tool cannot see it. Adopt it:  git -C {} worktree move {} {}/{}",
+                    s.path, p.main_root, s.path, p.wt_root, s.slug
+                ),
+            )
+        })
+        .collect()
 }
 
 /// Gitignored, untracked files in MAIN that no `[[file]]` entry declares.

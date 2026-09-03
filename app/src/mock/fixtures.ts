@@ -37,7 +37,8 @@ export type Place = {
   declared: Declared;
   lifecycle_effective: string;
 };
-export type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean };
+export type Stray = { path: string; branch: string | null; slug: string };
+export type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean; strays?: Stray[] };
 export type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 export type Workspace = { projects: ProjectView[] };
 
@@ -201,7 +202,14 @@ function cdv(): ProjectView {
       lifecycle_effective: "abandoned",
     }),
   ];
-  return { root, ok: true, error: null, snapshot: { repo: root, prefix: P, places } };
+  // The shape found in the real repo on 2026-09-02: a worktree a previous tool
+  // (dmux) registered under its own dir. Drives the nav's ⊟ flag + the sheet.
+  const strays: Stray[] = [{
+    path: `${root}/.dmux/worktrees/dmux-1781998195357`,
+    branch: "feature/api-default-deny-auth",
+    slug: "feature-api-default-deny-auth",
+  }];
+  return { root, ok: true, error: null, snapshot: { repo: root, prefix: P, places, strays } };
 }
 
 function worktreesRepo(): ProjectView {

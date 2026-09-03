@@ -24,6 +24,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   with its peer `name`, pid and tmux pane. Read from the same probe files the
   app's dots use (`worktrees_core::agent`, moved out of the app so both read
   one truth).
+- **Worktrees outside `.worktrees/` are reported instead of ignored.** A
+  worktree git registers for the repo but that lives elsewhere — made by hand,
+  or by another tool (`.dmux/worktrees/…`) — was invisible to every command
+  and to the app while still holding a branch. `ls --json` now carries them as
+  `strays` (from the `git worktree list` the snapshot already runs, so the app
+  flags the project the moment it loads: a ⊟ on the project row, and a section
+  in the Project sheet with the exact `git worktree move` that adopts each
+  one), and `doctor` reports each as a `stray-worktree` warning with the same
+  remedy. Nothing is moved for you: a tmux session or an editor may be sitting
+  in it.
+- **A profile can expose the worktrees MCP server with its mutating tools.**
+  The server a profile injects was read-only (`worktrees mcp`), and a profiled
+  launch runs `--strict-mcp-config`, so an orchestrating session under a
+  profile could list places but never create one. `worktrees_mcp_mutations`
+  (Profiles → MCP servers, nested under the existing toggle) adds
+  `--mutations`.
 
 ## [0.19.1] - 2026-08-30
 

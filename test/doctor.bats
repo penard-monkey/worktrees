@@ -143,6 +143,39 @@ wt() { echo "$REPO/.worktrees/$1"; }
   [ "$output" = '{"schema_version":1,"findings":[]}' ]
 }
 
+@test "doctor: a worktree outside .worktrees/ is a warning carrying the adopt command" {
+  run_wt new feat-x --no-tmux
+  git -C "$REPO" worktree add -q -b side/feature "$BATS_TEST_TMPDIR/elsewhere" main
+  # git registers the PHYSICAL path (/private/var…), same as $REPO is kept
+  local stray; stray="$(cd "$BATS_TEST_TMPDIR/elsewhere" && pwd -P)"
+  # no config: still reported, still exit 0 — nothing is broken, it is unmanaged
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"elsewhere (on 'side/feature') is registered outside .worktrees/"* ]]
+  [[ "$output" == *"git -C $REPO worktree move $stray $REPO/.worktrees/side-feature"* ]]
+  run_wt doctor --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"severity":"warn","code":"stray-worktree","place":null,"path":null'* ]]
+  # a named place is a question about that place; --config-only reads no registry
+  run_wt doctor feat-x
+  [[ "$output" != *"stray"* ]]
+  run_wt doctor --config-only --json
+  [ "$output" = '{"schema_version":1,"findings":[]}' ]
+  # with a config, the stray rides along with the file checks and --strict never promotes it
+  write_project_config '[[file]]' 'path = ".env"'
+  touch "$REPO/.env"; echo '.env' >> "$REPO/.gitignore"
+  run_wt relink --all
+  run_wt doctor --strict --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"code":"stray-worktree"'* ]]
+  # adopted → gone
+  git -C "$REPO" worktree move "$BATS_TEST_TMPDIR/elsewhere" "$REPO/.worktrees/side-feature"
+  run_wt doctor --json
+  [[ "$output" != *"stray-worktree"* ]]
+  run_wt ls
+  [[ "$output" == *"side-feature"* ]]
+}
+
 @test "WORKTREES_NO_PROJECT_CONFIG=1 ignores .worktrees.toml wholesale (§5's audit switch)" {
   # "I am auditing an untrusted clone." The file must behave as if it were not
   # there — not "mostly", and not only for the ops that read it explicitly.

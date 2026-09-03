@@ -41,6 +41,8 @@ export type DoctorFinding = {
 export type DoctorReport = { code: number; schema_version: number; findings: DoctorFinding[]; error: string | null };
 
 export type SuggestedFile = { path: string; credential: boolean };
+/** `model::Stray` — a worktree git registers outside `.worktrees/`. */
+export type Stray = { path: string; branch: string | null; slug: string };
 export type InitSuggestion = {
   path: string;
   exists: boolean;
@@ -101,11 +103,14 @@ export function ProjectSheet({
   root,
   editorCmd,
   suggestion,
+  strays = [],
   onClose,
   onReport,
   onConfigWritten,
 }: {
   open: boolean;
+  /** Worktrees registered outside `.worktrees/` (from the snapshot's `strays`). */
+  strays?: Stray[];
   root: string;
   editorCmd: string;
   /** What `init` would suggest here (App probes it once per project). */
@@ -292,6 +297,29 @@ export function ProjectSheet({
             {cfg?.error && <pre className="update-log">{cfg.error}</pre>}
             {cfg?.warnings.map((w, i) => <div className="hint" key={i}>! {w}</div>)}
           </section>
+
+          {strays.length > 0 && (
+            <section className="setting">
+              <label>
+                Worktrees outside .worktrees/
+                <span className="upd-tag warn">{strays.length}</span>
+              </label>
+              <div className="ver-rows">
+                {strays.map((s) => (
+                  <div className="ver-row" key={s.path}>
+                    <span className="ver-path" title={s.path}>{s.path}</span>
+                    {" "}<b>{s.branch ?? "(detached)"}</b>
+                  </div>
+                ))}
+              </div>
+              <div className="hint">
+                Git registers these for this repo, but they live outside <code>.worktrees/</code> — made
+                by hand or by another tool — so nothing here can see them. Adopting one is a move;
+                nothing is moved for you, because a tmux session or an editor may be sitting in it:
+              </div>
+              <pre className="update-log">{strays.map((s) => `git -C ${root} worktree move ${s.path} ${root}/.worktrees/${s.slug}`).join("\n")}</pre>
+            </section>
+          )}
 
           <section className="setting">
             <label>AI profile</label>
