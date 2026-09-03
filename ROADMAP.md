@@ -5,6 +5,33 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Cut v0.20.0.** #183 (brief / `--name` / MCP `create_worktree` single-pane /
+  `place_status` agents) and #184 (strays in `ls --json` + app flag + doctor
+  `stray-worktree`; profile `worktrees_mcp_mutations`) sit in `[Unreleased]`.
+  Nothing of the agent workflow is usable from an installed binary until this
+  ships. Then, in valleos: `claude mcp add -s user worktrees -- worktrees mcp
+  --mutations` (cwd discovery makes per-repo `.mcp.json` redundant — drop it),
+  brief one place from `(main)`, and test the two things no suite here can:
+  `SendMessage` reaching a BUSY worker, and `notify_when_idle` coming back.
+  Write the orchestrator loop into valleos' CLAUDE.md once it has run.
+  _From: [2026-09-02 agent-brief](docs/sessions/2026-09-02-agent-brief/summary.md)_
+
+- **Agent workflow, next slices (parked by design).** One agent per place at a
+  time is the stance; the door left open is **sub-places**
+  (`communications/<task>` worktrees off `communications-next`). Also parked:
+  brief PROGRESS as status (the agent's `progress.md` + `notify_when_idle`'s
+  one-liner), a `worktrees agents` view, and a `worktrees adopt <path>
+  [--name]` verb wrapping `git worktree move` once the doctor remedy has been
+  typed by hand more than twice. The harness pass for the ⊟ flag + Project-
+  sheet stray section is still owed (tsc only).
+  _From: [2026-09-02 agent-brief](docs/sessions/2026-09-02-agent-brief/summary.md)_
+
+- **Cross-session inbound holds by default under bypass-permissions.** A
+  receiver in bypass mode HOLDS a message for approval unless the sender also
+  bypasses; a `-p` worker needs `--settings '{"crossSessionInbound":"accept"}'`.
+  Not hit yet; the day a worker "never got the brief", this is where to look.
+  _From: [2026-09-02 agent-brief](docs/sessions/2026-09-02-agent-brief/summary.md)_
+
 - **The Writing Tools override is a workaround for an OS bug.** The app adds
   `allowsWritingToolsAffordance` → NO to wry's WKWebView subclass because
   macOS 26 asserts inside the affordance it would otherwise float over a

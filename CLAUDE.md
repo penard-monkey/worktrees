@@ -17,6 +17,18 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `<prefix>-<slug>` with `.` → `-`.
 - One version source: workspace `Cargo.toml`. The app crate + tauri.conf
   inherit it; `test/misc.bats` asserts the binary against it.
+- **Agents (since #183): project → place = a WORKSTREAM → agent = a claude
+  session launched against a brief.** The brief is `.planning/brief.md` in
+  the worktree (`ops::BRIEF_PATH`); claude opens on the fixed
+  `ops::BRIEF_OPENER` and NEVER receives the brief via argv. Pane-0 claude
+  gets `--name <full tmux session>` so claude's own cross-session messaging
+  (`ListAgents`/`SendMessage`/`notify_when_idle`) addresses it — that is the
+  bus, we do not build one. `worktrees_core::agent` reads
+  `~/.claude/sessions/<pid>.json` for BOTH the nav dots and MCP `place_status`;
+  keep them on that one reader. The orchestrator is `(main)`'s claude; one
+  user-scope `claude mcp add -s user worktrees -- worktrees mcp --mutations`
+  serves every repo (cwd discovery), and a PROFILE needs
+  `worktrees_mcp_mutations` or its injected server is read-only.
 
 ## Gates (run before any PR)
 
