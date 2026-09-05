@@ -34,7 +34,7 @@ const EDGE_SPEED = 8;
 
 /** Swallow the click that belongs to a gesture that just ended. Capture-phase
  *  and window-wide, because the release can land on ANYTHING — a place row
- *  (whose click would ENTER it), a rail lens, the project header's ✕ — and
+ *  (whose click would ENTER it), a rail icon, the project header's ✕ — and
  *  per-handler guards cannot cover surfaces they were never added to.
  *
  *  `stillDown` is the Escape case: the drag is dead but the button is not, so

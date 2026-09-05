@@ -470,7 +470,7 @@ Serde `Place` struct: every unknowable field `Option<T>` (CLI emits explicit nul
 ### Persistence
 - `tauri-plugin-window-state` → geometry.
 - `<app-config-dir>/worktrees-ui/ui-state.json` → selected place, terminal-visible,
-  nav-collapse, sort (UI-global; NEVER mixed with per-repo `.worktrees.places.json`).
+  sidebar mode, sort (UI-global; NEVER mixed with per-repo `.worktrees.places.json`).
 - `<app-config-dir>/shell-cwds.json` → each dock shell tab's last directory,
   keyed `repo|slug` → tab index. Its OWN file, not a key in ui-state.json: that
   one is written whole-blob by the frontend, so a backend write into it is

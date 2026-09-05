@@ -82,7 +82,6 @@ type Workspace = { projects: ProjectView[] };
  *  — a question, so it must never reach the error banner. */
 type DirProbe = { exists: boolean; is_git: boolean; has_commits: boolean };
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; needs_confirm?: string | null; warnings?: string[] };
-type Lens = "places" | "recent" | "attention";
 /** Last known `doctor` state for one project root. `slugs` decorates rows,
  * `issues` is the project-level count (placeless findings included, so it equals
  * the sheet's Health badge), `error` means the last run did not produce a report
@@ -107,11 +106,16 @@ const isBareArm = (k: string | null) =>
 /** core's `diag::EXIT_NEEDS_CONFIRM` — "I stopped to ask", never a failure. */
 const EXIT_NEEDS_CONFIRM = 4;
 
-// ⌘1..N nav targets, in the nav's displayed top-to-bottom order: Home (clear
-// selection → briefing), then the rail's lens entries. Module scope = stable.
-const NAV_CHORDS: { home?: boolean; lens?: Lens }[] = [
-  { home: true }, { lens: "places" }, { lens: "recent" }, { lens: "attention" },
-];
+// ⌘1..N nav targets, in the nav's displayed top-to-bottom order. Two entries
+// now — Home and Places — so ⌘3/⌘4 are dead keys rather than shortcuts to the
+// Recent/Attention lenses, which no longer exist. Module scope = stable.
+const NAV_CHORDS = ["home", "places"] as const;
+
+/** How long the pointer must be off BOTH the rail and the sidebar before an
+ *  unpinned sidebar closes. Long enough to cross the seam between the two
+ *  elements (they are separate boxes, so a diagonal exit fires `pointerleave`
+ *  on one before `pointerenter` on the other), short enough not to feel stuck. */
+const NAV_HIDE_MS = 300;
 
 // Size chords. ⌘+/⌘−/⌘0 is the OVERALL app size (page zoom); add ⌥ for the
 // rendered markdown's reading size. `zoomDir` answers 1 / -1 / 0 (reset), or
@@ -177,8 +181,8 @@ const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effe
 /** Worth a look. `behind` counts only for `(main)`, where the base ref IS
  *  origin/main and ↓ means "pull" — on a worktree it only says the base moved
  *  under you, which is not something the worktree did wrong and not something
- *  the lens should collect. `dirty` and `ahead` are work that exists nowhere
- *  else yet; those are the signals. */
+ *  the attention filter should collect. `dirty` and `ahead` are work that
+ *  exists nowhere else yet; those are the signals. */
 const hasAttention = (p: Place) => !!p.dirty || !!p.ahead || (p.is_main && !!p.behind);
 
 // nav icons live in ./icons now — inline SVG, inheriting currentColor per theme
@@ -207,7 +211,7 @@ function ago(epoch?: number): string {
 // instead of racing an in-flight animation.
 const DONE_T1_SECS = 15 * 60; // "just finished — go look"
 const DONE_T2_SECS = 2 * 3600; // this working block
-const DONE_T3_SECS = 12 * 3600; // overnight; past this the Recent lens takes over
+const DONE_T3_SECS = 12 * 3600; // overnight; past this the row is simply old
 type DoneTier = "" | "t1" | "t2" | "t3";
 function doneTier(epoch: number, nowSec: number): DoneTier {
   if (!epoch) return "";
@@ -220,10 +224,10 @@ function doneTier(epoch: number, nowSec: number): DoneTier {
 /// "When did I last USE this place" — opened or worked, whichever is newer.
 ///
 /// ONE consumer left: the restore-on-launch target. Every list a user reads —
-/// the nav tree, ⌘K, the Recent lens, the home Resume list — orders and labels
-/// by `activityAt` instead, so the age printed on a row is the reason it sits
-/// where it does. Four lists that agreed on nothing were four different answers
-/// to "what did I touch last".
+/// the nav tree, ⌘K, the home Resume list — orders and labels by `activityAt`
+/// instead, so the age printed on a row is the reason it sits where it does.
+/// Three lists that agreed on nothing were three different answers to "what did
+/// I touch last".
 ///
 /// Restore keeps THIS key because it deliberately has no commit-epoch fallback.
 /// A worktree created from the CLI and never touched has a commit from
@@ -2313,7 +2317,13 @@ function App() {
   const [err, setErr] = useState("");
   const [sel, setSel] = useState<{ repo: string; slug: string } | null>(null);
   const [filter, setFilter] = useState("");
-  const [lens, setLens] = useState<Lens>("places");
+  // The sidebar's TRANSIENT half: is the unpinned overlay on screen right now.
+  // Never persisted — a reveal is a peek, and an app that reopened holding one
+  // would be showing a panel nobody asked for.
+  const [navRevealed, setNavRevealed] = useState(false);
+  // Attention as a FILTER rather than a lens: transient too, because it is a
+  // question you ask ("what needs me?"), not a mode you live in.
+  const [attnOnly, setAttnOnly] = useState(false);
   const [newFor, setNewFor] = useState<string | null>(null);
   const [newBase, setNewBase] = useState("");
   // What a REJECTED create had typed in it, so reopening the form restores the
@@ -2441,6 +2451,7 @@ function App() {
   const appStale = !!(upd?.latest && vnewer(upd.latest, upd.app_version));
   const updateAvail = cliStale || cliMissing || appStale;
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const navRef = useRef<HTMLElement | null>(null);
 
   // ── per-place panel state ────────────────────────────────────────────────
   // A space owns its dock: what is open, which tab, how wide. `settings` holds
@@ -2746,9 +2757,9 @@ function App() {
   const workedAt = (p: Place) =>
     Math.max(donePaths.get(p.path) ?? 0, p.declared?.last_worked_epoch ?? 0);
   // THE clock. Row age and sort key for every list a user reads — the nav tree,
-  // the Recent lens, the home Resume list, ⌘K — so a row's printed age is the
-  // reason it sits where it does. When something HAPPENED here: Claude work or a
-  // commit, never an open. `last_opened_epoch` is deliberately excluded so
+  // the home Resume list, ⌘K — so a row's printed age is the reason it sits
+  // where it does. When something HAPPENED here: Claude work or a commit, never
+  // an open. `last_opened_epoch` is deliberately excluded so
   // clicking a row neither resets its clock to "now" nor reshuffles the tree
   // (⌘K used to rank by opens, which is why the palette and the tree behind it
   // disagreed about what you touched last). The one place opens still decide is
@@ -2947,7 +2958,6 @@ function App() {
       applySettings(merged);
       setSettings(merged);
       if (Object.keys(preHydration.current).length > 0) saveSettings(merged);
-      setLens(merged.lens);
       setCollapsed(merged.collapsed ?? {});
       // release notes: embedded CHANGELOG vs last-seen version. Fresh install
       // (no last_seen) records silently; a version CHANGE shows What's-new.
@@ -2980,12 +2990,10 @@ function App() {
   const updateSettings = (patch: Partial<Settings> | ((prev: Settings) => Partial<Settings>)) => {
     setSettings((prev) => {
       const p = typeof patch === "function" ? patch(prev) : patch;
-      // resizing a hidden nav is dead UI — bring it back for live preview
-      const auto = p.nav_width !== undefined && prev.nav_collapsed ? { nav_collapsed: false } : null;
-      const next = { ...prev, ...p, ...auto };
+      const next = { ...prev, ...p };
       applySettings(next);
       if (hydrated.current) saveSettings(next);
-      else Object.assign(preHydration.current, p, auto);
+      else Object.assign(preHydration.current, p);
       return next;
     });
     // theme changes the terminal colors too (xterm reads CSS vars once per version)
@@ -3410,7 +3418,9 @@ function App() {
       const probe = await invoke<DirProbe>("probe_dir", { dir });
       if (!probe.is_git) {
         setInitAsk(dir);
-        if (settings.nav_collapsed) toggleNav();
+        // The offer renders INSIDE the nav, so the nav has to be on screen —
+        // and `initAsk` is one of the sticky conditions, so it stays there.
+        revealNav(false);
         return;
       }
       commitWs(await invoke<Workspace>("add_project", { dir }));
@@ -3554,8 +3564,11 @@ function App() {
   // there"; the health check reads it. No `setTermFocus` bump either: there may
   // be no terminal to hand the keyboard to, and selection alone should not steal
   // focus from the nav you are arrowing through.
-  const selectPlace = (repo: string, p: Place) => {
-    setSel({ repo, slug: p.slug });
+  const selectPlace = (repo: string, p: Place) => selectSlug(repo, p.slug);
+  /** The same verb addressed by slug — the nav filter's Enter has a row element,
+   *  not a `Place` (see `enterFirstMatch`). */
+  const selectSlug = (repo: string, slug: string) => {
+    setSel({ repo, slug });
     setMenu(null);
     closeCtx();
   };
@@ -3667,7 +3680,8 @@ function App() {
   // Settings → Data → "Reset to defaults". Preserve last_seen_version so the
   // What's-new sheet doesn't re-fire, push through the same apply/persist/refit
   // path as every other change, and reset the React state that MIRRORS settings
-  // (lens + per-project collapsed) so the UI doesn't show stale nav state.
+  // (the revealed overlay + per-project collapsed) so the UI doesn't show stale
+  // nav state.
   //
   // ⚠ This DOES clear `init_dismissed`, so every dismissed init banner comes
   // back. That is the right behavior and is deliberate: "reset to defaults" is
@@ -3678,13 +3692,8 @@ function App() {
   const onReset = () => {
     const next = { ...DEFAULTS, last_seen_version: settings.last_seen_version };
     updateSettings(next);
-    setLens(next.lens);
+    setNavRevealed(false);
     setCollapsed(next.collapsed);
-  };
-  const editNote = (repo: string, p: Place) => {
-    closeCtx();
-    setSel({ repo, slug: p.slug });
-    setTimeout(() => document.querySelector<HTMLInputElement>(".note-strip")?.focus(), 60);
   };
   // A dialog, so there is no nav to bring back — but the draft MUST be cleared:
   // it belongs to the create that was rejected, and reopening for a different
@@ -4254,16 +4263,131 @@ function App() {
   const toggleGroup = (key: string, def: boolean) =>
     setGroupOpen((g) => ({ ...g, [key]: !(g[key] ?? def) }));
 
-  // rail-only mode: hide the nav column, keep the rail (persisted in ui-state)
-  const toggleNav = useCallback(() => {
+  // ── the sidebar: pinned column, or an overlay that comes and goes ────────
+  // Everything below is deliberately built out of REFS and stable callbacks:
+  // the window keydown listener registers once, and a chord that re-registered
+  // the listener on every settings change would drop keystrokes mid-gesture.
+  const navState = useRef({ pinned: DEFAULTS.nav_pinned, revealed: false, hover: DEFAULTS.nav_hover_reveal, initAsk: false });
+  navState.current = { pinned: settings.nav_pinned, revealed: navRevealed, hover: settings.nav_hover_reveal, initAsk: !!initAsk };
+  /** Pointer presence, per element. The rail and the sidebar are separate boxes
+   *  with a seam between them, so this is two flags and one timer rather than a
+   *  single "is the pointer in the region" boolean that a diagonal exit breaks. */
+  const navOver = useRef({ rail: false, nav: false });
+  const navHideTimer = useRef<number | null>(null);
+  /** Where the keyboard was before ⌘B/⌘2 took it into the filter, so hiding
+   *  hands it back instead of dropping it on <body>. */
+  const navReturn = useRef<HTMLElement | null>(null);
+  /** Focus the filter on the NEXT render that actually shows the overlay — a
+   *  hidden nav is `display: none`, and focusing inside one silently fails. */
+  const navFocusPending = useRef(false);
+
+  /** Conditions under which the leave timer must not fire. Read at FIRE time,
+   *  not when the timer is armed: a menu can open while the timer is running.
+   *  `.menu-catch` is the one query that covers every menu in the app at once
+   *  (CtxMenu renders it, and so do the sort and topbar popovers). */
+  const navSticky = () =>
+    navState.current.initAsk ||
+    !!document.querySelector(".menu-catch") ||
+    document.body.classList.contains("dragging") ||
+    !!navRef.current?.contains(document.activeElement);
+
+  const clearNavHide = useCallback(() => {
+    if (navHideTimer.current !== null) clearTimeout(navHideTimer.current);
+    navHideTimer.current = null;
+  }, []);
+
+  const hideNav = useCallback(() => {
+    clearNavHide();
+    setNavRevealed((was) => {
+      // Hand the keyboard back only if the sidebar still holds it — focus that
+      // has legitimately moved on (a terminal click, a dialog) is not ours.
+      if (was && navReturn.current && navRef.current?.contains(document.activeElement))
+        navReturn.current.focus();
+      navReturn.current = null;
+      return false;
+    });
+  }, [clearNavHide]);
+
+  /** Arm (or re-arm) the close. Re-polls rather than subscribing to each sticky
+   *  source: a menu, a drag and a focused rename each end through their own
+   *  code, and "when the sticky condition ends with the pointer already outside,
+   *  hide after the same delay" is exactly one 300ms poll, not five callbacks. */
+  const armNavHide = useCallback(() => {
+    clearNavHide();
+    const tick = () => {
+      navHideTimer.current = null;
+      // The pointer came back: `pointerleave` will arm this again on the way out.
+      if (navOver.current.rail || navOver.current.nav) return;
+      if (navSticky()) { navHideTimer.current = window.setTimeout(tick, NAV_HIDE_MS); return; }
+      hideNav();
+    };
+    navHideTimer.current = window.setTimeout(tick, NAV_HIDE_MS);
+  }, [clearNavHide, hideNav]);
+
+  /** Show the overlay. `focus` is the keyboard path (⌘B / ⌘2), which also takes
+   *  the filter — hovering must NOT, or the pointer would steal the terminal's
+   *  keyboard every time it crossed the rail. */
+  const revealNav = useCallback((focus: boolean) => {
+    if (navState.current.pinned) { if (focus) searchRef.current?.focus(); return; }
+    clearNavHide();
+    if (focus && !navState.current.revealed) {
+      const el = document.activeElement;
+      navReturn.current = el instanceof HTMLElement && el !== document.body ? el : null;
+      navFocusPending.current = true;
+    }
+    setNavRevealed(true);
+  }, [clearNavHide]);
+
+  /** The one persisted half. Stable, and written the same way `updateSettings`
+   *  would — through `setSettings` so a pre-hydration ⌘B is not reverted. */
+  const setNavPinned = useCallback((pinned: boolean) => {
     setSettings((prev) => {
-      const next = { ...prev, nav_collapsed: !prev.nav_collapsed };
+      if (prev.nav_pinned === pinned) return prev;
+      const next = { ...prev, nav_pinned: pinned };
       applySettings(next);
       if (hydrated.current) saveSettings(next);
-      else preHydration.current.nav_collapsed = next.nav_collapsed;
+      else preHydration.current.nav_pinned = pinned;
       return next;
     });
-  }, []);
+    clearNavHide();
+    // Unpinning leaves the panel ON SCREEN as the overlay: the sidebar you were
+    // reading must not blink out from under the click that unpinned it, and its
+    // fade-out on the way to the terminal IS the confirmation that it unpinned.
+    setNavRevealed(!pinned);
+    if (!pinned) armNavHide();
+  }, [armNavHide, clearNavHide]);
+
+  /** ⌘B, and the whole story it tells: pinned → unpin (peel it off the layout),
+   *  hidden → reveal with the filter focused, revealed → pin. So ⌘B ⌘B from
+   *  nothing pins, and ⌘B Esc is a peek. */
+  const navChord = useCallback(() => {
+    const st = navState.current;
+    if (st.pinned) setNavPinned(false);
+    else if (st.revealed) setNavPinned(true);
+    else revealNav(true);
+  }, [revealNav, setNavPinned]);
+
+  useEffect(() => {
+    if (!navFocusPending.current || !navRevealed) return;
+    navFocusPending.current = false;
+    searchRef.current?.focus();
+  }, [navRevealed]);
+  // Pinning from anywhere (the Settings segmented control included) retires the
+  // overlay — there is nothing to overlay once the panel owns a column.
+  useEffect(() => { if (settings.nav_pinned) { clearNavHide(); setNavRevealed(false); } }, [settings.nav_pinned, clearNavHide]);
+  useEffect(() => clearNavHide, [clearNavHide]);
+
+  /** `pointerenter`/`pointerleave` on the two elements — NOT `mouseout`
+   *  bubbling, which fires on every internal boundary the pointer crosses. */
+  const navPointer = (which: "rail" | "nav", inside: boolean) => {
+    navOver.current[which] = inside;
+    if (inside) {
+      clearNavHide();
+      if (which === "rail" && !navState.current.pinned && navState.current.hover) revealNav(false);
+    } else if (!navOver.current.rail && !navOver.current.nav && navState.current.revealed) {
+      armNavHide();
+    }
+  };
   // Right rail → dock tab. Clicking the ACTIVE tab collapses the dock (VS Code's
   // model), which is why the topbar no longer carries its own dock toggle.
   const pickDockTab = (tab: Settings["dock_tab"]) =>
@@ -4278,25 +4402,16 @@ function App() {
   const toggleDock = useCallback(() => {
     updatePanels((cur) => ({ dock_open: !cur.dock_open }));
   }, [updatePanels]);
-  // keyboard lens select (⌘2..N): unlike changeLens, re-selecting the active lens
-  // must NOT toggle/collapse the nav — a keyboard chord always REVEALS the view.
-  const selectLens = useCallback((l: Lens) => {
-    setLens(l);
-    setSettings((prev) => {
-      if (prev.lens === l && !prev.nav_collapsed) return prev;
-      const next = { ...prev, lens: l, nav_collapsed: false };
-      applySettings(next);
-      if (hydrated.current) saveSettings(next);
-      else Object.assign(preHydration.current, { lens: l, nav_collapsed: false });
-      return next;
-    });
-  }, []);
+  // ⌘2 — Places. Always REVEALS and never toggles: a chord aimed at a view
+  // that closed it instead is the one behaviour a keyboard user cannot undo
+  // without looking. Pinned, there is nothing to reveal, so it takes the filter.
+  const focusPlaces = useCallback(() => { revealNav(true); }, [revealNav]);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
-  const keyRef = useRef({ selectLens, selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface });
+  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface });
   const filesTabOpen = eff.dock_open && eff.dock_tab === "files";
   keyRef.current = {
-    selectLens, selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
+    selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
     filesTabOpen,
     // ⌘+/⌘−/⌘0 only mean something while a RENDERED markdown doc is on screen —
     // in the dock's Files tab or in the reader. Anywhere else the chord is left
@@ -4344,6 +4459,18 @@ function App() {
       if (e.key === "Escape" && keyRef.current.reading && !keyRef.current.settingsOpen && !keyRef.current.switchOpen) {
         e.preventDefault();
         setReading(false);
+        return;
+      }
+      // Esc closes the revealed sidebar — LAST in the Escape chain, so every
+      // surface that already owns the key keeps it. `.menu-catch` covers the ctx
+      // menus and popovers; a rename editor stops Escape from ever reaching this
+      // listener (TitleEditor calls stopPropagation). No preventDefault: a
+      // terminal in vim gets its Escape either way, and swallowing it there
+      // would be a far worse bug than a sidebar that also closed.
+      if (e.key === "Escape" && navState.current.revealed && !keyRef.current.settingsOpen
+          && !keyRef.current.switchOpen && !keyRef.current.reading && !keyRef.current.findOn
+          && !document.querySelector(".menu-catch")) {
+        hideNav();
         return;
       }
       // ⌘⇧E — reading mode: the dock's current file expands over the main pane.
@@ -4421,7 +4548,7 @@ function App() {
         // Ctrl+B is the tmux prefix — let the embedded terminal keep it; ⌘B still toggles
         if (e.ctrlKey && !e.metaKey && e.target instanceof Element && e.target.closest(".term-host")) return;
         e.preventDefault();
-        toggleNav();
+        navChord();
       } else if (e.metaKey && k === "j") {
         // ⌘J — toggle the right dock (Files / Terminal). Meta chord fires past
         // the embedded terminal, like ⌘B.
@@ -4471,14 +4598,17 @@ function App() {
         setFindOn(target);
         setFindToken((v) => v + 1);
       } else if (e.metaKey && e.key >= "1" && e.key <= "9") {
-        // ⌘1..N — jump to a nav view (Home / lenses). Always REVEALS (never
-        // toggles). Meta-only chord is safe past the term-host.
+        // ⌘1..N — jump to a nav view. Two targets only, so ⌘3..⌘9 fall through
+        // WITHOUT preventDefault: unbound keys rather than chords that swallow
+        // themselves. Meta-only is safe past the term-host.
         const idx = e.key.charCodeAt(0) - 49; // '1' → 0
         const target = NAV_CHORDS[idx];
         if (!target) return;
         e.preventDefault();
-        if (target.home) { setSel(null); setMenu(null); closeCtx(); if (settings.nav_collapsed) toggleNav(); }
-        else if (target.lens) keyRef.current.selectLens(target.lens);
+        // ⌘1 deliberately leaves the sidebar alone: Home is a destination in the
+        // main pane, and a chord that also moved a panel would be two acts.
+        if (target === "home") { setSel(null); setMenu(null); closeCtx(); }
+        else focusPlaces();
       } else if (e.metaKey && k === "e") {
         // ⌘E — open the selected place in the editor (no-op when nothing selected).
         e.preventDefault();
@@ -4488,15 +4618,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleNav, toggleDock, updatePanels, fail, settings.nav_collapsed]);
-
-  // lens click: collapsed → expand into that lens; active lens again → collapse (VS Code style)
-  const changeLens = (l: Lens) => {
-    if (settings.nav_collapsed) { setLens(l); updateSettings({ lens: l, nav_collapsed: false }); return; }
-    if (l === lens) { toggleNav(); return; }
-    setLens(l);
-    updateSettings({ lens: l });
-  };
+  }, [navChord, focusPlaces, hideNav, toggleDock, updatePanels, fail]);
 
   const q = filter.trim().toLowerCase();
   const matchPlace = (p: Place) =>
@@ -4507,6 +4629,23 @@ function App() {
     (p.declared?.title ?? "").toLowerCase().includes(q) ||
     (p.branch ?? "").toLowerCase().includes(q) ||
     (p.declared?.note ?? "").toLowerCase().includes(q);
+  // The text filter and the attention filter COMPOSE, as one predicate applied
+  // exactly where `matchPlace` was. Nothing else has to learn about attention:
+  // the empty-group hiding the text filter already does (`buckets[g]?.length`
+  // in ProjectNode) then covers both for free.
+  const visiblePlace = (p: Place) => matchPlace(p) && (!attnOnly || hasAttention(p));
+
+  /** Enter in the filter: select the FIRST row the tree is showing. Read off the
+   *  DOM rather than recomputed — the rendered order already accounts for the
+   *  sort mode, collapsed projects, collapsed tier groups and hidden tiers, and
+   *  a second implementation of that ordering would be a mirror that drifts.
+   *  SELECT only, never enter: it is the keyboard's version of a row click. */
+  const enterFirstMatch = () => {
+    const row = navScrollRef.current?.querySelector<HTMLElement>("li.row[data-slug]:not(.pending)");
+    const repo = row?.closest<HTMLElement>("[data-project-root]")?.dataset.projectRoot;
+    if (repo && row?.dataset.slug) selectSlug(repo, row.dataset.slug);
+    hideNav();
+  };
 
   // workspace-wide stats for the Briefing cockpit
   const allPlaces = useMemo(
@@ -4572,7 +4711,10 @@ function App() {
     const startW = settings.nav_width;
     const move = (ev: MouseEvent) =>
       updateSettings({
-        nav_width: clampNav(startW + (ev.clientX - startX), dockShown ? eff.dock_width : 0, window.innerWidth),
+        // The dock is only reserved against while the sidebar is a COLUMN. As an
+        // overlay it covers the terminal rather than sharing the row with it, so
+        // reserving would cap the drag against width nothing is competing for.
+        nav_width: clampNav(startW + (ev.clientX - startX), settings.nav_pinned && dockShown ? eff.dock_width : 0, window.innerWidth),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
@@ -4600,16 +4742,12 @@ function App() {
   // moment this needs useState (a hover card, an inline editor), hoist it to
   // module scope with props FIRST.
   // No age override any more: every list this row appears in sorts by
-  // `activityAt`, so the row can just print it. The old `ageEpoch` prop existed
-  // because the Recent lens ordered by a different clock, and a list that labels
-  // rows with a clock it does not order by reads as a broken sort.
-  const PlaceRow = ({ repo, p, showProject }: { repo: string; p: Place; showProject?: boolean }) => {
+  // `activityAt`, so the row can just print it.
+  const PlaceRow = ({ repo, p }: { repo: string; p: Place }) => {
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
     // The main worktree is not in any tier group and cannot leave one, so it is
-    // the one row that never arms a drag. `showProject` marks the flat lenses
-    // (Recent / Attention), which mix projects and order by activity — there is
-    // no position there to drag a row into.
-    const draggable = !p.is_main && !showProject;
+    // the one row that never arms a drag.
+    const draggable = !p.is_main;
     const isSource = drag?.item.kind === "place" && drag.item.slug === p.slug && drag.item.repo === repo;
     // Aging, off the same clock the row already prints (`activityAt`) — so the
     // dim and the "23d" beside it are the same statement, and rows refresh it
@@ -4631,8 +4769,8 @@ function App() {
         // ▸ button below, the topbar/empty-state Enter, or the ctx menu). The
         // first click of a double-click selects and the second enters — enterPlace
         // selects as well, so the pair lands on the same place either way.
-        onClick={() => selectPlace(repo, p)}
-        onDoubleClick={() => enterPlace(repo, p)}
+        onClick={() => { selectPlace(repo, p); hideNav(); }}
+        onDoubleClick={() => { enterPlace(repo, p); hideNav(); }}
         onContextMenu={(e) => placeCtx(e, repo, p)}
         onPointerDown={draggable ? (e) => arm(e, { kind: "place", repo, slug: p.slug }) : undefined}
         title={p.declared?.title ? `${p.declared.title} — ${p.slug}` : p.slug}
@@ -4642,7 +4780,6 @@ function App() {
           <span className="row-name">
             {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
             {nameOf(p)}
-            {showProject ? <span className="row-proj">{basename(repo)}</span> : null}
           </span>
           {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
         </span>
@@ -4660,7 +4797,7 @@ function App() {
             <button
               className="row-enter"
               title="Enter — open the session"
-              onClick={(e) => { e.stopPropagation(); enterPlace(repo, p); }}
+              onClick={(e) => { e.stopPropagation(); enterPlace(repo, p); hideNav(); }}
             >
               <Icons.ChevronRight size={12} />
             </button>
@@ -4680,7 +4817,7 @@ function App() {
 
   const ProjectNode = ({ pv }: { pv: ProjectView }) => {
     const open = !collapsed[pv.root];
-    const places = (pv.snapshot?.places ?? []).filter(matchPlace);
+    const places = (pv.snapshot?.places ?? []).filter(visiblePlace);
     const main = places.find((p) => p.is_main) ?? null;
     // In-flight creates for this project. Checked against the UNFILTERED
     // snapshot: `new` on a branch that already has a worktree reuses that one,
@@ -4852,33 +4989,12 @@ function App() {
     );
   };
 
-  // flat lens (recent / attention) across all projects
-  const FlatLens = ({ items }: { items: { pv: ProjectView; p: Place }[] }) => (
-    <ul className="places flat">
-      {items.length === 0 && <li className="flat-empty">Nothing here.</li>}
-      {items.map(({ pv, p }) => <PlaceRow key={pv.root + p.slug} repo={pv.root} p={p} showProject />)}
-    </ul>
-  );
+  // The attention COUNT is over every place in the workspace, deliberately not
+  // over the text-filtered ones: the badge answers "what needs me?", and a
+  // number that shrank because you were typing a name would be answering a
+  // different question with the same glyph.
+  const attentionCount = useMemo(() => allPlaces.filter(({ p }) => hasAttention(p)).length, [allPlaces]);
 
-  // Recent = the tree flattened and ranked, not a second opinion about time.
-  // It used to rank (and label) by `usedEpoch`, so the same place could sit
-  // third here and first in the tree with two different ages next to it.
-  // `donePaths` is a dep because `activityAt` reads it.
-  const recentItems = useMemo(
-    () => allPlaces.filter(({ p }) => matchPlace(p) && !p.is_main)
-      .sort((a, b) => activityAt(b.p) - activityAt(a.p)),
-    [allPlaces, q, donePaths],
-  );
-  const attentionItems = useMemo(
-    () => allPlaces.filter(({ p }) => matchPlace(p) && hasAttention(p)),
-    [allPlaces, q],
-  );
-
-  const RAIL = [
-    { key: "places" as Lens, icon: <Icons.ListTree size={17} />, title: "Places — the full tree" },
-    { key: "recent" as Lens, icon: <Icons.History size={17} />, title: "Recent — resurface dormant places" },
-    { key: "attention" as Lens, icon: <Icons.TriangleAlert size={17} />, title: "Attention — dirty / unpushed / unpulled main / broken" },
-  ];
   const DOCK_RAIL = [
     { key: "files" as Settings["dock_tab"], icon: <Icons.Folder size={17} />, title: "Files" },
     { key: "terminal" as Settings["dock_tab"], icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
@@ -4898,39 +5014,76 @@ function App() {
     "minmax(0, 1fr)", // .space — terminal + dock, under one header
     "var(--rail-w)", // right rail — permanent, like the left one
   ].filter(Boolean).join(" ");
+  // The overlay's width. `clampNav` with NO dock reservation, unlike the pinned
+  // column: the overlay covers the terminal rather than sharing the row with
+  // it, so there is nothing to reserve width away from.
+  const navOverlayW = clampNav(settings.nav_width, 0, vw);
 
   return (
     <div className="app" style={{ gridTemplateColumns: gridCols }}>
-      {/* ── activity rail ── */}
-      <nav className="rail">
-        {RAIL.map((r) => (
-          <button
-            key={r.key}
-            className={"rail-icon" + (lens === r.key ? (settings.nav_collapsed ? " remembered" : " active") : "")}
-            title={r.title}
-            onClick={() => changeLens(r.key)}
-          >
-            {r.icon}
-          </button>
-        ))}
-        <div className="rail-spacer" />
-        <button className="rail-icon" title={settings.nav_collapsed ? `show nav — ${lens} (⌘B)` : "hide nav (⌘B)"} onClick={toggleNav}>
-          {settings.nav_collapsed ? <Icons.PanelLeftOpen size={17} /> : <Icons.PanelLeftClose size={17} />}
+      {/* ── activity rail ──
+          ONE destination icon now (Places). The rail used to carry three lenses
+          plus a separate hide button — four controls for two states, and the
+          hide button duplicated the lens icon's own toggle. */}
+      <nav
+        className="rail"
+        onPointerEnter={() => navPointer("rail", true)}
+        onPointerLeave={() => navPointer("rail", false)}
+      >
+        {/* `active` while the sidebar is on screen either way, `remembered`
+            when it is not — Places is the rail's one destination, so it is
+            never fully dark. Which of the two on-screen states you are in is
+            told by the sidebar itself (a column, or a shadowed overlay). */}
+        <button
+          className={"rail-icon" + (settings.nav_pinned || navRevealed ? " active" : " remembered")}
+          title={
+            settings.nav_pinned ? "Places — pinned; click to unpin (⌘B)"
+              : navRevealed ? "Places — showing; click to pin (⌘B)"
+                : "Places — hidden; click to pin (⌘B)"
+          }
+          data-testid="places-rail"
+          onClick={() => setNavPinned(!settings.nav_pinned)}
+        >
+          <Icons.ListTree size={17} />
         </button>
-        {/* The same three-way menu as the footer's: with the nav collapsed this
+        <div className="rail-spacer" />
+        {/* The same three-way menu as the footer's: with the sidebar hidden this
             is the ONLY way in, and a shortcut that silently answers one of the
             three questions is the inconsistency the menu exists to remove. */}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
         <button className={"rail-icon" + (updateAvail ? " upd" : "")} title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
       </nav>
 
-      {/* ── nav (kept mounted while collapsed so form drafts / scroll survive ⌘B) ── */}
-      <aside className={"nav" + (fit.navShown ? "" : " hidden")}>
-        <button className={"home-item" + (sel ? "" : " on")} onClick={() => { setSel(null); setMenu(null); closeCtx(); }}>
+      {/* ── the sidebar ──
+          ONE element, three visual states: a pinned grid column, `hidden`
+          (display:none but STILL MOUNTED, so form drafts, scroll position and
+          the filter draft survive), and `overlay` — absolutely positioned over
+          the terminal. The overlay is the reason this is not three components:
+          revealing it must not resize the pty, and a panel that only sometimes
+          owns a track can't be a column without doing exactly that. */}
+      <aside
+        ref={navRef}
+        className={"nav" + (fit.navShown ? "" : navRevealed ? " overlay" : " hidden")}
+        style={fit.navShown || !navRevealed ? undefined : { width: navOverlayW }}
+        onPointerEnter={() => navPointer("nav", true)}
+        onPointerLeave={() => navPointer("nav", false)}
+      >
+        <button className={"home-item" + (sel ? "" : " on")} onClick={() => { setSel(null); setMenu(null); closeCtx(); hideNav(); }}>
           <HomeIcon /> Home
         </button>
         <div className="nav-head">
-          <span className="nav-title">{lens === "places" ? "PLACES" : lens === "recent" ? "RECENT" : "ATTENTION"}</span>
+          <span className="nav-title">PLACES</span>
+          {/* Attention is a FILTER here, not a lens of its own: the count is the
+              whole answer most of the time, and the rows it would list are the
+              rows already on screen. The count is over the WHOLE workspace. */}
+          <button
+            className={"icon-btn attn" + (attnOnly ? " on" : "") + (attentionCount ? "" : " dim")}
+            title="attention — dirty / unpushed / unpulled main / broken"
+            data-testid="attn-filter"
+            onClick={() => setAttnOnly((v) => !v)}
+          >
+            <Icons.TriangleAlert size={13} />{attentionCount}
+          </button>
           <div className="menu-wrap">
             <button className={"icon-btn" + (settings.sort_mode !== "recent" ? " on" : "")} title="sort places" onClick={() => setSortOpen(!sortOpen)}><Icons.ArrowUpDown /></button>
             {sortOpen && (
@@ -4952,31 +5105,37 @@ function App() {
           </div>
           <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}><Icons.Search /></button>
         </div>
-        <input ref={searchRef} className="search" placeholder="filter places…" value={filter} onChange={(e) => setFilter(e.currentTarget.value)} />
+        <input
+          ref={searchRef} className="search" placeholder="filter places…" value={filter}
+          onChange={(e) => setFilter(e.currentTarget.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); enterFirstMatch(); } }}
+        />
         {initAsk && (
           <InitRepoPrompt dir={initAsk} onInit={initRepo} onCancel={() => setInitAsk(null)} />
         )}
         <div className="nav-scroll" ref={navScrollRef}>
           {ws && ws.projects.length === 0 && <div className="empty small">No projects yet.<br />Add one from the rail.</div>}
-          {lens === "places" && ws?.projects.map((pv) => (
-            <Fragment key={pv.root}>
-              {projGapAt(pv.root) && <div className="drop-gap proj" />}
-              <ProjectNode pv={pv} />
-            </Fragment>
-          ))}
-          {lens === "places" && projGapAt(null) && <div className="drop-gap proj" />}
-          {lens === "recent" && <FlatLens items={recentItems} />}
-          {lens === "attention" && (
-            <>
-              <FlatLens items={attentionItems} />
-              {ws?.projects.filter((pv) => !pv.ok).map((pv) => (
-                <div className="project broken-flat" key={pv.root}><span className="rollup broken">⊘</span> {basename(pv.root)} <span className="pgone">repo gone</span></div>
+          {attnOnly && attentionCount === 0
+            ? <div className="empty small">Nothing needs attention.</div>
+            : ws?.projects.map((pv) => (
+                <Fragment key={pv.root}>
+                  {projGapAt(pv.root) && <div className="drop-gap proj" />}
+                  <ProjectNode pv={pv} />
+                </Fragment>
               ))}
-            </>
-          )}
+          {projGapAt(null) && <div className="drop-gap proj" />}
         </div>
-        {/* Claude plan usage — nav-only by design: no rail affordance, it rides
-            out ⌘B inside the hidden nav (and keeps polling, one call/180s). */}
+        {/* Overlay only. Pinned, the sidebar is furniture you have already
+            decided about; unpinned it is a thing that just appeared, and this is
+            the one line that says what it answers to. `flex: none` + nowrap, so
+            it takes its row out of the SCROLLER and never off the usage rows. */}
+        {!fit.navShown && (
+          <div className="nav-hint">
+            <kbd>type</kbd> to filter · <kbd>↵</kbd> first match · <kbd>esc</kbd> hide · <kbd>⌘B</kbd> pin
+          </div>
+        )}
+        {/* Claude plan usage — sidebar-only by design: no rail affordance, it
+            rides out ⌘B inside the hidden nav (and keeps polling, one call/180s). */}
         <UsageWidget onError={fail} />
         {/* One footer row, three ways in (menu below). It no longer picks a
             folder on click: "add a project" is a question with three answers
@@ -5074,7 +5233,7 @@ function App() {
 
               <div className="controls">
                 {/* the dock toggle moved to the right rail — it lives next to
-                    the thing it opens, and no longer collides with the lens ▤ */}
+                    the thing it opens, and no longer collides with the Places ▤ */}
                 {selected.tmux_session.up ? (
                   <>
                     <span className="live-badge" title="session live"><span className="status-dot on" /> live</span>
@@ -5166,14 +5325,6 @@ function App() {
                 </div>
               </div>
             </header>
-
-            <input className="note-strip" placeholder="note…" defaultValue={selected.declared?.note ?? ""}
-              key={sel.repo + sel.slug + (selected.declared?.note ?? "")}
-              onBlur={(e) => {
-                const note = e.currentTarget.value;
-                patchDeclared(sel.repo, sel.slug, { note: note.trim() || undefined });
-                mutate(invoke("set_note", { repo: sel.repo, slug: sel.slug, note }));
-              }} />
           </>
         )}
 
@@ -5757,7 +5908,6 @@ function App() {
                   </button>
                 ))}
               </div>
-              <button className="pop-item" onClick={() => editNote(ctx.repo, ctxPlace)}>Edit note…</button>
               <div className="ctx-sep" />
               {ctxPlace.branch && (
                 <button className="pop-item" onClick={() => newFromBranch(ctx.repo, ctxPlace.branch!)}>New worktree off {ctxPlace.branch}…</button>

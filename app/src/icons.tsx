@@ -38,7 +38,7 @@ const Svg = ({ size = 15, className, children }: IconProps & { children: ReactNo
   </svg>
 );
 
-// ── lenses (the activity rail) ──
+// ── the activity rail ──
 /** Places — the full tree. A box (▤) said nothing about hierarchy. */
 export const ListTree = (p: IconProps) => (
   <Svg {...p}>
@@ -47,15 +47,6 @@ export const ListTree = (p: IconProps) => (
     <path d="M21 18h-8" />
     <path d="M3 6v4c0 1.1.9 2 2 2h3" />
     <path d="M3 10v6c0 1.1.9 2 2 2h3" />
-  </Svg>
-);
-/** Recent — a clock with the counter-clockwise arrow; a bare clock (◷) reads
- * as "time", not "go back to what you were doing". */
-export const History = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-    <path d="M3 3v5h5" />
-    <path d="M12 7v5l4 2" />
   </Svg>
 );
 export const TriangleAlert = (p: IconProps) => (
@@ -67,22 +58,9 @@ export const TriangleAlert = (p: IconProps) => (
 );
 
 // ── panel toggles ──
-// Left/right pairs that name the panel they act on. « / » never did — and the
-// dock's ▧ was indistinguishable from the Places ▤ next to it.
-export const PanelLeftClose = (p: IconProps) => (
-  <Svg {...p}>
-    <rect width="18" height="18" x="3" y="3" rx="2" />
-    <path d="M9 3v18" />
-    <path d="m16 15-3-3 3-3" />
-  </Svg>
-);
-export const PanelLeftOpen = (p: IconProps) => (
-  <Svg {...p}>
-    <rect width="18" height="18" x="3" y="3" rx="2" />
-    <path d="M9 3v18" />
-    <path d="m14 9 3 3-3 3" />
-  </Svg>
-);
+// A pair that names the panel it acts on. « / » never did — and the dock's ▧
+// was indistinguishable from the Places ▤ next to it. (The LEFT pair went with
+// the rail's hide button: the Places icon is the sidebar's only toggle now.)
 export const PanelRightClose = (p: IconProps) => (
   <Svg {...p}>
     <rect width="18" height="18" x="3" y="3" rx="2" />
