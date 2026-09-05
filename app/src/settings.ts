@@ -121,7 +121,16 @@ export type Settings = {
   density: "comfortable" | "compact";
   nav_width: number; // 220–460, further capped by the viewport (see fitLayout)
   nav_guides: boolean; // draw the tree plumb lines in the nav (data-guides on <html>)
-  nav_collapsed: boolean; // rail-only mode (nav hidden)
+  // ── the sidebar, as TWO booleans ────────────────────────────────────────
+  // Pinned = the nav is a grid column, exactly as it has always been. Unpinned
+  // = it is an OVERLAY that covers the terminal instead of taking width from it
+  // (`fitLayout` drops the column, App draws `.nav.overlay`), so revealing it
+  // never resizes the pty — the whole reason it is not a column any more.
+  // `nav_hover_reveal` only means anything while unpinned: it is the pointer
+  // trigger alone, so "Hidden" still opens on ⌘B / ⌘2. Settings → Navigation
+  // shows the pair as one three-way control (Pinned / Auto-hide / Hidden).
+  nav_pinned: boolean;
+  nav_hover_reveal: boolean;
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal"; // last-used dock tab
@@ -203,9 +212,8 @@ export type Settings = {
   // because the answer is the same every time for a given person, and re-ticking
   // it on every push is how a checkbox teaches you to ignore it.
   sync_with_sessions: boolean;
-  lens: "places" | "recent" | "attention";
   collapsed: Record<string, boolean>; // per-project-root collapse
-  hidden_tiers: string[]; // lifecycle tiers hidden in the Places lens (active/idle/dormant)
+  hidden_tiers: string[]; // lifecycle tiers hidden in the Places tree (active/idle/dormant)
   sort_mode: "recent" | "alpha" | "manual";
   sort_dir: "asc" | "desc";
   manual_order: Record<string, string[]>; // repo root -> slug order (Manual sort)
@@ -230,7 +238,7 @@ export type Settings = {
 };
 
 /** Current settings revision. Bump ONLY together with a step in `migrate`. */
-export const SETTINGS_REV = 1;
+export const SETTINGS_REV = 2;
 
 export const DEFAULTS: Settings = {
   ui_rem: 15,
@@ -243,7 +251,8 @@ export const DEFAULTS: Settings = {
   density: "comfortable",
   nav_width: 300,
   nav_guides: true,
-  nav_collapsed: false,
+  nav_pinned: false,
+  nav_hover_reveal: true,
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
@@ -268,7 +277,6 @@ export const DEFAULTS: Settings = {
   fetch_interval_min: 0,
   restore_last: false,
   sync_with_sessions: false,
-  lens: "places",
   collapsed: {},
   hidden_tiers: [],
   sort_mode: "recent",
@@ -357,7 +365,7 @@ export function stepMdZoom(v: number, dir: 1 | -1): number {
 // when fullscreen) or overflows a small one, which is what made the topbar's
 // flex children pile on top of each other.
 export const RAIL_W = 44; // keep in sync with --rail-w (tokens.css)
-// Both rails are permanent columns — the left one picks the lens, the right one
+// Both rails are permanent columns — the left one holds Places, the right one
 // picks the dock tab — so the elastic center is short two of them, always.
 export const RAILS_W = RAIL_W * 2;
 export const MAIN_MIN = 420; // center-pane floor: below it the topbar can't lay out
@@ -399,7 +407,9 @@ export type Fit = { navShown: boolean; navW: number; dockShown: boolean; dockW: 
 export const MAIN_TIGHT = 560;
 
 export function fitLayout(s: Settings, dockEligible: boolean, w = viewport()): Fit {
-  const navShown = !s.nav_collapsed;
+  // Only a PINNED sidebar is a column. Unpinned it is an overlay App draws
+  // over the terminal, so it owns no track and takes no width from anything.
+  const navShown = s.nav_pinned;
   let dockShown = s.dock_open && dockEligible;
   // reserve the dock's floor while sizing the nav, so the two can't both win
   let navW = navShown ? clampNav(s.nav_width, dockShown ? DOCK_MIN : 0, w) : 0;
@@ -446,10 +456,23 @@ function normalizePair(t: unknown, appearance: "light" | "dark", fallback: Theme
  *
  *  rev 1 — `files_show_ignored` flipped to true. A tree that withholds entries
  *  with nothing on screen admitting it does not read as a filter, it reads as a
- *  broken listing: the files a session had just written were simply absent. */
+ *  broken listing: the files a session had just written were simply absent.
+ *
+ *  rev 2 — the sidebar became pinned/auto-hide/hidden and the lens rail was
+ *  retired. EVERYONE lands on the new default (unpinned + hover), deliberately:
+ *  auto-hide is the shape the app is now designed around, not a preference an
+ *  old install gets to keep. The two dead keys are DELETED rather than left to
+ *  rot — `loadSettings` merges the stored blob over DEFAULTS, so anything not
+ *  removed here is copied forward into ui-state.json on the next save forever. */
 function migrate(s: Settings, from: number): boolean {
   if (from >= SETTINGS_REV) return false;
   if (from < 1) s.files_show_ignored = DEFAULTS.files_show_ignored;
+  if (from < 2) {
+    delete (s as Partial<Settings> & { nav_collapsed?: unknown }).nav_collapsed;
+    delete (s as Partial<Settings> & { lens?: unknown }).lens;
+    s.nav_pinned = DEFAULTS.nav_pinned;
+    s.nav_hover_reveal = DEFAULTS.nav_hover_reveal;
+  }
   s.settings_rev = SETTINGS_REV;
   return true;
 }

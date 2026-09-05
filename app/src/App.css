@@ -33,6 +33,10 @@ button { cursor: pointer; }
   height: 100%;
   background: var(--bg-abyss);
   color: var(--txt);
+  /* The anchor for `.nav.overlay`. An unpinned sidebar is absolutely positioned
+     against THIS box, which is what keeps it out of the column track — and so
+     out of every width the terminal is measured from. */
+  position: relative;
 }
 
 /* ── activity rail ── */
@@ -56,7 +60,9 @@ button { cursor: pointer; }
   content: ""; position: absolute; left: -6px; top: 6px; bottom: 6px;
   width: 2px; border-radius: var(--r-full); background: var(--accent);
 }
-/* nav collapsed: the last lens stays faintly marked so re-expand is predictable */
+/* Places is the rail's one destination, so it never goes fully dark: `active`
+   while the sidebar is on screen, `remembered` — brighter than a plain rail
+   icon, short of the accent — while it is not. */
 .rail-icon.remembered { color: var(--txt); }
 .rail-icon:disabled { color: var(--txt-mute); opacity: 0.4; cursor: default; }
 .rail-icon:disabled:hover { background: transparent; color: var(--txt-mute); }
@@ -77,6 +83,18 @@ button { cursor: pointer; }
 }
 /* rail-only mode: hidden, NOT unmounted — form drafts + scroll survive ⌘B */
 .nav.hidden { display: none; }
+/* Unpinned + revealed: the same panel, lifted OUT of the grid and laid over the
+   terminal. Nothing reflows, so the pty keeps its columns and takes no SIGWINCH
+   — the whole point of the overlay. z-index 30 sits under `.menu-catch` (40) so
+   every menu, popover and dialog still layers above it. Width is inline (it
+   follows `nav_width` through `clampNav`); `--line-strong` because a floating
+   edge over a dark terminal needs more than the column's hairline. */
+.nav.overlay {
+  position: absolute; left: var(--rail-w); top: 0; bottom: 0;
+  z-index: 30;
+  border-right: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-float);
+}
 /* Home — a top-level destination above the tree (deselect = go home) */
 .home-item {
   display: flex; align-items: center; gap: var(--s2);
@@ -100,6 +118,29 @@ button { cursor: pointer; }
 }
 .icon-btn:hover { color: var(--txt-hi); background: var(--bg-elev); }
 .icon-btn.on { color: var(--pin); }
+/* The Places header's attention filter: glyph + count on one line. `dim` is
+   "nothing to look at" — still clickable, so the control never disappears out
+   from under the eye that learned where it lives. */
+.icon-btn.attn {
+  gap: 3px; font-size: var(--fs-meta); font-variant-numeric: tabular-nums;
+}
+.icon-btn.attn.on { color: var(--warn); background: var(--bg-elev); }
+.icon-btn.attn.dim { opacity: 0.45; }
+
+/* The overlay's one-line legend. `flex: none` keeps it out of `.nav-scroll`'s
+   flexible row, so it can never push the usage rows off the bottom. */
+.nav-hint {
+  flex: none; display: flex; align-items: center; gap: 4px;
+  padding: var(--s2) var(--s3);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-micro); color: var(--txt-mute);
+  white-space: nowrap; overflow: hidden;
+}
+.nav-hint kbd {
+  padding: 0 4px; border-radius: var(--r-sm);
+  background: var(--bg-input); border: 1px solid var(--line);
+  font-family: var(--term-family); font-size: var(--fs-micro); color: var(--txt-dim);
+}
 
 .search {
   margin: 0 var(--s3) var(--s2); padding: var(--s2) var(--s3);
@@ -267,8 +308,6 @@ button { cursor: pointer; }
   background: color-mix(in srgb, var(--danger) 18%, transparent);
 }
 
-.broken-flat { padding: var(--s2) var(--s3); color: var(--txt-mute); font-size: var(--fs-label); display: flex; gap: var(--s2); align-items: center; }
-
 /* ── new-worktree form ── */
 .newform { display: flex; flex-direction: column; gap: var(--s2); margin: var(--s1) var(--s3) var(--s2); }
 .newform input {
@@ -355,8 +394,6 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 
 /* ── place row (3-col grid → glyphs can never collide) ── */
 .places { list-style: none; margin: 0; padding: 0 var(--s2) 0 0; }
-.places.flat { padding: var(--s2); }
-.flat-empty { color: var(--txt-mute); font-size: var(--fs-label); padding: var(--s3); }
 .row {
   display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: var(--s2);
   padding: var(--row-pad-v) var(--row-pad-h); border-radius: var(--r-md); cursor: pointer;
@@ -410,7 +447,6 @@ html[data-guides="off"] .kids > .places::after { display: none; }
    actually looking at is never the dim one. */
 .row.stale .row-name { color: var(--txt-mute); }
 .row.sel .row-name { color: var(--accent); font-weight: var(--fw-bold); }
-.row-proj { color: var(--txt-mute); font-weight: var(--fw-body); font-size: var(--fs-meta); margin-left: var(--s2); }
 .row-branch { font-size: var(--fs-meta); color: var(--branch-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .glyphs { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-micro); }
@@ -915,7 +951,7 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .init-banner .ver-actions { margin-top: 0; }
 
-/* new-worktree form pinned at the top of the nav (visible in every lens) */
+/* new-worktree form pinned at the top of the nav */
 .nav-newform {
   margin: 0 var(--s2) var(--s2);
   padding: var(--s2);
@@ -934,14 +970,6 @@ body.dragging .menu-catch { pointer-events: none; }
   margin: 0; font-size: var(--fs-meta); color: var(--txt-mute); line-height: 1.4;
 }
 .newform-note code { word-break: break-all; color: var(--txt); }
-
-/* note */
-.note-strip {
-  margin: 0; padding: var(--s2) var(--s3);
-  background: var(--bg-tree); color: var(--txt); border: 0; border-bottom: 1px solid var(--line);
-  font-size: var(--fs-body); outline: none;
-}
-.note-strip:focus { background: var(--bg-elev); }
 
 /* terminal hero */
 /* The find bar's anchor. `.term-host` cannot be it: xterm measures that box and
@@ -1981,6 +2009,9 @@ body.dragging .menu-catch { pointer-events: none; }
 .seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; width: fit-content; }
 .seg button { background: var(--bg-input); color: var(--txt-dim); border: 0; padding: var(--s2) var(--s4); font-size: var(--fs-label); text-transform: capitalize; }
 .seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: var(--fw-med); }
+/* Labels that are already written the way they must read — `capitalize` treats
+   the hyphen as a word break and would print "Auto-Hide". */
+.seg.seg-plain button { text-transform: none; }
 .row2 { display: flex; align-items: center; gap: var(--s2); }
 .row2 input { width: 90px; }
 .row2 select { flex: 1; min-width: 0; }

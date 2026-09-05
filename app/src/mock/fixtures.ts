@@ -102,7 +102,7 @@ function cdv(): ProjectView {
     place(P, root, {
       // `behind` on MAIN is the one ↓ the app still draws — main's base ref is
       // origin/main, so this is the classic "you have commits to pull". It is
-      // also what puts main in the Attention lens.
+      // also what puts main in the header's attention filter.
       // The old commit date is deliberate too: main sits untouched while the
       // work happens in worktrees, so this is the row that proves `(main)` is
       // exempt from the stale dim rather than merely young enough to escape it.

@@ -469,6 +469,33 @@ export function SettingsSheet({
           </>}
 
           {cat === "navigation" && <>
+          {/* One control for what used to be two booleans and a rail button.
+              The pair it writes is `nav_pinned` + `nav_hover_reveal`, and only
+              the middle state uses both — "Hidden" is unpinned with the pointer
+              trigger off, which is why it still opens on ⌘B. */}
+          <section className="setting">
+            <label>Sidebar</label>
+            <div className="seg seg-plain">
+              {([
+                ["pinned", "Pinned", { nav_pinned: true }],
+                ["auto", "Auto-hide", { nav_pinned: false, nav_hover_reveal: true }],
+                ["hidden", "Hidden", { nav_pinned: false, nav_hover_reveal: false }],
+              ] as const).map(([mode, label, patch]) => {
+                const cur = settings.nav_pinned ? "pinned" : settings.nav_hover_reveal ? "auto" : "hidden";
+                return (
+                  <button key={mode} className={cur === mode ? "on" : ""} onClick={() => onChange(patch)}>
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="hint">
+              ⌘B and the Places icon switch between pinned and hidden. With auto-hide, the sidebar
+              slides over the terminal when the pointer reaches the rail or on ⌘B, and closes on Esc
+              or when you open a place.
+            </div>
+          </section>
+
           <section className="setting">
             <label>Nav width <span className="val">{settings.nav_width}px</span></label>
             <input
@@ -550,14 +577,12 @@ export function SettingsSheet({
             <label>Shortcuts</label>
             <div className="shortcuts">
               {[
-                ["⌘B", "Toggle the nav"],
+                ["⌘B", "Sidebar — reveal, then pin (unpin when pinned)"],
                 ["⌘J", "Toggle the dock (Files / Terminal)"],
                 ["⌘K", "Quick switcher"],
                 ["⌘,", "Open Settings"],
                 ["⌘1", "Home (briefing)"],
-                ["⌘2", "Places"],
-                ["⌘3", "Recent"],
-                ["⌘4", "Attention"],
+                ["⌘2", "Places — reveal the sidebar and focus the filter"],
                 ["⌘E", "Open selection in editor"],
                 ["⌘F", "Find — in the terminal, or in the open file"],
                 ["⌘T", "New terminal in the dock"],
@@ -565,7 +590,7 @@ export function SettingsSheet({
                 ["⌘+ / ⌘−", "Overall size — the whole window, terminal included"],
                 ["⌘0", "Overall size back to 100%"],
                 ["⌘⌥+ / ⌘⌥−", "Reading size of a rendered markdown file"],
-                ["Esc", "Close sheets & menus"],
+                ["Esc", "Close sheets, menus & the revealed sidebar"],
               ].map(([key, desc]) => (
                 <div className="shortcut-row" key={key}>
                   <kbd>{key}</kbd>

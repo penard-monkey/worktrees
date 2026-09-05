@@ -5,6 +5,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **The sidebar is one control with three states, and it no longer takes width
+  from the terminal.** Pinned it is the column it always was; unpinned it is an
+  OVERLAY that lays itself over the terminal when the pointer reaches the left
+  rail — so revealing it reflows nothing and the tmux pane keeps every column it
+  was painting. Auto-hide is the new default. ⌘B tells the whole story: hidden →
+  reveal with the filter focused, revealed → pin, pinned → unpin. Esc closes a
+  revealed sidebar, Enter in the filter selects the first row the tree is
+  showing and closes it, and so does clicking a place. It stays put while a menu
+  is open, a drag is in flight, or the filter has the keyboard. The Places icon
+  in the rail pins and unpins; Settings → Navigation carries the same three
+  states as **Pinned · Auto-hide · Hidden**, where Hidden only turns off the
+  pointer trigger — ⌘B and ⌘2 still open it.
+
+### Removed
+- **The Recent and Attention lenses.** ⌘K already ranks by activity and searches
+  slug, title, branch and note, which is what Recent was for. Attention is now a
+  filter in the Places header — a ⚠ with the count of everything dirty,
+  unpushed, or on a main that is behind, one click to show only those rows in
+  the tree they actually live in. The rail is one Places icon; ⌘3 and ⌘4 are
+  retired.
+- **The note strip and the rail's hide button.** A place's note is kept in the
+  places file and stays searchable — the nav filter and ⌘K both match on it —
+  but there is no longer a box in the app to type one into; the MCP `set_note`
+  tool still writes it. The rail's separate hide button went with the lenses:
+  the Places icon is the sidebar's only toggle now, which is what it always did
+  anyway.
+
 ### Fixed
 - **A renamed place no longer prints its branch twice.** The place header drew
   the branch chip whenever a branch existed, so a worktree made by `worktrees
