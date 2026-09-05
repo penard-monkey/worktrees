@@ -3172,6 +3172,16 @@ function App() {
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
 
+  // Does the topbar's branch chip say anything the name and the alias do not?
+  // On `(main)` it names the branch main is on, which is news; on a worktree it
+  // speaks only when the branch differs from the directory. `worktrees new
+  // <branch>` makes those two equal, and the chip then printed the slug straight
+  // back — twice over on a renamed place, once beside the alias and once beside
+  // the name. This is the nav row's `divergent` rule (PlaceRow), which the
+  // topbar never adopted. A detached HEAD needs no case of its own: `branch` is
+  // None there (project.rs `status_v2`), so the chip has never rendered for it.
+  const showBranch = !!selected?.branch && (selected.is_main || selected.branch !== selected.slug);
+
   // ── column fitting ──
   // Track the viewport so the side panels re-fit on every resize (and on a
   // restore into a window smaller than the one the widths were saved from —
@@ -5010,13 +5020,25 @@ function App() {
                       {selected.is_main ? "◆ " : ""}{nameOf(selected)}
                     </b>
                     {/* renamed: the slug still names the directory and the tmux
-                        session, so it stays on screen rather than being replaced */}
+                        session, so it stays on screen rather than being replaced
+                        — and when the branch chip is suppressed (see
+                        `showBranch`: the branch equals the slug) it stands for
+                        the branch too, which is what its title then says. */}
                     {selected.declared?.title?.trim() ? (
-                      <span className="slug-alias" title="worktree directory and tmux session name">{selected.slug}</span>
+                      <span
+                        className="slug-alias"
+                        title={
+                          showBranch
+                            ? "worktree directory and tmux session name"
+                            : "worktree directory, tmux session and branch"
+                        }
+                      >
+                        {selected.slug}
+                      </span>
                     ) : null}
                   </>
                 )}
-                {selected.branch && (
+                {showBranch && (
                   <span className={"branch" + (!selected.is_main && selected.branch !== selected.slug ? " hi" : "")}>
                     {!selected.is_main && selected.branch !== selected.slug ? "↗ " : ""}{selected.branch}
                   </span>
