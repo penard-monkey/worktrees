@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A renamed place no longer prints its branch twice.** The place header drew
+  the branch chip whenever a branch existed, so a worktree made by `worktrees
+  new <branch>` — where the branch and the directory carry the same name — said
+  that name beside the title and again in the chip. The chip now speaks only
+  when it adds something: an unrenamed place whose branch matches its directory
+  shows the name on its own, a renamed one shows the title and the directory,
+  and a branch that differs from the directory still gets its ↗ chip. `(main)`
+  keeps its chip, which names the branch main is sitting on.
+
 ## [0.20.0] - 2026-09-02
 
 ### Added

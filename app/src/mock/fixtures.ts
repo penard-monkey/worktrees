@@ -231,6 +231,17 @@ function worktreesRepo(): ProjectView {
       lifecycle_effective: "active",
     }),
     place(P, root, {
+      // The RENAMED place, and the only fixture whose branch equals its slug —
+      // the shape `worktrees new <branch>` produces. It is what proves the
+      // topbar prints the directory once: the title names it, the alias names
+      // the directory/session/branch, and there is no branch chip to repeat it.
+      slug: "random-work", branch: "random-work",
+      tmux_session: { name: `${P}-random-work`, up: true },
+      last_commit_subject: "note from standup",
+      declared: { pinned: true, title: "standup-and-daily-work", last_opened_epoch: NOW - 2 * 3600 },
+      lifecycle_effective: "active",
+    }),
+    place(P, root, {
       slug: "fix-flaky-ci", branch: "fix/flaky-ci",
       // afterglow t3 — this morning's work, nearly out
       last_commit_subject: "retry tmux smoke",
