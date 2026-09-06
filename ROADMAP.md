@@ -5,6 +5,42 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Filter Enter selects the first VISIBLE row, so a match inside a collapsed
+  tier group selects nothing and just closes the overlay.** Deliberate: the
+  DOM order already encodes sort/collapse/hidden tiers and a second ordering
+  would drift. The fix is auto-expanding groups that contain matches while a
+  filter is typed (the text filter already hides EMPTY groups; project headers
+  with zero matches still render with a `0`, which is the same question).
+  Related: the tree has NO arrow-key navigation — ⌘K is the keyboard path —
+  decide after Usage data says whether anyone wants it.
+  _From: [2026-09-05 ui-overhaul](docs/sessions/2026-09-05-ui-overhaul/summary.md)_
+
+- **The dev/sandbox build logs into the INSTALLED app's `app.log`.** `APP_IDENT`
+  is a const, so `sandbox.sh --app`'s identifier override moves the config dir
+  but not the log; a sandbox run that scans every real `~/.claude` session can
+  write facts about the user's live sessions into the file they paste into bug
+  reports (why the draft sampler logs counts only unless `WORKTREES_TRACE_DRAFTS`
+  names a path). Derive the log dir from the runtime identifier.
+  _From: [2026-09-05 ui-overhaul](docs/sessions/2026-09-05-ui-overhaul/summary.md)_
+
+- **Usage heatmap blind spots.** No key, so invisible: combobox popup rows
+  (`.combo-item` — branch switcher, new-worktree base picker), context-menu
+  `pop-item`s without a `title`, non-button click targets (`.sb-label`, the
+  Claude-usage chip rows, `.viewer-tag`, StatusSheet `Row`), two over-long static
+  titles (FilesPane "Show what this branch changed…", ProjectSheet "re-seed
+  declared copies…"). Coarsening: `closest("[data-testid]")` keys an untitled
+  control inside the sync/import modals as `sync-modal`/`import-modal`. Fix with
+  `data-track` where a row shows up dark for the wrong reason; leave the rest
+  until the data asks.
+  _From: [2026-09-05 ui-overhaul](docs/sessions/2026-09-05-ui-overhaul/summary.md)_
+
+- **Read Settings → Usage after two weeks, then cut.** The lenses went by
+  decision, not data; the next round (project headers under a filter, the sort
+  menu, Home's resume list, the dock rail, `PanelRightClose/Open` icons that
+  nothing imports) should go by the heatmap. Install first — the metrics only
+  start with a build that has them.
+  _From: [2026-09-05 ui-overhaul](docs/sessions/2026-09-05-ui-overhaul/summary.md)_
+
 - **Cut v0.20.0.** #183 (brief / `--name` / MCP `create_worktree` single-pane /
   `place_status` agents) and #184 (strays in `ls --json` + app flag + doctor
   `stray-worktree`; profile `worktrees_mcp_mutations`) sit in `[Unreleased]`.
