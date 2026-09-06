@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A ✎ on any place with an unsent prompt.** Text typed at Claude's prompt and
+  never sent leaves the session reading `idle` — identical to an empty pane —
+  so a place that is waiting on YOU used to look like a place with nothing
+  happening. The nav row now carries a ✎ beside its other glyphs, and ⌘K and
+  the Home resume rows print the draft's first words, so you can see which
+  place to go back to without opening any of them. It is read from the
+  session's own pane every 15 seconds (one chained tmux call, whatever the
+  session count) and hovering gives the full text. A session that is mid-turn
+  still accepts typing and sends it when the turn ends, so its text reads
+  "queued" rather than "unsent"; a Claude started outside tmux has no pane to
+  read and shows nothing at all.
 - **Settings → Usage: which controls you actually use, measured on this Mac and
   nowhere else.** The app now keeps a tally of what gets clicked and where the
   foreground hours go, so the UI can shed the parts nobody touches. What is

@@ -924,6 +924,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "log_tail":
       return "2026-07-25 20:00:01Z [info] startup v0.2.1 PATH=/usr/bin:...\n2026-07-25 20:00:09Z [info] open messaging fresh=false ok repo=/Users/demo/workspace/cdv\n2026-07-25 20:01:12Z [warn] close api rc=1 repo=/Users/demo/workspace/cdv: no live session";
 
+    // The unsent-prompt set. The real one shells out to tmux and reads each
+    // claude pane's screen; here it is just the fixture the push below carries,
+    // so the mount-time pull and the event agree the way they do in lib.rs.
+    case "list_drafts":
+      return clone(drafts);
+
     // tmux presence → the missing-tmux banner. STATEFUL like mockCliVersion, so
     // the whole flow is exercisable headlessly: `?notmux` starts without tmux and
     // a Re-check (refresh:true, i.e. the backend re-resolving PATH) FINDS it —
@@ -1773,6 +1779,24 @@ setInterval(() => {
 }, 5000);
 const nowSec = () => Math.floor(Date.now() / 1000);
 
+// simulated unsent prompts — the `sessions:drafts` push (lib.rs poll thread,
+// every 5th tick) plus the `list_drafts` pull the frontend does on mount. Two
+// fixtures, because the two sentences differ: an IDLE place with a draft is
+// "unsent", a BUSY one is "queued behind the running turn" (claude accepts
+// typing mid-turn and sends it when the turn ends). `billing-refactor` is busy
+// in ACTIVITY_CYCLE[0], which is what makes the pairing honest.
+//
+// The mock cannot express the real thing's TIMING (its invokes resolve in a
+// microtask); the 15s beat and the empty-set transition are the sandbox app's
+// job. What this drives is the rendering: the row glyph, the ⌘K line and the
+// Home resume line.
+type MockDraft = { path: string; text: string; queued: boolean };
+let drafts: MockDraft[] = [
+  { path: `${WT}/feat-redesign`, text: "make the nav overlay auto-hide on a place click", queued: false },
+  { path: `${CDV}/billing-refactor`, text: "and after that, regenerate the invoice fixtures", queued: true },
+];
+setTimeout(() => emitEvent("sessions:drafts", { drafts }), 500);
+
 // Harness-only controls for states a user cannot reach by clicking. An
 // unreadable `.worktrees.toml` is the highest-consequence state in the Project
 // sheet (doctor stops running, every op refuses) and there is no button that
@@ -1789,6 +1813,15 @@ const healthyConfigs: Record<string, MockCfg> = {};
   /** Every ui-event this session recorded, for the privacy assertions: a
    *  harness run greps this JSON for slugs, paths and filter text. */
   uiEvents: () => mockUiEvents.slice(),
+  /** Replace the unsent-prompt set and push it, exactly as the poll thread
+   *  does — including the transition to EMPTY (`__mock.setDrafts([])`), which
+   *  is the case a sent prompt produces and the one that must clear the glyph,
+   *  the ⌘K line and the Home line together. */
+  setDrafts(next: MockDraft[]) {
+    drafts = next.map((d) => ({ ...d }));
+    emitEvent("sessions:drafts", { drafts });
+    return drafts;
+  },
   /** Fire the backend's shell:exit — the only way to reach the dock's
    * "process exited / Restart shell" state headlessly, since the mock has no
    * real PTY to die. */

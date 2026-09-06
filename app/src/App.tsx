@@ -627,12 +627,26 @@ function fuzzyScore(query: string, hay: string): number {
   return 400 - first - gaps * 5; // scattered: below any substring hit
 }
 
-function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, onPick, onClose }: {
+/** One place's unsent prompt (lib.rs `Draft`). `queued` = the session is
+ *  mid-turn, so claude will send this text when the turn ends. */
+type Draft = { path: string; text: string; queued: boolean };
+
+/** The one sentence a draft gets, in all three places it is shown. */
+const draftTitle = (d: Draft) =>
+  (d.queued ? "queued behind the running turn: " : "unsent: ") + d.text;
+
+/** …and the one way it is shortened for a row that already has columns. */
+const DRAFT_LEAD = 48;
+const draftLead = (d: Draft) =>
+  d.text.length > DRAFT_LEAD ? d.text.slice(0, DRAFT_LEAD) + "…" : d.text;
+
+function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, onPick, onClose }: {
   open: boolean;
   items: SwitchItem[];
   rank: (p: Place) => number;
   busyPaths: Set<string>;
   waitingPaths: Set<string>;
+  draftPaths: Map<string, Draft>;
   onPick: (root: string, p: Place) => void;
   onClose: () => void;
 }) {
@@ -734,6 +748,7 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, onPick, onClo
             results.map((it, i) => {
               const { pv, p } = it;
               const act = busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
+              const draft = draftPaths.get(p.path);
               return (
                 <div
                   key={`${pv.root}::${p.slug}`}
@@ -753,6 +768,12 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, onPick, onClo
                   <span className="qs-proj">{basename(pv.root)}</span>
                   {p.branch && p.branch !== p.slug && <span className="qs-branch">{p.branch}</span>}
                   <span className={"life " + p.lifecycle_effective}>{p.lifecycle_effective}</span>
+                  {/* The first words of an unsent prompt. ⌘K is where you
+                      decide WHICH place to go to, so "this one is waiting on
+                      you" belongs on the row rather than one hover away. */}
+                  {draft && (
+                    <span className="qs-draft" title={draftTitle(draft)}>✎ {draftLead(draft)}</span>
+                  )}
                   <span className="qs-age">{ago(rank(p))}</span>
                 </div>
               );
@@ -2886,6 +2907,25 @@ function App() {
   const activityOf = (p: Place): "busy" | "waiting" | "" =>
     busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
 
+  // The UNSENT prompt: text typed at claude's prompt and never sent. Nothing in
+  // the probe file says so (an unsent draft leaves `status: "idle"`, exactly
+  // like an empty pane), so the backend reads the pane's own screen every 15s
+  // and pushes the whole set — see lib.rs `scan_drafts`. Keyed by worktree path
+  // like `busyPaths`. A session started OUTSIDE tmux has no screen to read and
+  // is simply absent: the row shows nothing rather than guessing.
+  //
+  // Unlike `sessions:busy` this one gets a mount-time pull as well. Its emit is
+  // change-gated on a 15s beat, so a frontend that mounts between two changes
+  // (every dev reload, and any window the backend outlives) would otherwise sit
+  // blank until the user typed something.
+  const [draftPaths, setDraftPaths] = useState<Map<string, Draft>>(new Map());
+  useEffect(() => {
+    const apply = (drafts: Draft[]) => setDraftPaths(new Map(drafts.map((d) => [d.path, d])));
+    invoke<Draft[]>("list_drafts").then(apply).catch(() => {});
+    const un = listen<{ drafts: Draft[] }>("sessions:drafts", (e) => apply(e.payload.drafts));
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, []);
+
   // Task-completed stamps. Two sources, and the overlay is why both exist: the
   // snapshot carries `declared.last_worked_epoch` (durable, survives restarts,
   // backfilled at launch), but a snapshot only re-pulls on `places:changed` —
@@ -4980,6 +5020,15 @@ function App() {
           {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
+          {/* The unsent prompt. A row-level DATA marker like ● ↑ ⚑ beside it,
+              so it stays Unicode (icons.tsx: those sit inline with tabular
+              text, not on buttons) — and a span, so its interpolated title is
+              never read as a usage key. Outside `glyphs()` because that list
+              truncates at MAX and this one must not be the signal that falls
+              off: nothing else in the app says the place is waiting on YOU. */}
+          {draftPaths.has(p.path) && (
+            <span className="g g-draft" title={draftTitle(draftPaths.get(p.path)!)}>✎</span>
+          )}
           {/* Age and the enter button share ONE grid cell, stacked: the slot is
               always as wide as the wider of the two, so swapping them on hover
               cannot move the name beside it. Visibility (not display) does the
@@ -5662,6 +5711,13 @@ function App() {
                       <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{nameOf(p)}</span>
                       <span className="rr-proj">{basename(pv.root)}</span>
                       <span className="rr-life">{p.lifecycle_effective}</span>
+                      {/* Same line as ⌘K's, for the same reason: the Home
+                          briefing is the other place you pick from. */}
+                      {draftPaths.get(p.path) && (
+                        <span className="rr-draft" title={draftTitle(draftPaths.get(p.path)!)}>
+                          ✎ {draftLead(draftPaths.get(p.path)!)}
+                        </span>
+                      )}
                       <span className="rr-age">{ago(activityAt(p))}</span>
                       <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
                     </div>
@@ -5961,7 +6017,7 @@ function App() {
           + highlight reset, autofocus fires). enterPlace bumps termFocus, returning
           focus to the terminal after a pick. */}
       {switchOpen && (
-        <QuickSwitch open items={allPlaces} rank={activityAt} busyPaths={busyPaths} waitingPaths={waitingPaths}
+        <QuickSwitch open items={allPlaces} rank={activityAt} busyPaths={busyPaths} waitingPaths={waitingPaths} draftPaths={draftPaths}
           onPick={(root, p) => { setSwitchOpen(false); enterPlace(root, p); }}
           onClose={() => setSwitchOpen(false)} />
       )}

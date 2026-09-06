@@ -456,6 +456,13 @@ Serde `Place` struct: every unknowable field `Option<T>` (CLI emits explicit nul
 - **Left nav:** places grouped by lifecycle (Main top; then Pinned/Active/Idle/Closed/
   Archived/Abandoned). Per row: slug, live badges (● tmux, ● stack, dirty dot, ahead/behind,
   ● claude), age. Search filters slug+branch+note — this is how dormant places resurface.
+  Beside the busy/waiting dots sits a **✎ for an unsent prompt**: text typed at
+  claude's prompt and never sent, which leaves the probe file reading `idle` and
+  is otherwise invisible. It is read from the pane's own screen every 15s (one
+  chained `tmux capture-pane`), the first words repeat in ⌘K and the Home resume
+  rows, and a busy session's text is labelled "queued" because claude sends it
+  when the turn ends. A session started outside tmux has no screen to read and
+  shows nothing — the honest answer, not a guess.
 - **Top bar:** branch + switch combobox + dirty/ahead-behind chips; branch≠slug shown cyan.
 - **Main pane:** xterm.js (FitAddon+WebglAddon) + infra strip (Start/Stop, port chips by
   `listening`, localhost links). One-click Open = `touch_place` + `worktrees open --no-attach`

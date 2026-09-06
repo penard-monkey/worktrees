@@ -202,6 +202,129 @@ pub fn agents_at(probes: &[ClaudeProbe], path: &str) -> Vec<Agent> {
     out
 }
 
+// ── the unsent prompt ────────────────────────────────────────────────────────
+// A place can be waiting on YOU with nothing in the probe file to say so: text
+// typed at claude's prompt and never sent reads as `idle`, exactly like an
+// empty pane. The only witness is the pane's own screen, so this half is a pure
+// parser over `tmux capture-pane -p` output — the I/O (one chained tmux call
+// per 15s) lives in the app, and everything here is testable without a session.
+
+/// The `%N` pane id out of a probe's `tmux` field (`<session>:@<win>.%<pane>`).
+///
+/// Pane ids are server-GLOBAL, so `-t %N` addresses a pane without naming its
+/// session — which is what lets one `tmux` invocation capture panes from many
+/// sessions at once. `None` for any spelling that does not end in `%<digits>`.
+pub fn pane_id(tmux: &str) -> Option<&str> {
+    let at = tmux.rfind('%')?;
+    let id = &tmux[at..];
+    if id.len() > 1 && id[1..].bytes().all(|b| b.is_ascii_digit()) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+/// The session name out of a probe's `tmux` field — everything before the `:`.
+/// Used to drop panes whose session is not in `tmux list-sessions`: a dead pane
+/// makes `capture-pane` print an error and ABORT the rest of the chained call,
+/// taking every later pane's screen with it.
+pub fn session_name(tmux: &str) -> Option<&str> {
+    let (s, _) = tmux.split_once(':')?;
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Longest draft we keep. Long enough to recognise the thought, short enough
+/// that a tooltip and a ⌘K row stay one line.
+const DRAFT_MAX: usize = 160;
+
+/// The unsent text sitting at claude's prompt on `screen`, or `None`.
+///
+/// `screen` is `capture-pane -p` output. The prompt box is the LAST one on the
+/// pane — a busy session prints its spinner ABOVE the box and still accepts
+/// typing (claude queues it for after the turn), so a spinner is not a reason
+/// to stop looking. The draft runs from the prompt char to the box's closing
+/// `───` rule, wrapped continuation lines included.
+pub fn draft_from_screen(screen: &str) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().collect();
+    // The prompt line must be the top row INSIDE the input box, i.e. the line
+    // above it is the box's own edge. That is the discriminator against
+    // claude's `❯` SELECTOR menus — the trust prompt renders
+    //
+    //     ❯ No, exit
+    //       Yes, I trust this folder
+    //
+    // with a blank line above and an indented sibling below, which is exactly
+    // the shape of a wrapped draft. Reading it would put "No, exit Yes, I trust
+    // this folder" on the row as an unsent prompt. (A menu drawn inside a box —
+    // the permission prompt — is already immune: its lines start with `│`.)
+    let start = lines
+        .iter()
+        .enumerate()
+        .rposition(|(i, l)| prompt_body(l).is_some() && i > 0 && is_box_edge(lines[i - 1].trim()))?;
+    let mut parts: Vec<&str> = vec![prompt_body(lines[start])?];
+    for line in &lines[start + 1..] {
+        let t = line.trim();
+        // The box's closing rule ends the draft; so does a blank line, which is
+        // what a pane with no box at all (a bare shell, a scrollback) offers.
+        if t.is_empty() || is_box_edge(t) {
+            break;
+        }
+        parts.push(t);
+    }
+    let joined = parts.join(" ");
+    // Collapse the wrap padding claude pads short lines with, and drop a
+    // captured cursor block — `capture-pane` renders the cell under the cursor
+    // as its character, so a draft can come back with one glued to its end.
+    let text: String = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.trim_end_matches(['▌', '█', '▏', '│']).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    if text.chars().count() > DRAFT_MAX {
+        // char boundary, not byte: a draft is prose and often not ASCII.
+        let mut out: String = text.chars().take(DRAFT_MAX).collect();
+        out.push('…');
+        return Some(out);
+    }
+    Some(text)
+}
+
+/// The text after the prompt character, when `line` IS a prompt line.
+///
+/// `❯` may be indented (claude has moved the box in and out over versions);
+/// the legacy `>` is accepted at column 0 ONLY, because an indented `>` is how
+/// claude renders a markdown blockquote in its own output and matching that
+/// would turn every quoted line into a phantom draft. The char must be followed
+/// by WHITESPACE or end the line — `>>=` in a code block is not a prompt.
+fn prompt_body(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = if let Some(r) = line.trim_start().strip_prefix('❯') {
+        r
+    } else if indent == 0 {
+        line.strip_prefix('>')?
+    } else {
+        return None;
+    };
+    if rest.is_empty() {
+        return Some(rest);
+    }
+    // ANY whitespace, not `' '`: claude 2.1.261 writes U+00A0 (no-break space)
+    // between the prompt char and the text — `❯\u{a0}check the invoice…` — so a
+    // plain space test rejects every real draft on the machine while every
+    // hand-written fixture passes. Confirmed by hex-dumping a live pane.
+    rest.strip_prefix(char::is_whitespace)
+}
+
+/// An edge of claude's prompt box — the rule above it and the rule below it.
+/// Checked on the FIRST character, since a rule carries a trailing label
+/// (`─── Marisol WhatsApp contract discussion ─`) and a boxed layout opens on a
+/// corner (`╭───╮`). Any char from the Box Drawing block counts; the ASCII
+/// fallback needs a run of three, so a draft line that starts with a markdown
+/// bullet ("- add the tests") is not mistaken for the end of the box.
+fn is_box_edge(t: &str) -> bool {
+    t.starts_with("---") || matches!(t.chars().next(), Some('\u{2500}'..='\u{257f}'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +426,176 @@ mod tests {
         // `agent` JSON leaves absent fields out rather than writing nulls.
         let j = serde_json::to_value(&agents_at(&probes, "/w/b")[0]).unwrap();
         assert_eq!(j, serde_json::json!({"state":"busy","pid":9}));
+    }
+
+    // ── the unsent prompt ───────────────────────────────────────────────────
+    // Screens below are real `capture-pane -p` shapes, trimmed to the last few
+    // lines. Indentation inside the raw strings is load-bearing: claude indents
+    // wrapped continuation lines by two spaces and puts the rule at column 0.
+
+    #[test]
+    fn pane_ids_come_out_of_the_probe_field() {
+        assert_eq!(pane_id("cdv-random-work:@0.%0"), Some("%0"));
+        assert_eq!(pane_id("valleos-communications:@14.%16"), Some("%16"));
+        assert_eq!(session_name("valleos-communications:@14.%16"), Some("valleos-communications"));
+        // Nothing usable → nothing claimed.
+        assert_eq!(pane_id("no-pane-here"), None);
+        assert_eq!(pane_id("weird:@0.%"), None);
+        assert_eq!(session_name("bare"), None);
+    }
+
+    #[test]
+    fn an_empty_prompt_is_not_a_draft() {
+        let screen = "\
+✻ Baked for 1m 11s · done 1:42 PM
+─────────────────────────────── Marisol WhatsApp contract discussion ─
+❯ 
+──────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
+";
+        assert_eq!(draft_from_screen(screen), None);
+        // …and a pane with no prompt box at all (a bare shell) says nothing.
+        assert_eq!(draft_from_screen("$ ls\nCargo.toml  src\n$ "), None);
+    }
+
+    #[test]
+    fn a_one_line_draft_is_the_text_after_the_prompt() {
+        let screen = "\
+✻ Baked for 1m 11s · done 1:42 PM
+                                          new task? /clear to save 448.7k tokens
+─────────────────────────────── Marisol WhatsApp contract discussion ─
+❯ ok now let's look at the wilmar group message
+──────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents                          /rc
+";
+        assert_eq!(
+            draft_from_screen(screen).as_deref(),
+            Some("ok now let's look at the wilmar group message"),
+        );
+    }
+
+    #[test]
+    fn a_wrapped_draft_joins_its_continuation_lines() {
+        let screen = "\
+────────────────────────────────────────────────────────────────
+❯ rewrite the invoice importer so it takes the csv from stdin and
+  writes one json object per row, then add a test for the empty
+  file case
+────────────────────────────────────────────────────────────────
+";
+        assert_eq!(
+            draft_from_screen(screen).as_deref(),
+            Some("rewrite the invoice importer so it takes the csv from stdin and writes one json object per row, then add a test for the empty file case"),
+        );
+    }
+
+    #[test]
+    fn the_legacy_angle_prompt_still_reads() {
+        let screen = "\
+─────────────────────────────────────────
+> check the deploy logs
+─────────────────────────────────────────
+";
+        assert_eq!(draft_from_screen(screen).as_deref(), Some("check the deploy logs"));
+        // …but an INDENTED `>` is claude quoting markdown in its own output,
+        // not a prompt, and must not become a phantom draft.
+        assert_eq!(draft_from_screen("  > a quoted line from the model\n"), None);
+    }
+
+    #[test]
+    fn a_prompt_on_the_last_line_needs_no_closing_rule() {
+        // A capture window can cut the box off mid-way; the draft is still
+        // there, and the cursor cell comes back as a block glued to the text.
+        let screen = "───────────────────────\n❯ ship it▌";
+        assert_eq!(draft_from_screen(screen).as_deref(), Some("ship it"));
+    }
+
+    #[test]
+    fn a_busy_pane_still_yields_its_queued_text() {
+        // The spinner sits ABOVE the box and claude keeps accepting typing —
+        // it queues it for after the turn. A spinner is not a reason to stop.
+        let screen = "\
+✻ Thinking… (18s · ↓ 1.2k tokens · esc to interrupt)
+──────────────────────────────────────────────
+❯ and after that, run the gates
+──────────────────────────────────────────────
+";
+        assert_eq!(draft_from_screen(screen).as_deref(), Some("and after that, run the gates"));
+    }
+
+    #[test]
+    fn a_long_draft_truncates_on_a_char_boundary() {
+        let long = "ó".repeat(300); // multi-byte: a byte slice here would panic
+        let screen = format!("─────\n❯ {long}\n─────\n");
+        let got = draft_from_screen(&screen).expect("300 chars is a draft");
+        assert_eq!(got.chars().count(), DRAFT_MAX + 1, "160 chars plus the ellipsis");
+        assert!(got.ends_with('…'));
+        assert!(got.starts_with("óóó"));
+    }
+
+    /// A `❯` SELECTOR menu is not a draft. Verbatim from claude 2.1.261's trust
+    /// prompt in a sandbox pane — the shape that made this rule necessary: the
+    /// cursor line and its indented sibling below read exactly like a wrapped
+    /// draft, and the parser would have put "No, exit Yes, I trust this folder"
+    /// on the row. The tell is what is ABOVE it: a blank line, not the box.
+    #[test]
+    fn a_selector_menu_is_not_a_draft() {
+        let screen = r#"
+────────────────────────────────────────
+ Accessing workspace:
+
+ /Users/davidpena/.cache/worktrees/sand
+ box/ui-tweaks-dr/repo/.worktrees/draft
+ test
+
+ Quick safety check: Is this a project
+ you created or one you trust? (Like
+ your own code, a well-known open
+ source project, or work from your
+ team). If not, take a moment to review
+ what's in this folder first.
+
+ Claude Code'll be able to read, edit,
+ and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+"#;
+        assert_eq!(draft_from_screen(screen), None);
+    }
+
+    /// …and the same guard on the other side: a `❯` line with no box above it
+    /// at all (claude printing a shell-style arrow, a pasted transcript) says
+    /// nothing rather than guessing.
+    #[test]
+    fn a_prompt_line_with_no_box_above_it_is_ignored() {
+        assert_eq!(draft_from_screen("some output\n❯ not a real prompt\n"), None);
+        // The box's own corner counts as an edge, so a boxed layout still reads.
+        assert_eq!(
+            draft_from_screen("╭──────────────╮\n❯ boxed and typed\n╰──────────────╯\n").as_deref(),
+            Some("boxed and typed"),
+        );
+    }
+
+    /// Verbatim bytes from a live claude 2.1.261 pane (40 columns, so the draft
+    /// wraps). The separator after `❯` is U+00A0, NOT a space — the one thing
+    /// that made every hand-written fixture pass and every real pane fail.
+    #[test]
+    fn a_real_pane_uses_a_no_break_space_after_the_prompt_char() {
+        let screen = "\
+─────────── sbx-ui-tweaks-dr-drafttest ─
+\u{276f}\u{a0}check the invoice importer before I
+  forget
+────────────────────────────────────────
+  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle)
+";
+        assert_eq!(
+            draft_from_screen(screen).as_deref(),
+            Some("check the invoice importer before I forget"),
+        );
     }
 }

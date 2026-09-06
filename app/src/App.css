@@ -461,6 +461,9 @@ html[data-guides="off"] .kids > .places::after { display: none; }
    human" class — but a GLYPH, so it can never be mistaken for it. */
 .g-drift { color: var(--warn); }
 .g-more { color: var(--txt-mute); background: var(--bg-panel); padding: 0 4px; border-radius: var(--r-full); }
+/* An unsent prompt. Dim, not amber: the waiting dot already owns "Claude needs
+   input", and this is the quieter cousin — YOU left something half-typed. */
+.g-draft { color: var(--txt-dim); }
 .row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; }
 /* The enter affordance rides in the age's slot. Both children occupy grid cell
    1/1, so the slot is sized by the WIDER of them and the hover swap cannot
@@ -1735,6 +1738,13 @@ body.dragging .menu-catch { pointer-events: none; }
 .rr-name { font-weight: var(--fw-med); color: var(--txt-hi); }
 .rr-proj { color: var(--txt-mute); font-size: var(--fs-meta); }
 .rr-life { color: var(--txt-dim); font-size: var(--fs-meta); text-transform: uppercase; letter-spacing: 0.05em; }
+/* Sits in the left-packed group (`.rr-age` takes the auto margin), and gives
+   way before it: a 48-char draft must not push the age and the Enter button
+   out of a narrow Home column. */
+.rr-draft {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--txt-dim); font-size: var(--fs-meta);
+}
 .rr-age { margin-left: auto; color: var(--txt-mute); font-size: var(--fs-meta); }
 .resume-row .enter-btn { margin-left: 0; }
 
@@ -1803,6 +1813,13 @@ body.dragging .menu-catch { pointer-events: none; }
 /* `.life` takes the auto margin, so the pair sits hard right and the age is the
    last thing on the row — same reading order as a nav row, same clock. */
 .qs-row .life { margin-left: auto; flex: none; }
+/* The unsent prompt's first words. The only SHRINKABLE thing on the row —
+   `.life` and `.qs-age` are both flex:none — so a long draft gives way to them
+   rather than pushing the age off the panel. */
+.qs-draft {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--txt-dim); font-size: var(--fs-meta);
+}
 .qs-age {
   flex: none; min-width: 2em; text-align: right; color: var(--txt-mute);
   font-size: var(--fs-micro); font-variant-numeric: tabular-nums;

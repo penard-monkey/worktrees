@@ -1138,6 +1138,147 @@ struct ClaudeActivity {
     waiting: Vec<String>,
 }
 
+// ── the unsent prompt (nav ✎, ⌘K, Home) ─────────────────────────────────────
+// A place can be waiting on YOU with nothing in the probe file to say so: text
+// typed at claude's prompt and never sent leaves `status: "idle"`, exactly like
+// an empty pane. The screen is the only witness, so this samples it.
+//
+// COST, deliberately bounded: ONE extra `tmux` spawn per 15s, whatever the
+// session count — every pane is captured in a single invocation by chaining
+// commands with `;` as its own argv element, and the session list is reused
+// from the fingerprint the tick loop already fetched. `%N` pane ids are
+// server-global, so `-t %N` addresses a pane without naming its session.
+
+/// How many rows above the cursor to capture. The prompt box is the bottom of
+/// the pane and the parser needs the box's TOP edge in frame (that edge is what
+/// tells an input box from a `❯` selector menu), so this has to clear the
+/// longest wrapped draft anyone types. `-S -20` starts 20 rows INTO the
+/// scrollback and runs to the bottom of the visible pane, so what comes back is
+/// the whole screen plus a little history — a few KB per pane. Too few costs a
+/// draft, never a wrong one.
+const DRAFT_CAPTURE_LINES: &str = "-20";
+
+/// Payload row for `sessions:drafts` / `list_drafts`.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+struct Draft {
+    /// The session's cwd — the same key as `sessions:busy` and a place's `path`.
+    path: String,
+    text: String,
+    /// The session is mid-turn, so claude will SEND this when the turn ends
+    /// rather than sit on it. A different sentence in the UI, not a different
+    /// signal.
+    queued: bool,
+}
+
+/// Payload for `sessions:drafts` — the CURRENT set, reconciled every sample.
+#[derive(Serialize, Clone)]
+struct Drafts {
+    drafts: Vec<Draft>,
+}
+
+/// Capture every live claude pane in one `tmux` call and parse the unsent text
+/// out of each. `sessions` is `tmux::session_fingerprint()`'s output (sorted
+/// names, one per line) — passed in rather than re-fetched so the pass costs a
+/// single spawn.
+///
+/// Panes whose session is not in that list are dropped BEFORE the call: a
+/// `capture-pane` on a dead pane makes tmux print an error and abandon the rest
+/// of the chain, which would silently blank every pane after it.
+fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
+    let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
+    let probes = worktrees_core::agent::live_probes();
+    // (cwd, pane id, queued) for the panes worth capturing.
+    let mut targets: Vec<(String, String, bool)> = Vec::new();
+    for p in &probes {
+        let state = worktrees_core::agent::effective_state(p);
+        // `shell` is not a claude prompt at all; `delegated` is a session whose
+        // turn is somewhere else, and whose box is not the user's to answer.
+        if state == "shell" || state == "delegated" {
+            continue;
+        }
+        let Some(tmux) = p.tmux.as_deref() else { continue }; // started outside tmux → no screen
+        let (Some(pane), Some(sess)) = (
+            worktrees_core::agent::pane_id(tmux),
+            worktrees_core::agent::session_name(tmux),
+        ) else {
+            continue;
+        };
+        if !live.contains(&sess) {
+            continue;
+        }
+        targets.push((p.cwd.clone(), pane.to_string(), state == "busy"));
+    }
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    // `display-message -p` expands `#{…}` AND eats `%` in its format, so the
+    // marker is built from the target's index and nothing else.
+    let marks: Vec<String> = (0..targets.len()).map(|i| format!("@@ {i} @@")).collect();
+    let mut args: Vec<&str> = Vec::with_capacity(targets.len() * 9);
+    for (i, (_, pane, _)) in targets.iter().enumerate() {
+        if i > 0 {
+            args.push(";");
+        }
+        // Marker FIRST: a chain that dies part-way then leaves the surviving
+        // segments still correctly attributed to their panes.
+        args.extend(["display-message", "-p", &marks[i], ";"]);
+        args.extend(["capture-pane", "-p", "-t", pane, "-S", DRAFT_CAPTURE_LINES]);
+    }
+    let out = worktrees_core::tmux::tmux(&args).map_err(|e| format!("tmux: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() { "tmux capture-pane failed".into() } else { err });
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut drafts: Vec<Draft> = Vec::new();
+    for (i, (path, _, queued)) in targets.iter().enumerate() {
+        let Some(rest) = text.split(&format!("{}\n", marks[i])).nth(1) else { continue };
+        // The next marker ends this pane's screen (the last one runs to EOF).
+        let screen = match marks.get(i + 1).and_then(|m| rest.find(m.as_str())) {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+        if let Some(t) = worktrees_core::agent::draft_from_screen(screen) {
+            drafts.push(Draft { path: path.clone(), text: t, queued: *queued });
+        }
+    }
+    // Two claude sessions can share a cwd (a fork, or a second one started by
+    // hand). The row has one ✎, so keep one draft per path — the busy one
+    // first, since "queued" is the more surprising of the two sentences.
+    drafts.sort_by(|a, b| a.path.cmp(&b.path).then(b.queued.cmp(&a.queued)));
+    drafts.dedup_by(|a, b| a.path == b.path);
+    Ok(drafts)
+}
+
+/// Mount-time pull for `sessions:drafts`. The event is change-gated and only
+/// fires every 15s, so a frontend that mounts (or reloads) between two changes
+/// would otherwise show nothing until the user typed something.
+#[tauri::command]
+async fn list_drafts() -> Result<Vec<Draft>, String> {
+    let fp = worktrees_core::tmux::session_fingerprint();
+    Ok(scan_drafts(&fp).unwrap_or_default())
+}
+
+/// Draft TEXT is something a person typed, so it never reaches the log — same
+/// rule the usage metrics live under. `applog` records counts only.
+///
+/// `WORKTREES_TRACE_DRAFTS=<path substring>` is the one exception, for proving
+/// the pipeline end to end against a scratch place. It is a FILTER rather than
+/// an on/off switch on purpose: `app.log` is keyed to `APP_IDENT`, which the
+/// dev/sandbox build shares with the installed app, and a session that scans
+/// every config root would otherwise write the user's real drafts into the
+/// file they paste into bug reports.
+fn draft_trace_filter() -> Option<String> {
+    std::env::var("WORKTREES_TRACE_DRAFTS").ok().filter(|v| !v.is_empty())
+}
+
+/// `WORKTREES_TRACE_SPAWNS=1` logs what the draft pass costs in subprocesses —
+/// the app cannot be measured with the CLI's PATH shim (`fixup_gui_path` puts
+/// the real tmux back in front), so the counter has to live here.
+fn trace_spawns() -> bool {
+    std::env::var("WORKTREES_TRACE_SPAWNS").is_ok_and(|v| v == "1")
+}
+
 // ── task-completed stamps (the nav's decaying "afterglow" dot) ───────────────
 // A place stops being busy → Claude finished a task there. That instant is worth
 // keeping: the green dot vanishing is currently the end of all visibility, and
@@ -4679,6 +4820,17 @@ pub fn run() {
                 // purpose: the exit hook is the accurate capture, this one only
                 // has to bound how much a crash or a force-quit can lose.
                 let mut cwd_ticks: u32 = 0;
+                // The unsent-prompt sample, on the same 15s beat and for the
+                // same reason: it costs a subprocess, and a draft is a thing a
+                // human is typing — 15s is faster than anyone notices.
+                let mut draft_ticks: u32 = 0;
+                let mut last_drafts: Vec<Draft> = Vec::new();
+                // Logged separately from the emit gate: the SET changes every
+                // time someone adds a word to a prompt, and app.log rotates at
+                // 1MB. The counts are the part worth keeping.
+                let mut last_draft_counts = (usize::MAX, usize::MAX);
+                // Only the first of a repeating tmux failure is worth a line.
+                let mut last_draft_err = String::new();
                 // Cold start: what happened while the app was closed. Runs before
                 // the first sleep so the nav's afterglow is right on frame one.
                 backfill_worked(&handle);
@@ -4703,9 +4855,53 @@ pub fn run() {
                     let fp = worktrees_core::tmux::session_fingerprint();
                     ticks += 1;
                     if fp != last || ticks >= 10 {
-                        last = fp;
+                        last = fp.clone(); // `fp` is the draft sample's session list too
                         ticks = 0;
                         let _ = handle.emit("places:changed", ());
+                    }
+                    draft_ticks += 1;
+                    if draft_ticks >= 5 {
+                        draft_ticks = 0;
+                        // `fp` is the session list this tick already paid for,
+                        // so the whole pass is ONE extra tmux spawn per 15s
+                        // regardless of how many sessions are open.
+                        match scan_drafts(&fp) {
+                            Ok(drafts) => {
+                                last_draft_err.clear();
+                                if trace_spawns() {
+                                    applog("info", "trace: draft sample = 1 tmux spawn (chained)");
+                                }
+                                // Emit on EVERY change, the transition to empty
+                                // included: a draft the user just sent must
+                                // take its ✎ with it.
+                                if drafts != last_drafts {
+                                    if let Some(f) = draft_trace_filter() {
+                                        for d in drafts.iter().filter(|d| d.path.contains(&f)) {
+                                            let head: String = d.text.chars().take(20).collect();
+                                            applog("info", &format!(
+                                                "draft {} queued={} {:?}", d.path, d.queued, head));
+                                        }
+                                    }
+                                    let counts =
+                                        (drafts.len(), drafts.iter().filter(|d| d.queued).count());
+                                    if counts != last_draft_counts {
+                                        last_draft_counts = counts;
+                                        applog("info", &format!(
+                                            "drafts: {} ({} queued)", counts.0, counts.1));
+                                    }
+                                    last_drafts = drafts.clone();
+                                    let _ = handle.emit("sessions:drafts", Drafts { drafts });
+                                }
+                            }
+                            // Keep the last known set rather than blanking every
+                            // ✎ on one bad tick (a pane that died mid-chain).
+                            Err(e) => {
+                                if e != last_draft_err {
+                                    last_draft_err = e.clone();
+                                    applog("warn", &format!("draft sample: {e}"));
+                                }
+                            }
+                        }
                     }
                     let (mut busy, mut waiting) = claude_activity();
                     busy.sort_unstable();
@@ -4787,6 +4983,7 @@ pub fn run() {
             set_zoom,
             claude_usage,
             log_info,
+            list_drafts,
             log_event,
             log_tail,
             get_changelog,
