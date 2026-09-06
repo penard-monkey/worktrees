@@ -3,7 +3,8 @@ import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProfilesInfo } from "./ProfilesPanel";
 
-// Right-side slide-over for ONE project — SettingsSheet's twin (proposal §10).
+// Right-side slide-over for ONE project (proposal §10). It stays a sheet:
+// unlike Settings, it is about the thing selected in the tree behind it.
 //
 // Why a sheet and not a pane: the app's selection model is `{repo, slug}` and the
 // main pane is binary (place | briefing). A real project pane means touching ~30
