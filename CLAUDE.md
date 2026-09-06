@@ -458,6 +458,25 @@ is invisible to the bats suite — there is no fake claude. Re-run
   PARSER that emits data we render ourselves is allowed, and `marked` (lexer
   only, for the dock's markdown) is the one instance. Syntax highlighting is
   hand-rolled in `app/src/highlight.ts` for the same reason.
+- **Driving the sandbox app by NAME drives the INSTALLED app — and it has no
+  bundle id to address instead.** `sandbox.sh --app` runs `tauri dev`, which
+  execs the UNBUNDLED binary (`<worktree>/target/debug/app` — the workspace
+  shares one target dir); LaunchServices records it with a NULL bundle id and
+  the name `app`, which is also the executable name inside
+  `/Applications/worktrees.app`. So `tell application "worktrees"` resolves to
+  the app the user is sitting in, `tell application id
+  "net.casadelvalle.worktrees.sbx"` resolves to NOTHING (that id only exists on
+  a `tauri build` bundle), `tell process "app"` is a coin toss between the two,
+  and a bare System Events `keystroke` goes to whatever window is frontmost —
+  the one stray "x" this produced landed in the user's live session. The only
+  safe handle is the PID: find it with `pgrep -fl 'ui-tweaks/target/'` (your
+  worktree's path), prove it with `ps -o pid,command`, and quit it with `kill
+  <pid>`. Do not script clicks or keys into it at all; the sandbox is for
+  READING its own files (`~/Library/Application Support/
+  net.casadelvalle.worktrees.sbx/…`) and its app.log after using it by hand,
+  and the mock harness is for everything that does not need real timing. If
+  the sandbox is not running, stop — never fall back to whatever answers to a
+  name.
 - **Never run the bundle's binary to probe it.**
   `target/release/bundle/macos/worktrees.app/Contents/MacOS/app --version` is the
   GUI entry point — it LAUNCHES a second instance instead of printing a version.

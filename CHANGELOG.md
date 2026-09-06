@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **Settings → Usage: which controls you actually use, measured on this Mac and
+  nowhere else.** The app now keeps a tally of what gets clicked and where the
+  foreground hours go, so the UI can shed the parts nobody touches. What is
+  recorded is a control's NAME (`nav.row`, `chord.cmd-b`, `dock.files`) and one
+  of ten fixed surfaces — never a place name, a slug, a path, a branch, a note,
+  or anything you typed; the backend refuses to store anything that does not
+  look like a name from the source. It lives in `ui-events.jsonl` beside your
+  settings, is never sent anywhere, and the panel shows foreground time by
+  surface plus an actions-per-day heatmap over the last 7 / 14 / 30 days —
+  where a row of zeros is the useful finding. Reveal the file or clear it from
+  the same panel.
+
 ### Changed
 - **Settings opens as a centered modal.** It had outgrown a 560px side panel —
   nine categories in a rail plus a pane, each one cramped — so it is now a

@@ -269,6 +269,9 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, c
         onContextMenu={(e) => onContext(e, entry)}
         data-tree-path={entry.path}
         aria-disabled={inert || undefined}
+        // usage: the row's title IS the file path and its git status — one
+        // fixed key for the control, nothing about which file it points at.
+        data-track="files.row"
         title={title}
       >
         <span className="tree-caret">{entry.is_dir && !inert && (open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />)}</span>
@@ -763,7 +766,7 @@ export function FileView(props: FileViewProps) {
         {showWrap && (
           <button className={"ctrl sm" + (wrap ? " on" : "")} title="Wrap long lines" onClick={() => onWrap(!wrap)}>Wrap</button>
         )}
-        <button className="ctrl sm" title={expanded ? "Collapse (⌘⇧E)" : "Expand over the main pane (⌘⇧E)"} onClick={() => onExpand(!expanded)}>
+        <button className="ctrl sm" data-track="files.expand" title={expanded ? "Collapse (⌘⇧E)" : "Expand over the main pane (⌘⇧E)"} onClick={() => onExpand(!expanded)}>
           {expanded ? "Collapse" : "Expand"}
         </button>
         <button className="ctrl sm" onClick={() => onOpenEditor(path)}>Editor</button>

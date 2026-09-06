@@ -42,6 +42,39 @@ const MOCK_SETTINGS_KEY = "wt-mock-ui-state"; // sessionStorage: see get_setting
 // as ?notmux: the state is chosen at load, and the path itself carries it so a
 // dir stays what it was picked as. `mockInited` is what init_repo /
 // create_initial_commit promote — once bootstrapped, a dir is a normal repo.
+// Local usage metrics (lib.rs `ui-events.jsonl`), in memory. `?usage=demo`
+// seeds ~14 days of plausible events so Settings → Usage can be looked at
+// without a fortnight of clicking — a few heavy keys, several light ones, and
+// two that have not been touched at all (the point of the whole feature).
+// NOTE: `?usage=off|stale|edge` are a DIFFERENT knob (Claude's plan widget);
+// they don't collide, but check both when you add a third.
+type MockUiEvent = { t: number; k: string; key: string; s: string; ms?: number };
+let mockUiEvents: MockUiEvent[] = [];
+const MOCK_USAGE_FILE = "/Users/demo/Library/Application Support/net.casadelvalle.worktrees/ui-events.jsonl";
+if (location.search.includes("usage=demo")) {
+  const day = 86_400_000;
+  const t0 = Date.now();
+  const seed: [string, string, number][] = [
+    ["nav.row", "nav", 9], ["chord.cmd-b", "nav", 6], ["dock.files", "dock.files", 4],
+    ["files.row", "dock.files", 8], ["places", "nav", 3], ["chord.cmd-k", "main", 2],
+    ["switch.row", "main", 2], ["attention", "nav", 1], ["nav.project", "nav", 1],
+    ["home.resume", "home", 1],
+  ];
+  for (let d = 13; d >= 0; d--) {
+    for (const [key, s, weight] of seed) {
+      // a shaped-but-arbitrary count, deterministic enough to eyeball
+      const n = Math.max(0, Math.round(weight * (0.4 + ((d * 7 + key.length) % 5) / 4) - (d % 3)));
+      for (let i = 0; i < n; i++) mockUiEvents.push({ t: t0 - d * day - i * 60_000, k: "act", key, s });
+    }
+    for (const [s, ms] of [["main", 4_200_000], ["dock.files", 1_100_000], ["nav", 420_000], ["home", 180_000]] as [string, number][]) {
+      mockUiEvents.push({ t: t0 - d * day, k: "dwell", key: "dwell", s, ms: Math.round(ms * (0.5 + ((d % 4) / 4))) });
+    }
+  }
+  // two controls last touched before the window — they must render as ZERO rows
+  mockUiEvents.push({ t: t0 - 40 * day, k: "act", key: "nav.project.strays", s: "nav" });
+  mockUiEvents.push({ t: t0 - 40 * day, k: "act", key: "profiles.pick", s: "settings" });
+}
+
 const mockPickPrefix = location.search.includes("empty")
   ? "empty-"
   : location.search.includes("unborn")
@@ -1511,6 +1544,55 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "settings_info":
       return { dir: "/Users/demo/Library/Application Support/net.casadelvalle.worktrees", file: "/Users/demo/Library/Application Support/net.casadelvalle.worktrees/ui-state.json" };
 
+    // ── local usage metrics ──────────────────────────────────────────────
+    // Same contract as lib.rs, INCLUDING the refusal: an event whose key or
+    // surface is not a hand-written identifier is dropped, so a harness run
+    // proves the same rule the real backend enforces.
+    case "ui_events_append": {
+      const ok = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 64 && /^[A-Za-z0-9._-]+$/.test(v);
+      for (const e of (args.events ?? []) as MockUiEvent[]) {
+        if ((e.k === "act" || e.k === "dwell") && ok(e.key) && ok(e.s) && e.t > 0) mockUiEvents.push(e);
+        else console.warn("[mock] ui_events_append refused", e);
+      }
+      return null;
+    }
+    case "ui_usage": {
+      // The Rust bucketing, in TS: local day = (t/1000 + tzOffsetMin*60) / 86400,
+      // floored. Keep the two in step — this is what the harness asserts against.
+      const n = Math.min(90, Math.max(1, Number(args.days ?? 14)));
+      const tz = Number(args.tzOffsetMin ?? 0);
+      const dayOf = (t: number) => Math.floor(Math.floor(t / 1000) / 86400 + tz / 1440);
+      const last = dayOf(Date.now());
+      const first = last - (n - 1);
+      const label = (d: number) => new Date(d * 86_400_000).toISOString().slice(0, 10);
+      const acts = new Map<string, number[]>();
+      const dwell = new Map<string, number[]>();
+      for (const e of mockUiEvents) {
+        // a key the file has EVER seen gets a row, even at zero — a control
+        // nobody has touched in a month is the answer, not a gap
+        if (e.k === "act" && !acts.has(e.key)) acts.set(e.key, new Array(n).fill(0));
+        const col = dayOf(e.t) - first;
+        if (col < 0 || col >= n) continue;
+        if (e.k === "act") acts.get(e.key)![col] += 1;
+        else if (e.k === "dwell") {
+          if (!dwell.has(e.s)) dwell.set(e.s, new Array(n).fill(0));
+          dwell.get(e.s)![col] += e.ms ?? 0;
+        }
+      }
+      const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
+      return {
+        days: Array.from({ length: n }, (_, i) => label(first + i)),
+        acts: [...acts].map(([key, per_day]) => ({ key, total: sum(per_day), per_day }))
+          .sort((a, b) => b.total - a.total || a.key.localeCompare(b.key)),
+        dwell: [...dwell].map(([surface, per_day]) => ({ surface, ms_total: sum(per_day), per_day }))
+          .sort((a, b) => b.ms_total - a.ms_total || a.surface.localeCompare(b.surface)),
+        file: MOCK_USAGE_FILE,
+      };
+    }
+    case "ui_events_clear":
+      mockUiEvents = [];
+      return null;
+
     // settings — persisted in sessionStorage (per tab), so state that is only
     // meaningful ACROSS a reload is exercisable: an init banner dismissed by
     // content hash must stay dismissed. `?whatsnew` still forces a stale
@@ -1704,6 +1786,9 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 // places:changed so the nav re-pulls immediately instead of waiting on the sweep.
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
+  /** Every ui-event this session recorded, for the privacy assertions: a
+   *  harness run greps this JSON for slugs, paths and filter text. */
+  uiEvents: () => mockUiEvents.slice(),
   /** Fire the backend's shell:exit — the only way to reach the dock's
    * "process exited / Restart shell" state headlessly, since the mock has no
    * real PTY to die. */
@@ -1775,4 +1860,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/createFile/finishTask/syncFail/syncLive)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/createFile/finishTask/syncFail/syncLive/uiEvents)");

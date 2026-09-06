@@ -2094,3 +2094,50 @@ body.dragging .menu-catch { pointer-events: none; }
   min-height: calc(var(--ui-rem) * 6);
 }
 .setting textarea:focus { border-color: var(--line-strong); }
+
+/* ── Settings → Usage: local metrics (usage.ts + lib.rs ui-events.jsonl) ─────
+   A divider before the last category, because Usage is not a setting — it
+   shows what the app has recorded about itself. */
+.settings-cat.sep { margin-top: var(--s2); padding-top: calc(var(--row-pad-v) + var(--s2)); border-top: 1px solid var(--line); border-radius: 0 0 var(--r-md) var(--r-md); }
+
+.um-head { display: flex; align-items: center; gap: var(--s3); }
+.um-head .hint { margin-top: 0; }
+.um-head select { margin-left: auto; width: auto; }
+
+/* Foreground time by surface. One series, so the fill is the accent and every
+   piece of text stays in a text token — the bar's colour is not information a
+   label has to repeat. */
+.um-bars { display: flex; flex-direction: column; gap: 6px; }
+.um-bar-row { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-meta); }
+.um-bar-label { flex: 0 0 96px; color: var(--txt-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.um-bar-track { flex: 1; min-width: 0; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.um-bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.um-bar-val { flex: 0 0 60px; text-align: right; color: var(--txt-dim); font-variant-numeric: tabular-nums; }
+
+/* Actions per day. `.settings-body` hides its own overflow-x (long paths), so
+   a month of columns has to scroll INSIDE its own box or it is simply cut. */
+.um-grid-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; }
+.um-grid { width: max-content; display: flex; flex-direction: column; gap: 2px; }
+.um-row { display: flex; align-items: center; gap: 2px; }
+.um-key {
+  flex: 0 0 150px; font-size: var(--fs-meta); color: var(--txt-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: var(--s2);
+}
+/* A control with nothing in the range is the finding, not a gap — it stays
+   listed, at the bottom, in the mute token. */
+.um-dead .um-key, .um-dead .um-total { color: var(--txt-mute); }
+.um-cell { flex: 0 0 16px; width: 16px; height: 16px; border-radius: 3px; }
+.um-col {
+  flex: 0 0 16px; width: 16px; text-align: center; font-size: 9px;
+  color: var(--txt-mute); font-variant-numeric: tabular-nums;
+}
+.um-total {
+  flex: 0 0 44px; text-align: right; font-size: var(--fs-meta); color: var(--txt-dim);
+  font-variant-numeric: tabular-nums; padding-left: var(--s2);
+}
+.um-head-row { margin-bottom: 2px; }
+.um-legend {
+  display: flex; align-items: center; justify-content: flex-end; gap: 3px;
+  font-size: var(--fs-micro); color: var(--txt-mute); margin-top: var(--s2);
+}
+.um-legend .um-cell { flex: 0 0 10px; width: 10px; height: 10px; border-radius: 2px; }
