@@ -309,6 +309,8 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               <button
                 className={"settings-cat" + (sel === p.id ? " on" : "")}
                 onClick={() => pick(p)}
+                // usage: the title is the profile's config DIRECTORY
+                data-track="profiles.pick"
                 title={p.dir ?? undefined}
               >
                 {p.name}
@@ -517,6 +519,11 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
                 className="ctrl sm"
                 onClick={() => draft.dir && revealItemInDir(draft.dir).catch((e) => fail(e, "reveal"))}
                 disabled={!draft.dir || draft.ever_launched === false}
+                // usage: one branch of this title is the profile's DIRECTORY
+                // (no key at all), the other is a sentence that reduces to
+                // `nothing-there-until-its-first-launch` — one button, two
+                // rows, neither of them its name.
+                data-track="profiles.reveal"
                 title={draft.ever_launched === false ? "Nothing there until its first launch" : draft.dir ?? ""}
               >
                 Reveal files

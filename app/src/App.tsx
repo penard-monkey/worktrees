@@ -13,6 +13,7 @@ import {
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
+import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
@@ -737,6 +738,7 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, onPick, onClo
                 <div
                   key={`${pv.root}::${p.slug}`}
                   className={"qs-row" + (i === hi ? " hi" : "")}
+                  data-track="switch.row"
                   onMouseEnter={() => setHi(i)}
                   onMouseDown={(e) => { e.preventDefault(); pick(it); }} // mousedown: fire before the input blurs
                 >
@@ -1000,7 +1002,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
                 onCancel={() => setEditing(null)}
               />
             ) : (
-              <button className="termtab-label" title={dead.includes(id) ? "process exited" : "double-click to rename"}
+              <button className="termtab-label" data-track="dock.term.tab" title={dead.includes(id) ? "process exited" : "double-click to rename"}
                 onClick={() => pick(id)} onDoubleClick={() => setEditing(id)}>{labelOf(id)}</button>
             )}
             <button className="termtab-x" title="close shell" onClick={() => closeTab(id)}><Icons.X size={11} /></button>
@@ -2646,6 +2648,23 @@ function App() {
       window.removeEventListener("keydown", mark, true);
     };
   }, []);
+  // ── local usage metrics ───────────────────────────────────────────────────
+  // What gets clicked, and where the hours go — see usage.ts for the rule that
+  // decides what may be recorded (fixed control keys and a fixed surface enum,
+  // never a place, a path or anything typed). Installed ONCE, from an effect
+  // that runs after the `lastSurface` one above and after every child has
+  // mounted, so its keydown listener sees `defaultPrevented` already set by
+  // App's own chord handler.
+  useEffect(() => installUsage(), []);
+  // The surfaces a pointer never lands on: opening Settings, entering reading
+  // mode and going Home are state changes, not clicks on a box that identifies
+  // them. Everything else is resolved from the pointerdown target.
+  useEffect(() => {
+    if (settingsOpen) setSurface("settings");
+    else if (reading) setSurface("read");
+    else if (!sel) setSurface("home");
+    else setSurface("main");
+  }, [settingsOpen, reading, sel]);
   // ⌘A — select the FILE, not the app.
   //
   // Not a keydown handler, and it cannot be one: `lib.rs` never calls `menu()`,
@@ -4779,7 +4798,16 @@ function App() {
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Registered right behind `onKey`, in the same effect, because it reads the
+    // `defaultPrevented` flag onKey's branches set — and two bubble-phase
+    // listeners on one target fire in registration order. Keeping the pair
+    // adjacent is what makes that ordering a fact rather than a coincidence of
+    // where two effects happen to sit in the file.
+    window.addEventListener("keydown", trackChord);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", trackChord);
+    };
   }, [navChord, focusPlaces, hideNav, toggleDock, updatePanels, fail]);
 
   const q = filter.trim().toLowerCase();
@@ -4936,6 +4964,9 @@ function App() {
         onContextMenu={(e) => placeCtx(e, repo, p)}
         onPointerDown={draggable ? (e) => arm(e, { kind: "place", repo, slug: p.slug }) : undefined}
         title={p.declared?.title ? `${p.declared.title} — ${p.slug}` : p.slug}
+        // usage: this row's TITLE is the place's name. Every control whose
+        // label carries user text gets an explicit key instead — see usage.ts.
+        data-track="nav.row"
       >
         <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
         <span className="row-id">
@@ -4959,6 +4990,7 @@ function App() {
             <button
               className="row-enter"
               title="Enter — open the session"
+              data-track="nav.row.enter"
               onClick={(e) => { e.stopPropagation(); enterPlace(repo, p); hideNav(); }}
             >
               <Icons.ChevronRight size={12} />
@@ -4970,7 +5002,7 @@ function App() {
   };
 
   const GroupHeader = ({ gkey, label, count, open, onToggle }: { gkey: string; label: string; count: number; open: boolean; onToggle: () => void }) => (
-    <div className="group-h" key={gkey} onClick={onToggle}>
+    <div className="group-h" key={gkey} data-track="nav.group" onClick={onToggle}>
       <span className="caret">{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
       {label}
       <span className="count">{count}</span>
@@ -5029,6 +5061,9 @@ function App() {
       <div className="project" data-project-root={pv.root} data-drop="project">
         <div
           className="project-h"
+          // usage: the header's own label is the repo path; the buttons inside
+          // it carry their own keys, which `closest` finds first.
+          data-track="nav.project"
           onContextMenu={(e) => projectCtx(e, pv.root)}
           onPointerDown={(e) => arm(e, { kind: "project", root: pv.root })}
         >
@@ -5045,6 +5080,7 @@ function App() {
           {pv.ok && health[pv.root]?.error ? (
             <button
               className="mini pbroken"
+              data-track="nav.project.broken"
               title={`config unreadable — doctor could not run here:\n${health[pv.root]!.error}`}
               onClick={() => setProjSheet(pv.root)}
             >⚑</button>
@@ -5058,6 +5094,7 @@ function App() {
             <button
               className="mini pstray"
               data-testid={`stray-mini|${pv.root}`}
+              data-track="nav.project.strays"
               title={`${pv.snapshot!.strays!.length} worktree${pv.snapshot!.strays!.length === 1 ? "" : "s"} registered outside .worktrees/ — this app can't see ${pv.snapshot!.strays!.length === 1 ? "it" : "them"}. Open the project sheet for the adopt command.`}
               onClick={() => setProjSheet(pv.root)}
             >⊟</button>
@@ -5067,12 +5104,13 @@ function App() {
               `.mini` is a <button>, which navdrag's `arm` already declines to
               start a drag from — no stopPropagation needed, same as +. */}
           {pv.ok && (
-            <button className="mini" title="Sync" data-testid={`sync-mini|${pv.root}`}
+            <button className="mini" title="Sync" data-testid={`sync-mini|${pv.root}`} data-track="nav.project.sync"
               onClick={(e) => openSyncPop(e, pv.root)}>⇄</button>
           )}
-          <button className="mini" title="new worktree" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
+          <button className="mini" title="new worktree" data-track="nav.project.new" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
           <button
             className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
+            data-track="nav.project.remove"
             title={confirmRm === `hdr|${pv.root}` ? "click again to remove from workspace" : "remove project"}
             onClick={() => removeProjectHdr(pv.root)}
           >
@@ -5122,7 +5160,7 @@ function App() {
               const opened = isOpen(key, false);
               return (
                 <div className="group dormant" key={key} data-gkey={key} data-open={opened ? "1" : "0"} data-drop="dormant">
-                  <div className="group-h dormant-h" onClick={() => toggleGroup(key, false)}>
+                  <div className="group-h dormant-h" data-track="nav.group" onClick={() => toggleGroup(key, false)}>
                     {/* same SVG caret as every other group header — the ASCII
                         ▾/▸ was one more thing making the quietest row louder */}
                     <span className="caret">{opened ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
@@ -5213,7 +5251,7 @@ function App() {
             is the ONLY way in, and a shortcut that silently answers one of the
             three questions is the inconsistency the menu exists to remove. */}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
-        <button className={"rail-icon" + (updateAvail ? " upd" : "")} title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
+        <button className={"rail-icon" + (updateAvail ? " upd" : "")} data-track="settings" title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── the sidebar ──
@@ -5335,6 +5373,7 @@ function App() {
                   <>
                     <b
                       className="slug"
+                      data-track="topbar.name"
                       title={selected.declared?.title ? "Double-click to rename" : "Double-click to name this place"}
                       onDoubleClick={() => setRenaming(true)}
                     >
@@ -5426,7 +5465,7 @@ function App() {
                 ) : (
                   <button className="enter-btn with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /></button>
                 )}
-                <button className={"icon-btn" + (selected.declared?.pinned ? " on" : "")} title={selected.declared?.pinned ? "unpin" : "pin"}
+                <button className={"icon-btn" + (selected.declared?.pinned ? " on" : "")} data-track="place.pin" title={selected.declared?.pinned ? "unpin" : "pin"}
                   onClick={() => {
                     const on = !selected.declared?.pinned;
                     patchDeclared(sel.repo, sel.slug, { pinned: on });
@@ -5453,6 +5492,7 @@ function App() {
                       {selected.tmux_session.up && (
                         confirmRm === closeKey(sel.repo, sel.slug) ? (
                           <button className="pop-item danger armed"
+                            data-track="place.close.confirm"
                             title={`${closeSess} was adopted, not opened under this repo's name — killing it takes the WHOLE session, every window and pane in it`}
                             onClick={() => closeFromMenu(sel.repo, sel.slug, true)}>Kill {closeSess} — whole session?</button>
                         ) : (
@@ -5617,7 +5657,7 @@ function App() {
                 <div className="resume">
                   {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
                   {resume.map(({ pv, p }) => (
-                    <div className="resume-row" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
+                    <div className="resume-row" data-track="home.resume" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
                       <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
                       <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{nameOf(p)}</span>
                       <span className="rr-proj">{basename(pv.root)}</span>
@@ -5657,6 +5697,7 @@ function App() {
                       className={"ctrl sm icon-only" + (settings.files_show_ignored ? " on" : "")}
                       aria-label={`Gitignored files: ${settings.files_show_ignored ? "shown" : "hidden"}. Click to toggle.`}
                       aria-pressed={settings.files_show_ignored}
+                      data-track="files.ignored"
                       title={settings.files_show_ignored
                         ? "Hide gitignored files"
                         : "Show gitignored files (build output, working notes)"}
@@ -5683,6 +5724,7 @@ function App() {
                       className={"ctrl sm icon-only" + (settings.files_changed_only ? " on" : "")}
                       aria-label={`Changed files only: ${settings.files_changed_only ? "on" : "off"}. Click to toggle.`}
                       aria-pressed={settings.files_changed_only}
+                      data-track="files.changed"
                       title={settings.files_changed_only
                         ? "Show every file again"
                         : "Show only what this branch changed"}
@@ -5693,6 +5735,7 @@ function App() {
                     <button
                       className="ctrl sm icon-only"
                       aria-label={`Files layout: ${settings.files_layout}. Click to cycle.`}
+                      data-track="files.layout"
                       title={`Layout: ${settings.files_layout} — click to cycle (auto → stacked → side by side)`}
                       onClick={() => updateSettings({ files_layout: NEXT_FILES_LAYOUT[settings.files_layout] })}
                     >
@@ -5800,6 +5843,7 @@ function App() {
               key={d.key}
               className={"rail-icon" + (on ? " active" : "")}
               disabled={!!why}
+              data-track={d.key === "terminal" ? "dock.terminal" : "dock.files"}
               title={why ? `${d.title} — ${why}` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
               onClick={() => pickDockTab(d.key)}
             >

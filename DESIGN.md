@@ -475,6 +475,16 @@ Serde `Place` struct: every unknowable field `Option<T>` (CLI emits explicit nul
   keyed `repo|slug` → tab index. Its OWN file, not a key in ui-state.json: that
   one is written whole-blob by the frontend, so a backend write into it is
   erased by the next settings save. Written by the backend only.
+- `<app-config-dir>/ui-events.jsonl` → local usage metrics, one JSON object per
+  line: a unix timestamp, a kind (`act` for a click or chord, `dwell` for
+  foreground milliseconds), a control KEY and a SURFACE. Backend-owned like
+  shell-cwds.json, and for the same reason. The keys and the surfaces are both
+  fixed vocabularies that live in the source (`app/src/usage.ts` resolves a
+  click to one via `data-track`; `valid_token` in lib.rs refuses to store
+  anything that is not a hand-written identifier) — so an event never carries a
+  place, a slug, a path, a branch, a note or anything typed, and the file never
+  leaves the machine. It rotates once at 4 MB; Settings → Usage reads it on
+  demand and can reveal or clear it.
 - Live cadence: `notify` watches `$GIT_COMMON` + places file (300ms debounce) + coarse 4s
   `ls --json` poll for tmux liveness + force-refresh after mutations.
 

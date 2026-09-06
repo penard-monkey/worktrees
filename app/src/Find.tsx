@@ -100,6 +100,7 @@ export function FindBar(props: FindBarProps) {
       <button
         className={"ctrl sm icon-only" + (caseSensitive ? " on" : "")}
         aria-pressed={caseSensitive}
+        data-track="find.case"
         title={caseSensitive ? "Match case: on" : "Match case: off"}
         onClick={() => onCaseSensitive(!caseSensitive)}
       >
