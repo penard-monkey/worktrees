@@ -55,23 +55,40 @@ console.log(`zoom-check: table ok — ${steps.length} steps (${steps[0]}..${step
 // Same technique as `race-check.mjs`: slice the handler out of App.tsx between
 // stable markers and evaluate it with stubs, so this tests the edit rather than
 // a paraphrase of it. What no other suite can see: ⌘ vs ⌘⌥ routing, the
-// keyRef mutation that makes a fast double-tap step twice, and the deliberate
-// decision to let ⌘+ through while a sheet is open.
+// keyRef mutation that makes a fast double-tap step twice, and the modal guard
+// that unbinds the chord while a dialog is up.
 import { transformWithEsbuild } from "vite";
 
 const APP = fileURLToPath(new URL("../src/App.tsx", import.meta.url));
 const appLines = fs.readFileSync(APP, "utf8").split("\n");
+// `const dir = …` was hoisted ABOVE the modal guard, because the guard's page-zoom
+// exception is defined in terms of it — one answer to "is this a size chord",
+// shared by the guard and the handler. So the first slice runs from that line
+// through the guard's closing brace, and the second is the zoom block itself;
+// the two shift-chord handlers that sit between them are not zoom and are left
+// out. Both halves are verbatim source, so this drives the real predicate.
 const from = appLines.findIndex((l) => l.includes("const dir = e.metaKey && !e.ctrlKey ? zoomDir(e) : undefined;"));
 const to = appLines.findIndex((l, i) => i > from && l.includes("if (!(e.metaKey || e.ctrlKey) || e.repeat"));
+const gFrom = appLines.findIndex((l) => l.includes("if ((e.metaKey || e.ctrlKey) && modalOpen()) {"));
+const gTo = appLines.findIndex((l, i) => i > gFrom && l.trim() === "}");
+const zFrom = appLines.findIndex((l, i) => i > gTo && l.includes("if (dir !== undefined) {"));
 // The direction tables + `zoomDir` live at module scope; take them verbatim too,
 // so a layout face added there is a face this check actually exercises.
 const dirTables = fs.readFileSync(APP, "utf8").match(/const ZOOM_BY_KEY[\s\S]*?\nconst zoomDir = [^\n]*\n/);
+if (gFrom < 0 || gTo < 0 || zFrom < 0 || !(from >= 0 && from < gFrom)) {
+  fail("App.tsx: the modal chord guard is gone — every app chord fires behind a dialog again");
+  console.error("\nzoom-check: 1 failure(s)");
+  process.exit(1);
+}
+// The predicate is DOM-based on purpose; a state mirror would drift silently.
+if (!/const modalOpen = \(\) => !!document\.querySelector\("\.modal-scrim, \.scrim"\);/.test(fs.readFileSync(APP, "utf8")))
+  fail("App.tsx: modalOpen no longer asks the DOM for `.modal-scrim, .scrim` — a dialog added later would go unguarded");
 if (from < 0 || to < 0 || !dirTables) {
   fail("App.tsx: the ⌘/⌘⌥ zoom block's markers are gone — the chord is unchecked");
   console.error("\nzoom-check: 1 failure(s)");
   process.exit(1);
 }
-const BLOCK = appLines.slice(from, to).join("\n");
+const BLOCK = appLines.slice(from, gTo + 1).join("\n") + "\n" + appLines.slice(zFrom, to).join("\n");
 
 // settings.ts imports the Tauri bridge; stub it so the module loads under node.
 const settingsSrc = ts.replace(/^import \{ invoke \}.*$/m, "const invoke = () => Promise.resolve();");
@@ -83,7 +100,8 @@ const S = await load(settingsSrc, "settings.ts");
 const handlerSrc = `
 ${dirTables[0]}
 export function build(env: any) {
-  const { keyRef, updatePanels, updateSettings, clampMdZoom, stepMdZoom, clampZoom, stepZoom, DEFAULTS } = env;
+  const { keyRef, updatePanels, updateSettings, clampMdZoom, stepMdZoom, clampZoom, stepZoom, DEFAULTS,
+          modalOpen, onlySettingsOpen } = env;
   return (e: any) => {
 ${BLOCK}
     return "fellthrough";
@@ -93,18 +111,24 @@ const { build } = await load(handlerSrc, "zoom-chord.ts");
 
 const keyRef = { current: {} };
 let panels = [], sets = [];
+// The DOM the guard asks about, reduced to the two answers it can give.
+let dom = { modal: false, settingsAlone: false };
 const onKey = build({
   keyRef, DEFAULTS: S.DEFAULTS,
+  modalOpen: () => dom.modal, onlySettingsOpen: () => dom.settingsAlone,
   clampMdZoom: S.clampMdZoom, stepMdZoom: S.stepMdZoom, clampZoom: S.clampZoom, stepZoom: S.stepZoom,
   updatePanels: (p) => panels.push(p), updateSettings: (p) => sets.push(p),
 });
 
 /** Press `key` with the given modifiers against `state`; report what happened. */
-function press(key, { alt = false, meta = true, ctrl = false, code = "" } = {}, state = {}) {
+function press(key, { alt = false, meta = true, ctrl = false, code = "", shift = false,
+                     modal = false, settingsAlone = false } = {}, state = {}) {
   panels = []; sets = [];
+  dom = { modal, settingsAlone };
   keyRef.current = { mdPreview: false, mdZoom: 100, appZoom: 1, switchOpen: false, settingsOpen: false, ...state };
   let prevented = false;
-  const through = onKey({ key, code, metaKey: meta, ctrlKey: ctrl, altKey: alt, preventDefault: () => { prevented = true; } });
+  const through = onKey({ key, code, metaKey: meta, ctrlKey: ctrl, altKey: alt, shiftKey: shift, repeat: false,
+                          preventDefault: () => { prevented = true; } });
   return { prevented, sets, panels, through: through === "fellthrough", kr: keyRef.current };
 }
 const eq = (got, want, what) => { if (JSON.stringify(got) !== JSON.stringify(want)) fail(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); };
@@ -124,9 +148,17 @@ const ev = { key: "+", metaKey: true, ctrlKey: false, altKey: false, preventDefa
 onKey(ev); onKey(ev);
 eq(sets, [{ app_zoom: 1.1 }, { app_zoom: 1.25 }], "a fast double-tap of ⌘+ walks two steps");
 
-// Deliberately ungated: "make everything bigger" must work from inside a sheet.
-eq(press("+", {}, { settingsOpen: true }).sets, [{ app_zoom: 1.1 }], "⌘+ works with Settings open");
-eq(press("+", {}, { switchOpen: true }).sets, [{ app_zoom: 1.1 }], "⌘+ works with the ⌘K palette open");
+// A dialog is up. Page zoom is the guard's one non-closing exception: it changes
+// the view and moves nothing, and the slider it mirrors lives inside Settings.
+const zoomBehind = press("+", { modal: true });
+eq([zoomBehind.sets, zoomBehind.prevented], [[{ app_zoom: 1.1 }], true], "⌘+ still steps the app size behind a dialog");
+eq(press("0", { modal: true }, { appZoom: 1.75 }).sets, [{ app_zoom: 1 }], "⌘0 still resets the app size behind a dialog");
+// The two the guard lets through, because both CLOSE what is on top. Neither is
+// a zoom chord, so "fell through" is the whole assertion.
+eq(press(",", { modal: true, settingsAlone: true }).through, true, "⌘, reaches its handler when Settings is the only dialog up");
+eq(press(",", { modal: true, settingsAlone: false }).through, false, "⌘, is dead behind any other dialog — it must not pull Settings out from under it");
+eq(press("k", { code: "KeyK", modal: true }, { switchOpen: true }).through, true, "⌘K reaches its handler while the palette owns the keyboard");
+eq(press("k", { code: "KeyK", modal: true }, { switchOpen: false }).through, false, "⌘K cannot open the palette from behind a dialog");
 
 // ⌥ switches to the markdown reader's own size — and only where one is showing.
 const md = press("+", { alt: true }, { mdPreview: true });
@@ -135,7 +167,10 @@ eq(md.sets, [], "⌘⌥+ leaves the app size alone");
 eq(press("0", { alt: true }, { mdPreview: true, mdZoom: 150 }).panels, [{ files_md_zoom: 100 }], "⌘⌥0 resets the reader");
 const noMd = press("+", { alt: true }, { mdPreview: false });
 eq([noMd.panels, noMd.sets, noMd.prevented], [[], [], false], "⌘⌥+ with no rendered markdown does nothing at all");
-eq(press("+", { alt: true }, { mdPreview: true, settingsOpen: true }).panels, [], "⌘⌥+ is still gated by Settings");
+// ⌥ is NOT excepted: it resizes the markdown reader, a surface behind the dialog
+// that nobody can see. Unbound, and not swallowed either.
+const mdBehind = press("+", { alt: true, modal: true }, { mdPreview: true });
+eq([mdBehind.panels, mdBehind.prevented], [[], false], "⌘⌥+ behind a dialog leaves the reader alone and is not swallowed");
 
 // macOS composes ⌥ with the layout: ⌥- is an en dash, ⌥= is "≠". The chord has
 // to survive that, or ⌘⌥+/⌘⌥− are dead on every composing layout — which is

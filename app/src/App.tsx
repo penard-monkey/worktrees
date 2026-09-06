@@ -135,6 +135,22 @@ const ZOOM_BY_CODE: Record<string, 1 | -1 | 0> = {
 // `??`, not `||`: 0 is a legal direction (reset) and would fall through `||`.
 const zoomDir = (e: KeyboardEvent): 1 | -1 | 0 | undefined => ZOOM_BY_KEY[e.key] ?? ZOOM_BY_CODE[e.code];
 
+/** Is a dialog on top of the app? One DOM query, not a mirror of React state:
+ *  every overlay paints a `.modal-scrim` (Settings, What's new) or a `.scrim`
+ *  (the Project and Status sheets, the ⌘K palette and the `.scrim-center`
+ *  dialogs), so a dialog written next year is covered without anyone
+ *  remembering to add a flag. The sidebar's `.menu-catch` check is the same
+ *  idea; `.menu-catch` itself is NOT included, because a context menu is
+ *  dismissed by the very act of pressing a chord elsewhere. */
+const modalOpen = () => !!document.querySelector(".modal-scrim, .scrim");
+/** …and is that dialog Settings, alone? ⌘, is the one chord allowed through the
+ *  guard, and only because it CLOSES what is on top. With anything stacked over
+ *  Settings (What's new) or any other dialog up, it must do nothing rather than
+ *  pull a surface out from under the one being read. */
+const onlySettingsOpen = () =>
+  document.querySelectorAll(".modal-scrim, .scrim").length === 1 &&
+  !!document.querySelector(".settings-modal");
+
 /** Where ⌘F lands. Follows the surface the user last TOUCHED, not the one that
  *  holds DOM focus: the file tree's rows are plain divs, so clicking a file to
  *  read it leaves `document.activeElement` on `<body>` and a focus-based rule
@@ -308,13 +324,37 @@ function changelogBetween(changelog: string, seen: string, current: string): str
 
 // keepachangelog markdown → typed sections, so "What's new" renders formatted
 // notes instead of raw markdown. Hard-wrapped bullet continuations are unwrapped.
-type NotesGroup = { name: string; items: string[] };
+type NotesItem = { lead: string; rest: string };
+type NotesGroup = { name: string; items: NotesItem[] };
 type NotesSection = { version: string; date: string; groups: NotesGroup[] };
 
+// A changelog entry reads as a headline plus its explanation: house style opens
+// each bullet with a bolded lead sentence. Peeling that off is what lets the
+// notes show the headlines and keep the paragraphs one click away.
+//
+// `[^*]+` rather than a lazy `.+?` — the same shape INLINE's own strong arm
+// uses, and for the same reason: `**a** and **b**` must lead with `a`, never
+// swallow through to the second run. It also means a lead can hold `code` but
+// not nested *em*, which is exactly what renderInline already assumes.
+//
+// Older entries (roughly the first half of the file) have no bolded lead at
+// all. Those are all lead and have nothing to open — the parser adapts to the
+// file, not the other way round.
+function splitItem(raw: string): NotesItem {
+  const m = raw.match(/^\*\*([^*]+)\*\*\s*/);
+  if (!m) return { lead: raw, rest: "" };
+  return { lead: m[1].trim(), rest: raw.slice(m[0].length).trim() };
+}
+
 function parseNotes(md: string): NotesSection[] {
-  const sections: NotesSection[] = [];
-  let sec: NotesSection | null = null;
-  let group: NotesGroup | null = null;
+  // Parsed RAW first — a hard-wrapped bullet is only whole once its
+  // continuation lines have been appended, so the lead/rest split runs after
+  // the loop rather than inside it.
+  type RawGroup = { name: string; items: string[] };
+  type RawSection = { version: string; date: string; groups: RawGroup[] };
+  const sections: RawSection[] = [];
+  let sec: RawSection | null = null;
+  let group: RawGroup | null = null;
   for (const line of md.split("\n")) {
     const h2 = line.match(/^## \[([^\]]+)\](?:\s*-\s*(.*))?/);
     if (h2) {
@@ -335,7 +375,13 @@ function parseNotes(md: string): NotesSection[] {
       group.items[group.items.length - 1] += " " + line.trim();
     }
   }
-  return sections.filter((s) => s.groups.some((g) => g.items.length));
+  return sections
+    .filter((s) => s.groups.some((g) => g.items.length))
+    .map((s) => ({
+      version: s.version,
+      date: s.date,
+      groups: s.groups.map((g) => ({ name: g.name, items: g.items.map(splitItem) })),
+    }));
 }
 
 // `code` / **strong** / *em* — the inline markup the changelog uses. One
@@ -352,27 +398,111 @@ function renderInline(s: string): React.ReactNode[] {
   });
 }
 
-function ReleaseNotes({ notes }: { notes: string }) {
-  const sections = parseNotes(notes);
+function ReleaseNotes({ sections, notes, open, onToggle }: {
+  sections: NotesSection[];
+  notes: string;
+  open: Set<string>;
+  onToggle: (id: string) => void;
+}) {
   if (!sections.length) return <pre className="notes">{notes}</pre>;
   return (
     <div className="relnotes">
-      {sections.map((sec) => (
+      {sections.map((sec, si) => (
         <section key={sec.version}>
           <div className="rel-head">
             {sections.length > 1 && <b className="rel-v">v{sec.version}</b>}
             {sec.date && <span className="rel-date">{sec.date}</span>}
           </div>
-          {sec.groups.map((g) => (
+          {sec.groups.map((g, gi) => (
             <div key={g.name} className="rel-group">
               <span className={`rel-tag rel-${g.name.toLowerCase()}`}>{g.name}</span>
               <ul>
-                {g.items.map((it, i) => <li key={i}>{renderInline(it)}</li>)}
+                {g.items.map((it, i) => {
+                  const id = `${si}:${gi}:${i}`;
+                  const on = open.has(id);
+                  return (
+                    <li key={i} className="rel-item">
+                      {/* The whole row is the target, not just the chevron. An
+                          item with no paragraph behind it is disabled rather
+                          than absent: it still reads as a headline, it just has
+                          nothing to open. */}
+                      <button
+                        className={"rel-lead" + (on ? " on" : "")}
+                        disabled={!it.rest}
+                        aria-expanded={it.rest ? on : undefined}
+                        onClick={() => onToggle(id)}
+                      >
+                        <span className="rel-chev">{it.rest ? <Icons.ChevronRight size={12} /> : null}</span>
+                        <span>{renderInline(it.lead)}</span>
+                      </button>
+                      {on && it.rest && <p className="rel-body">{renderInline(it.rest)}</p>}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ))}
         </section>
       ))}
+    </div>
+  );
+}
+
+// "What's new" — the release notes, on first launch after an update and from
+// Settings → Updates. MODULE SCOPE and self-contained: the per-item open set
+// and the header's Show/Hide details toggle are one piece of state that nothing
+// outside the modal reads, and a component defined inside App() would be
+// re-created (and reset) by the 3s poll.
+function WhatsNewModal({ version, notes, manual, onClose }: {
+  version: string;
+  notes: string;
+  manual: boolean;
+  onClose: () => void;
+}) {
+  const sections = useMemo(() => parseNotes(notes), [notes]);
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
+  // Escape closes the notes, and only the notes — SettingsSheet's own listener
+  // stands down while this one is up (it tests for `.modal-scrim.stacked`).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  // Only entries that HAVE a paragraph can open, so "Show details" is measured
+  // against those — otherwise the label would flip to "Hide details" for a set
+  // of notes where nothing ever opened.
+  const openable = useMemo(() => {
+    const ids: string[] = [];
+    sections.forEach((sec, si) => sec.groups.forEach((g, gi) => g.items.forEach((it, i) => {
+      if (it.rest) ids.push(`${si}:${gi}:${i}`);
+    })));
+    return ids;
+  }, [sections]);
+  // Derived, never a second boolean: opening every row by hand and pressing the
+  // header toggle must not both mean "show details".
+  const allOpen = openable.length > 0 && openable.every((id) => open.has(id));
+  const toggle = (id: string) => setOpen((prev) => {
+    const next = new Set(prev);
+    if (!next.delete(id)) next.add(id);
+    return next;
+  });
+  return (
+    <div className="modal-scrim stacked" onClick={onClose}>
+      <aside className="modal whatsnew-modal" onClick={(e) => e.stopPropagation()}>
+        <header className="settings-h">
+          <b>{manual ? "Release notes" : `What's new — v${version}`}</b>
+          {openable.length > 0 && (
+            <button className="icon-btn" onClick={() => setOpen(allOpen ? new Set() : new Set(openable))}>
+              {allOpen ? "Hide details" : "Show details"}
+            </button>
+          )}
+          <button className="icon-btn" title="close" onClick={onClose}><Icons.X size={13} /></button>
+        </header>
+        <div className="settings-body">
+          <ReleaseNotes sections={sections} notes={notes} open={open} onToggle={toggle} />
+        </div>
+        <div className="modal-foot">Full changelog · Settings → Updates</div>
+      </aside>
     </div>
   );
 }
@@ -4427,19 +4557,6 @@ function App() {
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // ⌘⇧T — new dock terminal. The chord this started as; ⌘T (in the
-      // meta-only section below) is the advertised one now and ⌘⇧T is kept as
-      // a silent alias, since it costs nothing and fingers remember.
-      // Handled BEFORE the meta-only guard (it needs shift). ⌘ only (not ctrl)
-      // so Ctrl+Shift+T still reaches the embedded shell; swallowed while the
-      // ⌘K palette owns the keyboard. No-op unless the dock's Terminal tab is
-      // mounted (it ignores the token otherwise) — which is exactly the gap
-      // ⌘T closes.
-      if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "t") {
-        e.preventDefault();
-        if (!keyRef.current.switchOpen) setNewTermToken((v) => v + 1);
-        return;
-      }
       // Esc closes the find bar before anything else — but NOT when the
       // terminal has the keyboard, where Escape is the user's (vim, a menu, a
       // prompt) and swallowing it would be a worse bug than a bar left open.
@@ -4454,7 +4571,7 @@ function App() {
         }
       }
       // Esc leaves reading mode — but only when reading is the TOP surface.
-      // The settings sheet and the ⌘K palette are above it and own Escape
+      // The Settings modal and the ⌘K palette are above it and own Escape
       // first, or one keypress dismisses the thing you can't see.
       if (e.key === "Escape" && keyRef.current.reading && !keyRef.current.settingsOpen && !keyRef.current.switchOpen) {
         e.preventDefault();
@@ -4473,14 +4590,61 @@ function App() {
         hideNav();
         return;
       }
+      // Which size chord this is, if any (undefined = not one). Computed HERE,
+      // above the guard, so the guard and the handler below ask the same
+      // question of the same event instead of each deciding for itself what a
+      // size chord is — the exception and the thing it excepts cannot drift.
+      const dir = e.metaKey && !e.ctrlKey ? zoomDir(e) : undefined;
+      // ── one guard for every app chord ────────────────────────────────────
+      // Nothing below this line means anything while a dialog is up: ⌘B, ⌘J,
+      // ⌘1 and friends rearrange panels nobody can see. They are UNBOUND here,
+      // not swallowed — no preventDefault, so the key keeps whatever it would
+      // otherwise do rather than vanishing into a handler that did nothing.
+      //
+      // The test is the DOM, not a mirror of open-dialog state: every overlay
+      // in the app paints a `.modal-scrim` (Settings, What's new) or a `.scrim`
+      // (the Project and Status sheets, the ⌘K palette and every `.scrim-center`
+      // dialog), so a dialog added later is covered without anyone remembering
+      // to add a flag. Same reasoning as the sidebar's `.menu-catch` check.
+      //
+      // Three exceptions. Two of them CLOSE what is on top rather than moving
+      // anything behind it: ⌘, when Settings is the only thing up, and ⌘K when
+      // the palette already owns the keyboard. The third is page zoom, which
+      // changes the view and moves nothing — it cannot disturb what a dialog is
+      // holding, and "make everything bigger" is exactly what you reach for
+      // while squinting at Settings, whose own size slider is right there. The
+      // ⌥ variant is NOT excepted: it resizes the markdown reader, a surface
+      // behind the dialog that nobody can see. The Escape chain above is
+      // deliberately left alone — it orders who gets Escape, which is a
+      // different question from which chords are live.
+      if ((e.metaKey || e.ctrlKey) && modalOpen()) {
+        const plain = e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.repeat;
+        const closesSettings = plain && e.key === "," && onlySettingsOpen();
+        const closesPalette = plain && e.key.toLowerCase() === "k" && keyRef.current.switchOpen;
+        const pageZoom = dir !== undefined && !e.altKey;
+        if (!closesSettings && !closesPalette && !pageZoom) return;
+      }
+      // ⌘⇧T — new dock terminal. The chord this started as; ⌘T (in the
+      // meta-only section below) is the advertised one now and ⌘⇧T is kept as
+      // a silent alias, since it costs nothing and fingers remember.
+      // Handled BEFORE the meta-only guard (it needs shift), and after the
+      // modal guard, which is what used to be its `switchOpen` check. ⌘ only
+      // (not ctrl) so Ctrl+Shift+T still reaches the embedded shell. No-op
+      // unless the dock's Terminal tab is mounted (it ignores the token
+      // otherwise) — which is exactly the gap ⌘T closes.
+      if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        setNewTermToken((v) => v + 1);
+        return;
+      }
       // ⌘⇧E — reading mode: the dock's current file expands over the main pane.
       // No-op with no file open, so the chord can't blank the terminal for
       // nothing. Also shift-guarded, hence its place above the meta-only gate.
       if (e.metaKey && e.shiftKey && !e.altKey && !e.repeat && e.key.toLowerCase() === "e") {
         e.preventDefault();
-        // Only meaningful with the Files tab showing a file: opening a reader
-        // for a stale path behind a modal, or over the Terminal tab, is noise.
-        if (keyRef.current.switchOpen || keyRef.current.settingsOpen) return;
+        // Only meaningful with the Files tab showing a file — opening a reader
+        // over the Terminal tab is noise. (Behind a dialog it never gets here:
+        // the modal guard above returned.)
         setReading((v) => (v ? false : keyRef.current.filesTabOpen && !!keyRef.current.dockFile));
         return;
       }
@@ -4497,12 +4661,12 @@ function App() {
       // Markdown reading size keeps its header +/− buttons either way.
       // The `dir === undefined` case FALLS THROUGH to the meta-only section
       // rather than returning: ⌘ plus anything that is not a size key is still
-      // somebody else's chord.
-      const dir = e.metaKey && !e.ctrlKey ? zoomDir(e) : undefined;
+      // somebody else's chord. (`dir` itself is computed above the modal guard,
+      // which needs it to make page zoom its one non-closing exception.)
       if (dir !== undefined) {
         const kr = keyRef.current;
         if (e.altKey) {
-          if (!kr.mdPreview || kr.switchOpen || kr.settingsOpen) return;
+          if (!kr.mdPreview) return;
           e.preventDefault();
           const cur = clampMdZoom(kr.mdZoom);
           const next = dir === 0 ? DEFAULTS.files_md_zoom : stepMdZoom(cur, dir);
@@ -4517,7 +4681,8 @@ function App() {
         // Deliberately NOT gated on the ⌘K palette or the Settings sheet, unlike
         // every other chord in here: "make everything bigger" is exactly what
         // you reach for while squinting at a sheet, and page zoom cannot disturb
-        // what either of them is holding.
+        // what either of them is holding. That is precisely why the modal guard
+        // above lets this one through while unbinding all the rest.
         e.preventDefault();
         const cur = clampZoom(kr.appZoom);
         const next = dir === 0 ? DEFAULTS.app_zoom : stepZoom(cur, dir);
@@ -4540,10 +4705,8 @@ function App() {
         setSwitchOpen((v) => !v);
         return;
       }
-      // While the palette is open, swallow the OTHER app chords (⌘1-4, ⌘E, ⌘,,
-      // ⌘B) — the palette owns the keyboard; only ⌘K (handled above) and Escape
-      // (owned by the palette itself) do anything.
-      if (keyRef.current.switchOpen) return;
+      // (The palette's own "swallow the other chords" check used to live here.
+      // The modal guard above subsumes it — the palette paints `.scrim`.)
       if (k === "b") {
         // Ctrl+B is the tmux prefix — let the embedded terminal keep it; ⌘B still toggles
         if (e.ctrlKey && !e.metaKey && e.target instanceof Element && e.target.closest(".term-host")) return;
@@ -4587,7 +4750,6 @@ function App() {
         // a second press re-selects the field rather than toggling the bar shut,
         // which is what every other find bar does.
         e.preventDefault();
-        if (keyRef.current.settingsOpen) return;
         // `lastSurface` is read HERE, live. A copy taken during render goes
         // stale the moment the user does something that changes no React state
         // — clicking into a terminal to focus it, clicking the open file's
@@ -5760,20 +5922,13 @@ function App() {
           onClose={() => setSwitchOpen(false)} />
       )}
 
-      {/* after SettingsSheet: opened from Settings, the notes stack ON TOP of it */}
+      {/* after SettingsSheet: opened from Settings, the notes stack ON TOP of it
+          (`.modal-scrim.stacked`, z-index 110 over Settings' 100) */}
       {whatsNew && (
-        <div className="scrim" onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}>
-          <aside className="settings-sheet whatsnew" onClick={(e) => e.stopPropagation()}>
-            <header className="settings-h">
-              <b>{whatsNew.manual ? "Release notes" : `What's new — v${whatsNew.version}`}</b>
-              <button className="icon-btn" title="close"
-                onClick={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}><Icons.X size={13} /></button>
-            </header>
-            <div className="settings-body">
-              <ReleaseNotes notes={whatsNew.notes} />
-            </div>
-          </aside>
-        </div>
+        <WhatsNewModal
+          version={whatsNew.version} notes={whatsNew.notes} manual={!!whatsNew.manual}
+          onClose={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}
+        />
       )}
       {newFor && (
         <NewPlaceDialog

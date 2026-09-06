@@ -27,7 +27,8 @@ const CATS = [
 ] as const;
 type CatId = (typeof CATS)[number]["id"];
 
-// Right-side slide-over. Presentational: App owns the Settings state and does the
+// A centered modal (the file keeps its name; the component is still what the
+// app calls Settings). Presentational: App owns the Settings state and does the
 // apply-live + persist + terminal-refit on each change. Esc / scrim closes.
 // The Version section owns its own update-run state (log/progress) locally.
 export function SettingsSheet({
@@ -228,7 +229,15 @@ export function SettingsSheet({
   };
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    // Escape belongs to whatever is ON TOP. What's new opens FROM here and
+    // stacks over it (`.modal-scrim.stacked`), and without this both listeners
+    // fire on one press: the notes would close and Settings would vanish from
+    // under them. Same DOM test the app's chord guard uses, for the same
+    // reason — a surface added later is covered without a new flag.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || document.querySelector(".modal-scrim.stacked")) return;
+      onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
@@ -236,10 +245,19 @@ export function SettingsSheet({
   if (!open) return null;
 
   return (
-    <div className="scrim" onClick={onClose}>
-      <aside className="settings-sheet" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-scrim" onClick={onClose}>
+      {/* A centered modal, not the right-hand sheet it started as: nine
+          categories in a 560px side panel left every pane cramped, and the
+          terminal keeps painting underneath either way. The inner layout
+          (`settings-h` / `settings-split` / `settings-cats` / `settings-body`)
+          is unchanged and still shared with the sheets that stayed sheets. */}
+      <aside className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
         <header className="settings-h">
           <b>Settings</b>
+          <span className="modal-keys">
+            <kbd className="kbd">esc</kbd>
+            <kbd className="kbd">⌘,</kbd>
+          </span>
           <button className="icon-btn" title="close (Esc)" onClick={onClose}><Icons.X /></button>
         </header>
 

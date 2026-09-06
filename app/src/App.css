@@ -136,7 +136,9 @@ button { cursor: pointer; }
   font-size: var(--fs-micro); color: var(--txt-mute);
   white-space: nowrap; overflow: hidden;
 }
-.nav-hint kbd {
+/* `.kbd` is the same chip standing on its own — the modal headers print the
+   shortcut that closes them. One rule, so the two can never drift apart. */
+.nav-hint kbd, .kbd {
   padding: 0 4px; border-radius: var(--r-sm);
   background: var(--bg-input); border: 1px solid var(--line);
   font-family: var(--term-family); font-size: var(--fs-micro); color: var(--txt-dim);
@@ -797,7 +799,7 @@ body.dragging .menu-catch { pointer-events: none; }
   background: color-mix(in srgb, var(--danger) 18%, transparent);
   border-color: var(--danger);
 }
-.whatsnew .notes {
+.whatsnew-modal .notes {
   margin: 0; white-space: pre-wrap; word-break: break-word;
   font-family: var(--term-family); font-size: var(--fs-meta); line-height: 1.5;
   color: var(--txt);
@@ -820,15 +822,36 @@ body.dragging .menu-catch { pointer-events: none; }
 .rel-deprecated { color: var(--txt-dim);  background: color-mix(in srgb, var(--txt-dim) 14%, transparent); }
 .rel-security   { color: var(--danger);   background: color-mix(in srgb, var(--danger) 14%, transparent); }
 .rel-group ul {
-  margin: var(--s2) 0 0; padding-left: var(--s4);
+  margin: var(--s2) 0 0; padding: 0; list-style: none;
   display: flex; flex-direction: column; gap: var(--s2);
 }
 .rel-group li {
   font-size: var(--fs-body); line-height: var(--lh-prose); color: var(--txt);
 }
-.rel-group li::marker { color: var(--txt-mute); }
-/* Most entries open with a bolded lead-in sentence — it carries the heading
-   weight the group tag can't, so it gets the brighter ink. */
+/* An entry is a headline plus its explanation. The chevron row IS the headline
+   — the whole row is the target, and the fixed-width chevron slot keeps an
+   entry with nothing to open flush with the ones that do. */
+.rel-lead {
+  display: flex; align-items: flex-start; gap: var(--s2); width: 100%;
+  min-height: 28px; padding: var(--s1) var(--s2); border: 0; border-radius: var(--r-sm);
+  background: transparent; text-align: left; cursor: pointer;
+  font-family: inherit; font-size: var(--fs-body); line-height: var(--lh-prose);
+  font-weight: var(--fw-med); color: var(--txt-hi);
+}
+.rel-lead:disabled { cursor: default; }
+.rel-lead:not(:disabled):hover { background: var(--bg-elev); }
+.rel-chev {
+  flex: 0 0 14px; display: flex; align-items: center; justify-content: center;
+  height: calc(var(--fs-body) * var(--lh-prose)); color: var(--txt-mute);
+  transition: transform var(--dur-fast) var(--ease);
+}
+.rel-lead.on .rel-chev { transform: rotate(90deg); }
+.rel-body {
+  margin: var(--s1) 0 0 calc(14px + var(--s2) * 2);
+  font-size: var(--fs-label); line-height: 1.5; color: var(--txt);
+}
+/* Lead-ins arrive as `**bold**` and are stripped by `splitItem`; a `**run**`
+   INSIDE a sentence still renders, and still carries the brighter ink. */
 .rel-group li strong { font-weight: var(--fw-bold); color: var(--txt-hi); }
 .rel-group li em { font-style: italic; }
 .rel-group code {
@@ -1718,12 +1741,41 @@ body.dragging .menu-catch { pointer-events: none; }
 .empty { margin: auto; text-align: center; color: var(--txt-mute); line-height: var(--lh-prose); }
 .empty.small { margin: var(--s4); font-size: var(--fs-label); }
 
-/* ── settings slide-over ── */
+/* ── slide-over scrim ── right-aligned: the Project and Status sheets, and the
+   base for `.scrim-center`'s dialogs. Settings moved to `.modal-scrim` below. */
 .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 100; display: flex; justify-content: flex-end; }
 
 /* ── ⌘K quick switcher ── centered variant of the scrim, panel near the top-third.
-   z-index above the settings sheet (100); never open at the same time in practice. */
+   z-index above the base scrim and the Settings modal (both 100). */
 .scrim-center { z-index: 110; justify-content: center; align-items: flex-start; padding-top: 14vh; }
+
+/* ── centered modal ── the shell Settings and What's new sit in. A separate
+   scrim from `.scrim` above, which is right-aligned because the three remaining
+   sheets (Project, Status, and the ones that own that class) are slide-overs.
+   The padding is what keeps the dialog off the window edges, and `min(…, 100%)`
+   — 100% of the padded grid area — is what makes it SHRINK on a short viewport
+   instead of overflowing it, so the body's scroller is always reachable. */
+.modal-scrim {
+  position: fixed; inset: 0; background: var(--scrim); z-index: 100;
+  display: grid; place-items: center; padding: var(--s5);
+}
+/* stacked on top of another modal — What's new opened from Settings → Updates.
+   Same 110 as `.scrim-center`, for the same reason and against the same 100. */
+.modal-scrim.stacked { z-index: 110; }
+.modal {
+  width: min(1000px, 100%); height: min(680px, 100%);
+  background: var(--bg-tree); border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-float);
+  display: flex; flex-direction: column; overflow: hidden;
+  animation: pop var(--dur-slow) var(--ease);
+}
+/* The title keeps `flex: 1` (see `.settings-h b`), so the chips ride hard right
+   with the close button rather than trailing the word "Settings". */
+.modal-keys { display: flex; align-items: center; gap: var(--s2); margin-right: var(--s3); }
+.modal-foot {
+  flex: none; padding: var(--s2) var(--s4); border-top: 1px solid var(--line);
+  font-size: var(--fs-micro); color: var(--txt-mute);
+}
 .qs-panel {
   width: min(560px, 92%); max-height: 60vh; display: flex; flex-direction: column;
   background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
@@ -1968,6 +2020,13 @@ body.dragging .menu-catch { pointer-events: none; }
   border-left: 1px solid var(--line); box-shadow: var(--shadow-float);
   display: flex; flex-direction: column; animation: pop var(--dur-slow) var(--ease);
 }
+/* Settings is a `.modal`, not a `.settings-sheet` — it outgrew a 560px side
+   panel at nine categories. Everything INSIDE it (`.settings-h`,
+   `.settings-split`, `.settings-cats`, `.settings-body`, `.setting`) is shared
+   with the sheets, unchanged; only the rail gets the extra room the width
+   affords. */
+.settings-modal .settings-cats { flex-basis: 190px; }
+.whatsnew-modal { width: min(640px, 100%); height: min(720px, 100%); }
 .settings-h { display: flex; align-items: center; padding: var(--s4); border-bottom: 1px solid var(--line); }
 .settings-h b { flex: 1; font-size: var(--fs-title); color: var(--txt-hi); }
 /* Category rail + single-category pane. One category is shown at a time (not

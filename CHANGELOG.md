@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **Settings opens as a centered modal.** It had outgrown a 560px side panel —
+  nine categories in a rail plus a pane, each one cramped — so it is now a
+  dialog in the middle of the window with room for both. The header carries the
+  keys that close it (`esc`) and toggle it (`⌘,`), the category rail is wider,
+  and nothing inside the categories changed. The terminal is untouched
+  underneath, exactly as it was behind the sheet.
+- **"What's new" shows each entry's lead sentence, with the details one click
+  away.** Release notes used to arrive as a wall of full paragraphs; every entry
+  is now a headline you can open, and "Show details" in the header opens the
+  whole set at once. The changelog file is unchanged — the notes simply read the
+  bolded lead-in that house style already puts at the front of every entry.
 - **The sidebar is one control with three states, and it no longer takes width
   from the terminal.** Pinned it is the column it always was; unpinned it is an
   OVERLAY that lays itself over the terminal when the pointer reaches the left
@@ -34,6 +45,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   anyway.
 
 ### Fixed
+- **App chords no longer fire behind a dialog.** ⌘B, ⌘J, ⌘T, ⌘E, ⌘1/⌘2 and the
+  markdown reader's ⌘⌥+ used to rearrange panels nobody could see while
+  Settings, the release notes, a project's sheet or any dialog was up — only the
+  ⌘K palette and Settings were ever guarded, and only against some of them. One
+  check now covers every surface at once: with a dialog open the chords are
+  unbound, not swallowed, and the only ones that still answer are the two that
+  close what is on top and the size keys — ⌘+ / ⌘− / ⌘0 keep working from inside
+  a dialog, because changing the size moves nothing behind it.
 - **A renamed place no longer prints its branch twice.** The place header drew
   the branch chip whenever a branch existed, so a worktree made by `worktrees
   new <branch>` — where the branch and the directory carry the same name — said

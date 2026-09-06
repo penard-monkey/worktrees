@@ -302,15 +302,11 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   whether anyone can reach it.
   _From: [2026-08-14 cmd-f-find](docs/sessions/2026-08-14-cmd-f-find/summary.md)_
 
-- **No app chord is guarded against the surfaces above it except the palette and
-  Settings.** The keydown handler checks `switchOpen`/`settingsOpen`, so ⌘J, ⌘B,
-  ⌘1-9, ⌘E and now ⌘+/⌘−/⌘0 all still fire behind the What's-new scrim and the
-  ProjectSheet — rearranging panels nobody can see. Long-standing and uniform,
-  which is why it keeps not being worth a one-chord fix; the fix is a single
-  "is a modal on top" predicate for all of them. Two smaller siblings from the
-  same session: a disabled stepper button never shows its `title`, so the
-  ⌘−/⌘+ hints vanish exactly at the ends of the range where a user is most
-  likely to hunt for them.
+- **A disabled stepper button never shows its `title`.** The markdown reader's
+  A−/A+ pair carries the ⌘⌥−/⌘⌥+ hints in its tooltips, and a disabled button
+  gets no pointer events — so the hints vanish exactly at the ends of the range,
+  where a user is most likely to hunt for them. Still true of
+  `FilesPane`'s `.zoomseg`.
   _From: [2026-08-14 markdown-zoom](docs/sessions/2026-08-14-markdown-zoom/summary.md)_
 
 - **The markdown zoom chord has never been pressed in a real build.** Every
