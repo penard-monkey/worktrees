@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.21.0] - 2026-09-05
 
 ### Added
 - **A ✎ on any place with an unsent prompt.** Text typed at Claude's prompt and
