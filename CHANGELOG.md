@@ -3,6 +3,32 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **The Claude plan bars have a home that is always on screen, and you pick
+  it.** They used to be sidebar furniture, which stopped meaning "visible" the
+  day the sidebar started auto-hiding. Settings → Appearance → Usage meter now
+  offers three hosts — a strip across the bottom of the window (the default,
+  and the only one that is also there on Home), the row under the terminal,
+  or a tile in the left rail — and a real Off, which stops polling the
+  endpoint rather than hiding a widget that keeps calling it. At rest each
+  host shows one compact line (or three hairlines, in the rail); hover for the
+  full windows and their resets, click to keep the panel open.
+
+### Changed
+- **The branch chip in the place header is the branch switcher.** It used to be
+  a combobox in the status bar under the terminal. Click the chip for the same
+  list; a place whose branch matches its slug shows the icon alone. `(main)`
+  keeps a plain chip — this row does not offer to move the main checkout.
+
+### Removed
+- **The status bar's tmux facts and the sidebar's "+ Add project" button.**
+  "tmux up", the session name and "pane0 claude" were each already said by the
+  nav dot, the agent dot and the header; the rail's folder-plus opens the same
+  three-way add menu the footer button did. The status bar row now appears only
+  when it is hosting the usage meter.
+
 ## [0.21.0] - 2026-09-05
 
 ### Added

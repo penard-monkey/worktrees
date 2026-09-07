@@ -1269,24 +1269,82 @@ function BranchCombo({
 // Status-bar branch switcher — the combo above plus the one thing it cannot
 // know: whether the switch it just asked for actually landed (the text is
 // cleared only if it did).
-function BranchSwitcher({ repo, slug, onSwitch, onError }: {
+/** The branch chip in the place header, which is also the branch SWITCHER.
+ *
+ *  It used to be a combobox parked in the status bar under the terminal. That
+ *  row is gone unless it is hosting the usage meter, and a control you can only
+ *  reach in one of four Appearance settings is not a control — so the chip that
+ *  already names the branch became the thing you click to change it.
+ *
+ *  `showText` is the header's `showBranch`: false when the branch equals the
+ *  slug, which is most worktrees. The button stays either way and drops to the
+ *  icon alone there, because the name beside it is already the branch's name. */
+function HeaderBranch({ repo, slug, branch, showText, onSwitch, onError }: {
   repo: string; slug: string;
+  branch: string | null;
+  showText: boolean;
   onSwitch: (branch: string) => Promise<boolean>;
   onError: (e: unknown) => void;
 }) {
+  const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [data, setData] = useState<BranchList | null>(null);
-  // In flight, so `data` is still null — without this the caret's first click
-  // fires TWO `git for-each-ref`: opening the pop calls load(), and the focus()
-  // that follows it synchronously re-enters onFocus before the first invoke has
-  // resolved. Cleared in `finally` so a FAILED read is retried on the next open.
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  // In flight, so `data` is still null — without this the first open can fire
+  // TWO `git for-each-ref`: the click calls load(), and the combo's autofocus
+  // re-enters onOpen before the first invoke has resolved. Cleared in `finally`
+  // so a FAILED read is retried on the next open.
   const loading = useRef(false);
 
-  // Reset when the place changes — a half-typed branch belongs to the place it
-  // was typed in.
-  useEffect(() => { setText(""); setData(null); }, [repo, slug]);
+  // FIXED, not absolute, and focused with `preventScroll`. Both halves are load-
+  // bearing, and both were found by hit-testing rather than by looking:
+  //
+  //  · `.identity` is `overflow: hidden`, so an absolutely-positioned popover
+  //    anchored inside it is CLIPPED to a 17px-tall strip — the combo's own
+  //    branch list dropped clean out of the box, invisible and unclickable,
+  //    while `getBoundingClientRect` still reported a perfectly sensible box.
+  //  · focusing the input then made the browser scroll `.identity` (hidden is
+  //    still programmatically scrollable) to reveal it, which pushed the place
+  //    NAME off the left of the header. `preventScroll` is what stops that.
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return; }
+    const place = () => {
+      const w = wrapRef.current, p = popRef.current;
+      if (!w || !p) return;
+      const wr = w.getBoundingClientRect();
+      const pw = p.offsetWidth;
+      const m = 8;
+      setPos({
+        left: Math.max(m, Math.min(wr.left, window.innerWidth - pw - m)),
+        top: wr.bottom + 6,
+      });
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    if (popRef.current) ro.observe(popRef.current);
+    window.addEventListener("resize", place);
+    popRef.current?.querySelector("input")?.focus({ preventScroll: true });
+    // The combo owns Escape while its LIST is showing (it stops the event, so
+    // this never sees that press); the next one reaches here and closes the
+    // popover. Two presses with the list open, one without — and never a bare
+    // field left behind with no key to dismiss it.
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", place);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
-  // Lazy: one `git for-each-ref` when the switcher is first used, not on every
+  // Reset when the place changes — a half-typed branch belongs to the place it
+  // was typed in. (App also keys this component by place, so this is the belt;
+  // the key is the braces.)
+  useEffect(() => { setText(""); setData(null); setOpen(false); }, [repo, slug]);
+
+  // Lazy: one `git for-each-ref` when the switcher is first opened, not on every
   // place selection.
   const load = () => {
     if (data || loading.current) return;
@@ -1298,25 +1356,59 @@ function BranchSwitcher({ repo, slug, onSwitch, onError }: {
   };
 
   return (
-    <BranchCombo
-      value={text}
-      data={data}
-      placeholder="switch branch…"
-      exclude={data?.current}
-      inputClass="switchto"
-      ariaLabel="switch branch"
-      testid="switch-branch"
-      onChange={setText}
-      onOpen={load}
-      onCommit={async (b) => {
-        if (!(await onSwitch(b))) return;
-        setText("");
-        // The list is now stale in the one way that shows: `current` still names
-        // the branch we just LEFT, so reopening would hide it and offer the
-        // branch we are on. Drop it and let the next open re-read.
-        setData(null);
-      }}
-    />
+    <div className="branch-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className={"branch btn" + (showText ? " hi" : "")}
+        data-testid="branch-chip"
+        aria-label="switch branch"
+        aria-expanded={open}
+        title={`on ${branch ?? "?"} — click to switch branch`}
+        onClick={() => { if (!open) load(); setOpen((v) => !v); }}
+      >
+        <Icons.GitBranch size={12} />
+        {showText && <span className="branch-name">{branch}</span>}
+        <span className="branch-caret">▾</span>
+      </button>
+      {open && (
+        <>
+          {/* The app's own outside-click catcher, so this popover closes the way
+              every other one does. `body.dragging` neutralises it. */}
+          <div className="menu-catch" onClick={() => setOpen(false)} />
+          <div
+            className="branch-pop"
+            ref={popRef}
+            // Off-screen until the first measurement lands, so it is never
+            // painted at 0,0 for a frame on its way to the chip.
+            style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: -9999 }}
+          >
+            <BranchCombo
+              value={text}
+              data={data}
+              placeholder="switch branch…"
+              exclude={data?.current}
+              inputClass="switchto"
+              ariaLabel="switch branch"
+              testid="switch-branch"
+              // "down", not the status bar's "up": the header is the FIRST row of
+              // the window, and a list opening upward from here has nowhere to go.
+              drop="down"
+              onChange={setText}
+              onOpen={load}
+              onCommit={async (b) => {
+                if (!(await onSwitch(b))) return;
+                setText("");
+                // The list is now stale in the one way that shows: `current` still
+                // names the branch we just LEFT, so reopening would hide it and
+                // offer the branch we are on. Drop it and let the next open re-read.
+                setData(null);
+                setOpen(false);
+              }}
+            />
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1768,23 +1860,38 @@ function useWindowAwake() {
   return { pageVisible };
 }
 
-function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
+/** How long the pointer must rest on the meter before the detail opens. Short
+ *  enough to feel like a tooltip, long enough that crossing the strip on the way
+ *  somewhere else does not flash a panel. */
+const USAGE_HOVER_MS = 140;
+
+/** The poll and the countdown, lifted OUT of the widget so App owns them.
+ *
+ *  Two reasons it does not live in the meter any more: the meter now has three
+ *  possible hosts (Settings → Appearance → Usage meter) and one poller must
+ *  serve all of them, and `enabled: false` has to mean the endpoint is never
+ *  called — an "off" that still fetches every 180s would be a lie. */
+function useUsage(enabled: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
   const [info, setInfo] = useState<UsageInfo | null>(null);
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
-  const { pageVisible } = useWindowAwake();
 
-  // Own timer, deliberately separate from the poll effect: cheap (a number in a
-  // module-scope component, so the re-render stays inside the widget) and it
-  // must keep running between the 180s pulls — but only while the window is
-  // actually on screen. Nobody needs a countdown animated at a minimized window.
+  // Own timer, deliberately separate from the poll effect: cheap, and it must
+  // keep running between the 180s pulls — but only while the window is actually
+  // on screen. Nobody needs a countdown animated at a minimized window.
   useEffect(() => {
-    if (!pageVisible) return;
+    if (!enabled || !pageVisible) return;
     setNowSec(Math.floor(Date.now() / 1000)); // re-zero: we may have been away for hours
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), USAGE_TICK_MS);
     return () => clearInterval(id);
-  }, [pageVisible]);
+  }, [enabled, pageVisible]);
 
   useEffect(() => {
+    if (!enabled) {
+      // Drop what we hold: turning the meter off and on again should show the
+      // endpoint's answer, not a snapshot from before it was switched off.
+      setInfo(null);
+      return;
+    }
     let alive = true;
     const pull = () => {
       // a pull is also the moment to re-zero the countdown clock: coming back
@@ -1808,19 +1915,23 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
       if (id) clearInterval(id);
       window.removeEventListener("focus", pull);
     };
-  }, [onError, pageVisible]);
+  }, [enabled, onError, pageVisible]);
 
-  if (!info || info.source === "unavailable" || info.limits.length === 0) return null;
-  // statusline = a local snapshot only as fresh as the last Claude Code session
-  const stale = info.source === "statusline";
+  // One gate for every host: a null `info` is what makes App skip the strip row
+  // and the footer row entirely, rather than painting an empty 26px band.
+  const ready = enabled && !!info && info.source !== "unavailable" && info.limits.length > 0;
+  return { info: ready ? info : null, nowSec };
+}
+
+/** The three full rows — what the sidebar used to carry, now the hover detail.
+ *  Unchanged from the sidebar version on purpose: this is the reading, and the
+ *  compact forms above it are only a summary of it. */
+function UsageRows({ info, nowSec }: { info: UsageInfo; nowSec: number }) {
   // no row has a live reset (endpoint dropped the field, or every window has
   // already rolled over) → no column at all, rather than a strip of blanks
   const anyEta = info.limits.some((l) => l.resets_at && l.resets_at > nowSec);
   return (
-    <div
-      className={"usage" + (stale ? " stale" : "")}
-      title={stale ? `Claude usage — statusline snapshot from ${new Date(info.fetched_at * 1000).toLocaleString()}` : undefined}
-    >
+    <div className="usage">
       {info.limits.map((l) => {
         const pct = Math.max(0, Math.min(100, Math.round(l.percent)));
         const tone = l.severity === "normal" ? "" : l.severity === "warning" ? " warn" : " over";
@@ -1842,6 +1953,171 @@ function UsageWidget({ onError }: { onError: (e: unknown) => void }) {
         );
       })}
     </div>
+  );
+}
+
+/** The meter: a compact trigger at rest, the full rows on hover.
+ *
+ *  `shape` is what it looks like, `side` is where the detail goes — the rail is
+ *  44px wide, so its tile carries no text at all and its panel flies right
+ *  instead of up. Both hosts of the "line" shape are the last row of their box,
+ *  so both drop upward. */
+function UsageMeter({ info, nowSec, shape, side }: {
+  info: UsageInfo;
+  nowSec: number;
+  shape: "line" | "tile";
+  side: "up" | "right";
+}) {
+  const [hovering, setHovering] = useState(false);
+  // A click PINS the panel open: the numbers are worth reading with the pointer
+  // somewhere else, and on the rail the panel is not big enough to park on.
+  const [pinned, setPinned] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const trigRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const armed = useRef<number | null>(null);
+  const shown = hovering || pinned;
+
+  useEffect(() => () => { if (armed.current) window.clearTimeout(armed.current); }, []);
+
+  // Clamp to the viewport on open, on window resize AND on a resize of the PANEL
+  // — the row count follows the plan, and a panel that grows after opening keeps
+  // the `top` computed for its old height, pushing its last row off the bottom
+  // edge (the CtxMenu lesson, same shape, same fix).
+  useLayoutEffect(() => {
+    if (!shown) { setPos(null); return; }
+    const place = () => {
+      const t = trigRef.current, p = popRef.current;
+      if (!t || !p) return;
+      const tr = t.getBoundingClientRect();
+      // offsetWidth/Height, not getBoundingClientRect: the rect is the PAINTED
+      // box and would be read through any transform the panel is wearing.
+      const pw = p.offsetWidth, ph = p.offsetHeight;
+      const m = 8;
+      const left = side === "right" ? tr.right + m : tr.left;
+      const top = side === "right" ? tr.top : tr.top - ph - m;
+      setPos({
+        left: Math.max(m, Math.min(left, window.innerWidth - pw - m)),
+        top: Math.max(m, Math.min(top, window.innerHeight - ph - m)),
+      });
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    if (popRef.current) ro.observe(popRef.current);
+    window.addEventListener("resize", place);
+    return () => { ro.disconnect(); window.removeEventListener("resize", place); };
+  }, [shown, side]);
+
+  useEffect(() => {
+    if (!pinned) return;
+    const onDown = (e: PointerEvent) => {
+      // The trigger's own click toggles `pinned` itself; closing here too would
+      // unpin and immediately re-pin.
+      if (trigRef.current?.contains(e.target as Node)) return;
+      setPinned(false);
+      setHovering(false);
+    };
+    // Bubble phase and NO stopPropagation: this panel is inert, so an Escape
+    // that also reaches something else is harmless — whereas swallowing it at
+    // the window would have taken Escape away from the terminal (vim, a prompt)
+    // for as long as the panel was pinned.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setPinned(false);
+      setHovering(false);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onDown, true);
+    };
+  }, [pinned]);
+
+  const arm = () => {
+    if (armed.current) window.clearTimeout(armed.current);
+    armed.current = window.setTimeout(() => setHovering(true), USAGE_HOVER_MS);
+  };
+  const disarm = () => {
+    if (armed.current) window.clearTimeout(armed.current);
+    armed.current = null;
+    setHovering(false);
+  };
+
+  // statusline = a local snapshot only as fresh as the last Claude Code session
+  const stale = info.source === "statusline";
+  const segs = info.limits.map((l) => {
+    const pct = Math.max(0, Math.min(100, Math.round(l.percent)));
+    return {
+      key: l.kind + "|" + l.label,
+      tick: usageTick(l),
+      pct,
+      tone: l.severity === "normal" ? "" : l.severity === "warning" ? " warn" : " over",
+    };
+  });
+  const worst = segs.reduce((a, b) => (b.pct > a.pct ? b : a), segs[0]);
+
+  return (
+    <>
+      <button
+        ref={trigRef}
+        type="button"
+        className={"usage-trig " + shape + (stale ? " stale" : "") + (pinned ? " pinned" : "")}
+        data-testid="usage-meter"
+        aria-label="Claude plan usage"
+        aria-expanded={shown}
+        title={
+          (stale
+            ? `Claude usage — statusline snapshot from ${new Date(info.fetched_at * 1000).toLocaleString()}`
+            : `Claude plan usage — ${worst.tick} at ${worst.pct}%`) + " · click to keep open"
+        }
+        onPointerEnter={arm}
+        onPointerLeave={disarm}
+        onFocus={() => setHovering(true)}
+        onBlur={() => setHovering(false)}
+        onClick={() => setPinned((v) => !v)}
+      >
+        {/* The flex container is this SPAN, never the button. WebKit shrink-
+            wraps a `<button>` that is itself a flex container without counting
+            its `overflow: hidden` children, so the box comes out too narrow and
+            the labels — the only shrinkable items — lose every pixel: bars and
+            percentages, no "5h"/"7d". Chrome sizes it correctly, which is why
+            the mock harness passed and the real app did not.
+            Today's rows laid ACROSS rather than down, which is why each segment
+            keeps the `usage-row` class: every severity rule in App.css is
+            written against it, so warn/over colour the line for free. */}
+        <span className={"usage-shape " + shape}>
+          {shape === "line"
+            ? segs.map((g) => (
+                <span className={"usage-row usage-seg" + g.tone} key={g.key}>
+                  <span className="usage-label">{g.tick}</span>
+                  <span className="usage-bar"><i style={{ width: `${g.pct}%` }} /></span>
+                  <span className="usage-pct">{g.pct}%</span>
+                </span>
+              ))
+            : segs.map((g) => (
+                <span className={"usage-row" + g.tone} key={g.key}>
+                  <span className="usage-bar"><i style={{ width: `${g.pct}%` }} /></span>
+                </span>
+              ))}
+        </span>
+      </button>
+      {shown && (
+        <div
+          ref={popRef}
+          className={"usage-pop" + (stale ? " stale" : "")}
+          // Off-screen until the first measurement lands, so the panel is never
+          // painted at 0,0 for a frame on its way to where it belongs.
+          style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: -9999 }}
+        >
+          <div className="usage-pop-head">
+            <span>Claude plan usage</span>
+            <span>{stale ? "statusline snapshot" : "live"}</span>
+          </div>
+          <UsageRows info={info} nowSec={nowSec} />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -2747,6 +3023,13 @@ function App() {
     setErr(m);
     invoke("log_event", { level: "error", msg: m }).catch(() => {});
   }, []);
+
+  // ONE poller for the Claude plan bars, whichever of the three hosts is
+  // showing them (Settings → Appearance → Usage meter). It lives up here rather
+  // than inside the meter because the placement setting decides where the meter
+  // MOUNTS, and a poller that moved with it would refetch on every change of
+  // mind — and because "off" has to reach the effect, not just the render.
+  const usage = useUsage(settings.usage_place !== "off", pageVisible, fail);
 
   // The message a FAILED refresh put in the banner, so a later successful one can
   // retract it — and ONLY it. A blanket clear here is not an option: refresh also
@@ -5269,6 +5552,11 @@ function App() {
   const navOverlayW = clampNav(settings.nav_width, 0, vw);
 
   return (
+    <div className="appwrap">
+    {/* `.app` stays exactly the four-column grid it was. The strip is its
+        SIBLING rather than a fifth row, because `.nav.overlay` is positioned
+        `top: 0; bottom: 0` against `.app` — inside it, a revealed sidebar would
+        cover the very thing the strip exists to keep on screen. */}
     <div className="app" style={{ gridTemplateColumns: gridCols }}>
       {/* ── activity rail ──
           ONE destination icon now (Places). The rail used to carry three lenses
@@ -5299,6 +5587,11 @@ function App() {
         {/* The same three-way menu as the footer's: with the sidebar hidden this
             is the ONLY way in, and a shortcut that silently answers one of the
             three questions is the inconsistency the menu exists to remove. */}
+        {/* Usage, when the rail is its host. Above the two buttons, so the
+            rail's actions stay together at the very bottom. */}
+        {settings.usage_place === "rail" && usage.info && (
+          <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="tile" side="right" />
+        )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
         <button className={"rail-icon" + (updateAvail ? " upd" : "")} data-track="settings" title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
       </nav>
@@ -5383,15 +5676,12 @@ function App() {
             <kbd>type</kbd> to filter · <kbd>↵</kbd> first match · <kbd>esc</kbd> hide · <kbd>⌘B</kbd> pin
           </div>
         )}
-        {/* Claude plan usage — sidebar-only by design: no rail affordance, it
-            rides out ⌘B inside the hidden nav (and keeps polling, one call/180s). */}
-        <UsageWidget onError={fail} />
-        {/* One footer row, three ways in (menu below). It no longer picks a
-            folder on click: "add a project" is a question with three answers
-            now, and the folder pick is only one of them. */}
-        <button className="add-footer with-icon" data-testid="add-menu-open" onClick={openAddMenu}>
-          <Icons.Plus size={13} /> Add project<span className="add-caret">▾</span>
-        </button>
+        {/* The Claude plan bars and the "+ Add project" footer BOTH used to end
+            the sidebar here. The bars moved out: sidebar-only stopped meaning
+            "always visible" the day the sidebar started auto-hiding, and they
+            now live wherever `usage_place` says. The button went for good — the
+            rail's folder-plus (`add-menu-rail`) opens the identical three-way
+            menu, and the project context menu carries "Add existing…". */}
         <div className="nav-resizer" onMouseDown={onResize} />
       </aside>
 
@@ -5447,11 +5737,26 @@ function App() {
                     ) : null}
                   </>
                 )}
-                {showBranch && (
-                  <span className={"branch" + (!selected.is_main && selected.branch !== selected.slug ? " hi" : "")}>
-                    {!selected.is_main && selected.branch !== selected.slug ? "↗ " : ""}{selected.branch}
-                  </span>
-                )}
+                {/* On a worktree the chip IS the switcher now. `showBranch` is
+                    false whenever the branch equals the slug — the common case,
+                    and one that would have left most places with nothing to
+                    click — so the button stays and collapses to its icon there,
+                    with the name beside it standing for the branch. `(main)`
+                    keeps a plain chip: switching the branch under the main
+                    checkout is not something this row should offer. */}
+                {selected.is_main
+                  ? showBranch && <span className="branch">{selected.branch}</span>
+                  : (
+                    <HeaderBranch
+                      key={sel.repo + "|" + sel.slug}
+                      repo={sel.repo}
+                      slug={sel.slug}
+                      branch={selected.branch}
+                      showText={showBranch}
+                      onSwitch={doSwitch}
+                      onError={fail}
+                    />
+                  )}
                 {/* squeezed window: the badges go, not the name — every fact
                     here is also in the nav row.
                     No "live" badge here: the controls carry one already (it
@@ -5661,21 +5966,19 @@ function App() {
                   </div>
                 )}
 
-                <footer className="statusbar">
-                  <div className="switch-wrap">
-                    {!selected.is_main && (
-                      <>
-                        <span className="sb-label" title={`on ${selected.branch ?? "?"}`}><Icons.GitBranch size={13} /></span>
-                        <BranchSwitcher key={sel.repo + "|" + sel.slug} repo={sel.repo} slug={sel.slug}
-                          onSwitch={doSwitch} onError={fail} />
-                      </>
-                    )}
-                  </div>
-                  <div className="sb-facts">
-                    {selected.tmux_session.up ? <>tmux <span className="ok">●</span> up · {selected.tmux_session.name}</> : <>tmux <span className="off">○</span> down</>}
-                    {selected.claude_session_present ? " · pane0 claude" : ""}
-                  </div>
-                </footer>
+                {/* What is left of the status bar. It used to carry two things
+                    and now carries at most one: the branch switcher moved into
+                    the header chip (where it is reachable from Home-less places
+                    and from every usage placement), and the tmux facts were
+                    deleted outright — "up" is the nav dot, "pane0 claude" is the
+                    agent dot, and the session name is the prefix plus the slug
+                    already in the header. So the row exists only when it is the
+                    usage meter's host, and only when there is usage to show. */}
+                {settings.usage_place === "footer" && usage.info && (
+                  <footer className="statusbar">
+                    <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="line" side="up" />
+                  </footer>
+                )}
               </>
             ) : (
               <div className="briefing">
@@ -6269,6 +6572,15 @@ function App() {
           </CtxMenu>
         );
       })()}
+    </div>
+    {/* The window-wide host: under rail, sidebar, terminal and dock alike, so it
+        survives ⌘B and is the only placement that is also there on Home. No
+        `info`, no row — an empty 26px band would be worse than no band. */}
+    {settings.usage_place === "strip" && usage.info && (
+      <div className="usage-strip">
+        <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="line" side="up" />
+      </div>
+    )}
     </div>
   );
 }

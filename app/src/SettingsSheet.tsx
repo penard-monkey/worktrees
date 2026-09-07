@@ -600,6 +600,35 @@ export function SettingsSheet({
               ))}
             </div>
           </section>
+
+          {/* The Claude plan bars used to be sidebar furniture, which stopped
+              meaning "on screen" once the sidebar started auto-hiding. Three
+              hosts now, and a real off switch — "off" stops the poll itself. */}
+          <section className="setting">
+            <label>Usage meter</label>
+            <div className="seg seg-plain">
+              {([
+                ["strip", "Strip"],
+                ["footer", "Footer"],
+                ["rail", "Rail"],
+                ["off", "Off"],
+              ] as const).map(([v, label]) => (
+                <button
+                  key={v}
+                  className={settings.usage_place === v ? "on" : ""}
+                  onClick={() => onChange({ usage_place: v })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="hint">
+              Where the Claude plan bars live. Strip is a row across the bottom of the window, so it
+              stays put through ⌘B and is the only one that also shows on Home. Footer puts them
+              under the terminal, on a place only. Rail is a tile beside the ＋ and ⚙ icons. Hover
+              any of them for the full windows and how long until each resets.
+            </div>
+          </section>
           </>}
 
           {cat === "behavior" && <>

@@ -25,12 +25,18 @@ button { cursor: pointer; }
 .caret, .tree-caret { display: flex; align-items: center; justify-content: center; }
 .pop-item .check { display: flex; align-items: center; flex: none; }
 
+/* The window: the four-column grid, and under it the optional usage strip.
+   Wrapping rather than adding a grid ROW is deliberate — `.nav.overlay` is
+   positioned against `.app`, so a strip inside it would be covered by the
+   sidebar the moment you revealed it. */
+.appwrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .app {
   display: grid;
   /* Fallback only — App.tsx always sets this inline (the nav column disappears
      on ⌘B). Four columns: rail, nav, .space (terminal + dock), rail. */
   grid-template-columns: var(--rail-w) var(--nav-w) minmax(0, 1fr) var(--rail-w);
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   background: var(--bg-abyss);
   color: var(--txt);
   /* The anchor for `.nav.overlay`. An unpinned sidebar is absolutely positioned
@@ -177,14 +183,12 @@ button { cursor: pointer; }
 .nav-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: var(--s2); }
 
 /* Claude plan usage — ambient, so it reads as chrome: micro type, hairline
-   bars, no heading. Colors follow the endpoint's own `severity`. */
-.usage {
-  display: flex; flex-direction: column; gap: 3px;
-  padding: var(--s2) var(--s3);
-  border-top: 1px solid var(--line);
-}
+   bars, no heading. Colors follow the endpoint's own `severity`.
+   The three-row block is the hover DETAIL now, so it carries no padding or
+   border of its own: `.usage-pop` is its only host and supplies both. */
+.usage { display: flex; flex-direction: column; gap: 3px; }
 /* statusline snapshot: a local file only as fresh as the last Claude session */
-.usage.stale { opacity: 0.55; }
+.usage.stale, .usage-trig.stale, .usage-pop.stale { opacity: 0.55; }
 .usage-row {
   display: flex; align-items: center; gap: var(--s2);
   font-size: var(--fs-micro); color: var(--txt-dim);
@@ -220,15 +224,68 @@ button { cursor: pointer; }
   font-variant-numeric: tabular-nums;
 }
 
-.add-footer {
-  margin: 0; padding: var(--s2) var(--s3); text-align: left;
-  background: var(--bg-tree); color: var(--txt-dim); border: 0; border-top: 1px solid var(--line);
-  font-size: var(--fs-label);
+/* ── the meter: a compact trigger at rest, the rows above on hover ──
+   Three hosts (Settings → Appearance → Usage meter), two shapes. The strip is
+   the window-wide row; the footer is the same shape under the terminal; the
+   rail gets the tile, the only form that fits 44px. */
+.usage-strip {
+  flex: none; display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s1) var(--s3);
+  border-top: 1px solid var(--line); background: var(--bg-panel);
 }
-.add-footer:hover { color: var(--txt-hi); }
-/* The menu affordance: a project can arrive three ways, and the caret is what
-   says this button asks rather than acts. */
-.add-caret { margin-left: auto; padding-left: var(--s2); font-size: var(--fs-micro); }
+/* The button is a plain box; `.usage-shape` inside it is the flex container.
+   NOT `display: flex` on the button itself — WebKit shrink-wraps a flex-
+   container button without its `overflow: hidden` children's width, and the
+   labels then shrink to 0: bars and percentages, no "5h"/"7d". Chrome sizes
+   it correctly, which is why the mock harness passed and the real app did not
+   (reproduced in headless WebKit: label width 0, button 201px vs 321px). */
+.usage-trig {
+  display: block; white-space: nowrap;
+  background: transparent; border: 0; border-radius: var(--r-sm);
+  color: inherit; font: inherit; text-align: left;
+}
+.usage-trig.line { padding: 2px var(--s2); }
+.usage-trig.tile { width: 32px; height: 32px; padding: 0 7px; }
+.usage-trig:hover, .usage-trig.pinned { background: var(--bg-elev); }
+.usage-shape { display: flex; align-items: center; }
+.usage-shape.line { gap: var(--s3); }
+.usage-shape.tile { flex-direction: column; justify-content: center; gap: 3px; height: 100%; }
+/* Each segment keeps `usage-row`, so every severity rule above still applies —
+   the compact line is today's rows laid across, not a second implementation.
+   `usage-seg`, NOT `seg`: the Settings segmented control owns `.seg`, and the
+   first cut of this line borrowed the name. Every segment rendered as a
+   bordered, overflow-hidden pill, and `overflow: hidden` made each one a flex
+   item that could shrink to nothing — which in a narrow window it did: labels
+   gone, percentages clipped. Invisible in the harness at 1280px. */
+.usage-row.usage-seg { gap: 6px; }
+/* The label can never be the shrink victim again: it is 2–5 characters, and
+   the 6em ellipsis cap on `.usage-label` still bounds a long model name. */
+.usage-row.usage-seg > .usage-label { flex: none; }
+/* Fixed, never flex: three bars sharing one row must not resize each other as
+   the percentages move, or the strip twitches on every 180s poll.
+   `width` as well as the basis, and it is not redundant: an empty span whose
+   size comes ONLY from `flex-basis` contributes nothing to WebKit's intrinsic
+   width for the button around it, so the button came out exactly 120px (three
+   bars) too narrow and its hover wash stopped mid-line. An explicit width is
+   counted by every engine (headless WebKit: 201px → 321px, Chrome's number). */
+.usage-row.usage-seg > .usage-bar { flex: 0 0 40px; width: 40px; min-width: 0; }
+.usage-row.usage-seg > .usage-pct { min-width: 2.4em; }
+.usage-shape.tile > .usage-row { width: 100%; }
+.usage-shape.tile .usage-bar { min-width: 0; }
+.usage-pop {
+  position: fixed; z-index: 45; width: 250px;
+  padding: var(--s2) var(--s3);
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+  /* The panel is measured before it is placed; nothing may point at it while it
+     is still parked off-screen. */
+  pointer-events: none;
+}
+.usage-pop-head {
+  display: flex; justify-content: space-between; gap: var(--s3);
+  margin-bottom: var(--s2);
+  font-size: var(--fs-micro); color: var(--txt-mute);
+}
 
 .nav-resizer {
   position: absolute; top: 0; right: -2px; width: 4px; height: 100%;
@@ -574,6 +631,28 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   background: var(--bg-elev); padding: 1px var(--s2); border-radius: var(--r-sm);
 }
 .topbar .branch.hi { color: var(--branch-hi); }
+/* The chip as the branch SWITCHER. `.branch-wrap` takes over the chip's own
+   width budget so the popover has something stable to anchor to, and the button
+   inherits the rest of `.topbar .branch`. A place whose branch equals its slug
+   has no name to show, so the button is then the icon and the caret alone. */
+.branch-wrap { position: relative; display: flex; align-items: center; flex: 0 1 auto; min-width: 0; max-width: 45%; }
+.topbar .branch.btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 100%; border: 0; font: inherit; font-size: var(--fs-label);
+  transition: color var(--dur-fast), background var(--dur-fast);
+}
+.topbar .branch.btn:hover { color: var(--txt-hi); background: var(--bg-elev); }
+.branch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-caret { flex: none; font-size: var(--fs-micro); color: var(--txt-mute); }
+.branch-pop {
+  /* fixed, so `.identity`'s `overflow: hidden` cannot clip the combo's list
+     away — see the note in HeaderBranch. App.tsx places it. */
+  position: fixed; z-index: 41;
+  width: 260px; padding: var(--s2);
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+}
+.branch-pop .combo { flex: 1 1 auto; width: 100%; }
 .status-cluster { display: flex; align-items: center; gap: var(--s3); flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: var(--fs-meta); }
 .status-cluster .s { display: inline-flex; align-items: center; gap: 3px; }
 .status-cluster .ok { color: var(--ok); }
@@ -1640,13 +1719,15 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 
 /* status bar */
+/* What is left of the status bar: one row under the terminal, rendered only
+   when it is the usage meter's host. The branch switcher moved to the header
+   chip and the tmux facts were deleted (every one of them is said elsewhere:
+   the nav dot, the agent dot, and the header's own name). */
 .statusbar {
   display: flex; align-items: center; gap: var(--s3); min-width: 0;
-  padding: var(--s2) var(--s3); border-top: 1px solid var(--line); background: var(--bg-panel);
+  padding: var(--s1) var(--s3); border-top: 1px solid var(--line); background: var(--bg-panel);
   font-size: var(--fs-meta); color: var(--txt-dim);
 }
-.switch-wrap { display: flex; align-items: center; gap: var(--s2); flex: 1 1 auto; min-width: 0; }
-.sb-label { color: var(--txt-dim); flex: none; }
 .switchto {
   flex: 0 1 200px; min-width: 0;
   background: var(--bg-input); color: var(--txt); border: 1px solid var(--line);
@@ -1654,7 +1735,9 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .switchto:focus { border-color: var(--line-strong); }
 
-/* branch combobox — opens UPWARD; the status bar is the last row of the window */
+/* branch combobox. `.combo-pop` opens UPWARD by default (a habit from the
+   status bar it used to live in); every current host — the header's branch
+   popover and the New-worktree dialog — passes drop="down". */
 .combo { position: relative; flex: 0 1 240px; min-width: 0; display: flex; }
 .combo .switchto { flex: 1 1 auto; padding-right: 18px; }
 /* The ▾ is the only thing that says this field HAS a list — it opens on focus,
@@ -1701,13 +1784,6 @@ body.dragging .menu-catch { pointer-events: none; }
 .combo-item.create b { color: var(--branch-hi); font-weight: var(--fw-med); }
 .combo-note { padding: var(--s1) var(--s2); color: var(--txt-mute); font-size: var(--fs-meta); }
 /* the tmux facts truncate rather than shove the switcher out of the bar */
-.sb-facts {
-  margin-left: auto; flex: 0 1 auto; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.sb-facts .ok { color: var(--ok); }
-.sb-facts .off { color: var(--txt-mute); }
 
 /* Home (empty state): logo + open button, then the resume list */
 .briefing { margin: auto; width: min(560px, 82%); padding: var(--s6) 0; }
