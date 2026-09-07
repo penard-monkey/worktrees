@@ -14,6 +14,7 @@ are archived beside its summary as `planning.tar.gz` in the repository.
 
 | Date | Session |
 |---|---|
+| [2026-09-07](2026-09-07-esc-modals/summary.html) | Escape dismisses every dialog even with the terminal focused — xterm stops propagation of each keydown it handles and a WKWebView click never moves focus, so a dialog opened from a menu never heard its own Escape and the ESC went to tmux; one capture-phase stack (`useEscape`) now owns the key for every modal surface, ordered by activation so stacked surfaces close one at a time |
 | [2026-09-07](2026-09-07-usage-meter-home/summary.html) | the Claude usage bars get a home you choose — a window-wide strip, the terminal footer, or a rail tile, behind Settings → Appearance — the branch chip becomes the switcher and the footer's tmux facts go; and a bug the Chrome harness cannot see: WebKit shrink-wraps a `<button>` flex container without its hidden-overflow children and counts nothing for a span sized only by `flex-basis`, reproduced and fixed in headless WebKit |
 | [2026-09-05](2026-09-05-ui-overhaul/summary.html) | UI overhaul — one sidebar control (auto-hide overlay), Settings modal + compact notes + chord guard, local usage metrics, unsent-prompt ✎ |
 | [2026-09-02](2026-09-02-agent-brief/summary.html) | agents — brief, `--name`, agent state in MCP; strays in `ls`/doctor |

@@ -5,6 +5,16 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **A drift guard for the Escape stack.** Every modal surface must call
+  `useEscape`; a new dialog written with its own `window.addEventListener(
+  "keydown")` regresses to the terminal-focus hole silently (#194's branch-chip
+  popover did exactly that, a day before #196). An `esc-check.mjs` in the
+  `dnd-check` family could parse the sources for `.scrim` / `.modal-scrim` /
+  `.menu-catch` render sites and fail on any component that paints one without
+  a `useEscape(` call — and on any bare Escape `keydown` listener outside the
+  documented exceptions (the inert usage panel, the inline rename editors).
+  _From: [2026-09-07 esc-modals](docs/sessions/2026-09-07-esc-modals/summary.md)_
+
 - **A WebKit probe as a check script.** The mock harness is Chrome; the app is
   WKWebView, and a `<button>` flex container sized differently enough there to
   drop every label in the usage meter while every gate stayed green. The
