@@ -5,6 +5,25 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **A WebKit probe as a check script.** The mock harness is Chrome; the app is
+  WKWebView, and a `<button>` flex container sized differently enough there to
+  drop every label in the usage meter while every gate stayed green. The
+  session's Playwright-WebKit probe (`addStyleTag` a candidate rule, re-measure,
+  edit only when the number moves) should become `app/scripts/webkit-check.mjs`
+  — or at minimum a recipe in `docs/` — so the next flex-inside-a-button change
+  has somewhere to run.
+  _From: [2026-09-07 usage-meter-home](docs/sessions/2026-09-07-usage-meter-home/summary.md)_
+
+- **Cut the usage-meter placements David does not keep.** Strip / Footer / Rail
+  shipped together so he can live with each; once one wins, remove the others
+  (keep `Off`) and the `.statusbar` row can go for good if Footer loses.
+  _From: [2026-09-07 usage-meter-home](docs/sessions/2026-09-07-usage-meter-home/summary.md)_
+
+- **The usage popover says only live / snapshot.** A "polled 2m ago" line (the
+  design canvas had one) would tell a stale bar from a fresh one at a glance;
+  `fetched_at` is already in the payload.
+  _From: [2026-09-07 usage-meter-home](docs/sessions/2026-09-07-usage-meter-home/summary.md)_
+
 - **Filter Enter selects the first VISIBLE row, so a match inside a collapsed
   tier group selects nothing and just closes the overlay.** Deliberate: the
   DOM order already encodes sort/collapse/hidden tiers and a second ordering
@@ -759,15 +778,6 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   bats shims only; one real app "New" on a lockfile repo to confirm pane
   layout + hint.
   _From: [2026-08-01 single-pane-new session](docs/sessions/2026-08-01-single-pane-new/summary.md)_
-
-- **Smoke-test the usage widget on a real launch.** v0.7.0's nav-footer
-  bars are verified against the endpoint via curl and in the mock harness,
-  but the built app's Keychain path (one-time prompt for "Claude
-  Code-credentials") hasn't been exercised end-to-end. Now also covers the
-  reset countdowns: `resets_at` has only ever been read through the tooltip on
-  the real oauth path, so the live `2d 5h` has never been seen outside the mock.
-  _From: [2026-08-02 usage-widget session](docs/sessions/2026-08-02-usage-widget/summary.md),
-  [2026-08-06 usage-countdown session](docs/sessions/2026-08-06-usage-countdown/summary.md)_
 
 - **CI has never run against several merged changes.** PR #82 merged while
   GitHub's queue was backed up and no workflow run was ever created, so
