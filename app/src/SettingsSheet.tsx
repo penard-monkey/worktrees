@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -426,20 +427,10 @@ export function SettingsSheet({
     setResetArmed(false);
     onReset();
   };
-  useEffect(() => {
-    if (!open) return;
-    // Escape belongs to whatever is ON TOP. What's new opens FROM here and
-    // stacks over it (`.modal-scrim.stacked`), and without this both listeners
-    // fire on one press: the notes would close and Settings would vanish from
-    // under them. Same DOM test the app's chord guard uses, for the same
-    // reason — a surface added later is covered without a new flag.
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || document.querySelector(".modal-scrim.stacked")) return;
-      onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  // Escape belongs to whatever is ON TOP. What's new opens FROM here and
+  // stacks over it; the Escape stack orders by activation, so the notes take
+  // the press and Settings stays put until they are gone.
+  useEscape(onClose, open);
 
   if (!open) return null;
 

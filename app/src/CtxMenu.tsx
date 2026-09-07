@@ -4,7 +4,8 @@
 // clamping and the three dismissal paths — so a second menu cannot drift out of
 // visual step with the first ones. The items are plain `.pop-item` buttons the
 // caller passes as children, styled by App.css.
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEscape } from "./useEscape";
 
 // Fixed at the cursor, clamped to the viewport, Esc / click-away /
 // right-click-away all close. Top-level (NOT nested in a component body) so its
@@ -34,11 +35,7 @@ export function CtxMenu({ x, y, onClose, children }: { x: number; y: number; onC
     window.addEventListener("resize", clamp);
     return () => { ro.disconnect(); window.removeEventListener("resize", clamp); };
   }, [x, y]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useEscape(onClose);
   return (
     <>
       <div className="menu-catch" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProfilesInfo } from "./ProfilesPanel";
@@ -185,12 +186,7 @@ export function ProjectSheet({
       .catch((e) => note(`could not read AI profiles: ${e}`));
   }, [open, refresh, root]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useEscape(onClose, open);
 
   // Every action shares this shape, copied from the CLI-update block in
   // SettingsSheet INCLUDING the hazard it already solved: state is re-read in

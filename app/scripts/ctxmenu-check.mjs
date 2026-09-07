@@ -21,18 +21,19 @@ import { transformWithEsbuild } from "vite";
 const SRC = process.argv[2] || fileURLToPath(new URL("../src/CtxMenu.tsx", import.meta.url));
 const raw = fs.readFileSync(SRC, "utf8");
 
-// Drop the react import (the hooks arrive through `env`) and un-export the
-// component so it can be returned from the factory. Everything else is verbatim.
+// Drop the react and useEscape imports (the hooks arrive through `env`) and
+// un-export the component so it can be returned from the factory. Everything
+// else is verbatim.
 const body = raw
   .split("\n")
-  .filter((l) => !/^\s*import\s.*from\s+"react"/.test(l))
+  .filter((l) => !/^\s*import\s.*from\s+"(react|\.\/useEscape)"/.test(l))
   .join("\n")
   .replace(/export function CtxMenu/, "function CtxMenu");
 if (!body.includes("function CtxMenu")) throw new Error("CtxMenu not found in " + SRC);
 
 const wrapped = `
 export function build(env: any) {
-  const { useEffect, useLayoutEffect, useRef, useState, h, F } = env;
+  const { useEffect, useLayoutEffect, useRef, useState, useEscape, h, F } = env;
 ${body}
   return { CtxMenu };
 }`;
@@ -84,6 +85,9 @@ function mount({ x, y, vw, vh, w, h: h0 }) {
     useState: (init) => [pos, (next) => { pos = typeof next === "function" ? next(pos) : next; }],
     useLayoutEffect: (fn) => { const c = fn(); if (c) cleanups.push(c); },
     useEffect: (fn) => { const c = fn(); if (c) cleanups.push(c); },
+    // Escape is the app-level stack's business (useEscape.ts); the clamp
+    // under test never touches it.
+    useEscape: () => {},
     h: (...a) => ({ tag: a[0] }),
     F: "fragment",
   };
