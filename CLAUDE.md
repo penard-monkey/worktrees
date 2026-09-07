@@ -282,6 +282,29 @@ is invisible to the bats suite — there is no fake claude. Re-run
   small on the first frame. `app/scripts/ctxmenu-check.mjs` evaluates the real
   CtxMenu source under DOM stubs and fails on the pre-fix version (same
   slice-the-real-source shape as `race-check.mjs`).
+- **The mock harness is CHROME; the app is WKWebView, and WebKit sizes a
+  `<button>` on its own rules.** The usage meter shipped with bars and
+  percentages and NO labels in the real app after every gate and the harness
+  passed at 1280px. Two WebKit-only gaps, both inside a `<button>`: a button
+  that is itself a flex container is shrink-wrapped WITHOUT its
+  `overflow: hidden` children, so those (the only shrinkable items) go to 0px;
+  and an empty span sized only by `flex-basis` contributes nothing to the
+  button's intrinsic width — three 40px bars came out as 120px missing. Make
+  an inner span the flex container, pin short labels with `flex: none`, and
+  give a basis-sized bar a real `width` too. Do not reason about it — measure
+  it: headless Playwright WebKit against the mock (`npm i playwright &&
+  playwright install webkit` in a scratch dir), `addStyleTag` a candidate
+  rule, re-measure, and edit only when the number moves (201px → 321px, which
+  is Chrome's number). Anything sized by flex inside a button needs that probe.
+- **grep the sheet before naming a class, and never autofocus inside an
+  `overflow: hidden` ancestor.** `.seg` already meant the Settings segmented
+  control (border, hidden overflow, `fit-content`), and reusing it for the
+  compact usage segments made bordered pills that could shrink to nothing.
+  Separately, a popover positioned inside `.identity` was clipped to the
+  header's 17px and its `autoFocus` SCROLLED that hidden-overflow box 34px,
+  pushing the place name off the header: fixed positioning from the anchor's
+  rect plus `focus({ preventScroll: true })`. Both read fine as rects; only
+  `elementFromPoint` and `scrollTop` told the truth.
 - **A synthetic pointer drag bypasses hit-testing on the way IN.** Dispatching
   `pointerdown` on a row starts a drag even when a full-screen overlay
   (`.menu-catch`) is up — which a real press could never do, because it would
