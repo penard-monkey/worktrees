@@ -131,6 +131,15 @@ export type Settings = {
   // shows the pair as one three-way control (Pinned / Auto-hide / Hidden).
   nav_pinned: boolean;
   nav_hover_reveal: boolean;
+  // ── where the Claude plan bars live ─────────────────────────────────────
+  // They used to be sidebar-only, which the auto-hiding sidebar turned into
+  // "usually not on screen". Three hosts now, all of them always visible:
+  // "strip" is a row across the bottom of the WINDOW (so it survives ⌘B and is
+  // the one placement that also shows on Home), "footer" is the row under the
+  // terminal (a selected place only), "rail" is a tile in the left rail.
+  // "off" is a real off switch: App stops calling `claude_usage` entirely,
+  // rather than hiding a component that keeps polling.
+  usage_place: "strip" | "footer" | "rail" | "off";
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal"; // last-used dock tab
@@ -253,6 +262,7 @@ export const DEFAULTS: Settings = {
   nav_guides: true,
   nav_pinned: false,
   nav_hover_reveal: true,
+  usage_place: "strip",
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
