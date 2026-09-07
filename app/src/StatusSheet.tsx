@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { Markdown } from "./markdown";
@@ -490,12 +491,7 @@ export function StatusSheet({
   declared: { status_report?: StatusReport | null } | null;
   onReport: (r: StatusReport) => void;
 }) {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useEscape(onClose, open);
 
   if (!open) return null;
 

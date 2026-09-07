@@ -132,6 +132,16 @@ is invisible to the bats suite — there is no fake claude. Re-run
 - **GUI launches get launchd's bare PATH** (no homebrew → no tmux).
   `fixup_gui_path()` in lib.rs resolves the login-shell PATH at startup —
   don't add subprocess calls that assume PATH before it runs.
+- **xterm STOPS PROPAGATION of every keydown it handles, and a WKWebView click
+  does not move focus.** So a `window` bubble-phase key listener never hears a
+  key pressed while the terminal has focus — Escape on a dialog opened from a
+  menu went to tmux and the dialog stayed, for every dialog that did not focus
+  an input of its own. Modal Escape lives in `useEscape.ts`: one CAPTURE
+  listener plus a stack ordered by activation, so the top surface takes the
+  key and the pty never sees it. Any new dialog, sheet, menu or popover calls
+  `useEscape`; do not add another `addEventListener("keydown")`. The Chrome
+  extension's synthetic key press did NOT reach the page here — verify with a
+  `KeyboardEvent` dispatched at the focused element, and read `escapeDepth()`.
 - **Components defined inside App() remount every render** (new identity) —
   anything with local state or input focus goes at module scope with props.
 - The mock harness (`pnpm dev:mock`, `app/src/mock/install.ts`) must track

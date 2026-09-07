@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { CtxMenu } from "./CtxMenu";
+import { useEscape } from "./useEscape";
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
@@ -462,13 +463,9 @@ function WhatsNewModal({ version, notes, manual, onClose }: {
 }) {
   const sections = useMemo(() => parseNotes(notes), [notes]);
   const [open, setOpen] = useState<Set<string>>(() => new Set());
-  // Escape closes the notes, and only the notes — SettingsSheet's own listener
-  // stands down while this one is up (it tests for `.modal-scrim.stacked`).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Escape closes the notes, and only the notes — this opens FROM Settings and
+  // so sits above it on the Escape stack (see useEscape).
+  useEscape(onClose);
   // Only entries that HAVE a paragraph can open, so "Show details" is measured
   // against those — otherwise the label would flip to "Hide details" for a set
   // of notes where nothing ever opened.
@@ -696,6 +693,9 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, o
   useEffect(() => {
     if (open) inputRef.current?.focus();
   }, [open]);
+  // On the window, not the input: focus can wander to a row, and the terminal
+  // underneath must not get the key either way.
+  useEscape(onClose, open);
 
   // keep the highlighted row in view as Arrow keys move it
   useEffect(() => {
@@ -722,9 +722,6 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, o
       e.preventDefault();
       const it = results[hi];
       if (it) pick(it);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onClose();
     }
   };
 
@@ -1137,6 +1134,10 @@ function BranchCombo({
   // that is the verdict line, i.e. the answer you typed the branch to get.
   const useless = options.length === 1 && !options[0].create && options[0].branch === q;
   const showPop = open && !useless;
+  // Only a VISIBLE pop owns Escape: while it shows, it is above the dialog
+  // hosting this field on the Escape stack, so one press closes the list and
+  // not the dialog; once it is gone the dialog gets the next press.
+  useEscape(() => setOpen(false), showPop);
 
   const commit = (branch: string) => {
     const b = branch.trim();
@@ -1170,14 +1171,6 @@ function BranchCombo({
       if (!showPop) { show(); return; }
       const d = e.key === "ArrowDown" ? 1 : -1;
       setHi((i) => (options.length ? (i + d + options.length) % options.length : 0));
-      return;
-    }
-    if (e.key === "Escape" && showPop) {
-      // Only a VISIBLE pop is closed here, and the event stops: a dialog hosting
-      // this field must not also take the same Escape as "cancel".
-      e.preventDefault();
-      e.stopPropagation();
-      setOpen(false);
       return;
     }
     if (e.key === "Enter") {
@@ -1326,18 +1319,16 @@ function HeaderBranch({ repo, slug, branch, showText, onSwitch, onError }: {
     if (popRef.current) ro.observe(popRef.current);
     window.addEventListener("resize", place);
     popRef.current?.querySelector("input")?.focus({ preventScroll: true });
-    // The combo owns Escape while its LIST is showing (it stops the event, so
-    // this never sees that press); the next one reaches here and closes the
-    // popover. Two presses with the list open, one without — and never a bare
-    // field left behind with no key to dismiss it.
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
-    window.addEventListener("keydown", onKey);
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", place);
-      window.removeEventListener("keydown", onKey);
     };
   }, [open]);
+  // The combo owns Escape while its LIST is showing (it sits above this entry
+  // on the Escape stack); the next press reaches here and closes the popover.
+  // Two presses with the list open, one without — and never a bare field left
+  // behind with no key to dismiss it.
+  useEscape(() => setOpen(false), open);
 
   // Reset when the place changes — a half-typed branch belongs to the place it
   // was typed in. (App also keys this component by place, so this is the belt;
@@ -1511,11 +1502,7 @@ function NewPlaceDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per open
   }, [project]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  useEscape(() => { if (!busy) onClose(); });
 
   // core strips a leading origin/ before anything else (ops.rs `strip_origin`)
   const b = branch.trim().replace(/^origin\//, "");
@@ -2322,11 +2309,7 @@ function RemoveDialog({ place, busy, error, onConfirm, onClose }: {
 }) {
   const [delBranch, setDelBranch] = useState(false);
   const [force, setForce] = useState(false);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  useEscape(() => { if (!busy) onClose(); });
   // The force checkbox only RENDERS while the place is dirty, but `force` is
   // this component's state and the component stays mounted across refresh ticks
   // — so a tree that gets committed underneath an open dialog would hide the
@@ -2466,11 +2449,7 @@ function NewProjectDialog({ defaultLocation, busy, error, onBrowse, onCreate, on
   const [loc, setLoc] = useState(defaultLocation);
   const nameRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => { nameRef.current?.focus(); }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !busy) onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  useEscape(() => { if (!busy) onClose(); });
   const trimmedName = name.trim();
   const trimmedLoc = loc.trim().replace(/\/+$/, "");
   const problem = nameProblem(trimmedName);
@@ -2539,11 +2518,7 @@ function ImportPicker({ list, loading, error, known, onPick, onClose }: {
   onPick: (p: HubProject) => void;
   onClose: () => void;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useEscape(onClose);
   const projects = list?.projects ?? [];
   return (
     <div className="scrim scrim-center" onClick={onClose}>
@@ -2631,15 +2606,11 @@ function SyncModal({ dir, project, adopt, preview, loading, busy, error, live, d
   onConfirm: () => void;
   onClose: () => void;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // Esc cannot cancel a transfer that is already running — the rsync is not
-      // ours to stop, and a modal that vanishes mid-apply hides what happened.
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  // Esc cannot cancel a transfer that is already running — the rsync is not
+  // ours to stop, and a modal that vanishes mid-apply hides what happened. The
+  // key is still SWALLOWED (the entry stays on the stack), so it does not fall
+  // through to a sheet underneath.
+  useEscape(() => { if (!busy) onClose(); });
 
   const plan = preview?.plan;
   const deletes = plan?.deletes ?? 0;

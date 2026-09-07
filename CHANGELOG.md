@@ -29,6 +29,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   three-way add menu the footer button did. The status bar row now appears only
   when it is hosting the usage meter.
 
+### Fixed
+- **Escape dismisses every dialog, even with the terminal focused.** xterm stops
+  propagation of each keydown it handles, so a dialog opened while the terminal
+  held the keyboard (a click on a button does not move focus in WKWebView)
+  never heard Escape — the key went to tmux instead and the dialog stayed.
+  Every modal surface now shares one capture-phase Escape stack
+  (`useEscape`): the topmost surface takes the key, the terminal never sees
+  it, and stacked surfaces (What's new over Settings, the branch list inside
+  New worktree) close one at a time.
+
 ## [0.21.0] - 2026-09-05
 
 ### Added
