@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **The afterglow's reach is yours to set.** The purple dot that marks a place
+  where Claude finished used to fade out over a fixed 12 hours in three fixed
+  steps. Settings → Navigation → Afterglow now offers a horizon from one hour
+  to a week and two to six brightness steps, spaced geometrically so the fresh
+  end keeps its resolution however far the tail is stretched. The first step
+  stays pinned at 15 minutes — it is the "go look now" window, and the one that
+  lights the project folder — and the hint prints the boundaries you have
+  actually chosen.
+
 ## [0.22.0] - 2026-09-07
 
 ### Added

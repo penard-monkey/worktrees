@@ -3,6 +3,7 @@
 // Every visual setting is a CSS custom property, so applying settings is just
 // variable assignment — no component re-render logic.
 import { invoke } from "@tauri-apps/api/core";
+import { clampSteps, snapHorizon } from "./afterglow";
 
 // Shippable themes: each id is a [data-theme] color map in tokens.css.
 // "system" follows macOS appearance and resolves to the Tokyo Night pair.
@@ -121,6 +122,13 @@ export type Settings = {
   density: "comfortable" | "compact";
   nav_width: number; // 220–460, further capped by the viewport (see fitLayout)
   nav_guides: boolean; // draw the tree plumb lines in the nav (data-guides on <html>)
+  // ── the afterglow dot's decay ───────────────────────────────────────────
+  // How long the purple "Claude finished here" ember stays lit, and in how many
+  // discrete brightness steps. The FIRST boundary is not a setting — it is
+  // pinned at 15 minutes (afterglow.ts `DONE_FIRST_SECS`), because tier 1 is
+  // also what lights the project folder. See `doneBounds` for the geometry.
+  done_horizon_secs: number; // a DONE_HORIZONS member — 1h..7d, snapped on load
+  done_steps: number; // DONE_STEPS_MIN..DONE_STEPS_MAX (2–6) brightness steps
   // ── the sidebar, as TWO booleans ────────────────────────────────────────
   // Pinned = the nav is a grid column, exactly as it has always been. Unpinned
   // = it is an OVERLAY that covers the terminal instead of taking width from it
@@ -260,6 +268,8 @@ export const DEFAULTS: Settings = {
   density: "comfortable",
   nav_width: 300,
   nav_guides: true,
+  done_horizon_secs: 12 * 3600,
+  done_steps: 3,
   nav_pinned: false,
   nav_hover_reveal: true,
   usage_place: "strip",
@@ -494,6 +504,11 @@ export async function loadSettings(): Promise<Settings> {
     s.theme = normalizeTheme(s.theme);
     s.theme_light = normalizePair(s.theme_light, "light", DEFAULTS.theme_light);
     s.theme_dark = normalizePair(s.theme_dark, "dark", DEFAULTS.theme_dark);
+    // Same reason as the themes above: these two are read straight into the
+    // render (`doneBounds` → an inline opacity), so a hand-edited or truncated
+    // ui-state.json must be corrected HERE rather than everywhere they are used.
+    s.done_horizon_secs = snapHorizon(s.done_horizon_secs);
+    s.done_steps = clampSteps(s.done_steps);
     if (migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0)) saveSettings(s);
     return s;
   } catch {
