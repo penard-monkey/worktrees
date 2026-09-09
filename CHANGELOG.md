@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.23.0] - 2026-09-09
 
 ### Added
 - **The afterglow's reach is yours to set.** The purple dot that marks a place
