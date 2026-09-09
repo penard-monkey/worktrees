@@ -1,8 +1,9 @@
-import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { clampSteps, doneBounds, doneOpacity, doneTier } from "./afterglow";
 import * as Icons from "./icons";
 import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
@@ -218,27 +219,23 @@ function ago(epoch?: number): string {
 
 // ── afterglow: "Claude finished a task here", decaying ───────────────────────
 // The busy dot vanishing used to be the end of all visibility. These tiers keep
-// a place lit after its work lands and dim it out over the working day, so the
-// nav answers "what moved recently" at a glance.
+// a place lit after its work lands and dim it out over the horizon, so the nav
+// answers "what moved recently" at a glance.
 //
-// DISCRETE, not a continuous fade, for three reasons: absolute opacity is
-// unreadable on its own (only the contrast BETWEEN rows carries), a CSS
-// animation long enough to cover 12h is frozen at frame 0 by
-// `prefers-reduced-motion` (tokens.css) — full brightness forever, the exact
-// inverse of the signal — and steps are assertable with getComputedStyle
-// instead of racing an in-flight animation.
-const DONE_T1_SECS = 15 * 60; // "just finished — go look"
-const DONE_T2_SECS = 2 * 3600; // this working block
-const DONE_T3_SECS = 12 * 3600; // overnight; past this the row is simply old
-type DoneTier = "" | "t1" | "t2" | "t3";
-function doneTier(epoch: number, nowSec: number): DoneTier {
-  if (!epoch) return "";
-  const age = nowSec - epoch;
-  if (age < DONE_T1_SECS) return "t1"; // negative (clock skew) lands here too
-  if (age < DONE_T2_SECS) return "t2";
-  if (age < DONE_T3_SECS) return "t3";
-  return "";
-}
+// The MATH lives in ./afterglow — how many tiers there are and how far they
+// reach is Settings → Navigation → Afterglow (`done_horizon_secs` /
+// `done_steps`, geometrically spaced from a pinned 15-minute first boundary),
+// so nothing here may hardcode a boundary. `bounds` is derived once per render
+// and both the nav row and the Resume list read the same one.
+//
+// Still DISCRETE, not a continuous fade, and the three reasons outlive the
+// tiers becoming configurable: absolute opacity is unreadable on its own (only
+// the contrast BETWEEN rows carries), a CSS animation long enough to cover a
+// horizon of hours is frozen at frame 0 by `prefers-reduced-motion`
+// (tokens.css) — full brightness forever, the exact inverse of the signal — and
+// steps are assertable with getComputedStyle instead of racing an in-flight
+// animation. Only tier 1 is a CLASS (`.t1`, the ring); the dimmer tiers are an
+// inline opacity, because the step count is no longer known to the stylesheet.
 /// "When did I last USE this place" — opened or worked, whichever is newer.
 ///
 /// ONE consumer left: the restore-on-launch target. Every list a user reads —
@@ -3222,17 +3219,31 @@ function App() {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), DECAY_TICK_MS);
     return () => clearInterval(id);
   }, [pageVisible]);
+  // The tier boundaries the user chose, recomputed only when they change.
+  const doneSteps = clampSteps(settings.done_steps);
+  const bounds = useMemo(
+    () => doneBounds(settings.done_horizon_secs, settings.done_steps),
+    [settings.done_horizon_secs, settings.done_steps],
+  );
   // Precedence in the dot slot: busy > waiting > done. Live state always wins —
   // the ember is what the slot shows when there is nothing happening NOW.
-  const doneOf = (p: Place): DoneTier =>
-    activityOf(p) ? "" : doneTier(workedAt(p), nowSec);
+  // 0 = no ember; 1..doneSteps = brightest..dimmest.
+  const doneOf = (p: Place): number =>
+    activityOf(p) ? 0 : doneTier(workedAt(p), nowSec, bounds);
   // One derivation for both the nav row and the Resume list — they are the same
   // signal in two places, and drifting them apart is how a dot starts lying.
+  // Class carries the hue and tier 1's ring; `dotStyle` carries the fade, which
+  // the stylesheet cannot express now that the step count is a setting.
   const dotClass = (p: Place) => {
     const act = activityOf(p);
     if (act) return " " + act;
     const tier = doneOf(p);
-    return tier ? ` done ${tier}` : "";
+    return tier ? " done" + (tier === 1 ? " t1" : "") : "";
+  };
+  const dotStyle = (p: Place): CSSProperties | undefined => {
+    if (activityOf(p)) return undefined;
+    const tier = doneOf(p);
+    return tier > 1 ? { opacity: doneOpacity(tier, doneSteps) } : undefined;
   };
   const dotTitle = (p: Place) => {
     const act = activityOf(p);
@@ -5262,7 +5273,7 @@ function App() {
         // label carries user text gets an explicit key instead — see usage.ts.
         data-track="nav.row"
       >
-        <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
+        <span className={"status-dot" + dotClass(p)} style={dotStyle(p)} title={dotTitle(p)} />
         <span className="row-id">
           <span className="row-name">
             {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
@@ -5332,7 +5343,7 @@ function App() {
       ? "busy"
       : places.some((p) => activityOf(p) === "waiting")
         ? "waiting"
-        : places.some((p) => doneOf(p) === "t1")
+        : places.some((p) => doneOf(p) === 1)
           ? "done"
           : "";
     const buckets: Record<string, Place[]> = {};
@@ -5981,7 +5992,7 @@ function App() {
                   {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
                   {resume.map(({ pv, p }) => (
                     <div className="resume-row" data-track="home.resume" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
-                      <span className={"status-dot" + dotClass(p)} title={dotTitle(p)} />
+                      <span className={"status-dot" + dotClass(p)} style={dotStyle(p)} title={dotTitle(p)} />
                       <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{nameOf(p)}</span>
                       <span className="rr-proj">{basename(pv.root)}</span>
                       <span className="rr-life">{p.lifecycle_effective}</span>

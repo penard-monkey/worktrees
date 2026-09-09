@@ -91,7 +91,16 @@ if (from < 0 || to < 0 || !dirTables) {
 const BLOCK = appLines.slice(from, gTo + 1).join("\n") + "\n" + appLines.slice(zFrom, to).join("\n");
 
 // settings.ts imports the Tauri bridge; stub it so the module loads under node.
-const settingsSrc = ts.replace(/^import \{ invoke \}.*$/m, "const invoke = () => Promise.resolve();");
+// It also imports ./afterglow, and a data: URL has no base to resolve a
+// relative specifier against — so INLINE that module's real source ahead of it
+// rather than stubbing the two functions. A stub would be a second answer to
+// `snapHorizon`, which is the exact drift these scripts exist to prevent;
+// afterglow.ts imports nothing, so concatenating it is safe.
+const settingsSrc =
+  read("../src/afterglow.ts").replace(/^export /gm, "") + "\n" +
+  ts
+    .replace(/^import \{ invoke \}.*$/m, "const invoke = () => Promise.resolve();")
+    .replace(/^import \{[^}]*\} from "\.\/afterglow";$/m, "");
 const load = async (src, name) => {
   const js = (await transformWithEsbuild(src, name, { loader: "ts", format: "esm" })).code;
   return import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));

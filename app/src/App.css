@@ -478,13 +478,17 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .status-dot.waiting { background: var(--warn); } /* Claude needs input — STATIC, no blink */
 .status-dot.on { background: var(--ok); } /* static "tmux up" fact (topbar) */
 /* Afterglow. NEVER animated — movement in this app means "running now", and the
- * decay is stepped in JS (App.tsx doneTier) rather than keyframed so it survives
- * reduced-motion, a remount, and a restart. t1's ring is a box-shadow, not an
- * animation, so it survives all three too. */
+ * decay is stepped in JS (afterglow.ts `doneTier`) rather than keyframed so it
+ * survives reduced-motion, a remount, and a restart. t1's ring is a box-shadow,
+ * not an animation, so it survives all three too.
+ *
+ * The FADE is an inline style, not a class per tier: the step count is a
+ * setting now (Settings → Navigation → Afterglow, 2–6), so the stylesheet
+ * cannot know how many tiers exist or what each one's opacity is —
+ * `doneOpacity` computes it and App.tsx's `dotStyle` writes it. Tier 1 gets no
+ * opacity at all, here or there; it is the "go look" tier and stays at full. */
 .status-dot.done { background: var(--done); }
 .status-dot.done.t1 { box-shadow: 0 0 0 3px color-mix(in srgb, var(--done) 30%, transparent); }
-.status-dot.done.t2 { opacity: 0.65; }
-.status-dot.done.t3 { opacity: 0.3; }
 /* a place being created — accent, not --ok: this is the app working, not a
    session. Same `breathe` as .busy so "something is happening" reads the same
    everywhere in the nav. */

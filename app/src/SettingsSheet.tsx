@@ -8,6 +8,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, clampZoom, THEMES, ZOOM_STEPS } from "./settings";
+import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
 
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
@@ -739,6 +740,32 @@ export function SettingsSheet({
               type="range" min={220} max={460} step={10} value={settings.nav_width}
               onChange={(e) => onChange({ nav_width: clampNav(+e.currentTarget.value) })}
             />
+          </section>
+
+          {/* The purple dot's decay. Horizon walks DONE_HORIZONS by index for
+              the same reason Overall size walks ZOOM_STEPS: a linear range over
+              1h..7d spends most of its travel on moves nobody can see. The hint
+              prints the boundaries from `doneBounds` itself rather than a
+              hand-written example, so it cannot go stale when either knob or
+              the geometry changes. */}
+          <section className="setting">
+            <label>Afterglow</label>
+            <label className="sub">Fade out over <span className="val">{fmtSecs(snapHorizon(settings.done_horizon_secs))}</span></label>
+            <input
+              type="range" min={0} max={DONE_HORIZONS.length - 1} step={1}
+              value={Math.max(0, DONE_HORIZONS.indexOf(snapHorizon(settings.done_horizon_secs) as (typeof DONE_HORIZONS)[number]))}
+              onChange={(e) => onChange({ done_horizon_secs: DONE_HORIZONS[+e.currentTarget.value] })}
+            />
+            <label className="sub">Steps <span className="val">{clampSteps(settings.done_steps)}</span></label>
+            <input
+              type="range" min={DONE_STEPS_MIN} max={DONE_STEPS_MAX} step={1} value={clampSteps(settings.done_steps)}
+              onChange={(e) => onChange({ done_steps: clampSteps(+e.currentTarget.value) })}
+            />
+            <div className="hint">
+              The purple dot marks a place where Claude finished, fading in steps:{" "}
+              {doneBounds(settings.done_horizon_secs, settings.done_steps).map(fmtSecs).join(" · ")}.
+              The first step is always {fmtSecs(DONE_FIRST_SECS)} and is the one that lights the project folder.
+            </div>
           </section>
 
           <section className="setting">

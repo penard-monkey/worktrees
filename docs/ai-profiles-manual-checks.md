@@ -204,6 +204,12 @@ upgrade can change the shape or the write timing and the dot degrades in silence
 - [ ] `kill -9` a busy session → it stamps "finished". Known and accepted: the
       busy-exit edge cannot tell completion from death.
 
+How far the ember reaches and in how many brightness steps is Settings →
+Navigation → Afterglow; the default is a **12h horizon in 3 steps** (15m ·
+1h 44m · 12h, geometrically spaced from a first boundary pinned at 15 minutes).
+Change either slider and the checks above still apply — only the boundaries
+move. The first step is the one that also lights the project folder.
+
 ## 11. Headless status report ("Ask Claude")
 
 The first path in this codebase that launches claude WITHOUT a tmux pane

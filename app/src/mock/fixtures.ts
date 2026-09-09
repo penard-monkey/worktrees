@@ -155,13 +155,13 @@ function cdv(): ProjectView {
       // to see — no ↓ glyph, no ↓ in the header, and it stays out of Attention.
       slug: "search-index", branch: "feat/search-opensearch",
       ahead: 0, behind: 3, last_commit_subject: "index mapping draft",
-      // afterglow t1 — freshest tier, full ember + halo
+      // afterglow tier 1 — freshest, full ember + halo (4min < the pinned 15m)
       declared: { last_opened_epoch: NOW - 2 * DAY, last_worked_epoch: NOW - 4 * MIN, note: "waiting on infra ticket" },
       lifecycle_effective: "idle",
     }),
     place(P, root, {
       slug: "hotfix-login", branch: "fix/login-loop", dirty: true, dirty_files: 1,
-      // afterglow t2 — worked this block, session since closed
+      // afterglow tier 2 — 45min, inside the default curve's 1h44m bound
       last_commit_subject: "guard null session",
       declared: { lifecycle: "closed", last_opened_epoch: NOW - 20 * DAY, last_worked_epoch: NOW - 45 * MIN },
       lifecycle_effective: "closed",
@@ -243,7 +243,7 @@ function worktreesRepo(): ProjectView {
     }),
     place(P, root, {
       slug: "fix-flaky-ci", branch: "fix/flaky-ci",
-      // afterglow t3 — this morning's work, nearly out
+      // afterglow tier 3 — 5h, the dimmest of the default 12h / 3-step curve
       last_commit_subject: "retry tmux smoke",
       declared: { lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY, last_worked_epoch: NOW - 5 * 3600 },
       lifecycle_effective: "closed",
