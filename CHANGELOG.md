@@ -3,6 +3,17 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A dock shell no longer types `2RR0;276;0c11;rgb:…` onto its own prompt
+  after you switch places.** Those were terminal replies, not garbage: the tab
+  replays its recorded output on every re-attach, and any query left in that
+  recording — vim's startup burst, which every `git commit` without `-m` leaves
+  behind — was re-asked of the fresh terminal, which answered down the pty as
+  if you had typed it. The replay is now parsed with replies muted; a program
+  still running in the tab keeps getting its answers.
+
 ## [0.23.0] - 2026-09-09
 
 ### Added

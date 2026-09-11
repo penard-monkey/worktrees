@@ -1173,7 +1173,10 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         try { ch?.onmessage?.(new TextEncoder().encode(banner).buffer); } catch { /* ignore */ }
       }, 40);
       deadShells.get(sidecarKey(args.repo, args.slug))?.delete(i); // reattach of a restarted tab
-      return ++shellGen; // attach generation — see shell_detach in lib.rs
+      // attach generation — see shell_detach in lib.rs. The banner stands in for
+      // the ring replay, so it is reported as one (a re-attach) or not (a spawn).
+      const gen = ++shellGen;
+      return { gen, replay: gen > 1 ? banner.length : 0 };
     }
     case "shell_write":
     case "shell_resize":

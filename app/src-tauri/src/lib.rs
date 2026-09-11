@@ -4422,8 +4422,28 @@ fn kill_place_shells(shells: &Shells, repo: &str, slug: &str) {
     }
 }
 
+/// What `shell_open` answers: the attach generation `shell_detach` must
+/// present, and how many bytes of ring were replayed into the channel FIRST.
+///
+/// The frontend needs the second so it can tell the replay from live output.
+/// The replay is a recording, and a recording must not be answered: any
+/// terminal query in it (vim's DA2 / cursor-position / colour / cursor-blink
+/// burst, say — every `git commit` without `-m` leaves one in the ring) is
+/// re-issued to a FRESH xterm on every re-attach, and xterm dutifully replies
+/// down the pty, where zsh echoes the printable tail of each reply onto the
+/// prompt as if typed. The pane mutes its `onData` until the replay is parsed;
+/// it cannot key that on "arrived before `shell_open` returned", because Tauri
+/// hands a large channel payload to the page through a separate fetch that can
+/// land AFTER the invoke's own response. What IS ordered is the channel: the
+/// snapshot is its first message whenever `replay > 0`.
+#[derive(Serialize)]
+struct ShellAttach {
+    gen: u64,
+    replay: usize,
+}
+
 /// Start (or re-attach to) the dock shell for `index` and stream it to
-/// `on_bytes`; returns the attach generation `shell_detach` must present.
+/// `on_bytes`; see `ShellAttach` for what it answers.
 /// Idempotent: a second call for a live shell just swaps the sink and replays —
 /// which is exactly what a tab flip or a dock re-open does.
 ///
@@ -4443,7 +4463,7 @@ async fn shell_open(
     rows: u16,
     on_bytes: Channel<InvokeResponseBody>,
     shells: State<'_, Shells>,
-) -> Result<u64, String> {
+) -> Result<ShellAttach, String> {
     let key: ShellKey = (repo.clone(), slug.clone(), index);
     let mut map = shells.0.lock().unwrap();
     if let Some(sh) = map.get_mut(&key) {
@@ -4452,7 +4472,8 @@ async fn shell_open(
         let ring = sh.ring.lock().unwrap();
         let mut sink = sh.sink.lock().unwrap();
         let snapshot: Vec<u8> = ring.iter().copied().collect();
-        if !snapshot.is_empty() {
+        let replay = snapshot.len();
+        if replay > 0 {
             let _ = on_bytes.send(InvokeResponseBody::Raw(snapshot));
         }
         *sink = Some(on_bytes);
@@ -4464,7 +4485,7 @@ async fn shell_open(
         // flip from feeding the ring a redraw per attach.
         let _ = sh.resize(cols, rows);
         sh.gen += 1;
-        return Ok(sh.gen);
+        return Ok(ShellAttach { gen: sh.gen, replay });
     }
 
     let (session, cwd) = place_session_cwd(&repo, &slug)?;
@@ -4539,7 +4560,7 @@ async fn shell_open(
     });
 
     map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1, size });
-    Ok(1)
+    Ok(ShellAttach { gen: 1, replay: 0 })
 }
 
 #[tauri::command]
