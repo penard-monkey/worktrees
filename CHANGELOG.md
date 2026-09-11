@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.23.1] - 2026-09-11
 
 ### Fixed
 - **A dock shell no longer types `2RR0;276;0c11;rgb:…` onto its own prompt
