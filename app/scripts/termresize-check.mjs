@@ -225,9 +225,9 @@ function mount({ w = 1000, h = 600, openDelayMs = 0 } = {}) {
   const transport = () => ({
     open: (cols, rows) => {
       invokes.push({ cmd: "term_open", args: { cols, rows } });
-      if (!openDelayMs) { attached = true; return Promise.resolve(1); }
+      if (!openDelayMs) { attached = true; return Promise.resolve({ replay: 0 }); }
       // The real one shells out to tmux; a slow attach is the whole point here.
-      return new Promise((res) => clock.setTimeout(() => { attached = true; res(1); }, openDelayMs));
+      return new Promise((res) => clock.setTimeout(() => { attached = true; res({ replay: 0 }); }, openDelayMs));
     },
     write: () => {},
     resize: (cols, rows) => {

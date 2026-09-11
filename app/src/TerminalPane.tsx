@@ -68,7 +68,11 @@ document.addEventListener("visibilitychange", applyBlink);
  * "stop streaming" for BOTH kinds — detach the tmux client, or drop the sink on
  * an owned shell. Neither ends the thing on the other side. */
 type Transport = {
-  open(cols: number, rows: number, onBytes: Channel<ArrayBuffer>): Promise<void>;
+  /** Resolves once attached. `replay` is how many bytes of recorded output the
+   *  backend pushed down `onBytes` FIRST — a dock shell's ring on re-attach —
+   *  and 0 when nothing was (a fresh shell; always, for tmux, which replays
+   *  nothing of its own). See `useTerm` for why the pane must know. */
+  open(cols: number, rows: number, onBytes: Channel<ArrayBuffer>): Promise<{ replay: number }>;
   write(data: number[]): void;
   resize(cols: number, rows: number): void;
   close(): void;
@@ -79,6 +83,7 @@ const tmuxTransport = (session: string): Transport => {
   return {
     async open(cols, rows, onBytes) {
       id = await invoke<number>("term_open", { session, cols, rows, onBytes });
+      return { replay: 0 };
     },
     write: (data) => { if (id != null) invoke("term_write", { id, data }); },
     resize: (cols, rows) => { if (id != null) invoke("term_resize", { id, cols, rows }); },
@@ -93,7 +98,9 @@ const shellTransport = (repo: string, slug: string, index: number): Transport =>
   let gen: number | null = null;
   return {
     async open(cols, rows, onBytes) {
-      gen = await invoke<number>("shell_open", { repo, slug, index, cols, rows, onBytes });
+      const at = await invoke<{ gen: number; replay: number }>("shell_open", { repo, slug, index, cols, rows, onBytes });
+      gen = at.gen;
+      return { replay: at.replay };
     },
     write: (data) => { invoke("shell_write", { repo, slug, index, data }); },
     // gated on the attach, like the tmux transport's `id` — before `shell_open`
@@ -204,8 +211,43 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     const tx = makeTransport();
     txRef.current = tx;
 
+    // A re-attached dock shell starts with a REPLAY: the backend's ring, every
+    // byte the shell ever wrote, pushed as the channel's first message. It is a
+    // recording, and xterm must not answer it. Any terminal query in there —
+    // vim's startup burst (two cursor-position reports, DA2, then the colour
+    // and cursor-blink queries once it hears back), left behind by every
+    // `git commit` without `-m` — is re-issued to this brand-new xterm, which
+    // replies down the pty as INPUT, and zsh echoes the printable tail of each
+    // reply onto the prompt: `2RR0;276;0c11;rgb:0f0f/0f0f/1616…`, on every
+    // place switch and dock re-open until 256K of later output rolls the query
+    // out of the ring (screenshot, 2026-09-11). So `onData` is muted while the
+    // replay is being parsed. The mute is exact: xterm runs a write's callback
+    // synchronously once THAT chunk is parsed and before the next one, so a live
+    // chunk queued behind the replay is answered normally.
+    //
+    // Which message is the replay: the FIRST on the channel, whenever `open`
+    // reports one (Tauri delivers a channel's messages in send order, and the
+    // backend sends the snapshot before installing the live sink). It cannot be
+    // "whatever arrived before `open` resolved" — a payload this size reaches
+    // the page through a separate fetch that can land AFTER the invoke's own
+    // response. And it may land BEFORE, when `replay` is still unknown; then the
+    // first message is presumed a replay, which on a fresh shell costs only the
+    // replies to a query in its first chunk of output, and zsh makes none.
+    let replay: number | null = null; // bytes the backend replayed; null until `open` answers
+    let first = true;
+    let parsingReplay = false;
     const onBytes = new Channel<ArrayBuffer>();
-    onBytes.onmessage = (msg) => term.write(new Uint8Array(msg));
+    onBytes.onmessage = (msg) => {
+      const bytes = new Uint8Array(msg);
+      const isReplay = first && replay !== 0;
+      first = false;
+      if (!isReplay) {
+        term.write(bytes);
+        return;
+      }
+      parsingReplay = true;
+      term.write(bytes, () => { parsingReplay = false; });
+    };
 
     // Attach at the pane's REAL grid, never at xterm's default (see `measured`).
     // Re-fit each frame while we wait, so the size we finally hand over is the
@@ -247,7 +289,7 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
           // correct it until the next gesture. `open` shells out to tmux, so the
           // window is wide enough to hit by mounting while the window animates.
           const opened = { cols: term.cols, rows: term.rows };
-          await tx.open(opened.cols, opened.rows, onBytes);
+          replay = (await tx.open(opened.cols, opened.rows, onBytes)).replay;
           if (disposed) {
             tx.close();
             return;
@@ -257,7 +299,10 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
           // that moved while `open` was in flight, and is a no-op if the grid is
           // still what we opened at.
           applySize();
-          term.onData((data) => tx.write(Array.from(new TextEncoder().encode(data))));
+          term.onData((data) => {
+            if (parsingReplay) return; // a reply to the recording, not to a program
+            tx.write(Array.from(new TextEncoder().encode(data)));
+          });
           term.focus();
         } catch (e) {
           term.writeln(`\r\n\x1b[31m[worktrees] ${e}\x1b[0m\r\n`);
