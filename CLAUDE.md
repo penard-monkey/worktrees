@@ -393,6 +393,20 @@ is invisible to the bats suite — there is no fake claude. Re-run
   lesson: that conversion made sizes relative to the ZOOM knob, not to a
   container, so a new host has to re-state `font-size: inherit` itself (and
   scope it, or the dock's document view loses the 13px it means).
+- **A replayed recording must not be ANSWERED, and "arrived before the invoke
+  resolved" is not how you find it.** `shell_open` replays a dock shell's 256K
+  ring into a fresh xterm on every re-attach; any terminal query in the ring
+  (vim's DA2 / CPR / colour / cursor-blink burst — every `git commit` without
+  `-m` leaves one) was re-asked, xterm replied down the pty as INPUT, and zsh
+  echoed `2RR0;276;0c11;rgb:…` onto the prompt after every place switch.
+  `TerminalPane` mutes `onData` while the replay parses, lifted by
+  `term.write(bytes, cb)`'s callback (xterm runs it after THAT chunk and before
+  the next, synchronously). The replay is the channel's FIRST message when
+  `open` reports `replay > 0` — not whatever landed before `open` resolved,
+  because Tauri sends a `Channel` payload above a size threshold through a
+  separate `fetch` that can arrive AFTER the invoke's own response; only the
+  channel's own order (`index`-buffered in `@tauri-apps/api`) is reliable.
+  `app/scripts/termreplay-check.mjs` guards it and fails on the pre-fix file.
 - **portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL** (crate
   `lib.rs:347`), and an interactive `/bin/sh` on a pty whose master is still
   open SURVIVES it. The app only gets away with this because dropping the
