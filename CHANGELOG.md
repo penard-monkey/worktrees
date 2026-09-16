@@ -3,6 +3,23 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **A Docs tab, per place, with a staleness header.** The right rail gains a
+  third entry: the documentation this worktree carries *at this commit* —
+  README, CLAUDE, DESIGN, ROADMAP, CHANGELOG, the place's brief, whatever else
+  is markdown at the root, then `docs/` in groups, each row titled from its
+  frontmatter or its first heading rather than its filename. A name filter over
+  the lot; ⌘F goes to it. Clicking a row opens the document in the Files tab's
+  reader, which has rendered markdown since v0.8.0.
+  The header is the point. A project with eleven worktrees can have seven of
+  them on one `docs/` tree and four on another, both correct for their branch,
+  and nothing on screen said which one you were reading — so it names the
+  branch, how far behind the base ref (and *which* ref), whether the tree is
+  dirty, and what the last commit was. Always, never collapsible. No new
+  dependency, no process, no configuration.
+
 ## [0.23.1] - 2026-09-11
 
 ### Fixed

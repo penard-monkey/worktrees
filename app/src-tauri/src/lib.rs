@@ -3511,6 +3511,52 @@ fn file_diff_for(f: &Path, want_head: bool) -> Result<FileDiff, String> {
     Ok(FileDiff { against, base_label, patch, untracked: false, binary: false, truncated })
 }
 
+/// The Docs tab's index for one place, plus the ref its staleness is measured
+/// against.
+///
+/// `base` is NOT `Place::upstream`, and the difference is the whole reason this
+/// field exists. Core measures `behind` against the project's BASE ref
+/// (`project.rs`: `rev-list --left-right --count <base_ref>...HEAD`, where
+/// `base_ref()` is `origin/main` when a fetch has brought one, else the local
+/// base) — deliberately, because "how far from main" is the question, and
+/// upstream told a different story on any branch that had merged main in. The
+/// `upstream` field is informational and on a feature branch it names
+/// `origin/<that branch>`. So a header reading "25 behind {upstream}" would
+/// print the wrong ref on every pushed branch — a silently-wrong staleness
+/// signal, in the one surface built to stop exactly that.
+#[derive(Serialize)]
+struct DocsIndex {
+    /// e.g. `origin/main`. Named in the header beside `behind`, because a bare
+    /// "25 behind" is the same silent error one level up.
+    base: String,
+    entries: Vec<worktrees_core::docs::DocEntry>,
+    truncated: bool,
+}
+
+/// Walk one place for its documentation (`worktrees_core::docs`).
+///
+/// `async fn` like every other handler — a sync one runs on the main thread,
+/// and this reads up to 2,000 files' heads plus two `show-ref`s.
+///
+/// The walk itself refuses symlinks and `.worktrees`/`.git`/`node_modules`/
+/// `target`/`dist`; this is the other half of that boundary, the same
+/// `guard_under_projects` contract `list_dir` and `read_file` are held to. A
+/// path outside every registered project is refused before anything is read.
+///
+/// A project that cannot be discovered is not a failure: the index still
+/// lists, with an empty `base`, and the header simply says "N behind" without
+/// naming a ref. Losing the ref name is survivable; losing the index is not.
+#[tauri::command]
+async fn list_docs(app: AppHandle, repo: String, root: String) -> Result<DocsIndex, String> {
+    let dir = guard_under_projects(&app, &root)?;
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {root}"));
+    }
+    let base = Project::discover(Path::new(&repo)).map(|p| p.base_ref()).unwrap_or_default();
+    let idx = worktrees_core::docs::index(&dir);
+    Ok(DocsIndex { base, entries: idx.entries, truncated: idx.truncated })
+}
+
 /// File contents for the viewer. Capped (default 1 MiB) and binary-guarded
 /// (a NUL byte in the read slice → `binary: true`, empty content). The frontend
 /// shows a "binary / open in editor" placeholder instead of garbage.
@@ -5014,6 +5060,7 @@ pub fn run() {
             changed_files,
             file_diff,
             read_file,
+            list_docs,
             read_file_base64,
             write_file,
             list_shell_sessions,

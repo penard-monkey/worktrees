@@ -8,6 +8,9 @@
 
 import { initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 
+/** `worktrees_core::docs::DocEntry` — see the `list_docs` case. */
+type MockDoc = { path: string; rel: string; title: string; group: string };
+
 let ws: Workspace = initialWorkspace();
 
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x));
@@ -1125,6 +1128,60 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         binary: false,
         truncated: false,
       };
+    }
+    case "list_docs": {
+      // `worktrees_core::docs::index`, in the shape the pane reads — NOT a
+      // re-implementation of it. The real walk's rules (skip `.worktrees`,
+      // never follow a symlink, the entry cap) are tested in core; what the
+      // harness has to express is the SHAPE: fixed root files first, then the
+      // brief, then `docs/` in groups, then the leftovers, each with a title
+      // the walk read out of the file rather than off the filename.
+      //
+      // `?docs=` drives the three states the pane renders differently and that
+      // no fixture reaches on its own: `empty` (a place with no markdown),
+      // `truncated` (the cap), `flat` (the pre-restructure tree from F1 —
+      // every root-level file, no `docs/` at all, which is what seven of
+      // valleos's eleven places actually look like).
+      const root = args.root as string;
+      const mode = new URLSearchParams(location.search).get("docs") ?? "";
+      const base = "origin/main";
+      const mk = (rel: string, title: string, group = ""): MockDoc => ({ path: `${root}/${rel}`, rel, title, group });
+      if (mode === "empty") return { base, entries: [], truncated: false };
+      if (mode === "flat") {
+        return {
+          base,
+          entries: [
+            mk("README.md", "Acuerdo marco"),
+            mk("00_acuerdo_marco.md", "00 · Acuerdo marco"),
+            mk("01_cuestionario.md", "01 · Cuestionario"),
+            mk("02_alcance.md", "02 · Alcance"),
+          ],
+          truncated: false,
+        };
+      }
+      const entries: MockDoc[] = [
+        mk("README.md", "worktrees"),
+        mk("CLAUDE.md", "worktrees — working notes for Claude"),
+        mk("DESIGN.md", "Design"),
+        mk("ROADMAP.md", "Roadmap"),
+        mk("CHANGELOG.md", "Changelog"),
+        mk(".planning/brief.md", "live-docs — per-place documentation"),
+        // Other root-level markdown lands HERE, with the named files — not
+        // below the tree. Core's `every_group_is_one_contiguous_run` is the
+        // contract; the harness has to hold it or it stops being parity.
+        mk("NOTES.md", "notes"),
+        mk("docs/index.md", "Documentation", "docs"),
+        mk("docs/adr/0001-no-repo-supplied-argv.md", "ADR 0001 — a cloned repo never supplies argv", "docs/adr"),
+        mk("docs/architecture/overview.md", "Platform overview", "docs/architecture"),
+        mk("docs/architecture/message-flow.md", "Message flow", "docs/architecture"),
+        mk("docs/proposals/place-docs.md", "Proposal — per-place docs", "docs/proposals"),
+        mk("docs/proposals/project-settings.md", "Proposal — project settings", "docs/proposals"),
+      ];
+      if (mode === "truncated") {
+        for (let i = 0; i < 40; i++) entries.push(mk(`docs/archive/a${i}.md`, `Archived note ${i}`, "docs/archive"));
+        return { base, entries, truncated: true };
+      }
+      return { base, entries, truncated: false };
     }
     case "read_file": {
       const f = fsFile(args.path as string);

@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod config;
 pub mod diag;
+pub mod docs;
 pub mod error;
 pub mod git;
 pub mod health;

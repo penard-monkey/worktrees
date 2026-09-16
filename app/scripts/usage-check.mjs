@@ -282,6 +282,63 @@ if (tcFrom < 0 || tcTo < 0 || tcTo < tcFrom) {
   eq(fired({ ...key({ metaKey: true, code: "KeyB", target: outside }), defaultPrevented: false }), null, "a chord that did nothing is not recorded");
 }
 
+// ── half 5: every dock tab is its own key AND its own surface ───────────────
+// The dock's rail used to read
+//     data-track={d.key === "terminal" ? "dock.terminal" : "dock.files"}
+// and `surfaceOf` still asks the matching either/or question. Both are two-way
+// for a rail that is a LIST, so a third tab does not fail — it reports as
+// `dock.files`, and so does every click inside it. The heatmap then shows a
+// Files tab that got more use than it did and a Docs tab that was never built,
+// which is worse than no metric: it is a wrong one that looks right.
+//
+// Nothing else catches this. `valid_token` is a SHAPE allowlist (ASCII
+// identifier chars, ≤64) — `dock.docs` passes it today and so would
+// `dock.anything`, so the closed vocabulary is the TS `Surface` union and
+// nowhere else. tsc is happy either way: both branches of the ternary are
+// legal strings. The feature works perfectly while the measurement lies.
+{
+  const APP = read("../src/App.tsx");
+  const U = read("../src/usage.ts");
+  // The rail is the source of truth for which tabs exist.
+  const railStart = APP.indexOf("const DOCK_RAIL = [");
+  const railEnd = railStart < 0 ? -1 : APP.indexOf("];", railStart);
+  if (railStart < 0 || railEnd < 0) {
+    fail("App.tsx: `DOCK_RAIL` is gone — renamed? this check reads the tab list from it");
+  } else {
+    const rail = APP.slice(railStart, railEnd);
+    const keys = [...rail.matchAll(/key:\s*"([a-z0-9-]+)"/g)].map((m) => m[1]);
+    if (keys.length < 2) fail(`App.tsx: DOCK_RAIL parsed as ${JSON.stringify(keys)} — the shape of an entry changed`);
+    // (a) each entry carries its OWN literal key, and the button renders that
+    //     key rather than choosing between two of them
+    const tracks = [...rail.matchAll(/key:\s*"([a-z0-9-]+)"[^}]*?track:\s*"([a-z0-9.\-_]+)"/g)];
+    const btn = APP.slice(APP.indexOf("<nav className=\"rail rail-right\">"));
+    const track = btn.match(/data-track=\{([^}]*)\}/);
+    if (!track) {
+      fail("App.tsx: the right rail's button has no `data-track` — its key would come from a title, and that title interpolates the tab name");
+    } else if (/\?/.test(track[1])) {
+      fail(
+        `App.tsx: the right rail's data-track is a ternary (${track[1].trim()}) over a rail of ` +
+          `${keys.length} tabs — a tab it does not name reports as another tab's key. ` +
+          "Give each DOCK_RAIL entry a literal `track` and render that.",
+      );
+    }
+    for (const k of keys) {
+      const hit = tracks.find(([, key]) => key === k);
+      if (!hit) fail(`App.tsx: DOCK_RAIL's \`${k}\` has no literal \`track\` beside its key — its clicks would report as another tab's`);
+      else if (hit[2] !== `dock.${k}`) fail(`App.tsx: DOCK_RAIL's \`${k}\` is tracked as "${hit[2]}", not "dock.${k}" — the key and the tab have drifted`);
+    }
+    // (b) each tab has a Surface of its own, and (c) `surfaceOf` can return it
+    const union = U.slice(U.indexOf("export type Surface ="), U.indexOf('| "other";') + 10);
+    const sofFrom = U.indexOf("export function surfaceOf(");
+    const sof = sofFrom < 0 ? "" : U.slice(sofFrom, U.indexOf("\n}", sofFrom));
+    for (const k of keys) {
+      if (!union.includes(`"dock.${k}"`)) fail(`usage.ts: \`Surface\` has no "dock.${k}" — dock tab \`${k}\` would record under another tab's surface`);
+      if (sof && !sof.includes(`"dock.${k}"`)) fail(`usage.ts: \`surfaceOf\` never returns "dock.${k}" — every click in that tab is attributed elsewhere`);
+    }
+    if (!sof) fail("usage.ts: `surfaceOf` is gone — renamed markers?");
+  }
+}
+
 // The Rust side refuses the same shapes, and it is the last belt: if its
 // allowlist ever becomes a denylist, a slug walks straight into the file.
 const RS = read("../src-tauri/src/lib.rs");
@@ -291,4 +348,4 @@ if (!/fn valid_token\(s: &str\) -> bool \{[\s\S]*?is_ascii_alphanumeric\(\)[\s\S
 if (!/fn valid_event\(/.test(RS)) fail("lib.rs: `valid_event` is gone — nothing checks a batch on the way in");
 
 if (bad) { console.error(`\nusage-check: ${bad} failure(s)`); process.exit(1); }
-console.log(`usage-check: ok — key resolution, chord names, the terminal-keystroke rule, ${SITES.length} pinned controls, and ${TSX.length} .tsx files with no unkeyed dynamic-title button`);
+console.log(`usage-check: ok — key resolution, chord names, the terminal-keystroke rule, every dock tab keyed and surfaced, ${SITES.length} pinned controls, and ${TSX.length} .tsx files with no unkeyed dynamic-title button`);
