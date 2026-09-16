@@ -657,6 +657,11 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   box-shadow: var(--shadow-float);
 }
 .branch-pop .combo { flex: 1 1 auto; width: 100%; }
+/* The topbar's remote link. `flex: none`: it sits in the identity's shrink
+   chain (name → branch → alias) and must not be the thing that gives way — a
+   13px glyph has nothing to give. `line-height: 0` so the inline SVG does not
+   add descender space and float the icon above the chip's midline. */
+.topbar .remote-link { flex: none; display: inline-flex; align-items: center; line-height: 0; padding: 3px 5px; }
 .status-cluster { display: flex; align-items: center; gap: var(--s3); flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: var(--fs-meta); }
 .status-cluster .s { display: inline-flex; align-items: center; gap: 3px; }
 .status-cluster .ok { color: var(--ok); }

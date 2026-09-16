@@ -2867,25 +2867,21 @@ async fn diagnostics() -> Result<String, String> {
     Ok(block)
 }
 
-/// Web URL for a place's branch on its origin remote: a /tree/<branch> link on
-/// github.com, the repo home for other hosts, None with no origin. The UI opens
-/// it via the opener plugin.
+/// The https web home of a project's `origin` remote, or None when there is no
+/// origin (or it is a local path / exotic protocol). This is the ONLY thing the
+/// backend knows about the remote; which PAGE to open — the repo home, or a
+/// branch's tree — is decided in the frontend (`remote.ts::remoteWebUrl`) from
+/// the snapshot it already holds (`Place.upstream`), so the rule lives once.
+/// The UI opens the result via the opener plugin.
 #[tauri::command]
-async fn github_url(repo: String, slug: String) -> Result<Option<String>, String> {
+async fn remote_url(repo: String) -> Result<Option<String>, String> {
     let p = Project::discover(Path::new(&repo)).map_err(|e| e.msg)?;
     let Some(remote) = worktrees_core::git::git_out(&p.main_root, &["remote", "get-url", "origin"])
         .filter(|s| !s.is_empty())
     else {
         return Ok(None);
     };
-    let Some(base) = normalize_remote(&remote) else {
-        return Ok(None);
-    };
-    let branch = p.wt_branch(&p.place_dir(&slug));
-    if branch.is_empty() || branch == "(detached)" || !base.starts_with("https://github.com/") {
-        return Ok(Some(base));
-    }
-    Ok(Some(format!("{base}/tree/{branch}")))
+    Ok(normalize_remote(&remote))
 }
 
 /// `git@host:owner/repo(.git)` / `ssh://git@host/…` / `http(s)://host/…` → the
@@ -5027,7 +5023,7 @@ pub fn run() {
             remove_place,
             open_place,
             close_place,
-            github_url,
+            remote_url,
             fetch_origin,
             set_fetch_interval,
             check_update,
@@ -6238,5 +6234,28 @@ mod tests {
         assert_eq!(all[0].key, "older", "the older generation comes first");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The remote spec is whatever `git remote get-url` says; the web base is
+    /// what a browser can open. Every shape git accepts for a hosted repo maps
+    /// to one https URL, and everything else (a local clone, an unknown scheme)
+    /// is None rather than a made-up link.
+    #[test]
+    fn a_remote_spec_becomes_one_https_base_or_none() {
+        for (spec, want) in [
+            ("git@github.com:acme/repo.git", "https://github.com/acme/repo"),
+            ("git@github.com:acme/repo", "https://github.com/acme/repo"),
+            ("ssh://git@github.com/acme/repo.git", "https://github.com/acme/repo"),
+            ("ssh://git@gitea.local:2222/acme/repo.git", "https://gitea.local/acme/repo"),
+            ("https://github.com/acme/repo.git", "https://github.com/acme/repo"),
+            ("https://github.com/acme/repo", "https://github.com/acme/repo"),
+            ("http://gitlab.internal/group/sub/repo.git", "http://gitlab.internal/group/sub/repo"),
+            ("  git@github.com:acme/repo.git\n", "https://github.com/acme/repo"),
+        ] {
+            assert_eq!(normalize_remote(spec).as_deref(), Some(want), "{spec}");
+        }
+        for spec in ["/Users/x/repo.git", "../sibling", "file:///tmp/repo", "git://github.com/acme/repo", "git@nocolon"] {
+            assert_eq!(normalize_remote(spec), None, "{spec}");
+        }
     }
 }
