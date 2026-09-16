@@ -339,6 +339,67 @@ if (tcFrom < 0 || tcTo < 0 || tcTo < tcFrom) {
   }
 }
 
+// ── half 6: a track() key is a LITERAL, everywhere but usage.ts ─────────────
+// `data-track` attributes are covered by halves 2 and 3, but a component can
+// also call `track()` directly, and that call takes a plain string — nothing in
+// the type system says it has to be a constant. `DocsPane` is the live example
+// of the hazard: it records that the name filter was used, and the query the
+// person typed is a variable in the same scope, two lines away.
+//
+// `valid_token` would not save it. A one-word filter ("adr") is a perfectly
+// well-formed token and would be written to ui-events.jsonl verbatim — the same
+// hole `titleKey` has for a name with spaces in it, reached by a different
+// route.
+//
+// `usage.ts` is exempt: `trackChord` composes `"chord." + comboName(e)`, and
+// `comboName` is built from `e.code`, a fixed physical-key vocabulary. That is
+// the ONE legitimate concatenation, and it is in the file that owns the rule.
+{
+  const SRCDIR = fileURLToPath(new URL("../src", import.meta.url));
+  const walk = (d) =>
+    fs.readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(`${d}/${e.name}`) : /\.tsx?$/.test(e.name) ? [`${d}/${e.name}`] : [],
+    );
+  /** Blank out comments and keep every other offset, so a note that MENTIONS
+   *  `track()` is not read as a call to it — the first thing this check did.
+   *  Strings are opaque (a `//` inside "https://…" is not a comment). */
+  const decomment = (src) => {
+    let out = "", i = 0;
+    while (i < src.length) {
+      const c = src[i], d = src[i + 1];
+      if (c === '"' || c === "'" || c === "`") {
+        const q = c; out += c; i++;
+        while (i < src.length && src[i] !== q) { if (src[i] === "\\") { out += "  "; i += 2; continue; } out += src[i]; i++; }
+        out += src[i] ?? ""; i++; continue;
+      }
+      if (c === "/" && d === "/") { while (i < src.length && src[i] !== "\n") { out += " "; i++; } continue; }
+      if (c === "/" && d === "*") { while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) { out += src[i] === "\n" ? "\n" : " "; i++; } out += "  "; i += 2; continue; }
+      out += c; i++;
+    }
+    return out;
+  };
+  const bad6 = [];
+  for (const f of walk(SRCDIR)) {
+    if (f.endsWith("/usage.ts")) continue;
+    const src = decomment(fs.readFileSync(f, "utf8"));
+    // `track(` but not `trackChord(`/`.track(`; first argument only.
+    for (const m of src.matchAll(/(?<![\w.])track\(\s*([^,)]*)/g)) {
+      const arg = m[1].trim();
+      if (/^(["'])(?:(?!\1).)*\1$/.test(arg)) continue; // a plain string literal
+      bad6.push(`${f.slice(SRCDIR.length + 1)}: track(${arg.slice(0, 48)}…)`);
+    }
+  }
+  if (bad6.length) {
+    fail(
+      `${bad6.length} track() call(s) whose key is not a string literal:\n` +
+        bad6.map((b) => `        ${b}`).join("\n") +
+        "\n      Every key in ui-events.jsonl is a constant that lives in this repo's" +
+        "\n      source. A key built from a value is how someone's typing gets written" +
+        "\n      to disk, and valid_token cannot tell a one-word query from a label.",
+    );
+  }
+}
+
 // The Rust side refuses the same shapes, and it is the last belt: if its
 // allowlist ever becomes a denylist, a slug walks straight into the file.
 const RS = read("../src-tauri/src/lib.rs");
@@ -348,4 +409,4 @@ if (!/fn valid_token\(s: &str\) -> bool \{[\s\S]*?is_ascii_alphanumeric\(\)[\s\S
 if (!/fn valid_event\(/.test(RS)) fail("lib.rs: `valid_event` is gone — nothing checks a batch on the way in");
 
 if (bad) { console.error(`\nusage-check: ${bad} failure(s)`); process.exit(1); }
-console.log(`usage-check: ok — key resolution, chord names, the terminal-keystroke rule, every dock tab keyed and surfaced, ${SITES.length} pinned controls, and ${TSX.length} .tsx files with no unkeyed dynamic-title button`);
+console.log(`usage-check: ok — key resolution, chord names, the terminal-keystroke rule, every dock tab keyed and surfaced, every track() key a literal, ${SITES.length} pinned controls, and ${TSX.length} .tsx files with no unkeyed dynamic-title button`);

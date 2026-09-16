@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
+import { track } from "./usage";
 
 /** `worktrees_core::docs::DocEntry`. */
 export type DocEntry = { path: string; rel: string; title: string; group: string };
@@ -135,6 +136,23 @@ export function DocsPane({ root, repo, place, reloadToken, onOpen, onError, find
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<string | null>(null);
   const filterRef = useRef<HTMLInputElement>(null);
+  // Has the filter been USED in this place, yet? The rail button, the rows,
+  // refresh and reveal all carry a `data-track` and are counted by the global
+  // click listener; an `<input>` is not a control `keyForTarget` reads, so
+  // without this the one Docs affordance with no evidence behind it would be
+  // the one most likely to be cut for lack of evidence.
+  //
+  // ONCE per mount, on the empty→non-empty edge, not per keystroke: a
+  // per-keystroke key outranks every real control within a day and drowns the
+  // comparison it exists to serve (the same reasoning that drops the pty's
+  // ctrl chords in `trackChord`). The pane is keyed by place, so a remount
+  // resets it and the count reads as "places where the filter was used".
+  //
+  // ⚠ The key is a LITERAL and must stay one. The query is a person's typing,
+  // and typing may never reach `ui-events.jsonl` — `usage-check.mjs` half 6
+  // refuses a non-literal `track()` argument outside `usage.ts` precisely
+  // because this file is where the temptation lives.
+  const filterUsed = useRef(false);
 
   // A stale answer must never paint over a fresh one: the walk is a few hundred
   // file reads, so two of them CAN overlap when the place changes mid-flight.
@@ -212,7 +230,11 @@ export function DocsPane({ root, repo, place, reloadToken, onOpen, onError, find
           type="text"
           placeholder={total ? `filter ${total} document${total === 1 ? "" : "s"}…` : "filter by name…"}
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v && !filterUsed.current) { filterUsed.current = true; track("docs.filter"); }
+            setQ(v);
+          }}
           onKeyDown={(e) => {
             if (e.key !== "Escape") return;
             // Escape clears, then releases. Two presses, because a filter you
