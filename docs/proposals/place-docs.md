@@ -1012,6 +1012,12 @@ already says ours are).
 
 ## 14. The patch — `penard-monkey/mo`, branch `harden/loopback-host-check`
 
+**Committed locally, deliberately not pushed.** The fork is public, so pushing
+it publishes a commit describing an unfixed issue in someone else's tool; the
+branch stays on disk at `~/workspace/mo` until upstream ships or declines.
+Nothing needs it pushed yet — `release.yml` is not wired to it, and if the
+patch lands upstream it never will be.
+
 `WithLoopbackHostOnly`, a middleware that refuses a request whose `Host` does
 not name the loopback interface, wired in `cmd/root.go` rather than inside
 `NewHandler`. That placement is the whole design of the patch: `mo`'s 35
@@ -1035,6 +1041,8 @@ Verified, in this order:
    `[::1]` are served exactly as before, and the escape hatch still opts out.
 
 Reported upstream through GitHub Private Vulnerability Reporting with the patch
-attached. If it lands, this fork is deleted and `release.yml` pins the fixed
+attached — `GHSA-6pff-wf7m-6f5h`, filed 2026-09-16, state `triage`.
+`SECURITY.md` promises a response within 7 days; no disclosure deadline was
+set on our side. If it lands, this fork is deleted and `release.yml` pins the fixed
 release instead — which is the outcome to want, and the reason the patch was
 written to be upstreamable rather than merely to work.
