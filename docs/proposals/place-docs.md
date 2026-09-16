@@ -912,3 +912,129 @@ a border and a glyph; the text is `--txt-hi` on `--bg-elev`, 5.17:1 in the
 worst theme. (Latte's `--warn` glyph is 1.93:1 there and 1.93–2.64:1 against
 every surface in that theme — a property of latte's amber, shared with every
 other `--warn` marker in the app, not of this pairing.)
+
+---
+
+## 13. The §11.3 gate, run — 2026-09-16. **`mo` fails it.**
+
+§11.3 set phase 3's acceptance criterion: *prove the viewer refuses a
+cross-origin read.* It was run against `mo` v1.6.8 (darwin_arm64 release
+binary, published checksum verified, scratch dir, removed afterwards). Two
+halves, and it passes one.
+
+> **Deliberately thin, for now.** The detail behind §13.2 — the walkthrough and
+> the reproduction — is held back until a fixed `mo` is released, and was
+> reported to its maintainer through GitHub Private Vulnerability Reporting, as
+> that project's `SECURITY.md` asks. Restore it here once upstream ships: the
+> reasoning is worth keeping in the record, and this proposal is the record.
+
+### 13.1 Cross-origin: **passes**
+
+`mo` sends **no** `Access-Control-Allow-Origin` header, and answers a preflight
+`OPTIONS` with `405`. An ordinary cross-origin `fetch` from a web page
+therefore cannot read a response. Its SPA shell also ships a real CSP
+(`default-src 'self'; connect-src 'self'; frame-ancestors 'none'`) — which,
+incidentally, is an independent reason the embedded-iframe idea §8 lists under
+**Never** would not have worked anyway.
+
+### 13.2 Host header: **not validated, and that is the whole gate**
+
+`mo` does not check the `Host` header, so a loopback bind does not by itself
+establish that a request came from the user's own browser. `mo`'s own README
+says the general form of this outright: *"mo has no authentication."*
+
+Being local is the precondition here, not the protection. A loopback bind keeps
+other **machines** out; it does not keep out the **browser on this machine**,
+which runs code from strangers and can reach `127.0.0.1`. The defence is one
+line of server code — the browser always sends the name it believes it is
+talking to and cannot be made to lie about it — and `mo` does not have it.
+
+**Bounded, and the bound matters.** Only documents `mo` has been *given* are
+reachable. There is **no path traversal**: `/../../../etc/passwd` returns `200`
+with the SPA shell at `Content-Length: 1587`, not the file — checked by reading
+the body rather than the status code, because the status alone reads like a
+breach and is not one. So the exposure is "the documents we registered", not
+"every file the user can read". For this feature those are close to the same
+sentence, and §4.3's reason for the rule is that these documents carry a
+client's signed agreement.
+
+**§5.1 makes it worse, not better.** One `mo` for the whole app with every
+place as a group means one success reads *every document in every place at
+once*, via `/_/api/groups`. The consolidation that makes the viewer cheap makes
+the blast radius total.
+
+### 13.3 §11.3's own remedy does not work here
+
+§11.3 offered an alternative: *"or the app puts its own loopback proxy in front
+that does."* It does not close this, and the reason is worth drawing, because a
+proxy is the obvious fix and it is the wrong one:
+
+```
+   what we would build                what reaches mo anyway
+
+   ┌──────────┐                       ┌──────────┐
+   │ our proxy│ :Q  checks Host ✓     │ a page   │ tries loopback ports
+   └────┬─────┘                       └────┬─────┘ 6275, 6276, 6277, …
+        │ forwards                         │
+        ▼                                  │  finds :P, connects directly
+   ┌──────────┐ :P  checks nothing ✗  ◀────┘
+   │    mo    │                            the proxy is never involved
+   └──────────┘
+```
+
+`mo` has to hold a **loopback TCP port** of its own — there is no Unix-socket
+bind (`--bind` takes an address; a socket path is treated as a non-loopback
+address and warned about), and no auth of any kind. So the proxy adds a second
+door to a house whose first door does not lock. The only versions that work are
+ones where `mo` itself refuses, or where nothing is listening at all.
+
+### 13.4 So phase 3 does not ship on a stock `mo`
+
+Not a deferral over taste: the gate was written before the measurement, the
+measurement was taken, and it says no. Everything in §5.3 and §12 survives
+whichever way this goes — the derived tree, the generated `click` directives,
+the staleness header injected into the documents — because none of it depends
+on which process serves the bytes.
+
+**Chosen: patch `mo` and build it from source.** It is Go and MIT; the check is
+a small middleware, and it is upstreamable. This is not the "fork in all but
+name" §5.2 rejected — that was a proxy injecting scripts keyed on class names
+in a 2 MB minified bundle. It does change the supply chain §11.5 priced: a Go
+**toolchain** in `release.yml` rather than a downloaded release binary, and we
+own the build. See §14.
+
+The two alternatives, recorded because they remain the fallbacks if upstream
+declines and maintaining a fork sours: **generate static pages and serve
+nothing** (no process, no port, nothing to forge; loses live-reload and
+full-text search, which are `mo`'s two real gifts), or **ship it and write the
+risk down** (defensible only if the served documents are not sensitive — §4.3
+already says ours are).
+
+## 14. The patch — `penard-monkey/mo`, branch `harden/loopback-host-check`
+
+`WithLoopbackHostOnly`, a middleware that refuses a request whose `Host` does
+not name the loopback interface, wired in `cmd/root.go` rather than inside
+`NewHandler`. That placement is the whole design of the patch: `mo`'s 35
+existing handler tests build requests with `httptest.NewRequest`, whose `Host`
+defaults to `example.com`, so enforcing inside `NewHandler` would have broken
+every one of them — and in `cmd/root.go` the policy sits next to the flag that
+governs it.
+
+It is applied **only when the bind address is itself loopback**: a deliberately
+exposed server has opted into being reached by name, and
+`--dangerously-allow-remote-access` turns it off, which is the escape hatch for
+a reverse proxy in front of a loopback bind.
+
+Verified, in this order:
+
+1. the new tests fail against unpatched `mo` (undefined symbols), then pass;
+2. `go test ./...` passes across all four of its packages, unchanged;
+3. `go vet` and `gofmt` clean (`golangci-lint` is not installed here);
+4. **end to end against a built binary** — the request that previously returned
+   a document's content returns `403`, while `127.0.0.1`, `localhost` and
+   `[::1]` are served exactly as before, and the escape hatch still opts out.
+
+Reported upstream through GitHub Private Vulnerability Reporting with the patch
+attached. If it lands, this fork is deleted and `release.yml` pins the fixed
+release instead — which is the outcome to want, and the reason the patch was
+written to be upstreamable rather than merely to work.
