@@ -217,7 +217,7 @@ function worktreesRepo(): ProjectView {
   const P = "worktrees";
   const places: Place[] = [
     place(P, root, {
-      slug: "(main)", branch: "main", is_main: true, ahead: 0, behind: 0,
+      slug: "(main)", branch: "main", is_main: true, ahead: 0, behind: 0, upstream: "origin/main",
       tmux_session: { name: `${P}-(main)`, up: false }, last_commit_subject: "docs: readme",
       // main glows too — a session run in the repo root stamps under the `(main)`
       // store key, same as any other place (lib.rs place_key_for)
@@ -225,7 +225,10 @@ function worktreesRepo(): ProjectView {
       lifecycle_effective: "closed",
     }),
     place(P, root, {
-      slug: "feat-redesign", branch: "feat/ui-redesign", dirty: true, dirty_files: 9, ahead: 7,
+      // Pushed (the upstream resolves), so the topbar's remote link is the
+      // branch's /tree/ page; random-work and fix-flaky-ci below have none and
+      // link to the repo home instead — both shapes on one project.
+      slug: "feat-redesign", branch: "feat/ui-redesign", dirty: true, dirty_files: 9, ahead: 7, upstream: "origin/feat/ui-redesign",
       tmux_session: { name: `${P}-feat-redesign`, up: true }, claude_session_present: true,
       last_commit_subject: "design tokens + nav", declared: { pinned: true, last_opened_epoch: NOW - 600 },
       lifecycle_effective: "active",

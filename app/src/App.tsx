@@ -24,6 +24,7 @@ import {
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
 } from "./dnd";
 import { useNavDrag, type DragItem } from "./navdrag";
+import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -2792,6 +2793,19 @@ function App() {
   // backend call) and again after an apply, so the menu can name the hub it
   // would use and grey itself out when there is none.
   const [syncStatus, setSyncStatus] = useState<Record<string, SyncStatusView>>({});
+  /** The https home of each project's origin remote, keyed by root — `null`
+   *  once read and found absent, missing until read. One `git remote get-url`
+   *  per project, on selection and on the project menu opening (a remote is
+   *  added once and rarely changes, but "rarely" is not "never", so it is
+   *  re-read at those two moments rather than cached for the app's life). The
+   *  topbar link renders only from this: a link that has to say "no remote"
+   *  when clicked is worse than no link. */
+  const [remoteBase, setRemoteBase] = useState<Record<string, string | null>>({});
+  const loadRemote = useCallback(async (root: string): Promise<string | null> => {
+    const base = await invoke<string | null>("remote_url", { repo: root });
+    setRemoteBase((m) => (m[root] === base ? m : { ...m, [root]: base }));
+    return base;
+  }, []);
   /** `adopt` non-null ⇒ an IMPORT: there is no local root yet, so `root` is ""
    *  and the backend is addressed by hub NAME instead. */
   const [sync, setSync] = useState<{ root: string; dir: SyncDir; adopt: Adopt | null } | null>(null);
@@ -3640,6 +3654,12 @@ function App() {
 
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
+  // The topbar's remote link needs the base before it can render — re-read on
+  // every change of PROJECT (not place: one remote per repo).
+  const selRepo = sel?.repo ?? null;
+  useEffect(() => {
+    if (selRepo) loadRemote(selRepo).catch(fail);
+  }, [selRepo, loadRemote, fail]);
 
   // Does the topbar's branch chip say anything the name and the alias do not?
   // On `(main)` it names the branch main is on, which is news; on a worktree it
@@ -4108,11 +4128,17 @@ function App() {
     if (!navigator.clipboard) { fail("clipboard unavailable"); return; }
     navigator.clipboard.writeText(text).catch(fail);
   };
-  const openOnRemote = async (repo: string, slug: string) => {
+  /** Open a project (`place` null → the repo home) or a place (its branch's
+   *  page when the branch is on origin, else the home) in the browser. Which
+   *  page is `remote.ts`'s call; this only finds the base — from the cache when
+   *  it has one, otherwise read now, so the menu item works on a project the
+   *  topbar has never shown. */
+  const openRemote = async (root: string, place: Place | null) => {
     closeCtx();
+    closeMenu();
     try {
-      const url = await invoke<string | null>("github_url", { repo, slug });
-      if (url) await openUrl(url);
+      const base = root in remoteBase ? remoteBase[root] : await loadRemote(root);
+      if (base) await openUrl(remoteWebUrl(base, place));
       else setErr("No origin remote for this project.");
     } catch (e) { fail(e); }
   };
@@ -4379,7 +4405,7 @@ function App() {
     setCtx({ kind: "project", x: e.clientX, y: e.clientY, root });
     // Re-read on every open rather than once: a hub is a drive someone plugs in
     // and pulls out, so a cached "no hub" would outlive the truth.
-    if (ws?.projects.find((v) => v.root === root)?.ok) loadSyncStatus(root);
+    if (ws?.projects.find((v) => v.root === root)?.ok) { loadSyncStatus(root); loadRemote(root).catch(fail); }
   };
 
   // ── nav sorting (Settings-persisted; Manual = drag) ──
@@ -5757,6 +5783,24 @@ function App() {
                       onError={fail}
                     />
                   )}
+                {/* The place on its remote, one click from the branch it names.
+                    Rendered only once the base is KNOWN for this repo (see
+                    `remoteBase`): a repo with no origin gets no link at all,
+                    not a link that apologises. Which page is remote.ts's rule
+                    — the branch's tree when it is on origin, the repo home
+                    otherwise — and the tooltip says which, as the URL. */}
+                {(() => {
+                  const base = remoteBase[sel.repo];
+                  if (!base) return null;
+                  const url = remoteWebUrl(base, selected);
+                  return (
+                    <button className="icon-btn remote-link" data-track="topbar.remote" data-testid="topbar-remote"
+                      title={`Open ${remoteTitle(url)}`}
+                      onClick={() => openUrl(url).catch(fail)}>
+                      <Icons.ExternalLink size={13} />
+                    </button>
+                  );
+                })()}
                 {/* squeezed window: the badges go, not the name — every fact
                     here is also in the nav row.
                     No "live" badge here: the controls carry one already (it
@@ -6521,7 +6565,7 @@ function App() {
             <button className="pop-item" data-testid="ctx-status"
               onClick={() => openStatus(ctx.repo, ctxPlace.slug)}>Status check…</button>
           )}
-          <button className="pop-item" onClick={() => openOnRemote(ctx.repo, ctxPlace.slug)}>Open on GitHub</button>
+          <button className="pop-item" onClick={() => openRemote(ctx.repo, ctxPlace)}>Open on {remoteHostLabel(remoteBase[ctx.repo])}</button>
           <button className="pop-item" onClick={() => revealPlace(ctxPlace.path)}>Reveal in Finder</button>
           <button className="pop-item" onClick={() => editIn(ctxPlace.path)}>Open in editor</button>
           <button className="pop-item" onClick={() => copyText(ctxPlace.path)}>Copy path</button>
@@ -6593,6 +6637,14 @@ function App() {
               );
             })()}
             <div className="ctx-sep" />
+            {/* The repo HOME, not main's tree: the project is the repo. Shown
+                even before the remote has been read (the click reads it), and
+                the click reports "no origin" — the place menu's contract. */}
+            {pv?.ok && (
+              <button className="pop-item" data-testid="proj-remote" onClick={() => openRemote(ctx.root, null)}>
+                Open on {remoteHostLabel(remoteBase[ctx.root])}
+              </button>
+            )}
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
             <button className="pop-item" onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>
             <button className="pop-item" onClick={() => editIn(ctx.root)}>Open in editor</button>

@@ -890,8 +890,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       });
       return { ok: true, code: 0, output: `closed tmux ${live} — worktree kept.` };
     }
-    case "github_url":
-      return `https://github.com/demo/${(args.repo as string).split("/").pop()}/tree/mock-branch`;
+    case "remote_url": {
+      // The https base only — which page is remote.ts's call. One project has
+      // no origin at all, so the topbar link's "hidden until known" state and
+      // the menu's "No origin remote" path both have a row to be seen on.
+      const name = (args.repo as string).split("/").pop() ?? "";
+      return name === "deleted-thing" || name.startsWith("local") ? null : `https://github.com/demo/${name}`;
+    }
     case "fetch_origin":
       console.info("[mock] fetch_origin:", args); // no ahead/behind state to model in the harness
       return null;

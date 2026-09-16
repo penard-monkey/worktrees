@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The repo on its remote, one click away.** Right-clicking a project in the
+  nav offers *Open on GitHub* (the host's name when it is not github.com) —
+  the repo home on its `origin`. And the topbar gains a link right of the
+  branch chip that opens the selected place on the remote: the branch's own
+  page when the branch is on origin, the repo home when it is not yet pushed
+  (the old place-menu link built `/tree/<branch>` regardless and 404'd on
+  every unpushed branch). The link renders only once the app has read the
+  remote, so a repo with no origin gets no link rather than one that
+  apologises when clicked; the tooltip is the URL. The page rule lives in one
+  place, `app/src/remote.ts`, guarded by `app/scripts/remote-check.mjs`; the
+  backend only turns the remote spec into an https base (`remote_url`,
+  replacing `github_url`).
 - **A Docs tab, per place, with a staleness header.** The right rail gains a
   third entry: the documentation this worktree carries *at this commit* —
   README, CLAUDE, DESIGN, ROADMAP, CHANGELOG, the place's brief, whatever else
