@@ -18,6 +18,14 @@
 //! 3. any other root-level `*.md`, alphabetically;
 //! 4. `docs/**/*.md`, depth-first, files before subdirectories.
 //!
+//! `[docs]` (proposal §3.2) changes exactly two of those four. `paths`
+//! replaces step 4 — the repo says which of its directories hold documentation
+//! — while 1, 2 and 3 stay, because the root files and the brief are about the
+//! repo rather than about its documentation layout. `index` prepends one entry
+//! ahead of everything, because "where reading starts" is a fact only the repo
+//! knows. Nothing else moves, and there is no key that can name a command:
+//! ADR 0001 is why `Docs` is two path fields (see `projcfg::Docs`).
+//!
 //! 3 sits before 4 so the ungrouped run is CONTIGUOUS — one block of
 //! root-level documents, then the tree. It read the other way round first, and
 //! that emitted two separate `group: ""` runs with the whole `docs/` tree
@@ -44,7 +52,10 @@
 //! never follows the one thing that could.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+use crate::projcfg::Docs;
 
 /// Root-level documents, in the order a reader wants them. Present ones only.
 pub const ROOT_FILES: [&str; 5] = ["README.md", "CLAUDE.md", "DESIGN.md", "ROADMAP.md", "CHANGELOG.md"];
@@ -238,28 +249,58 @@ fn entry(root: &Path, rel: &str, group: &str) -> DocEntry {
     }
 }
 
+/// The index for the worktree at `root`, by convention alone.
+pub fn index(root: &Path) -> DocsIndex {
+    index_with(root, None)
+}
+
 /// The index for the worktree at `root`, which the caller has already
-/// canonicalised and proved is under a registered project.
+/// canonicalised and proved is under a registered project. `docs` is the
+/// project's `[docs]` section when it has one.
 ///
 /// Never errors: a place with no documentation is an empty index, not a
 /// failure, and an unreadable subdirectory drops out rather than taking the
 /// listing with it. "Fail per file, loudly" is the dock's rule
 /// (`ViewErrorBoundary`); here the unit that can fail is a row, and a row that
 /// cannot be read simply is not one.
-pub fn index(root: &Path) -> DocsIndex {
+///
+/// **A declared path that does not exist is skipped, never an error.** Four of
+/// valleos's eleven places have no `apps/docs` on their branch; a config
+/// written on main must not make the index fail on a place that has not
+/// rebased, which would be the inconsistency this tab exists to remove wearing
+/// a different hat.
+pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
     let mut entries: Vec<DocEntry> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut truncated = false;
 
-    let push = |entries: &mut Vec<DocEntry>, seen: &mut Vec<String>, rel: String, group: &str| -> bool {
+    // ONE dedupe rule for the whole walk, and it lives here rather than at the
+    // four call sites. `[docs] index = "docs/index.md"` names a file the tree
+    // pass then walks into, so the row came out twice — and a per-site check
+    // would have closed that one route and left the next one open. `false`
+    // means the CAP was hit, which is the only thing the caller must report; a
+    // duplicate is simply not pushed.
+    let push = |entries: &mut Vec<DocEntry>, seen: &mut BTreeSet<String>, rel: String, group: &str| -> bool {
+        if seen.contains(&rel) {
+            return true;
+        }
         if entries.len() >= MAX_ENTRIES {
             return false;
         }
         entries.push(entry(root, &rel, group));
-        seen.push(rel);
+        seen.insert(rel);
         true
     };
 
+    // 0. `[docs] index` — where reading starts, ahead of everything. Grouped
+    //    with the root files however deep it lives: it is the landing page for
+    //    the whole place, so a `docs` header above it would file it under a
+    //    tree it is introducing.
+    if let Some(i) = docs.and_then(|d| d.index.as_ref()) {
+        if is_regular_file(&root.join(i.as_str())) && !push(&mut entries, &mut seen, i.as_str().to_string(), "") {
+            truncated = true;
+        }
+    }
     // 1. the named root files, in the order a reader wants them
     for f in ROOT_FILES {
         if is_regular_file(&root.join(f)) && !push(&mut entries, &mut seen, f.to_string(), "") {
@@ -278,7 +319,7 @@ pub fn index(root: &Path) -> DocsIndex {
     if let Ok(rd) = std::fs::read_dir(root) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if !is_md(&name) || seen.iter().any(|s| s == &name) {
+            if !is_md(&name) || seen.contains(&name) {
                 continue;
             }
             if std::fs::symlink_metadata(e.path()).map(|m| m.is_file()).unwrap_or(false) {
@@ -293,10 +334,34 @@ pub fn index(root: &Path) -> DocsIndex {
             break;
         }
     }
-    // 4. docs/, depth-first
-    let docs = root.join(DOCS_DIR);
-    if !truncated && std::fs::symlink_metadata(&docs).map(|m| m.is_dir()).unwrap_or(false) {
-        let mut stack: Vec<(PathBuf, String, usize)> = vec![(docs, DOCS_DIR.to_string(), 0)];
+    // 4. the documentation tree(s). `[docs] paths` replaces the convention's
+    //    `docs/`, in DECLARED order — the repo chose that order and sorting it
+    //    would be this module second-guessing the one thing it was told.
+    let declared: Vec<String> = match docs.map(|d| d.paths.as_slice()) {
+        Some(p) if !p.is_empty() => p.iter().map(|r| r.as_str().to_string()).collect(),
+        _ => vec![DOCS_DIR.to_string()],
+    };
+    for rel in declared {
+        if truncated {
+            break;
+        }
+        let target = root.join(&rel);
+        let Ok(md) = std::fs::symlink_metadata(&target) else { continue }; // declared, absent: skip
+        if md.is_file() {
+            // A declared FILE is listed on its own, grouped by its directory
+            // like any other entry.
+            if is_md(&rel) {
+                let group = Path::new(&rel).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                if !push(&mut entries, &mut seen, rel.clone(), &group) {
+                    truncated = true;
+                }
+            }
+            continue;
+        }
+        if !md.is_dir() {
+            continue; // a symlink is neither, which is the treatment it gets
+        }
+        let mut stack: Vec<(PathBuf, String, usize)> = vec![(target, rel, 0)];
         while let Some((dir, rel, depth)) = stack.pop() {
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
             let (mut files, mut dirs): (Vec<String>, Vec<(PathBuf, String)>) = (Vec::new(), Vec::new());
@@ -340,6 +405,7 @@ pub fn index(root: &Path) -> DocsIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projcfg::RelPath;
     use std::fs;
 
     struct Tmp(PathBuf);
@@ -550,6 +616,130 @@ mod tests {
         }
         assert_eq!(rels(&i), vec!["docs/real.md"]);
         let _ = fs::remove_dir_all(&away);
+    }
+
+    // ── [docs] (proposal §3.2) ───────────────────────────────────────────────
+
+    fn cfg(paths: &[&str], index: Option<&str>) -> Docs {
+        Docs {
+            paths: paths.iter().map(|p| RelPath::parse(p).unwrap()).collect(),
+            index: index.map(|i| RelPath::parse(i).unwrap()),
+        }
+    }
+
+    #[test]
+    fn declared_paths_replace_the_tree_and_keep_the_root_files() {
+        let t = tmp("cfgpaths");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        write(r, "docs/convention.md", "# c");
+        write(r, "handbook/a.md", "# a");
+        write(r, "packages/db/README.md", "# db");
+        let i = index_with(r, Some(&cfg(&["handbook", "packages/db/README.md"], None)));
+        assert_eq!(
+            rels(&i),
+            vec!["README.md", "handbook/a.md", "packages/db/README.md"],
+            "declared paths replace docs/, the ROOT files stay — they are about the repo, not its layout",
+        );
+    }
+
+    #[test]
+    fn a_declared_directory_is_walked_and_a_declared_file_is_listed_alone() {
+        let t = tmp("cfgkinds");
+        let r = &t.0;
+        write(r, "handbook/a.md", "# a");
+        write(r, "handbook/deep/b.md", "# b");
+        write(r, "notes/one.md", "# one");
+        write(r, "notes/two.md", "# two");
+        let i = index_with(r, Some(&cfg(&["handbook", "notes/one.md"], None)));
+        // DECLARED order, not sorted and not dirs-before-files: the repo chose
+        // this order, and second-guessing it is the one thing this must not do.
+        assert_eq!(rels(&i), vec!["handbook/a.md", "handbook/deep/b.md", "notes/one.md"]);
+        // the single file is grouped by its own directory, like any other entry
+        assert_eq!(i.entries[2].group, "notes");
+    }
+
+    #[test]
+    fn a_declared_path_that_does_not_exist_is_skipped_not_an_error() {
+        // Four of eleven places have no `apps/docs` on their branch. A config
+        // written on main must not make the index fail on a place that has not
+        // rebased — that is the inconsistency the tab exists to remove.
+        let t = tmp("cfgmissing");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        write(r, "handbook/a.md", "# a");
+        let i = index_with(r, Some(&cfg(&["handbook", "apps/docs", "gone.md"], None)));
+        assert_eq!(rels(&i), vec!["README.md", "handbook/a.md"]);
+        assert!(!i.truncated);
+    }
+
+    #[test]
+    fn the_declared_index_is_listed_first_above_the_root_files() {
+        let t = tmp("cfgindex");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        write(r, "CLAUDE.md", "# c");
+        write(r, "docs/index.md", "# landing");
+        let i = index_with(r, Some(&cfg(&[], Some("docs/index.md"))));
+        assert_eq!(rels(&i)[0], "docs/index.md", "reading starts here: {:?}", rels(&i));
+        assert_eq!(i.entries[0].group, "", "…and it sits with the root files, not under docs/");
+        // …and it is not listed TWICE when the convention would have found it
+        assert_eq!(rels(&i).iter().filter(|r| **r == "docs/index.md").count(), 1);
+        assert_eq!(rels(&i), vec!["docs/index.md", "README.md", "CLAUDE.md"]);
+    }
+
+    #[test]
+    fn a_declared_index_that_is_missing_changes_nothing() {
+        let t = tmp("cfgindexgone");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        let i = index_with(r, Some(&cfg(&[], Some("docs/index.md"))));
+        assert_eq!(rels(&i), vec!["README.md"]);
+    }
+
+    #[test]
+    fn a_declared_path_is_still_walked_under_every_layer_b_rule() {
+        // Layer A already refused `..`, `~`, `.git` and friends at parse time.
+        // This is the OTHER half: a path that is legal as a string still gets
+        // the walk's own refusals — no symlink following, no `.worktrees`, no
+        // dotted directory, and the containment invariant.
+        let t = tmp("cfglayerb");
+        let r = &t.0;
+        write(r, "handbook/a.md", "# a");
+        write(r, "handbook/.hidden/x.md", "# x");
+        write(r, "handbook/node_modules/pkg/README.md", "# vendor");
+        write(r, "handbook/.worktrees/other/docs/ghost.md", "# ghost");
+        let away = t.0.join("..").join(format!("wtdocs-cfgaway-{}", std::process::id()));
+        fs::create_dir_all(&away).unwrap();
+        fs::write(away.join("leak.md"), "# leak").unwrap();
+        std::os::unix::fs::symlink(&away, r.join("handbook/out")).unwrap();
+        let i = index_with(r, Some(&cfg(&["handbook"], None)));
+        assert_eq!(rels(&i), vec!["handbook/a.md"]);
+        let canon_root = fs::canonicalize(r).unwrap();
+        for e in &i.entries {
+            assert!(fs::canonicalize(&e.path).unwrap().starts_with(&canon_root), "{}", e.rel);
+        }
+        let _ = fs::remove_dir_all(&away);
+    }
+
+    #[test]
+    fn declared_paths_keep_one_contiguous_run_per_group() {
+        // The contract the frontend renders against, under config too.
+        let t = tmp("cfgruns");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        write(r, "b/one.md", "# 1");
+        write(r, "a/two.md", "# 2");
+        write(r, "a/sub/three.md", "# 3");
+        let i = index_with(r, Some(&cfg(&["b", "a"], Some("README.md"))));
+        let mut runs: Vec<&str> = Vec::new();
+        for e in &i.entries {
+            if runs.last() != Some(&e.group.as_str()) {
+                assert!(!runs.contains(&e.group.as_str()), "group {:?} resumes: {:?}", e.group, rels(&i));
+                runs.push(&e.group);
+            }
+        }
+        assert_eq!(runs, vec!["", "b", "a", "a/sub"], "declared ORDER is preserved, not sorted");
     }
 
     #[test]

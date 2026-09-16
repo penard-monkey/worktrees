@@ -898,6 +898,7 @@ mod tests {
             ports: None,
             compose: None,
             project: Default::default(),
+            docs: None,
         }
     }
 

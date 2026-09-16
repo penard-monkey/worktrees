@@ -4,7 +4,7 @@ title: "Proposal — per-place docs"
 
 # Proposal — per-place docs
 
-**Status:** **phase 1 BUILT**, 2026-09-16 — the Docs tab, the staleness header
+**Status:** **phases 1 and 2 BUILT**, 2026-09-16 — the Docs tab, the staleness header
 and the name filter, behind no new dependency, process or config. §7.3's open
 questions are answered in §11, and **two claims in this document were wrong**;
 both are corrected there, and one of them (§7.1's `behind … upstream`) would
@@ -182,8 +182,14 @@ index = "docs/index.md"                                       # optional landing
 - `WORKTREES_NO_PROJECT_CONFIG=1` (`projcfg.rs:366-377`) disables `[docs]` with
   the rest of the project rung — the "auditing an untrusted clone" switch
   applies here without new code.
-- **This section is optional in the strongest sense: phase 1 ships without it
+- **This section is optional in the strongest sense: phase 1 shipped without it
   (§8).** The convention has to be good enough that most repos never write it.
+
+**Built, with two decisions the draft did not make — §12.** `[docs]` is read
+from **the place, not the main worktree** (the only `projcfg` consumer that
+diverges, and the feature defeats itself otherwise), and a `.worktrees.toml`
+that does not parse falls back to the convention and says so on screen rather
+than blanking the tab.
 
 ---
 
@@ -835,3 +841,208 @@ Phase 1 as scoped, and nothing beyond it. Specifically absent, by design:
 85-behind place, and per-place tab memory on real `list_workspace` timing.
 Everything above was verified against the Chrome mock, which by construction
 cannot express any of those three.
+
+---
+
+## 12. Phase 2 as built — 2026-09-16
+
+`[docs]` exists, through `RelPath` and the closed known-key set, exactly as
+§3.2 specified. Two decisions §3.2 did not make, both found by building it.
+
+### 12.1 `[docs]` is read from the PLACE, not from the main worktree
+
+This is the only consumer of `projcfg` that does not read `main_root`, and the
+divergence is the point rather than an oversight.
+
+`project_prefix`, materialize, `[ports]` and `[compose]` all read main's config
+because they describe the **project**: one prefix, one port stride, one compose
+file list, whatever branch you happen to be standing on. `[docs]` describes
+*content that exists on a branch*, and the whole premise of this tab is that
+the content differs per place.
+
+Read main's instead and the feature defeats itself, in precisely the scenario
+§1.1 is built from. A restructure lands `[docs] paths = ["handbook"]` on main.
+The seven of eleven places that have not rebased do not have `handbook` — so
+every one of them shows an **empty index** while its `docs/` sits there
+unlisted. A place whose branch predates the key gets the convention, which is
+what its tree actually looks like. Both states correct for their branch.
+
+It grants a branch no power it did not have. `Docs` is two `RelPath` fields
+with Layer A already applied, the walk re-checks containment (Layer B), and the
+place directory was guarded before any of it. The worst a hostile branch can do
+is point the listing at a different directory inside its own worktree — and the
+app already reads a cloned repo's config for the prefix.
+
+### 12.2 A broken config lists by convention, and says so
+
+`load` returns `Err` on a config that does not parse, and the first shape of
+this command propagated it. That is wrong for this surface: §2.7 is *"never a
+dead server for the whole place"*, and a blank Docs tab because of a typo three
+sections away in `.worktrees.toml` is that failure wearing a different hat.
+
+`list_docs` now carries `config_error`, falls back to the convention, and the
+pane renders an amber band above the filter saying so. Silence would be worse
+than either alternative: an index quietly showing something other than what the
+repo declared is the same class of wrongness as an unlabelled stale tree.
+
+### 12.3 Three smaller things
+
+- **`[docs]` shows in the Project sheet.** Every other section does, and this
+  is the one whose *effect* is on another surface entirely — so it is the
+  easiest to write wrong and never notice.
+- **`paths = []` is an error, not a silent fallback.** "I declared the
+  documentation tree and it is nothing" is a typo every time; a repo that wants
+  the convention omits the key, which is what an `index`-only config does.
+- **Declared order is listing order.** The repo chose it; sorting it would be
+  the walk second-guessing the one thing it was told.
+
+### 12.4 What building it found
+
+`[docs] index = "docs/index.md"` named a file the tree pass then walked into,
+so the row came out **twice**. The fix is one dedupe rule inside the walk's own
+`push` rather than a check at each of the four call sites — a per-site check
+would have closed that one route and left the next one open. Caught by a test
+written before the feature, which is the only reason it was not shipped.
+
+A styling measurement worth keeping: the config-error band first used a 12%
+`--warn` tint of `--bg-panel`, and `--txt-dim` over it measured **2.92:1 in
+nord and 3.1:1 in tokyo-day** — amber is a light hue, so tinting a light
+surface with it moves the background *toward* the foreground. The amber is now
+a border and a glyph; the text is `--txt-hi` on `--bg-elev`, 5.17:1 in the
+worst theme. (Latte's `--warn` glyph is 1.93:1 there and 1.93–2.64:1 against
+every surface in that theme — a property of latte's amber, shared with every
+other `--warn` marker in the app, not of this pairing.)
+
+---
+
+## 13. The §11.3 gate, run — 2026-09-16. **`mo` fails it.**
+
+§11.3 set phase 3's acceptance criterion: *prove the viewer refuses a
+cross-origin read.* It was run against `mo` v1.6.8 (darwin_arm64 release
+binary, published checksum verified, scratch dir, removed afterwards). Two
+halves, and it passes one.
+
+> **Deliberately thin, for now.** The detail behind §13.2 — the walkthrough and
+> the reproduction — is held back until a fixed `mo` is released, and was
+> reported to its maintainer through GitHub Private Vulnerability Reporting, as
+> that project's `SECURITY.md` asks. Restore it here once upstream ships: the
+> reasoning is worth keeping in the record, and this proposal is the record.
+
+### 13.1 Cross-origin: **passes**
+
+`mo` sends **no** `Access-Control-Allow-Origin` header, and answers a preflight
+`OPTIONS` with `405`. An ordinary cross-origin `fetch` from a web page
+therefore cannot read a response. Its SPA shell also ships a real CSP
+(`default-src 'self'; connect-src 'self'; frame-ancestors 'none'`) — which,
+incidentally, is an independent reason the embedded-iframe idea §8 lists under
+**Never** would not have worked anyway.
+
+### 13.2 Host header: **not validated, and that is the whole gate**
+
+`mo` does not check the `Host` header, so a loopback bind does not by itself
+establish that a request came from the user's own browser. `mo`'s own README
+says the general form of this outright: *"mo has no authentication."*
+
+Being local is the precondition here, not the protection. A loopback bind keeps
+other **machines** out; it does not keep out the **browser on this machine**,
+which runs code from strangers and can reach `127.0.0.1`. The defence is one
+line of server code — the browser always sends the name it believes it is
+talking to and cannot be made to lie about it — and `mo` does not have it.
+
+**Bounded, and the bound matters.** Only documents `mo` has been *given* are
+reachable. There is **no path traversal**: `/../../../etc/passwd` returns `200`
+with the SPA shell at `Content-Length: 1587`, not the file — checked by reading
+the body rather than the status code, because the status alone reads like a
+breach and is not one. So the exposure is "the documents we registered", not
+"every file the user can read". For this feature those are close to the same
+sentence, and §4.3's reason for the rule is that these documents carry a
+client's signed agreement.
+
+**§5.1 makes it worse, not better.** One `mo` for the whole app with every
+place as a group means one success reads *every document in every place at
+once*, via `/_/api/groups`. The consolidation that makes the viewer cheap makes
+the blast radius total.
+
+### 13.3 §11.3's own remedy does not work here
+
+§11.3 offered an alternative: *"or the app puts its own loopback proxy in front
+that does."* It does not close this, and the reason is worth drawing, because a
+proxy is the obvious fix and it is the wrong one:
+
+```
+   what we would build                what reaches mo anyway
+
+   ┌──────────┐                       ┌──────────┐
+   │ our proxy│ :Q  checks Host ✓     │ a page   │ tries loopback ports
+   └────┬─────┘                       └────┬─────┘ 6275, 6276, 6277, …
+        │ forwards                         │
+        ▼                                  │  finds :P, connects directly
+   ┌──────────┐ :P  checks nothing ✗  ◀────┘
+   │    mo    │                            the proxy is never involved
+   └──────────┘
+```
+
+`mo` has to hold a **loopback TCP port** of its own — there is no Unix-socket
+bind (`--bind` takes an address; a socket path is treated as a non-loopback
+address and warned about), and no auth of any kind. So the proxy adds a second
+door to a house whose first door does not lock. The only versions that work are
+ones where `mo` itself refuses, or where nothing is listening at all.
+
+### 13.4 So phase 3 does not ship on a stock `mo`
+
+Not a deferral over taste: the gate was written before the measurement, the
+measurement was taken, and it says no. Everything in §5.3 and §12 survives
+whichever way this goes — the derived tree, the generated `click` directives,
+the staleness header injected into the documents — because none of it depends
+on which process serves the bytes.
+
+**Chosen: patch `mo` and build it from source.** It is Go and MIT; the check is
+a small middleware, and it is upstreamable. This is not the "fork in all but
+name" §5.2 rejected — that was a proxy injecting scripts keyed on class names
+in a 2 MB minified bundle. It does change the supply chain §11.5 priced: a Go
+**toolchain** in `release.yml` rather than a downloaded release binary, and we
+own the build. See §14.
+
+The two alternatives, recorded because they remain the fallbacks if upstream
+declines and maintaining a fork sours: **generate static pages and serve
+nothing** (no process, no port, nothing to forge; loses live-reload and
+full-text search, which are `mo`'s two real gifts), or **ship it and write the
+risk down** (defensible only if the served documents are not sensitive — §4.3
+already says ours are).
+
+## 14. The patch — `penard-monkey/mo`, branch `harden/loopback-host-check`
+
+**Committed locally, deliberately not pushed.** The fork is public, so pushing
+it publishes a commit describing an unfixed issue in someone else's tool; the
+branch stays on disk at `~/workspace/mo` until upstream ships or declines.
+Nothing needs it pushed yet — `release.yml` is not wired to it, and if the
+patch lands upstream it never will be.
+
+`WithLoopbackHostOnly`, a middleware that refuses a request whose `Host` does
+not name the loopback interface, wired in `cmd/root.go` rather than inside
+`NewHandler`. That placement is the whole design of the patch: `mo`'s 35
+existing handler tests build requests with `httptest.NewRequest`, whose `Host`
+defaults to `example.com`, so enforcing inside `NewHandler` would have broken
+every one of them — and in `cmd/root.go` the policy sits next to the flag that
+governs it.
+
+It is applied **only when the bind address is itself loopback**: a deliberately
+exposed server has opted into being reached by name, and
+`--dangerously-allow-remote-access` turns it off, which is the escape hatch for
+a reverse proxy in front of a loopback bind.
+
+Verified, in this order:
+
+1. the new tests fail against unpatched `mo` (undefined symbols), then pass;
+2. `go test ./...` passes across all four of its packages, unchanged;
+3. `go vet` and `gofmt` clean (`golangci-lint` is not installed here);
+4. **end to end against a built binary** — the request that previously returned
+   a document's content returns `403`, while `127.0.0.1`, `localhost` and
+   `[::1]` are served exactly as before, and the escape hatch still opts out.
+
+Reported upstream through GitHub Private Vulnerability Reporting with the patch
+attached — `GHSA-6pff-wf7m-6f5h`, filed 2026-09-16, state `triage`.
+`SECURITY.md` promises a response within 7 days; no disclosure deadline was
+set on our side. If it lands, this fork is deleted and `release.yml` pins the fixed
+release instead — which is the outcome to want, and the reason the patch was
+written to be upstreamable rather than merely to work.

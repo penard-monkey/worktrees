@@ -2338,3 +2338,32 @@ body.dragging .menu-catch { pointer-events: none; }
 .docs-note { padding: var(--s3) var(--s2); color: var(--txt-dim); font-size: var(--fs-meta); }
 .docs-note-sub { display: block; margin-top: var(--s1); color: var(--txt-mute); }
 .docs-trunc { border-top: 1px solid var(--line); margin-top: var(--s2); }
+
+/* A place whose own `.worktrees.toml` is broken still gets an index — the
+ * convention's — and is told so.
+ *
+ * The amber is a BORDER and a glyph, not a wash behind the text. A 12%
+ * `--warn` tint of `--bg-panel` was the first try and it failed measurement in
+ * half the themes: `--txt-dim` over it came out at 2.92:1 in nord and 3.1:1 in
+ * tokyo-day, and latte's own `--warn` glyph sat at 2.33:1 on its own band —
+ * amber is a light hue, so tinting a light surface with it moves the
+ * background TOWARD the foreground. `--bg-elev` is a tested surface and
+ * `--txt-hi` on it is the pairing the whole app already reads against
+ * (5.17:1 in the worst theme, 13.5:1 in the best).
+ *
+ * The ⚠ stays `--warn` and is a MARKER, never the message. In
+ * catppuccin-latte that glyph measures 1.93:1 here — and 1.93–2.64:1 against
+ * every other surface in that theme, so it is a property of latte's amber
+ * rather than of this pairing, shared with every other `--warn` marker in the
+ * app. Changing it is a theme decision, not this component's. Don't re-measure
+ * it: the text carries the sentence. */
+.docs-warn {
+  flex: none; display: flex; gap: var(--s2); align-items: baseline;
+  padding: var(--s2); min-width: 0;
+  border-bottom: 1px solid var(--line);
+  border-left: 2px solid var(--warn);
+  background: var(--bg-elev);
+  color: var(--txt-hi); font-size: var(--fs-meta);
+}
+.docs-warn-i { flex: none; color: var(--warn); }
+.docs-warn-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -180,6 +180,7 @@ type MockCfg = {
   files: { path: string; mode: string }[];
   ports: { stride: number; max_slots: number; base: [string, number][] } | null;
   compose: { files: string[]; project: string } | null;
+  docs: { paths: string[]; index: string | null } | null;
   error: string | null;
   warnings: string[];
 };
@@ -248,6 +249,8 @@ const mockConfigs: Record<string, MockCfg> = {
     // Two files, in docker's order: the base declares the named volumes, the
     // worktree override goes last (projcfg::Compose::files).
     compose: { files: ["docker-compose.yml", "docker-compose.worktree.yml"], project: "{prefix}-wt-{slug}" },
+    // `[docs]` — declared order, and an index that pulls above the root files.
+    docs: { paths: ["docs", "packages/db/README.md"], index: "docs/index.md" },
     error: null,
     warnings: ["future_thing = 1 — unknown key, ignored"],
   },
@@ -257,6 +260,7 @@ const mockConfigs: Record<string, MockCfg> = {
     files: [],
     ports: null,
     compose: null,
+    docs: null,
     error: null,
     warnings: [],
   },
@@ -1142,16 +1146,35 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // brief, then `docs/` in groups, then the leftovers, each with a title
       // the walk read out of the file rather than off the filename.
       //
-      // `?docs=` drives the three states the pane renders differently and that
-      // no fixture reaches on its own: `empty` (a place with no markdown),
+      // `?docs=` drives the states the pane renders differently and that no
+      // fixture reaches on its own: `empty` (a place with no markdown),
       // `truncated` (the cap), `flat` (the pre-restructure tree from F1 —
       // every root-level file, no `docs/` at all, which is what seven of
-      // valleos's eleven places actually look like).
+      // valleos's eleven places actually look like), `cfg` (a `[docs]` section
+      // in force), and `badcfg` (a `.worktrees.toml` that does not parse — the
+      // index falls back to the convention and says so).
       const root = args.root as string;
       const mode = new URLSearchParams(location.search).get("docs") ?? "";
       const base = "origin/main";
       const mk = (rel: string, title: string, group = ""): MockDoc => ({ path: `${root}/${rel}`, rel, title, group });
       if (mode === "empty") return { base, entries: [], truncated: false };
+      if (mode === "cfg") {
+        // `[docs] paths = ["handbook", "packages/db/README.md"]`, `index =
+        // "handbook/start.md"` — declared ORDER, the root files kept, and the
+        // index pulled above them.
+        return {
+          base,
+          entries: [
+            mk("handbook/start.md", "Start here"),
+            mk("README.md", "worktrees"),
+            mk("CLAUDE.md", "worktrees — working notes for Claude"),
+            mk("handbook/onboarding.md", "Onboarding", "handbook"),
+            mk("handbook/ops/runbook.md", "Runbook", "handbook/ops"),
+            mk("packages/db/README.md", "Schema", "packages/db"),
+          ],
+          truncated: false,
+        };
+      }
       if (mode === "flat") {
         return {
           base,
@@ -1182,6 +1205,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         mk("docs/proposals/place-docs.md", "Proposal — per-place docs", "docs/proposals"),
         mk("docs/proposals/project-settings.md", "Proposal — project settings", "docs/proposals"),
       ];
+      if (mode === "badcfg") {
+        return {
+          base,
+          config_error: ".worktrees.toml:3: `..` path component not allowed: ../outside",
+          entries: [mk("README.md", "worktrees"), mk("docs/index.md", "Documentation", "docs")],
+          truncated: false,
+        };
+      }
       if (mode === "truncated") {
         for (let i = 0; i < 40; i++) entries.push(mk(`docs/archive/a${i}.md`, `Archived note ${i}`, "docs/archive"));
         return { base, entries, truncated: true };
@@ -1291,7 +1322,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "project_config_read":
       return clone(mockConfigs[args.repo] ?? {
         path: `${args.repo}/.worktrees.toml`,
-        exists: false, files: [], ports: null, compose: null, error: null, warnings: [],
+        exists: false, files: [], ports: null, compose: null, docs: null, error: null, warnings: [],
       });
     case "doctor": {
       const root = args.repo as string;
@@ -1575,6 +1606,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         path: `${root}/.worktrees.toml`, exists: true,
         files: [{ path: ".env", mode: "link" }, { path: "app/.env.local", mode: "link" }],
         ports: null, compose: null, error: null, warnings: [],
+        docs: null,
       };
       if (mockSuggestions[root]) mockSuggestions[root] = { ...mockSuggestions[root], exists: true, qualifies: false };
       return { ok: true, code: 0, warnings: [], output: `▸ wrote ${root}/.worktrees.toml\n▸ Commit it — this is project structure, like docker-compose.yml.` };
@@ -1923,6 +1955,7 @@ const healthyConfigs: Record<string, MockCfg> = {};
       path: cfg.path,
       exists: true,
       files: [], ports: null, compose: null, warnings: [],
+      docs: null,
       error: msg ?? ".worktrees.toml:7: expected `=` after key `path` — the file does not parse",
     };
     emitEvent("places:changed", {});

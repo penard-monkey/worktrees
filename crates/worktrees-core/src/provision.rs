@@ -931,6 +931,7 @@ mod tests {
                     project: "{prefix}-wt-{slug}".into(),
                 }),
                 project: Default::default(),
+                docs: None,
             }
         }
         fn run_cfg(&self, slug: &str, reallocate: bool, cfg: &ProjectConfig) -> Result<Outcome, ProvisionError> {

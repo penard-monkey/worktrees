@@ -32,6 +32,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   dirty, and what the last commit was. Always, never collapsible. No new
   dependency, no process, no configuration.
 
+## [Unreleased]
+
+### Added
+- **A project can say where its documentation lives.** `.worktrees.toml` gains
+  an optional `[docs]` section — `paths` (the directories and files the Docs
+  tab walks, in the order you list them) and `index` (the page reading starts
+  on, pulled to the top of the list). Both are plain paths: the same
+  allow-listed, no-`..`, no-`~`, no-`.git` treatment `[[file]]` gets, and there
+  is no key that can name a command to run. Omit the section and nothing
+  changes — the convention already finds README, CLAUDE, DESIGN, ROADMAP,
+  CHANGELOG, the brief and `docs/`. The Project sheet shows what it parsed.
+  It is read from **the worktree you are looking at**, not from main, which is
+  the whole point: a branch that predates the section gets the convention, so
+  a repo mid-restructure shows each place the documentation that place
+  actually has. And a `.worktrees.toml` that does not parse still lists — by
+  convention, with a line saying why — rather than emptying the tab.
+
 ## [0.23.1] - 2026-09-11
 
 ### Fixed
