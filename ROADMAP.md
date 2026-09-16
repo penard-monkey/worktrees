@@ -5,6 +5,16 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The tmux pane drops replies to tmux's attach-time queries.** `onData` is
+  wired only after `term_open` resolves, and xterm fires a data event into no
+  listener for anything parsed before that — so tmux's DA / colour / blink
+  burst on attach may go unanswered and tmux keeps its defaults. Harmless so
+  far (nothing visible), but it is the same shape as the dock-shell bug from
+  the other side: the fix there reports `replay: 0` for tmux and leaves this
+  alone. Wire `onData` before `open`, gated on the attach id the way `write`
+  already is, and confirm with `termreplay-check.mjs`'s tmux case.
+  _From: [2026-09-11 shell-replay-mute](docs/sessions/2026-09-11-shell-replay-mute/summary.md)_
+
 - **A drift guard for the Escape stack.** Every modal surface must call
   `useEscape`; a new dialog written with its own `window.addEventListener(
   "keydown")` regresses to the terminal-focus hole silently (#194's branch-chip
