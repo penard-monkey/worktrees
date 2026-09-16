@@ -23,10 +23,19 @@ dist/
 # planning-with-files working docs — the plan for the CURRENT work stream, kept
 # local; at close-out they're tarballed into docs/sessions/<date>-<slug>/
 # next to the session summary (see .claude/skills/close-out). (DESIGN.md +
-# MIGRATION.md are tracked design docs; these three are scratch/working memory.)
+# MIGRATION.md are tracked design docs; these are scratch/working memory.)
+#
+# Two layouts, both ignored. The three root files are the original flat layout.
+# `.planning/` is the directory form, and it is also where `worktrees new`
+# writes an agent's brief — BRIEF_PATH in crates/worktrees-core/src/ops.rs,
+# whose doc comment says this working dir is one "every repo of ours already
+# gitignores". That was true of our other repos and quietly false of this one
+# until this line existed, so a brief written into a worktree OF worktrees
+# would have shown up as an untracked file with nothing to explain it.
 /task_plan.md
 /findings.md
 /progress.md
+.planning/
 
 # session screenshots belong in ~/.cache/worktrees/<project>/<worktree>/ — these
 # patterns are the safety net for strays in the repo root
