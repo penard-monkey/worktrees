@@ -23,12 +23,17 @@ export type ProjectFileView = { path: string; mode: string };
 export type ProjectPortsView = { stride: number; max_slots: number; base: [string, number][] };
 /** `files` is docker's `-f` list, in docker's order — see lib.rs. */
 export type ProjectComposeView = { files: string[]; project: string };
+/** `[docs]` — which paths the Docs tab walks, and where reading starts.
+ *  Shown here because its EFFECT is on another surface entirely, which makes
+ *  it the section easiest to write wrong and never notice. */
+export type ProjectDocsView = { paths: string[]; index: string | null };
 export type ProjectConfigView = {
   path: string;
   exists: boolean;
   files: ProjectFileView[];
   ports: ProjectPortsView | null;
   compose: ProjectComposeView | null;
+  docs: ProjectDocsView | null;
   error: string | null;
   warnings: string[];
 };
@@ -269,6 +274,7 @@ export function ProjectSheet({
                     files <b>{cfg.files.length}</b>
                     {cfg.ports ? <> · ports <b>{cfg.ports.base.length}</b> (stride {cfg.ports.stride}, ≤{cfg.ports.max_slots} slots)</> : null}
                     {cfg.compose ? <> · compose <b>{cfg.compose.files.join(" + ")}</b></> : null}
+                    {cfg.docs ? <> · docs <b>{cfg.docs.paths.length || "convention"}</b></> : null}
                   </div>
                   {cfg.files.map((f) => (
                     <div className="ver-row dx-file" key={f.path}>
@@ -279,6 +285,15 @@ export function ProjectSheet({
                   {cfg.compose && (
                     <div className="ver-row">project name <b>{cfg.compose.project}</b></div>
                   )}
+                  {cfg.docs?.index && (
+                    <div className="ver-row">docs open on <b>{cfg.docs.index}</b></div>
+                  )}
+                  {cfg.docs?.paths.map((p) => (
+                    <div className="ver-row dx-file" key={p}>
+                      <span className="dx-mode link">docs</span>
+                      <span className="ver-path" title={p}>{p}</span>
+                    </div>
+                  ))}
                 </>
               )}
             </div>

@@ -4,7 +4,7 @@ title: "Proposal — per-place docs"
 
 # Proposal — per-place docs
 
-**Status:** **phase 1 BUILT**, 2026-09-16 — the Docs tab, the staleness header
+**Status:** **phases 1 and 2 BUILT**, 2026-09-16 — the Docs tab, the staleness header
 and the name filter, behind no new dependency, process or config. §7.3's open
 questions are answered in §11, and **two claims in this document were wrong**;
 both are corrected there, and one of them (§7.1's `behind … upstream`) would
@@ -182,8 +182,14 @@ index = "docs/index.md"                                       # optional landing
 - `WORKTREES_NO_PROJECT_CONFIG=1` (`projcfg.rs:366-377`) disables `[docs]` with
   the rest of the project rung — the "auditing an untrusted clone" switch
   applies here without new code.
-- **This section is optional in the strongest sense: phase 1 ships without it
+- **This section is optional in the strongest sense: phase 1 shipped without it
   (§8).** The convention has to be good enough that most repos never write it.
+
+**Built, with two decisions the draft did not make — §12.** `[docs]` is read
+from **the place, not the main worktree** (the only `projcfg` consumer that
+diverges, and the feature defeats itself otherwise), and a `.worktrees.toml`
+that does not parse falls back to the convention and says so on screen rather
+than blanking the tab.
 
 ---
 
@@ -835,3 +841,74 @@ Phase 1 as scoped, and nothing beyond it. Specifically absent, by design:
 85-behind place, and per-place tab memory on real `list_workspace` timing.
 Everything above was verified against the Chrome mock, which by construction
 cannot express any of those three.
+
+---
+
+## 12. Phase 2 as built — 2026-09-16
+
+`[docs]` exists, through `RelPath` and the closed known-key set, exactly as
+§3.2 specified. Two decisions §3.2 did not make, both found by building it.
+
+### 12.1 `[docs]` is read from the PLACE, not from the main worktree
+
+This is the only consumer of `projcfg` that does not read `main_root`, and the
+divergence is the point rather than an oversight.
+
+`project_prefix`, materialize, `[ports]` and `[compose]` all read main's config
+because they describe the **project**: one prefix, one port stride, one compose
+file list, whatever branch you happen to be standing on. `[docs]` describes
+*content that exists on a branch*, and the whole premise of this tab is that
+the content differs per place.
+
+Read main's instead and the feature defeats itself, in precisely the scenario
+§1.1 is built from. A restructure lands `[docs] paths = ["handbook"]` on main.
+The seven of eleven places that have not rebased do not have `handbook` — so
+every one of them shows an **empty index** while its `docs/` sits there
+unlisted. A place whose branch predates the key gets the convention, which is
+what its tree actually looks like. Both states correct for their branch.
+
+It grants a branch no power it did not have. `Docs` is two `RelPath` fields
+with Layer A already applied, the walk re-checks containment (Layer B), and the
+place directory was guarded before any of it. The worst a hostile branch can do
+is point the listing at a different directory inside its own worktree — and the
+app already reads a cloned repo's config for the prefix.
+
+### 12.2 A broken config lists by convention, and says so
+
+`load` returns `Err` on a config that does not parse, and the first shape of
+this command propagated it. That is wrong for this surface: §2.7 is *"never a
+dead server for the whole place"*, and a blank Docs tab because of a typo three
+sections away in `.worktrees.toml` is that failure wearing a different hat.
+
+`list_docs` now carries `config_error`, falls back to the convention, and the
+pane renders an amber band above the filter saying so. Silence would be worse
+than either alternative: an index quietly showing something other than what the
+repo declared is the same class of wrongness as an unlabelled stale tree.
+
+### 12.3 Three smaller things
+
+- **`[docs]` shows in the Project sheet.** Every other section does, and this
+  is the one whose *effect* is on another surface entirely — so it is the
+  easiest to write wrong and never notice.
+- **`paths = []` is an error, not a silent fallback.** "I declared the
+  documentation tree and it is nothing" is a typo every time; a repo that wants
+  the convention omits the key, which is what an `index`-only config does.
+- **Declared order is listing order.** The repo chose it; sorting it would be
+  the walk second-guessing the one thing it was told.
+
+### 12.4 What building it found
+
+`[docs] index = "docs/index.md"` named a file the tree pass then walked into,
+so the row came out **twice**. The fix is one dedupe rule inside the walk's own
+`push` rather than a check at each of the four call sites — a per-site check
+would have closed that one route and left the next one open. Caught by a test
+written before the feature, which is the only reason it was not shipped.
+
+A styling measurement worth keeping: the config-error band first used a 12%
+`--warn` tint of `--bg-panel`, and `--txt-dim` over it measured **2.92:1 in
+nord and 3.1:1 in tokyo-day** — amber is a light hue, so tinting a light
+surface with it moves the background *toward* the foreground. The amber is now
+a border and a glyph; the text is `--txt-hi` on `--bg-elev`, 5.17:1 in the
+worst theme. (Latte's `--warn` glyph is 1.93:1 there and 1.93–2.64:1 against
+every surface in that theme — a property of latte's amber, shared with every
+other `--warn` marker in the app, not of this pairing.)

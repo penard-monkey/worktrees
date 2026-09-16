@@ -35,7 +35,16 @@ export type DocEntry = { path: string; rel: string; title: string; group: string
  *  project's base ref, never `Place::upstream`. `""` when the project could not
  *  be discovered, in which case the header says "N behind" and names nothing,
  *  which is honest rather than wrong. */
-export type DocsIndex = { base: string; entries: DocEntry[]; truncated: boolean };
+export type DocsIndex = {
+  base: string;
+  /** This place's `.worktrees.toml` did not parse. The index below it is the
+   *  CONVENTION's, not the config's — said out loud, because an index quietly
+   *  showing something other than what the repo declared is the same class of
+   *  silent wrongness as an unlabelled stale tree. */
+  config_error?: string | null;
+  entries: DocEntry[];
+  truncated: boolean;
+};
 
 /** Just enough of `Place` for the header. Declared structurally so this file
  *  does not import App's type and App does not have to export it. */
@@ -222,6 +231,15 @@ export function DocsPane({ root, repo, place, reloadToken, onOpen, onError, find
           </div>
         )}
       </div>
+
+      {idx?.config_error && (
+        <div className="docs-warn" title={idx.config_error}>
+          <span className="docs-warn-i" aria-hidden>⚠</span>
+          <span className="docs-warn-t">
+            <code>.worktrees.toml</code> did not parse — listing by convention. {idx.config_error}
+          </span>
+        </div>
+      )}
 
       <div className="docs-filter">
         <input

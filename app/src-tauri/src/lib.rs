@@ -1992,6 +1992,19 @@ struct ProjectComposeView {
     project: String,
 }
 
+/// `[docs]` as the sheet shows it. Present here for the same reason every other
+/// section is: a declared section the sheet does not mention leaves the user
+/// unable to tell whether it took effect — and `[docs]` is the one section
+/// whose effect is on ANOTHER surface (the Docs tab), so it is the easiest to
+/// write wrong and never notice.
+#[derive(Serialize)]
+struct ProjectDocsView {
+    /// Declared order, which is also listing order (`docs::index_with`).
+    paths: Vec<String>,
+    /// Where reading starts, when declared.
+    index: Option<String>,
+}
+
 /// The direct analogue of `get_ai_config`: read-only visibility of a config the
 /// app does not (yet) edit. Never a `CmdResult` — the sheet renders structure.
 #[derive(Serialize)]
@@ -2002,6 +2015,7 @@ struct ProjectConfigView {
     files: Vec<ProjectFileView>,
     ports: Option<ProjectPortsView>,
     compose: Option<ProjectComposeView>,
+    docs: Option<ProjectDocsView>,
     /// A fatal parse/validation failure, rendered as its `file:line: message`.
     /// This is the most important thing the sheet can say when set: it is *why*
     /// every op in the repo is refusing.
@@ -2027,6 +2041,7 @@ async fn project_config_read(repo: String) -> Result<ProjectConfigView, String> 
         files: Vec::new(),
         ports: None,
         compose: None,
+        docs: None,
         error: None,
         warnings: Vec::new(),
     };
@@ -2052,6 +2067,10 @@ async fn project_config_read(repo: String) -> Result<ProjectConfigView, String> 
             view.compose = cfg.compose.as_ref().map(|c| ProjectComposeView {
                 files: c.files.iter().map(|f| f.as_str().to_string()).collect(),
                 project: c.project.clone(),
+            });
+            view.docs = cfg.docs.as_ref().map(|d| ProjectDocsView {
+                paths: d.paths.iter().map(|p| p.as_str().to_string()).collect(),
+                index: d.index.as_ref().map(|i| i.as_str().to_string()),
             });
             view.warnings = findings.iter().map(|f| f.message.clone()).collect();
         }
@@ -3529,6 +3548,11 @@ struct DocsIndex {
     /// e.g. `origin/main`. Named in the header beside `behind`, because a bare
     /// "25 behind" is the same silent error one level up.
     base: String,
+    /// `.worktrees.toml` in THIS PLACE did not parse. The index still lists, by
+    /// convention, and the pane says so — a broken config must never be a blank
+    /// Docs tab, which is the "never a dead server for the whole place" rule
+    /// (`ViewErrorBoundary`) applied one level up.
+    config_error: Option<String>,
     entries: Vec<worktrees_core::docs::DocEntry>,
     truncated: bool,
 }
@@ -3546,6 +3570,27 @@ struct DocsIndex {
 /// A project that cannot be discovered is not a failure: the index still
 /// lists, with an empty `base`, and the header simply says "N behind" without
 /// naming a ref. Losing the ref name is survivable; losing the index is not.
+///
+/// ⚠ **`[docs]` is read from THIS PLACE, not from the main worktree** — the one
+/// consumer of `projcfg` that does, and the divergence is deliberate.
+/// `project_prefix`, materialize, `[ports]` and `[compose]` all read
+/// `main_root` because they describe the PROJECT: one prefix, one port stride,
+/// one compose file list, whatever branch you are standing on. `[docs]`
+/// describes *content that exists on a branch*, and the Docs tab's whole
+/// premise is that content differs per place.
+///
+/// Read main's instead and the feature defeats itself. A restructure that lands
+/// `[docs] paths = ["handbook"]` on main would, on the seven of eleven places
+/// that have not rebased, declare a directory their branch does not have — and
+/// every one of them would show an EMPTY index while their `docs/` sat there
+/// unlisted. A place whose branch predates the key gets the convention, which
+/// is what its tree actually looks like. Both states correct for their branch,
+/// which is the sentence this whole feature exists to make true.
+///
+/// It grants a branch no power it did not have: `Docs` is two `RelPath` fields
+/// (Layer A already applied), the walk re-checks containment (Layer B), and the
+/// place directory itself was guarded above. The worst a hostile branch can do
+/// is point the listing at a different directory inside its own worktree.
 #[tauri::command]
 async fn list_docs(app: AppHandle, repo: String, root: String) -> Result<DocsIndex, String> {
     let dir = guard_under_projects(&app, &root)?;
@@ -3553,8 +3598,18 @@ async fn list_docs(app: AppHandle, repo: String, root: String) -> Result<DocsInd
         return Err(format!("not a directory: {root}"));
     }
     let base = Project::discover(Path::new(&repo)).map(|p| p.base_ref()).unwrap_or_default();
-    let idx = worktrees_core::docs::index(&dir);
-    Ok(DocsIndex { base, entries: idx.entries, truncated: idx.truncated })
+    // A config that does not parse falls back to the convention and SAYS so.
+    // `load` already honours WORKTREES_NO_PROJECT_CONFIG, so the audit switch
+    // turns `[docs]` off with the rest of the project rung — no new code path.
+    let (cfg, config_error) = match worktrees_core::projcfg::load(&dir) {
+        Ok((c, _findings)) => (c, None),
+        Err(e) => {
+            applog("warn", &format!("list_docs root={root}: {e}"));
+            (None, Some(e.to_string()))
+        }
+    };
+    let idx = worktrees_core::docs::index_with(&dir, cfg.as_ref().and_then(|c| c.docs.as_ref()));
+    Ok(DocsIndex { base, config_error, entries: idx.entries, truncated: idx.truncated })
 }
 
 /// File contents for the viewer. Capped (default 1 MiB) and binary-guarded
