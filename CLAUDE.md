@@ -437,6 +437,12 @@ is invisible to the bats suite — there is no fake claude. Re-run
   `app/scripts/zoom-check.mjs` guards both, and also that `ZOOM_STEPS` stays
   inside the Rust clamp; it slices the real handler out of App.tsx the way
   `race-check.mjs` does, so it tests the edit and not a paraphrase.
+  **`settings.ts` cannot gain a relative import without breaking that
+  script**: it loads `settings.ts` as a `data:` URL module, which has no base
+  to resolve `./x` against (`ERR_UNSUPPORTED_RESOLVE_REQUEST`). `afterglow.ts`
+  is inlined ahead of it (exports stripped, import line removed) — inline the
+  real source, never stub the imported functions, or the check carries a
+  second answer to the rule it exists to guard.
 - **Playwright: a two-click arm needs BOTH clicks in one `browser_evaluate`.**
   The arm expires in 4s — longer than one MCP round-trip — and the button's
   `title` CHANGES when armed, so selecting on the unarmed title silently hits a
