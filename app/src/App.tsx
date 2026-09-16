@@ -8,6 +8,7 @@ import * as Icons from "./icons";
 import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
 import { ShellPane, TerminalPane } from "./TerminalPane";
+import { DocsPane } from "./DocsPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
 import {
@@ -171,7 +172,13 @@ function findTarget(s: {
   // shells are swept with it), and a target that mounts no bar is worse than
   // no target: every further ⌘F picks it again and the main pane is
   // unreachable from the keyboard.
-  const dockOk = s.dockShown && (s.dockTab === "terminal" ? s.mainTermUp : !!s.dockFile);
+  //
+  //  Docs is unconditional where the other two are not: its find surface is its
+  //  own name filter, which is always mounted. Files needs an open FILE (its
+  //  viewer renders a hint otherwise) and Terminal needs a live session.
+  const dockOk =
+    s.dockShown &&
+    (s.dockTab === "terminal" ? s.mainTermUp : s.dockTab === "docs" ? true : !!s.dockFile);
   if (s.last === "dock" && dockOk) return "dock";
   if (s.mainTermUp) return "main";
   return dockOk ? "dock" : null;
@@ -5509,9 +5516,20 @@ function App() {
   // different question with the same glyph.
   const attentionCount = useMemo(() => allPlaces.filter(({ p }) => hasAttention(p)).length, [allPlaces]);
 
+  // The rail IS the tab list — three-way ternaries elsewhere read their labels
+  // back out of it rather than restating them.
+  //
+  // `track` is a literal beside its key rather than a `\`dock.${d.key}\`` at the
+  // button, and that is not ceremony. The usage file's rule is that every key
+  // in `ui-events.jsonl` is a constant that lives in this repo's source, and
+  // `usage-check.mjs` enforces it by refusing an interpolated `data-track` —
+  // which an interpolation here would be, indistinguishable to the scanner from
+  // one built out of a place name. Half 5 pins each `track` to its own `key`,
+  // so the pair cannot drift and a fourth tab cannot arrive keyless.
   const DOCK_RAIL = [
-    { key: "files" as Settings["dock_tab"], icon: <Icons.Folder size={17} />, title: "Files" },
-    { key: "terminal" as Settings["dock_tab"], icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
+    { key: "files" as Settings["dock_tab"], track: "dock.files", icon: <Icons.Folder size={17} />, title: "Files" },
+    { key: "terminal" as Settings["dock_tab"], track: "dock.terminal", icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
+    { key: "docs" as Settings["dock_tab"], track: "dock.docs", icon: <Icons.BookText size={17} />, title: "Docs" },
   ];
 
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
@@ -6022,7 +6040,7 @@ function App() {
               {/* the rail owns tab selection AND collapse, so this is a title, not
                   a control strip */}
               <div className="dock-tabs">
-                <span className="dock-title">{eff.dock_tab === "files" ? "Files" : "Terminal"}</span>
+                <span className="dock-title">{DOCK_RAIL.find((d) => d.key === eff.dock_tab)?.title ?? "Files"}</span>
                 <span className="dock-spacer" />
                 {eff.dock_tab === "files" && (
                   <>
@@ -6084,9 +6102,40 @@ function App() {
                     </button>
                   </>
                 )}
+                {eff.dock_tab === "docs" && (
+                  <button
+                    className="ctrl sm icon-only"
+                    aria-label="Refresh the documentation index"
+                    title="Re-walk this place for documents"
+                    data-track="docs.refresh"
+                    onClick={reloadFiles}
+                  >
+                    ↻
+                  </button>
+                )}
               </div>
               <div className="dock-body">
-                {eff.dock_tab === "files" ? (
+                {eff.dock_tab === "docs" ? (
+                  // Keyed on the place: the index, the filter and the selection
+                  // are all per place, and remounting is cheaper than five
+                  // reset effects that each have to remember to exist.
+                  <DocsPane
+                    key={sel.repo + "|" + sel.slug}
+                    root={selected.path}
+                    repo={sel.repo}
+                    place={selected}
+                    reloadToken={placesToken}
+                    // Phase 1's Read action: the file goes to the Files tab's
+                    // renderer, which has done markdown since v0.8.0. The dock
+                    // is controlled from here (`dockFile`), so this needs no
+                    // new plumbing — it sets the same state a tree row does.
+                    onOpen={(p) => { setDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
+                    onError={fail}
+                    findOpen={findOn === "dock"}
+                    findToken={findToken}
+                    onFindClose={closeFind}
+                  />
+                ) : eff.dock_tab === "files" ? (
                   <FilesPane
                     root={selected.path}
                     openPath={dockFile}
@@ -6184,7 +6233,10 @@ function App() {
               key={d.key}
               className={"rail-icon" + (on ? " active" : "")}
               disabled={!!why}
-              data-track={d.key === "terminal" ? "dock.terminal" : "dock.files"}
+              // The entry's own key, not an either/or over two of them: a
+              // ternary here files any tab it does not name under another
+              // tab's key, silently. See `DOCK_RAIL`.
+              data-track={d.track}
               title={why ? `${d.title} — ${why}` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
               onClick={() => pickDockTab(d.key)}
             >

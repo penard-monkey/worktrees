@@ -27,6 +27,7 @@ export type Surface =
   | "main"          // the place's terminal
   | "dock.files"
   | "dock.terminal"
+  | "dock.docs"
   | "read"          // reading mode (a rendered file over the whole pane)
   | "home"          // the briefing
   | "nav"           // sidebar / rails
@@ -187,7 +188,16 @@ export function surfaceOf(t: Element): Surface | null {
   // session-less worktree shows in the main pane
   if (t.closest(".status-sheet, .term-status")) return "status";
   if (t.closest(".reading")) return "read";
-  if (t.closest(".dock")) return t.closest(".termtabs, .term-host") ? "dock.terminal" : "dock.files";
+  // One branch per dock tab, most specific first. It is a chain rather than a
+  // pair because the rail is a LIST: a tab with no branch of its own does not
+  // fail, it silently records as `dock.files` — and then the heatmap shows a
+  // Files tab busier than it was beside a tab that reads as never used.
+  // `usage-check.mjs` half 5 asserts one branch per `DOCK_RAIL` entry.
+  if (t.closest(".dock")) {
+    if (t.closest(".termtabs, .term-host")) return "dock.terminal";
+    if (t.closest(".docspane")) return "dock.docs";
+    return "dock.files";
+  }
   if (t.closest(".rail, .nav")) return "nav";
   // `.briefing` and `.term-status` live INSIDE `.main`, so `.main` is the
   // fallthrough — the terminal and its chrome, and nothing more specific.

@@ -282,6 +282,124 @@ if (tcFrom < 0 || tcTo < 0 || tcTo < tcFrom) {
   eq(fired({ ...key({ metaKey: true, code: "KeyB", target: outside }), defaultPrevented: false }), null, "a chord that did nothing is not recorded");
 }
 
+// ── half 5: every dock tab is its own key AND its own surface ───────────────
+// The dock's rail used to read
+//     data-track={d.key === "terminal" ? "dock.terminal" : "dock.files"}
+// and `surfaceOf` still asks the matching either/or question. Both are two-way
+// for a rail that is a LIST, so a third tab does not fail — it reports as
+// `dock.files`, and so does every click inside it. The heatmap then shows a
+// Files tab that got more use than it did and a Docs tab that was never built,
+// which is worse than no metric: it is a wrong one that looks right.
+//
+// Nothing else catches this. `valid_token` is a SHAPE allowlist (ASCII
+// identifier chars, ≤64) — `dock.docs` passes it today and so would
+// `dock.anything`, so the closed vocabulary is the TS `Surface` union and
+// nowhere else. tsc is happy either way: both branches of the ternary are
+// legal strings. The feature works perfectly while the measurement lies.
+{
+  const APP = read("../src/App.tsx");
+  const U = read("../src/usage.ts");
+  // The rail is the source of truth for which tabs exist.
+  const railStart = APP.indexOf("const DOCK_RAIL = [");
+  const railEnd = railStart < 0 ? -1 : APP.indexOf("];", railStart);
+  if (railStart < 0 || railEnd < 0) {
+    fail("App.tsx: `DOCK_RAIL` is gone — renamed? this check reads the tab list from it");
+  } else {
+    const rail = APP.slice(railStart, railEnd);
+    const keys = [...rail.matchAll(/key:\s*"([a-z0-9-]+)"/g)].map((m) => m[1]);
+    if (keys.length < 2) fail(`App.tsx: DOCK_RAIL parsed as ${JSON.stringify(keys)} — the shape of an entry changed`);
+    // (a) each entry carries its OWN literal key, and the button renders that
+    //     key rather than choosing between two of them
+    const tracks = [...rail.matchAll(/key:\s*"([a-z0-9-]+)"[^}]*?track:\s*"([a-z0-9.\-_]+)"/g)];
+    const btn = APP.slice(APP.indexOf("<nav className=\"rail rail-right\">"));
+    const track = btn.match(/data-track=\{([^}]*)\}/);
+    if (!track) {
+      fail("App.tsx: the right rail's button has no `data-track` — its key would come from a title, and that title interpolates the tab name");
+    } else if (/\?/.test(track[1])) {
+      fail(
+        `App.tsx: the right rail's data-track is a ternary (${track[1].trim()}) over a rail of ` +
+          `${keys.length} tabs — a tab it does not name reports as another tab's key. ` +
+          "Give each DOCK_RAIL entry a literal `track` and render that.",
+      );
+    }
+    for (const k of keys) {
+      const hit = tracks.find(([, key]) => key === k);
+      if (!hit) fail(`App.tsx: DOCK_RAIL's \`${k}\` has no literal \`track\` beside its key — its clicks would report as another tab's`);
+      else if (hit[2] !== `dock.${k}`) fail(`App.tsx: DOCK_RAIL's \`${k}\` is tracked as "${hit[2]}", not "dock.${k}" — the key and the tab have drifted`);
+    }
+    // (b) each tab has a Surface of its own, and (c) `surfaceOf` can return it
+    const union = U.slice(U.indexOf("export type Surface ="), U.indexOf('| "other";') + 10);
+    const sofFrom = U.indexOf("export function surfaceOf(");
+    const sof = sofFrom < 0 ? "" : U.slice(sofFrom, U.indexOf("\n}", sofFrom));
+    for (const k of keys) {
+      if (!union.includes(`"dock.${k}"`)) fail(`usage.ts: \`Surface\` has no "dock.${k}" — dock tab \`${k}\` would record under another tab's surface`);
+      if (sof && !sof.includes(`"dock.${k}"`)) fail(`usage.ts: \`surfaceOf\` never returns "dock.${k}" — every click in that tab is attributed elsewhere`);
+    }
+    if (!sof) fail("usage.ts: `surfaceOf` is gone — renamed markers?");
+  }
+}
+
+// ── half 6: a track() key is a LITERAL, everywhere but usage.ts ─────────────
+// `data-track` attributes are covered by halves 2 and 3, but a component can
+// also call `track()` directly, and that call takes a plain string — nothing in
+// the type system says it has to be a constant. `DocsPane` is the live example
+// of the hazard: it records that the name filter was used, and the query the
+// person typed is a variable in the same scope, two lines away.
+//
+// `valid_token` would not save it. A one-word filter ("adr") is a perfectly
+// well-formed token and would be written to ui-events.jsonl verbatim — the same
+// hole `titleKey` has for a name with spaces in it, reached by a different
+// route.
+//
+// `usage.ts` is exempt: `trackChord` composes `"chord." + comboName(e)`, and
+// `comboName` is built from `e.code`, a fixed physical-key vocabulary. That is
+// the ONE legitimate concatenation, and it is in the file that owns the rule.
+{
+  const SRCDIR = fileURLToPath(new URL("../src", import.meta.url));
+  const walk = (d) =>
+    fs.readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(`${d}/${e.name}`) : /\.tsx?$/.test(e.name) ? [`${d}/${e.name}`] : [],
+    );
+  /** Blank out comments and keep every other offset, so a note that MENTIONS
+   *  `track()` is not read as a call to it — the first thing this check did.
+   *  Strings are opaque (a `//` inside "https://…" is not a comment). */
+  const decomment = (src) => {
+    let out = "", i = 0;
+    while (i < src.length) {
+      const c = src[i], d = src[i + 1];
+      if (c === '"' || c === "'" || c === "`") {
+        const q = c; out += c; i++;
+        while (i < src.length && src[i] !== q) { if (src[i] === "\\") { out += "  "; i += 2; continue; } out += src[i]; i++; }
+        out += src[i] ?? ""; i++; continue;
+      }
+      if (c === "/" && d === "/") { while (i < src.length && src[i] !== "\n") { out += " "; i++; } continue; }
+      if (c === "/" && d === "*") { while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) { out += src[i] === "\n" ? "\n" : " "; i++; } out += "  "; i += 2; continue; }
+      out += c; i++;
+    }
+    return out;
+  };
+  const bad6 = [];
+  for (const f of walk(SRCDIR)) {
+    if (f.endsWith("/usage.ts")) continue;
+    const src = decomment(fs.readFileSync(f, "utf8"));
+    // `track(` but not `trackChord(`/`.track(`; first argument only.
+    for (const m of src.matchAll(/(?<![\w.])track\(\s*([^,)]*)/g)) {
+      const arg = m[1].trim();
+      if (/^(["'])(?:(?!\1).)*\1$/.test(arg)) continue; // a plain string literal
+      bad6.push(`${f.slice(SRCDIR.length + 1)}: track(${arg.slice(0, 48)}…)`);
+    }
+  }
+  if (bad6.length) {
+    fail(
+      `${bad6.length} track() call(s) whose key is not a string literal:\n` +
+        bad6.map((b) => `        ${b}`).join("\n") +
+        "\n      Every key in ui-events.jsonl is a constant that lives in this repo's" +
+        "\n      source. A key built from a value is how someone's typing gets written" +
+        "\n      to disk, and valid_token cannot tell a one-word query from a label.",
+    );
+  }
+}
+
 // The Rust side refuses the same shapes, and it is the last belt: if its
 // allowlist ever becomes a denylist, a slug walks straight into the file.
 const RS = read("../src-tauri/src/lib.rs");
@@ -291,4 +409,4 @@ if (!/fn valid_token\(s: &str\) -> bool \{[\s\S]*?is_ascii_alphanumeric\(\)[\s\S
 if (!/fn valid_event\(/.test(RS)) fail("lib.rs: `valid_event` is gone — nothing checks a batch on the way in");
 
 if (bad) { console.error(`\nusage-check: ${bad} failure(s)`); process.exit(1); }
-console.log(`usage-check: ok — key resolution, chord names, the terminal-keystroke rule, ${SITES.length} pinned controls, and ${TSX.length} .tsx files with no unkeyed dynamic-title button`);
+console.log(`usage-check: ok — key resolution, chord names, the terminal-keystroke rule, every dock tab keyed and surfaced, every track() key a literal, ${SITES.length} pinned controls, and ${TSX.length} .tsx files with no unkeyed dynamic-title button`);
