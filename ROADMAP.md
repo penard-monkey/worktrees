@@ -459,6 +459,15 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   schema and the history format are both undocumented.
   _From: [2026-08-09 afterglow-dot session](docs/sessions/2026-08-09-afterglow-dot/summary.md)_
 
+- **The afterglow's decay is a setting now (v0.23.0); its ranges are a guess.**
+  Settings → Navigation → Afterglow: horizon from `DONE_HORIZONS` (1h..7d) and
+  2–6 steps, geometric from a pinned 15m first boundary, defaults reproducing
+  the old 12h / 3 steps. Two soft edges: 2h × 6 steps packs three boundaries
+  into 40 minutes (legal, barely distinguishable), and `snapHorizon`'s NaN
+  fallback hardcodes the index of the default rather than reading `DEFAULTS`
+  (import cycle). Revisit both once David has lived with a longer horizon.
+  _From: [2026-09-09 afterglow-decay-setting session](docs/sessions/2026-09-09-afterglow-decay-setting/summary.md)_
+
 - **Zombie children — real, unreproduced, and the obvious diagnosis is wrong.**
   A 14-hour v0.9.0 instance accumulated 41 unreaped children. `term_close` /
   `kill_shell` call `child.kill()` with no `wait()`, which looks like the bug and
