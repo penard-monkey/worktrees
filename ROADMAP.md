@@ -5,6 +5,17 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The mock's TerminalPane throws on every place switch.** `Cannot read
+  properties of undefined (reading 'dimensions')` from `TerminalPane.tsx:196`'s
+  post-switch `setTimeout` into xterm — twice per switch in the harness, landing
+  in the mock applog as an error. Harness-only as far as anyone has looked, but
+  it is the same `fit()`-after-dispose shape that would matter in the app if
+  the timer ever outlived a real pane. Also owed to the harness: a project
+  fixture with NO origin, so the topbar link's "hidden until known" state and
+  the menu's "No origin remote" message have a row to be seen on; and one
+  click on the topbar link in the sandbox app, which nobody has done yet.
+  _From: [2026-09-16 remote-links](docs/sessions/2026-09-16-remote-links/summary.md)_
+
 - **The tmux pane drops replies to tmux's attach-time queries.** `onData` is
   wired only after `term_open` resolves, and xterm fires a data event into no
   listener for anything parsed before that — so tmux's DA / colour / blink
