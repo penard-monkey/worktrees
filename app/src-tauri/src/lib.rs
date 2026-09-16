@@ -1247,7 +1247,7 @@ fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
     // `display-message -p` expands `#{…}` AND eats `%` in its format, so the
     // marker is built from the target's index and nothing else.
     let marks: Vec<String> = (0..targets.len()).map(|i| format!("@@ {i} @@")).collect();
-    let mut args: Vec<&str> = Vec::with_capacity(targets.len() * 9);
+    let mut args: Vec<&str> = Vec::with_capacity(targets.len() * 10);
     for (i, (_, pane, _)) in targets.iter().enumerate() {
         if i > 0 {
             args.push(";");
@@ -1255,7 +1255,10 @@ fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
         // Marker FIRST: a chain that dies part-way then leaves the surviving
         // segments still correctly attributed to their panes.
         args.extend(["display-message", "-p", &marks[i], ";"]);
-        args.extend(["capture-pane", "-p", "-t", pane, "-S", DRAFT_CAPTURE_LINES]);
+        // `-e` keeps the styling: claude paints its own suggested follow-up
+        // into the box in DIM, and the text alone cannot tell it from typing
+        // (`agent::draft_from_screen` reads the attribute and strips the rest).
+        args.extend(["capture-pane", "-e", "-p", "-t", pane, "-S", DRAFT_CAPTURE_LINES]);
     }
     let out = worktrees_core::tmux::tmux(&args).map_err(|e| format!("tmux: {e}"))?;
     if !out.status.success() {
