@@ -723,6 +723,39 @@ async fn touch_place(repo: String, slug: String) -> Result<(), String> {
     store::edit(&repo, &slug, |d| d.last_opened_epoch = Some(sysclock::now_epoch()))
 }
 
+/// Stamp "the user has SEEN this place's afterglow", forward-only.
+///
+/// The epoch comes from the FRONTEND, not from `now_epoch()`: the frontend is
+/// what knows the moment the dwell expired, and it has already written the same
+/// number into its optimistic map. Two clocks for one fact is how an ack and the
+/// dot it is acking end up disagreeing by a second.
+///
+/// Reads before it writes, like `stamp_worked`: selecting a place is a gesture
+/// the user makes all day, and an unconditional `store::edit` would rewrite
+/// `.worktrees.places.json` on every one of them. A stale-or-equal epoch is a
+/// no-op, NOT an error — the caller fire-and-forgets it.
+///
+/// ⚠ Touches `last_seen_epoch` and nothing else. `last_worked_epoch` is the
+/// fact being acknowledged and `last_opened_epoch` means "I entered here";
+/// moving either from this path would erase the signal or lie to the Recent lens.
+#[tauri::command]
+async fn mark_seen(repo: String, slug: String, epoch: i64) -> Result<(), String> {
+    if store::read_lenient(&repo)
+        .places
+        .get(&slug)
+        .and_then(|d| d.last_seen_epoch)
+        .unwrap_or(0)
+        >= epoch
+    {
+        return Ok(()); // already seen at or after this moment
+    }
+    store::edit(&repo, &slug, |d| {
+        if d.last_seen_epoch.unwrap_or(0) < epoch {
+            d.last_seen_epoch = Some(epoch);
+        }
+    })
+}
+
 // ── mutating ops via core (create/switch/rm from the UI) ─────────────────────
 
 /// Outcome of a core op: exit code + the op's own messages (the loud guards),
@@ -5072,6 +5105,7 @@ pub fn run() {
             set_note,
             set_title,
             touch_place,
+            mark_seen,
             new_place,
             switch_place,
             list_branches,

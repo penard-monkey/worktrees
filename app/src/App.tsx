@@ -3,7 +3,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { clampSteps, doneBounds, doneOpacity, doneTier } from "./afterglow";
+import { clampSteps, doneBounds, doneOpacity, doneTierSeen, isUnread, seenEpoch } from "./afterglow";
 import * as Icons from "./icons";
 import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
@@ -40,6 +40,11 @@ type Declared = {
   /// When Claude last FINISHED a task here (see store.rs). Opening a session
   /// never sets it — only work does.
   last_worked_epoch?: number;
+  /// When the user last SAW this place's afterglow (see store.rs): selected in a
+  /// visible window for a dwell, or entered. Forward-only, and absent falls back
+  /// to `last_opened_epoch` — see `seenEpoch`. A finish newer than this is
+  /// UNREAD and holds tier 1 however old it is.
+  last_seen_epoch?: number;
   /// The cached "Ask Claude" read of this place (`ai_status_report`, lib.rs).
   /// Not a known key of `Declared` in Rust — it round-trips through `extra`,
   /// which is why it shows up here as a plain key on the declared JSON.
@@ -1791,6 +1796,11 @@ const USAGE_POLL_MS = 180_000;
 /// Afterglow re-tier cadence. Boundaries then land within ±60s of true, which is
 /// invisible at 15m/2h/12h — and it is a pure recompute, no I/O.
 const DECAY_TICK_MS = 60_000;
+/// How long a place must stay selected, in a visible window, before its unread
+/// finish counts as SEEN. Arrowing down the nav passes through every row in far
+/// less than this; landing on one and reading it does not. Without the dwell,
+/// walking past an unread place would silently spend its signal.
+const SEEN_DWELL_MS = 1000;
 // The countdown ticks off the LOCAL clock, not off a poll: `resets_at` is
 // absolute, so a 15s tick keeps the minute display honest without touching the
 // rate-limited endpoint (polling harder to animate a clock would be absurd).
@@ -3217,6 +3227,38 @@ function App() {
   }, []);
   const workedAt = (p: Place) =>
     Math.max(donePaths.get(p.path) ?? 0, p.declared?.last_worked_epoch ?? 0);
+  // The ACK, optimistically. Same two-source shape as `donePaths` and for the
+  // same reason: `mark_seen` writes the declared store, but a store write does
+  // not emit `places:changed`, so the snapshot this component is rendering will
+  // not carry the new stamp until something else refreshes it. Without the map
+  // the dot you just acknowledged keeps its second ring for however long that
+  // takes. Max of the two, so a refresh can never walk an ack back.
+  const [seenPaths, setSeenPaths] = useState<Map<string, number>>(new Map());
+  const seenAt = (p: Place) =>
+    Math.max(
+      seenPaths.get(p.path) ?? 0,
+      seenEpoch(p.declared?.last_seen_epoch, p.declared?.last_opened_epoch),
+    );
+  // "Claude finished here and nobody has looked since." Gated on `activityOf`
+  // like `doneOf` below — a place that is busy RIGHT NOW is not a thing you are
+  // behind on, it is a thing you are watching.
+  const unreadOf = (p: Place) => !activityOf(p) && isUnread(workedAt(p), seenAt(p));
+  /** Spend a place's unread signal: stamp NOW locally so the ring goes at once,
+   *  and forward-only in the declared store so it survives a restart.
+   *
+   *  Call this ONLY when `unreadOf(p)` — every guard at every call site exists
+   *  so that selecting a place you have already read is not a file write. The
+   *  backend is forward-only too, but a no-op invoke per click is still a round
+   *  trip per click. */
+  const ack = (repo: string, p: Place) => {
+    const t = Math.floor(Date.now() / 1000);
+    setSeenPaths((m) => {
+      const next = new Map(m);
+      next.set(p.path, Math.max(next.get(p.path) ?? 0, t));
+      return next;
+    });
+    invoke("mark_seen", { repo, slug: p.slug, epoch: t }).catch(() => {});
+  };
   // THE clock. Row age and sort key for every list a user reads — the nav tree,
   // the home Resume list, ⌘K — so a row's printed age is the reason it sits
   // where it does. When something HAPPENED here: Claude work or a commit, never
@@ -3250,7 +3292,7 @@ function App() {
   // the ember is what the slot shows when there is nothing happening NOW.
   // 0 = no ember; 1..doneSteps = brightest..dimmest.
   const doneOf = (p: Place): number =>
-    activityOf(p) ? 0 : doneTier(workedAt(p), nowSec, bounds);
+    activityOf(p) ? 0 : doneTierSeen(workedAt(p), seenAt(p), nowSec, bounds);
   // One derivation for both the nav row and the Resume list — they are the same
   // signal in two places, and drifting them apart is how a dot starts lying.
   // Class carries the hue and tier 1's ring; `dotStyle` carries the fade, which
@@ -3259,7 +3301,10 @@ function App() {
     const act = activityOf(p);
     if (act) return " " + act;
     const tier = doneOf(p);
-    return tier ? " done" + (tier === 1 ? " t1" : "") : "";
+    if (!tier) return "";
+    // Unread is always tier 1 (`doneTierSeen`), so `.unread` only ever lands on
+    // top of `.t1` — it adds the outer ring, it does not replace the halo.
+    return " done" + (tier === 1 ? " t1" + (unreadOf(p) ? " unread" : "") : "");
   };
   const dotStyle = (p: Place): CSSProperties | undefined => {
     if (activityOf(p)) return undefined;
@@ -3272,6 +3317,8 @@ function App() {
     if (act === "waiting") return "Claude needs input";
     if (!doneOf(p)) return undefined;
     const a = ago(workedAt(p));
+    if (unreadOf(p))
+      return a === "now" ? "Claude finished just now — not seen yet" : `Claude finished ${a} ago — not seen yet`;
     return a === "now" ? "Claude finished just now" : `Claude finished ${a} ago`;
   };
 
@@ -3660,6 +3707,33 @@ function App() {
   useEffect(() => {
     if (selRepo) loadRemote(selRepo).catch(fail);
   }, [selRepo, loadRemote, fail]);
+
+  // ── the ack: a selected place, in a visible window, for a dwell ──
+  //
+  // Selecting is the browsing verb and stamps NOTHING (see `selectPlace`) — this
+  // is the one exception, and it is not a recency stamp: it records that a
+  // signal was DELIVERED, which is the only honest way to stop delivering it.
+  // Visibility matters as much as selection: a place left selected behind a
+  // hidden window has not been looked at, and WKWebView does fire
+  // `visibilitychange` here (CLAUDE.md), so `pageVisible` is real.
+  //
+  // Keyed on PRIMITIVES, never on `selected` itself: that object is rebuilt on
+  // every `list_workspace` sweep, and an identity-keyed effect would restart the
+  // dwell on each one and — on a workspace that refreshes faster than the
+  // dwell — never ack at all.
+  //
+  // A completion that lands while the place is already selected and visible
+  // re-runs this (`donePaths` changed, so `selUnread` flips true) and acks after
+  // the dwell. That is the "I watched it finish" case, and it is intended.
+  const selUnread = !!selected && unreadOf(selected);
+  useEffect(() => {
+    if (!sel || !selected || !pageVisible || !selUnread) return;
+    const { repo } = sel;
+    const p = selected;
+    const id = setTimeout(() => ack(repo, p), SEEN_DWELL_MS);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel?.repo, sel?.slug, pageVisible, selUnread]);
 
   // Does the topbar's branch chip say anything the name and the alias do not?
   // On `(main)` it names the branch main is on, which is news; on a worktree it
@@ -4069,6 +4143,10 @@ function App() {
     const fresh = opts?.fresh ?? !settings.ai_auto_resume;
     (async () => {
       invoke("touch_place", { repo, slug: p.slug }).catch(() => {}); // fire-and-forget recency stamp
+      // Entering is the strongest "I looked" there is, so it acks with no dwell.
+      // Guarded exactly like the dwell effect: an enter into a place with
+      // nothing unread must not write the store.
+      if (unreadOf(p)) ack(repo, p);
       await runCmd("open_place", { repo, slug: p.slug, fresh });
     })();
   };
@@ -5379,6 +5457,10 @@ function App() {
         : places.some((p) => doneOf(p) === 1)
           ? "done"
           : "";
+    // The folder's own tooltip splits the done case: an unread child is the
+    // reason to open a collapsed project, and "just finished" would be a lie
+    // about a finish that has been sitting there since this morning.
+    const rollupUnread = rollup === "done" && places.some((p) => unreadOf(p));
     const buckets: Record<string, Place[]> = {};
     for (const p of places) { if (p.is_main) continue; (buckets[bucketOf(p)] ??= []).push(p); }
     for (const k of Object.keys(buckets)) buckets[k] = sortPlaces(pv.root, buckets[k]);
@@ -5416,7 +5498,7 @@ function App() {
         >
           <span className="caret" onClick={() => toggleProject(pv.root)}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
           {pv.ok
-            ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : rollup === "done" ? "a session just finished" : undefined}><FolderIcon /></span>
+            ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : rollup === "done" ? (rollupUnread ? "a session finished — not seen yet" : "a session just finished") : undefined}><FolderIcon /></span>
             : <span className="rollup broken" title="repo gone">⊘</span>}
           <span className="pname" title={pv.root} onClick={() => toggleProject(pv.root)}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}

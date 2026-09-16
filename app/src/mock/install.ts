@@ -823,6 +823,16 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         reconcile(p);
       });
       return null;
+    // FORWARD-ONLY, like the real one (lib.rs `mark_seen`): the epoch comes from
+    // the frontend, and a stale or equal one is a silent no-op rather than an
+    // error. No `reconcile` — seeing a place is not opening it, so it must not
+    // move the lifecycle tier the way `touch_place` does.
+    case "mark_seen":
+      editPlace(args.repo, args.slug, (p) => {
+        const cur = p.declared?.last_seen_epoch ?? 0;
+        if (args.epoch > cur) p.declared = { ...(p.declared ?? {}), last_seen_epoch: args.epoch };
+      });
+      return null;
 
     case "new_place": {
       await sleep(mockCreateDelayMs); // BEFORE the mutation — the place must not exist while the op runs

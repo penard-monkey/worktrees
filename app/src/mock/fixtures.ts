@@ -10,6 +10,9 @@ export type Declared = {
   note?: string;
   last_opened_epoch?: number;
   last_worked_epoch?: number;
+  /** When the user last SAW the afterglow here (store.rs). A `last_worked_epoch`
+   *  newer than this (and than `last_opened_epoch`) is UNREAD. */
+  last_seen_epoch?: number;
   /** The cached "Ask Claude" read (`ai_status_report`). Round-trips through the
    *  Rust store's `extra`, so on the wire it is a plain declared key. */
   status_report?: { text: string; epoch: number; verdict?: string } | null;
@@ -155,15 +158,38 @@ function cdv(): ProjectView {
       // to see — no ↓ glyph, no ↓ in the header, and it stays out of Attention.
       slug: "search-index", branch: "feat/search-opensearch",
       ahead: 0, behind: 3, last_commit_subject: "index mapping draft",
-      // afterglow tier 1 — freshest, full ember + halo (4min < the pinned 15m)
+      // afterglow tier 1 — freshest, full ember + halo (4min < the pinned 15m).
+      // Also the UNREAD fixture: worked 4 minutes ago, last looked at two days
+      // ago, no `last_seen_epoch` at all — so it wears the bigger dot and the
+      // second ring until the harness selects it for a second. Its neighbour
+      // `perf-budget` below is the same finish already SEEN, so the two ring
+      // treatments render side by side in one tier group.
       declared: { last_opened_epoch: NOW - 2 * DAY, last_worked_epoch: NOW - 4 * MIN, note: "waiting on infra ticket" },
+      lifecycle_effective: "idle",
+    }),
+    place(P, root, {
+      // The SEEN twin of `search-index`: the same fresh finish, already
+      // acknowledged. Tier 1, halo, ordinary 8px dot — the control the unread
+      // treatment has to be distinguishable FROM.
+      slug: "perf-budget", branch: "chore/perf-budget",
+      last_commit_subject: "budget for the nav sweep",
+      declared: {
+        last_opened_epoch: NOW - 3 * DAY,
+        last_worked_epoch: NOW - 5 * MIN,
+        last_seen_epoch: NOW - 60,
+      },
       lifecycle_effective: "idle",
     }),
     place(P, root, {
       slug: "hotfix-login", branch: "fix/login-loop", dirty: true, dirty_files: 1,
       // afterglow tier 2 — 45min, inside the default curve's 1h44m bound
       last_commit_subject: "guard null session",
-      declared: { lifecycle: "closed", last_opened_epoch: NOW - 20 * DAY, last_worked_epoch: NOW - 45 * MIN },
+      // `last_seen_epoch` is what keeps this fixture MEANING tier 2: without it
+      // the 45-minute finish is unread and the unread rule pins it back to 1.
+      declared: {
+        lifecycle: "closed", last_opened_epoch: NOW - 20 * DAY,
+        last_worked_epoch: NOW - 45 * MIN, last_seen_epoch: NOW - 40 * MIN,
+      },
       lifecycle_effective: "closed",
     }),
     place(P, root, {
@@ -221,7 +247,7 @@ function worktreesRepo(): ProjectView {
       tmux_session: { name: `${P}-(main)`, up: false }, last_commit_subject: "docs: readme",
       // main glows too — a session run in the repo root stamps under the `(main)`
       // store key, same as any other place (lib.rs place_key_for)
-      declared: { last_worked_epoch: NOW - 30 * MIN },
+      declared: { last_worked_epoch: NOW - 30 * MIN, last_seen_epoch: NOW - 25 * MIN },
       lifecycle_effective: "closed",
     }),
     place(P, root, {
@@ -248,7 +274,10 @@ function worktreesRepo(): ProjectView {
       slug: "fix-flaky-ci", branch: "fix/flaky-ci",
       // afterglow tier 3 — 5h, the dimmest of the default 12h / 3-step curve
       last_commit_subject: "retry tmux smoke",
-      declared: { lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY, last_worked_epoch: NOW - 5 * 3600 },
+      declared: {
+        lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY,
+        last_worked_epoch: NOW - 5 * 3600, last_seen_epoch: NOW - 4 * 3600,
+      },
       lifecycle_effective: "closed",
     }),
   ];
