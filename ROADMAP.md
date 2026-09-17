@@ -489,6 +489,17 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   (import cycle). Revisit both once David has lived with a longer horizon.
   _From: [2026-09-09 afterglow-decay-setting session](docs/sessions/2026-09-09-afterglow-decay-setting/summary.md)_
 
+- **Unread completions (#211) have run only in the mock.** The afterglow dot
+  now holds tier 1 with a second ring until the place is seen (selected in a
+  visible window for a 1s dwell, or entered) and `mark_seen` stamps
+  `Declared.last_seen_epoch`. The live busy → done → seen path needs one hand
+  run in the sandbox app (no fake claude): confirm the ring, dwell on the row,
+  confirm the plain halo and the stamp in `.worktrees.places.json`. Known
+  blind spot, accepted: reading the session from another terminal attached to
+  the same tmux leaves the place unread. Not built: mark-unread / mark-all-read
+  gestures, a Dock badge count, a notification when the window is hidden.
+  _From: [2026-09-16 unread-afterglow session](docs/sessions/2026-09-16-unread-afterglow/summary.md)_
+
 - **Zombie children — real, unreproduced, and the obvious diagnosis is wrong.**
   A 14-hour v0.9.0 instance accumulated 41 unreaped children. `term_close` /
   `kill_shell` call `child.kill()` with no `wait()`, which looks like the bug and
