@@ -16,6 +16,28 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   click on the topbar link in the sandbox app, which nobody has done yet.
   _From: [2026-09-16 remote-links](docs/sessions/2026-09-16-remote-links/summary.md)_
 
+- **The ✎'s suggestion filter is coupled to Claude Code's rendering, and one
+  case was never observed.** It treats a prompt body that starts in SGR 2 (dim)
+  as Claude's own suggested follow-up, because that is how 2.1.269–2.1.273
+  paint it. Two risks. If an upgrade changes the attribute, the pencil silently
+  goes back to lighting for every suggestion. And if text typed during a TURN
+  is drawn dim too, the filter hides real queued drafts and `Draft::queued`
+  becomes dead — no busy pane had unsent typed text when this was measured, so
+  it is unverified in both directions. Add both to
+  `docs/ai-profiles-manual-checks.md` (is the suggestion still dim; does ✎ stay
+  lit for text typed mid-turn), and consider a fixture-refresh script that
+  dumps a live prompt line's bytes into the test module.
+  _From: [2026-09-16 dim-suggestion](docs/sessions/2026-09-16-dim-suggestion/summary.md)_
+
+- **`CHANGELOG.md` has two `## [Unreleased]` headers.** A merge on 2026-09-16
+  added a second block above the existing one instead of merging into it, so
+  the file now carries `## [Unreleased]` twice (the docs-paths entry sits under
+  the lower one). Release step 1 moves *the* `[Unreleased]` section into the
+  version heading — with two, whichever is not cut is silently left behind and
+  ships in no release notes. Merge them before the next release; a CI grep for
+  more than one `^## \[Unreleased\]` would stop it recurring.
+  _From: [2026-09-16 dim-suggestion](docs/sessions/2026-09-16-dim-suggestion/summary.md)_
+
 - **The tmux pane drops replies to tmux's attach-time queries.** `onData` is
   wired only after `term_open` resolves, and xterm fires a data event into no
   listener for anything parsed before that — so tmux's DA / colour / blink
