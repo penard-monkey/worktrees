@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.24.0] - 2026-09-16
 
 ### Added
 - **The nav marks a finish you have not looked at.** The afterglow dot grows a
@@ -36,18 +36,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   dirty, and what the last commit was. Always, never collapsible. No new
   dependency, no process, no configuration.
 
-### Fixed
-- **The ✎ no longer lights for Claude's own suggestion.** After a turn, Claude
-  Code paints a dimmed follow-up into its prompt box — something to accept with
-  Tab, not something you typed — and the draft scan read it as an unsent prompt,
-  so a place you had not touched showed the pencil. The scan now captures the
-  pane with its styling and treats a body that starts dim as empty; your own
-  typing carries no attribute and reads exactly as before. Same rule covers the
-  empty box's `Try "…"` placeholder.
-
-## [Unreleased]
-
-### Added
 - **A project can say where its documentation lives.** `.worktrees.toml` gains
   an optional `[docs]` section — `paths` (the directories and files the Docs
   tab walks, in the order you list them) and `index` (the page reading starts
@@ -61,6 +49,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   a repo mid-restructure shows each place the documentation that place
   actually has. And a `.worktrees.toml` that does not parse still lists — by
   convention, with a line saying why — rather than emptying the tab.
+
+### Fixed
+- **The ✎ no longer lights for Claude's own suggestion.** After a turn, Claude
+  Code paints a dimmed follow-up into its prompt box — something to accept with
+  Tab, not something you typed — and the draft scan read it as an unsent prompt,
+  so a place you had not touched showed the pencil. The scan now captures the
+  pane with its styling and treats a body that starts dim as empty; your own
+  typing carries no attribute and reads exactly as before. Same rule covers the
+  empty box's `Try "…"` placeholder.
 
 ## [0.23.1] - 2026-09-11
 
