@@ -473,7 +473,7 @@ html[data-guides="off"] .kids > .places::after { display: none; }
  * Hue does the separating, never motion alone: `prefers-reduced-motion` kills
  * the blink (tokens.css), and a busy dot and a finished one that differed ONLY
  * by animation would collapse into the same pixel for those users. */
-.status-dot { width: 8px; height: 8px; border-radius: var(--r-full); background: transparent; flex: none; }
+.status-dot { width: 8px; height: 8px; border-radius: var(--r-full); background: transparent; flex: none; position: relative; }
 .status-dot.busy { background: var(--ok); animation: breathe 2s steps(4, jump-none) infinite; } /* Claude working */
 .status-dot.waiting { background: var(--warn); } /* Claude needs input — STATIC, no blink */
 .status-dot.on { background: var(--ok); } /* static "tmux up" fact (topbar) */
@@ -489,6 +489,33 @@ html[data-guides="off"] .kids > .places::after { display: none; }
  * opacity at all, here or there; it is the "go look" tier and stays at full. */
 .status-dot.done { background: var(--done); }
 .status-dot.done.t1 { box-shadow: 0 0 0 3px color-mix(in srgb, var(--done) 30%, transparent); }
+/* UNREAD: Claude finished here and nobody has looked yet. Always rides on top
+ * of `.t1` — `doneTierSeen` pins an unread finish to tier 1 — so this adds a
+ * channel rather than replacing one.
+ *
+ * Why a second ring and not a brighter dot: tier 1 is ALREADY full brightness
+ * and already wears the halo, so the only room left is geometry. Two concentric
+ * rings read as "there is more of this" at a glance and, unlike a hue change,
+ * do not collide with busy/waiting, which own the other two colours in this
+ * slot. Animation is out by the rule at the top of this block.
+ *
+ * Nothing here may move the row. The dot grows 8px → 10px and takes a -1px
+ * margin back, so its MARGIN box stays 8px and its centre does not shift: the
+ * 14px dot column and the row height are untouched, and the unread dot still
+ * lines up with every ordinary one down the column. The outer ring is a
+ * pseudo-element rather than a second box-shadow because a shadow cannot leave
+ * a gap — it would have to paint the row's background into the space, and that
+ * background differs on `.row:hover` / `.row.sel`. Absolute, so it is out of
+ * flow; it overhangs the column by 4px a side and is clipped by nothing (`.row`,
+ * `.places` and `.nav-scroll` all leave it room).
+ *
+ * The geometry: halo ends 3px out from the dot, ring runs 5px→6px out. A 2px
+ * gap is what makes it two rings instead of one thick one. */
+.status-dot.done.unread { width: 10px; height: 10px; margin: -1px; }
+.status-dot.done.unread::after {
+  content: ""; position: absolute; inset: -6px; border-radius: var(--r-full);
+  border: 1px solid color-mix(in srgb, var(--done) 60%, transparent);
+}
 /* a place being created — accent, not --ok: this is the app working, not a
    session. Same `breathe` as .busy so "something is happening" reads the same
    everywhere in the nav. */

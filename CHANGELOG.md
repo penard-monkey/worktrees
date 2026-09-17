@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The nav marks a finish you have not looked at.** The afterglow dot grows a
+  second ring and holds its first step — however old the finish is — until you
+  select the place or enter it; once seen it drops straight to the tier its
+  real age earns, with no clock restart.
 - **The repo on its remote, one click away.** Right-clicking a project in the
   nav offers *Open on GitHub* (the host's name when it is not github.com) —
   the repo home on its `origin`. And the topbar gains a link right of the

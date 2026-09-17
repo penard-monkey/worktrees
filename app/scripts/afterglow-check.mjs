@@ -37,7 +37,8 @@ const load = async (src, name) => {
 // and this script all need it), so it loads under node with no stubbing at all.
 const A = await load(read("../src/afterglow.ts"), "afterglow.ts");
 const { DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MIN, DONE_STEPS_MAX,
-        doneBounds, doneTier, doneOpacity, fmtSecs, snapHorizon, clampSteps } = A;
+        doneBounds, doneTier, doneOpacity, fmtSecs, snapHorizon, clampSteps,
+        seenEpoch, isUnread, doneTierSeen } = A;
 
 if (DONE_FIRST_SECS !== 900)
   fail(`DONE_FIRST_SECS is ${DONE_FIRST_SECS}, not 900 — tier 1 is the "go look" window AND the project-folder rollup; both are statements about a quarter of an hour`);
@@ -107,10 +108,62 @@ for (const h of DONE_HORIZONS) {
 }
 
 // The default curve is the one the old three constants stood for, and the one
-// the mock fixtures (4min / 45min / 5h) are written against.
+// the mock fixtures (4min / 5min / 45min / 5h) are written against.
 eq(doneBounds(12 * 3600, 3), [900, 6235, 43200], "the default 12h / 3-step curve");
 eq([doneOpacity(1, 3), doneOpacity(2, 3), doneOpacity(3, 3)], [1, 0.65, 0.3],
    "3 steps must reproduce the opacities the stylesheet used to hardcode");
+
+// ── unread ─────────────────────────────────────────────────────────────────
+// The rule that makes the dot wait to be seen. Every case here is one a user
+// hits in a normal week, and every one of them renders as "a dot that is simply
+// a bit different" if it is wrong — nothing else in the repo can see it.
+{
+  const B = doneBounds(12 * 3600, 3); // [900, 6235, 43200]
+  const H = 12 * 3600;
+
+  // seenEpoch: the two stamps, and the upgrade path. `last_seen_epoch` did not
+  // exist before this feature, so `last_opened_epoch` has to stand in — or every
+  // place a user ever worked in lights up at once on first launch.
+  if (seenEpoch(undefined, undefined) !== 0) fail(`seenEpoch(undefined, undefined) = ${seenEpoch(undefined, undefined)} — a place with neither stamp must read as never seen`);
+  if (seenEpoch(500, undefined) !== 500) fail("seenEpoch: a lone seen stamp must be used");
+  if (seenEpoch(undefined, 500) !== 500) fail("seenEpoch: a lone opened stamp must be the fallback");
+  if (seenEpoch(500, 900) !== 900) fail("seenEpoch: the LATER of the two wins — an enter after the last ack is still a look");
+  if (seenEpoch(900, 500) !== 900) fail("seenEpoch: an ack after the last enter is still a look");
+
+  // isUnread: a place that never worked has nothing to be unread about, and the
+  // ack is idempotent because equality counts as seen.
+  if (isUnread(0, 0)) fail("isUnread(0, 0) — a place Claude never finished in must not read as unread");
+  if (isUnread(0, 100)) fail("isUnread(0, 100) — no work, no unread");
+  if (!isUnread(NOW - 60, NOW - 120)) fail("isUnread: a finish after the last look must be unread");
+  if (isUnread(NOW - 60, NOW - 60)) fail("isUnread: seen EXACTLY at the finish must read as seen — the ack would otherwise re-fire forever");
+  if (isUnread(NOW - 60, NOW - 30)) fail("isUnread: seen after the finish must read as seen");
+
+  // doneTierSeen: unread pins tier 1 past every bound, including the horizon.
+  for (const age of [1, 899, 901, 6234, 6236, 43199, H, H + 1, 30 * 86400]) {
+    const t = doneTierSeen(NOW - age, 0, NOW, B);
+    if (t !== 1) fail(`doneTierSeen: an UNREAD finish ${age}s old is tier ${t}, want 1 — unread outlives the horizon`);
+  }
+  // …and being seen spends it: the tier is the one the REAL age earns, with no
+  // clock restart. A 3h-old finish read for the first time now is a 3h-old dot.
+  for (const [age, want] of [[60, 1], [899, 1], [901, 2], [6234, 2], [6236, 3], [43199, 3], [H, 0], [H + 1, 0]]) {
+    const t = doneTierSeen(NOW - age, NOW, NOW, B);
+    if (t !== want) fail(`doneTierSeen: a SEEN finish ${age}s old is tier ${t}, want ${want} (its real age, not a restarted clock)`);
+    if (t !== doneTier(NOW - age, NOW, B))
+      fail(`doneTierSeen: a seen finish must be exactly doneTier — ${t} vs ${doneTier(NOW - age, NOW, B)} at ${age}s`);
+  }
+  // No stamp at all is still an empty slot, unread rule or not.
+  if (doneTierSeen(0, 0, NOW, B) !== 0) fail("doneTierSeen(0, 0, …) lights a dot — a place with no last_worked_epoch has nothing to show");
+  if (doneTierSeen(0, NOW, NOW, B) !== 0) fail("doneTierSeen(0, seen, …) lights a dot");
+  // The fallback, end to end: seen absent but ENTERED after the finish ⇒ read.
+  {
+    const worked = NOW - 3 * 3600;
+    const t = doneTierSeen(worked, seenEpoch(undefined, NOW - 3600), NOW, B);
+    if (t !== doneTier(worked, NOW, B))
+      fail(`doneTierSeen with only last_opened_epoch (newer than the finish) is tier ${t}, want its real tier ${doneTier(worked, NOW, B)}`);
+    const u = doneTierSeen(worked, seenEpoch(undefined, NOW - 4 * 3600), NOW, B);
+    if (u !== 1) fail(`doneTierSeen with only last_opened_epoch (OLDER than the finish) is tier ${u}, want 1`);
+  }
+}
 
 // ── garbage in ─────────────────────────────────────────────────────────────
 // ui-state.json is a plain file the user can edit; none of this may throw, and
@@ -156,6 +209,9 @@ if (/\.done\.t2|\.done\.t3/.test(css))
 if (!/\.status-dot\.done\.t1\s*\{[^}]*box-shadow/.test(css))
   fail("App.css: `.status-dot.done.t1`'s ring is gone — tier 1 loses the one channel that is not brightness");
 
+if (!/\.status-dot\.done\.unread\b/.test(css))
+  fail("App.css: `.status-dot.done.unread` is gone — an unread finish would be indistinguishable from a fresh one, which is the entire feature");
+
 const app = read("../src/App.tsx");
 if (/DONE_T[123]_SECS/.test(app))
   fail("App.tsx: a `DONE_Tn_SECS` constant is back — a boundary living outside afterglow.ts is a second answer to the same question");
@@ -168,6 +224,17 @@ if (sites !== styled)
   fail(`App.tsx: ${sites} afterglow dot render site(s) but ${styled} carry style={dotStyle(p)} — the nav row and the Resume list must not drift`);
 if (!/places\.some\(\(p\) => doneOf\(p\) === 1\)/.test(app))
   fail("App.tsx: the project rollup no longer keys on tier 1 — the folder would light for the whole horizon");
+// One home for the unread comparison. App.tsx may ASK (`isUnread(...)`), it may
+// not ANSWER — a second `worked > seen` in the component is the `dnd.ts`
+// mirror-drift shape, and it would keep answering the old way after this module
+// changed. The strings below are what such a comparison looks like in the
+// render path.
+for (const re of [/workedAt\([^)]*\)\s*>\s*seen/, /worked\s*>\s*seen/, /last_worked_epoch[^\n]*>\s*[^\n]*last_seen_epoch/]) {
+  if (re.test(app))
+    fail(`App.tsx carries its own unread comparison (${re}) — the rule lives in afterglow.ts and nowhere else`);
+}
+if (!/isUnread\(/.test(app))
+  fail("App.tsx no longer calls `isUnread` — the nav is deciding unread some other way");
 
 const settings = read("../src/settings.ts");
 for (const k of ["done_horizon_secs", "done_steps"]) {
@@ -177,4 +244,4 @@ if (!/s\.done_horizon_secs = snapHorizon\(/.test(settings) || !/s\.done_steps = 
   fail("settings.ts: loadSettings no longer sanitises the two afterglow keys — a hand-edited ui-state.json reaches the render unchecked");
 
 if (bad) { console.error(`\nafterglow-check: ${bad} failure(s)`); process.exit(1); }
-console.log(`afterglow-check: ok — ${combos} horizon×step curves verified, default ${JSON.stringify(doneBounds(12 * 3600, 3))} (${doneBounds(12 * 3600, 3).map(fmtSecs).join(" · ")}), mirrors clean`);
+console.log(`afterglow-check: ok — ${combos} horizon×step curves verified, default ${JSON.stringify(doneBounds(12 * 3600, 3))} (${doneBounds(12 * 3600, 3).map(fmtSecs).join(" · ")}), unread rule held, mirrors clean`);

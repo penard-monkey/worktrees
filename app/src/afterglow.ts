@@ -3,6 +3,14 @@
 // and nothing else — never an open, never a commit — so the nav answers "what
 // moved recently" at a glance after the busy dot has gone.
 //
+// It also owns the UNREAD rule. An afterglow decays by wall clock whether or
+// not anyone looked, which is the right answer for "how long ago" and the wrong
+// one for "is there something here for me". `doneTierSeen` holds a finish the
+// user has not seen at tier 1 — past the horizon, forever if need be — and the
+// moment it IS seen the dot drops to its REAL age rather than restarting a
+// clock. Mail semantics, and the arithmetic lives here with everything else the
+// dot is made of.
+//
 // This module is PURE and React-free on purpose: App.tsx renders the tiers, the
 // Settings sheet prints the boundaries it is about to write, and
 // `scripts/afterglow-check.mjs` drives the real functions under node. Three
@@ -24,7 +32,11 @@
 /** The first boundary is PINNED, not derived. Tier 1 is the "go look" signal:
  *  it wears the ring, and it is the only tier the project-folder rollup lights
  *  on (App.tsx). Both of those are statements about a quarter of an hour, so a
- *  user stretching the horizon to a week must not silently stretch them too. */
+ *  user stretching the horizon to a week must not silently stretch them too.
+ *
+ *  Tier 1 is reached two ways, and that is deliberate: a finish is "go look"
+ *  while it is FRESH, and also while it is UNSEEN, however old it is (see
+ *  `doneTierSeen`). Age alone was the whole rule until unread existed. */
 export const DONE_FIRST_SECS = 15 * 60;
 
 /** The horizon slider's stops. A TABLE, not a linear range, for the same reason
@@ -98,6 +110,40 @@ export function doneTier(epoch: number, nowSec: number, bounds: number[]): numbe
   const age = nowSec - epoch;
   for (let i = 0; i < bounds.length; i++) if (age < bounds[i]) return i + 1;
   return 0;
+}
+
+/** The moment the user last SAW this place, from the two stamps that can say so.
+ *  `last_opened_epoch` is the FALLBACK, not a second answer: it predates
+ *  `last_seen_epoch` by a release, so on first launch after the upgrade a place
+ *  entered since its last finish reads as seen instead of shouting. Entering is
+ *  also a strictly stronger "I looked" than selecting, so it can never be wrong
+ *  to count it — only too generous, and only once. */
+export function seenEpoch(seen?: number, opened?: number): number {
+  return Math.max(seen ?? 0, opened ?? 0);
+}
+
+/** "Claude finished here and the user has not looked since." Needs a real
+ *  `worked` — a place that never worked has nothing to be unread ABOUT, and
+ *  `0 > 0` would otherwise be the only thing stopping every empty place from
+ *  lighting up. Equality is SEEN: the ack stamps at or after the completion it
+ *  acknowledges, so `>` is what makes the ack idempotent. */
+export function isUnread(worked: number, seen: number): boolean {
+  return worked > 0 && worked > seen;
+}
+
+/** The tier the dot actually renders: `doneTier`, except that an unread finish
+ *  is pinned to 1. Note what this does NOT do — it does not touch `worked`. A
+ *  finish seen for the first time three hours late lands on the tier its real
+ *  age earns (dim, maybe off), not at the top of a restarted decay. The signal
+ *  that was waiting to be delivered is spent by being read, and what is left is
+ *  the honest "how long ago". */
+export function doneTierSeen(
+  worked: number,
+  seen: number,
+  nowSec: number,
+  bounds: number[],
+): number {
+  return isUnread(worked, seen) ? 1 : doneTier(worked, nowSec, bounds);
 }
 
 /** The dot's opacity for a tier. Linear from 1 down to 0.3 across the steps —

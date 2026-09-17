@@ -765,6 +765,7 @@ export function SettingsSheet({
               The purple dot marks a place where Claude finished, fading in steps:{" "}
               {doneBounds(settings.done_horizon_secs, settings.done_steps).map(fmtSecs).join(" · ")}.
               The first step is always {fmtSecs(DONE_FIRST_SECS)} and is the one that lights the project folder.
+              A finish you have not looked at yet holds the first step, however old it is, until you select the place.
             </div>
           </section>
 

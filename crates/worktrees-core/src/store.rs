@@ -59,6 +59,11 @@ pub struct Declared {
     /// startup backfill from an older log can never walk a live observation back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_worked_epoch: Option<i64>,
+    /// When the user last SAW this place's afterglow: the row was selected in a
+    /// visible window, or the place was entered. Forward-only. Absent means fall
+    /// back to `last_opened_epoch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_epoch: Option<i64>,
     /// The AI profile this place's session was last STARTED with, and that
     /// profile's `updated_epoch` at the time.
     ///
@@ -297,6 +302,43 @@ mod tests {
         assert_eq!(alpha.last_worked_epoch, Some(1_700_000_000));
         assert_eq!(alpha.pinned, Some(true));
         assert_eq!(alpha.extra.get("from_the_future").and_then(|v| v.as_i64()), Some(42));
+    }
+
+    /// The SEEN stamp rides the same story, and has one extra thing to prove:
+    /// it is a THIRD epoch beside two that already exist, so a write of it must
+    /// leave `last_worked_epoch` and `last_opened_epoch` exactly as it found
+    /// them — confusing the three is the one way this field can lie (a seen
+    /// stamp that moved `last_worked_epoch` would clear the very dot it is
+    /// supposed to be acknowledging).
+    #[test]
+    fn seen_stamp_round_trips_beside_the_other_epochs() {
+        let t = tmp("seen");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::write(
+            t.0.join(STORE_FILE),
+            r#"{"version":1,"places":{"alpha":{"last_opened_epoch":1699999000,"last_worked_epoch":1700000000,"pinned":true,"from_the_future":42}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_lenient(&repo).places["alpha"].last_seen_epoch, None);
+
+        edit(&repo, "alpha", |d| d.last_seen_epoch = Some(1_700_000_500)).unwrap();
+
+        let back = read_lenient(&repo);
+        let alpha = &back.places["alpha"];
+        assert_eq!(alpha.last_seen_epoch, Some(1_700_000_500));
+        assert_eq!(alpha.last_worked_epoch, Some(1_700_000_000));
+        assert_eq!(alpha.last_opened_epoch, Some(1_699_999_000));
+        assert_eq!(alpha.pinned, Some(true));
+        assert_eq!(alpha.extra.get("from_the_future").and_then(|v| v.as_i64()), Some(42));
+
+        // An absent stamp must not serialize as `"last_seen_epoch": null` — an
+        // older binary reads that back as a hard parse error, not as None.
+        let t2 = tmp("seen-absent");
+        let repo2 = t2.0.to_string_lossy().to_string();
+        edit(&repo2, "beta", |d| d.pinned = Some(true)).unwrap();
+        let raw = fs::read_to_string(t2.0.join(STORE_FILE)).unwrap();
+        assert!(!raw.contains("last_seen_epoch"), "absent seen stamp must not be serialized: {raw}");
     }
 
     /// `title` rides the same no-version-bump story as the afterglow stamp: an
