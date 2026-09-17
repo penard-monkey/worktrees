@@ -256,7 +256,6 @@ const DRAFT_MAX: usize = 160;
 pub fn draft_from_screen(screen: &str) -> Option<String> {
     let raw: Vec<&str> = screen.lines().collect();
     let stripped: Vec<String> = raw.iter().map(|l| strip_escapes(l)).collect();
-    let lines: Vec<&str> = stripped.iter().map(String::as_str).collect();
     // The prompt line must be the top row INSIDE the input box, i.e. the line
     // above it is the box's own edge. That is the discriminator against
     // claude's `❯` SELECTOR menus — the trust prompt renders
@@ -268,15 +267,15 @@ pub fn draft_from_screen(screen: &str) -> Option<String> {
     // the shape of a wrapped draft. Reading it would put "No, exit Yes, I trust
     // this folder" on the row as an unsent prompt. (A menu drawn inside a box —
     // the permission prompt — is already immune: its lines start with `│`.)
-    let start = lines
+    let start = stripped
         .iter()
         .enumerate()
-        .rposition(|(i, l)| prompt_body(l).is_some() && i > 0 && is_box_edge(lines[i - 1].trim()))?;
+        .rposition(|(i, l)| prompt_body(l).is_some() && i > 0 && is_box_edge(stripped[i - 1].trim()))?;
     if body_starts_dim(raw[start]) {
         return None;
     }
-    let mut parts: Vec<&str> = vec![prompt_body(lines[start])?];
-    for line in &lines[start + 1..] {
+    let mut parts: Vec<&str> = vec![prompt_body(&stripped[start])?];
+    for line in &stripped[start + 1..] {
         let t = line.trim();
         // The box's closing rule ends the draft; so does a blank line, which is
         // what a pane with no box at all (a bare shell, a scrollback) offers.
@@ -329,87 +328,84 @@ fn prompt_body(line: &str) -> Option<&str> {
     rest.strip_prefix(char::is_whitespace)
 }
 
-/// `line` with every escape sequence removed: CSI (`ESC [ … final`, which is
-/// all `capture-pane -e` emits for styling) and OSC (`ESC ] … BEL|ST`, which a
-/// newer tmux emits for hyperlinks). A lone ESC that starts neither is dropped
-/// on its own. Plain `-p` output has none and comes back unchanged.
+/// `line` with every escape sequence removed — CSI (`ESC [ … final`, which is
+/// all `capture-pane -e` emits for styling), OSC (`ESC ] … BEL|ST`, which a
+/// newer tmux emits for hyperlinks) and the bare SO/SI bytes `-e` uses for the
+/// DEC line-drawing charset. Plain `-p` output has none and comes back
+/// unchanged.
 fn strip_escapes(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
-    let mut it = line.chars().peekable();
-    while let Some(c) = it.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        match it.peek() {
-            Some('[') => {
-                it.next();
-                // parameter + intermediate bytes, then one final byte
-                while let Some(&n) = it.peek() {
-                    it.next();
-                    if ('\u{40}'..='\u{7e}').contains(&n) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                it.next();
-                while let Some(n) = it.next() {
-                    if n == '\u{7}' {
-                        break;
-                    }
-                    if n == '\u{1b}' && it.peek() == Some(&'\\') {
-                        it.next();
-                        break;
-                    }
-                }
-            }
-            _ => {}
+    let mut dim = false; // unused here; `skip_escape` is the one scanner
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '\u{1b}' => rest = skip_escape(rest, &mut dim),
+            '\u{e}' | '\u{f}' => {}
+            _ => out.push(c),
         }
     }
     out
 }
 
+/// `after` is what follows an ESC. Consumes the sequence and returns the rest:
+/// a CSI up to its final byte (an SGR one is folded into `dim`), an OSC up to
+/// BEL or ST, and a lone ESC nothing at all.
+fn skip_escape<'a>(after: &'a str, dim: &mut bool) -> &'a str {
+    if let Some(csi) = after.strip_prefix('[') {
+        let Some(end) = csi.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c)) else { return "" };
+        if &csi[end..end + 1] == "m" {
+            apply_sgr(&csi[..end], dim);
+        }
+        &csi[end + 1..]
+    } else if let Some(osc) = after.strip_prefix(']') {
+        let mut rest = osc;
+        loop {
+            let Some(i) = rest.find(['\u{7}', '\u{1b}']) else { return "" };
+            if rest[i..].starts_with('\u{7}') {
+                return &rest[i + 1..];
+            }
+            if rest[i + 1..].starts_with('\\') {
+                return &rest[i + 2..];
+            }
+            rest = &rest[i + 1..];
+        }
+    } else {
+        after
+    }
+}
+
 /// Whether the first visible character after the prompt char on `raw` (a
 /// `capture-pane -e` line) is painted dim — SGR attribute 2, which claude uses
-/// for the suggestion it writes into its own box. Whitespace and escapes
-/// between the prompt char and that character are walked, so a highlight set
-/// before the no-break space (a selection's background) or a dim that was
-/// reset again (`22`/`0`) before the text does not count. False for a line
-/// with no prompt char, and for unstyled input.
+/// for the suggestion it writes into its own box. The SGR state is tracked
+/// from column 0, so a dim set BEFORE the prompt char counts too; whitespace
+/// and escapes between the prompt char and the body are walked, so a
+/// highlight set before the no-break space (a selection's background) or a
+/// dim reset again (`22`/`0`) before the text does not. The prompt char is
+/// `❯` anywhere, or the legacy `>` before any other visible character (the
+/// stripped line was already checked to be a prompt line). False for a line
+/// with no prompt char or no body, and for unstyled input.
 fn body_starts_dim(raw: &str) -> bool {
-    // The prompt char, in the RAW line: `❯` anywhere, or the legacy `>` only
-    // when nothing visible precedes it (the stripped line was already checked
-    // to be a prompt line, so this just locates the char again).
-    let start = match raw.find('❯') {
-        Some(i) => i + '❯'.len_utf8(),
-        None => match raw.find('>') {
-            Some(i) if strip_escapes(&raw[..i]).is_empty() => i + 1,
-            _ => return false,
-        },
-    };
     let mut dim = false;
-    let mut rest = &raw[start..];
-    loop {
-        if let Some(after) = rest.strip_prefix('\u{1b}') {
-            let Some(after) = after.strip_prefix('[') else {
-                rest = after; // a lone ESC: skip it, keep looking
-                continue;
-            };
-            let end = after.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c));
-            let Some(end) = end else { return dim };
-            if &after[end..end + 1] == "m" {
-                apply_sgr(&after[..end], &mut dim);
+    let mut seen_prompt = false;
+    let mut seen_visible = false;
+    let mut rest = raw;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '\u{1b}' => rest = skip_escape(rest, &mut dim),
+            '\u{e}' | '\u{f}' => {}
+            _ if seen_prompt => {
+                if !c.is_whitespace() {
+                    return dim;
+                }
             }
-            rest = &after[end + 1..];
-            continue;
-        }
-        match rest.chars().next() {
-            None => return dim, // no body at all
-            Some(c) if c.is_whitespace() => rest = &rest[c.len_utf8()..],
-            Some(_) => return dim,
+            '❯' => seen_prompt = true,
+            '>' if !seen_visible => seen_prompt = true,
+            _ => seen_visible |= !c.is_whitespace(),
         }
     }
+    false
 }
 
 /// Fold one SGR parameter string (`2`, `0`, `38;5;244`, `1;2`, `38:2::200;2;2`)
@@ -672,6 +668,11 @@ mod tests {
 \u{1b}[0m\u{1b}[38;5;244m─────────────────────────────────────────────────────────
 ";
         assert_eq!(draft_from_screen(screen), None);
+        // Dim set BEFORE the chevron, still in effect at the body, counts…
+        assert_eq!(draft_from_screen("─────\n\u{1b}[2m❯\u{a0}suggested\u{1b}[0m\n─────\n"), None);
+        // …and an OSC (a hyperlink) between the prompt and the dim body is
+        // walked, not mistaken for text.
+        assert_eq!(draft_from_screen("─────\n❯\u{a0}\u{1b}]8;;http://x\u{7}\u{1b}[2msuggested\u{1b}]8;;\u{7}\n─────\n"), None);
         // The empty-box placeholder is dim too.
         assert_eq!(draft_from_screen("\u{1b}[38;5;244m─────\n\u{1b}[39m❯\u{a0}\u{1b}[2mTry \"fix the failing test\"\u{1b}[0m\n─────\n"), None);
     }
@@ -700,6 +701,10 @@ mod tests {
         // …and dim that was RESET before the first character does not count.
         let screen = "─────\n❯\u{a0}\u{1b}[2m\u{1b}[22mtext\n─────\n";
         assert_eq!(draft_from_screen(screen).as_deref(), Some("text"));
+        // `-e` brackets DEC line-drawing in bare SO/SI bytes (confirmed on
+        // tmux 3.7b); they are not text and must not reach the draft.
+        let screen = "─────\n❯\u{a0}\u{e}\u{f}typed\n─────\n";
+        assert_eq!(draft_from_screen(screen).as_deref(), Some("typed"));
     }
 
     #[test]
