@@ -245,7 +245,9 @@ button { cursor: pointer; }
   color: inherit; font: inherit; text-align: left;
 }
 .usage-trig.line { padding: 2px var(--s2); }
-.usage-trig.tile { width: 32px; height: 32px; padding: 0 7px; }
+/* `position: relative` is load-bearing: `.usage-badge` is the rail host's
+   whole status indicator and hangs off this box's top-right corner. */
+.usage-trig.tile { position: relative; width: 32px; height: 32px; padding: 0 7px; }
 .usage-trig:hover, .usage-trig.pinned { background: var(--bg-elev); }
 .usage-shape { display: flex; align-items: center; }
 .usage-shape.line { gap: var(--s3); }
@@ -281,11 +283,140 @@ button { cursor: pointer; }
      is still parked off-screen. */
   pointer-events: none;
 }
+/* PINNED is a deliberate act ("click to keep open"), and a pinned panel now has
+   something to click: the status band's link out to the page. A hover panel
+   could not have one — moving the pointer into it would be moving it off the
+   trigger. */
+.usage-pop.pinned { pointer-events: auto; }
 .usage-pop-head {
   display: flex; justify-content: space-between; gap: var(--s3);
   margin-bottom: var(--s2);
   font-size: var(--fs-micro); color: var(--txt-mute);
 }
+
+/* ── Claude service status ──────────────────────────────────────────────────
+ * Only ever on screen when a watched component is unwell (App.tsx
+ * `useClaudeStatus`), so every rule here is styling an exception.
+ *
+ * Hue: --danger for an outage, --warn for degraded. Amber is ALREADY "Claude
+ * needs input" in the nav dot and "config drift" in `.g-drift`, both of which
+ * mean "a human is needed here" — a degraded service is the same class of fact
+ * and may share it, but an OUTAGE is not, and red is the one hue in this
+ * palette that nothing in the nav uses.
+ */
+.status-chip {
+  /* `block`, not `flex` — see `.usage-trig` above for what a flex-container
+     button costs in WebKit. `.status-chip-inner` is the flex box. */
+  display: block; white-space: nowrap;
+  padding: 2px var(--s2); border: 0; border-radius: var(--r-full);
+  font: inherit; font-size: var(--fs-micro); font-weight: var(--fw-bold);
+  cursor: pointer;
+  /* TEXT is --txt-hi, not the severity token, and the DOT carries the hue —
+     the same division `.status-row` makes below. Measured, not assumed:
+     `--warn` on its own 16% tint is 3.1:1 in tokyo-day and 2.2:1 in
+     catppuccin-latte, and `--danger` is 2.2:1 in nord — these tokens are tuned
+     as fills, and 11px bold text needs 4.5:1. The tint and the dot still say
+     which severity it is, and so does the word inside the chip. */
+  color: var(--txt-hi); background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
+.status-chip-inner { display: flex; align-items: center; gap: 5px; }
+/* `currentColor` off its OWN `color`, which is why the hue lives here and not
+   on the chip: the chip's color is the label's. Shared with the band's head. */
+.status-chip-dot {
+  width: 6px; height: 6px; border-radius: var(--r-full); flex: none;
+  color: var(--warn); background: currentColor;
+}
+.status-chip.down { background: color-mix(in srgb, var(--danger) 16%, transparent); }
+.status-chip.down .status-chip-dot { color: var(--danger); }
+.status-chip:hover { background: color-mix(in srgb, var(--warn) 26%, transparent); }
+.status-chip.down:hover { background: color-mix(in srgb, var(--danger) 26%, transparent); }
+
+/* The chip sits at the far end of whichever row hosts it; the bars keep the
+   near end. `auto` rather than a spacer element, so a row with no meter at all
+   (usage unavailable, chip only) still lands it in the same place. */
+.usage-strip .status-chip, .statusbar .status-chip { margin-left: auto; }
+
+/* The rail host's entire indicator. Geometry is `.rail-icon.upd::after`'s,
+   deliberately unchanged — that badge already teaches "there is news on this
+   32px square", and a second dot with its own size would be a second idea. It
+   is NOT a pseudo-element here because the trigger's ::after is unclaimed but
+   its content box is full of bars; a real span is what survives a shape
+   change. Always red: see the block comment in App.tsx. */
+.usage-badge {
+  position: absolute; top: 4px; right: 4px;
+  width: 6px; height: 6px; border-radius: var(--r-full);
+  background: var(--danger); box-shadow: 0 0 4px var(--danger);
+}
+
+.status-pop {
+  position: fixed; z-index: 46; width: 272px;
+  padding: var(--s2) var(--s3);
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+}
+.status-detail { display: flex; flex-direction: column; gap: 2px; }
+.status-row {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--fs-meta); color: var(--txt-dim); padding: 2px 0;
+}
+.status-row-dot { width: 7px; height: 7px; border-radius: var(--r-full); flex: none; }
+.status-row.ok .status-row-dot { background: var(--ok); }
+.status-row.deg .status-row-dot { background: var(--warn); }
+.status-row.down .status-row-dot { background: var(--danger); }
+.status-row-name { flex: 1 1 auto; min-width: 0; color: var(--txt-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* --txt-dim, not the severity token, for the same measured reason as the chip:
+   `--warn` as TEXT is 3.7:1 in tokyo-day and 2.6:1 in catppuccin-latte, and this
+   word ("degraded performance") is the row's meaning, not its decoration. The
+   dot beside it carries the hue. Every colour in this panel now lives in a dot
+   or a tint; every word is a text token. */
+.status-row-state { flex: none; font-size: var(--fs-micro); color: var(--txt-dim); }
+/* The incident is PROSE, and it is the only thing here anyone reads twice —
+   recessed against --bg-panel, which differs from --bg-abyss in all six themes
+   (the `.update-log` lesson: --bg-abyss on --bg-abyss is a 0-unit distance that
+   tokyo-day's hairline cannot carry). */
+.status-inc {
+  margin-top: var(--s2); padding: var(--s2);
+  background: var(--bg-abyss); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.status-inc-name { font-size: var(--fs-meta); font-weight: var(--fw-med); color: var(--txt-hi); }
+.status-inc-body { margin-top: 3px; font-size: var(--fs-micro); color: var(--txt-dim); line-height: var(--lh-prose); }
+.status-inc-when { margin-top: 4px; font-size: var(--fs-micro); color: var(--txt-mute); }
+.status-foot {
+  display: flex; align-items: center; gap: var(--s2);
+  margin-top: var(--s2); padding-top: var(--s2); border-top: 1px solid var(--line);
+  font-size: var(--fs-micro);
+}
+.status-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 0; border: 0; background: transparent; cursor: pointer;
+  font: inherit; font-size: var(--fs-micro); color: var(--accent);
+}
+.status-link:hover { color: var(--branch-hi); text-decoration: underline; }
+/* The one place the UI admits its own scope: six components on the page, two
+   that a worktree can feel. */
+.status-scope { margin-left: auto; color: var(--txt-mute); }
+
+/* The band the rail tile's panel wears above the plan bars. Its own separator
+   rather than a nested card: the panel is 250px and a box inside a box inside a
+   popover is three borders to read past. */
+.status-band {
+  /* Full-bleed: the margins UNDO `.usage-pop`'s own padding exactly
+     (`var(--s2) var(--s3)`), so the tint reaches the panel's edges and reads as
+     a band rather than as a card floating inside one. Keep the two in step —
+     they were off by a token on the first cut, which looked like an inset box
+     and measured as one (`fullBleed: false` in the harness). */
+  margin: calc(var(--s2) * -1) calc(var(--s3) * -1) var(--s2);
+  padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--warn) 9%, var(--bg-panel));
+}
+.status-band.down { background: color-mix(in srgb, var(--danger) 9%, var(--bg-panel)); }
+/* Same division as the chip, for the same measured reason. */
+.status-band-head {
+  display: flex; align-items: center; gap: 5px; margin-bottom: var(--s1);
+  font-size: var(--fs-micro); font-weight: var(--fw-bold); color: var(--txt-hi);
+}
+.status-band-head .status-chip-dot { color: var(--warn); }
+.status-band.down .status-band-head .status-chip-dot { color: var(--danger); }
 
 .nav-resizer {
   position: absolute; top: 0; right: -2px; width: 4px; height: 100%;
