@@ -220,6 +220,126 @@ pub fn tune_session(session: &str) {
 /// `new-session -d -s <session> -c <wt> -P -F '#{pane_id}' <pane0>` → pane id.
 /// `Err(reason)` carries tmux's own stderr (or a spawn error) so the caller can
 /// surface WHY the session failed instead of a silent `None`.
+/// Put `text` into pane 0 of `session` as a PASTE, without sending a newline.
+///
+/// Pane 0 is the AI: `new_session` launches it there (`pane0`), and the split
+/// that follows takes pane 1. So `-t <session>:0.0` addresses Claude
+/// specifically, rather than whatever pane the user happens to have focused —
+/// which is the difference between dropping a reference into the prompt and
+/// dropping it into a half-typed shell command.
+///
+/// **`paste-buffer -p`, never `send-keys -l`.** `-p` wraps the text in
+/// bracketed-paste markers ONLY when the program in that pane has actually
+/// requested mode 2004, which Claude's input does and a confirmation prompt
+/// does not. So a paste that lands while Claude is asking "do you want to
+/// allow this?" is inert text, where `send-keys` would be an unprompted
+/// keystroke into that dialog. Do not add a fallback that uses it.
+///
+/// The buffer is NAMED and deleted afterwards so this never disturbs the
+/// user's own paste stack, and `--` ends option parsing so a reference that
+/// begins with `-` cannot be read as a flag.
+pub fn paste_to_pane(session: &str, text: &str) -> Result<(), String> {
+    let buf = format!("worktrees-drop-{}", std::process::id());
+    let target = pane_zero(session);
+    let [set_argv, paste_argv, del_argv] = paste_commands(&buf, &target, text);
+    let set = tmux(&set_argv).map_err(|e| e.to_string())?;
+    if !set.status.success() {
+        return Err(String::from_utf8_lossy(&set.stderr).trim().to_string());
+    }
+    let out = tmux(&paste_argv);
+    // Delete the buffer whatever happened to the paste — a named buffer left
+    // behind would accumulate one entry per failed drop for the tmux server's
+    // whole life.
+    let _ = tmux(&del_argv);
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// tmux's address for pane 0 of a session — where `new_session` launches the
+/// AI, and therefore the only pane a reference should ever land in.
+///
+/// Its own function because it is the difference between typing into Claude's
+/// prompt and typing into whatever the user last clicked, and building it
+/// inline put it outside the reach of the argv test below: a mutation dropping
+/// the `:0.0` passed the whole suite.
+fn pane_zero(session: &str) -> String {
+    format!("{session}:0.0")
+}
+
+/// The three tmux invocations a drop makes, as argv.
+///
+/// Split out so the exact shape is testable without a tmux server or a PATH
+/// shim — `PATH` is process-global and `cargo test` runs tests in threads, so
+/// a shim would race every other test that shells out. The shape is the whole
+/// safety argument (`-p`, `:0.0`, `--`, and the cleanup), so it is worth
+/// pinning directly.
+fn paste_commands<'a>(buf: &'a str, target: &'a str, text: &'a str) -> [Vec<&'a str>; 3] {
+    [
+        // `--` so a reference that begins with `-` is not read as a flag.
+        vec!["set-buffer", "-b", buf, "--", text],
+        // `-p` = bracketed paste IF the pane's program asked for mode 2004.
+        vec!["paste-buffer", "-b", buf, "-p", "-t", target],
+        vec!["delete-buffer", "-b", buf],
+    ]
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    /// The shape IS the safety argument, so it is asserted rather than assumed.
+    #[test]
+    fn a_drop_pastes_into_pane_zero_and_cleans_up_after_itself() {
+        let [set, paste, del] = paste_commands("buf1", "sess:0.0", "-@worktrees:place://x ");
+
+        assert_eq!(set, ["set-buffer", "-b", "buf1", "--", "-@worktrees:place://x "]);
+        assert_eq!(
+            set.iter().position(|a| *a == "--").unwrap(),
+            set.len() - 2,
+            "`--` must be the LAST option, or a reference starting with `-` is read as a flag"
+        );
+
+        assert!(paste.contains(&"-p"), "without -p this is an unbracketed injection: {paste:?}");
+        let t = paste.iter().position(|a| *a == "-t").expect("-t");
+        assert_eq!(
+            paste[t + 1], "sess:0.0",
+            "pane 0 is the AI (tmux::new_session launches it there); anything else              types into whatever the user happened to focus"
+        );
+
+        assert_eq!(del, ["delete-buffer", "-b", "buf1"]);
+        assert_eq!(del[2], set[2], "the buffer deleted must be the one written");
+
+        // The rule this must never lose: `send-keys` would type into a
+        // permission prompt, which does not request bracketed-paste mode.
+        for argv in [&set, &paste, &del] {
+            assert!(!argv.contains(&"send-keys"), "send-keys can type into a confirmation dialog");
+        }
+    }
+
+    /// The `:0.0` lives here rather than inline because inline it was
+    /// untestable — see `pane_zero`.
+    #[test]
+    fn a_drop_addresses_pane_zero_by_name() {
+        assert_eq!(pane_zero("worktrees-bug-fixes"), "worktrees-bug-fixes:0.0");
+        assert!(
+            pane_zero("s").ends_with(":0.0"),
+            "without the window.pane suffix tmux pastes into the ACTIVE pane, \
+             which may be the shell in pane 1"
+        );
+    }
+
+    #[test]
+    fn each_drop_uses_its_own_buffer_name() {
+        // Named, so a drop never disturbs the user's own paste stack.
+        let buf = format!("worktrees-drop-{}", std::process::id());
+        assert!(buf.starts_with("worktrees-drop-"), "{buf}");
+        assert_ne!(buf, "", "an empty -b would mean tmux's default buffer");
+    }
+}
+
 pub fn new_session(session: &str, wt: &str, pane0: &str) -> Result<String, String> {
     let o = tmux(&["new-session", "-d", "-s", session, "-c", wt, "-P", "-F", "#{pane_id}", pane0])
         .map_err(|e| e.to_string())?;

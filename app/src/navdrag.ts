@@ -98,7 +98,7 @@ export function useNavDrag<T>(opts: {
     g.current = null;
     if (s?.scroll) cancelAnimationFrame(s.scroll);
     if (s?.raf) cancelAnimationFrame(s.raf);
-    document.body.classList.remove("dragging");
+    document.body.classList.remove("dragging", "dragging-place", "dragging-project");
     if (s?.live) {
       swallowNextClick(stillDown);
       cb.current.onZone?.(null, null);
@@ -146,7 +146,11 @@ export function useNavDrag<T>(opts: {
         // Selection and hover suppression live on `body.dragging` (App.css) —
         // cancelling pointermove has no default action per spec, so there is
         // deliberately no preventDefault here.
-        document.body.classList.add("dragging");
+        //
+        // The KIND goes on too: a place can be dropped somewhere a project
+        // cannot (the terminal, as a reference), and a drop target nobody can
+        // see is a feature nobody finds.
+        document.body.classList.add("dragging", `dragging-${s.item.kind}`);
       }
       if (!s.raf) s.raf = requestAnimationFrame(apply);
       if (!s.scroll) s.scroll = requestAnimationFrame(autoscroll);

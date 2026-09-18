@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Drag a worktree into a session to talk about it.** Dragging a place from
+  the nav onto the terminal types a reference to it into the Claude session
+  running there — the same `@worktrees:place://…` token the `@` menu completes,
+  so it expands into that place's branch, divergence, dirty state and tmux
+  session rather than just naming it. The terminal shows itself as a target
+  while a place is in flight, and a drop from another project is refused with
+  a reason: that session's MCP server is pinned to its own repo and could not
+  resolve it.
+
 - **The app tells you when Claude itself is down.** A poll of
   `status.claude.com` now puts an indicator in the window — and only ever when
   something is wrong; on a normal day nothing renders at all. It is scoped to

@@ -812,6 +812,19 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         p.declared = { ...(p.declared ?? {}), note: args.note || undefined };
       });
       return null;
+    // The nav drag's landing. The real one builds the token in Rust and pastes
+    // it into pane 0 via tmux; there is no tmux here, so record the call and
+    // return a token of the same SHAPE — a harness drop can then assert what
+    // would have been inserted, which is the only part the frontend owns.
+    case "drop_reference": {
+      const uri = `place://${String(args.slug).replace(/[^\p{L}\p{N}_.-]/gu, "-").replace(/^[-.]+|[-.]+$/g, "") || "place"}`;
+      const token = `@worktrees:${uri}`;
+      mockDrops.push({
+        repo: args.repo, slug: args.slug,
+        intoSlug: args.intoSlug, intoSession: args.intoSession, token,
+      });
+      return token;
+    }
     case "set_title":
       editPlace(args.repo, args.slug, (p) => {
         p.declared = { ...(p.declared ?? {}), title: args.title?.trim() || undefined };
@@ -1978,11 +1991,19 @@ setTimeout(() => emitEvent("sessions:drafts", { drafts }), 500);
 //
 // `root` defaults to the cdv fixture. Returns the root it touched. Both fire a
 // places:changed so the nav re-pulls immediately instead of waiting on the sweep.
+/** Every `drop_reference` this session recorded — what the nav drag would have
+ *  pasted, and into which session. The real command's effect is a tmux paste,
+ *  which the harness has no way to observe. */
+type MockDrop = { repo: string; slug: string; intoSlug: string; intoSession: string; token: string };
+const mockDrops: MockDrop[] = [];
+
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
   /** Every ui-event this session recorded, for the privacy assertions: a
    *  harness run greps this JSON for slugs, paths and filter text. */
   uiEvents: () => mockUiEvents.slice(),
+  /** What the nav drag dropped into a session, newest last. */
+  drops: () => mockDrops.slice(),
   /** Replace the unsent-prompt set and push it, exactly as the poll thread
    *  does — including the transition to EMPTY (`__mock.setDrafts([])`), which
    *  is the case a sent prompt produces and the one that must clear the glyph,

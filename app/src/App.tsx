@@ -4787,7 +4787,10 @@ function App() {
   type DropTarget =
     | { kind: "tier"; repo: string; tier: Tier; before: string | null; lands: Tier; patch: DeclPatch }
     | { kind: "reject"; hint: string }
-    | { kind: "project"; before: string | null };
+    | { kind: "project"; before: string | null }
+    // Dropping a place onto the TERMINAL is not a move at all — it types a
+    // reference to that place into the Claude session running there.
+    | { kind: "mention"; repo: string; slug: string; intoSlug: string; intoSession: string; name: string };
 
   const placeAt = (repo: string, slug: string) =>
     ws?.projects.find((v) => v.root === repo)?.snapshot?.places.find((p) => p.slug === slug) ?? null;
@@ -4834,6 +4837,24 @@ function App() {
       );
       const i = pointerIndex(rows, ny);
       return { kind: "project", before: rows[i]?.slug ?? null };
+    }
+
+    // The terminal, checked first: it is nowhere near the nav's tier zones, and
+    // a drop there means something completely different from a reorder.
+    if (el?.closest('[data-drop="mention"]')) {
+      if (!sel || !selected?.tmux_session.up) return null;
+      if (item.repo !== sel.repo) {
+        // Not a cosmetic guard. The MCP server is pinned to the repo it was
+        // launched in and no tool takes a repo path, so a foreign project's
+        // slug cannot resolve in that session — the token would be dead text.
+        return { kind: "reject", hint: "a session can only reference worktrees from its own project" };
+      }
+      const p = placeAt(item.repo, item.slug);
+      if (!p) return null;
+      return {
+        kind: "mention", repo: item.repo, slug: item.slug,
+        intoSlug: sel.slug, intoSession: selected.tmux_session.name, name: nameOf(p),
+      };
     }
 
     const zone = el?.closest<HTMLElement>("[data-tier]");
@@ -4886,9 +4907,21 @@ function App() {
       return;
     }
     if (item.kind === "project") {
+      // Narrow on the TARGET too: the union now carries a shape with no
+      // `before` at all, and a project item can only ever land on a project.
+      if (target.kind !== "project") return;
       if (target.before === item.root) return;
       const roots = moveBefore((ws?.projects ?? []).map((pv) => pv.root), item.root, target.before);
       reorderProjects(roots);
+      return;
+    }
+    if (target.kind === "mention") {
+      invoke<string>("drop_reference", {
+        repo: target.repo, slug: target.slug,
+        intoSlug: target.intoSlug, intoSession: target.intoSession,
+      })
+        .then((token) => setNotice(`${token} \u2192 ${target.name}'s session`))
+        .catch((e) => fail(e));
       return;
     }
     if (target.kind !== "tier") return;
@@ -5022,6 +5055,14 @@ function App() {
     commit: commitDrop,
     onZone: onDragZone,
   });
+
+  // The terminal lights up only once the drop actually RESOLVES to a mention —
+  // a cross-project drag is over the same pixels and must not promise anything.
+  useEffect(() => {
+    const on = drag?.target?.kind === "mention";
+    document.body.classList.toggle("drop-mention", on);
+    return () => document.body.classList.remove("drop-mention");
+  }, [drag?.target?.kind]);
   /** The gap element, rendered at the landing slot of the group being hovered.
    *  `before === null` means "at the end of that group". */
   const gapAt = (repo: string, tier: Tier, before: string | null) =>
@@ -6682,6 +6723,7 @@ function App() {
           {drag.item.kind === "project" ? basename(drag.item.root) : nameOf({ slug: drag.item.slug, declared: placeAt(drag.item.repo, drag.item.slug)?.declared })}
           {drag.target?.kind === "reject" && <span className="drag-why">{drag.target.hint}</span>}
           {drag.target?.kind === "tier" && <span className="drag-why">→ {TIER_LABEL[drag.target.lands]}</span>}
+          {drag.target?.kind === "mention" && <span className="drag-why">→ reference in this session</span>}
         </div>
       )}
 

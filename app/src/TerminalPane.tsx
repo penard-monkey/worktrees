@@ -407,8 +407,13 @@ export type TermFindProps = {
 
 /** The rendered pane: xterm plus its find bar. Both kinds of terminal share it,
  *  so find behaves identically in the main pane and in a dock shell tab. */
-function TermSurface({ makeTransport, tkey, termVersion, focusToken, findOpen = false, findToken = 0, onFindClose }: {
+function TermSurface({ makeTransport, tkey, termVersion, focusToken, drop, findOpen = false, findToken = 0, onFindClose }: {
   makeTransport: () => Transport; tkey: string; termVersion: number; focusToken: number;
+  /** `data-drop` for the nav drag's hit-test, or absent. Passed IN rather than
+   *  set here because this component is shared: every dock shell tab renders it
+   *  too, and only the place's own tmux pane is somewhere a worktree reference
+   *  can be dropped. */
+  drop?: string;
 } & TermFindProps) {
   const { hostRef, termRef, searchRef, epoch } = useTerm(makeTransport, tkey, termVersion, focusToken);
   const [query, setQuery] = useState("");
@@ -489,7 +494,7 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, findOpen = 
   }, [searchRef, termRef, onFindClose]);
 
   return (
-    <div className="term-wrap">
+    <div className="term-wrap" data-drop={drop}>
       <div ref={hostRef} className="term-host" />
       {findOpen && (
         <FindBar
@@ -512,7 +517,7 @@ export function TerminalPane({ session, termVersion = 0, focusToken = 0, ...find
 } & TermFindProps) {
   return (
     <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}
-      termVersion={termVersion} focusToken={focusToken} {...find} />
+      termVersion={termVersion} focusToken={focusToken} drop="mention" {...find} />
   );
 }
 

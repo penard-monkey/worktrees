@@ -39,6 +39,7 @@
 
 use std::io::{BufRead, Read, Write};
 
+use worktrees_core::mention::uri_map;
 use worktrees_core::{ops, store, ui::CaptureUi, Project};
 
 /// Pick the protocol version to answer `initialize` with: echo what the client
@@ -1001,94 +1002,6 @@ fn since_ms(t: std::time::Instant) -> u128 {
     t.elapsed().as_millis()
 }
 
-/// Turn a slug into something that survives Claude Code's TWO @-mention rules.
-///
-/// `slugify` in core is `s.replace('/', "-")` and nothing else, so every
-/// git-legal branch character reaches a slug — and the client applies two
-/// different, narrower filters to a mention:
-///
-///   * the menu's token charset, `/^@[\p{L}\p{N}\p{M}_\-./\\()[\]~:]*/u`, so a
-///     uri containing `@ # % + = , ! &` cannot be typed-to-complete at all
-///     (note `%` is excluded — percent-encoding is NOT a way out); and
-///   * the submit-time extractor, `/…@([^\s]+:[^\s]+)\b/g`, whose trailing `\b`
-///     drops any uri that does not END on a word character.
-///
-/// `(` and `)` pass the first and fail the second, which is the worst case:
-/// `place://(main)` completes in the menu and then silently resolves to
-/// nothing. So the output here is deliberately narrower than either rule —
-/// `[A-Za-z0-9_.-]`, never ending in `.` or `-`.
-fn safe_uri_part(slug: &str) -> String {
-    let mut out = String::with_capacity(slug.len());
-    for c in slug.chars() {
-        // `is_alphanumeric`, not `is_ascii_alphanumeric`: the menu charset is
-        // `\p{L}\p{N}\p{M}` and the submit extractor is `[^\s]+`, so both admit
-        // a Cyrillic or CJK slug MID-uri. Folding those to `-` turned every
-        // non-ASCII place into `place`, `place-2`, … — names that identify
-        // nothing and renumber whenever a sibling appears.
-        if c.is_alphanumeric() || c == '_' || c == '.' || c == '-' {
-            out.push(c);
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    let trimmed = out.trim_matches(|c: char| c == '-' || c == '.');
-    if trimmed.is_empty() {
-        return "place".to_string();
-    }
-    // The LAST character is the one rule that stays ASCII: JavaScript's `\b` is
-    // ASCII-only even under the `u` flag, so a uri ending in a non-ASCII letter
-    // fails the submit extractor exactly the way `wip-` does. `_` is a word
-    // character in both of the client's charsets.
-    match trimmed.chars().next_back() {
-        Some(c) if c.is_ascii_alphanumeric() || c == '_' => trimmed.to_string(),
-        _ => format!("{trimmed}_"),
-    }
-}
-
-/// `place://…` uris for a whole index, deduplicated.
-///
-/// Two slugs can sanitise to one uri (`feat/x` and `feat-x` both give
-/// `feat-x`), and the client resolves a mention with `find(r => r.uri === B)` —
-/// first match wins, silently. So collisions are broken HERE, in the index's
-/// own order (main first, then glob order), and `(main)` therefore wins the
-/// bare `main` from a worktree literally named `main`. That pair already needs
-/// a special case in core (`ops.rs`'s `resolve_place`); this is the same
-/// ambiguity seen from the naming side.
-fn uri_map(places: &[worktrees_core::model::PlaceRef]) -> Vec<(String, &worktrees_core::model::PlaceRef)> {
-    // Pass one: every slug that needs no sanitising RESERVES its own name.
-    //
-    // Suffixing naively re-created the bug this function exists to close.
-    // Dirs `wip`, `wip-`, `wip-2` mapped to `wip`, `wip-2`, `wip-2-2` — so
-    // `place://wip-2` named the dir `wip-`, and the dir actually called `wip-2`
-    // answered to something else. A model holding `ReadMcpResource` asking for
-    // the obvious uri got the wrong place, silently. It was unstable too:
-    // creating `wip` renumbered `wip-`, so a mention typed a moment earlier
-    // resolved elsewhere after the next refresh.
-    let mut used: std::collections::HashSet<String> = places
-        .iter()
-        .filter(|p| safe_uri_part(&p.slug) == p.slug)
-        .map(|p| format!("place://{}", p.slug))
-        .collect();
-    let mut out = Vec::with_capacity(places.len());
-    for p in places {
-        let base = safe_uri_part(&p.slug);
-        let clean = format!("place://{base}");
-        if base == p.slug {
-            // Reserved above. Two places cannot share a slug, so this is unique.
-            out.push((clean, p));
-            continue;
-        }
-        let mut uri = clean;
-        let mut n = 2;
-        while !used.insert(uri.clone()) {
-            uri = format!("place://{base}-{n}");
-            n += 1;
-        }
-        out.push((uri, p));
-    }
-    out
-}
-
 /// Shorten for the picker: the client truncates a suggestion's description to
 /// 60 characters, so anything past that is invisible and the useful words have
 /// to come first.
@@ -1291,82 +1204,6 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// Both of the client's mention rules, encoded as cases. The menu's charset
-    /// accepts `(` and `)` but the submit extractor's trailing `\b` does not, so
-    /// `(main)` is the case that completes and THEN fails — the reason this
-    /// function exists at all.
-    #[test]
-    fn a_uri_part_survives_both_of_the_clients_mention_rules() {
-        assert_eq!(safe_uri_part("(main)"), "main", "parens must not reach a uri");
-        assert_eq!(safe_uri_part("bug-fixes"), "bug-fixes");
-        assert_eq!(safe_uri_part("feat/thing"), "feat-thing", "a slash is legal in a slug");
-        assert_eq!(safe_uri_part("v1.2"), "v1.2", "a dot is fine mid-uri");
-        assert_eq!(safe_uri_part("wip-"), "wip", "a trailing dash would fail \\b");
-        assert_eq!(safe_uri_part("x."), "x", "so would a trailing dot");
-        assert_eq!(safe_uri_part("a+b=c"), "a-b-c", "chars the MENU cannot type");
-        assert_eq!(safe_uri_part("50%"), "50", "percent-encoding is not available either");
-        assert_eq!(safe_uri_part("!!!"), "place", "never empty");
-        // Both client rules admit these mid-uri; only the LAST character has to
-        // be ASCII, because JavaScript's `\b` is ASCII even under `u`.
-        assert_eq!(safe_uri_part("\u{444}\u{443}\u{43d}"), "\u{444}\u{443}\u{43d}_", "a Cyrillic slug keeps its name");
-        assert_eq!(safe_uri_part("caf\u{e9}-x"), "caf\u{e9}-x", "…and only pays for the trailing rule");
-        for s in ["(main)", "feat/x", "a+b", "wip-", "50%", "!!!", "\u{444}\u{443}\u{43d}", "\u{65e5}\u{672c}\u{8a9e}"] {
-            let u = safe_uri_part(s);
-            assert!(
-                u.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-'),
-                "{s} -> {u} left a character outside the safe set"
-            );
-            let last = u.chars().last().unwrap();
-            assert!(last.is_ascii_alphanumeric() || last == '_', "{s} -> {u} ends on a non-word char");
-        }
-    }
-
-    /// The client resolves a mention with `find(r => r.uri === B)` — first match
-    /// wins, silently — so two slugs may never sanitise to one uri.
-    #[test]
-    fn colliding_slugs_get_distinct_uris_and_main_wins() {
-        use worktrees_core::model::PlaceRef;
-        let p = |slug: &str, is_main: bool| PlaceRef {
-            slug: slug.to_string(),
-            path: format!("/tmp/{slug}"),
-            branch: None,
-            registered: true,
-            is_main,
-        };
-        let places = vec![p("(main)", true), p("main", false), p("feat/x", false), p("feat-x", false)];
-        let got: Vec<String> = uri_map(&places).into_iter().map(|(u, _)| u).collect();
-        assert_eq!(
-            got,
-            vec!["place://main-2", "place://main", "place://feat-x-2", "place://feat-x"],
-            "a slug that needs no sanitising keeps its own name; the dirty one moves"
-        );
-
-        // The regression that made the two-pass reservation necessary: a naive
-        // suffix handed `place://wip-2` to the dir called `wip-`, while the dir
-        // actually named `wip-2` answered to something else entirely.
-        let shadow = vec![p("wip", false), p("wip-", false), p("wip-2", false)];
-        let pairs: Vec<(String, String)> = uri_map(&shadow)
-            .into_iter()
-            .map(|(u, r)| (u, r.slug.clone()))
-            .collect();
-        for (uri, slug) in &pairs {
-            if let Some(bare) = uri.strip_prefix("place://") {
-                assert!(
-                    bare == slug || shadow.iter().all(|p| p.slug != *bare),
-                    "{uri} reads as the dir {bare:?} but resolves to {slug:?}"
-                );
-            }
-        }
-
-        for got in [
-            uri_map(&places).into_iter().map(|(u, _)| u).collect::<Vec<_>>(),
-            pairs.iter().map(|(u, _)| u.clone()).collect::<Vec<_>>(),
-        ] {
-            let uniq: std::collections::HashSet<&String> = got.iter().collect();
-            assert_eq!(uniq.len(), got.len(), "uris must be unique: {got:?}");
-        }
     }
 
     /// The signal behind `list_changed`. The third assertion is the point: if

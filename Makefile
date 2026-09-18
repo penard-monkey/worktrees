@@ -9,7 +9,7 @@ BATS   := ./test/lib/bats-core/bin/bats
 RELEASE_BIN := $(CURDIR)/target/release/worktrees
 
 .PHONY: build build-debug install install-copy install-app dev-app uninstall lint \
-        test test-real-tmux test-mcp check release
+        test test-real-tmux test-mcp test-frontend check release
 
 build:
 	cargo build --release -p worktrees-cli
@@ -78,7 +78,19 @@ test-real-tmux: build-debug
 test-mcp: build
 	python3 scripts/mcp-resources-check.py
 
-check: lint test test-mcp
+# The `app/scripts/*-check.mjs` family: each one slices REAL frontend source and
+# evaluates it under stubs, guarding a rule that `tsc` and the unit tests cannot
+# see (a CSS declaration, a branch order, a mirror of a core decision). There
+# are a dozen of them and until now not one ran anywhere but by hand, so a
+# regression they were written to catch would have been found by a person.
+# Pure and fast — no browser, no harness, no network.
+test-frontend:
+	@for f in app/scripts/*-check.mjs; do \
+	  printf '%-34s ' "$$(basename $$f)"; \
+	  node "$$f" >/dev/null 2>&1 && echo ok || { echo FAIL; node "$$f"; exit 1; }; \
+	done
+
+check: lint test test-mcp test-frontend
 
 # make release VERSION=x.y.z — bump the workspace version in Cargo.toml first.
 release:

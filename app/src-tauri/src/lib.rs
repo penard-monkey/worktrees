@@ -19,7 +19,7 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{git, ops, store, sync, sysclock, Project, Ui};
+use worktrees_core::{git, mention, ops, store, sync, sysclock, tmux, Project, Ui};
 
 // ── app log ──────────────────────────────────────────────────────────────────
 // Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
@@ -704,6 +704,45 @@ async fn set_note(repo: String, slug: String, note: String) -> Result<(), String
     store::edit(&repo, &slug, |d| {
         d.note = if note.trim().is_empty() { None } else { Some(note) }
     })
+}
+
+/// Drop a reference to one place into ANOTHER place's Claude session.
+///
+/// The nav drag's landing. What arrives is the same `@worktrees:place://…`
+/// token the `@` menu completes, built in Rust from `worktrees_core::mention`
+/// so there is exactly one implementation of it — the client matches a mention
+/// against its cached resource list by exact string equality, so a frontend
+/// copy that drifted by a character would reference the wrong place silently
+/// rather than erroring.
+///
+/// `into_session` rather than a slug because the receiving place may be on an
+/// ADOPTED session whose name is not the canonical one; the frontend already
+/// holds the real name from `ls`.
+#[tauri::command]
+async fn drop_reference(
+    repo: String,
+    slug: String,
+    into_slug: String,
+    into_session: String,
+) -> Result<String, String> {
+    let project = Project::discover(std::path::Path::new(&repo)).map_err(|e| e.msg)?;
+    let places = project.place_index();
+    let uri = mention::uri_for(&places, &slug)
+        .ok_or_else(|| format!("no such place: {slug}"))?;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let server = mention::server_name_for(
+        &repo,
+        &into_slug,
+        &std::path::Path::new(&home).join(".claude.json"),
+    );
+    let token = mention::mention(&server, &uri);
+    // Spaces on BOTH sides. The client's extractor requires whitespace (or
+    // start-of-input) before the `@`, and this cannot see the prompt to know
+    // whether there already is any; the trailing one closes the `\b` and
+    // dismisses the completion popup the `@` opens as it arrives.
+    tmux::paste_to_pane(&into_session, &format!(" {token} "))?;
+    applog("info", &format!("drop_reference: {token} -> {into_session}"));
+    Ok(token)
 }
 
 /// Rename a place's LABEL. Empty clears it, which is how the UI goes back to
@@ -5380,6 +5419,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_places,
             list_workspace,
+            drop_reference,
             add_project,
             create_project,
             probe_dir,
