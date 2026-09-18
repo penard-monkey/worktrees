@@ -145,6 +145,22 @@ export type Settings = {
   // shows the pair as one three-way control (Pinned / Auto-hide / Hidden).
   nav_pinned: boolean;
   nav_hover_reveal: boolean;
+  // ── which edge each half of the shell owns ──────────────────────────────
+  // "left" is the shape the app shipped with: the Places rail + sidebar on the
+  // left, the dock's rail + panel on the right. "right" MIRRORS the whole
+  // shell — both rails, both panels, both resizers and the overlay's anchor
+  // swap edges together.
+  //
+  // ONE flag rather than a side per panel, because the two halves are not
+  // interchangeable hosts. The nav is a grid column that can lift out into an
+  // overlay; the dock is a flex sibling of `main` INSIDE `.space`, so the space
+  // header crowns terminal and dock together. Mirroring keeps each panel in the
+  // host it was built for — moving Files into the nav's column would cost it
+  // that header, and moving Places into the dock would cost it the overlay.
+  //
+  // Global, like the rest of the nav's state and unlike the dock's: it is how
+  // you LEAVE a space, so it must not move under you when you arrive somewhere.
+  places_side: "left" | "right";
   // ── where the Claude plan bars live ─────────────────────────────────────
   // They used to be sidebar-only, which the auto-hiding sidebar turned into
   // "usually not on screen". Three hosts now, all of them always visible:
@@ -294,6 +310,7 @@ export const DEFAULTS: Settings = {
   done_steps: 3,
   nav_pinned: false,
   nav_hover_reveal: true,
+  places_side: "left",
   usage_place: "strip",
   dock_open: false,
   dock_width: 360,
@@ -479,6 +496,11 @@ export function applySettings(s: Settings) {
   root.dataset.theme = resolveTheme(s);
   root.dataset.density = s.density;
   root.dataset.guides = s.nav_guides ? "on" : "off";
+  // Normalised to one of the two here rather than passed through: a hand-edited
+  // ui-state.json holding anything else would otherwise leave the attribute
+  // set to a value no rule matches, which reads as the unmirrored layout but
+  // with `settings.places_side` still saying something App.tsx has to guess at.
+  root.dataset.placesSide = s.places_side === "right" ? "right" : "left";
 }
 
 // Pre-theme installs persisted theme:"dark"; unknown ids (downgrades) reset too.

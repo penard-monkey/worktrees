@@ -1782,8 +1782,15 @@ function TmuxBanner({ onRecheck }: { onRecheck: () => Promise<boolean> }) {
  *  resize AND on a resize of the panel itself, because a panel that grows after
  *  opening (a plan with a fourth bucket, an incident with a long update) keeps
  *  the `top` computed for its old height and pushes its last row off the bottom
- *  edge, unreachable (the CtxMenu lesson, same shape, same fix). */
-function usePopPos(shown: boolean, side: "up" | "right") {
+ *  edge, unreachable (the CtxMenu lesson, same shape, same fix).
+ *
+ *  `side` is where the panel goes RELATIVE TO THE TRIGGER, not which edge of
+ *  the window it ends up near — "right" and "left" are the two ways a rail tile
+ *  can open beside itself, and which one the rail wants flips with
+ *  `places_side`. Opening a mirrored rail's panel to the "right" would not just
+ *  look wrong: the clamp below would shove it back over the rail it came from,
+ *  because there is no window left on that side, so it would land ON the rail. */
+function usePopPos(shown: boolean, side: "up" | "right" | "left") {
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const trigRef = useRef<HTMLButtonElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
@@ -1798,8 +1805,9 @@ function usePopPos(shown: boolean, side: "up" | "right") {
       // box and would be read through any transform the panel is wearing.
       const pw = p.offsetWidth, ph = p.offsetHeight;
       const m = 8;
-      const left = side === "right" ? tr.right + m : tr.left;
-      const top = side === "right" ? tr.top : tr.top - ph - m;
+      const left = side === "right" ? tr.right + m : side === "left" ? tr.left - pw - m : tr.left;
+      // Both beside-sides align with the trigger's top; only "up" stacks above.
+      const top = side === "up" ? tr.top - ph - m : tr.top;
       setPos({
         left: Math.max(m, Math.min(left, window.innerWidth - pw - m)),
         top: Math.max(m, Math.min(top, window.innerHeight - ph - m)),
@@ -2014,7 +2022,7 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
   info: UsageInfo;
   nowSec: number;
   shape: "line" | "tile";
-  side: "up" | "right";
+  side: "up" | "right" | "left";
   /** Set only by the rail host, where the tile IS the status indicator: there
    *  is no room beside it for a chip, so the badge rides the tile and the
    *  reading joins the panel this trigger already opens. The line hosts get a
@@ -4049,6 +4057,17 @@ function App() {
     return () => { window.removeEventListener("resize", onWinResize); cancelAnimationFrame(raf); };
   }, []);
 
+  // Which edge each half of the shell owns (Settings -> Navigation -> Sides).
+  // Declared HERE, above `fit`, because everything downstream that has a
+  // handedness reads it: the grid's column order, both resizers' drag sign and
+  // the rail popover's side. The CSS half rides on `[data-places-side]`
+  // (`applySettings`) rather than on inline styles, so this flag only has to
+  // reach the things a stylesheet cannot see — arithmetic and props.
+  //
+  // `fit` itself is deliberately NOT one of them: the widths are symmetric, so
+  // mirroring changes where the columns sit and never how wide they are.
+  const mirrored = settings.places_side === "right";
+
   // Dock only makes sense with a place selected (Files/Terminal need a worktree).
   const dockEligible = !!selected && !!sel;
   const fit = fitLayout(eff, dockEligible, vw);
@@ -5637,10 +5656,15 @@ function App() {
     if (restoreTarget) setSel({ repo: restoreTarget.pv.root, slug: restoreTarget.p.slug });
   }, [ws, settings.restore_last, restoreTarget, sel]);
 
-  // ── nav resizer (drag the nav's right edge) ──
+  // ── nav resizer (drag the nav's INNER edge — the one facing the terminal) ──
   // Both resizers clamp against the LIVE viewport, so a drag can never push the
   // center pane under its floor. `window.innerWidth` is read inside the move
   // handler rather than closed over — the window can be resized mid-drag.
+  //
+  // Mirrored, that edge is the nav's LEFT one, so the pointer travels the other
+  // way to make the panel wider. The handle's own position is CSS
+  // (`.nav-resizer`); only the sign of the delta lives here, and the two must
+  // agree or the panel shrinks when you pull it open.
   const onResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -5650,21 +5674,24 @@ function App() {
         // The dock is only reserved against while the sidebar is a COLUMN. As an
         // overlay it covers the terminal rather than sharing the row with it, so
         // reserving would cap the drag against width nothing is competing for.
-        nav_width: clampNav(startW + (ev.clientX - startX), settings.nav_pinned && dockShown ? eff.dock_width : 0, window.innerWidth),
+        nav_width: clampNav(startW + (mirrored ? startX - ev.clientX : ev.clientX - startX), settings.nav_pinned && dockShown ? eff.dock_width : 0, window.innerWidth),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
 
-  // ── dock resizer (drag the dock's LEFT edge — moving left GROWS it) ──
+  // ── dock resizer (drag the dock's inner edge — moving AWAY from its window
+  //    edge GROWS it). Unmirrored that is the dock's left edge and leftward;
+  //    mirrored the dock is the left-hand panel, so it is the right edge and
+  //    rightward. Same pairing as the nav above: sign here, handle in CSS. ──
   const onDockResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startW = eff.dock_width;
     const move = (ev: MouseEvent) =>
       updatePanels({
-        dock_width: clampDock(startW - (ev.clientX - startX), fit.navShown ? fit.navW : 0, window.innerWidth),
+        dock_width: clampDock(startW + (mirrored ? ev.clientX - startX : startX - ev.clientX), fit.navShown ? fit.navW : 0, window.innerWidth),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
@@ -5978,12 +6005,39 @@ function App() {
   // space header can crown both (see `.space` in App.css) — a header spanning
   // two grid columns can't be expressed here, because these columns are
   // *removed* when hidden, not zeroed, so every line index shifts with ⌘B.
-  const gridCols = [
-    "var(--rail-w)",
-    fit.navShown ? `${fit.navW}px` : null,
-    "minmax(0, 1fr)", // .space — terminal + dock, under one header
-    "var(--rail-w)", // right rail — permanent, like the left one
-  ].filter(Boolean).join(" ");
+  //
+  // Mirrored, the TRACKS swap but the DOM does not. Each child gets a CSS
+  // `order` instead, and the boxes land in different columns without a single
+  // node moving in the tree. That is not a stylistic preference — one of these
+  // children owns a mounted xterm, and re-parenting it costs a repaint at best
+  // and the pty's grid at worst. The trade is that `order` is visual only, so
+  // Tab still walks the panels in DOM order, which mirrored runs right-to-left.
+  //
+  // ONE array, read twice: it is the column list AND it is where each child's
+  // `order` comes from. Writing the sequence a second time — say as `order:`
+  // rules in the stylesheet — is the mirror that drifts quietly, because
+  // auto-placement keeps filling tracks in order-modified order either way: a
+  // stale column list does not throw, it just puts a 300px sidebar where the
+  // terminal's `1fr` belongs.
+  //
+  // A hidden nav contributes no track (it is `display: none` or, revealed,
+  // absolutely positioned) and simply leaves a gap in the numbering. Orders
+  // only have to be MONOTONIC, never contiguous, so nothing else has to know.
+  const shell: [key: string, track: string | null][] = mirrored
+    ? [
+      ["railRight", "var(--rail-w)"], // the mirrored shell leads with the dock's rail
+      ["space", "minmax(0, 1fr)"], // terminal + dock, under one header
+      ["nav", fit.navShown ? `${fit.navW}px` : null],
+      ["rail", "var(--rail-w)"], // Places' rail, now against the window's right edge
+    ]
+    : [
+      ["rail", "var(--rail-w)"],
+      ["nav", fit.navShown ? `${fit.navW}px` : null],
+      ["space", "minmax(0, 1fr)"], // terminal + dock, under one header
+      ["railRight", "var(--rail-w)"], // right rail — permanent, like the left one
+    ];
+  const ord = Object.fromEntries(shell.map(([k], i) => [k, i + 1])) as Record<string, number>;
+  const gridCols = shell.map(([, t]) => t).filter(Boolean).join(" ");
   // The overlay's width. `clampNav` with NO dock reservation, unlike the pinned
   // column: the overlay covers the terminal rather than sharing the row with
   // it, so there is nothing to reserve width away from.
@@ -6002,6 +6056,7 @@ function App() {
           hide button duplicated the lens icon's own toggle. */}
       <nav
         className="rail"
+        style={{ order: ord.rail }}
         onPointerEnter={() => navPointer("rail", true)}
         onPointerLeave={() => navPointer("rail", false)}
       >
@@ -6028,7 +6083,7 @@ function App() {
         {/* Usage, when the rail is its host. Above the two buttons, so the
             rail's actions stay together at the very bottom. */}
         {settings.usage_place === "rail" && usage.info && (
-          <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="tile" side="right"
+          <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="tile" side={mirrored ? "left" : "right"}
             status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
@@ -6045,7 +6100,11 @@ function App() {
       <aside
         ref={navRef}
         className={"nav" + (fit.navShown ? "" : navRevealed ? " overlay" : " hidden")}
-        style={fit.navShown || !navRevealed ? undefined : { width: navOverlayW }}
+        // `order` rides along with the overlay's width rather than moving to a
+        // class: both are geometry this component computes, and an overlaid nav
+        // is out of flow anyway — the order simply stops mattering until it is
+        // pinned again.
+        style={{ order: ord.nav, ...(fit.navShown || !navRevealed ? null : { width: navOverlayW }) }}
         onPointerEnter={() => navPointer("nav", true)}
         onPointerLeave={() => navPointer("nav", false)}
       >
@@ -6130,7 +6189,7 @@ function App() {
           sat outside it as a sibling, which is precisely what made Files and
           Terminal read as app furniture pointed at a place rather than as parts
           of it. */}
-      <div className="space">
+      <div className="space" style={{ order: ord.space }}>
         {/* tmux missing is an APP-level condition, not a per-place one, so it
             stays above the space header rather than under it. */}
         {!tmuxOk && <TmuxBanner onRecheck={recheckTmux} />}
@@ -6507,9 +6566,15 @@ function App() {
           {/* ── right dock: Files (browse + edit) / Terminal (embedded shell) ──
               A flex sibling of `main` inside the space body — no longer a grid
               column of its own. That is what puts it under the space header
-              instead of beside it. */}
+              instead of beside it.
+
+              And it is why the mirror reaches it with an `order` of its own
+              rather than through `shell` above: that array orders the GRID's
+              children, and the dock is not one of them. `.reading` is
+              `position: absolute; inset: 0` against `.space-body`, so it keeps
+              covering terminal and dock together either way round. */}
           {dockShown && selected && sel && (
-            <aside className="dock" style={{ flex: `0 0 ${fit.dockW}px` }}>
+            <aside className="dock" style={{ order: mirrored ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
               <div className="dock-resizer" onMouseDown={onDockResize} />
               {/* the rail owns tab selection AND collapse, so this is a title, not
                   a control strip */}
@@ -6698,7 +6763,7 @@ function App() {
       {/* ── right rail: mirrors the left one. Permanent, so the dock always has
           a visible affordance; the active icon collapses the dock. Disabled
           with no place selected — Files/Terminal both need a worktree. */}
-      <nav className="rail rail-right">
+      <nav className="rail rail-right" style={{ order: ord.railRight }}>
         {DOCK_RAIL.map((d) => {
           const on = dockShown && eff.dock_tab === d.key;
           const why = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
