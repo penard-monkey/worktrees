@@ -1560,7 +1560,9 @@ mod tests {
         assert_eq!(l.match_word, "claude", "adoption matches the program, not the env prefix");
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/data/profiles/work' ");
         // …and the composed line still starts the program as pane0's foreground
-        // process, which is what keeps pane_current_command == "claude".
+        // process. (What tmux then REPORTS is another matter: a native install
+        // resolves through a versioned symlink, so `pane_current_command` can
+        // read `2.1.277` — `tmux::is_version_like` is why that still matches.)
         let line = format!("{}{}", l.shell_prefix(), l.cmd);
         assert!(line.starts_with("CLAUDE_CONFIG_DIR="));
         assert!(line.contains(" claude --append-system-prompt-file"));

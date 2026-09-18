@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The drag never found Claude.** v0.25.0 shipped "drag a worktree into a
+  session" and it could not work: the session's AI pane was located by matching
+  the process name against `claude`, but a natively-installed Claude runs
+  through a versioned symlink and macOS reports the RESOLVED name — `2.1.277` —
+  so the match never hit and every drop refused with "no Claude running in
+  session". Measured across 21 live sessions, the old rule found the pane in
+  none of them. The pane is now identified by what it was LAUNCHED as together
+  with what it is still RUNNING, so a session whose Claude has exited is still
+  refused rather than having the reference typed onto its shell prompt — and
+  the refusal now names the panes it saw, so the next mismatch is one log line
+  rather than a survey.
+
 ## [0.25.0] - 2026-09-18
 
 ### Added

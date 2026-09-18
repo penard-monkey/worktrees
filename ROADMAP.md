@@ -34,8 +34,10 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   old name; no PR has ever targeted it).
   _From: [2026-09-18 mcp-setup-wizard](docs/sessions/2026-09-18-mcp-setup-wizard/summary.md)_
 
-- **The drag has never actually been performed.** #221 shipped it and every
-  part is tested except the gesture: the mock records the invoke but has no tmux
+- **The drag's manual checks still have not been run in full.** It HAS now been
+  performed once — it failed outright (see the v0.25.0 fix in CHANGELOG: the AI
+  pane was never found, in any session), which is exactly what the unrun check
+  existed to catch. The rest of it is still unexercised: the mock records the invoke but has no tmux
   to paste into, and driving the real app is off-limits. Two steps in
   `docs/ai-profiles-manual-checks.md` matter most and neither has been run —
   dropping while Claude is asking a permission question (the safety argument is
