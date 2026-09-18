@@ -331,7 +331,7 @@ pub fn paste_to_ai(session: &str, ai_word: &str, text: &str) -> Result<(), Strin
 /// Split out so the exact shape is testable without a tmux server or a PATH
 /// shim — `PATH` is process-global and `cargo test` runs tests in threads, so
 /// a shim would race every other test that shells out. The shape is the whole
-/// safety argument (`-p`, `:0.0`, `--`, and the cleanup), so it is worth
+/// safety argument (`-p`, the pane id, `--`, and the cleanup), so it is worth
 /// pinning directly.
 fn paste_commands<'a>(buf: &'a str, pane: &'a PaneId, text: &'a str) -> [Vec<&'a str>; 3] {
     [
