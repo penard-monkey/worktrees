@@ -34,7 +34,7 @@ const decode = (s: string) => s.replace(/&(?:amp|lt|gt|quot|#39|apos|nbsp);/g, (
  * that is not http(s), a relative path, or an in-document anchor therefore gets
  * NO href at all — it renders as inert text carrying its own label.
  */
-function safeHref(href: string): string | undefined {
+export function safeHref(href: string): string | undefined {
   const h = href.trim();
   if (!h) return undefined;
   if (h.startsWith("#")) return h;
