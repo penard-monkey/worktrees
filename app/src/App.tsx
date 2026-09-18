@@ -9,6 +9,7 @@ import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
+import { safeHref } from "./markdown";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
 import { canNudge, McpNudge, type McpStatus } from "./McpPanel";
@@ -401,10 +402,25 @@ function parseNotes(md: string): NotesSection[] {
 // alternation, code first, so a `**` inside a code span stays literal. The
 // inner text of a match can never re-match its own delimiter (each arm forbids
 // it), so the recursion below bottoms out after at most two levels.
-const INLINE = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*)/;
+const INLINE = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*|\[[^\]]+\]\([^()\s]+\))/;
+const LINK = /^\[([^\]]+)\]\(([^()\s]+)\)$/;
 function renderInline(s: string): React.ReactNode[] {
   return s.split(INLINE).map((part, i) => {
     if (i % 2 === 0) return part;
+    const link = LINK.exec(part);
+    if (link) {
+      // safeHref vets the target; onClick AND onAuxClick both route through
+      // openUrl, because a middle-click fires auxclick with no click — a click
+      // handler alone is not a boundary and the WebView would follow the href.
+      const href = safeHref(link[2]);
+      if (!href) return <span key={i}>{link[1]}</span>;
+      const go = (e: React.MouseEvent) => {
+        e.preventDefault();
+        openUrl(href).catch((err) =>
+          invoke("log_event", { level: "error", msg: `openUrl ${href}: ${err}` }).catch(() => {}));
+      };
+      return <a key={i} href={href} onClick={go} onAuxClick={go}>{renderInline(link[1])}</a>;
+    }
     if (part.startsWith("`")) return <code key={i}>{part.slice(1, -1)}</code>;
     if (part.startsWith("**")) return <strong key={i}>{renderInline(part.slice(2, -2))}</strong>;
     return <em key={i}>{renderInline(part.slice(1, -1))}</em>;
