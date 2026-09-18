@@ -275,7 +275,9 @@ regexes and a cache inside it.
 2. Send a message containing one. The reply should show it knew the branch and
    the path WITHOUT calling a tool first — that is the resource being expanded
    and inlined rather than merely named.
-3. `(main)` must appear as `place://main`. A uri ending in a non-word character
+3. `(main)` must appear as `place://main` — unless a worktree is literally named
+   `main`, which legitimately takes that uri and pushes the main checkout to
+   `place://main-2`. A uri ending in a non-word character
    silently resolves to nothing at submit time even though it completes in the
    menu, which is the failure this is most likely to regress into.
 4. Create a worktree from the app or the CLI while the session is open, wait a
@@ -297,7 +299,9 @@ While checking any of the above, the server is writing what it saw to
 cached and the list the server serves have diverged, which is exactly what the
 watcher exists to prevent. `WORKTREES_MCP_DEBUG=0` switches it off,
 `WORKTREES_MCP_DEBUG_LOG=<path>` moves it. **This logging is temporary** — see
-ROADMAP; a test fails on 2026-12-15 to make sure it goes.
+ROADMAP; a test fails once the workspace version reaches 0.26.0 to make sure it
+goes. The suite does not write here — bats and `make test-mcp` both redirect it
+— so anything in this file came from a real session.
 
 If mentions expand nowhere at all, check the switches that disable the whole
 attachment path before suspecting this feature: `CLAUDE_CODE_DISABLE_ATTACHMENTS`,

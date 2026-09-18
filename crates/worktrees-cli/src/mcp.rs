@@ -108,17 +108,30 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     dlog(
         &server.project.main_root,
         &format!(
-            "start v{} mutations={} log={:?} REMOVE_THIS_LOG_BY={DEBUG_UNTIL}",
+            "start v{} mutations={} log={:?} REMOVE_THIS_LOG_AT_v{}.{}",
             env!("CARGO_PKG_VERSION"),
             mutations,
-            debug_log_path()
+            debug_log_path(),
+            REMOVE_AT_VERSION.0,
+            REMOVE_AT_VERSION.1
         ),
     );
     // One line on stderr so the log is findable from `claude --debug` without
     // the per-request noise going there too. stderr is human-facing by this
     // module's own rule; stdout stays protocol.
     if let Some(p) = debug_log_path() {
-        eprintln!("worktrees mcp: debug log -> {} (temporary; remove by {DEBUG_UNTIL})", p.display());
+        // NOT `eprintln!`: Rust ignores SIGPIPE, so a write to a closed stderr
+        // returns EPIPE and `eprintln!` PANICS on it. Every other `eprintln!`
+        // here is an error path taken once; this one runs on every launch, so a
+        // client that pipes stderr and closes its read end would kill the
+        // server at startup, every time.
+        let _ = writeln!(
+            std::io::stderr(),
+            "worktrees mcp: debug log -> {} (temporary; goes at v{}.{})",
+            p.display(),
+            REMOVE_AT_VERSION.0,
+            REMOVE_AT_VERSION.1
+        );
     }
     spawn_list_watcher(wt_root, places_file, server.project.main_root.clone(), ready);
 
@@ -728,7 +741,10 @@ impl Server {
         // answered "no such resource: " to a caller that never sent one.
         let t0 = std::time::Instant::now();
         let uri = params.get("uri").and_then(|v| v.as_str()).ok_or_else(|| {
-            dlog(&self.project.main_root, &format!("resources/read MALFORMED params={params}"));
+            dlog(
+                &self.project.main_root,
+                &format!("resources/read MALFORMED params={}", clip(&params.to_string(), FREE_TEXT_MAX)),
+            );
             (-32602_i64, "uri is required and must be a string".to_string())
         })?;
 
@@ -768,8 +784,11 @@ impl Server {
         }
         if let Some(list) = v["agents"].as_array_mut() {
             for a in list.iter_mut() {
-                if let Some(t) = a.get("name").and_then(|x| x.as_str()) {
-                    a["name"] = serde_json::json!(clip(t, FREE_TEXT_MAX));
+                // `name` AND `tmux`: a sibling session's `--name` reaches both.
+                for f in ["name", "tmux"] {
+                    if let Some(t) = a.get(f).and_then(|x| x.as_str()) {
+                        a[f] = serde_json::json!(clip(t, FREE_TEXT_MAX));
+                    }
                 }
             }
         }
@@ -865,33 +884,71 @@ fn safe_arg(v: &str, what: &str) -> Result<String, String> {
 // real session use them. This writes what the server saw to a file the user can
 // tail, and it is meant to come OUT once the feature has been exercised.
 //
-// `DEBUG_UNTIL` is enforced: `the_debug_log_is_temporary_and_says_so` fails once
-// that date passes, and its message names everything to delete. That is the
-// reminder — a comment would not be one.
+// `REMOVE_AT_VERSION` is enforced: `the_debug_log_is_temporary_and_says_so`
+// fails once the workspace version reaches it, and its message names everything
+// to delete. That is the reminder — a comment would not be one.
+//
+// A version, not a date. A date bomb fires on whatever unrelated PR happens to
+// be open that morning, needs a working `date` (a runner without one passes
+// SILENTLY — the one thing a reminder must never do), and drags in timezones.
+// The version gate fires in the release-bump PR, which is exactly when the
+// CHANGELOG line promising this removal is being edited anyway.
 //
 // Off with `WORKTREES_MCP_DEBUG=0`; path overridable with
 // `WORKTREES_MCP_DEBUG_LOG`. stdout is never touched: the transport lives there.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Delete the debug log after this date (YYYY-MM-DD). See the test.
-const DEBUG_UNTIL: &str = "2026-12-15";
+/// Delete the debug logging when the workspace version reaches this. See the
+/// test — it is what enforces it. `0.25.0` is this feature's release, so this
+/// buys exactly one release cycle of real use.
+const REMOVE_AT_VERSION: (u32, u32) = (0, 26);
 
-/// Where the debug log goes, or `None` when it is switched off.
+/// `CARGO_PKG_VERSION` as (major, minor), or `None` if it is not the usual
+/// shape. Parsed rather than string-compared: `"0.9.0" < "0.26.0"` is FALSE
+/// lexicographically, so the obvious `<` would have stopped firing the moment
+/// a minor went past 9 — a reminder that silently never fires.
+fn version_major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut it = v.split('.');
+    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+}
+
+/// Rotate once past this size. On by default and written per request, so it
+/// must not be able to fill a disk while nobody is looking.
+const DEBUG_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The path rule, as a PURE function of the three inputs it depends on.
 ///
-/// Under `~/.cache/worktrees/` because that is already this repo's word for
-/// "throwaway artifacts for one project" (CLAUDE.md). One file for every
-/// session in every repo, because the useful question is "what happened across
-/// my worktrees just now" — each line carries the pid and the repo to sort them
-/// back out.
-fn debug_log_path() -> Option<std::path::PathBuf> {
-    if std::env::var("WORKTREES_MCP_DEBUG").is_ok_and(|v| v == "0" || v == "false") {
+/// Split out so the test can exercise the rule without touching process-global
+/// env vars: `cargo test` runs threads, `set_var` is process-wide, and any other
+/// test that logged while a mutation was in flight would race it (in newer Rust
+/// it is outright unsound). Passing the values in removes the race rather than
+/// narrowing it.
+fn debug_log_path_from(
+    switch: Option<&str>,
+    explicit: Option<&str>,
+    home: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if matches!(switch, Some("0") | Some("false")) {
         return None;
     }
-    if let Ok(p) = std::env::var("WORKTREES_MCP_DEBUG_LOG") {
-        return (!p.is_empty()).then(|| std::path::PathBuf::from(p));
+    if let Some(p) = explicit.filter(|p| !p.is_empty()) {
+        return Some(std::path::PathBuf::from(p));
     }
-    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
-    Some(std::path::Path::new(&home).join(".cache/worktrees/mcp-debug.log"))
+    // Under `~/.cache/worktrees/` because that is already this repo's word for
+    // "throwaway artifacts" (CLAUDE.md). One file for every session in every
+    // repo: the useful question is "what happened across my worktrees just
+    // now", and each line carries the pid and the repo to sort them back out.
+    let home = home.filter(|h| !h.is_empty())?;
+    Some(std::path::Path::new(home).join(".cache/worktrees/mcp-debug.log"))
+}
+
+/// Where the debug log goes, or `None` when it is switched off.
+fn debug_log_path() -> Option<std::path::PathBuf> {
+    debug_log_path_from(
+        std::env::var("WORKTREES_MCP_DEBUG").ok().as_deref(),
+        std::env::var("WORKTREES_MCP_DEBUG_LOG").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
 }
 
 /// Append one line. Never fails loudly: a debug log that can break the server
@@ -901,16 +958,36 @@ fn debug_log_path() -> Option<std::path::PathBuf> {
 /// from interleaving mid-line — the same single-writer discipline `emit` uses
 /// for stdout, for the same reason.
 fn dlog(repo: &str, msg: &str) {
-    let Some(path) = debug_log_path() else { return };
+    // The suite must never write here. The whole deliverable is a log a HUMAN
+    // reads after real use, and the first version of this filled it with
+    // `repo=repo` from the check script's temp repo and `repo=wt-mcp-caps-<pid>`
+    // from a unit test — 11 lines, not one of them from a session. `dlog_to`
+    // stays drivable, so the writer is still tested; only this entry point,
+    // which resolves the real path from the environment, is muted.
+    if cfg!(test) {
+        return;
+    }
+    dlog_to(debug_log_path().as_deref(), repo, msg);
+}
+
+fn dlog_to(path: Option<&std::path::Path>, repo: &str, msg: &str) {
+    let Some(path) = path else { return };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
+    }
+    // Rotate rather than truncate, so the window that was just lost is still
+    // readable in `.1` — the report this log exists for usually arrives AFTER
+    // the interesting minute. A rename race between sessions is benign: one
+    // wins and the others append to the fresh file.
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > DEBUG_LOG_MAX_BYTES) {
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
     }
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let line = format!("{ms} pid={} repo={} {msg}\n", std::process::id(), short_repo(repo));
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -1382,84 +1459,121 @@ mod tests {
     }
 
     /// THE REMINDER. A comment asking someone to remove temporary code is not a
-    /// reminder; a red build is. This goes off on `DEBUG_UNTIL` and names the
-    /// whole removal in its failure message, so whoever hits it does not have
-    /// to reconstruct what "the debug logging" meant.
+    /// reminder; a red build is. This goes off when the workspace version
+    /// reaches `REMOVE_AT_VERSION` and names the whole removal in its failure
+    /// message, so whoever hits it does not have to reconstruct what "the debug
+    /// logging" meant.
     ///
-    /// Shells out to `date` rather than adding a time crate — the CLI has no
-    /// chrono and this is the one place that needs a calendar. If `date` is
-    /// missing the test passes: a broken clock must not block a release.
+    /// It fires during the release bump (Release step 2 in CLAUDE.md), which is
+    /// the moment the CHANGELOG line promising this removal is being written.
+    /// No clock, no `date`, no timezone — and no way to pass silently.
     #[test]
     fn the_debug_log_is_temporary_and_says_so() {
-        let today = std::process::Command::new("date")
-            .arg("+%Y-%m-%d")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-        if today.is_empty() {
-            return;
-        }
-        // ISO dates compare correctly as strings, which is the whole reason the
-        // constant is written this way.
+        let here = version_major_minor(env!("CARGO_PKG_VERSION"))
+            .expect("the workspace version should be major.minor.patch");
         assert!(
-            today.as_str() <= DEBUG_UNTIL,
-            "The MCP resource debug logging has outlived its welcome (DEBUG_UNTIL = {DEBUG_UNTIL}, \
-             today = {today}).\n\
+            here < REMOVE_AT_VERSION,
+            "The MCP resource debug logging has outlived its welcome \
+             (this is v{}, and it was to go at v{}.{}).\n\
              \n\
-             It was added to learn how a REAL claude session uses `@worktrees:place://…`, because \
-             nothing in this suite can exercise that. If it has served its purpose, remove:\n\
+             It was added to learn how a REAL claude session uses \
+             `@worktrees:place://\u{2026}`, because nothing in this suite can exercise that. \
+             Read `~/.cache/worktrees/mcp-debug.log` FIRST — whatever it caught should \
+             become a test or a ROADMAP note. Then remove:\n\
              \n\
-               - `DEBUG_UNTIL`, `debug_log_path`, `dlog`, `short_repo`, `since_ms`, \
-                 `changed_summary` and this test, in mcp.rs\n\
-               - every `dlog(` call site and the `eprintln!` in `cmd_mcp`\n\
+               - `REMOVE_AT_VERSION`, `version_major_minor`, `DEBUG_LOG_MAX_BYTES`, \
+                 `debug_log_path{{,_from}}`, `dlog{{,_to}}`, `short_repo`, `since_ms`, \
+                 `changed_summary`, and this test plus \
+                 `the_debug_log_is_switchable_and_never_fatal`, in mcp.rs\n\
+               - every `dlog(` call site, and the stderr banner in `cmd_mcp`\n\
                - the `repo` parameter threaded into `spawn_list_watcher` for it\n\
-               - the ROADMAP entry, and the `WORKTREES_MCP_DEBUG` lines in \
-                 docs/ai-profiles-manual-checks.md\n\
+               - `WORKTREES_MCP_DEBUG=0` in test/mcp.bats and the env in \
+                 scripts/mcp-resources-check.py\n\
+               - the ROADMAP entry, the CHANGELOG note, and the \
+                 `WORKTREES_MCP_DEBUG` section in docs/ai-profiles-manual-checks.md\n\
              \n\
-             If it is still earning its keep, move DEBUG_UNTIL out and say why here."
+             If it is still earning its keep, raise REMOVE_AT_VERSION and say why here.",
+            env!("CARGO_PKG_VERSION"),
+            REMOVE_AT_VERSION.0,
+            REMOVE_AT_VERSION.1,
+        );
+    }
+
+    /// The parse the reminder rests on. A lexicographic `<` would have made the
+    /// gate stop firing at minor 10 — silently, which is the one failure a
+    /// reminder cannot have.
+    #[test]
+    fn the_removal_gate_compares_versions_numerically() {
+        assert_eq!(version_major_minor("0.24.0"), Some((0, 24)));
+        assert_eq!(version_major_minor("1.2.3-rc1"), Some((1, 2)));
+        assert_eq!(version_major_minor("nonsense"), None);
+        assert!(version_major_minor("0.9.0").unwrap() < REMOVE_AT_VERSION);
+        assert!(version_major_minor("0.26.0").unwrap() >= REMOVE_AT_VERSION, "must fire AT the version");
+        assert!(version_major_minor("0.100.0").unwrap() >= REMOVE_AT_VERSION, "and past it");
+        assert!(
+            "0.9.0" > "0.26.0",
+            "the lexicographic trap this exists to avoid: string compare says 0.9.0 is NEWER"
         );
     }
 
     /// The log must never be able to break the server it is debugging.
+    ///
+    /// No env mutation anywhere here: `cargo test` runs threads and `set_var`
+    /// is process-global, so a test that set `WORKTREES_MCP_DEBUG` would race
+    /// every other test that logs. The rule is a pure function and the writer
+    /// takes its path, so both can be exercised directly.
     #[test]
     fn the_debug_log_is_switchable_and_never_fatal() {
-        // The switch the manual-check doc tells a user to reach for.
-        temp_env("WORKTREES_MCP_DEBUG", Some("0"), || {
-            assert!(debug_log_path().is_none(), "WORKTREES_MCP_DEBUG=0 must disable it");
-        });
+        let home = Some("/Users/x");
+        assert!(
+            debug_log_path_from(Some("0"), None, home).is_none(),
+            "WORKTREES_MCP_DEBUG=0 must disable it"
+        );
+        assert!(debug_log_path_from(Some("false"), None, home).is_none());
+        assert_eq!(
+            debug_log_path_from(None, None, home),
+            Some(std::path::PathBuf::from("/Users/x/.cache/worktrees/mcp-debug.log")),
+        );
+        assert_eq!(
+            debug_log_path_from(None, Some("/tmp/elsewhere.log"), home),
+            Some(std::path::PathBuf::from("/tmp/elsewhere.log")),
+            "an explicit path wins"
+        );
+        assert_eq!(
+            debug_log_path_from(None, Some(""), home),
+            debug_log_path_from(None, None, home),
+            "an EMPTY override is not a path: fall back to the default, never to \"\""
+        );
+        assert!(
+            debug_log_path_from(None, None, None).is_none(),
+            "no HOME, no default path — and no panic"
+        );
+
         // An unwritable path is survivable: no panic, no propagated error.
-        temp_env("WORKTREES_MCP_DEBUG_LOG", Some("/proc/nope/cannot/write.log"), || {
-            dlog("/tmp/whatever", "this must not panic");
-        });
-        // And a line carries what separates N sessions sharing one file.
+        dlog_to(Some(std::path::Path::new("/proc/nope/cannot/write.log")), "/tmp/r", "must not panic");
+
         let dir = std::env::temp_dir().join(format!("wt-mcp-dlog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("d.log");
-        temp_env("WORKTREES_MCP_DEBUG_LOG", Some(path.to_str().unwrap()), || {
-            dlog("/Users/x/work/myrepo", "hello");
-        });
+        dlog_to(Some(&path), "/Users/x/work/myrepo", "hello");
         let body = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(body.contains("pid="), "no pid in {body:?}");
         assert!(body.contains("repo=myrepo"), "repo should be the basename, got {body:?}");
         assert!(body.trim_end().ends_with("hello"), "got {body:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    /// Env vars are process-global, so these tests set one, run, and restore.
-    /// `cargo test` threads, so anything reading the SAME var must be here.
-    fn temp_env(key: &str, val: Option<&str>, f: impl FnOnce()) {
-        let prev = std::env::var(key).ok();
-        match val {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-        f();
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
+        // It is on by default and written per request, so it must not be able
+        // to grow without bound — and the rotated window must still be there.
+        std::fs::write(&path, vec![b'x'; (DEBUG_LOG_MAX_BYTES + 1) as usize]).unwrap();
+        dlog_to(Some(&path), "/tmp/r", "after rotation");
+        assert!(
+            std::fs::metadata(&path).unwrap().len() < DEBUG_LOG_MAX_BYTES,
+            "the live log should have been rotated away"
+        );
+        assert!(
+            dir.join("d.log.1").exists(),
+            "…and the previous window kept, not discarded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
