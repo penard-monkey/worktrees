@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Put Places on whichever side you like.** Settings → Navigation → Sides
+  mirrors the whole shell: the Places rail and sidebar move to the right edge,
+  and the Files / Terminal / Docs rail and dock move to the left. It is one
+  switch rather than a side per panel because the two halves are not
+  interchangeable hosts — the sidebar is a column that can lift out into an
+  overlay over the terminal, and the dock is a sibling of the terminal *under*
+  the space header, so each panel keeps the host it was built for. Everything
+  that has a handedness follows: both resizers move to the edge facing the
+  terminal and still widen when you pull them that way, the auto-hide sidebar
+  slides in from its own rail, and the rail's usage panel opens toward the
+  window instead of back over the rail. Widths, ⌘B and ⌘J are unchanged.
+
 ## [0.25.1] - 2026-09-18
 
 ### Fixed

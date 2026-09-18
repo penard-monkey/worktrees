@@ -756,6 +756,33 @@ export function SettingsSheet({
             </div>
           </section>
 
+          {/* One control for BOTH halves of the shell. See `places_side` in
+              settings.ts for why it is a mirror rather than a side per panel:
+              the nav and the dock are not interchangeable hosts, so the thing
+              that can move is which edge each of them owns. */}
+          <section className="setting">
+            <label>Sides</label>
+            <div className="seg seg-plain">
+              {([
+                ["left", "Places left"],
+                ["right", "Places right"],
+              ] as const).map(([side, label]) => (
+                <button
+                  key={side}
+                  className={settings.places_side === side ? "on" : ""}
+                  onClick={() => onChange({ places_side: side })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="hint">
+              Which window edge each half of the app owns. The Places rail and sidebar take the side
+              you pick; the Files / Terminal / Docs rail and panel take the other one. Widths, ⌘B and
+              ⌘J are unchanged — only the sides move, and each resizer moves with its panel.
+            </div>
+          </section>
+
           <section className="setting">
             <label>Nav width <span className="val">{settings.nav_width}px</span></label>
             <input

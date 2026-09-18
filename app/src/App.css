@@ -45,6 +45,54 @@ button { cursor: pointer; }
   position: relative;
 }
 
+/* ── mirrored shell (`places_side: "right"`) ──
+   Swaps which window edge each half of the app owns: the Places rail + sidebar
+   move right, the dock's rail + panel move left. ONE flag rather than a side
+   per panel, because the two halves are not interchangeable hosts — the nav is
+   a grid column that can lift out into an overlay, the dock is a flex sibling
+   of `main` inside `.space` so the space header crowns terminal and dock
+   together. Mirroring keeps each panel in the host it was built for.
+
+   WHICH COLUMN EACH CHILD LANDS IN IS NOT HERE. That is a CSS `order`, but it
+   is written inline from the same array that builds `gridTemplateColumns`
+   (`shell` in App.tsx) — the sequence has exactly one home, because a stale
+   second copy of it would not throw, it would quietly put the sidebar where the
+   terminal belongs. Everything below is what a stylesheet can own alone: a
+   hairline, a resizer or an inset that has to follow the panel it belongs to,
+   with no counterpart in App.tsx to drift from.
+
+   These win on SPECIFICITY (`html[attr] .class` beats a bare class), not on
+   source order, so the unmirrored rules below stay the readable default and
+   none of them has to know this block exists.
+
+   `:not(.rail-right)` rather than leaning on source order: `.rail-right`
+   carries BOTH classes, so a plain `.rail` here would match it too and the two
+   rules would sit at equal specificity — correct only until someone reorders
+   them. */
+html[data-places-side="right"] .rail:not(.rail-right) { border-right: 0; border-left: 1px solid var(--line); }
+html[data-places-side="right"] .nav { border-right: 0; border-left: 1px solid var(--line); }
+html[data-places-side="right"] .rail-right { border-left: 0; border-right: 1px solid var(--line); }
+html[data-places-side="right"] .dock { border-left: 0; border-right: 1px solid var(--line); }
+/* The active bar always hugs the WINDOW edge, so it changes sides with the rail
+   — and takes the half-pixel correction with it. -5 on a rail's outer edge (at
+   -6 the bar sits past the content box and widens the document), -6 on the
+   inner one, exactly as the unmirrored pair below has it. */
+html[data-places-side="right"] .rail:not(.rail-right) .rail-icon.active::before { left: auto; right: -5px; }
+html[data-places-side="right"] .rail-right .rail-icon.active::before { right: auto; left: -6px; }
+/* The overlay is positioned against `.app`, so it hangs off the opposite inset.
+   `--line-strong` stays: a floating edge over a dark terminal still needs more
+   than the column's hairline, whichever side it floats on. */
+html[data-places-side="right"] .nav.overlay {
+  left: auto; right: var(--rail-w);
+  border-right: 0; border-left: 1px solid var(--line-strong);
+}
+/* Each resizer sits on its panel's INNER edge — the one facing the terminal —
+   so both handles cross to the other side. App.tsx flips the SIGN of the drag
+   to match; a handle that moves without its sign shrinks the panel you are
+   pulling open. */
+html[data-places-side="right"] .nav-resizer { right: auto; left: -2px; }
+html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
+
 /* ── activity rail ── */
 .rail {
   display: flex; flex-direction: column; align-items: center;
