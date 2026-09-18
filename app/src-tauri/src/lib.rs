@@ -1825,6 +1825,290 @@ async fn claude_usage() -> Result<UsageInfo, String> {
     }
 }
 
+// ── Claude service status (status.claude.com) ───────────────────────────────
+// Statuspage's public summary: unauthenticated, ~2KB, no credentials anywhere
+// near it. The page carries SIX components and this app depends on TWO — a
+// place's session is Claude Code, the usage bars are the API — so the severity
+// below is computed from the WATCHED components only and NEVER from the page's
+// own top-level `status.indicator`, which covers all six. That is not a
+// hypothetical: the most recent incident on the page while this was written was
+// "Issues with Google Play subscriptions", which would have lit a badge in the
+// nav for something no worktree can feel.
+//
+// Matched by ID first: `k8w3r06qmzrp` outlives "Claude API (api.anthropic.com)"
+// being retitled, and a rename is exactly the change nobody here would notice.
+// The name prefix is the fallback, and the name the page gives is what the UI
+// shows — it is the string the status page itself uses, so a user comparing the
+// two sees the same words.
+//
+// Missing data is NOT an error, for the same reason as `claude_usage` above: a
+// probe whose whole job is "is Claude broken" must not raise a dialog when the
+// network is down. `source: "unavailable"` renders nothing and the reason goes
+// to app.log.
+
+const STATUS_URL: &str = "https://status.claude.com/api/v2/summary.json";
+/// The status page's URL for a human, carried in the payload so the frontend
+/// never hardcodes a second copy of it.
+const STATUS_PAGE: &str = "https://status.claude.com";
+/// (component id, name prefix). Order is the display order.
+const STATUS_WATCHED: [(&str, &str); 2] = [
+    ("yyzkbfz2thpt", "Claude Code"),
+    ("k8w3r06qmzrp", "Claude API"),
+];
+/// Minimum gap between real fetches. Longer than usage's 120s: a status page
+/// changes on human timescales (an incident is minutes old before it is
+/// posted), and this is a poll nobody asked for.
+const STATUS_TTL_SECS: i64 = 240;
+/// How long an EXPIRED answer may still be served when a fetch fails. A pull
+/// that lands before the network is back — waking from a closed lid is the
+/// common one, and the window-focus pull makes it likely — would otherwise turn
+/// a live incident into silence and the indicator would blink out and back.
+/// Bounded, because the opposite failure is worse: a cached "Claude Code is
+/// down" held over a long disconnection would still be on screen hours after
+/// the outage ended. Past this, silence is the honest answer.
+const STATUS_STALE_MAX_SECS: i64 = 1800;
+
+#[derive(Serialize, Clone, PartialEq)]
+struct StatusComponent {
+    name: String,
+    /// Statuspage's own vocabulary, verbatim: operational | degraded_performance
+    /// | partial_outage | major_outage | under_maintenance.
+    status: String,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct StatusIncident {
+    name: String,
+    /// investigating | identified | monitoring | resolved
+    status: String,
+    /// The latest update's body, which is the one sentence worth showing.
+    body: Option<String>,
+    updated_at: Option<i64>,
+    url: Option<String>,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct ClaudeStatus {
+    source: String, // live | unavailable
+    fetched_at: i64,
+    /// none | degraded | down — the only field the indicator's visibility reads.
+    severity: String,
+    components: Vec<StatusComponent>,
+    /// How many components the page carries in total. Only the footer line
+    /// "watching 2 of 6" reads it — but that line is the one place the UI
+    /// admits its own scope, and a hardcoded 6 would quietly start lying.
+    total: usize,
+    incident: Option<StatusIncident>,
+    page_url: String,
+}
+
+static STATUS_CACHE: Mutex<Option<ClaudeStatus>> = Mutex::new(None);
+
+/// A component's status → 0 none / 1 degraded / 2 down. An UNKNOWN value counts
+/// as degraded rather than as operational: if Statuspage adds a state, the
+/// honest default is "something is off", not silence.
+fn status_rank(s: &str) -> u8 {
+    match s {
+        "operational" => 0,
+        "major_outage" => 2,
+        _ => 1,
+    }
+}
+
+fn status_word(rank: u8) -> &'static str {
+    match rank {
+        0 => "none",
+        2 => "down",
+        _ => "degraded",
+    }
+}
+
+/// `summary.json` → our payload. Pure, so the mapping is unit-tested against a
+/// captured body rather than against the live page.
+fn status_parse(body: &str, now: i64) -> Result<ClaudeStatus, String> {
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| format!("bad json: {e}"))?;
+    let comps = v
+        .get("components")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| "no components array".to_string())?;
+
+    let mut watched_ids: Vec<String> = Vec::new();
+    let mut out: Vec<StatusComponent> = Vec::new();
+    for (id, prefix) in STATUS_WATCHED {
+        let hit = comps
+            .iter()
+            .find(|c| c.get("id").and_then(|x| x.as_str()) == Some(id))
+            .or_else(|| {
+                comps.iter().find(|c| {
+                    c.get("name")
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|n| n.starts_with(prefix))
+                })
+            });
+        let Some(c) = hit else { continue };
+        watched_ids.push(c.get("id").and_then(|x| x.as_str()).unwrap_or(id).to_string());
+        out.push(StatusComponent {
+            name: c.get("name").and_then(|x| x.as_str()).unwrap_or(prefix).to_string(),
+            status: c
+                .get("status")
+                .and_then(|x| x.as_str())
+                .unwrap_or("operational")
+                .to_string(),
+        });
+    }
+    // Every watched component gone from the page is the shape moving under us,
+    // not an all-clear: say so rather than reporting calm.
+    if out.is_empty() {
+        return Err("no watched component on the page".into());
+    }
+
+    let rank = out.iter().map(|c| status_rank(&c.status)).max().unwrap_or(0);
+
+    // `incidents` in summary.json is the UNRESOLVED set. We take the first one
+    // that names a watched component — the page lists newest first, and a second
+    // simultaneous incident is detail the link covers.
+    let incident = v
+        .get("incidents")
+        .and_then(|i| i.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|inc| {
+                inc.get("components")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|cs| {
+                        cs.iter().any(|c| {
+                            c.get("id")
+                                .and_then(|x| x.as_str())
+                                .is_some_and(|id| watched_ids.iter().any(|w| w == id))
+                        })
+                    })
+            })
+        })
+        .map(|inc| {
+            let latest = inc
+                .get("incident_updates")
+                .and_then(|u| u.as_array())
+                .and_then(|a| a.first());
+            StatusIncident {
+                name: inc
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("Incident")
+                    .to_string(),
+                status: inc
+                    .get("status")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("investigating")
+                    .to_string(),
+                body: latest
+                    .and_then(|u| u.get("body"))
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string),
+                updated_at: latest
+                    .and_then(|u| u.get("updated_at").or_else(|| u.get("created_at")))
+                    .and_then(|x| x.as_str())
+                    .and_then(parse_iso8601)
+                    .or_else(|| {
+                        inc.get("updated_at")
+                            .and_then(|x| x.as_str())
+                            .and_then(parse_iso8601)
+                    }),
+                url: inc
+                    .get("shortlink")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string),
+            }
+        });
+
+    Ok(ClaudeStatus {
+        source: "live".into(),
+        fetched_at: now,
+        severity: status_word(rank).into(),
+        components: out,
+        total: comps.len(),
+        incident,
+        page_url: STATUS_PAGE.into(),
+    })
+}
+
+/// GET the status summary → (http status, body). curl, same reasoning as
+/// `usage_get`: the dep tree and the TLS stack stay where they are.
+fn status_get() -> Result<(u16, String), String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-s", "--max-time", "10", "-w", "\n%{http_code}", STATUS_URL]);
+    let out = run_deadline(cmd, 15).map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("curl exited {}", out.status.code().unwrap_or(-1)));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let cut = text.rfind('\n').ok_or("curl produced no status line")?;
+    let code: u16 = text[cut + 1..]
+        .trim()
+        .parse()
+        .map_err(|_| "curl produced no status code".to_string())?;
+    Ok((code, text[..cut].to_string()))
+}
+
+/// Is Claude itself broken right now. Never Errs — see the block comment above.
+#[tauri::command]
+async fn claude_status() -> Result<ClaudeStatus, String> {
+    let now = sysclock::now_epoch();
+    let cached = STATUS_CACHE.lock().unwrap().clone();
+    if let Some(c) = cached.as_ref() {
+        if now - c.fetched_at < STATUS_TTL_SECS {
+            return Ok(c.clone());
+        }
+    }
+    // A failed fetch falls back to the expired entry while it is young enough
+    // to still be true (see STATUS_STALE_MAX_SECS), and to silence after that.
+    let fallback = |why: String| match stale_or_silence(cached, now) {
+        Some(c) => {
+            applog("warn", &format!("claude_status: {why} — serving the last answer"));
+            c
+        }
+        None => fallback_hard(now, why),
+    };
+    match status_get() {
+        Ok((200, body)) => match status_parse(&body, now) {
+            Ok(info) => {
+                *STATUS_CACHE.lock().unwrap() = Some(info.clone());
+                Ok(info)
+            }
+            // A body we cannot read is NOT a transient failure — the page's
+            // shape moved — so this one does not fall back to a cached answer
+            // that the next fetch will never be able to refresh.
+            Err(why) => Ok(fallback_hard(now, why)),
+        },
+        Ok((code, _)) => Ok(fallback(format!("http {code}"))),
+        Err(why) => Ok(fallback(why)),
+    }
+}
+
+/// What a FAILED fetch should serve: the expired cache while it is young enough
+/// to still be true, or `None` for silence. Pure, so the boundary is a test and
+/// not a claim.
+fn stale_or_silence(cached: Option<ClaudeStatus>, now: i64) -> Option<ClaudeStatus> {
+    match cached {
+        Some(c) if now - c.fetched_at <= STATUS_STALE_MAX_SECS => Some(c),
+        _ => None,
+    }
+}
+
+/// Silence, with the reason logged. Used when the page answered but we could not
+/// read it: serving a stale entry there would keep a possibly-resolved incident
+/// on screen with no prospect of it ever being corrected.
+fn fallback_hard(now: i64, why: String) -> ClaudeStatus {
+    applog("warn", &format!("claude_status: {why}"));
+    ClaudeStatus {
+        source: "unavailable".into(),
+        fetched_at: now,
+        severity: "none".into(),
+        components: Vec::new(),
+        total: 0,
+        incident: None,
+        page_url: STATUS_PAGE.into(),
+    }
+}
+
 /// Find the installed CLI: whatever `command -v` resolves in the USER'S login
 /// shell (zsh reads ~/.zprofile; plain sh would not — the app may be launched
 /// from Finder with a bare PATH), then the common install dirs. Chatty profiles
@@ -5137,6 +5421,7 @@ pub fn run() {
             tmux_check,
             set_zoom,
             claude_usage,
+            claude_status,
             log_info,
             list_drafts,
             log_event,
@@ -5205,6 +5490,150 @@ mod tests {
 
     fn v(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── Claude service status ───────────────────────────────────────────────
+
+    /// A trimmed `summary.json`: six components as the real page carries them,
+    /// plus whatever incidents the caller wants.
+    fn status_body(code: &str, api: &str, incidents: &str) -> String {
+        format!(
+            r#"{{
+              "page": {{"id":"tymt9n04zgry","name":"Claude","url":"https://status.claude.com"}},
+              "components": [
+                {{"id":"rwppv331jlwc","name":"claude.ai","status":"major_outage"}},
+                {{"id":"0qbwn08sd68x","name":"Claude Console (platform.claude.com)","status":"operational"}},
+                {{"id":"k8w3r06qmzrp","name":"Claude API (api.anthropic.com)","status":"{api}"}},
+                {{"id":"yyzkbfz2thpt","name":"Claude Code","status":"{code}"}},
+                {{"id":"bpp5gb3hpjcl","name":"Claude Cowork","status":"operational"}},
+                {{"id":"0scnb50nvy53","name":"Claude for Government","status":"operational"}}
+              ],
+              "incidents": [{incidents}],
+              "scheduled_maintenances": [],
+              "status": {{"indicator":"critical","description":"Major outage"}}
+            }}"#
+        )
+    }
+
+    /// The whole reason this does not read `status.indicator`: the page's own
+    /// verdict covers six components and this app feels two. claude.ai is in a
+    /// major outage in every body above and the page calls itself critical —
+    /// and a worktree does not care.
+    #[test]
+    fn severity_ignores_components_this_app_does_not_use() {
+        let s = status_parse(&status_body("operational", "operational", ""), 100).unwrap();
+        assert_eq!(s.severity, "none");
+        assert_eq!(s.components.len(), 2, "only the watched two are reported");
+        assert_eq!(s.components[0].name, "Claude Code");
+        assert_eq!(s.total, 6, "…out of the six the page carries");
+    }
+
+    #[test]
+    fn severity_is_the_worst_watched_component() {
+        let deg = status_parse(&status_body("operational", "degraded_performance", ""), 100).unwrap();
+        assert_eq!(deg.severity, "degraded");
+        let part = status_parse(&status_body("partial_outage", "operational", ""), 100).unwrap();
+        assert_eq!(part.severity, "degraded");
+        let down = status_parse(&status_body("major_outage", "degraded_performance", ""), 100).unwrap();
+        assert_eq!(down.severity, "down", "down wins over degraded");
+    }
+
+    /// A state Statuspage has not shipped yet must not read as "fine".
+    #[test]
+    fn an_unknown_component_state_counts_as_degraded() {
+        let s = status_parse(&status_body("operational", "on_fire", ""), 100).unwrap();
+        assert_eq!(s.severity, "degraded");
+    }
+
+    /// Ids are the match, so a retitled component keeps being watched — and the
+    /// name we SHOW is the page's current one, not our stale prefix.
+    #[test]
+    fn a_renamed_component_is_still_matched_by_id() {
+        let body = status_body("operational", "operational", "")
+            .replace("Claude Code", "Claude Code (CLI + app)");
+        let s = status_parse(&body, 100).unwrap();
+        assert_eq!(s.components[0].name, "Claude Code (CLI + app)");
+    }
+
+    /// And a re-ISSUED component — new id, same name — is matched by the name
+    /// prefix, which is the only reason the prefix is carried at all.
+    #[test]
+    fn a_reissued_component_is_still_matched_by_name() {
+        let body = status_body("major_outage", "operational", "").replace("yyzkbfz2thpt", "newidnewid00");
+        let s = status_parse(&body, 100).unwrap();
+        assert_eq!(s.severity, "down");
+    }
+
+    /// Both watched components gone is the page's shape moving under us. An
+    /// all-clear would be a lie told exactly when we can no longer tell.
+    #[test]
+    fn losing_every_watched_component_is_an_error_not_an_all_clear() {
+        let body = status_body("operational", "operational", "")
+            .replace("yyzkbfz2thpt", "gone1")
+            .replace("Claude Code", "Something Else")
+            .replace("k8w3r06qmzrp", "gone2")
+            .replace("Claude API (api.anthropic.com)", "Other API");
+        assert!(status_parse(&body, 100).is_err());
+    }
+
+    const INC_API: &str = r#"{
+        "name":"Elevated errors on the Messages API","status":"monitoring",
+        "shortlink":"https://stspg.io/abc","updated_at":"2026-09-18T15:00:00Z",
+        "components":[{"id":"k8w3r06qmzrp"}],
+        "incident_updates":[
+          {"body":"A fix has been applied and error rates are recovering.","updated_at":"2026-09-18T15:04:00Z"},
+          {"body":"We are investigating.","updated_at":"2026-09-18T14:30:00Z"}
+        ]
+    }"#;
+    const INC_OTHER: &str = r#"{
+        "name":"Issues with Google Play subscriptions","status":"investigating",
+        "components":[{"id":"rwppv331jlwc"}],
+        "incident_updates":[{"body":"Unrelated.","updated_at":"2026-09-18T15:04:00Z"}]
+    }"#;
+
+    #[test]
+    fn the_incident_shown_is_one_that_names_a_watched_component() {
+        let body = status_body("operational", "degraded_performance", &format!("{INC_OTHER},{INC_API}"));
+        let inc = status_parse(&body, 100).unwrap().incident.expect("an incident");
+        assert_eq!(inc.name, "Elevated errors on the Messages API");
+        // the LATEST update's body, which is the sentence worth showing
+        assert!(inc.body.unwrap().starts_with("A fix has been applied"));
+        assert_eq!(inc.updated_at, Some(1789743840));
+        assert_eq!(inc.url.as_deref(), Some("https://stspg.io/abc"));
+    }
+
+    #[test]
+    fn an_incident_on_an_unwatched_component_is_not_reported() {
+        let body = status_body("operational", "operational", INC_OTHER);
+        let s = status_parse(&body, 100).unwrap();
+        assert!(s.incident.is_none());
+        assert_eq!(s.severity, "none");
+    }
+
+    #[test]
+    fn a_body_that_is_not_the_status_page_is_an_error() {
+        assert!(status_parse("not json", 100).is_err());
+        assert!(status_parse(r#"{"page":{}}"#, 100).is_err());
+    }
+
+    /// A pull that lands before the network is back must not turn a live
+    /// incident into silence — but a cached outage may not outlive the outage
+    /// either. Both halves of that bargain, at the boundary.
+    #[test]
+    fn a_failed_fetch_serves_the_last_answer_only_while_it_can_still_be_true() {
+        let at = |t: i64| Some(ClaudeStatus {
+            source: "live".into(), fetched_at: t, severity: "down".into(),
+            components: vec![StatusComponent { name: "Claude Code".into(), status: "major_outage".into() }],
+            total: 6, incident: None, page_url: STATUS_PAGE.into(),
+        });
+        let now = 1_000_000;
+        // fresh-ish and expired: still the truest thing we have
+        assert_eq!(stale_or_silence(at(now - 60), now).unwrap().severity, "down");
+        assert!(stale_or_silence(at(now - STATUS_STALE_MAX_SECS), now).is_some(), "at the bound, inclusive");
+        // past the bound the outage may well be over; silence beats a stale alarm
+        assert!(stale_or_silence(at(now - STATUS_STALE_MAX_SECS - 1), now).is_none());
+        // nothing cached at all
+        assert!(stale_or_silence(None, now).is_none());
     }
 
     /// The dialog validates as you type; this is the check that DECIDES. Every

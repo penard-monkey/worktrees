@@ -3,6 +3,24 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **The app tells you when Claude itself is down.** A poll of
+  `status.claude.com` now puts an indicator in the window — and only ever when
+  something is wrong; on a normal day nothing renders at all. It is scoped to
+  the two components a worktree can actually feel, *Claude Code* and *Claude
+  API*, and deliberately not to the status page's own six-component verdict:
+  the page's last incident before this shipped was "Issues with Google Play
+  subscriptions", which would have lit a badge for nothing. Where it lands
+  follows *Settings → Appearance → Usage meter*, which already answers "where
+  does Claude's chrome live here": the strip and footer get a chip beside the
+  bars, the rail gets a corner dot on the 32px tile with the reading folded
+  into the popover that tile already opens, and `off` gets nothing — turning
+  Claude's chrome off is not a decision an outage may overrule. Clicking
+  either opens the component list, the incident's latest update, and a link to
+  the page itself.
+
 ## [0.24.0] - 2026-09-16
 
 ### Added
