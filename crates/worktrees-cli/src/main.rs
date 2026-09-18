@@ -31,6 +31,8 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees sync push|pull [name]       courier-sync this project to/from an SSD hub (rsync)
   worktrees sync status                 hub + project sync state (--json; no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
+  worktrees mcp --status [--json]       is the server wired into claude? (no repo needed)
+  worktrees mcp --install [--read-only] wire it into claude, user scope (--uninstall removes it)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";
 
@@ -63,6 +65,39 @@ fn run() -> i32 {
         Some("sync") => {
             let mut ui = CliUi;
             return worktrees_core::sync::cmd_sync(&mut ui, args.get(1..).unwrap_or(&[]));
+        }
+        // ALL of `mcp` runs ahead of the git guard, and both halves need it for
+        // the same reason: neither is a question about the repository you are
+        // standing in.
+        //
+        // The setup verbs are about THIS MACHINE's claude — asking whether the
+        // server is wired up from a directory that is not a checkout is the
+        // normal case, and the guard would answer "not a git repository", which
+        // reads as a verdict on the MCP setup rather than on the cwd.
+        //
+        // The SERVER needs it because it is installed at user scope: claude
+        // launches it for every session, including the ones started outside a
+        // repo, and the guard's exit 1 is what those sessions displayed as
+        // "✘ Failed to connect: CONNECTION_CLOSED". It now serves with no tools
+        // (see `Server::project`), which it cannot do if it never starts.
+        //
+        // The repo, when there is one, is still resolved — `cmd_mcp` pins its
+        // own project from CLAUDE_PROJECT_DIR/cwd, and the setup verbs take it
+        // so the local/project scopes can be consulted.
+        Some("mcp") => {
+            let rest = args.get(1..).unwrap_or(&[]);
+            return match mcp::setup_verb(rest) {
+                Some(verb) => {
+                    let repo = std::env::current_dir()
+                        .ok()
+                        .and_then(|d| Project::discover(&d).ok())
+                        .map(|p| p.main_root);
+                    mcp::cmd_mcp_setup(verb, repo.as_deref(), rest)
+                }
+                // Not routed through `ui`: this speaks JSON-RPC on stdout, and
+                // anything else written there corrupts the transport.
+                None => mcp::cmd_mcp(rest),
+            };
         }
         _ => {}
     }
@@ -130,9 +165,6 @@ fn run() -> i32 {
         // verdict is part of finding out what a tree is, like `ls` and `doctor`.
         "status" => ops::cmd_status(&project, &mut ui, rest),
         "init" => ops::cmd_init(&project, &mut ui, rest),
-        // Note: not routed through `ui` — this speaks JSON-RPC on stdout, and
-        // anything else written there corrupts the transport.
-        "mcp" => mcp::cmd_mcp(rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));
             println!();

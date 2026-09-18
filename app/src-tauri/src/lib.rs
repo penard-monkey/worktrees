@@ -2276,6 +2276,57 @@ async fn get_ai_config() -> Result<AiConfig, String> {
     })
 }
 
+// ── Claude MCP setup (Settings → Claude, and the Home nudge) ─────────────────
+// Thin wrappers over `worktrees_core::mcpsetup`, which holds the whole rule set
+// (what counts as installed, which scopes we write, why we shell out to `claude`
+// instead of editing ~/.claude.json). The CLI's `worktrees mcp --status` runs the
+// SAME functions, so the two surfaces cannot disagree about the verdict.
+//
+// `repo` is optional and normally the project in focus: it is what makes the
+// local and project scopes checkable. Home has no repo and passes none — the
+// user scope, which is the only one we ever write, does not need it.
+
+/// Is the worktrees MCP server wired into this machine's claude?
+///
+/// Cheap by construction — it parses `~/.claude.json` rather than running
+/// `claude mcp list`, which health-checks by launching every server in the cwd
+/// (~1.1s, and a false ✘ whenever the cwd is not a repo). Safe to call on a
+/// sheet open or a Home render; still `async`, like every command here, because
+/// it touches the filesystem.
+#[tauri::command]
+async fn mcp_status(repo: Option<String>) -> Result<worktrees_core::mcpsetup::Status, String> {
+    Ok(worktrees_core::mcpsetup::status(repo.as_deref()))
+}
+
+/// Wire it in (or repair, or re-install with a different `--mutations`).
+///
+/// Spawns `claude mcp add`, so it is slow enough to need a busy state in the UI
+/// and is deadline-guarded in core. The returned `Outcome` carries the RE-READ
+/// status, which is the real success signal — the frontend renders that rather
+/// than assuming the click worked.
+#[tauri::command]
+async fn mcp_install(repo: Option<String>, mutations: bool) -> Result<worktrees_core::mcpsetup::Outcome, String> {
+    let r = worktrees_core::mcpsetup::install(repo.as_deref(), mutations);
+    match &r {
+        Ok(o) => applog(
+            if o.ok { "info" } else { "warn" },
+            &format!("mcp_install mutations={mutations}: ok={} state={:?}", o.ok, o.status.state),
+        ),
+        Err(e) => applog("error", &format!("mcp_install mutations={mutations}: {e}")),
+    }
+    r
+}
+
+/// Remove the user-scope server, so the panel is not a one-way door.
+#[tauri::command]
+async fn mcp_uninstall(repo: Option<String>) -> Result<worktrees_core::mcpsetup::Outcome, String> {
+    let r = worktrees_core::mcpsetup::uninstall(repo.as_deref());
+    if let Err(e) = &r {
+        applog("error", &format!("mcp_uninstall: {e}"));
+    }
+    r
+}
+
 // ── per-project config surface (the Project sheet, proposal §10) ─────────────
 // Read-only config view + the four verbs (doctor / relink / provision / init).
 //
@@ -5405,6 +5456,9 @@ pub fn run() {
             check_update,
             update_cli,
             get_ai_config,
+            mcp_status,
+            mcp_install,
+            mcp_uninstall,
             project_config_read,
             doctor,
             place_health,
