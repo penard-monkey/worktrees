@@ -213,8 +213,57 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   grep -q 'from mcp' "$REPO/.worktrees.places.json"
 }
 
-@test "outside a git repository the server refuses to start" {
-  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize"}' > "$BATS_TEST_TMPDIR/in.jsonl"
-  run bash -c "cd '$BATS_TEST_TMPDIR' && '$WT_BIN' mcp < '$BATS_TEST_TMPDIR/in.jsonl' 2>&1"
-  [ "$status" -ne 0 ]
+# The server used to EXIT here, which was fine while it was added per-repo and
+# became wrong once the app started installing it at user scope: claude launches
+# a user-scope server for every session, including the ones started in a home or
+# scratch directory, and each of those showed "✘ Failed to connect:
+# CONNECTION_CLOSED" for a perfectly correct install.
+#
+# The contract is now: handshake normally, advertise NOTHING, exit 0, and say on
+# STDERR (never stdout, which carries protocol) why there are no tools.
+@test "outside a git repository the server serves, with no tools" {
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$BATS_TEST_TMPDIR' && '$WT_BIN' mcp < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"serverInfo"'* ]]
+  [[ "$output" == *'"tools":[]'* ]]
+  [[ "$output" != *'"list_places"'* ]]
+
+  # ...and the explanation goes to stderr, with stdout left pure protocol.
+  run bash -c "cd '$BATS_TEST_TMPDIR' && '$WT_BIN' mcp < '$BATS_TEST_TMPDIR/in.jsonl' 2>&1 >/dev/null"
+  [[ "$output" == *'no tools'* ]]
+}
+
+# The setup verbs run OUTSIDE a repository too — they are about this machine's
+# claude, not about a checkout. A git guard here would answer "not a git
+# repository", which reads as a verdict on the MCP setup rather than on the cwd.
+@test "mcp --status answers outside a git repository" {
+  run bash -c "cd '$BATS_TEST_TMPDIR' && HOME='$BATS_TEST_TMPDIR' '$WT_BIN' mcp --status --json"
+  [[ "$output" == *'"state"'* ]]
+  [[ "$output" != *'Not inside a git repository'* ]]
+}
+
+# Two halves of the same rule, and the suite gets the first one for free: the
+# bats harness runs with WORKTREES_AI_CMD=fake-ai, so this machine is BY
+# DEFINITION not a claude machine, and the honest answer is "none of this
+# applies" rather than "not installed" — a nudge to set up an MCP server for a
+# program you do not run is pure noise.
+@test "mcp --status is not-applicable when the AI command is not claude" {
+  run bash -c "cd '$BATS_TEST_TMPDIR' && HOME='$BATS_TEST_TMPDIR' '$WT_BIN' mcp --status --json"
+  [[ "$output" == *'"state":"not-applicable"'* ]]
+  [[ "$output" == *'"ai_cmd":"fake-ai"'* ]]
+}
+
+# ...and with claude as the AI command and no ~/.claude.json at all (a brand-new
+# machine — exactly who the app's nudge is for) the answer is "absent": not a
+# crash, and not "installed".
+@test "mcp --status reads absent from an empty HOME" {
+  run bash -c "cd '$BATS_TEST_TMPDIR' && HOME='$BATS_TEST_TMPDIR' WORKTREES_AI_CMD=claude '$WT_BIN' mcp --status --json"
+  [[ "$output" == *'"state":"absent"'* ]]
+  [[ "$output" == *'"user":null'* ]]
+  [[ "$output" == *'"found_in":[]'* ]]
+  # The command is always spelled out, so the UI (and a human) can run it by hand.
+  [[ "$output" == *'claude mcp add -s user worktrees --'* ]]
 }

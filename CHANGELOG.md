@@ -40,6 +40,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `~/.cache/worktrees/mcp-debug.log` (`WORKTREES_MCP_DEBUG=0` to switch it off)
   so the first real sessions can be diagnosed; that logging is scheduled for
   removal.
+- **The app can wire Claude's MCP server up for you.** A new *Claude* section in
+  Settings shows whether `worktrees mcp` is registered with the `claude` on this
+  machine, and a button that registers it — one user-scope server that serves
+  every project, which is what lets a session create, inspect and close
+  worktrees as tools instead of driving git by hand. A dismissible card on Home
+  makes the offer once there is a project to use it on. The command is printed
+  next to the button, so anyone who would rather run it themselves can, and a
+  machine where `claude` is not on the app's PATH gets the command instead of a
+  dead button.
+
+  It **never edits `~/.claude.json` itself** — it shells out to `claude mcp add`,
+  because that file is claude's own live state and a read-modify-write from here
+  would silently drop whatever a running session wrote in between. Detection
+  reads the file rather than asking `claude mcp list`, which health-checks by
+  launching each server in the current directory and so reports a correct
+  install as "✘ Failed to connect" whenever that directory is not a repo.
+
+  Four states, not two: as well as *installed* and *not set up*, the panel
+  reports a server whose binary has **moved or been removed** (offering Repair —
+  re-installing the CLI cannot fix a stale path inside claude's config), and one
+  that is registered **read-only**, which an orchestrator cannot create or close
+  a place with. A server under the name `worktrees` that is not ours is reported
+  and left strictly alone. Only the *not set up* state is ever allowed to nudge;
+  a dismissal of the offer does not silence the broken-server warning.
+
+  The same engine backs `worktrees mcp --status [--json]`, `--install
+  [--read-only]` and `--uninstall`, all of which run outside a repository.
+
+### Fixed
+- **A Claude session started outside a git repository no longer shows the
+  worktrees server as failed.** `worktrees mcp` exited before the handshake when
+  there was no project, which a user-scope install turns into a red
+  `✘ CONNECTION_CLOSED` in `/mcp` for every session started in a home or scratch
+  directory — for a setup that is entirely correct. It now completes the
+  handshake, advertises no tools, and says why.
 
 ## [0.24.0] - 2026-09-16
 

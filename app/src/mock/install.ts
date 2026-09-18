@@ -36,6 +36,44 @@ function reconcile(pl: Place) {
 
 let dialogCount = 0;
 let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
+// Claude MCP wiring, stateful so the install transition is drivable: the Home
+// card must actually GO AWAY when the button works, and Settings must flip to
+// the connected verdict, neither of which a constant can exercise.
+//
+// `?mcp=` picks the starting state, the same query-knob shape as ?notmux —
+// `installed` | `readonly` | `stale` | `foreign` | `elsewhere` | `notclaude` |
+// `nocli`, default absent. Every one of those is a branch in McpPanel's
+// `verdict()` that is otherwise unreachable without editing someone's real
+// ~/.claude.json.
+const MOCK_WT_BIN = "/Users/demo/.local/bin/worktrees";
+let mockMcp: Record<string, unknown> = (() => {
+  const want = new URLSearchParams(location.search).get("mcp") ?? "absent";
+  const entry = (args: string[], ok = true) => ({
+    command: MOCK_WT_BIN, args, mutations: args.includes("--mutations"), command_ok: ok, ours: true,
+  });
+  const base = {
+    ai_cmd: "claude",
+    claude_bin: "/Users/demo/.local/bin/claude",
+    worktrees_bin: MOCK_WT_BIN,
+    user: null as unknown,
+    found_in: [] as string[],
+    command: `claude mcp add -s user worktrees -- ${MOCK_WT_BIN} mcp --mutations`,
+    config_path: "/Users/demo/.claude.json",
+  };
+  switch (want) {
+    case "installed": return { ...base, state: "installed", user: entry(["mcp", "--mutations"]), found_in: ["user"] };
+    case "readonly": return { ...base, state: "read-only", user: entry(["mcp"]), found_in: ["user"] };
+    case "stale": return { ...base, state: "stale", user: entry(["mcp", "--mutations"], false), found_in: ["user"] };
+    case "foreign": return {
+      ...base, state: "foreign", found_in: ["user"],
+      user: { command: "npx", args: ["someones-other-server"], mutations: false, command_ok: true, ours: false },
+    };
+    case "elsewhere": return { ...base, state: "elsewhere", found_in: ["profile"] };
+    case "notclaude": return { ...base, state: "not-applicable", ai_cmd: "aider", claude_bin: null };
+    case "nocli": return { ...base, state: "cli-missing", worktrees_bin: null, command: null };
+    default: return { ...base, state: "absent" };
+  }
+})();
 // tmux is there unless the harness is asked to take it away (?notmux); see the
 // tmux_check case for the two shapes.
 const mockTmuxStuck = location.search.includes("notmux=stuck");
@@ -1397,6 +1435,33 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         ok: true, code: 0,
         output: `worktrees installer\n→ ${args.tag}: darwin/arm64 prebuilt\n✓ checksum verified\n✓ installed to ~/.local/bin/worktrees\nworktrees ${mockCliVersion}`,
       };
+    }
+
+    // Claude MCP wiring. `mcp_install` flips the state the way the real one
+    // does — and, like it, answers with the RE-READ status rather than a bare
+    // ok, because that is what the panel renders.
+    case "mcp_status":
+      return clone(mockMcp);
+    case "mcp_install": {
+      const mutations = args.mutations !== false;
+      mockMcp = {
+        ...mockMcp,
+        state: mutations ? "installed" : "read-only",
+        found_in: ["user"],
+        user: {
+          command: MOCK_WT_BIN, args: mutations ? ["mcp", "--mutations"] : ["mcp"],
+          mutations, command_ok: true, ours: true,
+        },
+      };
+      return {
+        ok: true,
+        output: `Added stdio MCP server worktrees with command: ${MOCK_WT_BIN} mcp${mutations ? " --mutations" : ""} to user config\n`,
+        status: clone(mockMcp),
+      };
+    }
+    case "mcp_uninstall": {
+      mockMcp = { ...mockMcp, state: "absent", found_in: [], user: null };
+      return { ok: true, output: "Removed MCP server worktrees from user config\n", status: clone(mockMcp) };
     }
 
     // AI command config (read-only, Phase 1). exists:false exercises the

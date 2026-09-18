@@ -1075,7 +1075,7 @@ fn global_mcp_servers(user: &serde_json::Value) -> Map<String, serde_json::Value
 /// Absolute path to a `worktrees` binary for the MCP stanza. Resolved fresh on
 /// every materialization — an absolute path baked into a profile goes stale the
 /// moment the binary moves or the profile is carried to another machine.
-fn worktrees_bin() -> Option<PathBuf> {
+pub fn worktrees_bin() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if exe.file_name().and_then(|s| s.to_str()) == Some("worktrees") {
             return Some(exe);
@@ -1083,30 +1083,36 @@ fn worktrees_bin() -> Option<PathBuf> {
     }
     // The app links core in-process, so current_exe() is the app bundle — fall
     // back to whatever `worktrees` is on PATH.
+    bin_on_path("worktrees")
+}
+
+/// The first executable named `name` on `PATH`, as an absolute path.
+///
+/// ABSOLUTE entries only. An empty PATH component (a trailing `:`, which
+/// `fixup_gui_path` can produce) makes `PathBuf::join` yield the RELATIVE path
+/// `name` — resolved against the process cwd, which for `worktrees open` is the
+/// cloned repo. A repo shipping a file named `worktrees` would otherwise be
+/// written into mcp.json as a command for claude to spawn.
+pub fn bin_on_path(name: &str) -> Option<PathBuf> {
     std::env::var("PATH").ok().and_then(|path| {
         path.split(':')
-            // ABSOLUTE entries only. An empty PATH component (a trailing `:`,
-            // which fixup_gui_path can produce) makes `PathBuf::join` yield the
-            // RELATIVE path `worktrees` — resolved against the process cwd,
-            // which for `worktrees open` is the cloned repo. A repo shipping a
-            // file named `worktrees` would otherwise be written into mcp.json as
-            // a command for claude to spawn.
             .filter(|d| d.starts_with('/'))
-            .map(|d| PathBuf::from(d).join("worktrees"))
-            .find(|c| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    c.metadata()
-                        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-                        .unwrap_or(false)
-                }
-                #[cfg(not(unix))]
-                {
-                    c.is_file()
-                }
-            })
+            .map(|d| PathBuf::from(d).join(name))
+            .find(|c| is_exec(c))
     })
+}
+
+/// A regular file with at least one execute bit.
+pub fn is_exec(p: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
 }
 
 // ── what the UI needs to be honest ───────────────────────────────────────────

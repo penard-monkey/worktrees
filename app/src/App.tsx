@@ -11,6 +11,7 @@ import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
+import { canNudge, McpNudge, type McpStatus } from "./McpPanel";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
@@ -3385,6 +3386,20 @@ function App() {
   useEffect(() => {
     invoke<boolean>("tmux_check", { refresh: false }).then(setTmuxOk).catch(fail);
   }, [fail]);
+  // Is the worktrees MCP server wired into claude? Probed ONCE at startup and
+  // re-read only after an install, never polled: it parses ~/.claude.json (see
+  // `mcpsetup`), and nothing outside this app's own buttons changes it in a way
+  // that has to be noticed mid-session — a server added from a terminal is
+  // picked up on the next launch, which is also when claude would load it.
+  //
+  // A failure is swallowed rather than routed through `fail()`. This is a
+  // suggestion, and an error toast on launch for a machine that has no
+  // ~/.claude.json at all (the common case for a brand-new install, which is
+  // exactly who this feature is for) would be the app's first word.
+  const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
+  useEffect(() => {
+    invoke<McpStatus>("mcp_status", { repo: null }).then(setMcpStatus).catch(() => setMcpStatus(null));
+  }, []);
   const recheckTmux = useCallback(async () => {
     try {
       const ok = await invoke<boolean>("tmux_check", { refresh: true });
@@ -6452,6 +6467,18 @@ function App() {
                   <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
                   <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
                 </div>
+                {/* Only for `absent`, only once there is a project to use it
+                    on, and only until it is installed or silenced. Home rather
+                    than over the terminal because this is a fact about the
+                    MACHINE, like the version rows and the logo above it — and
+                    because a card here is never in the way of work. */}
+                {canNudge(mcpStatus) && !settings.mcp_nudge_dismissed && (ws?.projects.length ?? 0) > 0 && (
+                  <McpNudge
+                    status={mcpStatus!}
+                    onOpenSettings={() => setSettingsOpen(true)}
+                    onDismiss={() => updateSettings({ mcp_nudge_dismissed: true })}
+                  />
+                )}
                 <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
                 <div className="resume">
                   {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
@@ -6795,7 +6822,8 @@ function App() {
       <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset}
-        repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)} />
+        repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
+        mcpStatus={mcpStatus} onMcpChanged={setMcpStatus} />
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query

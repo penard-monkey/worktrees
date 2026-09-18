@@ -254,6 +254,22 @@ export type Settings = {
   // the same re-suggest rule, and unifying them would mean the CLI reading an
   // app-owned file — a worse dependency than a duplicated boolean-shaped fact.
   init_dismissed: Record<string, string>;
+  // The Home card offering to wire the worktrees MCP server into claude,
+  // silenced for good. A plain BOOLEAN, unlike `init_dismissed` above — and the
+  // difference is worth stating, because that key's whole point is that a
+  // boolean was the wrong shape there.
+  //
+  // It is the right shape here because the card has nothing to re-suggest. The
+  // suggestion's content never changes (it is always "install the server"), and
+  // the states that DO change something — the server going stale, or being
+  // read-only — are deliberately not this card and are not covered by this flag
+  // (`State::nudgeable` in mcpsetup.rs is `Absent` and nothing else). A user who
+  // silenced "install this" has not agreed to be silent about "the thing you
+  // installed is broken".
+  //
+  // It also only ever governs the ABSENT case: the card retires itself the
+  // moment the server exists, so the flag is unreachable in every other state.
+  mcp_nudge_dismissed: boolean;
   // Bumped when a DEFAULT changes in a way that has to reach installs which
   // already persisted the old value. Without it a default flip is invisible to
   // exactly the people who have been running the app — see `migrate`.
@@ -310,6 +326,7 @@ export const DEFAULTS: Settings = {
   manual_order: {},
   last_seen_version: "",
   init_dismissed: {},
+  mcp_nudge_dismissed: false,
   settings_rev: SETTINGS_REV,
 };
 
