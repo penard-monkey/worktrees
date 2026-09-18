@@ -263,14 +263,67 @@ pub fn ai_pane(session: &str, ai_word: &str) -> Option<PaneId> {
     // reference into a DIFFERENT worktree's Claude. `session_exists` documents
     // the same trap for `has-session`.
     let target = format!("={session}");
-    let o = tmux(&["list-panes", "-t", &target, "-F", "#{pane_id}\t#{pane_current_command}"]).ok()?;
+    let o = tmux(&[
+        "list-panes",
+        "-t",
+        &target,
+        // `pane_start_command` LAST: it is a shell command line and the only
+        // field here that can contain anything, so it gets the tail.
+        "-F",
+        "#{pane_id}\t#{pane_current_command}\t#{pane_start_command}",
+    ])
+    .ok()?;
     if !o.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&o.stdout).lines().find_map(|l| {
-        let (id, cmd) = l.split_once('\t')?;
-        is_ai_command(cmd, ai_word).then(|| PaneId(id.to_string()))
-    })
+    let text = String::from_utf8_lossy(&o.stdout);
+    let panes: Vec<(&str, &str, &str)> = text
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(3, '\t');
+            let id = it.next()?;
+            // A pane id is always `%N`. The guard is cheap and makes the
+            // invariant `PaneId` exists for true at the one place ids enter —
+            // it also closes a pre-3.2 tmux corner, where `pane_start_command`
+            // was the raw string and an embedded newline could split a line.
+            id.starts_with('%').then_some((id, it.next()?, it.next().unwrap_or("")))
+        })
+        .collect();
+    pick_ai_pane(&panes, ai_word).map(|id| PaneId(id.to_string()))
+}
+
+/// Which of a session's panes is the AI — the whole rule, as a pure function.
+///
+/// `ai_pane` is reachable only from the app (no CLI path, so no bats), which
+/// makes this the only coverage the selection will ever get.
+///
+/// The start command is a DISAMBIGUATOR, never evidence on its own.
+/// `ops::launch` builds pane 0 as `<ai_cmd>; exec "${SHELL}"`, so when Claude
+/// exits — `/exit`, ctrl-D, a crash — the pane lives on as a shell while
+/// `pane_start_command` still says `claude`. Trusting it alone put the token on
+/// that shell's prompt and reported success, which is the exact outcome
+/// `paste_to_ai` exists to refuse. Verified: a pane started as
+/// `exec sh -ic 'true claude; exec sh'` lists as `cmd=[bash] start=["…claude…"]`.
+fn pick_ai_pane<'a>(panes: &[(&'a str, &'a str, &'a str)], ai_word: &str) -> Option<&'a str> {
+    panes
+        .iter()
+        // Both signals: launched as the AI AND still running it.
+        .find(|(_, cmd, start)| start.contains(ai_word) && is_ai_command(cmd, ai_word))
+        // An ADOPTED pane was never launched with a command, so its foreground
+        // process is all the evidence there is.
+        .or_else(|| panes.iter().find(|(_, cmd, _)| is_ai_command(cmd, ai_word)))
+        .map(|(id, _, _)| *id)
+}
+
+/// `%0=zsh %1=vim`, so a refusal can be diagnosed from one log line.
+fn pane_summary(session: &str) -> String {
+    let target = format!("={session}");
+    tmux(&["list-panes", "-t", &target, "-F", "#{pane_id}=#{pane_current_command}"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 /// Is this `pane_current_command` the AI? Byte-for-byte the rule `session_in`
@@ -280,7 +333,30 @@ pub fn ai_pane(session: &str, ai_word: &str) -> Option<PaneId> {
 pub fn is_ai_command(cmd: &str, ai_word: &str) -> bool {
     // `node`: claude is a node program, and tmux reports the interpreter when
     // the binary is a wrapper script.
-    cmd.contains(ai_word) || cmd == "node"
+    cmd.contains(ai_word) || cmd == "node" || is_version_like(cmd)
+}
+
+/// `2.1.277` — a bare dotted version, which is what a natively-installed Claude
+/// reports as its process name.
+///
+/// It is NOT a process rename. `~/.local/bin/claude` is a symlink to
+/// `~/.local/share/claude/versions/2.1.277`, and XNU sets `p_comm` from the
+/// RESOLVED last path component while argv[0] stays `claude`. Measured:
+///
+/// ```text
+/// ps -o ucomm,comm -p 69362   ->   2.1.277   claude
+/// pane_current_command        ->   2.1.277
+/// ```
+///
+/// Three things follow. Searching for a process TITLE finds nothing, because
+/// nothing was retitled. It is macOS-specific — tmux's Linux backend reads
+/// `/proc/<pid>/cmdline` and reports `claude`. And an npm or brew install
+/// reports `node`/`claude` and never reaches this rule.
+///
+/// Deliberately strict: three or more numeric components and nothing else.
+fn is_version_like(cmd: &str) -> bool {
+    let parts: Vec<&str> = cmd.split('.').collect();
+    parts.len() >= 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Put `text` into the AI's pane in `session` as a PASTE, without a newline.
@@ -306,8 +382,10 @@ pub fn paste_to_ai(session: &str, ai_word: &str, text: &str) -> Result<(), Strin
     // An honest failure. The alternative — pasting into whatever pane happens
     // to be at index 0 — puts the token on a shell prompt and still reports
     // success, which is worse than saying nothing happened.
+    // Name what was there. The last time this rule was wrong it took a survey of
+    // 21 live sessions to find out why; the next time should be one log line.
     let pane = ai_pane(session, ai_word)
-        .ok_or_else(|| format!("no Claude running in session {session}"))?;
+        .ok_or_else(|| format!("no Claude running in session {session} (panes: {})", pane_summary(session)))?;
     let buf = format!("worktrees-drop-{}", std::process::id());
     let [set_argv, paste_argv, del_argv] = paste_commands(&buf, &pane, text);
     let set = tmux(&set_argv).map_err(|e| e.to_string())?;
@@ -384,6 +462,72 @@ mod paste_tests {
     /// is no window 0 at all; closing a pane renumbers the survivors; and an
     /// adopted session was never laid out by `new_session`. So the pane is found
     /// by what it RUNS, using the same rule adoption uses.
+    /// The strings here were measured on the live session where the drop failed
+    /// with "no Claude running": a natively-installed Claude reports its
+    /// VERSION as the process name, so neither the AI word nor `node` appears
+    /// anywhere in `pane_current_command`.
+    #[test]
+    fn a_version_named_claude_is_still_recognised() {
+        assert!(
+            is_ai_command("2.1.277", "claude"),
+            "the bug that made every drop report no Claude in the session"
+        );
+        assert!(is_version_like("10.0.1"), "not just single digits");
+        assert!(!is_version_like("zsh"));
+        assert!(!is_version_like("node"));
+        assert!(!is_version_like("2.1"), "two components is not a version here");
+        assert!(!is_version_like("v2.1.3"), "a leading v is not a bare version");
+        assert!(!is_version_like("a.b.c"));
+        assert!(!is_version_like("..."), "empty components are not digits");
+        assert!(!is_version_like(""));
+    }
+
+    /// The SELECTION, which is where the interesting failures live — the
+    /// predicate above says what a command looks like, this says which pane wins.
+    #[test]
+    fn the_start_command_disambiguates_but_never_vouches() {
+        let pick = |panes: &[(&str, &str, &str)]| pick_ai_pane(panes, "claude").map(str::to_string);
+
+        // THE REGRESSION. `ops::launch` builds pane 0 as `claude; exec $SHELL`,
+        // so a pane whose Claude has exited keeps a start command saying
+        // `claude` while running a shell. Trusting the start command alone
+        // pasted the token onto that prompt and called it success.
+        assert_eq!(
+            pick(&[("%0", "zsh", "exec sh -ic 'claude --name x; exec sh'")]),
+            None,
+            "a pane whose Claude has EXITED must not be chosen"
+        );
+
+        // Both signals present: the ordinary running case.
+        assert_eq!(
+            pick(&[("%0", "2.1.277", "exec sh -ic 'claude --name x; exec sh'")]),
+            Some("%0".to_string())
+        );
+
+        // The start command breaks a tie: pane 1 is a node dev server, pane 0 is
+        // the AI. Without the ordering, `node` in pane 1 could win.
+        assert_eq!(
+            pick(&[
+                ("%1", "node", ""),
+                ("%0", "2.1.277", "exec sh -ic 'claude; exec sh'"),
+            ]),
+            Some("%0".to_string()),
+            "a launched-and-running AI beats a bare `node` elsewhere"
+        );
+
+        // Adopted: nothing launched it with a command, so the foreground
+        // process is the only evidence there is.
+        assert_eq!(pick(&[("%3", "2.1.277", "")]), Some("%3".to_string()));
+        assert_eq!(pick(&[("%3", "claude", "")]), Some("%3".to_string()));
+
+        // Nothing resembling the AI: refuse. There is deliberately NO
+        // sole-pane fallback — the app creates sessions single-pane, so "one
+        // pane" is equally the shape of a live session and of one whose Claude
+        // has exited, and the fallback would fire exactly where it is wrong.
+        assert_eq!(pick(&[("%0", "zsh", "")]), None);
+        assert_eq!(pick(&[]), None);
+    }
+
     #[test]
     fn the_ai_pane_is_found_by_command_not_by_position() {
         assert!(is_ai_command("claude", "claude"));

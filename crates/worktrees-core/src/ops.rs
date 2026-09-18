@@ -191,8 +191,11 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         // than through `tmux new-session -e`: env baked into the process survives
         // detach, reattach and a tmux server restart by definition, and the bats
         // fake-tmux shim parses argv positionally with no `-e` case. Assignments
-        // first also keeps the program itself as pane0's foreground process, so
-        // `pane_current_command` stays `claude`.
+        // first also keeps the program itself as pane0's foreground process —
+        // though NOT necessarily under the name `claude`: a natively-installed
+        // claude is a symlink to `versions/<x.y.z>`, and macOS takes the
+        // process name from the resolved target, so `pane_current_command`
+        // reads `2.1.277`. See `tmux::is_version_like`.
         let pane0 = if !ai_cmd.is_empty() {
             format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&ai.pane0_body_for(keep, &session)))
         } else {
