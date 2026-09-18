@@ -2573,3 +2573,18 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .docs-warn-i { flex: none; color: var(--warn); }
 .docs-warn-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── the terminal as a drop target for a worktree reference ──────────────────
+   Two levels, because a target nobody can see is a feature nobody finds: a
+   quiet inset while any PLACE drag is live (projects cannot be referenced, so
+   they get nothing), and the accent once the drop has actually resolved — a
+   cross-project drag is over the same pixels and resolves to a reject, so it
+   must not light up. `outline` rather than `border`: the terminal's grid is
+   sized from this box, and a border would re-cols the pty mid-drag. */
+body.dragging-place .term-wrap[data-drop="mention"] {
+  outline: 1px dashed var(--line);
+  outline-offset: -2px;
+}
+body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
+  outline: 2px solid var(--accent);
+}

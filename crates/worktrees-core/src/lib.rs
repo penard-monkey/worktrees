@@ -15,6 +15,7 @@ pub mod health;
 pub mod init;
 pub mod materialize;
 pub mod mcpsetup;
+pub mod mention;
 pub mod model;
 pub mod ops;
 pub mod profile;

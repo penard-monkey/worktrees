@@ -126,6 +126,24 @@ impl Entry {
     }
 }
 
+/// The key OUR server is registered under in a parsed `~/.claude.json`, if it is
+/// there at all.
+///
+/// Judged by `Entry::ours` — what the stanza RUNS — so a user who
+/// `claude mcp add`ed it as `wt` is found, and a foreign server squatting on
+/// our key is not. Exposed because the nav drag needs the same answer from the
+/// other direction: `mention::server_name_for` has to name the server in a
+/// token, and a second implementation of "is this ours" would be free to drift
+/// from the one the install button trusts.
+pub fn our_key(user_claude_json: &serde_json::Value) -> Option<String> {
+    user_claude_json
+        .get("mcpServers")?
+        .as_object()?
+        .iter()
+        .find(|(_, v)| Entry::parse(v).is_some_and(|e| e.ours))
+        .map(|(k, _)| k.clone())
+}
+
 /// Where a server was found. Ordered by how much we are willing to do about it.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
