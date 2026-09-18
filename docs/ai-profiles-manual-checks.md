@@ -260,6 +260,51 @@ Open the sheet with right-click a worktree → **Status check…**, then the
 
 ---
 
+## MCP resources in the `@` menu
+
+`make test-mcp` proves the SERVER side end to end (the list, the reads, the
+push, and that stdout is never torn). What no suite here can prove is that
+claude's picker actually offers them, because there is no fake claude. Re-run
+this whenever the `claude` binary is upgraded — the whole feature rests on two
+regexes and a cache inside it.
+
+1. In a session in this repo, type `@worktrees` — the places should be listed,
+   named by slug, each described as `<lifecycle> · <branch>`. Typing part of a
+   slug (`@bug-fix`) should also find it: the client fuzzy-ranks a resource's
+   `name` above its uri.
+2. Send a message containing one. The reply should show it knew the branch and
+   the path WITHOUT calling a tool first — that is the resource being expanded
+   and inlined rather than merely named.
+3. `(main)` must appear as `place://main`. A uri ending in a non-word character
+   silently resolves to nothing at submit time even though it completes in the
+   menu, which is the failure this is most likely to regress into.
+4. Create a worktree from the app or the CLI while the session is open, wait a
+   few seconds, and type `@` again — the new place should be there with no
+   restart. If it is not, `/mcp` → reconnect is the user-level fix, and the
+   watcher thread is what regressed.
+
+**Why this cannot be done headlessly.** `claude -p '… @worktrees:place://x …'`
+does NOT expand the mention — and neither does `-p` with a plain `@CHANGELOG.md`,
+which is how you can tell it is print mode and not this feature. Mention
+expansion lives on the interactive input path. What `-p` CAN prove, and what was
+used to check this in: `resources/list` (ask it to list the MCP resources) and
+`resources/read` (ask it to read `place://<slug>` with `ReadMcpResourceTool`).
+Both exercise the server; only a real typed `@` exercises the picker.
+
+While checking any of the above, the server is writing what it saw to
+`~/.cache/worktrees/mcp-debug.log` — `tail -f` it in another pane. A
+`resources/read MISS` line is the one to care about: it means the list claude
+cached and the list the server serves have diverged, which is exactly what the
+watcher exists to prevent. `WORKTREES_MCP_DEBUG=0` switches it off,
+`WORKTREES_MCP_DEBUG_LOG=<path>` moves it. **This logging is temporary** — see
+ROADMAP; a test fails on 2026-12-15 to make sure it goes.
+
+If mentions expand nowhere at all, check the switches that disable the whole
+attachment path before suspecting this feature: `CLAUDE_CODE_DISABLE_ATTACHMENTS`,
+`CLAUDE_CODE_SIMPLE`, `restricted` mode, and `blockReadsOutsideWorkingDirectories`.
+
+---
+
 ## Known-unverifiable
 
 - Whether a future claude version changes the keychain service-name derivation.

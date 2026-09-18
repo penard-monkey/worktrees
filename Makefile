@@ -9,7 +9,7 @@ BATS   := ./test/lib/bats-core/bin/bats
 RELEASE_BIN := $(CURDIR)/target/release/worktrees
 
 .PHONY: build build-debug install install-copy install-app dev-app uninstall lint \
-        test test-real-tmux check release
+        test test-real-tmux test-mcp check release
 
 build:
 	cargo build --release -p worktrees-cli
@@ -70,7 +70,15 @@ test: build-debug
 test-real-tmux: build-debug
 	$(BATS) --filter-tags real-tmux test/
 
-check: lint test
+# The MCP resource surface end to end: a SECOND thread writing to the same
+# newline-delimited stdout as the request loop, and the silence owed before
+# `notifications/initialized`. Neither is reachable from bats or from the unit
+# tests — this drives the real binary over a pipe. Needs the release build,
+# because that is the binary it drives.
+test-mcp: build
+	python3 scripts/mcp-resources-check.py
+
+check: lint test test-mcp
 
 # make release VERSION=x.y.z — bump the workspace version in Cargo.toml first.
 release:

@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Reference another worktree while you type.** The MCP server now publishes
+  every place as an MCP resource, so `@worktrees:place://bug-fixes` in a Claude
+  session completes from the `@` menu and expands into that place's live status
+  — branch, divergence, dirty state, its tmux session name and who is working
+  in it. The picker stays current on its own: the server pushes
+  `resources/list_changed` when a worktree is created or removed, from any
+  source (the CLI, the app, another agent, a bare `git worktree add`).
+  Temporarily, the server also logs what it served to
+  `~/.cache/worktrees/mcp-debug.log` (`WORKTREES_MCP_DEBUG=0` to switch it off)
+  so the first real sessions can be diagnosed; that logging is scheduled for
+  removal.
+
 ## [0.24.0] - 2026-09-16
 
 ### Added
