@@ -42,6 +42,12 @@ const body = (name) => {
   const j = pane.indexOf("\n}\n", i);
   return pane.slice(i, j < 0 ? undefined : j);
 };
+// Both bodies must be FOUND first: `body()` returns "" for a component that has
+// been renamed, and `!/drop=/.test("")` is true — the ShellPane assertion would
+// have reported ok for a file it could no longer parse.
+for (const name of ["TerminalPane", "ShellPane"]) {
+  check(body(name) !== "", `${name} is still an exported component this can read`);
+}
 check(/drop="mention"/.test(body("TerminalPane")), "TerminalPane marks itself a drop target");
 check(!/drop=/.test(body("ShellPane")), "ShellPane does NOT — a dock scratch shell is not a place");
 

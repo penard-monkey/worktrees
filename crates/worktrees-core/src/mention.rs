@@ -130,29 +130,71 @@ pub fn server_name_in(user_claude_json: &serde_json::Value) -> Option<String> {
 }
 
 /// The server name the session running in `into_slug` will actually have
-/// registered — which is not always what `~/.claude.json` says.
+/// registered — or why there is none, which is a real and reachable answer.
 ///
-/// A PROFILE launch writes its own stanza under [`DEFAULT_SERVER`] and passes
-/// `--strict-mcp-config`, which drops the user-scope entry entirely
-/// (`profile.rs`). So for a profiled session the user's own naming is
-/// irrelevant, and consulting it would produce `@wt:…` for a session that only
-/// answers to `@worktrees:…` — a token that completes nowhere and expands to
-/// nothing. `Declared::profile_id` is the launch stamp that says which it was.
-pub fn server_name_for(repo: &str, into_slug: &str, user_claude_json: &Path) -> String {
-    let profiled = crate::store::read_lenient(repo)
+/// Three things decide it, and the obvious reading of the first is wrong:
+///
+///   * `--strict-mcp-config` (which drops user-scope servers) is added only
+///     when the profile does NOT inherit global MCP (`profile.rs`'s
+///     `if !p.inherit_global_mcp`). An earlier version of this claimed a
+///     profile launch always drops user scope, and would have named the wrong
+///     server for an inheriting profile.
+///   * `worktrees_mcp: false` registers no stanza at all, so such a session has
+///     no worktrees server to address however it was launched.
+///   * an unprofiled session has only what `~/.claude.json` gives it, which may
+///     be nothing.
+///
+/// Returning `Err` rather than guessing `worktrees` matters: a guessed name
+/// produces a token that completes nowhere and expands to nothing, under a
+/// notice that said the drop succeeded.
+///
+/// One limitation that cannot be fixed here: `profile_id` is a LAUNCH stamp, so
+/// a session started by hand or adopted carries the previous launch's value (or
+/// none). This is the best available answer, not a certain one.
+pub fn server_name_for(
+    repo: &str,
+    into_slug: &str,
+    user_claude_json: &Path,
+) -> Result<String, String> {
+    let user_scope = || {
+        std::fs::read(user_claude_json)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .as_ref()
+            .and_then(server_name_in)
+    };
+    let stamped = crate::store::read_lenient(repo)
         .places
         .get(into_slug)
-        .and_then(|d| d.profile_id.as_ref())
-        .is_some();
-    if profiled {
-        return DEFAULT_SERVER.to_string();
+        .and_then(|d| d.profile_id.clone());
+
+    let Some(pid) = stamped else {
+        return user_scope().ok_or_else(|| {
+            "that session has no worktrees MCP server \u{2014} add one from Settings \u{2192} Claude"
+                .to_string()
+        });
+    };
+    let profiles = crate::profile::read_lenient();
+    let Some(p) = profiles.profiles.get(&pid) else {
+        // A dangling stamp: the profile was deleted after launch. What the
+        // session actually loaded is unknowable, so fall back rather than
+        // assert either way.
+        return user_scope().ok_or_else(|| {
+            format!("that session was launched with profile '{pid}', which no longer exists")
+        });
+    };
+    if p.worktrees_mcp {
+        return Ok(DEFAULT_SERVER.to_string());
     }
-    std::fs::read(user_claude_json)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .as_ref()
-        .and_then(server_name_in)
-        .unwrap_or_else(|| DEFAULT_SERVER.to_string())
+    if p.inherit_global_mcp {
+        return user_scope().ok_or_else(|| {
+            format!("profile '{}' does not provide the worktrees MCP server", p.name)
+        });
+    }
+    Err(format!(
+        "profile '{}' runs with --strict-mcp-config and no worktrees MCP server",
+        p.name
+    ))
 }
 
 /// The whole token to type, e.g. `@worktrees:place://bug-fixes`.
@@ -267,10 +309,12 @@ mod tests {
         assert_eq!(server_name_in(&serde_json::Value::Null), None);
     }
 
-    /// A profiled session answers only to `worktrees`, whatever the user called
-    /// their own user-scope server — `--strict-mcp-config` drops that entry.
+    /// The rule that was WRONG first: a profile launch does not always drop
+    /// user scope (`--strict-mcp-config` is conditional on `inherit_global_mcp`)
+    /// and a profile can provide no worktrees server at all, which must be said
+    /// rather than guessed.
     #[test]
-    fn a_profiled_session_ignores_the_users_own_server_name() {
+    fn the_server_name_follows_what_the_profile_actually_registers() {
         let dir = std::env::temp_dir().join(format!("wt-mention-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -285,15 +329,20 @@ mod tests {
         )
         .unwrap();
 
-        // Unprofiled: the user's own name is what that session registered.
-        assert_eq!(server_name_for(&repo, "plain", &user), "wt");
+        // Unprofiled: whatever the user registered themselves.
+        assert_eq!(server_name_for(&repo, "plain", &user).as_deref(), Ok("wt"));
 
-        // Profiled: the stamp wins.
-        crate::store::edit(&repo, "profiled", |d| d.profile_id = Some("p1".into())).unwrap();
-        assert_eq!(server_name_for(&repo, "profiled", &user), DEFAULT_SERVER);
+        // Unprofiled with nothing registered is an ERROR, not a guess: a guessed
+        // name expands to nothing under a notice that said it worked.
+        let empty = dir.join("empty.json");
+        std::fs::write(&empty, "{}").unwrap();
+        assert!(server_name_for(&repo, "plain", &empty).is_err());
 
-        // No `~/.claude.json` at all is the common case, not an error.
-        assert_eq!(server_name_for(&repo, "plain", &dir.join("nope.json")), DEFAULT_SERVER);
+        // A dangling stamp falls back rather than asserting either way.
+        crate::store::edit(&repo, "ghost", |d| d.profile_id = Some("gone".into())).unwrap();
+        assert_eq!(server_name_for(&repo, "ghost", &user).as_deref(), Ok("wt"));
+        assert!(server_name_for(&repo, "ghost", &empty).is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

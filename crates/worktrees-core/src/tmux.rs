@@ -195,7 +195,7 @@ impl PaneList {
                     continue;
                 }
             }
-            if cmd.contains(ai_word) || cmd == "node" {
+            if is_ai_command(cmd, ai_word) {
                 return Some(sess.clone());
             }
             if best.is_none() {
@@ -220,28 +220,96 @@ pub fn tune_session(session: &str) {
 /// `new-session -d -s <session> -c <wt> -P -F '#{pane_id}' <pane0>` → pane id.
 /// `Err(reason)` carries tmux's own stderr (or a spawn error) so the caller can
 /// surface WHY the session failed instead of a silent `None`.
-/// Put `text` into pane 0 of `session` as a PASTE, without sending a newline.
+/// A tmux pane id (`%7`). A newtype, and the ONLY thing `paste_commands` will
+/// accept as a target.
 ///
-/// Pane 0 is the AI: `new_session` launches it there (`pane0`), and the split
-/// that follows takes pane 1. So `-t <session>:0.0` addresses Claude
-/// specifically, rather than whatever pane the user happens to have focused —
-/// which is the difference between dropping a reference into the prompt and
-/// dropping it into a half-typed shell command.
+/// Not decoration. A tmux target given as a NAME prefix-matches — `-t api`
+/// resolves to `api-fix` when that is the only session — so a reference could
+/// be pasted into a different worktree's Claude. The first fix for that was a
+/// test asserting the target starts with `%`, and it did not hold: the target
+/// is chosen inside `paste_to_ai`, while the test called `paste_commands`
+/// directly with a literal, so swapping the argument back to
+/// `format!("{session}:0.0")` passed the whole suite. The constructor is
+/// private to this module and only `ai_pane` builds one, so the wrong target
+/// can no longer be spelled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneId(String);
+
+impl PaneId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The pane in `session` that is running the AI, as a stable `%id`.
+///
+/// NOT `:0.0`. Pane 0 is where `new_session` launches the AI, and that is the
+/// only thing true about it — three ordinary situations break the assumption:
+///
+///   * `set -g base-index 1` in a user's `~/.tmux.conf` (common) means there is
+///     no window 0 at all, and `tmux` answers `can't find window: 0`. Nothing
+///     here pins `base-index`, and `tune_session` does not either;
+///   * closing pane 0 and opening another renumbers the survivors, so index 0
+///     becomes whatever is left — typically the shell in what was pane 1;
+///   * an ADOPTED session was not created by `new_session`, so its pane 0 is
+///     whatever the user happened to start first.
+///
+/// Matched on the pane's command against the AI word, the same rule
+/// `PaneList::session_in` uses for adoption, and returned as a `%id` because
+/// those are globally unique and never renumber.
+pub fn ai_pane(session: &str, ai_word: &str) -> Option<PaneId> {
+    // `=` anchors the session name: a tmux target PREFIX-matches, so `-t api`
+    // resolves to `api-fix` when that is the only session — which would drop a
+    // reference into a DIFFERENT worktree's Claude. `session_exists` documents
+    // the same trap for `has-session`.
+    let target = format!("={session}");
+    let o = tmux(&["list-panes", "-t", &target, "-F", "#{pane_id}\t#{pane_current_command}"]).ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&o.stdout).lines().find_map(|l| {
+        let (id, cmd) = l.split_once('\t')?;
+        is_ai_command(cmd, ai_word).then(|| PaneId(id.to_string()))
+    })
+}
+
+/// Is this `pane_current_command` the AI? Byte-for-byte the rule `session_in`
+/// adopts by, in one place so the two cannot drift — and keyed on the
+/// configured `ai_word`, not on the literal "claude", because the AI command is
+/// a setting (`config::resolve_ai_cmd`).
+pub fn is_ai_command(cmd: &str, ai_word: &str) -> bool {
+    // `node`: claude is a node program, and tmux reports the interpreter when
+    // the binary is a wrapper script.
+    cmd.contains(ai_word) || cmd == "node"
+}
+
+/// Put `text` into the AI's pane in `session` as a PASTE, without a newline.
 ///
 /// **`paste-buffer -p`, never `send-keys -l`.** `-p` wraps the text in
-/// bracketed-paste markers ONLY when the program in that pane has actually
-/// requested mode 2004, which Claude's input does and a confirmation prompt
-/// does not. So a paste that lands while Claude is asking "do you want to
-/// allow this?" is inert text, where `send-keys` would be an unprompted
-/// keystroke into that dialog. Do not add a fallback that uses it.
+/// bracketed-paste markers when the program in that pane has requested mode
+/// 2004, which Claude's input does — so the text arrives as a PASTE, which is
+/// a thing a TUI handles deliberately, rather than as a burst of keystrokes it
+/// cannot distinguish from typing. That is what keeps a drop landing during a
+/// "do you want to allow this?" prompt from reading as an answer to it.
+///
+/// An earlier version of this comment claimed a permission prompt does not
+/// request 2004 — that was a guess, and almost certainly wrong, since it is the
+/// same program with the mode already set. The paste/keystroke distinction is
+/// the part that holds; the behaviour during a prompt is step 5 of the drag's
+/// manual checks precisely because it is not verified here.
+/// Do not add a `send-keys` fallback.
 ///
 /// The buffer is NAMED and deleted afterwards so this never disturbs the
 /// user's own paste stack, and `--` ends option parsing so a reference that
 /// begins with `-` cannot be read as a flag.
-pub fn paste_to_pane(session: &str, text: &str) -> Result<(), String> {
+pub fn paste_to_ai(session: &str, ai_word: &str, text: &str) -> Result<(), String> {
+    // An honest failure. The alternative — pasting into whatever pane happens
+    // to be at index 0 — puts the token on a shell prompt and still reports
+    // success, which is worse than saying nothing happened.
+    let pane = ai_pane(session, ai_word)
+        .ok_or_else(|| format!("no Claude running in session {session}"))?;
     let buf = format!("worktrees-drop-{}", std::process::id());
-    let target = pane_zero(session);
-    let [set_argv, paste_argv, del_argv] = paste_commands(&buf, &target, text);
+    let [set_argv, paste_argv, del_argv] = paste_commands(&buf, &pane, text);
     let set = tmux(&set_argv).map_err(|e| e.to_string())?;
     if !set.status.success() {
         return Err(String::from_utf8_lossy(&set.stderr).trim().to_string());
@@ -258,17 +326,6 @@ pub fn paste_to_pane(session: &str, text: &str) -> Result<(), String> {
     }
 }
 
-/// tmux's address for pane 0 of a session — where `new_session` launches the
-/// AI, and therefore the only pane a reference should ever land in.
-///
-/// Its own function because it is the difference between typing into Claude's
-/// prompt and typing into whatever the user last clicked, and building it
-/// inline put it outside the reach of the argv test below: a mutation dropping
-/// the `:0.0` passed the whole suite.
-fn pane_zero(session: &str) -> String {
-    format!("{session}:0.0")
-}
-
 /// The three tmux invocations a drop makes, as argv.
 ///
 /// Split out so the exact shape is testable without a tmux server or a PATH
@@ -276,12 +333,14 @@ fn pane_zero(session: &str) -> String {
 /// a shim would race every other test that shells out. The shape is the whole
 /// safety argument (`-p`, `:0.0`, `--`, and the cleanup), so it is worth
 /// pinning directly.
-fn paste_commands<'a>(buf: &'a str, target: &'a str, text: &'a str) -> [Vec<&'a str>; 3] {
+fn paste_commands<'a>(buf: &'a str, pane: &'a PaneId, text: &'a str) -> [Vec<&'a str>; 3] {
     [
         // `--` so a reference that begins with `-` is not read as a flag.
         vec!["set-buffer", "-b", buf, "--", text],
         // `-p` = bracketed paste IF the pane's program asked for mode 2004.
-        vec!["paste-buffer", "-b", buf, "-p", "-t", target],
+        // A `%id`, which is globally unique and cannot prefix-match another
+        // session the way a NAME target can.
+        vec!["paste-buffer", "-b", buf, "-p", "-t", pane.as_str()],
         vec!["delete-buffer", "-b", buf],
     ]
 }
@@ -292,8 +351,9 @@ mod paste_tests {
 
     /// The shape IS the safety argument, so it is asserted rather than assumed.
     #[test]
-    fn a_drop_pastes_into_pane_zero_and_cleans_up_after_itself() {
-        let [set, paste, del] = paste_commands("buf1", "sess:0.0", "-@worktrees:place://x ");
+    fn a_drop_targets_a_pane_id_and_cleans_up_after_itself() {
+        let pane = PaneId("%7".into());
+        let [set, paste, del] = paste_commands("buf1", &pane, "-@worktrees:place://x ");
 
         assert_eq!(set, ["set-buffer", "-b", "buf1", "--", "-@worktrees:place://x "]);
         assert_eq!(
@@ -304,31 +364,36 @@ mod paste_tests {
 
         assert!(paste.contains(&"-p"), "without -p this is an unbracketed injection: {paste:?}");
         let t = paste.iter().position(|a| *a == "-t").expect("-t");
-        assert_eq!(
-            paste[t + 1], "sess:0.0",
-            "pane 0 is the AI (tmux::new_session launches it there); anything else              types into whatever the user happened to focus"
+        assert!(
+            paste[t + 1].starts_with('%'),
+            "the target must be a pane ID. A NAME target PREFIX-matches, so `-t api` \
+             resolves to `api-fix` when that is the only session, and the reference \
+             lands in another worktree's Claude (got {:?})",
+            paste[t + 1]
         );
 
         assert_eq!(del, ["delete-buffer", "-b", "buf1"]);
         assert_eq!(del[2], set[2], "the buffer deleted must be the one written");
 
-        // The rule this must never lose: `send-keys` would type into a
-        // permission prompt, which does not request bracketed-paste mode.
         for argv in [&set, &paste, &del] {
             assert!(!argv.contains(&"send-keys"), "send-keys can type into a confirmation dialog");
         }
     }
 
-    /// The `:0.0` lives here rather than inline because inline it was
-    /// untestable — see `pane_zero`.
+    /// Pane 0 is NOT "the AI". `base-index 1` in a user's tmux.conf means there
+    /// is no window 0 at all; closing a pane renumbers the survivors; and an
+    /// adopted session was never laid out by `new_session`. So the pane is found
+    /// by what it RUNS, using the same rule adoption uses.
     #[test]
-    fn a_drop_addresses_pane_zero_by_name() {
-        assert_eq!(pane_zero("worktrees-bug-fixes"), "worktrees-bug-fixes:0.0");
-        assert!(
-            pane_zero("s").ends_with(":0.0"),
-            "without the window.pane suffix tmux pastes into the ACTIVE pane, \
-             which may be the shell in pane 1"
-        );
+    fn the_ai_pane_is_found_by_command_not_by_position() {
+        assert!(is_ai_command("claude", "claude"));
+        assert!(is_ai_command("node", "claude"), "claude is a node program behind a wrapper");
+        assert!(!is_ai_command("zsh", "claude"), "a shell must never receive a dropped reference");
+        assert!(!is_ai_command("bash", "claude"));
+        assert!(!is_ai_command("vim", "claude"));
+        // The AI command is a SETTING, so the word is too.
+        assert!(is_ai_command("aider", "aider"));
+        assert!(!is_ai_command("claude", "aider"));
     }
 
     #[test]

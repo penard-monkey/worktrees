@@ -290,6 +290,9 @@ regexes and a cache inside it.
 Also by hand, for a different reason: the mock records the invoke but has no
 tmux to paste into, and driving the real app is off-limits.
 
+0. If your `~/.tmux.conf` sets `base-index 1`, or you have closed and reopened
+   panes in the session, do this check anyway — those are exactly the cases the
+   pane is located by COMMAND rather than by index for.
 1. With a place selected and its session up, drag another place from the nav
    over the terminal. It should show a dashed outline as soon as the drag
    starts (that is the discoverability half) and a solid accent outline once the
@@ -301,10 +304,15 @@ tmux to paste into, and driving the real app is off-limits.
 4. Drag a place from a DIFFERENT project over the same terminal: the ghost must
    go red with "a session can only reference worktrees from its own project",
    and dropping must do nothing.
-5. Drop while Claude is asking a permission question. It must land as text in
-   the prompt, never answer the dialog — `paste-buffer -p` only brackets when
-   the pane's program requested mode 2004, which a prompt does not. If this ever
-   regresses, the cause is someone adding a `send-keys` fallback.
+5. Drop while Claude is asking a permission question. It must land as text,
+   never answer the dialog. **This is the least-verified thing here.** The
+   safety argument is that `paste-buffer -p` delivers a PASTE (a TUI handles
+   those deliberately) rather than keystrokes; it is NOT that a prompt turns
+   bracketed paste off, which it almost certainly does not. If it ever regresses
+   the likely cause is a `send-keys` fallback — there must never be one.
+6. Drop into a session whose Claude has exited (the tmux session is still up,
+   pane 0 is a shell). Nothing should be pasted and the notice should say so,
+   rather than the token appearing on a shell prompt under a success message.
 
 **Why this cannot be done headlessly.** `claude -p '… @worktrees:place://x …'`
 does NOT expand the mention — and neither does `-p` with a plain `@CHANGELOG.md`,

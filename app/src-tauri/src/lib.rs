@@ -19,7 +19,7 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{git, mention, ops, store, sync, sysclock, tmux, Project, Ui};
+use worktrees_core::{config, git, mcpsetup, mention, ops, profile, store, sync, sysclock, tmux, Project, Ui};
 
 // ── app log ──────────────────────────────────────────────────────────────────
 // Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
@@ -729,18 +729,19 @@ async fn drop_reference(
     let places = project.place_index();
     let uri = mention::uri_for(&places, &slug)
         .ok_or_else(|| format!("no such place: {slug}"))?;
-    let home = std::env::var("HOME").unwrap_or_default();
-    let server = mention::server_name_for(
-        &repo,
-        &into_slug,
-        &std::path::Path::new(&home).join(".claude.json"),
-    );
+    // `mcpsetup::claude_json_path()` rather than hand-building it from $HOME:
+    // that module owns where claude's config lives.
+    let server = mention::server_name_for(&repo, &into_slug, &mcpsetup::claude_json_path())?;
     let token = mention::mention(&server, &uri);
     // Spaces on BOTH sides. The client's extractor requires whitespace (or
     // start-of-input) before the `@`, and this cannot see the prompt to know
     // whether there already is any; the trailing one closes the `\b` and
     // dismisses the completion popup the `@` opens as it arrives.
-    tmux::paste_to_pane(&into_session, &format!(" {token} "))?;
+    //
+    // Addressed by the AI's pane, not by an index — see `tmux::ai_pane` for the
+    // three ordinary ways pane 0 turns out not to be Claude.
+    let ai_word = profile::ai_word_of(&config::resolve_ai_cmd(None));
+    tmux::paste_to_ai(&into_session, &ai_word, &format!(" {token} "))?;
     applog("info", &format!("drop_reference: {token} -> {into_session}"));
     Ok(token)
 }
