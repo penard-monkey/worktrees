@@ -1772,6 +1772,51 @@ function TmuxBanner({ onRecheck }: { onRecheck: () => Promise<boolean> }) {
   );
 }
 
+/** Place a floating panel beside its trigger and keep it on screen.
+ *
+ *  Extracted from UsageMeter the moment the status popover became its second
+ *  caller: two copies of this would be two answers to "where does the panel
+ *  go", and the half that is easy to leave out of the second copy is the one
+ *  that matters — the panel-RESIZE observer. Clamping runs on open, on window
+ *  resize AND on a resize of the panel itself, because a panel that grows after
+ *  opening (a plan with a fourth bucket, an incident with a long update) keeps
+ *  the `top` computed for its old height and pushes its last row off the bottom
+ *  edge, unreachable (the CtxMenu lesson, same shape, same fix). */
+function usePopPos(shown: boolean, side: "up" | "right") {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const trigRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!shown) { setPos(null); return; }
+    const place = () => {
+      const t = trigRef.current, p = popRef.current;
+      if (!t || !p) return;
+      const tr = t.getBoundingClientRect();
+      // offsetWidth/Height, not getBoundingClientRect: the rect is the PAINTED
+      // box and would be read through any transform the panel is wearing.
+      const pw = p.offsetWidth, ph = p.offsetHeight;
+      const m = 8;
+      const left = side === "right" ? tr.right + m : tr.left;
+      const top = side === "right" ? tr.top : tr.top - ph - m;
+      setPos({
+        left: Math.max(m, Math.min(left, window.innerWidth - pw - m)),
+        top: Math.max(m, Math.min(top, window.innerHeight - ph - m)),
+      });
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    if (popRef.current) ro.observe(popRef.current);
+    window.addEventListener("resize", place);
+    return () => { ro.disconnect(); window.removeEventListener("resize", place); };
+  }, [shown, side]);
+
+  // Off-screen until the first measurement lands, so the panel is never painted
+  // at 0,0 for a frame on its way to where it belongs.
+  const style = pos ? { left: pos.left, top: pos.top } : { left: -9999, top: -9999 };
+  return { trigRef, popRef, style };
+}
+
 // ── Claude plan usage (nav footer) ──────────────────────────────────────────
 // The same bars as Claude Code's /usage panel: 5h session window, weekly
 // all-models, plus any model-scoped weekly bucket ("Fable"). Backend
@@ -1964,65 +2009,48 @@ function UsageRows({ info, nowSec }: { info: UsageInfo; nowSec: number }) {
  *  44px wide, so its tile carries no text at all and its panel flies right
  *  instead of up. Both hosts of the "line" shape are the last row of their box,
  *  so both drop upward. */
-function UsageMeter({ info, nowSec, shape, side }: {
+function UsageMeter({ info, nowSec, shape, side, status, onError }: {
   info: UsageInfo;
   nowSec: number;
   shape: "line" | "tile";
   side: "up" | "right";
+  /** Set only by the rail host, where the tile IS the status indicator: there
+   *  is no room beside it for a chip, so the badge rides the tile and the
+   *  reading joins the panel this trigger already opens. The line hosts get a
+   *  `StatusChip` next to them instead and pass nothing here. */
+  status?: ClaudeStatusInfo | null;
+  onError?: (e: unknown) => void;
 }) {
   const [hovering, setHovering] = useState(false);
   // A click PINS the panel open: the numbers are worth reading with the pointer
   // somewhere else, and on the rail the panel is not big enough to park on.
   const [pinned, setPinned] = useState(false);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-  const trigRef = useRef<HTMLButtonElement | null>(null);
-  const popRef = useRef<HTMLDivElement | null>(null);
   const armed = useRef<number | null>(null);
   const shown = hovering || pinned;
+  const { trigRef, popRef, style: popStyle } = usePopPos(shown, side);
 
   useEffect(() => () => { if (armed.current) window.clearTimeout(armed.current); }, []);
-
-  // Clamp to the viewport on open, on window resize AND on a resize of the PANEL
-  // — the row count follows the plan, and a panel that grows after opening keeps
-  // the `top` computed for its old height, pushing its last row off the bottom
-  // edge (the CtxMenu lesson, same shape, same fix).
-  useLayoutEffect(() => {
-    if (!shown) { setPos(null); return; }
-    const place = () => {
-      const t = trigRef.current, p = popRef.current;
-      if (!t || !p) return;
-      const tr = t.getBoundingClientRect();
-      // offsetWidth/Height, not getBoundingClientRect: the rect is the PAINTED
-      // box and would be read through any transform the panel is wearing.
-      const pw = p.offsetWidth, ph = p.offsetHeight;
-      const m = 8;
-      const left = side === "right" ? tr.right + m : tr.left;
-      const top = side === "right" ? tr.top : tr.top - ph - m;
-      setPos({
-        left: Math.max(m, Math.min(left, window.innerWidth - pw - m)),
-        top: Math.max(m, Math.min(top, window.innerHeight - ph - m)),
-      });
-    };
-    place();
-    const ro = new ResizeObserver(place);
-    if (popRef.current) ro.observe(popRef.current);
-    window.addEventListener("resize", place);
-    return () => { ro.disconnect(); window.removeEventListener("resize", place); };
-  }, [shown, side]);
 
   useEffect(() => {
     if (!pinned) return;
     const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
       // The trigger's own click toggles `pinned` itself; closing here too would
       // unpin and immediately re-pin.
-      if (trigRef.current?.contains(e.target as Node)) return;
+      if (trigRef.current?.contains(t)) return;
+      // …and the PANEL is no longer inert: a pinned one takes the pointer
+      // (`.usage-pop.pinned`, App.css) so the status band's link out to
+      // status.claude.com can be clicked. Without this arm, pointerdown on that
+      // link unpins, React unmounts the panel, and the `click` that would have
+      // opened the URL never lands on anything — a link that does nothing, and
+      // only in the rail host.
+      if (popRef.current?.contains(t)) return;
       setPinned(false);
       setHovering(false);
     };
-    // Bubble phase and NO stopPropagation: this panel is inert, so an Escape
-    // that also reaches something else is harmless — whereas swallowing it at
-    // the window would have taken Escape away from the terminal (vim, a prompt)
-    // for as long as the panel was pinned.
+    // Bubble phase and NO stopPropagation: Escape here must not be taken away
+    // from the terminal (vim, a prompt) for as long as the panel is pinned, and
+    // an Escape that also reaches something else is harmless.
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       setPinned(false);
@@ -2103,20 +2131,246 @@ function UsageMeter({ info, nowSec, shape, side }: {
                 </span>
               ))}
         </span>
+        {/* Always red, never amber: the bars under it are already amber at
+            `warning` severity, and two ambers 4px apart meaning unrelated
+            things ("your weekly is nearly spent" / "the API is degraded") is
+            not a distinction anyone can read at 32px. Degraded vs. down is
+            made in words, in the panel. Geometry is `.rail-icon.upd::after`'s,
+            unchanged — the rail already teaches this dot. */}
+        {status && <span className="usage-badge" aria-hidden="true" />}
       </button>
       {shown && (
         <div
           ref={popRef}
-          className={"usage-pop" + (stale ? " stale" : "")}
-          // Off-screen until the first measurement lands, so the panel is never
-          // painted at 0,0 for a frame on its way to where it belongs.
-          style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: -9999 }}
+          className={"usage-pop" + (stale ? " stale" : "") + (pinned ? " pinned" : "")}
+          style={popStyle}
         >
+          {/* The outage goes ABOVE the plan bars: it is the answer to the
+              question the bars are usually asked ("can I work right now"), and
+              it is the reason the tile is wearing a badge at all. */}
+          {status && (
+            <div className={"status-band" + (status.severity === "down" ? " down" : "")}>
+              <div className="status-band-head">
+                <span className="status-chip-dot" />
+                {statusLabel(status)}
+              </div>
+              <StatusDetail info={status} onError={onError ?? (() => {})} />
+            </div>
+          )}
           <div className="usage-pop-head">
             <span>Claude plan usage</span>
             <span>{stale ? "statusline snapshot" : "live"}</span>
           </div>
           <UsageRows info={info} nowSec={nowSec} />
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── Claude service status (status.claude.com) ───────────────────────────────
+// Backend `claude_status` (lib.rs) answers a severity computed from the two
+// components this app actually depends on — Claude Code and the API — and never
+// from the status page's own six-component verdict. `useClaudeStatus` returns
+// null unless one of those two is unwell, so every host below is written as
+// "render nothing when there is nothing to say": on a normal day this feature
+// does not exist on screen, which is the whole brief.
+//
+// WHERE it lands follows `usage_place`, because that setting already answers
+// "where does Claude's chrome live in this window":
+//
+//   strip / footer → the chip, inline with the usage bars
+//   rail           → a corner dot on the 32px tile (no room for a chip), with
+//                    the detail in the popover the tile ALREADY opens: "the API
+//                    is degraded" and "your weekly is at 38%" are two answers to
+//                    the same question, and they belong on one surface
+//   off            → nothing. The user turned Claude's chrome off; an outage is
+//                    not a licence to turn it back on.
+//
+// The strip is the fallback host when the named one is not on screen — rail
+// mode with no usage data has no tile to badge, and a chip with nowhere to live
+// would just be silence.
+//
+// The one live collision to know about: the tile's bars are already severity-
+// coloured (`.usage-row.warn`/`.over`), so at 92% weekly the tile is ALREADY
+// amber. That is why `.usage-badge` is only ever `--danger` red — degraded vs.
+// down is a distinction the popover makes in words, and two ambers 4px apart
+// meaning unrelated things is not a distinction anyone can read.
+
+type StatusComponent = { name: string; status: string };
+type StatusIncident = {
+  name: string;
+  status: string;
+  body: string | null;
+  updated_at: number | null;
+  url: string | null;
+};
+export type ClaudeStatusInfo = {
+  source: string;   // live | unavailable
+  fetched_at: number;
+  severity: string; // none | degraded | down
+  components: StatusComponent[];
+  total: number;
+  incident: StatusIncident | null;
+  page_url: string;
+};
+
+// 300s. Longer than the usage meter's 180s on purpose: an incident is minutes
+// old before it is posted, so a tighter poll buys nothing and this is a request
+// nobody asked for. The backend caps real fetches at one per 240s regardless.
+const STATUS_POLL_MS = 300_000;
+
+/** "Claude API (api.anthropic.com)" → "Claude API". The parenthetical is the
+ *  hostname, which is the page's disambiguation for a reader who has six
+ *  components in front of them; here there are two. */
+function shortName(n: string): string {
+  const i = n.indexOf(" (");
+  return i < 0 ? n : n.slice(0, i);
+}
+
+/** Worst first, so the chip names the component that is most broken. */
+function statusRank(s: string): number {
+  return s === "operational" ? 0 : s === "major_outage" ? 2 : 1;
+}
+
+/** The chip's text: the unwell component, or "Claude" when every watched one
+ *  is — naming one of two outages would be a half-truth in the four words the
+ *  chip gets. */
+function statusLabel(info: ClaudeStatusInfo): string {
+  const bad = info.components
+    .filter((c) => c.status !== "operational")
+    .sort((a, b) => statusRank(b.status) - statusRank(a.status));
+  const who = bad.length === 0 ? "Claude"
+    : bad.length === info.components.length ? "Claude"
+      : shortName(bad[0].name);
+  return `${who} · ${info.severity === "down" ? "down" : "degraded"}`;
+}
+
+function useClaudeStatus(enabled: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
+  const [info, setInfo] = useState<ClaudeStatusInfo | null>(null);
+
+  useEffect(() => {
+    if (!enabled) { setInfo(null); return; }
+    let alive = true;
+    const pull = () => {
+      invoke<ClaudeStatusInfo>("claude_status")
+        .then((s) => { if (alive) setInfo(s); })
+        .catch((e) => { if (alive) onError(e); });
+    };
+    // Hidden → no pull and no interval, same as the usage poll: this effect
+    // re-runs on the hidden edge, and fetching there spends a request on the
+    // transition into going quiet.
+    if (pageVisible) pull();
+    const id = pageVisible ? setInterval(pull, STATUS_POLL_MS) : null;
+    // Coming back to the window is exactly when "why is Claude not answering"
+    // gets asked, and the backend's TTL makes the extra pull free.
+    window.addEventListener("focus", pull);
+    return () => {
+      alive = false;
+      if (id) clearInterval(id);
+      window.removeEventListener("focus", pull);
+    };
+  }, [enabled, onError, pageVisible]);
+
+  // THE gate, for every host: nothing renders unless a watched component is
+  // actually unwell. An `unavailable` answer (no network, page moved, shape
+  // changed) is silence, not a badge that says we cannot tell.
+  return info && info.source === "live" && info.severity !== "none" ? info : null;
+}
+
+/** The reading: which components, what the incident says, and the way out to
+ *  the page itself. One rendering, two hosts — the chip's popover and the rail
+ *  tile's — for the same reason StatusSheet has one body: two copies would
+ *  drift the moment one of them grew a row. */
+function StatusDetail({ info, onError }: { info: ClaudeStatusInfo; onError: (e: unknown) => void }) {
+  const inc = info.incident;
+  return (
+    <div className="status-detail">
+      {info.components.map((c) => {
+        const tone = c.status === "operational" ? "ok" : c.status === "major_outage" ? "down" : "deg";
+        return (
+          <div className={"status-row " + tone} key={c.name}>
+            <span className="status-row-dot" />
+            <span className="status-row-name">{shortName(c.name)}</span>
+            {/* Statuspage's own word, underscores opened up: "degraded
+                performance" is what the page says, and a user comparing the two
+                should not have to translate ours back into theirs. */}
+            <span className="status-row-state">{c.status.replace(/_/g, " ")}</span>
+          </div>
+        );
+      })}
+      {inc && (
+        <div className="status-inc">
+          <div className="status-inc-name">{inc.name}</div>
+          {inc.body && <div className="status-inc-body">{inc.body}</div>}
+          <div className="status-inc-when">
+            {inc.status}
+            {inc.updated_at ? ` · updated ${ago(inc.updated_at)} ago` : ""}
+          </div>
+        </div>
+      )}
+      <div className="status-foot">
+        {/* The incident's own shortlink when there is one — it lands on the
+            update you are reading rather than on the page's front door. */}
+        <button className="status-link" onClick={() => openUrl(inc?.url ?? info.page_url).catch(onError)}>
+          status.claude.com <Icons.ExternalLink size={11} />
+        </button>
+        <span className="status-scope">watching {info.components.length} of {info.total}</span>
+      </div>
+    </div>
+  );
+}
+
+/** The chip: the whole indicator for the strip and footer hosts. Click, not
+ *  hover — the panel carries a link, so it has to accept the pointer, and a
+ *  hover panel you can move into is a hover panel that never closes. */
+function StatusChip({ info, side, onError }: {
+  info: ClaudeStatusInfo;
+  side: "up" | "right";
+  onError: (e: unknown) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const { trigRef, popRef, style } = usePopPos(open, side);
+  // CLAUDE.md: every popover goes through useEscape. A `window` keydown
+  // listener of its own would never hear the key while the terminal has focus.
+  useEscape(() => setOpen(false), open);
+
+  useEffect(() => {
+    if (!open) return;
+    const off = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (!trigRef.current?.contains(t) && !popRef.current?.contains(t)) setOpen(false);
+    };
+    // Capture, so a click that lands on something which stops propagation
+    // still closes this.
+    window.addEventListener("pointerdown", off, true);
+    return () => window.removeEventListener("pointerdown", off, true);
+  }, [open, trigRef, popRef]);
+
+  return (
+    <>
+      <button
+        ref={trigRef}
+        type="button"
+        className={"status-chip" + (info.severity === "down" ? " down" : "")}
+        data-testid="claude-status-chip"
+        aria-expanded={open}
+        title={`Claude service status — ${statusLabel(info)} · click for detail`}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {/* The flex container is this SPAN, never the button. WebKit
+            shrink-wraps a `<button>` that is itself a flex container without
+            counting every child, and the usage meter lost its labels to
+            exactly that — in the real app only, after the harness passed.
+            `.usage-trig` / `.usage-shape` is the shape that survived it. */}
+        <span className="status-chip-inner">
+          <span className="status-chip-dot" />
+          {statusLabel(info)}
+        </span>
+      </button>
+      {open && (
+        <div ref={popRef} className="status-pop" style={style}>
+          <StatusDetail info={info} onError={onError} />
         </div>
       )}
     </>
@@ -3029,6 +3283,16 @@ function App() {
   // MOUNTS, and a poller that moved with it would refetch on every change of
   // mind — and because "off" has to reach the effect, not just the render.
   const usage = useUsage(settings.usage_place !== "off", pageVisible, fail);
+  // Claude's own service status. Polled independently of the usage endpoint —
+  // they fail for different reasons, and a machine with no Claude Code
+  // credentials (no bars at all) still wants to be told the API is down.
+  const claudeStatus = useClaudeStatus(settings.usage_place !== "off", pageVisible, fail);
+  // The rail can only badge a tile that EXISTS. No usage data, no tile — so the
+  // indicator falls back to the window-wide strip rather than inventing a rail
+  // icon that appears mid-incident, which is the one thing the rail must not do
+  // (it would change length exactly when you are confused about why Claude
+  // stopped answering).
+  const statusOnTile = settings.usage_place === "rail" && usage.info ? claudeStatus : null;
 
   // The message a FAILED refresh put in the banner, so a later successful one can
   // retract it — and ONLY it. A blanket clear here is not an option: refresh also
@@ -3701,6 +3965,16 @@ function App() {
 
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
+  // The status chip's host, declared HERE and not up with `statusOnTile`,
+  // because the footer renders under `selected && sel` — and `selected` is a
+  // LOOKUP into the workspace, so it is null for the seconds between a restored
+  // `sel` and the first `list_workspace`, and for good if the place was removed
+  // elsewhere. Gating on `sel` sent the chip to a footer that does not exist,
+  // and it appeared nowhere at all. The strip is the only always-available host.
+  const statusChipHost: "strip" | "footer" | null =
+    !claudeStatus || statusOnTile ? null
+      : settings.usage_place === "footer" && selected ? "footer"
+        : "strip";
   // The topbar's remote link needs the base before it can render — re-read on
   // every change of PROJECT (not place: one remote per repo).
   const selRepo = sel?.repo ?? null;
@@ -5698,7 +5972,8 @@ function App() {
         {/* Usage, when the rail is its host. Above the two buttons, so the
             rail's actions stay together at the very bottom. */}
         {settings.usage_place === "rail" && usage.info && (
-          <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="tile" side="right" />
+          <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="tile" side="right"
+            status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
         <button className={"rail-icon" + (updateAvail ? " upd" : "")} data-track="settings" title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
@@ -6100,9 +6375,14 @@ function App() {
                     agent dot, and the session name is the prefix plus the slug
                     already in the header. So the row exists only when it is the
                     usage meter's host, and only when there is usage to show. */}
-                {settings.usage_place === "footer" && usage.info && (
+                {((settings.usage_place === "footer" && usage.info) || statusChipHost === "footer") && (
                   <footer className="statusbar">
-                    <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="line" side="up" />
+                    {settings.usage_place === "footer" && usage.info && (
+                      <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="line" side="up" />
+                    )}
+                    {statusChipHost === "footer" && claudeStatus && (
+                      <StatusChip info={claudeStatus} side="up" onError={fail} />
+                    )}
                   </footer>
                 )}
               </>
@@ -6744,9 +7024,14 @@ function App() {
     {/* The window-wide host: under rail, sidebar, terminal and dock alike, so it
         survives ⌘B and is the only placement that is also there on Home. No
         `info`, no row — an empty 26px band would be worse than no band. */}
-    {settings.usage_place === "strip" && usage.info && (
+    {((settings.usage_place === "strip" && usage.info) || statusChipHost === "strip") && (
       <div className="usage-strip">
-        <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="line" side="up" />
+        {settings.usage_place === "strip" && usage.info && (
+          <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="line" side="up" />
+        )}
+        {statusChipHost === "strip" && claudeStatus && (
+          <StatusChip info={claudeStatus} side="up" onError={fail} />
+        )}
       </div>
     )}
     </div>

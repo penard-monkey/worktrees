@@ -1014,6 +1014,69 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       };
     }
 
+    // Claude's own service status. Operational by DEFAULT, because that is the
+    // day this feature has to be invisible on — every indicator is gated on
+    // `severity !== "none"`, so the harness's normal state proves the gate.
+    //   ?status=degraded  the API is degraded, an incident is open
+    //   ?status=down      Claude Code is out, the chip/badge goes red
+    //   ?status=both      both watched components unwell → the chip says "Claude"
+    //   ?status=off       the backend could not tell (no network, shape moved)
+    case "claude_status": {
+      const t = now();
+      const page = "https://status.claude.com";
+      const q = location.search.match(/status=(\w+)/)?.[1];
+      const base = { source: "live", fetched_at: t, total: 6, page_url: page };
+      const inc = (name: string, body: string) => ({
+        name, status: "monitoring", body,
+        updated_at: t - 14 * 60, url: "https://stspg.io/mock",
+      });
+      if (q === "off") {
+        return { ...base, source: "unavailable", severity: "none", components: [], total: 0, incident: null };
+      }
+      if (q === "degraded") {
+        return {
+          ...base, severity: "degraded",
+          components: [
+            { name: "Claude Code", status: "operational" },
+            { name: "Claude API (api.anthropic.com)", status: "degraded_performance" },
+          ],
+          incident: inc("Elevated errors on the Messages API",
+            "A fix has been applied and error rates are recovering. We are monitoring the results."),
+        };
+      }
+      if (q === "down") {
+        return {
+          ...base, severity: "down",
+          components: [
+            { name: "Claude Code", status: "major_outage" },
+            { name: "Claude API (api.anthropic.com)", status: "operational" },
+          ],
+          incident: inc("Claude Code sessions failing to start",
+            "We have identified the cause and are rolling back the change."),
+        };
+      }
+      if (q === "both") {
+        return {
+          ...base, severity: "down",
+          components: [
+            { name: "Claude Code", status: "major_outage" },
+            { name: "Claude API (api.anthropic.com)", status: "partial_outage" },
+          ],
+          // no incident: components can turn red before the page posts one, and
+          // the panel has to read as a whole answer without it
+          incident: null,
+        };
+      }
+      return {
+        ...base, severity: "none",
+        components: [
+          { name: "Claude Code", status: "operational" },
+          { name: "Claude API (api.anthropic.com)", status: "operational" },
+        ],
+        incident: null,
+      };
+    }
+
     case "switch_place":
       editPlace(args.repo, args.slug, (p) => { p.branch = args.branch; });
       return { ok: true, code: 0, output: `Switched ${args.slug} → ${args.branch}` };
