@@ -348,6 +348,40 @@ is invisible to the bats suite — there is no fake claude. Re-run
   not exist, `ops.rs:417`). Four cases were wrong in the first version and every
   test passed. When you touch `ops.rs`'s create path, walk `NewPlaceDialog`'s
   chain against it by hand.
+- **An accent token is a FILL, not text, and the theme you develop in will not
+  tell you.** `--warn` as 11px bold text on its own 16% tint measures 3.1:1 in
+  tokyo-day and 2.2:1 in catppuccin-latte; `--danger` is 2.2:1 in nord and 3.2:1
+  in gruvbox-dark — and 6.2:1 in tokyo-night, which is where it gets looked at.
+  The status chip shipped its first cut that way and read perfectly. The rule
+  the app already follows elsewhere is the fix: hue lives in a DOT or a tint,
+  words take `--txt-hi` / `--txt-dim` (`.status-row`, `.status-chip`). Measuring
+  it has two traps of its own: a translucent background must be COMPOSITED over
+  the first opaque ancestor before any ratio means anything — read
+  `backgroundColor` straight and every ratio comes back 1.0, which reads as "no
+  contrast anywhere" rather than "the probe is wrong" — and the parser needs
+  both shapes (see the `color-mix()` note below). Then check the number against
+  the app's OWN tokens before calling it a defect: `--txt-mute` is 2.5–2.8 and
+  `--accent` is 3.1 in tokyo-day everywhere in this app, so a new panel matching
+  them is consistent, not broken, and "fixing" only that panel is the actual
+  regression.
+- **Giving a `pointer-events: none` panel something to click turns its own
+  dismiss handler against it.** `.usage-pop` is inert because it is measured
+  before it is placed; the status band's link needed
+  `.usage-pop.pinned { pointer-events: auto }`, and `UsageMeter`'s outside-click
+  handler excluded only `trigRef`. Pointerdown on the link unpinned the panel,
+  React unmounted it, and the `click` never landed on anything — a link that
+  does nothing, and only in one host. Any close-on-outside handler must exclude
+  the PANEL as well as the trigger. The harness cannot find this by clicking:
+  `.click()` dispatches no `pointerdown`, so reproducing it needs a real
+  `PointerEvent` at the element.
+- **`sel` is a selection; `selected` is a LOOKUP that can be null while `sel`
+  is set.** `selected` resolves `sel` against `ws`, so it is null for the
+  seconds between a restored selection and the first `list_workspace`, and for
+  good once a place is removed elsewhere. Anything gated on `sel` that renders
+  inside `selected && sel` disappears in that window — the status chip was
+  assigned to a footer that did not exist and appeared nowhere at all. Gate on
+  whatever the host actually renders under, which means declaring it below
+  `selected` rather than up with the other derived state.
 - **Read what `getComputedStyle` hands back before doing arithmetic on it.** A resolved
   `color-mix()` comes back as `color(srgb 0-1 / a)` while plain colours come
   back as `rgb(0-255)`; parsing both on the 0-255 scale made an added row and a

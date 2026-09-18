@@ -5,6 +5,22 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The Claude status indicator has never met a real outage, and never met
+  WebKit.** `status_parse` is tested against captured `summary.json` bodies and
+  the UI against the mock's four canned states, but `claude_status` has not once
+  been invoked against the live page from inside a running app — worth one
+  `app/scripts/sandbox.sh --app` run, ideally while `status.claude.com` is
+  actually unwell. The chip is also Chrome-measured only: it is `display: block`
+  with an inner flex span precisely because of the usage meter's WebKit
+  shrink-wrap history, but the headless-WebKit probe that caught the meter's
+  201px → 321px gap has not been pointed at it. Related and cheap: a reusable
+  wrapper for that probe, since it has now been wanted twice and rebuilt from
+  scratch both times. And one coupling to remember — `STATUS_WATCHED` matches
+  components by ID with a name prefix as fallback; if Anthropic splits or
+  renames `Claude Code` / `Claude API`, the ID match goes stale silently and the
+  prefix is the only thing left holding it up.
+  _From: [2026-09-18 claude-status-indicator](docs/sessions/2026-09-18-claude-status-indicator/summary.md)_
+
 - **The mock's TerminalPane throws on every place switch.** `Cannot read
   properties of undefined (reading 'dimensions')` from `TerminalPane.tsx:196`'s
   post-switch `setTimeout` into xterm — twice per switch in the harness, landing
