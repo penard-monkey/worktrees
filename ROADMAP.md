@@ -34,23 +34,24 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   old name; no PR has ever targeted it).
   _From: [2026-09-18 mcp-setup-wizard](docs/sessions/2026-09-18-mcp-setup-wizard/summary.md)_
 
-- **The DRAG half of "reference another worktree" is unbuilt.** #215 shipped the
-  typed `@` autocomplete; the original ask was also to drag a place row from the
-  nav into a session. The design is settled and deliberately does NOT reuse the
-  resource uri: the drop should insert a **quoted absolute path**
-  (`@"/…/.worktrees/bug-fixes"`), because the quoted file-mention form
-  (`@"([^"]+)"`, verified in the client) has no `\b` rule and no charset limit,
-  needs no server-name discovery, cannot go stale, works cross-project where the
-  MCP server cannot reach at all, and degrades to a path the model can still
-  `ls` rather than to an opaque string. Mechanically it is cheap: `navdrag.ts`
-  is pointer-driven (not HTML5 DnD), so the terminal becomes a target with one
-  `data-drop` attribute, and `tmux set-buffer` + `paste-buffer -p -t <session>:0.0`
-  targets pane 0 (guaranteed to be the AI by `tmux.rs`'s `new_session`) without
-  any new `TerminalPane` API. Two traps recorded in the session summary: put the
-  attribute on a node `TerminalPane` owns, NOT `.term-wrap` (`TermSurface` is
-  shared with every dock shell tab), and never add a `send-keys -l` fallback —
-  `paste-buffer -p` cannot type into a permission prompt, and that can.
-  _From: [2026-09-18 mcp-resources](docs/sessions/2026-09-18-mcp-resources/summary.md)_
+- **The drag has never actually been performed.** #221 shipped it and every
+  part is tested except the gesture: the mock records the invoke but has no tmux
+  to paste into, and driving the real app is off-limits. Two steps in
+  `docs/ai-profiles-manual-checks.md` matter most and neither has been run —
+  dropping while Claude is asking a permission question (the safety argument is
+  paste-vs-keystrokes, NOT that a prompt disables bracketed paste, which it
+  almost certainly does not), and dropping into a session whose Claude has
+  exited, which must refuse rather than paste onto a shell prompt. Also worth
+  one run under `set -g base-index 1`, the config that used to break every drop.
+  _From: [2026-09-18 drag-reference](docs/sessions/2026-09-18-drag-reference/summary.md)_
+
+- **Nothing pins tmux's `base-index`, and the app assumed it.** `tune_session`
+  sets options on a session it creates but never `base-index`, so a user's
+  `~/.tmux.conf` decides whether window 0 exists. The drop path no longer cares
+  (it addresses a `%id`), but anything else here that spells a `:0.0` target
+  would break for that user silently. Worth a sweep, and worth deciding whether
+  `tune_session` should pin it.
+  _From: [2026-09-18 drag-reference](docs/sessions/2026-09-18-drag-reference/summary.md)_
 
 - **Two known edges in the MCP resource uris, both exotic, both recorded rather
   than fixed.** `uri_map`'s two-pass reservation guarantees a dirty slug's uri
