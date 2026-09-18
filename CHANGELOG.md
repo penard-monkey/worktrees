@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.25.0] - 2026-09-18
 
 ### Added
 - **Drag a worktree into a session to talk about it.** Dragging a place from
