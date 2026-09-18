@@ -114,7 +114,7 @@ worth knowing too: **bash expands every assignment on a `local a=1 b="$a"` line
 before binding any of them**, so `b` is empty — and under `set -u` the function
 dies mid-way inside a command substitution, leaving the caller with "".
 
-**A new test must be shown to FAIL first.** ROADMAP's zombie-children item
+**A new test must be shown to FAIL first.** The zombie-children issue (#262)
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old
 line), watch it go red, then restore. Two tests this repo now relies on were
@@ -639,8 +639,8 @@ is invisible to the bats suite — there is no fake claude. Re-run
   app is quit+reopened and the old server is gone: check `ps -o lstart` on the
   tmux server before concluding otherwise. Don't try to diagnose from TCC.db —
   reading it needs Full Disk Access on the TERMINAL, and the tccd log is
-  redacted. Releases stay ad-hoc; see ROADMAP for the distribution tier (and
-  why the Mac App Store is not it).
+  redacted. Releases stay ad-hoc; see #283 for the distribution tier (and why
+  the Mac App Store is not it).
 
 ## Decisions
 
@@ -677,8 +677,9 @@ paths, gates, index and branch naming live in `.claude/close-out.md`, which
 the skill reads; edit that file, not the skill. Short version: scratch →
 `~/.cache/worktrees/…`, session summary + planning tarball →
 `docs/sessions/<date>-<slug>/` + a row in `docs/sessions/index.md`
-(committed), stragglers → `ROADMAP.md`, one squash-merged PR, then a fresh
-branch off origin/main.
+(committed), stragglers → **GitHub issues** (`ROADMAP.md` is the index over
+them, not the parking lot — `.claude/close-out.md` has the triage rule and the
+labels), one squash-merged PR, then a fresh branch off origin/main.
 
 **`gh pr merge` reports a failure it did not cause.** From a side worktree it
 dies with *fatal: 'main' is already used by worktree at …* — that is `gh`'s

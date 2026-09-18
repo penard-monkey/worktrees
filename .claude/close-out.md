@@ -8,7 +8,7 @@ Only the deltas from that skill's defaults live here.
 | archive dir | `docs/sessions/<YYYY-MM-DD>-<slug>/` (default) — ALSO add a row at the top of the table in `docs/sessions/index.md`, linking `<slug>/summary.html` (Jekyll site: `.md` → `.html`) |
 | scratch dir | `~/.cache/worktrees/<project>/<worktree-name>/` — e.g. `~/.cache/worktrees/worktrees/ui-changes/` |
 | planning files | `task_plan.md`, `findings.md`, `progress.md` (gitignored) |
-| roadmap | `ROADMAP.md` (default) |
+| roadmap | **GitHub issues, not a file** — see “Roadmap → issues” below. `ROADMAP.md` is now an index over them plus the deliberately-not-issues; it is edited only when a straggler belongs in one of those sections |
 | merge | squash (default) |
 | branch naming | per worktree — `<tree>-<something>`, idle base `<tree>-next`: `bug-fixes` → `bug-fixes-next`, `ui-changes` → `ui-changes-next`. ⚠ `ui-next` belongs to the **ui-tweaks** tree; two worktrees must never share an idle base (see the phantom-state note below) |
 
@@ -22,6 +22,42 @@ cargo test -p worktrees-core
 cargo test -p worktrees-cli
 cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 ```
+
+## Roadmap → issues (replaces the skill's step 6)
+
+Stragglers become **GitHub issues**, not ROADMAP.md bullets. The roadmap file is
+the index; `gh` is the parking lot.
+
+For each thing worth keeping:
+
+1. **Is it a task?** If it is a decision already made, a note waiting on
+   evidence, or a chore that belongs to a machine rather than the codebase, it
+   goes in the matching section of `ROADMAP.md` — *Decided and declined*,
+   *Parked with a reason*, *Waiting on evidence*, *Local chores*. Those sections
+   keep their full prose. Do not file them.
+2. **Otherwise file it:** `gh issue create`, carrying the full prose (the
+   context is the point — do not compress it into a bullet), and linking the
+   session summary at the bottom the way the existing issues do.
+3. **Label it.** One `area:*` (`app` / `core` / `cli` / `ci-tooling` / `docs`),
+   plus `bug` / `enhancement` / `tech-debt` as it fits. Add `good first issue`
+   **only** if it is self-contained, needs no hardware beyond a checkout, and
+   the CLAUDE.md gates are the whole bar — that label is how an outside
+   contributor finds a starting point, so a wrong one costs them an evening.
+4. **`needs-real-mac`** for anything only confirmable by hand in the real app.
+   Prefer appending a checkbox to the existing tracker
+   ([#294](https://github.com/penard-monkey/worktrees/issues/294), or
+   [#295](https://github.com/penard-monkey/worktrees/issues/295) for
+   `docs/ai-profiles-manual-checks.md`) over filing a new issue — twenty issues
+   that all say “open the app” help nobody.
+5. **Add a row** to the matching table in `ROADMAP.md`.
+6. **Close what the session finished.** `gh issue close <n> --comment` with the
+   PR that did it. This is the step that keeps the list honest, and it is the
+   one the old append-only file never had.
+
+⚠ Cross-references inside an issue body: `#N` resolves against this repo, and
+PR numbers and issue numbers share one sequence. Check what a number actually
+points at before writing it — `#49` is a PR about the busy dot, not the
+note-focus bug.
 
 ## Notes
 
