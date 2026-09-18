@@ -21,6 +21,21 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   prefix is the only thing left holding it up.
   _From: [2026-09-18 claude-status-indicator](docs/sessions/2026-09-18-claude-status-indicator/summary.md)_
 
+- **Remove the MCP resource debug logging (gate: workspace version 0.26.0).** The
+  `@worktrees:place://…` path cannot be tested here — there is no fake claude —
+  so `worktrees mcp` currently appends every `resources/list`, every
+  `resources/read` (including a MISS, which means the client's cached list and
+  ours have diverged), and every `list_changed` with the places that moved, to
+  `~/.cache/worktrees/mcp-debug.log`. It is there to find the issues only real
+  use will surface. `mcp::tests::the_debug_log_is_temporary_and_says_so` goes
+  red when the workspace version reaches 0.26.0 — the release bump after this
+  feature ships — and its message lists everything to delete, so this entry is a
+  pointer, not the reminder. (A version, not a date: a date bomb fires on
+  whatever unrelated PR is open that morning, and passes SILENTLY on a runner
+  with no `date`.) Before removing it, read the log: whatever it caught should
+  become a test or a note here.
+  _From: the mcp-resources session (see docs/sessions/)_
+
 - **The mock's TerminalPane throws on every place switch.** `Cannot read
   properties of undefined (reading 'dimensions')` from `TerminalPane.tsx:196`'s
   post-switch `setTimeout` into xterm — twice per switch in the harness, landing

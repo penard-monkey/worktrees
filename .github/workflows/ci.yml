@@ -93,6 +93,11 @@ jobs:
           make install BINDIR="$RUNNER_TEMP/xbin"
           "$RUNNER_TEMP/xbin/worktrees" --version
           "$RUNNER_TEMP/xbin/worktrees" help >/dev/null
+      # Rides this job because the release build it needs is already done above.
+      # Covers what bats and the unit tests cannot: the MCP server's watcher
+      # thread writing to the same newline-delimited stdout as its request loop.
+      - name: make test-mcp (MCP resource surface over a real pipe)
+        run: make test-mcp
 
   # Tauri app crate ("P4"): frontend typecheck + build (dist feeds tauri-build),
   # then the Rust shell linking worktrees-core. rust-cache because the tauri dep

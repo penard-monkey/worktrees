@@ -2,12 +2,12 @@
 //! ported 1:1 from the bash `cmd_ls`/`emit_*`. git/tmux are shelled out so the
 //! stale-dir trap and output match exactly.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::resolve_prefix_from;
 use crate::error::{Result, WtError};
-use crate::model::{LsJson, Place, Stray, TmuxSession, SCHEMA_VERSION};
+use crate::model::{LsJson, Place, PlaceRef, Stray, TmuxSession, SCHEMA_VERSION};
 use crate::projcfg;
 use crate::render::{self, Row};
 use crate::sysclock::{now_epoch, SysClock};
@@ -423,6 +423,56 @@ impl Project {
             });
         }
         out
+    }
+
+    /// Every place, named and located, for ONE `git worktree list --porcelain`
+    /// plus one `read_dir` — no per-place git, no tmux, no session probing.
+    ///
+    /// The ordering is `ls`'s minus the recency sort: main first, then
+    /// `.worktrees/` in glob order. Callers that derive a stable identifier per
+    /// place (the MCP resource uris) depend on that being deterministic, so it
+    /// must not become recency-sorted the way `ls` is.
+    pub fn place_index(&self) -> Vec<PlaceRef> {
+        let branches: HashMap<String, Option<String>> = self.worktree_list().into_iter().collect();
+        std::iter::once((self.main_root.clone(), true))
+            .chain(self.worktree_dirs().into_iter().map(|d| (d, false)))
+            .map(|(path, is_main)| PlaceRef {
+                slug: if is_main { "(main)".to_string() } else { basename(&path) },
+                branch: branches.get(&path).cloned().flatten(),
+                registered: branches.contains_key(&path),
+                is_main,
+                path,
+            })
+            .collect()
+    }
+
+    /// The full `Place` snapshot for ONE place, without paying for the others.
+    ///
+    /// `ls` computes every place because it is asked for every place. A caller
+    /// that wants one — an MCP resource read, where the client fans several
+    /// mentions out concurrently — would otherwise trigger a whole fan-out per
+    /// mention. The per-snapshot prefetches (tmux panes, the AI word, the base
+    /// ref, the claude config root) are the same ones `ls` makes; what is saved
+    /// is the per-place git work for every OTHER place.
+    ///
+    /// Takes a `PlaceRef` rather than a slug so the caller's existing
+    /// `place_index()` is not repeated as a second `git worktree list`.
+    pub fn place_one(&self, p: &PlaceRef) -> Place {
+        // `place_json` only ever asks `reg.contains(dir)`, so the registered set
+        // for a single place is exactly that one answer.
+        let mut reg = HashSet::new();
+        if p.registered {
+            reg.insert(p.path.clone());
+        }
+        self.place_json(
+            &p.path,
+            p.is_main,
+            &reg,
+            tmux::PaneList::fetch().as_ref(),
+            &adopt_ai_word(),
+            &self.base_ref(),
+            &self.claude_config_root(),
+        )
     }
 
     /// Physical dir for a place slug; `(main)` → the main checkout.

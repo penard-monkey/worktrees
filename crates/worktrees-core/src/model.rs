@@ -62,6 +62,29 @@ pub struct Stray {
     pub slug: String,
 }
 
+/// A place named and located, and NOTHING that costs a git call per place.
+///
+/// `Place` (above) is the full snapshot: it shells out to git for status,
+/// divergence and log, and to tmux, for every worktree. That is right for
+/// `ls`, which is asked for it, and wrong for a caller that only needs to know
+/// WHICH places exist — the MCP resource list, which every live session
+/// re-fetches whenever the set changes. `PlaceRef` is the whole set for one
+/// `git worktree list --porcelain` plus one `read_dir`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlaceRef {
+    /// `(main)` for the main checkout, else the directory name — the same slug
+    /// `Place` carries, so it is a valid argument to every slug-taking tool.
+    pub slug: String,
+    pub path: String,
+    /// `None` when detached, or when the worktree is not registered.
+    pub branch: Option<String>,
+    pub is_main: bool,
+    /// Whether git knows about this worktree. An unregistered directory under
+    /// `.worktrees/` is still a place (`ls` shows it as stale) and still has a
+    /// name worth referring to.
+    pub registered: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LsJson {
     pub schema_version: u32,
