@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.25.1] - 2026-09-18
 
 ### Fixed
 - **The drag never found Claude.** v0.25.0 shipped "drag a worktree into a
