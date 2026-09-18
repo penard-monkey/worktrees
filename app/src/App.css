@@ -1223,6 +1223,54 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .init-banner .ver-actions { margin-top: 0; }
 
+/* ── Claude MCP setup: the Home card + the Settings verdict line ──────────────
+   The card borrows `.init-banner`'s box treatment (the app's one "here is
+   something you could set up" idiom) but NOT its amber edge: nothing is wrong,
+   and the amber in this app means "needs a human". It sits on `.briefing`, which
+   sits on `.main` — `--bg-abyss` — so the surface is `--bg-elev`, for the reason
+   the `.term-status .update-log` rule two hundred lines up spells out: a
+   recessed box over a token EQUAL to its host has zero contrast in every theme
+   and is carried by a 1px border that tokyo-day cannot carry. */
+.mcp-card {
+  display: flex; flex-direction: column; gap: var(--s2);
+  margin-bottom: var(--s5); padding: var(--s3);
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-md);
+}
+.mcp-card-h {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--fs-meta); color: var(--txt-hi); font-weight: var(--fw-med);
+}
+.mcp-card p {
+  margin: 0; font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt-dim);
+}
+.mcp-card .ver-actions { margin-top: 0; align-items: center; }
+/* Quieter than a `.ctrl`: dismissing is not an action of equal weight to the one
+   the card is asking for, and a second bordered button reads as a choice
+   between two things rather than an offer with a way out. */
+.mcp-dismiss {
+  background: none; border: 0; padding: 0 var(--s1); cursor: pointer;
+  font: inherit; font-size: var(--fs-micro); color: var(--txt-dim);
+}
+.mcp-dismiss:hover { color: var(--txt); text-decoration: underline; }
+
+/* The one-line verdict in Settings. `align-items: start` so a wrapped sentence
+   keeps its icon on the first line rather than centring it against three. */
+.mcp-verdict {
+  display: flex; align-items: start; gap: var(--s2);
+  margin-top: var(--s2); padding: var(--s2);
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt);
+}
+.mcp-verdict svg { flex: none; margin-top: 1px; }
+.mcp-ok svg { color: var(--ok); }
+.mcp-warn { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.mcp-warn svg { color: var(--warn); }
+.mcp-off svg { color: var(--txt-dim); }
+/* The command is meant to be READ and copied, so it may not be clipped to the
+   9rem `.update-log` is capped at, and it wraps on whitespace rather than
+   `break-all` — a path broken mid-component is unreadable and unpasteable. */
+.mcp-cmd { max-height: none; word-break: normal; overflow-wrap: anywhere; }
+
 /* new-worktree form pinned at the top of the nav */
 .nav-newform {
   margin: 0 var(--s2) var(--s2);

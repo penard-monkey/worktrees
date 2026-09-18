@@ -66,8 +66,25 @@ const LATEST: &str = "2025-11-25";
 
 const EXIT_NEEDS_CONFIRM: i32 = 3;
 
+/// Said by every tool that is somehow reached without a project. Also the
+/// `initialize` instructions' shorter cousin.
+const NO_PROJECT: &str = "not inside a git repository — this server has no project to manage";
+
 struct Server {
-    project: Project,
+    /// `None` when the server was launched outside a git repository.
+    ///
+    /// It used to be fatal: `Project::discover` failing exited before the
+    /// JSON-RPC loop ever started. That was fine while this server was added
+    /// per-repo, and became wrong the moment the app started installing it at
+    /// USER scope for everybody — a user-scope server is launched by EVERY
+    /// claude session, including the ones started in a home directory or a
+    /// scratch folder, and each of those showed a red "✘ Failed to connect:
+    /// CONNECTION_CLOSED" in `/mcp` for a setup that is perfectly correct.
+    ///
+    /// So we serve: handshake, say plainly where we are, and advertise NO tools.
+    /// An empty tool list is the honest statement of "nothing here to drive", and
+    /// it costs a model nothing to read.
+    project: Option<Project>,
     mutations: bool,
     /// Set when `notifications/initialized` arrives. Shared with the watcher
     /// thread, which must not emit before it.
@@ -79,6 +96,91 @@ struct Server {
 /// sessions and by whoever's commits were pulled, and they land in a prompt —
 /// a cap keeps a hostile or merely huge one from being the whole message.
 const FREE_TEXT_MAX: usize = 400;
+
+/// `worktrees mcp --status | --install | --uninstall` — the setup verbs, split
+/// out from the server so they can run OUTSIDE a repository.
+///
+/// `None` means "this is not a setup invocation, go serve". Returning an Option
+/// rather than branching in `cmd_mcp` keeps the dispatch in main.rs, which has
+/// to make the same decision one step earlier (the git guard).
+pub fn setup_verb(args: &[String]) -> Option<&'static str> {
+    for a in args {
+        match a.as_str() {
+            "--status" => return Some("status"),
+            "--install" => return Some("install"),
+            "--uninstall" => return Some("uninstall"),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Run one of those verbs. `repo` is the project in focus when there is one —
+/// it is what makes the local/project scopes checkable, and `None` is a normal
+/// answer here (the whole point of hoisting these above the git guard).
+pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
+    use worktrees_core::mcpsetup::{self, State};
+    let json = args.iter().any(|a| a == "--json");
+    // The server's own flag, reused: `--install` alone installs the mutating
+    // server (what an orchestrator needs), `--read-only` holds it back.
+    let mutations = !args.iter().any(|a| a == "--read-only");
+
+    let report = |st: &mcpsetup::Status| {
+        if json {
+            println!("{}", serde_json::to_string(st).unwrap_or_default());
+            return;
+        }
+        let line = match st.state {
+            State::Installed => "✔ installed (user scope), mutating".to_string(),
+            State::ReadOnly => "✔ installed (user scope), READ-ONLY — an orchestrator cannot create or close places".to_string(),
+            State::Stale => format!(
+                "✘ installed, but the binary it names is gone: {}",
+                st.user.as_ref().map(|e| e.command.as_str()).unwrap_or("?")
+            ),
+            State::Foreign => format!(
+                "! an MCP server named `{}` exists and is not ours (runs `{}`) — untouched",
+                mcpsetup::SERVER_KEY,
+                st.user.as_ref().map(|e| e.command.as_str()).unwrap_or("?")
+            ),
+            State::Elsewhere => format!("✔ not in user scope, but configured in: {:?}", st.found_in),
+            State::Absent => "— not installed".to_string(),
+            State::CliMissing => "— not installed, and no `worktrees` binary found to point it at".to_string(),
+            State::NotApplicable => format!("— the AI command is `{}`, not claude", st.ai_cmd),
+        };
+        println!("{line}");
+        if let Some(c) = &st.command {
+            println!("  install with: {c}");
+        }
+        println!("  config: {}", st.config_path);
+    };
+
+    match verb {
+        "status" => {
+            let st = mcpsetup::status(repo);
+            report(&st);
+            i32::from(!matches!(st.state, State::Installed | State::ReadOnly | State::Elsewhere | State::NotApplicable))
+        }
+        "install" | "uninstall" => {
+            let r = if verb == "install" {
+                mcpsetup::install(repo, mutations)
+            } else {
+                mcpsetup::uninstall(repo)
+            };
+            match r {
+                Ok(o) => {
+                    print!("{}", o.output);
+                    report(&o.status);
+                    i32::from(!o.ok)
+                }
+                Err(e) => {
+                    eprintln!("{}", worktrees_core::render::error_line(&e));
+                    1
+                }
+            }
+        }
+        _ => 1,
+    }
+}
 
 pub fn cmd_mcp(args: &[String]) -> i32 {
     let mutations = args.iter().any(|a| a == "--mutations");
@@ -93,20 +195,30 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
         eprintln!("worktrees mcp: cannot determine a working directory");
         return 1;
     };
+    // A discovery failure is NOT fatal — see `Server::project`. Reported on
+    // stderr (never stdout, which carries protocol) and then served empty.
     let project = match Project::discover(&root) {
-        Ok(p) => p,
+        Ok(p) => Some(p),
         Err(e) => {
-            eprintln!("worktrees mcp: {}", e.msg);
-            return e.code;
+            eprintln!("worktrees mcp: {} — serving with no tools", e.msg);
+            None
         }
     };
     let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let wt_root = project.wt_root_dir().to_string();
-    let places_file = format!("{}/.worktrees.places.json", project.main_root);
+    // Everything below needs a project: the resource list IS the places in it,
+    // and the watcher exists to notice them changing. With none there is nothing
+    // to publish and nothing to watch, so the watcher is not spawned at all —
+    // rather than started against a path that does not exist. `dlog` still has
+    // somewhere to write: the directory we looked in.
+    let watch = project
+        .as_ref()
+        .map(|p| (p.wt_root_dir().to_string(), format!("{}/.worktrees.places.json", p.main_root), p.main_root.clone()));
+    let log_root =
+        project.as_ref().map(|p| p.main_root.clone()).unwrap_or_else(|| root.to_string_lossy().into_owned());
     let mut server = Server { project, mutations, ready: ready.clone() };
 
     dlog(
-        &server.project.main_root,
+        &log_root,
         &format!(
             "start v{} mutations={} log={:?} REMOVE_THIS_LOG_AT_v{}.{}",
             env!("CARGO_PKG_VERSION"),
@@ -133,7 +245,9 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
             REMOVE_AT_VERSION.1
         );
     }
-    spawn_list_watcher(wt_root, places_file, server.project.main_root.clone(), ready);
+    if let Some((wt_root, places_file, main_root)) = watch {
+        spawn_list_watcher(wt_root, places_file, main_root, ready);
+    }
 
     let stdin = std::io::stdin();
     // Bounded: `lines()` grows a String until it finds a newline, so a client
@@ -277,7 +391,7 @@ impl Server {
         let Some(id) = id else {
             if method == Some("notifications/initialized") {
                 self.ready.store(true, std::sync::atomic::Ordering::Relaxed);
-                dlog(&self.project.main_root, "client initialized; watcher unmuted");
+                dlog(self.log_root(), "client initialized; watcher unmuted");
             }
             return None;
         };
@@ -325,21 +439,32 @@ impl Server {
                 "resources": { "subscribe": false, "listChanged": true }
             },
             "serverInfo": { "name": "worktrees", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": format!(
-                "Worktree management for the repository at {}. One git worktree per branch, \
-                 one tmux session per worktree. Use list_places to see the current state. \
-                 {}",
-                self.project.main_root,
-                if self.mutations {
-                    "Mutating tools are enabled; destructive ones need confirm: true."
-                } else {
-                    "This server is read-only apart from note/pin/lifecycle metadata."
-                }
-            ),
+            "instructions": match &self.project {
+                None => "This session is not inside a git repository, so there is no project to \
+                         manage and this server exposes no tools. Start a session inside a \
+                         worktrees-managed repository to use it."
+                    .to_string(),
+                Some(p) => format!(
+                    "Worktree management for the repository at {}. One git worktree per branch, \
+                     one tmux session per worktree. Use list_places to see the current state. \
+                     {}",
+                    p.main_root,
+                    if self.mutations {
+                        "Mutating tools are enabled; destructive ones need confirm: true."
+                    } else {
+                        "This server is read-only apart from note/pin/lifecycle metadata."
+                    }
+                ),
+            },
         })
     }
 
     fn tools(&self) -> Vec<serde_json::Value> {
+        // No repo, no tools. Advertising them and failing every call would be a
+        // worse lie than an empty list.
+        if self.project.is_none() {
+            return Vec::new();
+        }
         let mut t = vec![
             tool(
                 "list_places",
@@ -504,7 +629,7 @@ impl Server {
         // the tree is.
         if advertised["annotations"]["readOnlyHint"] != serde_json::json!(true) {
             if let Some(msg) =
-                worktrees_core::sync::hub_copy_refusal(std::path::Path::new(&self.project.main_root))
+                worktrees_core::sync::hub_copy_refusal(std::path::Path::new(&self.proj()?.main_root))
             {
                 return Ok(text_err(&msg));
             }
@@ -512,7 +637,7 @@ impl Server {
 
         match name {
             "list_places" => {
-                let ls = self.project.ls();
+                let ls = self.proj()?.ls();
                 Ok(text_ok(&serde_json::to_string_pretty(&ls).unwrap_or_default()))
             }
             "place_status" => {
@@ -520,7 +645,7 @@ impl Server {
                     Ok(v) => v,
                     Err(e) => return Ok(text_err(&e)),
                 };
-                let ls = self.project.ls();
+                let ls = self.proj()?.ls();
                 match ls.places.iter().find(|p| p.slug == slug) {
                     Some(p) => {
                         // The place, plus WHO is working in it: the claude
@@ -638,6 +763,23 @@ impl Server {
         }
     }
 
+    /// The pinned project, or the one sentence every tool says without it.
+    ///
+    /// Unreachable in practice — `tools()` advertises nothing when there is no
+    /// project, and `call` refuses an unadvertised name — but the type has to be
+    /// discharged somewhere, and a real message beats an `unwrap` that would take
+    /// the transport down with it.
+    /// Where `dlog` writes. The project's root when there is one; otherwise the
+    /// directory the server was launched in, so a no-project session still
+    /// leaves a trace rather than silently having nowhere to put one.
+    fn log_root(&self) -> &str {
+        self.project.as_ref().map(|p| p.main_root.as_str()).unwrap_or(".")
+    }
+
+    fn proj(&self) -> Result<&Project, String> {
+        self.project.as_ref().ok_or_else(|| NO_PROJECT.to_string())
+    }
+
     /// A slug that is flag-safe AND names a place that actually exists.
     ///
     /// The existence check is not pedantry: `store::edit` creates the entry it is
@@ -645,7 +787,7 @@ impl Server {
     /// for a place that never existed.
     fn known_slug(&self, slug: &str) -> Result<String, String> {
         let slug = safe_arg(slug, "slug")?;
-        if self.project.ls().places.iter().any(|p| p.slug == slug) {
+        if self.proj()?.ls().places.iter().any(|p| p.slug == slug) {
             Ok(slug)
         } else {
             Err(format!("no such place: {slug}"))
@@ -656,7 +798,7 @@ impl Server {
         if slug.is_empty() {
             return Ok(text_err("slug is required"));
         }
-        match store::edit(&self.project.main_root, slug, f) {
+        match store::edit(&self.proj()?.main_root, slug, f) {
             Ok(()) => Ok(text_ok("ok")),
             Err(e) => Ok(text_err(&e)),
         }
@@ -672,8 +814,14 @@ impl Server {
     /// — that belongs in `resources/read`, which runs per mention, on demand.
     fn resources(&self) -> serde_json::Value {
         let t0 = std::time::Instant::now();
-        let places = self.project.place_index();
-        let declared = store::read_lenient(&self.project.main_root);
+        // No repo, no places — so no resources, for the same reason `tools()`
+        // returns nothing: publishing entries that every read would refuse is a
+        // worse lie than an empty list.
+        let Ok(project) = self.proj() else {
+            return serde_json::json!({ "resources": [] });
+        };
+        let places = project.place_index();
+        let declared = store::read_lenient(&project.main_root);
         let list: Vec<serde_json::Value> = uri_map(&places)
             .into_iter()
             .map(|(uri, p)| {
@@ -706,7 +854,7 @@ impl Server {
             })
             .collect();
         dlog(
-            &self.project.main_root,
+            self.log_root(),
             &format!(
                 "resources/list n={} took={}ms uris=[{}]",
                 list.len(),
@@ -742,13 +890,19 @@ impl Server {
         let t0 = std::time::Instant::now();
         let uri = params.get("uri").and_then(|v| v.as_str()).ok_or_else(|| {
             dlog(
-                &self.project.main_root,
+                self.log_root(),
                 &format!("resources/read MALFORMED params={}", clip(&params.to_string(), FREE_TEXT_MAX)),
             );
             (-32602_i64, "uri is required and must be a string".to_string())
         })?;
 
-        let places = self.project.place_index();
+        let project = self.proj().map_err(|e| {
+            // We advertised no resources without a project (see `resources`), so
+            // any uri at all is unresolvable — the same -32002 an unknown uri
+            // gets, because from the caller's side it IS one.
+            (-32002_i64, e)
+        })?;
+        let places = project.place_index();
         let found = uri_map(&places)
             .into_iter()
             .find(|(u, _)| u == uri)
@@ -761,7 +915,7 @@ impl Server {
                 // resolve means the list it cached and the list we serve have
                 // diverged — which is the whole risk the watcher exists to cover.
                 dlog(
-                    &self.project.main_root,
+                    self.log_root(),
                     &format!(
                         "resources/read MISS uri={uri} known=[{}]",
                         uri_map(&places).iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>().join(" ")
@@ -772,7 +926,7 @@ impl Server {
 
         // ONE place, not the `ls` fan-out. The client resolves every mention in
         // a prompt concurrently, so a fan-out here would be paid per mention.
-        let place = self.project.place_one(&found);
+        let place = project.place_one(&found);
         let mut v = serde_json::to_value(&place).unwrap_or_default();
         let agents = worktrees_core::agent::agents_at(&worktrees_core::agent::live_probes(), &place.path);
         v["agent_state"] = serde_json::json!(agents.first().map(|a| a.state.as_str()).unwrap_or("none"));
@@ -806,7 +960,7 @@ impl Server {
             "place": v,
         });
         dlog(
-            &self.project.main_root,
+            self.log_root(),
             &format!(
                 "resources/read uri={uri} slug={} branch={:?} took={}ms agents={}",
                 found.slug,
@@ -830,8 +984,9 @@ impl Server {
     /// returns EXIT_NEEDS_CONFIRM instead of treating an unanswered prompt as a
     /// decline — that distinction is what keeps a guarded operation guarded.
     fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(&self, f: F) -> serde_json::Value {
+        let Ok(project) = self.proj() else { return text_err(NO_PROJECT) };
         let mut ui = CaptureUi::default();
-        let rc = f(&self.project, &mut ui);
+        let rc = f(project, &mut ui);
         let body = ui.lines.join("\n");
         if rc == 0 {
             text_ok(if body.is_empty() { "ok" } else { &body })
@@ -1230,6 +1385,48 @@ mod tests {
         assert_eq!(r["annotations"]["readOnlyHint"], serde_json::json!(true));
     }
 
+    /// A user-scope server is launched by EVERY claude session, including the
+    /// ones started in a home directory. Before this, `Project::discover`
+    /// failing exited before the JSON-RPC loop ever ran, and claude displayed
+    /// "✘ Failed to connect: CONNECTION_CLOSED" for a perfectly correct install.
+    ///
+    /// The contract is: handshake normally, advertise NOTHING, and say why.
+    #[test]
+    fn with_no_project_it_still_handshakes_and_advertises_no_tools() {
+        use serde_json::json;
+        let mut server = Server { project: None, mutations: true, ready: Default::default() };
+
+        let init = server
+            .handle_line(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }).to_string())
+            .expect("initialize is answered");
+        let v: serde_json::Value = serde_json::from_str(&init).unwrap();
+        assert_eq!(v["result"]["serverInfo"]["name"], json!("worktrees"));
+        assert!(v["result"].get("error").is_none());
+        let instr = v["result"]["instructions"].as_str().unwrap_or_default();
+        assert!(instr.contains("not inside a git repository"), "unhelpful instructions: {instr}");
+
+        assert!(server.tools().is_empty(), "a server with no project must advertise no tools");
+
+        // ...and the same for RESOURCES, which are one-per-place: with no repo
+        // there are no places, so publishing entries every read would refuse is
+        // the same lie in a second channel.
+        let res = server.resources();
+        assert_eq!(res["resources"].as_array().map(Vec::len), Some(0), "no project must publish no resources");
+
+        // Any uri is therefore a miss, and must come back as the client's
+        // ordinary unknown-resource error rather than a panic on the absent
+        // project.
+        let err = server
+            .read_resource(&json!({ "uri": "worktrees://place/anything" }))
+            .expect_err("a uri with no project cannot resolve");
+        assert_eq!(err.0, -32002);
+
+        // And an unadvertised name is refused as unknown rather than panicking
+        // on the absent project — `proj()` exists to discharge that.
+        let r = server.call(&json!({ "name": "list_places", "arguments": {} })).unwrap();
+        assert_eq!(r["isError"], json!(true));
+    }
+
     /// Guard A on the MCP surface. The CLI refuses every mutating command inside
     /// a tree that rode in on a sync hub, at one dispatch choke point in main.rs;
     /// `worktrees mcp` never passes that point, and a model driving this server
@@ -1260,7 +1457,7 @@ mod tests {
         .unwrap();
 
         let project = Project::discover(&root).expect("a git repo");
-        let mut server = Server { project, mutations: true, ready: Default::default() };
+        let mut server = Server { project: Some(project), mutations: true, ready: Default::default() };
 
         // Reading is how you find out WHAT this tree is — never refused.
         let r = server.call(&json!({ "name": "list_places", "arguments": {} })).unwrap();
@@ -1416,7 +1613,7 @@ mod tests {
             .expect("git init")
             .success());
         let project = Project::discover(&base).expect("a git repo");
-        let server = Server { project, mutations: false, ready: Default::default() };
+        let server = Server { project: Some(project), mutations: false, ready: Default::default() };
 
         let caps = server.initialize(&json!({ "protocolVersion": LATEST }))["capabilities"].clone();
         assert_eq!(caps["resources"]["listChanged"], json!(true));

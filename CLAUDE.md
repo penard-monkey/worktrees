@@ -30,6 +30,26 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   serves every repo (cwd discovery), and a PROFILE needs
   `worktrees_mcp_mutations` or its injected server is read-only.
 
+**`~/.claude.json` is claude's live state — READ it, never write it.** It is the
+user-scope `mcpServers` home (`mcpsetup.rs`), a few hundred KB of onboarding
+flags, caches and per-project history that every running session rewrites whole.
+A read-modify-write from here loses whatever a live session wrote in between,
+silently, and it is someone else's data. The app's setup wizard shells out to
+`claude mcp add -s user` for that reason — same rule as `ui-state.json`'s
+whole-blob owner, one level out. Its twin: **`claude mcp list`/`get` cannot tell
+you whether a server is installed.** It health-checks by LAUNCHING each server in
+the current directory, so `worktrees mcp` — which legitimately serves nothing
+outside a repo — reports `✘ CONNECTION_CLOSED` from `/tmp` and `✔ Connected` from
+a checkout, for the same correct install. It also costs ~1.1s a call. Detection
+parses the file; only the WRITE goes through claude.
+
+**A user-scope MCP server is launched by every session, including the ones with
+no repo.** `worktrees mcp` used to exit at `Project::discover`, which was fine
+while it was added per-repo and became a red ✘ in `/mcp` for every session
+started in a home or scratch directory the moment the app began installing it
+globally. It now handshakes, advertises zero tools and says why; `test/mcp.bats`
+pins that, and the bats suite caught the change by asserting the old contract.
+
 ## Gates (run before any PR)
 
 ```sh

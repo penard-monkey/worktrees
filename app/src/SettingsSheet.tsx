@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useEscape } from "./useEscape";
+import { McpSection, type McpStatus } from "./McpPanel";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -22,6 +23,11 @@ const CATS = [
   { id: "navigation", label: "Navigation" },
   { id: "commands", label: "Commands" },
   { id: "ai", label: "AI profiles" },
+  // Its own category rather than a block inside Commands: it starts as one
+  // section and already carries status, scope, the two repair paths, the
+  // hand-run command and an uninstall — and it is the surface a dismissed Home
+  // card sends people to, so it has to be findable by name.
+  { id: "claude", label: "Claude" },
   { id: "behavior", label: "Behavior" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
@@ -246,6 +252,8 @@ export function SettingsSheet({
   onReset,
   repo,
   onReport,
+  mcpStatus,
+  onMcpChanged,
 }: {
   open: boolean;
   settings: Settings;
@@ -262,6 +270,10 @@ export function SettingsSheet({
   /// needs to know which one to report as effective. Empty is fine (global view).
   repo: string;
   onReport: (msg: string) => void;
+  /// Claude MCP wiring — fetched by App (Home shows a card from the same
+  /// status), so this panel renders rather than re-probes.
+  mcpStatus: McpStatus | null;
+  onMcpChanged: (s: McpStatus) => void;
 }) {
   // Selected category — local, deliberately NOT persisted: the sheet always
   // opens on Appearance so "where was I" never depends on last session.
@@ -462,6 +474,12 @@ export function SettingsSheet({
             >
               {c.label}
               {c.id === "updates" && actionable ? <span className="upd-tag">upd</span> : null}
+              {/* `stale` only. `absent` deliberately does NOT badge the category:
+                  the Home card is already making that offer, and a permanent dot
+                  in Settings for something the user has been asked about and not
+                  acted on turns a suggestion into a chore. A BROKEN server is a
+                  different claim and earns the mark. */}
+              {c.id === "claude" && mcpStatus?.state === "stale" ? <span className="upd-tag warn">!</span> : null}
             </button>
           ))}
         </nav>
@@ -483,6 +501,10 @@ export function SettingsSheet({
           </>}
 
           {cat === "ai" && <ProfilesPanel key={repo || "none"} repo={repo} onReport={onReport} />}
+
+          {cat === "claude" && <>
+          <McpSection status={mcpStatus} repo={repo} onChanged={onMcpChanged} onReport={onReport} />
+          </>}
 
           {cat === "commands" && <>
           <section className="setting">
