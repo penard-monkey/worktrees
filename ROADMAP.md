@@ -5,6 +5,35 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The MCP setup flow has never been run in the real app.** #218 shipped
+  Settings → Claude and the Home card entirely against the mock harness and
+  headless chromium. `mcp_install` is a ~1s `claude mcp add` subprocess behind a
+  busy state, which is precisely the shape CLAUDE.md records the mock as unable
+  to express — its invokes resolve in a microtask, so no double-click window, no
+  in-flight state, no slow-answer ordering exists there. One pass with
+  `app/scripts/sandbox.sh --app` before the next release: click Set up with the
+  real binary, watch the button while it works, and confirm the Home card retires
+  without a manual refresh.
+  _From: [2026-09-18 mcp-setup-wizard](docs/sessions/2026-09-18-mcp-setup-wizard/summary.md)_
+
+- **Two unrelated things are now called "Claude" in Settings.** #216 put a Claude
+  *status* indicator (status.claude.com, `StatusDetail`) in the chrome; #218 added
+  a Claude *settings category* for the MCP server. No code conflict — they never
+  touch the same component — but the status detail currently opens from the usage
+  meter's popover, and a reader looking for "everything about Claude" will find
+  the category and not the outage panel. Worth deciding whether the status detail
+  belongs inside the category rather than only behind the chip.
+  _From: [2026-09-18 mcp-setup-wizard](docs/sessions/2026-09-18-mcp-setup-wizard/summary.md)_
+
+- **The `mcp-setup-wizard` worktree's idle base is the bare tree name.** Every
+  other tree parks on `<tree>-next` (`.claude/close-out.md`); this one was created
+  on a branch called `mcp-setup-wizard`, which is the shape the config exists to
+  prevent — the rule is there because two worktrees sharing a base produce the
+  phantom-staged-state failure recorded in that file, and a bare tree name is the
+  most likely collision. Rename to `mcp-setup-wizard-next` (nothing depends on the
+  old name; no PR has ever targeted it).
+  _From: [2026-09-18 mcp-setup-wizard](docs/sessions/2026-09-18-mcp-setup-wizard/summary.md)_
+
 - **The DRAG half of "reference another worktree" is unbuilt.** #215 shipped the
   typed `@` autocomplete; the original ask was also to drag a place row from the
   nav into a session. The design is settled and deliberately does NOT reuse the
