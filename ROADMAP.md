@@ -5,6 +5,38 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The DRAG half of "reference another worktree" is unbuilt.** #215 shipped the
+  typed `@` autocomplete; the original ask was also to drag a place row from the
+  nav into a session. The design is settled and deliberately does NOT reuse the
+  resource uri: the drop should insert a **quoted absolute path**
+  (`@"/…/.worktrees/bug-fixes"`), because the quoted file-mention form
+  (`@"([^"]+)"`, verified in the client) has no `\b` rule and no charset limit,
+  needs no server-name discovery, cannot go stale, works cross-project where the
+  MCP server cannot reach at all, and degrades to a path the model can still
+  `ls` rather than to an opaque string. Mechanically it is cheap: `navdrag.ts`
+  is pointer-driven (not HTML5 DnD), so the terminal becomes a target with one
+  `data-drop` attribute, and `tmux set-buffer` + `paste-buffer -p -t <session>:0.0`
+  targets pane 0 (guaranteed to be the AI by `tmux.rs`'s `new_session`) without
+  any new `TerminalPane` API. Two traps recorded in the session summary: put the
+  attribute on a node `TerminalPane` owns, NOT `.term-wrap` (`TermSurface` is
+  shared with every dock shell tab), and never add a `send-keys -l` fallback —
+  `paste-buffer -p` cannot type into a permission prompt, and that can.
+  _From: [2026-09-18 mcp-resources](docs/sessions/2026-09-18-mcp-resources/summary.md)_
+
+- **Two known edges in the MCP resource uris, both exotic, both recorded rather
+  than fixed.** `uri_map`'s two-pass reservation guarantees a dirty slug's uri
+  can never read as an existing slug, but two DIRTY slugs sharing one base
+  (`a+b`, `a=b`) still renumber when a third that sorts before them appears, so
+  a mention typed a moment earlier can resolve elsewhere after a refresh — a
+  slug-derived short hash instead of a counter would be stable. And
+  `safe_uri_part` uses `is_alphanumeric()`, which is not exactly the client's
+  `\p{L}\p{N}\p{M}`: enclosed alphanumerics (`Ⓐ`) pass ours and fail the menu's,
+  while combining marks fail ours and pass the menu's, so a decomposed `café`
+  (NFD — what HFS+ produced) folds to `cafe` and becomes a collision candidate
+  against a real `cafe`. Neither is reachable without a deliberately strange
+  branch name; both need a general-category table to fix exactly.
+  _From: [2026-09-18 mcp-resources](docs/sessions/2026-09-18-mcp-resources/summary.md)_
+
 - **The Claude status indicator has never met a real outage, and never met
   WebKit.** `status_parse` is tested against captured `summary.json` bodies and
   the UI against the mock's four canned states, but `claude_status` has not once
@@ -60,14 +92,19 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   dumps a live prompt line's bytes into the test module.
   _From: [2026-09-16 dim-suggestion](docs/sessions/2026-09-16-dim-suggestion/summary.md)_
 
-- **`CHANGELOG.md` has two `## [Unreleased]` headers.** A merge on 2026-09-16
-  added a second block above the existing one instead of merging into it, so
-  the file now carries `## [Unreleased]` twice (the docs-paths entry sits under
-  the lower one). Release step 1 moves *the* `[Unreleased]` section into the
-  version heading — with two, whichever is not cut is silently left behind and
-  ships in no release notes. Merge them before the next release; a CI grep for
-  more than one `^## \[Unreleased\]` would stop it recurring.
-  _From: [2026-09-16 dim-suggestion](docs/sessions/2026-09-16-dim-suggestion/summary.md)_
+- **Guard against a second `## [Unreleased]` header.** The duplicate this item
+  used to report is GONE — it existed from `59dc918` to `0cbdce7`, and the
+  v0.24.0 release commit `9ce5a77` removed both headers with the entry it
+  worried about shipping correctly inside the 0.24.0 section. What remains is
+  the hazard, and it nearly recurred in #215: the merge-base had ZERO
+  `[Unreleased]` sections (the release had consumed it) and two branches
+  independently re-created one, which is exactly how the first duplicate
+  appeared. Release step 1 moves *the* `[Unreleased]` section into the version
+  heading, so with two, whichever is not cut ships in no release notes at all.
+  A `make lint` / CI grep failing on more than one `^## \[Unreleased\]` is the
+  whole fix and there is none today.
+  _From: [2026-09-16 dim-suggestion](docs/sessions/2026-09-16-dim-suggestion/summary.md),
+  re-confirmed [2026-09-18 mcp-resources](docs/sessions/2026-09-18-mcp-resources/summary.md)_
 
 - **The tmux pane drops replies to tmux's attach-time queries.** `onData` is
   wired only after `term_open` resolves, and xterm fires a data event into no
