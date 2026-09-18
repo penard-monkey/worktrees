@@ -18,10 +18,12 @@ use std::path::Path;
 
 use crate::model::PlaceRef;
 
-/// The MCP server name a profile launch registers, verbatim
-/// (`profile.rs` inserts the stanza under this key, and a profile launch adds
+/// The MCP server name a profile launch registers, verbatim (`profile.rs`
+/// inserts the stanza under this key, and a profile launch adds
 /// `--strict-mcp-config`, which drops any user-scope entry).
-pub const DEFAULT_SERVER: &str = "worktrees";
+///
+/// The SAME constant the setup wizard installs under — one name, one place.
+pub const DEFAULT_SERVER: &str = crate::mcpsetup::SERVER_KEY;
 
 /// Turn a slug into something that survives Claude Code's TWO @-mention rules.
 ///
@@ -118,31 +120,13 @@ pub fn uri_for(places: &[PlaceRef], slug: &str) -> Option<String> {
 /// The name the worktrees MCP server is registered under in this user's
 /// `~/.claude.json`, if it is there.
 ///
-/// A profile launch does not consult this — it writes its own stanza under
-/// `DEFAULT_SERVER` and passes `--strict-mcp-config`, which drops user scope
-/// entirely. This is for a session started outside a profile, where the server
-/// is whatever `claude mcp add -s user <name>` called it. Matched on the
-/// command's basename plus `mcp` as the first arg rather than on the key, so a
-/// user who named it `wt` is still found.
+/// Delegates to `mcpsetup::our_key`, which is the judgement the setup wizard's
+/// status and install already use — "is this stanza ours" is one question and
+/// must not have two answers. A profile launch does not consult this at all: it
+/// writes its own stanza under [`DEFAULT_SERVER`] and passes
+/// `--strict-mcp-config`, which drops user scope entirely.
 pub fn server_name_in(user_claude_json: &serde_json::Value) -> Option<String> {
-    let servers = user_claude_json.get("mcpServers")?.as_object()?;
-    servers
-        .iter()
-        .find(|(_, v)| {
-            let cmd_is_worktrees = v
-                .get("command")
-                .and_then(|c| c.as_str())
-                .map(|c| Path::new(c).file_name().and_then(|s| s.to_str()) == Some("worktrees"))
-                .unwrap_or(false);
-            let first_arg_is_mcp = v
-                .get("args")
-                .and_then(|a| a.as_array())
-                .and_then(|a| a.first())
-                .and_then(|a| a.as_str())
-                == Some("mcp");
-            cmd_is_worktrees && first_arg_is_mcp
-        })
-        .map(|(k, _)| k.clone())
+    crate::mcpsetup::our_key(user_claude_json)
 }
 
 /// The server name the session running in `into_slug` will actually have
