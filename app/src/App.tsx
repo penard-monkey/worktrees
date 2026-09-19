@@ -11,7 +11,9 @@ import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
-import { canNudge, McpNudge, type McpStatus } from "./McpPanel";
+import { type McpStatus } from "./McpPanel";
+import { dismissPatch, pendingOffers, type Offer } from "./offers";
+import type { CatId } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
@@ -466,10 +468,16 @@ function ReleaseNotes({ sections, notes, open, onToggle }: {
 // and the header's Show/Hide details toggle are one piece of state that nothing
 // outside the modal reads, and a component defined inside App() would be
 // re-created (and reset) by the 3s poll.
-function WhatsNewModal({ version, notes, manual, onClose }: {
+function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceOffer, onClose }: {
   version: string;
   notes: string;
   manual: boolean;
+  /// Pending offers, listed under the notes. Empty in the MANUAL view: that one
+  /// is opened from Settings, so the reader is already standing where the links
+  /// would send them.
+  offers: Offer[];
+  onTakeOffer: (o: Offer) => void;
+  onSilenceOffer: (o: Offer) => void;
   onClose: () => void;
 }) {
   const sections = useMemo(() => parseNotes(notes), [notes]);
@@ -507,6 +515,47 @@ function WhatsNewModal({ version, notes, manual, onClose }: {
           )}
           <button className="icon-btn" title="close" onClick={onClose}><Icons.X size={13} /></button>
         </header>
+        {offers.length > 0 && (
+          /* ABOVE the notes and outside `.settings-body`, which is the only
+             part of this modal that scrolls — so the band is pinned and a long
+             changelog cannot push it under a fold. It sat below the notes once;
+             the entry it replaced sat fourth of six INSIDE them. Both were
+             missed by the person who wrote them, which is three variations of
+             the same mistake: the thing to DO was placed after the thing to
+             read.
+
+             Deliberately not a card. The body below is full of bordered
+             entries, so another bordered box would read as one more of them —
+             a full-bleed band is a different KIND of object at a glance. The
+             tint is `--ai`, because purple already means claude everywhere in
+             this app (see tokens.css), which also keeps it distinct from
+             `--accent`, the generic interactive hue.
+
+             It is NOT the only way to reach the offer, and must not be: this
+             modal appears once per version and never at all on a fresh
+             install, so Settings → Claude carries the same dismissal on
+             demand. */
+          <div className="wn-offers">
+            {offers.length > 1 && (
+              <div className="wn-offers-h">{offers.length} things to set up</div>
+            )}
+            {offers.map((o) => (
+              <div className="wn-offer" key={o.id}>
+                <Icons.SquareTerminal size={15} />
+                <div className="wn-offer-txt">
+                  <div className="wn-offer-t">{o.title}</div>
+                  <div className="wn-offer-b">{o.body}</div>
+                </div>
+                <div className="wn-offer-acts">
+                  {/* The one FILLED button in this modal. Everything else here
+                      is text, so the single accent fill is unambiguous. */}
+                  <button className="enter-btn sm" onClick={() => onTakeOffer(o)}>{o.cta}</button>
+                  <button className="mcp-dismiss" onClick={() => onSilenceOffer(o)}>Don't show again</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="settings-body">
           <ReleaseNotes sections={sections} notes={notes} open={open} onToggle={toggle} />
         </div>
@@ -3037,7 +3086,14 @@ function App() {
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Where Settings was asked to open. One state, never a boolean beside it:
+  // `settingsOpen` is derived, so "the sheet is up" and "which section it went
+  // to" cannot disagree. `{}`-with-no-cat is the ordinary ⌘, open.
+  const [settingsAt, setSettingsAt] = useState<{ cat: CatId; focus?: string } | null>(null);
+  const settingsOpen = settingsAt !== null;
+  const openSettings = useCallback((at?: { cat: CatId; focus?: string }) => {
+    setSettingsAt(at ?? { cat: "appearance" });
+  }, []);
   const [switchOpen, setSwitchOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
@@ -3408,6 +3464,48 @@ function App() {
   useEffect(() => {
     invoke<McpStatus>("mcp_status", { repo: null }).then(setMcpStatus).catch(() => setMcpStatus(null));
   }, []);
+
+  // Offers: things set up nowhere, listed in the release notes and badged on
+  // the gear until taken or silenced. Derived — no surface computes its own
+  // answer, which is how the Home card and the Settings panel came to disagree
+  // about whether there was anything to say.
+  const offers = useMemo(
+    () => pendingOffers({ mcp: mcpStatus }, settings.offers_dismissed ?? {}),
+    [mcpStatus, settings.offers_dismissed],
+  );
+  const takeOffer = useCallback((o: Offer) => {
+    setSettingsAt(o.to);
+  }, []);
+  // The FUNCTIONAL form, which `updateSettings`' own docstring requires for a
+  // record-keyed patch: built from a captured `settings`, a second offer
+  // silenced from another surface in the same tick would be erased by whatever
+  // this closure last saw, and the loss reaches disk (ui-state.json is saved
+  // whole). Safe today with one offer id; not safe by construction, which is
+  // the part that rots.
+  const silenceOffer = useCallback((o: Offer) => {
+    updateSettings((prev) => ({ offers_dismissed: dismissPatch(o, prev.offers_dismissed ?? {}) }));
+  }, []);
+  // The MCP offer specifically, for Settings → Claude's "stop suggesting this".
+  const mcpOffer = offers.find((o) => o.id === "mcp-server") ?? null;
+
+  // The rail dot already means "something in Settings needs you" (an update).
+  // An unacted offer is the same claim, so it lights the same dot rather than
+  // inventing a second indicator next to it.
+  const railAlert = updateAvail || offers.length > 0;
+  // An offer is not an update, and until now they painted the same dot: you
+  // could not tell "the CLI is behind" from "you never set the server up"
+  // without hovering a gear, which nobody does. Same 6px dot in the same place
+  // — a second shape would be a second idea — recoloured to the band's purple
+  // when an offer is the only thing pending. With an update ALSO pending the
+  // dot stays accent (the older meaning) and the tooltip names both.
+  const railOfferOnly = offers.length > 0 && !updateAvail;
+  const railTitle = updateAvail && offers.length > 0
+    ? "settings — update available · setup suggested"
+    : updateAvail
+      ? "settings — update available"
+      : offers.length > 0
+        ? "settings — setup suggested"
+        : "settings (⌘,)";
   const recheckTmux = useCallback(async () => {
     try {
       const ok = await invoke<boolean>("tmux_check", { refresh: true });
@@ -3530,6 +3628,12 @@ function App() {
   // like `doneOf` below — a place that is busy RIGHT NOW is not a thing you are
   // behind on, it is a thing you are watching.
   const unreadOf = (p: Place) => !activityOf(p) && isUnread(workedAt(p), seenAt(p));
+  /** Per place path, the seen epoch as it stood before this visit acked it.
+   *  A ref, not state: nothing renders off it directly — `docsBaseline` reads it
+   *  during render for a pane that is keyed by place and freezes its own copy —
+   *  and making it state would re-render the whole tree on an ack that has
+   *  already queued one. */
+  const priorSeen = useRef<Map<string, number>>(new Map());
   /** Spend a place's unread signal: stamp NOW locally so the ring goes at once,
    *  and forward-only in the declared store so it survives a restart.
    *
@@ -3539,6 +3643,16 @@ function App() {
    *  trip per click. */
   const ack = (repo: string, p: Place) => {
     const t = Math.floor(Date.now() / 1000);
+    // What the seen epoch was BEFORE this ack — the Docs tab's recency baseline.
+    //
+    // Without this the mark is dead on arrival. `ack` fires when you select an
+    // unread place, which is exactly the visit the Docs tab's "new since you
+    // looked" exists for: Claude finished, you came to see what it did. Reading
+    // `seenAt(p)` from the pane would read the value this line just moved to
+    // NOW, so every document would be older than the baseline and nothing would
+    // ever be marked. Written before the stamp, and only on a real ack, so a
+    // revisit that acks nothing leaves the previous answer standing.
+    priorSeen.current.set(p.path, seenAt(p));
     setSeenPaths((m) => {
       const next = new Map(m);
       next.set(p.path, Math.max(next.get(p.path) ?? 0, t));
@@ -3546,6 +3660,11 @@ function App() {
     });
     invoke("mark_seen", { repo, slug: p.slug, epoch: t }).catch(() => {});
   };
+  /** "When did you last look at this place", for the Docs tab's recency mark.
+   *  The pre-ack value when this visit spent an unread signal, else the plain
+   *  seen epoch — which is the right answer for a place you have already read:
+   *  you looked, so nothing here is new. */
+  const docsBaseline = (p: Place) => priorSeen.current.get(p.path) ?? seenAt(p);
   // THE clock. Row age and sort key for every list a user reads — the nav tree,
   // the home Resume list, ⌘K — so a row's printed age is the reason it sits
   // where it does. When something HAPPENED here: Claude work or a commit, never
@@ -3873,6 +3992,34 @@ function App() {
       return next;
     });
   }, []);
+
+  // ── "show me this document", from a Claude session ────────────────────────
+  // `worktrees show` / the MCP `show_doc` tool drop a request in
+  // `~/.cache/worktrees/inbox`; the backend's 3 s tick validates it and emits
+  // this. See `worktrees_core::inbox` for why it travels through the filesystem
+  // (the app has no inbound surface, and the CLI cannot reach Tauri's config
+  // dir).
+  //
+  // TWO STEPS, deliberately. `updatePanels` writes the panel record for
+  // `selRef.current`, and that ref is assigned during RENDER — so calling it in
+  // the same handler as `setSel` would store the dock state against the place
+  // you are leaving, not the one being opened. The request is parked until the
+  // selection it names has actually landed.
+  const [pendingDoc, setPendingDoc] = useState<{ repo: string; slug: string; path: string } | null>(null);
+  useEffect(() => {
+    const un = listen<{ repo: string; slug: string; path: string }>("app:open-doc", (e) => {
+      setSel({ repo: e.payload.repo, slug: e.payload.slug });
+      setPendingDoc(e.payload);
+    });
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, []);
+  useEffect(() => {
+    if (!pendingDoc) return;
+    if (sel?.repo !== pendingDoc.repo || sel?.slug !== pendingDoc.slug) return;
+    setDockFile(pendingDoc.path);
+    updatePanels({ dock_tab: "files", dock_open: true });
+    setPendingDoc(null);
+  }, [pendingDoc, sel, updatePanels]);
 
   /** Forget remembered panels for keys matching `shouldDrop`.
    *
@@ -5528,7 +5675,7 @@ function App() {
         // ⌘, opens Settings (macOS convention) — a meta chord is safe past the
         // term-host (its passthrough concerns are ctrl-only). Esc already closes.
         e.preventDefault();
-        setSettingsOpen((v) => !v);
+        setSettingsAt((v) => (v ? null : { cat: "appearance" }));
       } else if (e.metaKey && k === "f") {
         // ⌘F — find. Which surface depends on where the user is (see findTarget);
         // a second press re-selects the field rather than toggling the bar shut,
@@ -6087,7 +6234,7 @@ function App() {
             status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
-        <button className={"rail-icon" + (updateAvail ? " upd" : "")} data-track="settings" title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
+        <button className={"rail-icon" + (railAlert ? " upd" : "") + (railOfferOnly ? " upd-offer" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── the sidebar ──
@@ -6526,18 +6673,6 @@ function App() {
                   <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
                   <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
                 </div>
-                {/* Only for `absent`, only once there is a project to use it
-                    on, and only until it is installed or silenced. Home rather
-                    than over the terminal because this is a fact about the
-                    MACHINE, like the version rows and the logo above it — and
-                    because a card here is never in the way of work. */}
-                {canNudge(mcpStatus) && !settings.mcp_nudge_dismissed && (ws?.projects.length ?? 0) > 0 && (
-                  <McpNudge
-                    status={mcpStatus!}
-                    onOpenSettings={() => setSettingsOpen(true)}
-                    onDismiss={() => updateSettings({ mcp_nudge_dismissed: true })}
-                  />
-                )}
                 <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
                 <div className="resume">
                   {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
@@ -6664,6 +6799,8 @@ function App() {
                     repo={sel.repo}
                     place={selected}
                     reloadToken={placesToken}
+                    pageVisible={pageVisible}
+                    seenEpoch={docsBaseline(selected)}
                     // Phase 1's Read action: the file goes to the Files tab's
                     // renderer, which has done markdown since v0.8.0. The dock
                     // is controlled from here (`dockFile`), so this needs no
@@ -6884,11 +7021,12 @@ function App() {
         }}
       />
 
-      <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
+      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onChange={updateSettings} onClose={() => setSettingsAt(null)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
-        mcpStatus={mcpStatus} onMcpChanged={setMcpStatus} />
+        mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
+        mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)} />
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query
@@ -6905,6 +7043,9 @@ function App() {
       {whatsNew && (
         <WhatsNewModal
           version={whatsNew.version} notes={whatsNew.notes} manual={!!whatsNew.manual}
+          offers={whatsNew.manual ? [] : offers}
+          onTakeOffer={(o) => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); takeOffer(o); }}
+          onSilenceOffer={silenceOffer}
           onClose={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}
         />
       )}

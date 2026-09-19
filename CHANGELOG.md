@@ -6,6 +6,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **"Show me that file" now works from a Claude session.** Ask the session to
+  open a document — *show me CLAUDE.md*, *let me see the plan* — and the app
+  comes to the front with it rendered in the dock. The session asks through the
+  new `show_doc` MCP tool or `worktrees show <file>`; both refuse a path that
+  resolves outside the repository they were run in, and the app re-checks it
+  against the registered projects before opening anything. A request expires
+  after 30 seconds, so nothing is queued up to appear on your screen later: if
+  the app is not running, the ask simply does not happen, and the session says
+  so rather than claiming it opened. `show_doc` needs an MCP server started with
+  `--mutations` — it changes nothing on disk, but it drives your screen.
+- **The Docs tab marks what changed since you last looked.** A dot and a
+  relative age on every document modified since your last visit to that place,
+  with a count in the header so a mark below the fold still reports. The order
+  of the index does not move. It reads modification times rather than git
+  status, which is the only thing that can work here: the documents this is for
+  — `task_plan.md`, `findings.md`, `progress.md`, an agent's `.planning/brief.md`
+  — are gitignored by design and never appear in `git status` at all.
 - **You can type in a markdown file's Source view again.** The dock's viewer has
   been read-only since v0.9.0, and clicking Source on a README put you in front
   of something that looks exactly like an editor and swallows every keystroke.
@@ -45,6 +62,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   terminal and still widen when you pull them that way, the auto-hide sidebar
   slides in from its own rail, and the rail's usage panel opens toward the
   window instead of back over the rail. Widths, ⌘B and ⌘J are unchanged.
+
+### Changed
+- **A suggestion now arrives where you actually are.** The card offering to wire
+  up Claude's MCP server has been replaced: pending setup suggestions are listed
+  in a band pinned above the release notes on the first launch after an
+  update, and anything still unacted leaves a dot on the Settings gear — purple
+  rather than the update dot's blue, so the two can be told apart without
+  hovering anything. The card it replaces was correct
+  about the machine and reached nobody, because it rendered only on the Home
+  screen *and* only once a project existed — two conditions that each read as
+  reasonable and multiply to almost never. The notes have no conditions at all,
+  which is the whole reason they are now the surface.
+
+  A suggestion also no longer tries to finish itself. Its button opens Settings
+  on the section that owns the decision, with that section marked, because
+  "set up" was never one click: a checkbox there decides whether Claude may
+  close and *remove* worktrees, and a button in a modal would either hide that
+  choice or ask it twice. That also keeps several pending suggestions a plain
+  list instead of a stack of panels needing an order.
+
+  `mcp_nudge_dismissed` becomes `offers_dismissed`, which records *what* was
+  dismissed rather than *that* something was — the rule `init_dismissed`
+  already followed, so a suggestion whose substance changes can ask again. An
+  existing dismissal carries over: nobody who silenced the old card is asked
+  a second time. Broken states are untouched and still cannot be silenced: a
+  server whose binary has moved, or one registered read-only, is a problem
+  rather than an offer.
+- `mcp_status` now records its verdict in the app log. Every answer but
+  "not set up" is a silent one by design, so a machine that never showed the
+  suggestion previously left no trace of why.
 
 ## [0.25.1] - 2026-09-18
 

@@ -104,6 +104,16 @@ Bash tool's cwd persists between calls, so an earlier `cd app` turns a later
 `make test` into "No rule to make target `test`" — a failure that looks like the
 change broke the build.
 
+**Two `gh` commands lie about CI, in opposite directions.**
+`gh pr checks <n> --watch` run in the gap between a push and the run
+registering prints "no checks reported on the 'x' branch" and exits **0** —
+identical to a pass, and it is what you get every time you push and immediately
+watch. And `gh` reports `conclusion: ""` for an in-progress job, never `null`,
+so a hand-rolled `--jq 'select(.conclusion != null)'` rollup counts every
+RUNNING job as a failure. Both fired within a minute of each other on #304, one
+claiming green and one claiming nine failures, neither true. Watch the run, not
+the PR view: `gh run watch <run-id> --exit-status`, then read raw conclusions.
+
 **A throwaway git script needs a guard, because `git -C ""` means HERE.** A
 probe let a repo path come back empty and aimed `branch -M main` and
 `push origin main` at the live worktree; git refused both (the worktree guard on
@@ -521,6 +531,27 @@ is invisible to the bats suite — there is no fake claude. Re-run
   a single eval return before any of them render — the DOM you read back is the
   one from before the clicks, which reads as "the tree ignored them". Drive
   state changes one call at a time and query in the next.
+- **A suggestion's surface may not add preconditions of its own.** The v0.25.0
+  MCP card was right about the machine and unreachable: `sel === null` AND
+  `projects.length > 0`, each defensible, multiplying to almost never — while
+  the release notes, which have NO preconditions, already carried the same
+  sentence as prose. `offers.ts` now holds every after-update suggestion; an
+  `Offer` is data with a destination (`to: {cat, focus}`), never a function,
+  because "Set up" was never one click (the panel's checkbox decides whether
+  Claude may REMOVE worktrees) and because N offers must stay N rows rather than
+  N embedded panels. Three separate attempts here put the thing to DO after the
+  thing to READ — changelog entry four of six, then a band below the notes, then
+  a 6px dot — so the band is pinned OUTSIDE `.settings-body`, the modal's only
+  scrolling child. And `offers-check.mjs` guards the modal's `offers=` FEED as
+  well as its render: pinning `{offers.length > 0 && (` says nothing about
+  `offers={sel ? offers : []}` one line up, which is the same bug relocated and
+  which passed the check until review found it.
+- **When a change deletes a thing, grep for comments that reason FROM it.**
+  `SettingsSheet.tsx` justified an un-badged category with "the Home card is
+  already making that offer" — of a card the same branch removed. The comment
+  was not merely stale; its reasoning had inverted, and it was pointing straight
+  at a real hole (the new dot had no off switch on a fresh install, because the
+  only dismissal lived in a modal that never opens there).
 - Plugin permissions live in `app/src-tauri/capabilities/default.json`;
   `opener:default` has open-url + reveal-item-in-dir but NOT open-path —
   a missing permission rejects the invoke silently. Never swallow errors:
@@ -584,6 +615,25 @@ is invisible to the bats suite — there is no fake claude. Re-run
   and the mock harness is for everything that does not need real timing. If
   the sandbox is not running, stop — never fall back to whatever answers to a
   name.
+- **`sandbox.sh` does not isolate `$HOME`, and that is right until it isn't.**
+  The header says so deliberately ("testing an AI profile means checking that
+  your global CLAUDE.md still loads"), and it is fatal for anything that READS
+  `$HOME`: `mcpsetup::status()` parses `~/.claude.json`, so on a machine that
+  already has the server the sandbox always reports `installed` and an offer can
+  never appear. Reproducing `absent` needs a throwaway HOME — and the real
+  `PATH` KEPT, because without it `worktrees` stops resolving, the state becomes
+  `cli-missing`, and that state deliberately suppresses the offer, so you would
+  measure the wrong thing and conclude the feature is broken. Point `CARGO_HOME`
+  and `RUSTUP_HOME` at the real ones or the build re-downloads the registry.
+  Second gap, unrelated: `--app` moves the CONFIG dir to
+  `net.casadelvalle.worktrees.sbx` but `app.log` still goes to the **plain**
+  identifier — a sandbox writes into your real app's log unless HOME is faked.
+- **A vanished sandbox app means the human closed it.** `tauri dev` exits 0 when
+  the window closes, which is indistinguishable from a clean shutdown because it
+  is one; a harness kill is 143. Twice in one session that was reported as a
+  crash and a relaunch started, once with a `setsid` "fix" for a problem that
+  did not exist. Its state is readable afterwards — the config dir's
+  `ui-state.json` shows which path was taken.
 - **Never run the bundle's binary to probe it.**
   `target/release/bundle/macos/worktrees.app/Contents/MacOS/app --version` is the
   GUI entry point — it LAUNCHES a second instance instead of printing a version.
