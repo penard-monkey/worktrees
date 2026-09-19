@@ -43,9 +43,16 @@ export function resolveTheme(s: Pick<Settings, "theme" | "theme_light" | "theme_
  *  returns `{...s, ...p}`), which doubles as the seed for a place that has none
  *  — see `term_tab_active` for the case where that seeding is exactly wrong.
  *
- *  The open FILE is not here either. A remembered path can be deleted, renamed
- *  or gitignored between visits, which turns "restore what I left" into an
- *  error banner on arrival. */
+ *  The open FILE is not here either, but it IS remembered now — as
+ *  `files_open` below, for the same reason `term_tab_active` lives out here:
+ *  every key in this record needs a global twin that doubles as a seed, and a
+ *  global "last open file" would hand one place another place's path. The
+ *  objection this comment used to record still stands and is answered rather
+ *  than dismissed: a remembered path can be deleted, renamed, gitignored or
+ *  left behind by a branch switch between visits, and `FileView` routes a
+ *  failed read to the app's error banner — so the restore VALIDATES through
+ *  `file_readable` (which answers false instead of erroring) and silently
+ *  opens nothing when the path is gone. */
 export type PlacePanels = {
   dock_open: boolean;
   /** WIDENING ONLY, and that direction matters. A record written by an older
@@ -230,6 +237,25 @@ export type Settings = {
   // nothing about the next. Keyed like `term_tab_names`, and read the same way:
   // a remembered tab that is no longer in the list falls back to the first.
   term_tab_active: Record<string, number>;
+  // Which file the Files tab was viewing, per place: `repo|slug` → path.
+  // Restored when you come back to a space, so navigating away and returning
+  // does not cost you the file you were reading.
+  //
+  // Out here rather than in `PlacePanels`, for `term_tab_active`'s exact
+  // reason: every key there must also exist as a GLOBAL, and a global would
+  // seed one place's file into another's. `src/lib.rs` in one worktree says
+  // nothing about the next — and unlike a tab index it would be a path that
+  // does not even exist over there.
+  //
+  // Read the same way as `term_tab_active` too: a remembered value that no
+  // longer resolves falls back to nothing, silently. `App.tsx` checks the path
+  // with `file_readable` before opening it, because a deleted or renamed file
+  // would otherwise greet you with an error banner on arrival — the objection
+  // that kept this from being stored at all until now.
+  //
+  // NOT a `| null` and never written empty: absence IS "no file open", and a
+  // key whose value is "" would be a path the viewer would try to read.
+  files_open: Record<string, string>;
   // Per-place panel state, keyed `repo|slug` (the same scheme as
   // `term_tab_names`). An entry here means "this place has been SET UP"; its
   // absence means the dock has never been opened there, and such a place starts
@@ -328,6 +354,7 @@ export const DEFAULTS: Settings = {
   term_tab_names: {},
   term_tabs: {},
   term_tab_active: {},
+  files_open: {},
   place_panels: {},
   editor_cmd: "code",
   terminal_cmd: "",

@@ -18,6 +18,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   slides in from its own rail, and the rail's usage panel opens toward the
   window instead of back over the rail. Widths, ⌘B and ⌘J are unchanged.
 
+- **The Files viewer remembers what you were reading, per Place.** Open a file,
+  go somewhere else, come back — it is still open, and it survives a restart.
+  Remembered per worktree rather than globally: `src/lib.rs` in one place says
+  nothing about the next, and would usually not even exist there.
+
+  This was deliberately refused until now, on the grounds that a remembered
+  path can be deleted, renamed, gitignored or left behind by a branch switch
+  between visits, and the viewer turns a failed read into an error banner — so
+  "restore what I left" would greet you with an error for the ordinary act of
+  deleting a file you once had open. The restore therefore checks the path
+  first and silently opens nothing when it no longer resolves. Reading mode
+  (⌘⇧E) deliberately does not come back with it: a full-pane overlay on arrival
+  would hide the terminal you just navigated to.
+
 ## [0.25.1] - 2026-09-18
 
 ### Fixed
