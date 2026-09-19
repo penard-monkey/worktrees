@@ -23,7 +23,7 @@
 // rendered verbatim. Nothing here re-derives a core rule, so there is nothing
 // for a `docs-check.mjs` to guard — which is the point of putting the walk in
 // core rather than splitting it.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
@@ -85,6 +85,12 @@ export type DocsPaneProps = {
    *  post-ack value, every badge would be cleared by the act of arriving to
    *  read it, and the feature would appear to do nothing at all. */
   seenEpoch: number;
+  /** Directory paths this place has COLLAPSED (`settings.docs_collapsed`), in
+   *  `DocEntry::group`'s spelling. Empty — the state of a place nobody has
+   *  customised — is a fully open tree, which is what the flat list this
+   *  replaced showed. */
+  collapsed: string[];
+  onCollapsed: (paths: string[]) => void;
   /** Open a document in the Files tab's renderer. */
   onOpen: (path: string) => void;
   onError: (e: unknown) => void;
@@ -152,20 +158,170 @@ function matches(e: DocEntry, terms: string[]): boolean {
  *  that would justify a filesystem watcher (see the effect that uses it). */
 const DOCS_POLL_MS = 4000;
 
-/** Entries in backend order, cut into the groups the backend assigned. Order of
- *  FIRST APPEARANCE, never re-sorted: the walk already decided, and a second
- *  opinion here is the mirror this component exists without. */
-function group(entries: DocEntry[]): Array<{ name: string; rows: DocEntry[] }> {
-  const out: Array<{ name: string; rows: DocEntry[] }> = [];
+/** A row in the tree: a document, or a directory holding more rows. */
+export type DocNode =
+  | { kind: "doc"; entry: DocEntry }
+  | { kind: "dir"; path: string; name: string; kids: DocNode[]; count: number };
+
+/** Entries in backend order, nested into the directories the backend named.
+ *
+ *  **Insertion order is the whole algorithm.** Every node is appended where it
+ *  is FIRST seen and never sorted, at any level, because the order is the
+ *  backend's decision and some of it is the repo's: `docs::index_with` puts the
+ *  root files in a fixed reading order, and `[docs] paths = ["b", "a"]` is
+ *  listed b-then-a because the repo said so (`declared_paths_keep_one_
+ *  contiguous_run_per_group`). Alphabetising here would quietly overrule that
+ *  and nothing would fail — the list would just be subtly not what the project
+ *  asked for, which is the silent-mirror failure this component was built
+ *  without (see the file note).
+ *
+ *  The nesting comes from `group`, never from `rel`'s directory part. They
+ *  differ on the one row where it matters: the brief lives at
+ *  `.planning/brief.md` and is grouped with the ROOT files on purpose, because
+ *  a group of one under a gitignored directory name reads as an accident
+ *  (`DocEntry::group`). Deriving the parent from `rel` would file it under a
+ *  `.planning/` directory the walk deliberately does not show. */
+export function tree(entries: DocEntry[]): DocNode[] {
+  const roots: DocNode[] = [];
+  const dirs = new Map<string, Extract<DocNode, { kind: "dir" }>>();
   for (const e of entries) {
-    const last = out[out.length - 1];
-    if (last && last.name === e.group) last.rows.push(e);
-    else out.push({ name: e.group, rows: [e] });
+    let into = roots;
+    if (e.group) {
+      let path = "";
+      for (const seg of e.group.split("/")) {
+        path = path ? `${path}/${seg}` : seg;
+        let dir = dirs.get(path);
+        if (!dir) {
+          dir = { kind: "dir", path, name: seg, kids: [], count: 0 };
+          dirs.set(path, dir);
+          into.push(dir);
+        }
+        into = dir.kids;
+      }
+    }
+    into.push({ kind: "doc", entry: e });
   }
-  return out;
+  // The count on a directory row is its WHOLE subtree, which is the number a
+  // collapsed row has to state — "archive (31)" while showing nothing is the
+  // only thing telling you what is behind it.
+  const count = (n: DocNode): number =>
+    n.kind === "doc" ? 1 : (n.count = n.kids.reduce((a, k) => a + count(k), 0));
+  roots.forEach(count);
+  return roots;
 }
 
-export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, seenEpoch, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
+/** One level of the tree, and then itself.
+ *
+ *  At MODULE scope with props, not inside `DocsPane`: a component declared in
+ *  another component's body is a new identity on every render, so React would
+ *  unmount and remount the whole subtree every time a keystroke changed the
+ *  filter — losing focus and scroll position on the way (CLAUDE.md). */
+function DocRows(p: {
+  nodes: DocNode[];
+  depth: number;
+  /** Directory paths the user has collapsed. */
+  closed: ReadonlySet<string>;
+  /** A filter is active, so children are shown whatever `closed` says. */
+  filtering: boolean;
+  onToggle: (path: string) => void;
+  sel: string | null;
+  isNew: (e: DocEntry) => boolean;
+  onOpenDoc: (e: DocEntry) => void;
+  onBrowse: (path: string) => void;
+  viewerBusy: boolean;
+  onError: (e: unknown) => void;
+}) {
+  return (
+    <>
+      {p.nodes.map((n) => {
+        if (n.kind === "dir") {
+          const open = !p.closed.has(n.path);
+          // The chevron follows what the user CHOSE; the children follow what
+          // the filter needs. A match hidden inside a collapsed directory is a
+          // filter that looks broken, and a chevron that ignores a click is a
+          // control that looks broken — so a filtered view can show a closed
+          // directory's matches, which is also the most informative thing it
+          // could say about where they came from.
+          const show = open || p.filtering;
+          return (
+            <div className="docs-branch-node" key={"dir:" + n.path}>
+              <button
+                className="docs-dir"
+                style={{ "--depth": p.depth } as CSSProperties}
+                data-track="docs.dir"
+                aria-expanded={open}
+                title={n.path}
+                onClick={() => p.onToggle(n.path)}
+              >
+                <span className="docs-chev" aria-hidden>
+                  {open ? <Icons.ChevronDown size={12} /> : <Icons.ChevronRight size={12} />}
+                </span>
+                <span className="docs-dirname">{n.name}</span>
+                <span className="docs-gcount">{n.count}</span>
+              </button>
+              {show && <DocRows {...p} nodes={n.kids} depth={p.depth + 1} />}
+            </div>
+          );
+        }
+        const e = n.entry;
+        return (
+          <div
+            key={e.path}
+            className={"docs-row" + (p.sel === e.path ? " sel" : "")}
+            style={{ "--depth": p.depth } as CSSProperties}
+            role="button"
+            tabIndex={0}
+            data-track="docs.row"
+            title={e.rel}
+            onClick={() => p.onOpenDoc(e)}
+            onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); p.onOpenDoc(e); } }}
+          >
+            {/* A DOT, never coloured text. `--accent` as 11px type on its
+                own tint measures 3.1:1 in tokyo-day and worse in latte
+                (CLAUDE.md); hue goes in the dot, the words take a text
+                token. `aria-hidden` because the label beside it already
+                says the same thing to a reader. */}
+            <span className={"docs-new" + (p.isNew(e) ? " on" : "")} aria-hidden />
+            <span className="docs-title">{e.title}</span>
+            <span className="docs-rel">{e.rel}</span>
+            {p.isNew(e) && (
+              <span className="docs-when" title={`modified ${new Date(e.mtime_ms).toLocaleString()}`}>
+                {ago(Math.floor(e.mtime_ms / 1000))}
+              </span>
+            )}
+            <span className="docs-verbs">
+              {/* §7.2: the browser becomes the row's other action, and the
+                  in-app read (the row itself) stays the primary one. It is
+                  the only way to see a diagram at all — the dock's renderer
+                  shows a mermaid fence as a code block, by decision. */}
+              <button
+                className="docs-verb"
+                data-track="docs.rowbrowser"
+                title="Open in the browser"
+                aria-label={`Open ${e.rel} in the browser`}
+                disabled={p.viewerBusy}
+                onClick={(ev) => { ev.stopPropagation(); p.onBrowse(e.path); }}
+              >
+                <Icons.ExternalLink size={13} />
+              </button>
+              <button
+                className="docs-verb"
+                data-track="docs.reveal"
+                title="Reveal in Finder"
+                aria-label={`Reveal ${e.rel} in Finder`}
+                onClick={(ev) => { ev.stopPropagation(); revealItemInDir(e.path).catch(p.onError); }}
+              >
+                <Icons.Folder size={13} />
+              </button>
+            </span>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, seenEpoch, collapsed, onCollapsed, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
   const [idx, setIdx] = useState<DocsIndex | null>(null);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -265,7 +421,18 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
 
   const terms = useMemo(() => q.toLowerCase().split(/\s+/).filter(Boolean), [q]);
   const shown = useMemo(() => (idx ? idx.entries.filter((e) => matches(e, terms)) : []), [idx, terms]);
-  const groups = useMemo(() => group(shown), [shown]);
+  const nodes = useMemo(() => tree(shown), [shown]);
+  const closed = useMemo(() => new Set(collapsed), [collapsed]);
+  // The persisted set is edited even while a filter is on — the chevron shows
+  // the choice, the filter shows the matches, and clearing the filter reveals
+  // what was actually chosen. Writing through the prop rather than holding a
+  // local copy keeps ONE source of truth: the settings blob is written whole
+  // (ui-state.json), so a component-local set would be silently overwritten by
+  // the next save from anywhere else.
+  const toggle = useCallback(
+    (path: string) => onCollapsed(collapsed.includes(path) ? collapsed.filter((p) => p !== path) : [...collapsed, path]),
+    [collapsed, onCollapsed],
+  );
   const total = idx?.entries.length ?? 0;
   // `0` is how `docs.rs` reports a stat it could not read, and it must never
   // mark: it would otherwise light up every row in a place whose baseline is
@@ -407,74 +574,26 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
           </div>
         )}
         {idx && !!total && !shown.length && <div className="docs-note">Nothing matches “{q}”.</div>}
-        {/* Keyed on the first row's PATH, not on the group name. Core promises
-            each group is one contiguous run (`every_group_is_one_contiguous_run`),
-            so the name would do — but it did not, once: the walk used to emit
-            the leftover root files after the tree, giving two `""` runs and two
-            siblings keyed `(root)`, which React answers by duplicating and
-            omitting children. A path is unique by construction, so a future
-            reordering can be wrong without also being silently wrong. */}
-        {groups.map((g) => (
-          <div className="docs-group" key={g.rows[0].path}>
-            {g.name && (
-              <div className="docs-ghead">
-                <span className="docs-gname">{g.name}</span>
-                <span className="docs-gcount">{g.rows.length}</span>
-              </div>
-            )}
-            {g.rows.map((e) => (
-              <div
-                key={e.path}
-                className={"docs-row" + (sel === e.path ? " sel" : "")}
-                role="button"
-                tabIndex={0}
-                data-track="docs.row"
-                title={e.rel}
-                onClick={() => open(e)}
-                onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(e); } }}
-              >
-                {/* A DOT, never coloured text. `--accent` as 11px type on its
-                    own tint measures 3.1:1 in tokyo-day and worse in latte
-                    (CLAUDE.md); hue goes in the dot, the words take a text
-                    token. `aria-hidden` because the label beside it already
-                    says the same thing to a reader. */}
-                <span className={"docs-new" + (isNew(e) ? " on" : "")} aria-hidden />
-                <span className="docs-title">{e.title}</span>
-                <span className="docs-rel">{e.rel}</span>
-                {isNew(e) && (
-                  <span className="docs-when" title={`modified ${new Date(e.mtime_ms).toLocaleString()}`}>
-                    {ago(Math.floor(e.mtime_ms / 1000))}
-                  </span>
-                )}
-                <span className="docs-verbs">
-                  {/* §7.2: the browser becomes the row's other action, and the
-                      in-app read (the row itself) stays the primary one. It is
-                      the only way to see a diagram at all — the dock's renderer
-                      shows a mermaid fence as a code block, by decision. */}
-                  <button
-                    className="docs-verb"
-                    data-track="docs.rowbrowser"
-                    title="Open in the browser"
-                    aria-label={`Open ${e.rel} in the browser`}
-                    disabled={viewerBusy}
-                    onClick={(ev) => { ev.stopPropagation(); void browse(e.path); }}
-                  >
-                    <Icons.ExternalLink size={13} />
-                  </button>
-                  <button
-                    className="docs-verb"
-                    data-track="docs.reveal"
-                    title="Reveal in Finder"
-                    aria-label={`Reveal ${e.rel} in Finder`}
-                    onClick={(ev) => { ev.stopPropagation(); revealItemInDir(e.path).catch(onError); }}
-                  >
-                    <Icons.Folder size={13} />
-                  </button>
-                </span>
-              </div>
-            ))}
-          </div>
-        ))}
+        {/* THE TREE. Nested by `DocEntry::group`, in first-appearance order,
+            and there is deliberately no flat/tree toggle: two ways to read the
+            same list is a preference nobody has an opinion about until it is
+            set wrong. Every key is a PATH, which is unique by construction —
+            the flat version keyed groups by NAME and the walk once emitted two
+            separate `""` runs, which React answers by duplicating a sibling and
+            omitting its children. */}
+        <DocRows
+          nodes={nodes}
+          depth={0}
+          closed={closed}
+          filtering={!!terms.length}
+          onToggle={toggle}
+          sel={sel}
+          isNew={isNew}
+          onOpenDoc={open}
+          onBrowse={(path) => void browse(path)}
+          viewerBusy={viewerBusy}
+          onError={onError}
+        />
         {idx?.truncated && (
           <div className="docs-note docs-trunc">
             Stopped at {total} documents — this place has more. The Files tab lists everything.

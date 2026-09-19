@@ -116,6 +116,11 @@ const isBareArm = (k: string | null) =>
   !!k && (k.startsWith("hdr|") || k.startsWith("close|") || k.startsWith("closectx|"));
 /** core's `diag::EXIT_NEEDS_CONFIRM` — "I stopped to ask", never a failure. */
 const EXIT_NEEDS_CONFIRM = 4;
+/** The "nothing collapsed" answer for a place with no `docs_collapsed` entry,
+ *  which is most of them. One frozen array rather than a fresh `[]` per render:
+ *  `DocsPane` derives a `Set` from it with `useMemo`, and a new identity every
+ *  render would rebuild that set on every keystroke in the filter box. */
+const EMPTY_PATHS: string[] = [];
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order. Two entries
 // now — Home and Places — so ⌘3/⌘4 are dead keys rather than shortcuts to the
@@ -3930,8 +3935,8 @@ function App() {
    *  years ago would still be carrying a dock width. */
   const dropPanels = useCallback((
     shouldDrop: (key: string) => boolean,
-    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs")[] =
-      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs"],
+    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs" | "docs_collapsed")[] =
+      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs", "docs_collapsed"],
   ) => {
     setSettings((prev) => {
       // The default sweeps EVERY per-place map, not just the panels: they are
@@ -4003,6 +4008,20 @@ function App() {
     if (ids.length) all[key] = ids;
     else delete all[key];
     updateSettings({ term_tabs: all });
+  };
+
+  /** Remember which directories are collapsed in this place's Docs tree (empty
+   *  = drop the entry, so a place nobody has customised leaves no trace).
+   *
+   *  Sibling of `term_tab_active` for the same reason it is: `panelsFor` spreads
+   *  `place_panels` over the globals, so a key there needs a global twin — and
+   *  "docs/adr is collapsed" is a sentence about ONE worktree's tree. */
+  const setDocsCollapsed = (repo: string, slug: string, paths: string[]) => {
+    const key = placeKey(repo, slug);
+    const all = { ...(settings.docs_collapsed ?? {}) };
+    if (paths.length) all[key] = paths;
+    else delete all[key];
+    updateSettings({ docs_collapsed: all });
   };
 
   /** Remember which shell tab is in front for this place (null = none left).
@@ -6716,6 +6735,13 @@ function App() {
                     reloadToken={placesToken}
                     pageVisible={pageVisible}
                     seenEpoch={docsBaseline(selected)}
+                    // The tree's collapsed directories, per place. Its own
+                    // record rather than a `place_panels` field — a set of
+                    // directory paths from one worktree means nothing in
+                    // another, and `panelsFor` would make it a seed (the note
+                    // on `docs_collapsed` in settings.ts has the long version).
+                    collapsed={(settings.docs_collapsed ?? {})[placeKey(sel.repo, sel.slug)] ?? EMPTY_PATHS}
+                    onCollapsed={(paths) => setDocsCollapsed(sel.repo, sel.slug, paths)}
                     // Phase 1's Read action: the file goes to the Files tab's
                     // renderer, which has done markdown since v0.8.0. The dock
                     // is controlled from here (`dockFile`), so this needs no

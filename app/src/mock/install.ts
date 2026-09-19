@@ -1345,6 +1345,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         mk("docs/architecture/message-flow.md", "Message flow", "docs/architecture"),
         mk("docs/proposals/place-docs.md", "Proposal — per-place docs", "docs/proposals"),
         mk("docs/proposals/project-settings.md", "Proposal — project settings", "docs/proposals"),
+        // Depth THREE, under a directory that also has files of its own — the
+        // tree has to nest these rather than show two sibling headers, and the
+        // indent is only visible past the second level.
+        mk("docs/architecture/services/gateway.md", "Gateway", "docs/architecture/services"),
+        // …and a directory nobody named: nothing is grouped under `docs/rfc`,
+        // so that node exists ONLY because this row's group names it. A tree
+        // that built its parents out of rows rather than out of paths drops
+        // this one, and the row lands at the root looking like a README.
+        mk("docs/rfc/2026/one.md", "RFC 1 — the first one", "docs/rfc/2026"),
       ];
       if (mode === "badcfg") {
         return {

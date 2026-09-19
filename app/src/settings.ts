@@ -230,6 +230,25 @@ export type Settings = {
   // nothing about the next. Keyed like `term_tab_names`, and read the same way:
   // a remembered tab that is no longer in the list falls back to the first.
   term_tab_active: Record<string, number>;
+  // Which directories are COLLAPSED in the Docs tree, `repo|slug` → paths
+  // (`"docs"`, `"docs/adr"`), as `docs::DocEntry::group` spells them.
+  //
+  // Not a `place_panels` field, and for exactly the reason `term_tab_active`
+  // is not: `panelsFor` returns `{...s, ...p}`, so every key there must also
+  // exist as a GLOBAL — and "docs/adr is collapsed" is a sentence about one
+  // worktree's tree. A global would seed it into places that may not even have
+  // that directory on their branch, which is §1.1's premise (seven of eleven
+  // places carry a different `docs/` entirely) turned into a settings bug.
+  //
+  // ⚠ COLLAPSED, not expanded, and the polarity is the design. Absent has to
+  // mean "nothing has been collapsed here", i.e. the whole tree is open —
+  // which is what the flat list this replaces showed, so no document goes
+  // missing by upgrading, and a directory added to the repo tomorrow appears
+  // rather than hiding inside a set written before it existed. It also keeps
+  // the record empty for every place nobody has customised.
+  //
+  // Pruned with the other per-place maps when a place goes away (`dropPanels`).
+  docs_collapsed: Record<string, string[]>;
   // Per-place panel state, keyed `repo|slug` (the same scheme as
   // `term_tab_names`). An entry here means "this place has been SET UP"; its
   // absence means the dock has never been opened there, and such a place starts
@@ -328,6 +347,7 @@ export const DEFAULTS: Settings = {
   term_tab_names: {},
   term_tabs: {},
   term_tab_active: {},
+  docs_collapsed: {},
   place_panels: {},
   editor_cmd: "code",
   terminal_cmd: "",

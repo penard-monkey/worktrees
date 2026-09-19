@@ -2555,19 +2555,57 @@ body.dragging .menu-catch { pointer-events: none; }
 .docs-q::placeholder { color: var(--txt-mute); }
 
 .docs-list { flex: 1; min-height: 0; min-width: 0; overflow: auto; padding-bottom: var(--s2); }
-.docs-ghead {
-  display: flex; align-items: baseline; gap: var(--s2);
-  padding: var(--s2) var(--s2) var(--s1);
-  color: var(--txt-mute); font-size: var(--fs-meta);
+.docs-gcount { flex: none; }
+
+/* THE TREE. One directory row per level, and the depth arrives as a custom
+ * property on the row itself (`--depth`, set inline by `DocRows`) so the
+ * arithmetic stays here with the spacing scale rather than being px computed in
+ * TSX. A step of 10px rather than a full `--s3`: the dock's floor is 240px and a
+ * `docs/architecture/adr` is three steps in before its title starts.
+ *
+ * The indent is PADDING on a full-width row, never a margin: the hover and
+ * selection backgrounds have to run the whole width of the list or a nested row
+ * reads as a different kind of thing from a root one. */
+.docs-dir {
+  display: flex; align-items: center; gap: var(--s1);
+  width: 100%;
+  padding: var(--s1) var(--s2) var(--s1) calc(var(--s2) + var(--depth, 0) * 10px);
+  background: transparent; border: 0; text-align: left; cursor: pointer;
+  color: var(--txt-mute); font: inherit; font-size: var(--fs-meta);
   letter-spacing: 0.06em; text-transform: uppercase;
 }
-.docs-gname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.docs-gcount { flex: none; }
+.docs-dir:hover { background: var(--bg-elev); color: var(--txt-hi); }
+.docs-dir:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* The NAME takes all the slack; the chevron and the count keep their size.
+ *
+ * MEASURED, because a flex layout inside a `<button>` is the shape of the usage
+ * meter's WebKit-only bug (CLAUDE.md): headless WebKit beside Chromium, at the
+ * dock's 240px floor, agree to the pixel — button 239, chevron 12, name 177,
+ * count 6, no horizontal overflow, the name hit-testable. The trap does not
+ * reach this row because `width: 100%` means the button is never asked to
+ * shrink-wrap, which is the same reason `.docs-browse` came out identical in
+ * both engines (proposal §15.6).
+ *
+ * The `flex: none` below is therefore a belt and not the thing holding this up:
+ * forced to 149px — narrower than the app allows — the name shrinks to 86px and
+ * REMOVING the pins changes nothing, because an SVG at a fixed px size and a
+ * two-character count have no shrinkable content to give. Worth keeping and
+ * worth not believing: the next control put in this row may well be the one
+ * that competes for width, and then it has to be measured again. */
+.docs-chev { flex: none; display: flex; align-items: center; color: var(--txt-mute); }
+.docs-dirname {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .docs-row {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
   grid-template-areas: "dot title title reveal" "dot rel when reveal";
   align-items: center; column-gap: var(--s1);
+  /* The shorthand FIRST and the indent after it — the other way round and
+     `padding` resets the left edge back to the gutter, silently, on every row
+     in the tree. */
   padding: 3px var(--s2); min-width: 0; cursor: pointer;
+  padding-left: calc(var(--s2) + var(--depth, 0) * 10px);
 }
 .docs-row:hover { background: var(--bg-elev); }
 .docs-row.sel { background: var(--bg-elev); color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); }
