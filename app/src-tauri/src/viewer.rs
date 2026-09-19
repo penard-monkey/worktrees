@@ -86,6 +86,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(2_000);
 /// name something real.
 const PROBE_HOST: &str = "worktrees-viewer-probe.invalid";
 
+/// How long the registration client gets. It is not the startup path — the
+/// server is already up and proven — but it does scale with the place: the
+/// index's cap is 2,000 documents and the client waits while the server reads a
+/// title out of each. Deliberately several times `PROBE_TIMEOUT`, which talks to
+/// a process that has nothing to do.
+const REGISTER_DEADLINE_SECS: u64 = 15;
+
 /// Per-document read cap, matching `read_file`'s. A document over this is not
 /// silently dropped — it gets a stub page saying so (§2.7, "fail per file,
 /// loudly"), because a row that opens onto nothing is the same silent wrongness
@@ -636,12 +643,15 @@ fn register(bin: &Path, state_dir: &Path, port: u16, group: &str, tree: &Path) -
     cmd.arg(tree);
     cmd.env("XDG_STATE_HOME", state_dir);
     cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::piped());
-    // This is a short-lived CLIENT — it talks to the server over loopback and
+    // `run_deadline` sets stdout and stderr itself and spawns a thread to drain
+    // each — setting them here would be overwritten, and the draining is the
+    // point: a >64KB burst on an undrained pipe deadlocks `try_wait`, and this
+    // client prints a line per file registered.
+    //
+    // This is a short-lived CLIENT: it talks to the server over loopback and
     // exits. It is not the supervised child, so it gets a deadline of its own
     // rather than a `try_wait` loop.
-    let out = crate::run_deadline(cmd, PROBE_TIMEOUT.as_secs().max(1))
+    let out = crate::run_deadline(cmd, REGISTER_DEADLINE_SECS)
         .map_err(|e| format!("registering {group} with the viewer: {e}"))?;
     if out.status.success() {
         return Ok(());
