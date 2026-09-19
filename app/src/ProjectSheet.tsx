@@ -136,6 +136,9 @@ export function ProjectSheet({
   const [err, setErr] = useState<string | null>(null);
   const [pinfo, setPinfo] = useState<ProfilesInfo | null>(null);
   const [showToml, setShowToml] = useState(false);
+  // Opened from an `undeclared` doctor finding: the init suggestion exists for
+  // exactly those files, but the section is normally gated on no config yet.
+  const [initForDrift, setInitForDrift] = useState(false);
   // Arm-then-confirm for the one destructive control in this sheet (`--force`),
   // same two-click shape as .pop-item.danger / .ctrl.sm.danger elsewhere. It is
   // disarmed by every state change below — an armed button surviving a re-check
@@ -241,7 +244,7 @@ export function ProjectSheet({
   const broken = report !== null && reportFailed(report);
   const issues = broken ? 0 : issueCount(report);
   const busy = running !== "";
-  const canSuggest = !!suggestion?.qualifies && !cfg?.exists;
+  const canSuggest = !!suggestion?.qualifies && (!cfg?.exists || initForDrift);
   // Force is offered only when something force would actually repair is present
   // at warn/error. The COUNT includes the info-level drifted copies, because
   // `--force` re-seeds those too — the confirm must name what it will rewrite,
@@ -406,6 +409,14 @@ export function ProjectSheet({
                       {f.place ? " " : null}
                       {f.message}
                       <span className="dx-code">{f.code}</span>
+                      {f.code === "undeclared" && suggestion?.qualifies ? (
+                        // Relink and Provision have buttons; undeclared did not.
+                        // The init suggestion already knows these files — the
+                        // button just opens it.
+                        <button className="ctrl sm" disabled={busy} onClick={() => setInitForDrift(true)}>
+                          Review with init
+                        </button>
+                      ) : null}
                     </span>
                   </div>
                 ))}
