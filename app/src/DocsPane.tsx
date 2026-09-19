@@ -29,8 +29,12 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { track } from "./usage";
 
-/** `worktrees_core::docs::DocEntry`. */
-export type DocEntry = { path: string; rel: string; title: string; group: string };
+/** `worktrees_core::docs::DocEntry`. `mtime_ms` is milliseconds, and it is
+ *  mtime rather than git status because the documents the mark exists for —
+ *  `task_plan.md`, the brief, everything under `.planning/` — are gitignored
+ *  and can never carry one (the field's docstring in `docs.rs` has the long
+ *  version). */
+export type DocEntry = { path: string; rel: string; title: string; group: string; mtime_ms: number };
 /** `DocsIndex` (lib.rs). `base` is the ref `behind` counts against — the
  *  project's base ref, never `Place::upstream`. `""` when the project could not
  *  be discovered, in which case the header says "N behind" and names nothing,
@@ -68,6 +72,19 @@ export type DocsPaneProps = {
   place: DocsPlace;
   /** Bumped by `places:changed` (tmux change, or the 30 s poll). */
   reloadToken: number;
+  /** `useWindowAwake`. The re-index below stops while the window is hidden —
+   *  nobody is reading a mark they cannot see, and the app gates every other
+   *  periodic cost the same way. */
+  pageVisible: boolean;
+  /** The place's seen epoch (SECONDS) as it was *before* this visit acked it —
+   *  `App.tsx`'s `docsBaseline`. A document modified after this is marked new.
+   *
+   *  ⚠ It must be the pre-ack value. Selecting an unread place stamps
+   *  `last_seen_epoch = now` (`App.tsx`'s `ack`), and that is precisely the
+   *  visit this mark exists for: Claude finished, you came to look. Handed the
+   *  post-ack value, every badge would be cleared by the act of arriving to
+   *  read it, and the feature would appear to do nothing at all. */
+  seenEpoch: number;
   /** Open a document in the Files tab's renderer. */
   onOpen: (path: string) => void;
   onError: (e: unknown) => void;
@@ -129,6 +146,12 @@ function matches(e: DocEntry, terms: string[]): boolean {
   return terms.every((t) => hay.includes(t));
 }
 
+/** How often the index is re-walked while the tab is open and the window is
+ *  visible. Fast enough that a document Claude writes is marked while you are
+ *  still looking at the list that should be marking it, and far below the cost
+ *  that would justify a filesystem watcher (see the effect that uses it). */
+const DOCS_POLL_MS = 4000;
+
 /** Entries in backend order, cut into the groups the backend assigned. Order of
  *  FIRST APPEARANCE, never re-sorted: the walk already decided, and a second
  *  opinion here is the mirror this component exists without. */
@@ -142,11 +165,24 @@ function group(entries: DocEntry[]): Array<{ name: string; rows: DocEntry[] }> {
   return out;
 }
 
-export function DocsPane({ root, repo, slug, place, reloadToken, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
+export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, seenEpoch, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
   const [idx, setIdx] = useState<DocsIndex | null>(null);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<string | null>(null);
+  // THE BASELINE, frozen for this visit. Captured when the place changes and
+  // held for as long as you stay, so the marks do not disappear out from under
+  // you while you are reading the list — ordinary "new since last visit".
+  //
+  // React's documented adjust-state-on-prop-change shape rather than a `useState`
+  // initialiser: the pane IS keyed by place (`App.tsx`), so a switch remounts
+  // and an initialiser would do — but `root` is a prop that can move on its own
+  // (the effect below already assumes so), and a baseline that silently kept a
+  // previous place's epoch would mark either everything or nothing with no way
+  // to tell which.
+  const [base, setBase] = useState({ root, epoch: seenEpoch });
+  if (base.root !== root) setBase({ root, epoch: seenEpoch });
+  const baseline = base.epoch;
   const filterRef = useRef<HTMLInputElement>(null);
   // Has the filter been USED in this place, yet? The rail button, the rows,
   // refresh and reveal all carry a `data-track` and are counted by the global
@@ -192,6 +228,26 @@ export function DocsPane({ root, repo, slug, place, reloadToken, onOpen, onError
   }, [repo, root, onError]);
 
   useEffect(() => { load(); }, [load, reloadToken]);
+  // ── the mark's own clock ───────────────────────────────────────────────────
+  // `reloadToken` is NOT enough, and the reason is worth stating: it is bumped
+  // by `places:changed`, which the backend emits when the tmux session
+  // fingerprint moves or every tenth 3 s tick — so a file being WRITTEN emits
+  // nothing at all, and the recency mark would appear up to 30 s after the
+  // write that earned it. There is no filesystem watcher anywhere in this app
+  // (`inbox.rs` has the note on why), and the case this tab is for is watching
+  // an agent work: 30 s is long enough to read as broken.
+  //
+  // So the pane re-indexes on its own beat while it is mounted and the window
+  // is visible. The walk is 82 markdown files and ~18 ms in this repo — it
+  // stats each candidate and reads 8 KiB of it, both of which the OS has cached
+  // by the second pass — and `load`'s `seq` guard already makes an overlapping
+  // answer impossible. A re-index does not clear `sel`, and `loading` only
+  // paints over an EMPTY pane, so this is invisible until something changes.
+  useEffect(() => {
+    if (!pageVisible) return;
+    const t = setInterval(load, DOCS_POLL_MS);
+    return () => clearInterval(t);
+  }, [load, pageVisible]);
   // A half-typed filter must not follow you to another place — the same rule
   // the dock's open file and the header rename already follow.
   useEffect(() => { setQ(""); setSel(null); }, [root]);
@@ -211,6 +267,14 @@ export function DocsPane({ root, repo, slug, place, reloadToken, onOpen, onError
   const shown = useMemo(() => (idx ? idx.entries.filter((e) => matches(e, terms)) : []), [idx, terms]);
   const groups = useMemo(() => group(shown), [shown]);
   const total = idx?.entries.length ?? 0;
+  // `0` is how `docs.rs` reports a stat it could not read, and it must never
+  // mark: it would otherwise light up every row in a place whose baseline is
+  // also 0 (never seen, never opened), which is every brand-new place.
+  const isNew = useCallback(
+    (e: DocEntry) => e.mtime_ms > 0 && baseline > 0 && Math.floor(e.mtime_ms / 1000) > baseline,
+    [baseline],
+  );
+  const fresh = useMemo(() => (idx ? idx.entries.filter(isNew).length : 0), [idx, isNew]);
 
   const open = (e: DocEntry) => { setSel(e.path); onOpen(e.path); };
 
@@ -280,6 +344,14 @@ export function DocsPane({ root, repo, slug, place, reloadToken, onOpen, onError
           <span className="docs-dirty">{head.dirty}</span>
         </div>
         {head.behind && <div className="docs-behind" title={head.behind}>{head.behind}</div>}
+        {/* Said out loud, because a long index scrolls and a mark you never
+            scroll to is a mark that did not happen. */}
+        {fresh > 0 && (
+          <div className="docs-fresh" title="Changed since you last looked at this place">
+            <span className="docs-new on" aria-hidden />
+            {fresh} {fresh === 1 ? "document" : "documents"} new since you looked
+          </div>
+        )}
         {(subject || age) && (
           <div className="docs-last" title={subject}>
             {subject && <span className="docs-subj">{subject}</span>}
@@ -361,8 +433,19 @@ export function DocsPane({ root, repo, slug, place, reloadToken, onOpen, onError
                 onClick={() => open(e)}
                 onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(e); } }}
               >
+                {/* A DOT, never coloured text. `--accent` as 11px type on its
+                    own tint measures 3.1:1 in tokyo-day and worse in latte
+                    (CLAUDE.md); hue goes in the dot, the words take a text
+                    token. `aria-hidden` because the label beside it already
+                    says the same thing to a reader. */}
+                <span className={"docs-new" + (isNew(e) ? " on" : "")} aria-hidden />
                 <span className="docs-title">{e.title}</span>
                 <span className="docs-rel">{e.rel}</span>
+                {isNew(e) && (
+                  <span className="docs-when" title={`modified ${new Date(e.mtime_ms).toLocaleString()}`}>
+                    {ago(Math.floor(e.mtime_ms / 1000))}
+                  </span>
+                )}
                 <span className="docs-verbs">
                   {/* §7.2: the browser becomes the row's other action, and the
                       in-app read (the row itself) stays the primary one. It is

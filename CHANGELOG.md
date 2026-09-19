@@ -28,6 +28,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   With no viewer installed the Docs tab is exactly what it was: it lists,
   filters, reads and reveals every document, and only that one button fails,
   once, out loud.
+- **"Show me that file" now works from a Claude session.** Ask the session to
+  open a document — *show me CLAUDE.md*, *let me see the plan* — and the app
+  comes to the front with it rendered in the dock. The session asks through the
+  new `show_doc` MCP tool or `worktrees show <file>`; both refuse a path that
+  resolves outside the repository they were run in, and the app re-checks it
+  against the registered projects before opening anything. A request expires
+  after 30 seconds, so nothing is queued up to appear on your screen later: if
+  the app is not running, the ask simply does not happen, and the session says
+  so rather than claiming it opened. `show_doc` needs an MCP server started with
+  `--mutations` — it changes nothing on disk, but it drives your screen.
+- **The Docs tab marks what changed since you last looked.** A dot and a
+  relative age on every document modified since your last visit to that place,
+  with a count in the header so a mark below the fold still reports. The order
+  of the index does not move. It reads modification times rather than git
+  status, which is the only thing that can work here: the documents this is for
+  — `task_plan.md`, `findings.md`, `progress.md`, an agent's `.planning/brief.md`
+  — are gitignored by design and never appear in `git status` at all.
 - **Put Places on whichever side you like.** Settings → Navigation → Sides
   mirrors the whole shell: the Places rail and sidebar move to the right edge,
   and the Files / Terminal / Docs rail and dock move to the left. It is one

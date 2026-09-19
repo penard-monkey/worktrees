@@ -3530,6 +3530,12 @@ function App() {
   // like `doneOf` below — a place that is busy RIGHT NOW is not a thing you are
   // behind on, it is a thing you are watching.
   const unreadOf = (p: Place) => !activityOf(p) && isUnread(workedAt(p), seenAt(p));
+  /** Per place path, the seen epoch as it stood before this visit acked it.
+   *  A ref, not state: nothing renders off it directly — `docsBaseline` reads it
+   *  during render for a pane that is keyed by place and freezes its own copy —
+   *  and making it state would re-render the whole tree on an ack that has
+   *  already queued one. */
+  const priorSeen = useRef<Map<string, number>>(new Map());
   /** Spend a place's unread signal: stamp NOW locally so the ring goes at once,
    *  and forward-only in the declared store so it survives a restart.
    *
@@ -3539,6 +3545,16 @@ function App() {
    *  trip per click. */
   const ack = (repo: string, p: Place) => {
     const t = Math.floor(Date.now() / 1000);
+    // What the seen epoch was BEFORE this ack — the Docs tab's recency baseline.
+    //
+    // Without this the mark is dead on arrival. `ack` fires when you select an
+    // unread place, which is exactly the visit the Docs tab's "new since you
+    // looked" exists for: Claude finished, you came to see what it did. Reading
+    // `seenAt(p)` from the pane would read the value this line just moved to
+    // NOW, so every document would be older than the baseline and nothing would
+    // ever be marked. Written before the stamp, and only on a real ack, so a
+    // revisit that acks nothing leaves the previous answer standing.
+    priorSeen.current.set(p.path, seenAt(p));
     setSeenPaths((m) => {
       const next = new Map(m);
       next.set(p.path, Math.max(next.get(p.path) ?? 0, t));
@@ -3546,6 +3562,11 @@ function App() {
     });
     invoke("mark_seen", { repo, slug: p.slug, epoch: t }).catch(() => {});
   };
+  /** "When did you last look at this place", for the Docs tab's recency mark.
+   *  The pre-ack value when this visit spent an unread signal, else the plain
+   *  seen epoch — which is the right answer for a place you have already read:
+   *  you looked, so nothing here is new. */
+  const docsBaseline = (p: Place) => priorSeen.current.get(p.path) ?? seenAt(p);
   // THE clock. Row age and sort key for every list a user reads — the nav tree,
   // the home Resume list, ⌘K — so a row's printed age is the reason it sits
   // where it does. When something HAPPENED here: Claude work or a commit, never
@@ -3873,6 +3894,34 @@ function App() {
       return next;
     });
   }, []);
+
+  // ── "show me this document", from a Claude session ────────────────────────
+  // `worktrees show` / the MCP `show_doc` tool drop a request in
+  // `~/.cache/worktrees/inbox`; the backend's 3 s tick validates it and emits
+  // this. See `worktrees_core::inbox` for why it travels through the filesystem
+  // (the app has no inbound surface, and the CLI cannot reach Tauri's config
+  // dir).
+  //
+  // TWO STEPS, deliberately. `updatePanels` writes the panel record for
+  // `selRef.current`, and that ref is assigned during RENDER — so calling it in
+  // the same handler as `setSel` would store the dock state against the place
+  // you are leaving, not the one being opened. The request is parked until the
+  // selection it names has actually landed.
+  const [pendingDoc, setPendingDoc] = useState<{ repo: string; slug: string; path: string } | null>(null);
+  useEffect(() => {
+    const un = listen<{ repo: string; slug: string; path: string }>("app:open-doc", (e) => {
+      setSel({ repo: e.payload.repo, slug: e.payload.slug });
+      setPendingDoc(e.payload);
+    });
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, []);
+  useEffect(() => {
+    if (!pendingDoc) return;
+    if (sel?.repo !== pendingDoc.repo || sel?.slug !== pendingDoc.slug) return;
+    setDockFile(pendingDoc.path);
+    updatePanels({ dock_tab: "files", dock_open: true });
+    setPendingDoc(null);
+  }, [pendingDoc, sel, updatePanels]);
 
   /** Forget remembered panels for keys matching `shouldDrop`.
    *
@@ -6665,6 +6714,8 @@ function App() {
                     slug={sel.slug}
                     place={selected}
                     reloadToken={placesToken}
+                    pageVisible={pageVisible}
+                    seenEpoch={docsBaseline(selected)}
                     // Phase 1's Read action: the file goes to the Files tab's
                     // renderer, which has done markdown since v0.8.0. The dock
                     // is controlled from here (`dockFile`), so this needs no

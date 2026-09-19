@@ -812,6 +812,7 @@ mod tests {
             rel: rel.to_string(),
             title: title.to_string(),
             group: String::new(),
+            mtime_ms: 0,
         }
     }
 

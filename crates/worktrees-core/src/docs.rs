@@ -105,6 +105,22 @@ pub struct DocEntry {
     /// PLACE, which is the one thing the root files are not, and a group of one
     /// under a gitignored directory name reads as an accident.
     pub group: String,
+    /// Last modification, in milliseconds since the epoch; `0` when the stat
+    /// failed. The recency mark in the Docs tab is this against the place's
+    /// seen epoch, and it is mtime rather than git status for one reason:
+    /// **the documents this signal exists for are gitignored.** `task_plan.md`,
+    /// `findings.md`, `progress.md` and the whole of `.planning/` (this repo's
+    /// own `.gitignore`, and `ops::BRIEF_PATH`'s docstring says every repo of
+    /// ours does the same) never appear in `git status`, so a git-derived mark
+    /// would light up `CHANGELOG.md` forever and the brief never — backwards
+    /// from what a reader wants. It costs nothing here: the walk has already
+    /// `symlink_metadata`'d this path to prove it a regular file and then
+    /// OPENED it to sniff a title.
+    ///
+    /// Milliseconds because `lib.rs::file_mtime_ms` already speaks them, and a
+    /// second's resolution is genuinely too coarse for "did this change while I
+    /// was reading it".
+    pub mtime_ms: u64,
 }
 
 /// The index for one place.
@@ -127,6 +143,23 @@ fn is_md(name: &str) -> bool {
 /// perfectly ordinary file.
 fn is_regular_file(p: &Path) -> bool {
     std::fs::symlink_metadata(p).map(|m| m.is_file()).unwrap_or(false)
+}
+
+/// Modification time in milliseconds since the epoch, `0` when it cannot be
+/// read. `symlink_metadata` for the same reason as above — every caller has
+/// already proved this is a regular file, and a stat that follows links has no
+/// business in this module even where it would agree.
+///
+/// A failure is `0`, never an error: a row whose mtime could not be read is
+/// still a row. `0` reads as "older than any baseline", so the mark is simply
+/// absent — which is the right way for this to fail.
+fn mtime_ms(p: &Path) -> u64 {
+    std::fs::symlink_metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Collapse whitespace, cap the length, and refuse an empty result.
@@ -274,6 +307,7 @@ fn entry(root: &Path, rel: &str, group: &str) -> DocEntry {
     let name = Path::new(rel).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| rel.to_string());
     DocEntry {
         title: title_of(&path, &name),
+        mtime_ms: mtime_ms(&path),
         path: path.to_string_lossy().to_string(),
         rel: rel.to_string(),
         group: group.to_string(),
@@ -458,6 +492,37 @@ mod tests {
     }
     fn rels(i: &DocsIndex) -> Vec<&str> {
         i.entries.iter().map(|e| e.rel.as_str()).collect()
+    }
+
+    /// The recency mark's whole input. Two things are asserted and the second
+    /// is the one that matters: the brief is GITIGNORED in every repo of ours
+    /// (`ops::BRIEF_PATH`), so it can never carry a git status — if this field
+    /// did not exist, the one document the tool writes itself would be the one
+    /// document the Docs tab could never mark as new.
+    #[test]
+    fn every_entry_carries_an_mtime_including_the_gitignored_ones() {
+        let t = tmp("mtime");
+        let r = &t.0;
+        write(r, "README.md", "# readme");
+        write(r, crate::ops::BRIEF_PATH, "# the brief");
+        write(r, "task_plan.md", "# plan");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let idx = index(r);
+        assert_eq!(idx.entries.len(), 3, "three documents, one of them the brief");
+        for e in &idx.entries {
+            // Just written, so: real, and not in the future. The window is wide
+            // because a slow CI box is not a bug; a ZERO is.
+            assert!(e.mtime_ms > 0, "{} indexed with no mtime", e.rel);
+            assert!(
+                e.mtime_ms >= now_ms.saturating_sub(60_000) && e.mtime_ms <= now_ms + 60_000,
+                "{} mtime {} is not within a minute of now ({now_ms})",
+                e.rel,
+                e.mtime_ms
+            );
+        }
     }
 
     #[test]
