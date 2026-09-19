@@ -4569,15 +4569,32 @@ async fn close_shell_session(
     keep_cwd: Option<bool>,
     shells: State<'_, Shells>,
 ) -> Result<(), String> {
-    kill_shell(&shells, &(repo.clone(), slug.clone(), index));
+    let key: ShellKey = (repo.clone(), slug.clone(), index);
+    let keep = keep_cwd.unwrap_or(false);
+    // A RESTART keeps this tab's scrollback, so persist it up to the second
+    // before the corpse is reaped. This is the one moment where "as of up to 15
+    // seconds ago" would be visible in the same breath as the action that caused
+    // it — and the dead shell's last output is usually the thing being restarted
+    // to get away from.
+    if keep {
+        flush_one_scrollback(&app, &shells, &key);
+    }
+    kill_shell(&shells, &key);
     // A tab the user CLOSED forgets where it was, exactly as it drops its name
     // (App.tsx `closeTab`) — otherwise the next tab to take this index would
     // open in a directory it never visited. A tab being RESTARTED goes through
     // this same command to reap the corpse and asks to KEEP its directory: it
     // is the same tab, and restarting a shell that died in a subdirectory only
     // to land at the place root is the exact papercut this feature removes.
-    if !keep_cwd.unwrap_or(false) {
+    if !keep {
         edit_cwds(&app, |map| forget_tab(map, &repo, &slug, index));
+        // …and its scrollback and command history with it, for the same reason
+        // and with more at stake: the next tab to take this index has never been
+        // here, and inheriting someone else's output is worse than inheriting
+        // their directory.
+        if let Ok(root) = term_hist_dir(&app) {
+            forget_tab_history(&root, &key);
+        }
     }
     Ok(())
 }
@@ -4829,6 +4846,683 @@ fn pick_start_dir(saved: Option<&str>, place_dir: &str) -> String {
     }
 }
 
+// ── dock shell history: scrollback + per-tab commands ────────────────────────
+// What a tab keeps between app RUNS, beyond the directory above: the output it
+// was showing, and the commands it ran. One directory per tab holds both:
+//
+//   <app config>/term-history/<slug>-<index>-<hash>/
+//       meta.json        which tab this is, and the width the bytes were laid out at
+//       scrollback.bin   the replay ring, verbatim
+//       zdotdir/         the generated ZDOTDIR, and the .zsh_history zsh writes there
+//
+// Its own tree, for the same reason `shell-cwds.json` is its own file:
+// `ui-state.json` is written WHOLE-BLOB by the frontend, so nothing the backend
+// writes may go near it.
+//
+// The directory NAME is only a name. A repo path is absolute and a slug can be
+// anything a branch name can be, so the stem is a hash — and `meta.json` names
+// the tab it belongs to, so a collision, a directory left by an older scheme, or
+// a half-written one reads as "not mine" rather than as someone else's
+// scrollback. Nothing in here is ever an error: the worst any failure costs is a
+// tab that opens blank, which is what every tab did before this existed.
+//
+// It is also the only place this app writes a user's terminal OUTPUT to disk —
+// anything a script echoed, secrets included — so the tree is created 0700 and
+// the files 0600, and Settings says so next to the switch that turns it on.
+
+/// For the directory NAME only — never for identity (see `read_scrollback`).
+/// FNV-1a 64, inline rather than a crate for eight lines. Not a security
+/// boundary: it names a file.
+fn fnv1a64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// A readable, filesystem-safe stem for one tab. The slug is decoration — it is
+/// what makes the directory browsable — so it is clamped hard; the hash carries
+/// all of the uniqueness.
+fn tab_stem(key: &ShellKey) -> String {
+    let (repo, slug, index) = key;
+    let safe: String = slug
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '-' })
+        .take(32)
+        .collect();
+    format!("{safe}-{index}-{:016x}", fnv1a64(&format!("{repo}|{slug}|{index}")))
+}
+
+/// How long an untouched tab's history is kept. This tree holds CONTENT, and
+/// unlike the cwd map there is nothing about it that shrinks on its own, so it
+/// needs a horizon as well as the sweeps.
+const TERM_HIST_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Serialises writers, exactly as `CWD_FILE_LOCK` does for the directories: the
+/// slow sampler, the shell commands and the sweeps all touch this tree.
+static TERM_HIST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Frontend-owned preferences the shell path needs. Set by
+/// `set_term_history_opts` on hydration and on every change — the same shape as
+/// `FETCH_INTERVAL_SECS`, and for the same reason: the backend must never READ
+/// `ui-state.json` to find them out, because it must never write it.
+static PERSIST_SCROLLBACK: AtomicBool = AtomicBool::new(true);
+static PER_TAB_HISTORY: AtomicBool = AtomicBool::new(true);
+
+/// `<app config>/term-history`, created 0700 on demand.
+fn term_hist_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("term-history");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    private_perms(&dir, 0o700);
+    Ok(dir)
+}
+
+/// Tighten a path we just created. Best-effort: a filesystem that cannot express
+/// the mode is not a reason to refuse to remember a tab.
+fn private_perms(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+}
+
+fn tab_dir(root: &Path, key: &ShellKey) -> PathBuf {
+    root.join(tab_stem(key))
+}
+
+/// Which tab a directory belongs to, and the WIDTH its bytes were laid out at.
+///
+/// `cols` is not bookkeeping. Raw bytes replayed into a different grid do not
+/// re-wrap, and the cursor-relative redraws in them were computed for a width
+/// that no longer exists — which is the defect ROADMAP.md parks under
+/// "terminal-state serialization". Recording the width lets the pane hand the
+/// recording the grid it was written for and let xterm reflow it back.
+///
+/// It is the pty's CURRENT width, not the width the oldest byte was written at —
+/// a byte ring has no single true width. It converges: quit at 174, restore at
+/// 100, and the next save records 100.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct TabMeta {
+    repo: String,
+    slug: String,
+    index: u32,
+    cols: u16,
+    at: i64,
+}
+
+fn read_meta(tab: &Path) -> Option<TabMeta> {
+    serde_json::from_slice(&std::fs::read(tab.join("meta.json")).ok()?).ok()
+}
+
+/// Write-then-rename, 0600. Readers deliberately do NOT take `TERM_HIST_LOCK` —
+/// `shell_open` reads this tree while holding the shell registry, and nothing
+/// holding the registry may wait on a file lock — so a plain write (a truncate
+/// followed by a write) would let a read land on half a document.
+fn hist_write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let r = std::fs::write(&tmp, bytes).and_then(|_| {
+        private_perms(&tmp, 0o600);
+        std::fs::rename(&tmp, path)
+    });
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
+/// Drop a leading partial line.
+///
+/// Only correct for a ring that has actually ROLLED — see `rolled_ring` below,
+/// which is the only caller and exists to state that condition.
+/// Bounded, so a ring with no newline at all is left alone rather than emptied.
+fn trim_to_line_start(b: &[u8]) -> &[u8] {
+    const LOOK: usize = 4096;
+    match b[..b.len().min(LOOK)].iter().position(|&c| c == b'\n') {
+        Some(i) => &b[i + 1..],
+        None => b,
+    }
+}
+
+/// What of a ring is worth saving.
+///
+/// A ring at the CAP has been drained from the front, so it begins wherever
+/// `drain` happened to cut — routinely the tail of an escape sequence whose
+/// introducer is gone, which replays as a few stray characters at the top. That
+/// leading fragment is dropped.
+///
+/// A ring BELOW the cap has never rolled: it begins where the shell began, and
+/// its first line is a real one. Trimming that would throw away a genuine line
+/// on every save — and worse, it COMPOUNDS, because the next restore seeds from
+/// the trimmed copy and the save after that trims the new first line. One line
+/// per restart, silently, off the oldest end. The length test is what separates
+/// the two cases, and it is exact: nothing else can put a ring at the cap.
+fn rolled_ring(bytes: &[u8]) -> &[u8] {
+    if bytes.len() >= SHELL_RING {
+        trim_to_line_start(bytes)
+    } else {
+        bytes
+    }
+}
+
+/// This tab's saved scrollback and the metadata it was saved with, or `None`.
+///
+/// `meta.json` is the identity, not the directory name: anything that does not
+/// name exactly this tab answers `None`. Never an error, and never another tab's
+/// output.
+fn read_scrollback(root: &Path, key: &ShellKey) -> Option<(Vec<u8>, TabMeta)> {
+    let tab = tab_dir(root, key);
+    let meta = read_meta(&tab)?;
+    if meta.repo != key.0 || meta.slug != key.1 || meta.index != key.2 {
+        return None;
+    }
+    let bytes = std::fs::read(tab.join("scrollback.bin")).ok()?;
+    Some((bytes, meta))
+}
+
+/// Stamp a tab's identity without touching its scrollback.
+///
+/// Called when a tab's `zdotdir` is generated, so a tab whose shell is closed
+/// before the first flush still has the `meta.json` every sweep here reads. A
+/// directory with no meta is one nothing can judge, so it would never be
+/// collected.
+fn ensure_meta(root: &Path, key: &ShellKey, cols: u16) {
+    let tab = tab_dir(root, key);
+    if read_meta(&tab).is_some() {
+        return;
+    }
+    write_meta(&tab, key, cols);
+}
+
+fn write_meta(tab: &Path, key: &ShellKey, cols: u16) {
+    let meta = TabMeta {
+        repo: key.0.clone(),
+        slug: key.1.clone(),
+        index: key.2,
+        cols,
+        at: sysclock::now_epoch(),
+    };
+    match serde_json::to_vec_pretty(&meta) {
+        Ok(j) => {
+            if let Err(e) = hist_write_atomic(&tab.join("meta.json"), &j) {
+                applog("error", &format!("term-history meta write failed: {e}"));
+            }
+        }
+        Err(e) => applog("error", &format!("term-history meta encode failed: {e}")),
+    }
+}
+
+/// Persist one tab's ring at the width it is currently being written at.
+fn write_scrollback(root: &Path, key: &ShellKey, bytes: &[u8], cols: u16) {
+    let tab = tab_dir(root, key);
+    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = std::fs::create_dir_all(&tab) {
+        return applog("error", &format!("term-history dir failed: {e}"));
+    }
+    private_perms(&tab, 0o700);
+    // bytes THEN meta: meta is what makes the directory readable, so writing it
+    // last means a crash mid-save leaves the PREVIOUS pair, never a new meta
+    // pointing at a half-written ring.
+    if let Err(e) = hist_write_atomic(&tab.join("scrollback.bin"), rolled_ring(bytes)) {
+        return applog("error", &format!("term-history write failed: {e}"));
+    }
+    write_meta(&tab, key, cols);
+}
+
+/// Everything one tab keeps between runs. Called when the tab is CLOSED — a
+/// RESTART keeps it (it is the same tab, and the dead shell's output is usually
+/// the thing you wanted to read), and so does closing the place, which keeps tab
+/// names and therefore has to keep what they hold.
+fn forget_tab_history(root: &Path, key: &ShellKey) {
+    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = std::fs::remove_dir_all(tab_dir(root, key));
+}
+
+/// Every tab of one place. Used when the place is REMOVED.
+fn forget_place_history(root: &Path, repo: &str, slug: &str) {
+    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(rd) = std::fs::read_dir(root) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() && read_meta(&p).is_some_and(|m| m.repo == repo && m.slug == slug) {
+            let _ = std::fs::remove_dir_all(&p);
+        }
+    }
+}
+
+/// Which stored tabs should go: the ones whose place no longer exists, and the
+/// ones nobody has touched in a month.
+///
+/// Split out from the filesystem so the decision can be tested directly, the way
+/// `vanished_keys` is. `place_dir` answers `None` when the PROJECT itself is
+/// unreachable — a repo that has been deleted or moved takes its places with it.
+fn stale_history<'a>(
+    metas: &'a [(PathBuf, TabMeta)],
+    now: i64,
+    mut place_dir: impl FnMut(&str, &str) -> Option<String>,
+) -> Vec<&'a PathBuf> {
+    metas
+        .iter()
+        .filter(|(_, m)| {
+            now - m.at > TERM_HIST_MAX_AGE_SECS
+                || !place_dir(&m.repo, &m.slug).is_some_and(|d| Path::new(&d).is_dir())
+        })
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// Cold-start sweep. Same reasoning as `forget_vanished_places` — a
+/// `worktrees rm` from a terminal never tells the app — plus the age horizon,
+/// because this tree holds content rather than a path.
+fn sweep_term_history(app: &AppHandle) {
+    let Ok(root) = term_hist_dir(app) else { return };
+    let Ok(rd) = std::fs::read_dir(&root) else { return };
+    let metas: Vec<(PathBuf, TabMeta)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        // no readable meta = nothing to judge it by; left alone rather than
+        // guessed at (`ensure_meta` is what keeps that set empty)
+        .filter_map(|p| read_meta(&p).map(|m| (p, m)))
+        .collect();
+    if metas.is_empty() {
+        return;
+    }
+    let mut projects: HashMap<String, Option<Project>> = HashMap::new();
+    let gone = stale_history(&metas, sysclock::now_epoch(), |repo, slug| {
+        projects.entry(repo.to_string()).or_insert_with(|| Project::discover(Path::new(repo)).ok());
+        projects[repo].as_ref().map(|p| p.place_dir(slug))
+    });
+    if gone.is_empty() {
+        return;
+    }
+    applog("info", &format!("term-history: sweeping {} tab(s)", gone.len()));
+    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for p in gone {
+        let _ = std::fs::remove_dir_all(p);
+    }
+}
+
+/// One shell's ring, ready to write once the registry lock is gone.
+type ScrollJob = (ShellKey, Arc<Mutex<VecDeque<u8>>>, u16);
+
+/// Persist every live shell's ring.
+///
+/// Dirty-gated, so a dozen idle tabs cost no I/O at all. The snapshot is taken
+/// under the REGISTRY lock and written after it is released: nothing that holds
+/// the registry may wait on a file lock, which is the same rule `save_shell_cwds`
+/// follows and the reason `shell_open` only ever reads this tree.
+///
+/// The flag is cleared BEFORE the ring is read, not after it is written. Output
+/// landing in that window re-sets it and costs one redundant write next tick;
+/// clearing it afterwards would instead drop the last chunk of a shell that then
+/// went quiet — the one direction that loses something.
+///
+/// Deliberately NOT filtered on `live_pid`, unlike `save_shell_cwds`. A shell
+/// that exited is kept in the registry precisely so its tab survives and can
+/// offer a restart, and its ring is exactly what the user wanted to read; a dead
+/// process has no cwd to sample, but it has plenty of scrollback.
+fn save_shell_scrollback(app: &AppHandle, shells: &Shells) {
+    if !PERSIST_SCROLLBACK.load(Ordering::Relaxed) {
+        return;
+    }
+    let jobs: Vec<ScrollJob> = {
+        let map = shells.0.lock().unwrap();
+        map.iter()
+            .filter(|(_, sh)| sh.dirty.swap(false, Ordering::Relaxed))
+            .map(|(k, sh)| (k.clone(), sh.ring.clone(), sh.size.cols))
+            .collect()
+    };
+    if jobs.is_empty() {
+        return;
+    }
+    let Ok(root) = term_hist_dir(app) else { return };
+    for (key, ring, cols) in jobs {
+        let bytes: Vec<u8> = ring.lock().unwrap().iter().copied().collect();
+        write_scrollback(&root, &key, &bytes, cols);
+    }
+}
+
+/// Persist ONE tab now, whatever its dirty flag says.
+///
+/// Used by the restart path: closing a dead shell to make room for a new one in
+/// the same tab is the one moment where "up to 15 seconds ago" is visible in the
+/// same breath as the action that caused it.
+fn flush_one_scrollback(app: &AppHandle, shells: &Shells, key: &ShellKey) {
+    if !PERSIST_SCROLLBACK.load(Ordering::Relaxed) {
+        return;
+    }
+    let job = {
+        let map = shells.0.lock().unwrap();
+        map.get(key).map(|sh| {
+            sh.dirty.store(false, Ordering::Relaxed);
+            (sh.ring.clone(), sh.size.cols)
+        })
+    };
+    let (Some((ring, cols)), Ok(root)) = (job, term_hist_dir(app)) else { return };
+    let bytes: Vec<u8> = ring.lock().unwrap().iter().copied().collect();
+    write_scrollback(&root, key, &bytes, cols);
+}
+
+/// `at` on the machine's LOCAL wall clock.
+///
+/// The seam below is the one thing this app writes for a person to read where
+/// it sits rather than for a log, and app.log's UTC — which CLAUDE.md already
+/// warns about when cross-referencing — is the wrong register for it. libc,
+/// because chrono is not a dependency and an offset is all `fmt_utc` lacks.
+fn fmt_local(at: i64) -> String {
+    #[cfg(unix)]
+    {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let t = at as libc::time_t;
+        if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+            return fmt_utc(at);
+        }
+        return fmt_utc(at + tm.tm_gmtoff as i64);
+    }
+    #[cfg(not(unix))]
+    fmt_utc(at)
+}
+
+/// Opens the seam, and nothing else emits it: `\x18` cancels any control
+/// sequence the ring's tail was cut inside, `\x1b\\` closes an unterminated
+/// OSC/DCS. Without them a seam can be swallowed as the argument of a
+/// half-written sequence — the one failure that reads as "the feature did not
+/// run". It doubles as the marker `trim_trailing_seam` finds.
+const SEAM_HEAD: &[u8] = b"\x18\x1b\\";
+
+/// What separates restored output from the shell about to start under it. Dim,
+/// so it reads as chrome rather than as something a command printed.
+fn restored_seam(at: i64) -> Vec<u8> {
+    let mut out = SEAM_HEAD.to_vec();
+    out.extend_from_slice(format!("\r\n\x1b[2m── restored · {} ──\x1b[0m\r\n", fmt_local(at)).as_bytes());
+    out
+}
+
+/// Drop a seam that is the LAST thing in the buffer — one a previous restore
+/// wrote and nothing has been typed under since. A seam with a session's output
+/// after it is left alone, because it still marks a real boundary.
+///
+/// The test is exact rather than a search: a seam is FIXED WIDTH (`fmt_utc` is),
+/// so the buffer ends with one precisely when the last `n` bytes begin with
+/// `SEAM_HEAD`. Scanning a window instead finds a seam that has work under it —
+/// which trims a boundary that should have stayed, and which is what the second
+/// half of `a_seam_nothing_was_typed_under_is_replaced_not_followed` caught.
+fn trim_trailing_seam(bytes: &[u8]) -> &[u8] {
+    let n = restored_seam(0).len();
+    if bytes.len() < n {
+        return bytes;
+    }
+    let cut = bytes.len() - n;
+    if &bytes[cut..cut + SEAM_HEAD.len()] == SEAM_HEAD {
+        &bytes[..cut]
+    } else {
+        bytes
+    }
+}
+
+/// The bytes a restoring tab is handed first: what it had, then a seam saying
+/// where that ended. Empty when there is nothing saved, so `replay` stays 0 and
+/// the pane keeps treating the shell's own first output as live.
+///
+/// This goes into the RING as well as down the channel — which is a reversal
+/// worth stating, because the tidy-looking rule is the opposite. A re-attach
+/// replays the ring and nothing else, so a seam kept out of it is visible only
+/// until the first tab flip; under React StrictMode the pane re-attaches before
+/// anyone has seen anything, so the seam was effectively dead. Being in the ring
+/// makes it persistable, which is why it carries an ABSOLUTE time rather than an
+/// age that would freeze at "2h ago" forever, and why a seam still sitting at
+/// the very end is REPLACED rather than followed — otherwise three launches with
+/// nothing typed between them stack three of them.
+fn restore_payload(bytes: &[u8], at: i64) -> Vec<u8> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let mut out = trim_trailing_seam(bytes).to_vec();
+    out.extend_from_slice(&restored_seam(at));
+    out
+}
+
+// ── per-tab command history ─────────────────────────────────────────────────
+// zsh is the whole reason this is not simply `HISTFILE`. macOS's `/etc/zshrc`
+// sets `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` UNCONDITIONALLY for every
+// interactive shell — measured: export HISTFILE, ask an interactive zsh what it
+// is, and it answers `~/.zsh_history`. `ZDOTDIR` is the one lever that file
+// honours.
+//
+// The cost is that ZDOTDIR also moves where zsh looks for `.zshenv`,
+// `.zprofile`, `.zshrc` and `.zlogin`, so this directory carries a shim for each
+// that sources the user's real one. We generate our own files and never touch
+// theirs — the same rule that ruled out OSC 7 for the working directory.
+//
+// Two things the shims have to get right, and a naive version of this gets both
+// wrong:
+//
+//   A user's own `~/.zshenv` may set ZDOTDIR — `export ZDOTDIR=$HOME/.config/zsh`
+//   is the standard dotfiles layout. Sourced blind, that hijacks the rest of the
+//   chain: zsh would read THEIR .zshrc, `/etc/zshrc` would put HISTFILE in THEIR
+//   directory, and the tab would quietly share the global history again. So the
+//   shim hands ZDOTDIR back before sourcing theirs, reads whatever they set, and
+//   then takes the chain back.
+//
+//   Their `.zshrc` may reference `$ZDOTDIR` itself (`source $ZDOTDIR/aliases.zsh`
+//   is how every plugin manager lays out a config). So ZDOTDIR is restored to
+//   THEIR value before their rc is sourced — which also means every child shell
+//   from that point on gets a normal environment and writes the normal
+//   `~/.zsh_history`, rather than inheriting this tab's.
+//
+// HISTFILE is then set explicitly, last, from an env var rather than a path baked
+// into a generated file: last so it beats a user rc that sets HISTFILE itself,
+// and explicitly so this does not depend on an Apple-specific line in /etc.
+
+const SHIM_HEADER: &str = "# Generated by worktrees — per-tab shell history. Edits are overwritten.\n";
+
+/// `$ZDOTDIR/.zshenv`: the load-bearing shim. Runs before anything else of the
+/// user's and is the only place that can discover a ZDOTDIR they set themselves.
+const ZSHENV_SHIM: &str = r#"_WT_Z=${ZDOTDIR}
+unset ZDOTDIR
+[ -r "$HOME/.zshenv" ] && . "$HOME/.zshenv"
+_WT_USER_Z=${ZDOTDIR:-$HOME}
+export ZDOTDIR=$_WT_Z
+"#;
+
+const ZPROFILE_SHIM: &str = r#"[ -r "${_WT_USER_Z:-$HOME}/.zprofile" ] && . "${_WT_USER_Z:-$HOME}/.zprofile"
+"#;
+
+/// `$ZDOTDIR/.zshrc`: hand the chain back, source theirs, then take the history.
+///
+/// `INC_APPEND_HISTORY` is not a nicety. The app SIGHUPs its shells on the way
+/// out (portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL), and zsh's
+/// default is to flush history only on a clean exit — without this a force-quit
+/// takes the whole session's commands with it, which is precisely the case this
+/// feature exists to survive. `SHARE_HISTORY` is deliberately NOT set: each tab
+/// has its own file, so there is nothing to share, and it would change arrow-key
+/// behaviour the user never asked us to touch.
+const ZSHRC_SHIM: &str = r#"if [ "${_WT_USER_Z:-$HOME}" = "$HOME" ]; then unset ZDOTDIR; else export ZDOTDIR=$_WT_USER_Z; fi
+[ -r "${_WT_USER_Z:-$HOME}/.zshrc" ] && . "${_WT_USER_Z:-$HOME}/.zshrc"
+[ -n "$WORKTREES_HISTFILE" ] && HISTFILE="$WORKTREES_HISTFILE"
+HISTSIZE=10000
+SAVEHIST=10000
+setopt INC_APPEND_HISTORY
+unset _WT_Z _WT_USER_Z
+"#;
+
+/// `$ZDOTDIR/.zlogin`: only reached by a NON-interactive login shell, because
+/// `.zshrc` has restored ZDOTDIR by the time an interactive one gets here and
+/// zsh then finds the user's own directly.
+const ZLOGIN_SHIM: &str = r#"[ -r "${_WT_USER_Z:-$HOME}/.zlogin" ] && . "${_WT_USER_Z:-$HOME}/.zlogin"
+"#;
+
+/// (Re)write the four shims. Regenerated on every spawn so an app upgrade
+/// refreshes them and a user who deletes the directory gets it back.
+fn write_zdotdir(zdot: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(zdot)?;
+    private_perms(zdot, 0o700);
+    for (name, body) in [
+        (".zshenv", ZSHENV_SHIM),
+        (".zprofile", ZPROFILE_SHIM),
+        (".zshrc", ZSHRC_SHIM),
+        (".zlogin", ZLOGIN_SHIM),
+    ] {
+        std::fs::write(zdot.join(name), format!("{SHIM_HEADER}{body}"))?;
+    }
+    Ok(())
+}
+
+/// Only worth saying once a run — it is a property of the user's `$SHELL`, not
+/// of any one tab, and a spawn happens every time a tab is activated.
+static UNSUPPORTED_SHELL_LOGGED: std::sync::Once = std::sync::Once::new();
+
+/// Point this tab's shell at its own command history. Answers which scheme was
+/// applied, for the tests; the caller ignores it.
+fn apply_tab_history_env(
+    cmd: &mut CommandBuilder,
+    root: &Path,
+    key: &ShellKey,
+    shell_bin: &str,
+) -> Option<&'static str> {
+    let name = Path::new(shell_bin).file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let tab = tab_dir(root, key);
+    match name {
+        "zsh" => {
+            let zdot = tab.join("zdotdir");
+            if let Err(e) = write_zdotdir(&zdot) {
+                applog("error", &format!("per-tab history: {e}"));
+                return None;
+            }
+            cmd.env("WORKTREES_HISTFILE", zdot.join(".zsh_history"));
+            cmd.env("ZDOTDIR", &zdot);
+            Some("zdotdir")
+        }
+        // bash reads HISTFILE from the environment and its rc files almost never
+        // set it, so the simple lever is the right one here. There is no ZDOTDIR
+        // equivalent, and `--rcfile` does not apply to the login shell this must
+        // stay.
+        "bash" | "sh" => {
+            if std::fs::create_dir_all(&tab).is_err() {
+                return None;
+            }
+            private_perms(&tab, 0o700);
+            cmd.env("HISTFILE", tab.join(".bash_history"));
+            Some("histfile")
+        }
+        // fish and the rest keep whatever history they already had. Better than a
+        // half-working scheme that silently loses commands — and the one log line
+        // is what makes "why is there no history here" answerable.
+        other => {
+            let other = other.to_string();
+            UNSUPPORTED_SHELL_LOGGED.call_once(|| {
+                applog(
+                    "info",
+                    &format!("per-tab history: {other} is not supported; shells keep their own history"),
+                );
+            });
+            None
+        }
+    }
+}
+
+// ── commands: preferences and the Data pane ─────────────────────────────────
+
+/// Push the two terminal-history preferences down from the frontend.
+///
+/// The settings blob is backend-opaque and frontend-owned, so the shell path
+/// cannot look them up — the frontend pushes instead, on hydration and on every
+/// change. Same shape as `set_fetch_interval`, and for the same reason.
+#[tauri::command]
+async fn set_term_history_opts(persist_scrollback: bool, per_tab_history: bool) -> Result<(), String> {
+    PERSIST_SCROLLBACK.store(persist_scrollback, Ordering::Relaxed);
+    PER_TAB_HISTORY.store(per_tab_history, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Bytes under one directory, recursively. This tree is only ever
+/// `<tab>/{meta.json, scrollback.bin, zdotdir/*}`, so the recursion is shallow.
+fn dir_bytes(dir: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.flatten()
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => dir_bytes(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+/// What Settings → Data shows beside "Clear saved terminal history".
+#[derive(Serialize)]
+struct TermHistoryInfo {
+    dir: String,
+    bytes: u64,
+    tabs: usize,
+}
+
+#[tauri::command]
+async fn term_history_info(app: AppHandle) -> Result<TermHistoryInfo, String> {
+    let root = term_hist_dir(&app)?;
+    let (mut bytes, mut tabs) = (0u64, 0usize);
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                tabs += 1;
+                bytes += dir_bytes(&p);
+            }
+        }
+    }
+    Ok(TermHistoryInfo { dir: root.to_string_lossy().into_owned(), bytes, tabs })
+}
+
+/// Forget every tab's saved output and command history.
+///
+/// The live rings go too. Leaving them would have the next sampler tick write
+/// the same bytes straight back, which would make the button a lie — but what is
+/// already PAINTED in an open terminal stays, because xterm owns that and
+/// wiping someone's visible screen is not what this asks for.
+///
+/// A tab's `zdotdir` is emptied rather than removed: a running shell holds
+/// `HISTFILE` inside it, and deleting the directory would leave that shell
+/// silently unable to record anything until it was restarted. `meta.json` stays
+/// for the same practical reason — it is identity and width, never user
+/// content, and a directory without it is one no sweep can ever collect.
+#[tauri::command]
+async fn term_history_clear(app: AppHandle, shells: State<'_, Shells>) -> Result<(), String> {
+    // Scoped: nothing that holds the registry may wait on the file lock below.
+    {
+        let map = shells.0.lock().unwrap();
+        for sh in map.values() {
+            sh.ring.lock().unwrap().clear();
+            sh.dirty.store(false, Ordering::Relaxed);
+        }
+    }
+    let root = term_hist_dir(&app)?;
+    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(rd) = std::fs::read_dir(&root) else { return Ok(()) };
+    let mut cleared = 0usize;
+    for e in rd.flatten() {
+        let tab = e.path();
+        if !tab.is_dir() {
+            continue;
+        }
+        cleared += 1;
+        let _ = std::fs::remove_file(tab.join("scrollback.bin"));
+        let zdot = tab.join("zdotdir");
+        if zdot.is_dir() {
+            let _ = hist_write_atomic(&zdot.join(".zsh_history"), b"");
+        } else {
+            let _ = std::fs::remove_file(tab.join(".bash_history"));
+        }
+    }
+    applog("info", &format!("term-history: cleared {cleared} tab(s) at the user's request"));
+    Ok(())
+}
+
 /// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
 #[tauri::command]
 async fn remove_place(
@@ -4871,6 +5565,9 @@ async fn remove_place(
         // (A `close` deliberately does NOT do this: closing keeps the tab names,
         // so it has to keep what those tabs point at.)
         edit_cwds(&app, |map| map.remove(&cwd_key(&repo, &slug_sweep)).is_some());
+        if let Ok(root) = term_hist_dir(&app) {
+            forget_place_history(&root, &repo, &slug_sweep);
+        }
     }
     Ok(r)
 }
@@ -5263,6 +5960,9 @@ struct Shell {
     /// The size the pty is actually at, so a request to be the size it already
     /// is can be dropped. See `next_pty_size`.
     size: PtySize,
+    /// Has the ring moved since it was last persisted? Lets the slow sampler
+    /// skip a tab nobody is using, which is most tabs most of the time.
+    dirty: Arc<AtomicBool>,
 }
 
 /// The size to hand `MasterPty::resize`, or `None` when the pty is already
@@ -5332,9 +6032,14 @@ fn kill_place_shells(shells: &Shells, repo: &str, slug: &str) {
 }
 
 /// What `shell_open` answers: the attach generation `shell_detach` must
-/// present, and how many bytes of ring were replayed into the channel FIRST.
+/// present, how many bytes were pushed down the channel FIRST, and the grid
+/// those bytes were laid out for.
 ///
-/// The frontend needs the second so it can tell the replay from live output.
+/// `replay` is a live shell's ring on a re-attach — and, since tabs started
+/// keeping their scrollback between runs, a fresh spawn's RESTORED ring plus its
+/// seam. Both are recordings; only a spawn with nothing saved still answers 0.
+///
+/// The frontend needs it so it can tell the replay from live output.
 /// The replay is a recording, and a recording must not be answered: any
 /// terminal query in it (vim's DA2 / cursor-position / colour / cursor-blink
 /// burst, say — every `git commit` without `-m` leaves one in the ring) is
@@ -5345,10 +6050,17 @@ fn kill_place_shells(shells: &Shells, repo: &str, slug: &str) {
 /// hands a large channel payload to the page through a separate fetch that can
 /// land AFTER the invoke's own response. What IS ordered is the channel: the
 /// snapshot is its first message whenever `replay > 0`.
+///
+/// `replay_cols` is the width the recording was written at. Raw bytes do not
+/// re-wrap, so replaying them into a different grid stacks every full line — the
+/// defect ROADMAP.md parks under "terminal-state serialization". The pane is
+/// always attaching a BRAND-NEW xterm, so it can hand the recording the grid it
+/// was written for and let xterm reflow it back afterwards.
 #[derive(Serialize)]
 struct ShellAttach {
     gen: u64,
     replay: usize,
+    replay_cols: Option<u16>,
 }
 
 /// Start (or re-attach to) the dock shell for `index` and stream it to
@@ -5376,6 +6088,11 @@ async fn shell_open(
     let key: ShellKey = (repo.clone(), slug.clone(), index);
     let mut map = shells.0.lock().unwrap();
     if let Some(sh) = map.get_mut(&key) {
+        // The grid the ring was written for, read BEFORE the resize below moves
+        // it. This is the pane's reflow input (see `ShellAttach::replay_cols`) —
+        // a tab flip after a ⌘B or a window drag is exactly the case where the
+        // recording and the terminal about to render it disagree.
+        let was_cols = sh.size.cols;
         // ring THEN sink, the same order the reader takes them — otherwise a
         // write landing mid-replay is either sent twice or dropped
         let ring = sh.ring.lock().unwrap();
@@ -5394,7 +6111,7 @@ async fn shell_open(
         // flip from feeding the ring a redraw per attach.
         let _ = sh.resize(cols, rows);
         sh.gen += 1;
-        return Ok(ShellAttach { gen: sh.gen, replay });
+        return Ok(ShellAttach { gen: sh.gen, replay, replay_cols: (replay > 0).then_some(was_cols) });
     }
 
     let (session, cwd) = place_session_cwd(&repo, &slug)?;
@@ -5420,6 +6137,24 @@ async fn shell_open(
     let saved = remembered_dir(&read_cwds(&app), &repo, &slug, index);
     cmd.cwd(pick_start_dir(saved.as_deref(), &cwd));
     cmd.env("TERM", "xterm-256color");
+    // This tab's own command history, where the shell can be pointed at one.
+    // Both preferences are read ONCE here: with either on, the tree is resolved
+    // (and created); with both off, nothing on disk is touched at all, which is
+    // what a switch that is off should mean.
+    let want_hist = PER_TAB_HISTORY.load(Ordering::Relaxed);
+    let want_scroll = PERSIST_SCROLLBACK.load(Ordering::Relaxed);
+    let hist_root = (want_hist || want_scroll).then(|| term_hist_dir(&app).ok()).flatten();
+    if want_hist {
+        if let Some(root) = hist_root.as_deref() {
+            // Stamped only when a per-tab shell directory was really created:
+            // that directory is the one thing here no scrollback flush would
+            // write a meta for, and a directory with no meta is one no sweep can
+            // ever collect.
+            if apply_tab_history_env(&mut cmd, root, &key, &shell_bin).is_some() {
+                ensure_meta(root, &key, cols);
+            }
+        }
+    }
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| {
         applog("error", &format!("shell_open {slug}#{index}: spawn {shell_bin} failed: {e}"));
@@ -5430,11 +6165,38 @@ async fn shell_open(
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
-    let ring = Arc::new(Mutex::new(VecDeque::<u8>::with_capacity(8192)));
+    // A tab that ran before this app did starts with its own history: the ring
+    // saved on the last run, replayed into the fresh xterm exactly as a tab flip
+    // replays a live one.
+    //
+    // Sent BEFORE `sink` exists and before the reader thread is spawned, so
+    // nothing the new shell writes can get in front of it — its early output
+    // sits in the pty buffer meanwhile with no reader to forward it. The
+    // ordering is true by construction here, not by a lock.
+    let restored = want_scroll.then(|| hist_root.as_deref().and_then(|root| read_scrollback(root, &key))).flatten();
+    let mut seed = VecDeque::<u8>::with_capacity(8192);
+    let (mut replay, mut replay_cols) = (0usize, None);
+    if let Some((bytes, meta)) = restored {
+        let payload = restore_payload(&bytes, meta.at);
+        if !payload.is_empty() {
+            replay = payload.len();
+            replay_cols = Some(meta.cols);
+            // Ring and channel get the SAME bytes, seam included — a re-attach
+            // replays the ring and nothing else, so anything left out of it is
+            // gone the first time the tab is flipped away from. See
+            // `restore_payload`.
+            seed.extend(payload.iter().copied());
+            let _ = on_bytes.send(InvokeResponseBody::Raw(payload));
+        }
+    }
+
+    let ring = Arc::new(Mutex::new(seed));
     let sink = Arc::new(Mutex::new(Some(on_bytes)));
     let stop = Arc::new(AtomicBool::new(false));
+    let dirty = Arc::new(AtomicBool::new(false));
 
-    let (r_ring, r_sink, r_stop) = (ring.clone(), sink.clone(), stop.clone());
+    let (r_ring, r_sink, r_stop, r_dirty) =
+        (ring.clone(), sink.clone(), stop.clone(), dirty.clone());
     let exit_key = key.clone();
     thread::spawn(move || {
         let mut buf = [0u8; 16384];
@@ -5450,6 +6212,7 @@ async fn shell_open(
                     ring.extend(chunk.iter().copied());
                     let overflow = ring.len().saturating_sub(SHELL_RING);
                     ring.drain(..overflow);
+                    r_dirty.store(true, Ordering::Relaxed);
                     // held together with the ring (see the re-attach comment)
                     if let Some(ch) = r_sink.lock().unwrap().as_ref() {
                         if ch.send(InvokeResponseBody::Raw(chunk.to_vec())).is_err() {
@@ -5468,8 +6231,8 @@ async fn shell_open(
         }
     });
 
-    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1, size });
-    Ok(ShellAttach { gen: 1, replay: 0 })
+    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1, size, dirty });
+    Ok(ShellAttach { gen: 1, replay, replay_cols })
 }
 
 #[tauri::command]
@@ -5795,6 +6558,10 @@ pub fn run() {
                 // Same cold-start slot: drop remembered directories for places
                 // that were removed while the app was closed.
                 forget_vanished_places(&handle);
+                // Same cold-start slot, same reasoning one level out: drop saved
+                // scrollback for places that are gone, and anything past the age
+                // horizon.
+                sweep_term_history(&handle);
                 loop {
                     std::thread::sleep(Duration::from_secs(3));
                     let interval = FETCH_INTERVAL_SECS.load(Ordering::Relaxed);
@@ -5844,6 +6611,7 @@ pub fn run() {
                     if cwd_ticks >= 5 {
                         cwd_ticks = 0;
                         save_shell_cwds(&handle, &handle.state::<Shells>());
+                        save_shell_scrollback(&handle, &handle.state::<Shells>());
                     }
                     let fp = worktrees_core::tmux::session_fingerprint();
                     ticks += 1;
@@ -6022,6 +6790,9 @@ pub fn run() {
             term_write,
             term_resize,
             term_close,
+            set_term_history_opts,
+            term_history_info,
+            term_history_clear,
             ui_events_append,
             ui_usage,
             ui_events_clear
@@ -6037,6 +6808,9 @@ pub fn run() {
                 // Where each tab ended up, recorded BEFORE the sweep — a killed
                 // shell has no cwd left to read.
                 save_shell_cwds(handle, &shells);
+                // …and what each tab was SHOWING, likewise before the sweep: a
+                // killed shell still has its ring, but it will not have it long.
+                save_shell_scrollback(handle, &shells);
                 let keys: Vec<ShellKey> = shells.0.lock().unwrap().keys().cloned().collect();
                 for k in &keys {
                     kill_shell(&shells, k);
@@ -7131,6 +7905,7 @@ mod tests {
             sink: Arc::new(Mutex::new(None)),
             gen: 1,
             size,
+            dirty: Arc::new(AtomicBool::new(false)),
         };
         // Poll rather than sleep a guessed amount; bounded so a shell that never
         // answers fails the test instead of hanging it.
@@ -7260,6 +8035,356 @@ mod tests {
             place
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── dock shell history: scrollback + per-tab commands ───────────────────
+
+    /// A scratch `term-history` root, unique per run: two concurrent `cargo
+    /// test` invocations must not share one.
+    fn hist_root(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wt-hist-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Round-trip through the real files, including the two rules a plain
+    /// serialize test would miss: the width travels with the bytes, and a tab
+    /// that has never been saved reads as nothing rather than as an error.
+    #[test]
+    fn a_scrollback_round_trips_with_the_width_it_was_written_at() {
+        let root = hist_root("round");
+        let k = key("/r", "feat", 3);
+
+        assert!(read_scrollback(&root, &k).is_none(), "an unsaved tab has no history");
+
+        write_scrollback(&root, &k, b"line one\nbuild output\n", 174);
+        let (bytes, meta) = read_scrollback(&root, &k).expect("saved tab reads back");
+        assert_eq!(bytes, b"line one\nbuild output\n", "a ring that never rolled keeps its first line");
+        assert_eq!(meta.cols, 174, "the width travels with the bytes");
+        assert_eq!((meta.repo.as_str(), meta.slug.as_str(), meta.index), ("/r", "feat", 3));
+
+        // closing the tab takes everything with it
+        forget_tab_history(&root, &k);
+        assert!(read_scrollback(&root, &k).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The two halves of `rolled_ring`, and the reason it is not just
+    /// `trim_to_line_start`.
+    ///
+    /// A ring AT the cap begins wherever `drain` cut — routinely mid-escape-
+    /// sequence — so its first fragment goes. A ring BELOW the cap begins where
+    /// the shell began, and trimming that drops a real line. The second case is
+    /// the one that bites, because it COMPOUNDS: the restore seeds from the
+    /// trimmed copy, so the next save trims the next line, one per restart.
+    #[test]
+    fn only_a_ring_that_actually_rolled_loses_its_first_line() {
+        let short = b"line one\nline two\n";
+        assert_eq!(rolled_ring(short), short, "a ring below the cap is saved whole");
+
+        // at the cap, and cut mid-line the way `drain` leaves it
+        let mut full = b"tail-of-a-cut-line".to_vec();
+        full.extend(std::iter::repeat(b'x').take(SHELL_RING));
+        full.insert(18, b'\n');
+        let kept = rolled_ring(&full);
+        assert!(kept.len() < full.len(), "a rolled ring drops its leading fragment");
+        assert_eq!(kept[0], b'x', "…and resumes at the start of a line");
+
+        // the compounding case, stated directly: saving what a restore seeded
+        // must be a fixed point, not another line gone
+        let seeded = rolled_ring(&full).to_vec();
+        assert_eq!(rolled_ring(&seeded), seeded.as_slice(), "re-saving a restored ring loses nothing");
+    }
+
+    /// The directory name is a hash, so it is only a NAME. `meta.json` is the
+    /// identity — without that check a collision would hand one tab another
+    /// tab's output, which is the one failure worse than opening blank.
+    #[test]
+    fn a_meta_that_names_another_tab_reads_as_nothing() {
+        let root = hist_root("ident");
+        let mine = key("/r", "feat", 1);
+        write_scrollback(&root, &mine, b"\nmine\n", 80);
+
+        // forge the collision: same directory, someone else's meta
+        let tab = tab_dir(&root, &mine);
+        let theirs = TabMeta {
+            repo: "/other".into(),
+            slug: "theirs".into(),
+            index: 9,
+            cols: 80,
+            at: sysclock::now_epoch(),
+        };
+        std::fs::write(tab.join("meta.json"), serde_json::to_vec(&theirs).unwrap()).unwrap();
+        assert!(read_scrollback(&root, &mine).is_none(), "another tab's meta is not mine");
+
+        // and a corrupt one is simply no history, never an error
+        std::fs::write(tab.join("meta.json"), b"{not json").unwrap();
+        assert!(read_scrollback(&root, &mine).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repo path is absolute and may contain anything; two tabs must never
+    /// land in the same directory, and the same tab must always land in its own.
+    #[test]
+    fn every_tab_gets_its_own_stem_and_keeps_it() {
+        let a = tab_stem(&key("/odd|repo", "feat", 1));
+        assert_eq!(a, tab_stem(&key("/odd|repo", "feat", 1)), "a stem is stable");
+        let others = [
+            key("/odd|repo", "feat", 2),        // same place, next tab
+            key("/odd", "repo|feat", 1),        // the separator moved
+            key("/other", "feat", 1),           // another project
+        ];
+        for o in &others {
+            assert_ne!(a, tab_stem(o), "{o:?} collided with /odd|repo|feat|1");
+        }
+        // a slug that is all path separators still names a file, not a path
+        let s = tab_stem(&key("/r", "feat/../../etc", 1));
+        assert!(!s.contains('/'), "a stem must never contain a separator: {s}");
+    }
+
+    /// The restore payload's contracts: the seam comes AFTER the content, an
+    /// empty save sends nothing at all (which keeps `replay` at 0 so the pane
+    /// treats the new shell's own first output as live), and the seam carries an
+    /// absolute time because it is persisted with the ring.
+    #[test]
+    fn a_seam_follows_the_content_and_an_empty_save_sends_nothing() {
+        let at = 1_700_000_000;
+        assert!(restore_payload(b"", at).is_empty(), "nothing saved, nothing replayed");
+
+        let out = restore_payload(b"the build log\n", at);
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.starts_with("the build log\n"), "the content comes first: {text:?}");
+        assert!(
+            text.find("the build log").unwrap() < text.find("restored").unwrap(),
+            "the seam marks the END of what was restored"
+        );
+        // absolute, not an age: this is seeded into the ring and persisted with
+        // it, so "2h ago" would freeze and be wrong forever after
+        assert!(text.contains(&fmt_local(at)), "the seam names when it was saved: {text:?}");
+        // cancels a control sequence the ring's tail was cut inside, so the seam
+        // cannot be swallowed as somebody's argument
+        assert!(out.starts_with(SEAM_HEAD) || out.windows(SEAM_HEAD.len()).any(|w| w == SEAM_HEAD));
+    }
+
+    /// Three launches with nothing typed between them must not stack three
+    /// seams — but a seam with a session's work under it still marks a real
+    /// boundary and stays.
+    #[test]
+    fn a_seam_nothing_was_typed_under_is_replaced_not_followed() {
+        let (t1, t2) = (1_700_000_000, 1_700_009_000);
+        let once = restore_payload(b"the build log\n", t1);
+        let twice = restore_payload(&once, t2);
+        let text = String::from_utf8_lossy(&twice);
+        assert_eq!(text.matches("── restored · ").count(), 1, "only the newest seam survives: {text:?}");
+        assert!(text.contains(&fmt_local(t2)) && !text.contains(&fmt_local(t1)));
+
+        // …but work done after a seam keeps it
+        let mut worked = once.clone();
+        worked.extend_from_slice(b"$ cargo test\nall good\n");
+        let after = restore_payload(&worked, t2);
+        let text = String::from_utf8_lossy(&after);
+        assert_eq!(text.matches("── restored · ").count(), 2, "a boundary with work under it stays: {text:?}");
+    }
+
+    /// The seam is written for a person sitting in front of the terminal, so it
+    /// is the machine's own clock — unlike app.log, which is UTC.
+    #[test]
+    fn the_seam_time_is_local_not_utc() {
+        let at = 1_700_000_000;
+        let local = fmt_local(at);
+        assert_eq!(local.len(), fmt_utc(at).len(), "same shape, different offset");
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let t = at as libc::time_t;
+        unsafe { libc::localtime_r(&t, &mut tm) };
+        assert_eq!(local, fmt_utc(at + tm.tm_gmtoff as i64));
+    }
+
+    /// The cold-start sweep's decision, the way `only_places_that_no_longer_exist_are_forgotten`
+    /// covers the cwd map's. Two reasons to drop a tab and one to keep it.
+    #[test]
+    fn a_tab_is_swept_when_its_place_is_gone_or_it_has_gone_stale() {
+        let now = 2_000_000_000;
+        let fresh = now - 60;
+        let old = now - TERM_HIST_MAX_AGE_SECS - 1;
+        let m = |repo: &str, slug: &str, at: i64| TabMeta {
+            repo: repo.into(),
+            slug: slug.into(),
+            index: 1,
+            cols: 80,
+            at,
+        };
+        let metas = vec![
+            (PathBuf::from("/h/alive"), m("/r", "alive", fresh)),
+            (PathBuf::from("/h/removed"), m("/r", "removed", fresh)),
+            (PathBuf::from("/h/stale"), m("/r", "alive", old)),
+            (PathBuf::from("/h/dead-repo"), m("/dead", "any", fresh)),
+        ];
+        let here = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+        let gone = stale_history(&metas, now, |repo, slug| match (repo, slug) {
+            ("/r", "alive") => Some(here.clone()),
+            ("/r", "removed") => Some("/gone/for/good".into()),
+            _ => None, // the project itself is unreachable
+        });
+        let gone: Vec<&str> = gone.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(gone, vec!["/h/removed", "/h/stale", "/h/dead-repo"]);
+    }
+
+    /// The generated shims, read as text. They are the whole per-tab history
+    /// mechanism, and every clause below is load-bearing — see the section
+    /// comment for which real configuration each one exists for.
+    #[test]
+    fn the_zdotdir_shims_hand_the_users_own_config_back_before_taking_the_history() {
+        let root = hist_root("zdot");
+        let zdot = root.join("zdotdir");
+        write_zdotdir(&zdot).unwrap();
+
+        let read = |n: &str| std::fs::read_to_string(zdot.join(n)).unwrap();
+        for n in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            assert!(read(n).starts_with("# Generated by worktrees"), "{n} is unlabelled");
+        }
+
+        // .zshenv: their environment while theirs runs, ours back afterwards —
+        // otherwise a `~/.zshenv` that exports ZDOTDIR hijacks the whole chain
+        let env = read(".zshenv");
+        assert!(env.contains("unset ZDOTDIR"), "their .zshenv must see a normal environment");
+        assert!(env.contains(r#". "$HOME/.zshenv""#), "their .zshenv is sourced, not replaced");
+        assert!(
+            env.find("unset ZDOTDIR").unwrap() < env.find("$HOME/.zshenv").unwrap(),
+            "ZDOTDIR must be unset BEFORE theirs is sourced"
+        );
+        assert!(env.contains("export ZDOTDIR=$_WT_Z"), "and taken back after");
+
+        // .zshrc: their ZDOTDIR restored before their rc (which may reference
+        // it), our HISTFILE after it (so a user rc that sets HISTFILE loses)
+        let rc = read(".zshrc");
+        let restore = rc.find("unset ZDOTDIR").expect("restores their ZDOTDIR");
+        let source = rc.find("/.zshrc\"").expect("sources their rc");
+        let hist = rc.find("HISTFILE=\"$WORKTREES_HISTFILE\"").expect("sets our HISTFILE");
+        assert!(restore < source, "their rc must be able to read $ZDOTDIR");
+        assert!(source < hist, "our HISTFILE must be set AFTER theirs, or theirs wins");
+        // without this a force-quit takes the whole session's commands with it:
+        // the app SIGHUPs its shells, and zsh's default flushes only on a clean exit
+        assert!(rc.contains("setopt INC_APPEND_HISTORY"));
+        assert!(!rc.contains("SHARE_HISTORY"), "each tab has its own file; nothing to share");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Which lever each shell gets. zsh cannot use `HISTFILE` — macOS's
+    /// `/etc/zshrc` overwrites it unconditionally — and nothing else can use
+    /// ZDOTDIR.
+    #[test]
+    fn each_shell_gets_the_only_lever_that_works_for_it() {
+        let root = hist_root("lever");
+        let k = key("/r", "feat", 1);
+        let zdot = tab_dir(&root, &k).join("zdotdir");
+
+        let mut zsh = CommandBuilder::new("/bin/zsh");
+        assert_eq!(apply_tab_history_env(&mut zsh, &root, &k, "/bin/zsh"), Some("zdotdir"));
+        assert_eq!(zsh.get_env("ZDOTDIR"), Some(zdot.as_os_str()));
+        assert_eq!(zsh.get_env("WORKTREES_HISTFILE"), Some(zdot.join(".zsh_history").as_os_str()));
+        assert!(zsh.get_env("HISTFILE").is_none(), "zsh's HISTFILE is /etc/zshrc's to set");
+
+        let mut bash = CommandBuilder::new("/bin/bash");
+        assert_eq!(apply_tab_history_env(&mut bash, &root, &k, "/bin/bash"), Some("histfile"));
+        assert!(bash.get_env("ZDOTDIR").is_none(), "ZDOTDIR means nothing to bash");
+        assert_eq!(
+            bash.get_env("HISTFILE"),
+            Some(tab_dir(&root, &k).join(".bash_history").as_os_str())
+        );
+
+        let mut fish = CommandBuilder::new("/opt/homebrew/bin/fish");
+        assert_eq!(apply_tab_history_env(&mut fish, &root, &k, "/opt/homebrew/bin/fish"), None);
+        assert!(fish.get_env("ZDOTDIR").is_none() && fish.get_env("HISTFILE").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The one that proves the MECHANISM rather than the strings: a real login
+    /// zsh, with a real `/etc/zshrc` in the way, writing its history where this
+    /// feature says it will.
+    ///
+    /// The string assertions above would pass just as happily if zsh ignored the
+    /// shims entirely. This is the sibling of
+    /// `proc_cwd_follows_a_live_shell_into_a_new_directory`, and it carries the
+    /// same two rules: DRAIN the master (a pty test that does not wedges the
+    /// child mid-exit, unkillable) and SIGKILL rather than trusting a signal.
+    #[test]
+    fn a_real_login_zsh_records_into_the_generated_zdotdir() {
+        if !Path::new("/bin/zsh").exists() {
+            return; // nothing to prove on a box without zsh
+        }
+        let root = hist_root("realzsh");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // A user rc with something only IT can provide, so "sourced" and
+        // "replaced" cannot look the same.
+        std::fs::write(home.join(".zshrc"), "export WT_TEST_MARKER=from-the-users-rc\n").unwrap();
+
+        let k = key("/r", "feat", 1);
+        let zdot = tab_dir(&root, &k).join("zdotdir");
+        let mut cmd = CommandBuilder::new("/bin/zsh");
+        cmd.arg("-l");
+        cmd.cwd(&root);
+        cmd.env("HOME", &home);
+        cmd.env("TERM", "xterm-256color");
+        assert_eq!(apply_tab_history_env(&mut cmd, &root, &k, "/bin/zsh"), Some("zdotdir"));
+
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        drain(&*pair.master);
+
+        // Answer into a FILE rather than parsing the pty: prompts, escape
+        // sequences and echo make the stream a poor witness.
+        let out = root.join("answers");
+        let mut w = pair.master.take_writer().unwrap();
+        write!(
+            w,
+            ": wt-history-probe\n\
+             print -r -- \"HISTFILE=$HISTFILE\" > {out}\n\
+             print -r -- \"MARKER=$WT_TEST_MARKER\" >> {out}\n\
+             print -r -- \"ZDOTDIR=${{ZDOTDIR-unset}}\" >> {out}\n",
+            out = out.display()
+        )
+        .unwrap();
+        w.flush().unwrap();
+
+        let hist = zdot.join(".zsh_history");
+        let mut answers = String::new();
+        for _ in 0..200 {
+            if let Ok(s) = std::fs::read_to_string(&out) {
+                if s.lines().count() >= 3 {
+                    answers = s;
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        // INC_APPEND_HISTORY writes per command, so the probe is already there —
+        // this shell is never asked to exit cleanly, which is the point.
+        let recorded = std::fs::read_to_string(&hist).unwrap_or_default();
+        hard_kill(&mut *child);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(!answers.is_empty(), "the shell never answered");
+        assert!(
+            answers.contains(&format!("HISTFILE={}", hist.display())),
+            "HISTFILE is not the tab's: {answers}"
+        );
+        assert!(
+            answers.contains("MARKER=from-the-users-rc"),
+            "the user's own .zshrc was not sourced: {answers}"
+        );
+        assert!(
+            answers.contains("ZDOTDIR=unset"),
+            "ZDOTDIR must be handed back, so child shells are unaffected: {answers}"
+        );
+        assert!(
+            recorded.contains("wt-history-probe"),
+            "a killed shell still recorded its commands (INC_APPEND_HISTORY): {recorded:?}"
+        );
     }
 
     // ── "Ask Claude" (ai_status_report) — the two pure pieces ────────────────

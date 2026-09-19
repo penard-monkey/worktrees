@@ -69,10 +69,16 @@ document.addEventListener("visibilitychange", applyBlink);
  * an owned shell. Neither ends the thing on the other side. */
 type Transport = {
   /** Resolves once attached. `replay` is how many bytes of recorded output the
-   *  backend pushed down `onBytes` FIRST — a dock shell's ring on re-attach —
-   *  and 0 when nothing was (a fresh shell; always, for tmux, which replays
-   *  nothing of its own). See `useTerm` for why the pane must know. */
-  open(cols: number, rows: number, onBytes: Channel<ArrayBuffer>): Promise<{ replay: number }>;
+   *  backend pushed down `onBytes` FIRST — a dock shell's live ring on
+   *  re-attach, or the scrollback it SAVED on a previous run when the shell is
+   *  being spawned fresh — and 0 when nothing was (a brand-new tab; always, for
+   *  tmux, which replays nothing of its own). See `useTerm` for why the pane
+   *  must know.
+   *
+   *  `replayCols` is the grid those bytes were laid out for, or null when the
+   *  backend could not say. Raw bytes do not re-wrap, so replaying them into a
+   *  different width stacks every full line — see the reflow in `useTerm`. */
+  open(cols: number, rows: number, onBytes: Channel<ArrayBuffer>): Promise<{ replay: number; replayCols: number | null }>;
   write(data: number[]): void;
   resize(cols: number, rows: number): void;
   close(): void;
@@ -83,7 +89,7 @@ const tmuxTransport = (session: string): Transport => {
   return {
     async open(cols, rows, onBytes) {
       id = await invoke<number>("term_open", { session, cols, rows, onBytes });
-      return { replay: 0 };
+      return { replay: 0, replayCols: null };
     },
     write: (data) => { if (id != null) invoke("term_write", { id, data }); },
     resize: (cols, rows) => { if (id != null) invoke("term_resize", { id, cols, rows }); },
@@ -98,9 +104,10 @@ const shellTransport = (repo: string, slug: string, index: number): Transport =>
   let gen: number | null = null;
   return {
     async open(cols, rows, onBytes) {
-      const at = await invoke<{ gen: number; replay: number }>("shell_open", { repo, slug, index, cols, rows, onBytes });
+      const at = await invoke<{ gen: number; replay: number; replay_cols: number | null }>(
+        "shell_open", { repo, slug, index, cols, rows, onBytes });
       gen = at.gen;
-      return { replay: at.replay };
+      return { replay: at.replay, replayCols: at.replay_cols };
     },
     write: (data) => { invoke("shell_write", { repo, slug, index, data }); },
     // gated on the attach, like the tmux transport's `id` — before `shell_open`
@@ -150,6 +157,18 @@ const ATTACH_WAIT_MS = 1000;
  *  at the edge that closes when the drag stops. */
 const RESIZE_SETTLE_MS = 80;
 
+/** How many lines of scrollback xterm keeps.
+ *
+ *  Not a preference — a floor. The backend replays up to `SHELL_RING` (256K) of
+ *  recorded output in one write, and xterm's default of 1000 lines silently
+ *  drops whatever does not fit: ~3200 lines at 80 columns were being pushed into
+ *  a buffer a third that size, so the OLDEST part of every replay — the build
+ *  that failed, the error you flipped back to read — was gone before it could be
+ *  scrolled to or found with ⌘F. `termresize-check.mjs` compares this against
+ *  `SHELL_RING` in lib.rs, so raising the ring without raising this fails a gate
+ *  rather than quietly truncating again. */
+const TERM_SCROLLBACK = 5000;
+
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
 function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -185,6 +204,13 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     const term = new Terminal({
       fontFamily: family, fontSize: size, cursorBlink: blinkWanted(), theme,
       allowProposedApi: true,
+      // xterm's default is 1000 lines, and a full 256K ring is ~3200 lines at 80
+      // columns — so the top of every replay was already being dropped on the
+      // floor before it could be scrolled to or searched. `TERM_SCROLLBACK` is
+      // checked against the backend's `SHELL_RING` by termresize-check.mjs, so
+      // raising one without the other fails a gate instead of silently
+      // truncating again.
+      scrollback: TERM_SCROLLBACK,
     });
     liveTerms.add(term);
     const fit = new FitAddon();
@@ -211,6 +237,21 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     const tx = makeTransport();
     txRef.current = tx;
 
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const applySize = () => {
+      settle = undefined;
+      if (!measured(host)) return;
+      try {
+        fit.fit();
+      } catch {
+        /* host detached mid-resize */
+      }
+      const sent = sentRef.current;
+      if (term.cols === sent.cols && term.rows === sent.rows) return;
+      sentRef.current = { cols: term.cols, rows: term.rows };
+      tx.resize(term.cols, term.rows);
+    };
+
     // A re-attached dock shell starts with a REPLAY: the backend's ring, every
     // byte the shell ever wrote, pushed as the channel's first message. It is a
     // recording, and xterm must not answer it. Any terminal query in there —
@@ -234,6 +275,7 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     // first message is presumed a replay, which on a fresh shell costs only the
     // replies to a query in its first chunk of output, and zsh makes none.
     let replay: number | null = null; // bytes the backend replayed; null until `open` answers
+    let replayCols: number | null = null; // the grid they were laid out for, if known
     let first = true;
     let parsingReplay = false;
     const onBytes = new Channel<ArrayBuffer>();
@@ -246,7 +288,43 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
         return;
       }
       parsingReplay = true;
-      term.write(bytes, () => { parsingReplay = false; });
+      // A recording is raw bytes laid out for the grid it was RECORDED at, and
+      // nothing in them re-wraps. Replayed narrower, every line that was full
+      // stacks a fragment underneath instead of continuing, and the
+      // cursor-relative redraws in it address columns that are not there —
+      // ROADMAP's "no byte log replays faithfully across a width change".
+      //
+      // What makes it fixable here is that this terminal is BRAND NEW: the
+      // replay is the first thing ever written to it, so nothing else can be
+      // damaged by moving the grid. Hand the recording the width it was written
+      // for, then put the real one back and let xterm's own buffer reflow do the
+      // conversion. It only recovers lines xterm itself wrapped — full-screen
+      // output (vim, htop) still cannot be re-laid-out by anyone — so this
+      // narrows the parked defect rather than closing it.
+      //
+      // Skipped when `replayCols` is unknown, which is only when the payload
+      // beat `open`'s own response. That degrades in the right direction: a
+      // payload big enough to take Tauri's separate-fetch path is one whose
+      // invoke has almost certainly landed already, and one small enough to
+      // arrive inline is a short recording with little to misplace.
+      const rc =
+        replayCols != null && replayCols >= 2 && replayCols <= 2000 && replayCols !== term.cols
+          ? replayCols
+          : null;
+      const was = { cols: term.cols, rows: term.rows };
+      if (rc != null) term.resize(rc, was.rows);
+      term.write(bytes, () => {
+        parsingReplay = false;
+        if (rc == null) return;
+        // Back to the pane's own grid. The backend was never told about the
+        // temporary width — `tx.resize` is not called and `sentRef` is
+        // deliberately not touched — so the pty never took a SIGWINCH for a size
+        // nobody was looking at, and the baseline still says what it always
+        // said. `applySize` after it is what corrects the grid if the host
+        // genuinely moved while this was parsing.
+        term.resize(was.cols, was.rows);
+        applySize();
+      });
     };
 
     // Attach at the pane's REAL grid, never at xterm's default (see `measured`).
@@ -255,21 +333,6 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     // shell that can never be measured.
     const giveUp = performance.now() + ATTACH_WAIT_MS;
     let raf = 0;
-
-    let settle: ReturnType<typeof setTimeout> | undefined;
-    const applySize = () => {
-      settle = undefined;
-      if (!measured(host)) return;
-      try {
-        fit.fit();
-      } catch {
-        /* host detached mid-resize */
-      }
-      const sent = sentRef.current;
-      if (term.cols === sent.cols && term.rows === sent.rows) return;
-      sentRef.current = { cols: term.cols, rows: term.rows };
-      tx.resize(term.cols, term.rows);
-    };
 
     const attach = () => {
       if (disposed) return;
@@ -289,7 +352,9 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
           // correct it until the next gesture. `open` shells out to tmux, so the
           // window is wide enough to hit by mounting while the window animates.
           const opened = { cols: term.cols, rows: term.rows };
-          replay = (await tx.open(opened.cols, opened.rows, onBytes)).replay;
+          const at = await tx.open(opened.cols, opened.rows, onBytes);
+          replay = at.replay;
+          replayCols = at.replayCols;
           if (disposed) {
             tx.close();
             return;

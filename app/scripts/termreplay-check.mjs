@@ -74,7 +74,7 @@ const REPLY = "\x1b[>0;276;0c";           // what xterm 5.5 answers
 
 /** Mount useTerm against a transport whose `open` the test resolves by hand,
  *  and an xterm stub whose parsing the test drives chunk by chunk. */
-function mount(replay) {
+function mount(replay, replayCols = null) {
   const host = { clientWidth: 800, clientHeight: 600 };
   const sent = [];        // what reached the pty (tx.write)
   let channel = null;     // the Channel the component handed to `open`
@@ -149,7 +149,7 @@ function mount(replay) {
     deliver: (text) => channel.onmessage(enc.encode(text).buffer),
     // A pre-fix transport resolved with the bare generation; the fixed one with
     // `{ replay }`. Resolving with the object is what the real one now does.
-    async resolveOpen() { resolveOpen({ replay }); await tick(); },
+    async resolveOpen() { resolveOpen({ replay, replayCols }); await tick(); },
     dispose() { cleanups.forEach((c) => c()); globalThis.ResizeObserver = prevRO; },
   };
 }
@@ -198,6 +198,27 @@ const RING = `~/x (main) » vim notes.md\r\n${QUERY}\x1b[6n\r\n~/x (main) » `;
   check(m.sent.length === 0, "queued behind the replay: the replay itself is silent");
   m.term().parseNext();
   check(m.sent.length === 1, "…and the live chunk right behind it is answered");
+  m.dispose();
+}
+
+// 3b. A tab RESTORED from disk. Structurally the same recording as a re-attach —
+//    which is the point: the pane cannot tell a spawn from a re-attach and must
+//    not try. Before scrollback was persisted, the first chunk after a SPAWN was
+//    always live, so this is the shape that would break if someone keyed the
+//    mute on "the shell is new" rather than on `replay`.
+//
+//    It also runs with `replayCols` set, i.e. through the reflow: the recording
+//    is written into a terminal that has just been resized to the width it was
+//    recorded at. That must not change who answers what.
+{
+  const m = mount(RING.length, 174);
+  await m.resolveOpen();
+  m.deliver(RING);
+  m.term().parseNext();
+  check(m.sent.length === 0, `restored from disk: the recording is not answered (${m.sent.length} sent)`);
+  m.deliver(QUERY);
+  m.term().parseNext();
+  check(m.sent.length === 1, "…and the freshly spawned shell's own query IS answered");
   m.dispose();
 }
 

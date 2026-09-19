@@ -3947,6 +3947,19 @@ function App() {
     invoke("set_fetch_interval", { mins: settings.fetch_interval_min }).catch(() => {});
   }, [settings.fetch_interval_min]);
 
+  // Same shape, same reason, for what a dock shell tab keeps between runs: the
+  // shell path in the backend decides whether to restore a ring and whether to
+  // generate a ZDOTDIR, and it cannot read the settings blob to find out.
+  // Pre-hydration this pushes the DEFAULTS (both on), which is also what the
+  // backend already assumes — so an early push is a no-op rather than a window
+  // in which a tab quietly opens blank.
+  useEffect(() => {
+    invoke("set_term_history_opts", {
+      persistScrollback: settings.term_persist_scrollback,
+      perTabHistory: settings.term_per_tab_history,
+    }).catch(() => {});
+  }, [settings.term_persist_scrollback, settings.term_per_tab_history]);
+
   // hydrate persisted settings BEFORE first meaningful paint. A pre-hydration
   // interaction (⌘B at launch) must neither be visually reverted nor let its
   // debounced save write a DEFAULTS-seeded object over the on-disk settings —

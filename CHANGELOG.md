@@ -50,6 +50,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   With no viewer bundle installed the Docs tab is exactly what it was: it
   lists, filters, reads and reveals every document, and only the browser page
   is missing.
+- **A shell tab keeps what it was showing, and what it ran.** A dock terminal
+  remembered its name, its position in the strip and the directory it was left
+  in — and then opened blank, because the PTY is the app's own and dies with it.
+  Each tab's last 256K of output is now saved and replayed when it reopens, under
+  a dim `── restored · 18 Sep 14:22 ──` rule with a fresh prompt beneath it, so what you
+  were reading is still there after a restart. Arrow-up is per tab too: a tab has
+  its own command history rather than the single `~/.zsh_history` every terminal
+  on the Mac shares, so a "build" tab and a "test" tab stop overwriting each
+  other's recall. Both are keyed to the tab, not its label, so renaming one
+  changes nothing; both switch off in Settings → Terminal, and Settings → Data &
+  Logs says how much is stored and clears it. Your own rc files are read exactly
+  as before and are never modified.
 
 ### Fixed
 - **The usage meter no longer disappears when a poll fails.** The endpoint it
@@ -84,6 +96,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   as soon as that session went quiet. Selecting or entering a place now records
   the visit whatever its session is doing, while the dot still shows live state
   ahead of the afterglow.
+- **The terminal was throwing away most of every replay.** xterm was left on its
+  default 1000 lines of scrollback while the backend replays up to 256K in one
+  write — about 3200 lines at 80 columns — so the oldest two thirds of what came
+  back on a tab flip were dropped before anything could scroll to them or find
+  them with ⌘F. It now keeps 5000, and a gate compares the two numbers so raising
+  one without the other fails a build instead of quietly truncating again.
+- **A replay laid out for a different width no longer stacks up.** Raw recorded
+  bytes do not re-wrap, so a ring recorded at 174 columns and replayed at 100 —
+  after a ⌘B, a window drag, or now a restart — put a fragment of every full line
+  on its own row. The pane hands the recording the width it was recorded at and
+  puts its own back afterwards, so xterm reflows it. Lines that xterm wrapped
+  come back right; full-screen output (vim, htop) still cannot be re-laid-out by
+  anyone.
 
 ## [0.26.0] - 2026-09-19
 

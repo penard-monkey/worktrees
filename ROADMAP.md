@@ -583,9 +583,11 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 - **Find is deliberately narrow in three places.** ⌘F on an image or binary
   viewer opens a bar that can only ever answer "no results" — it should be
   suppressed by file kind. Terminal find sees only what xterm received since it
-  attached (default `scrollback` 1000 lines); raising that widens it, while
-  reaching tmux's own history would mean driving copy-mode, which takes over the
-  user's pane and was deliberately not attempted. And the file side's
+  attached — which now includes a dock tab's RESTORED scrollback, and 5000 lines
+  of it rather than xterm's 1000-line default (`TERM_SCROLLBACK`, pinned against
+  `SHELL_RING` by termresize-check.mjs). Reaching tmux's own history in the main
+  pane would still mean driving copy-mode, which takes over the user's pane and
+  was deliberately not attempted. And the file side's
   no-Highlight-API fallback — select the active hit instead of tinting all of
   them — exists for WKWebView older than Safari 17.2 and has never been
   exercised; there is no `minimumSystemVersion` in `tauri.conf.json` to say
@@ -623,6 +625,14 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   removed and recreated while the app is closed. Worth considering whether tab
   identity should live in ONE place — most likely the declared store — rather
   than being kept in sync by convention.
+
+  There is now a THIRD store on the same split key: `term-history/<stem>/` holds
+  each tab's saved scrollback and its generated ZDOTDIR. It follows the backend
+  half's rules (dropped on an explicit close and on `remove_place`, kept on
+  `close_place`, swept at cold start) and adds an age horizon of its own, because
+  it holds CONTENT rather than a path — a reused index would inherit someone
+  else's output, not merely their directory. That raises the stakes on
+  consolidating tab identity; it does not change the shape of the answer.
   _From: [2026-08-14 terminal-tab-memory](docs/sessions/2026-08-14-terminal-tab-memory/summary.md)_
 
 - **The mock harness models no shells, no directories and no time.** It CAN

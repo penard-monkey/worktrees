@@ -10,9 +10,12 @@ import ProfilesPanel from "./ProfilesPanel";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, clampZoom, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
+import { humanSize } from "./filekind";
 
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
+/** `term_history_info` — what the saved-scrollback tree currently costs. */
+type TermHistoryInfo = { dir: string; bytes: number; tabs: number };
 
 // Sheet categories. One is shown at a time (see .settings-split) — the flat
 // 12-section pile made every setting equally hard to find. Purely presentational:
@@ -460,10 +463,14 @@ export function SettingsSheet({
   const [settingsPath, setSettingsPath] = useState("");
   const [dataErr, setDataErr] = useState<string | null>(null);
   const [resetArmed, setResetArmed] = useState(false);
+  const [histArmed, setHistArmed] = useState(false);
+  const [termHist, setTermHist] = useState<TermHistoryInfo | null>(null);
   useEffect(() => {
     if (!open) return;
     setResetArmed(false); // re-arm each time the sheet opens
+    setHistArmed(false);
     invoke<{ dir: string; file: string }>("settings_info").then((i) => setSettingsPath(i.file)).catch(() => {});
+    invoke<TermHistoryInfo>("term_history_info").then(setTermHist).catch(() => {});
   }, [open]);
   // reveal (not open-path): opener:default grants reveal-item-in-dir only.
   // Failures are NEVER swallowed — they surface here AND land in app.log.
@@ -481,6 +488,21 @@ export function SettingsSheet({
     if (!resetArmed) { setResetArmed(true); return; } // arm; second click confirms
     setResetArmed(false);
     onReset();
+  };
+  // Saved terminal history — the one store here that holds user CONTENT rather
+  // than preferences, so it gets its own size readout and its own two-click
+  // clear rather than riding on "reset to defaults".
+  const doClearHist = async () => {
+    if (!histArmed) { setHistArmed(true); return; }
+    setHistArmed(false);
+    try {
+      await invoke("term_history_clear");
+      setTermHist(await invoke<TermHistoryInfo>("term_history_info"));
+    } catch (e) {
+      const m = `clear terminal history failed: ${String(e)}`;
+      setDataErr(m);
+      invoke("log_event", { level: "error", msg: m }).catch(() => {});
+    }
   };
   // Escape belongs to whatever is ON TOP. What's new opens FROM here and
   // stacks over it; the Escape stack orders by activation, so the notes take
@@ -540,6 +562,38 @@ export function SettingsSheet({
               type="range" min={10} max={24} step={1} value={settings.term_size}
               onChange={(e) => onChange({ term_size: clampTerm(+e.currentTarget.value) })}
             />
+          </section>
+
+          <section className="setting">
+            <label>What a shell tab remembers</label>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.term_persist_scrollback}
+                onChange={(e) => onChange({ term_persist_scrollback: e.currentTarget.checked })}
+              />
+              Keep each tab's output between restarts
+            </label>
+            <div className="hint">
+              A dock shell dies with the app, so its tab used to reopen blank. Its last
+              256K of output is saved and replayed instead. This is the only thing that
+              writes a terminal's output to disk — whatever a command printed, secrets
+              included — under Application Support. Clear it under Data &amp; Logs.
+            </div>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.term_per_tab_history}
+                onChange={(e) => onChange({ term_per_tab_history: e.currentTarget.checked })}
+              />
+              Give each tab its own command history
+            </label>
+            <div className="hint">
+              Arrow-up recalls what this tab ran, rather than the one history every
+              terminal on the Mac shares. zsh and bash only; your own rc files are read
+              as usual and never modified. Turn it off if a shell setup of yours depends
+              on $ZDOTDIR.
+            </div>
           </section>
           </>}
 
@@ -926,6 +980,19 @@ export function SettingsSheet({
               </button>
             </div>
             {resetArmed && <div className="hint">Restores every setting to its default (theme, fonts, nav, sort, tiers).</div>}
+            <div className="ver-rows">
+              <div className="ver-row">
+                <span className="ver-path" title={termHist?.dir}>
+                  {termHist ? `Saved terminal history — ${termHist.tabs} tab(s), ${humanSize(termHist.bytes)}` : "…"}
+                </span>
+              </div>
+            </div>
+            <div className="ver-actions">
+              <button className={"ctrl sm danger" + (histArmed ? " armed" : "")} onClick={doClearHist}>
+                {histArmed ? "Confirm clear?" : "Clear terminal history"}
+              </button>
+            </div>
+            {histArmed && <div className="hint">Forgets every tab's saved output and command history. Terminals already on screen keep what they are showing.</div>}
             {dataErr && <pre className="update-log">{dataErr}</pre>}
           </section>
           </>}

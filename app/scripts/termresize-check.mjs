@@ -130,7 +130,7 @@ function makeClock() {
 const tick = () => new Promise((r) => globalThis.setTimeout(r, 0));
 
 // ── one mount of useTerm, with a host whose size we drive by hand ────────────
-function mount({ w = 1000, h = 600, openDelayMs = 0 } = {}) {
+function mount({ w = 1000, h = 600, openDelayMs = 0, replay = 0, replayCols = null } = {}) {
   const clock = makeClock();
   // A font change moves the grid by changing the CELL, not the box — which is
   // why it is the `termVersion` effect's job and not the observer's.
@@ -139,6 +139,8 @@ function mount({ w = 1000, h = 600, openDelayMs = 0 } = {}) {
   const dropped = [];       // resizes made before the attach answered
   const host = { clientWidth: w, clientHeight: h, _w: w, _h: h };
   let roCallback = null;
+  let theTerm = null;       // the TerminalStub useTerm built
+  let channel = null;       // the Channel it handed to `open`
 
   class TerminalStub {
     constructor(opts) {
@@ -147,10 +149,20 @@ function mount({ w = 1000, h = 600, openDelayMs = 0 } = {}) {
       this.cols = 80;
       this.rows = 24;
       this.element = {};
+      this.queue = [];
+      theTerm = this;
     }
     loadAddon(a) { a.activate?.(this); }
     open() {}
-    write() {}
+    // Queued, as xterm's WriteBuffer queues them: the completion callback is
+    // what puts the grid back after a reflow, and it must not run until the test
+    // says the chunk has been parsed.
+    write(bytes, cb) { this.queue.push({ bytes, cb }); }
+    parseNext() {
+      const w = this.queue.shift();
+      if (!w) throw new Error("parseNext: nothing queued");
+      w.cb?.();
+    }
     writeln() {}
     focus() {}
     onData() {}
@@ -223,11 +235,12 @@ function mount({ w = 1000, h = 600, openDelayMs = 0 } = {}) {
   // shellTransport), so the invoke is never made and nothing reports it.
   let attached = false;
   const transport = () => ({
-    open: (cols, rows) => {
+    open: (cols, rows, ch) => {
+      channel = ch;
       invokes.push({ cmd: "term_open", args: { cols, rows } });
-      if (!openDelayMs) { attached = true; return Promise.resolve({ replay: 0 }); }
+      if (!openDelayMs) { attached = true; return Promise.resolve({ replay, replayCols }); }
       // The real one shells out to tmux; a slow attach is the whole point here.
-      return new Promise((res) => clock.setTimeout(() => { attached = true; res({ replay: 0 }); }, openDelayMs));
+      return new Promise((res) => clock.setTimeout(() => { attached = true; res({ replay, replayCols }); }, openDelayMs));
     },
     write: () => {},
     resize: (cols, rows) => {
@@ -250,6 +263,11 @@ function mount({ w = 1000, h = 600, openDelayMs = 0 } = {}) {
     clock, invokes, dropped,
     resizes: () => invokes.filter((i) => i.cmd === "term_resize"),
     open: () => invokes.find((i) => i.cmd === "term_open"),
+    /** The grid the CANVAS is on, which a reflow moves and the pty never sees. */
+    termGrid: () => ({ cols: theTerm.cols, rows: theTerm.rows }),
+    /** Push a channel message, as the backend's replay arrives. */
+    deliver: (text) => channel.onmessage(new TextEncoder().encode(text).buffer),
+    parseNext: () => theTerm.parseNext(),
     /** The grid the pty is actually on: what `open` asked for, then every
      *  resize that was not dropped. */
     ptyGrid() {
@@ -432,6 +450,79 @@ async function settled(opts) {
   else
     fail(`the pane settled at ${show(before)} but the pty is still on ${show(m.ptyGrid())} — the font change's resize was never recorded, so the dedup suppressed a resize the pty needed`);
   m.dispose();
+}
+
+// ── the restored ring is laid out at the width it was RECORDED at ────────────
+// A saved ring is raw bytes wrapped for a grid that no longer exists, and after
+// a restart it usually does not: the window moved, the dock changed width, the
+// zoom stepped. The pane hands the recording the width the backend recorded and
+// puts its own back afterwards, so xterm reflows it.
+//
+// The thing that must not happen is the pty hearing about that temporary width.
+// It is a grid nobody is looking at, and every distinct grid handed to a pty is
+// a SIGWINCH the shell answers with a redraw — straight into the ring being
+// restored. Test 8 is the one that fails on a version that routes the reflow
+// through `applySize`/`tx.resize` instead of `term.resize`.
+{
+  const REC = 174;
+  const m = mount({ replay: 64, replayCols: REC });
+  m.clock.advance(1);
+  await tick();
+  const pane = m.termGrid();
+  if (pane.cols === REC) throw new Error("pick a recorded width the pane does not already have");
+
+  m.deliver("restored output\r\n");
+  const during = m.termGrid();
+  if (during.cols === REC) ok(`the recording is written at the width it was recorded at (${REC})`);
+  else fail(`the recording was written at ${during.cols} columns, not the ${REC} it was laid out for`);
+
+  m.parseNext();                                  // xterm finishes the chunk
+  if (same(m.termGrid(), pane)) ok(`…and the canvas is back on the pane's own grid (${show(pane)})`);
+  else fail(`the canvas is stuck at ${show(m.termGrid())} after the replay — it should have returned to ${show(pane)}`);
+
+  const leaked = m.resizes().filter((r) => r.args.cols === REC);
+  if (!leaked.length) ok("…and the pty was never told about the reflow width");
+  else fail(`${leaked.length} pty resize(s) carried the reflow width ${REC} — every one is a SIGWINCH into the ring being restored`);
+  m.dispose();
+}
+
+// 9. No reflow when the backend could not say. The payload can beat `open`'s own
+//    response (termreplay-check case 1), and then the width is simply unknown —
+//    the recording must be written as-is rather than at a guess.
+{
+  const m = mount({ replay: 64, replayCols: null });
+  m.clock.advance(1);
+  await tick();
+  const pane = m.termGrid();
+  m.deliver("restored output\r\n");
+  if (same(m.termGrid(), pane)) ok("an unknown recording width leaves the grid alone");
+  else fail(`the grid moved to ${show(m.termGrid())} with no recorded width to move it to`);
+  m.dispose();
+}
+
+// ── mirror: xterm must be able to HOLD what the backend replays ──────────────
+// `SHELL_RING` bounds one replay; xterm's `scrollback` bounds what survives
+// being written. They are set in different languages in different files, and
+// when the second is smaller the oldest part of every replay is dropped on the
+// floor — silently, with nothing to see but a shorter history than you had. That
+// is what xterm's 1000-line default was doing to a 256K ring. 80 columns is the
+// narrowest grid worth sizing for, so a full ring is at most SHELL_RING/80 lines
+// of full-width text. Same shape as dnd-check.mjs: parse both sides, fail on
+// drift, so raising one without the other is a red gate rather than a quiet
+// regression.
+{
+  const lib = fs.readFileSync(fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)), "utf8");
+  const ringM = /const SHELL_RING: usize = ([^;]+);/.exec(lib);
+  const scrollM = /const TERM_SCROLLBACK = (\d+);/.exec(raw);
+  if (!ringM) fail("SHELL_RING not found in lib.rs — has the dock shell's ring been renamed?");
+  else if (!scrollM) fail("TERM_SCROLLBACK not found in TerminalPane.tsx — has the scrollback been inlined again?");
+  else {
+    const ring = ringM[1].split("*").reduce((a, b) => a * Number(b.trim()), 1);
+    const scrollback = Number(scrollM[1]);
+    const held = scrollback * 80;
+    if (held >= ring) ok(`xterm holds a full ring: scrollback ${scrollback} x 80 cols = ${held} >= SHELL_RING ${ring}`);
+    else fail(`xterm keeps ${scrollback} lines (~${held} bytes at 80 cols) but the backend replays up to SHELL_RING ${ring} — the oldest ${ring - held} bytes of every replay are dropped`);
+  }
 }
 
 console.log(failed ? `\n${failed} failure(s)` : "\nall good");

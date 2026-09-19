@@ -557,6 +557,55 @@ is invisible to the bats suite — there is no fake claude. Re-run
   separate `fetch` that can arrive AFTER the invoke's own response; only the
   channel's own order (`index`-buffered in `@tauri-apps/api`) is reliable.
   `app/scripts/termreplay-check.mjs` guards it and fails on the pre-fix file.
+- **A dock tab's scrollback now OUTLIVES the app, so a spawn replays too.**
+  `shell_open`'s spawn branch used to answer `replay: 0` — "a recording means a
+  re-attach" was load-bearing documentation and is now false. The saved ring is
+  sent before `sink` exists and before the reader thread is spawned, which makes
+  it the channel's first message by CONSTRUCTION rather than by a lock (early
+  shell output waits in the pty buffer with nobody reading it). The mute needed
+  no change, which is the evidence the original contract was cut on the right
+  axis. Two invariants that are easy to "tidy" away. The `── restored · … ──`
+  seam IS seeded into the ring, which is the opposite of the tidy-looking rule
+  ("the ring holds only what the shell wrote") and was got wrong first: a
+  re-attach replays the ring and NOTHING else, so a seam kept out of it lives
+  only until the first tab flip — and StrictMode re-attaches every pane before
+  anyone has seen anything, so it was dead on arrival and the mock reproduced it
+  exactly. Being in the ring makes it persistable, hence an ABSOLUTE local time
+  rather than an age that would freeze at "2h ago", and hence
+  `trim_trailing_seam`, so three launches with nothing typed between them do not
+  stack three seams — and that trim must test the buffer's END (a seam is fixed
+  width) rather than search a window, or it eats a boundary that had a session's
+  work under it. And the ring is flushed on a 15s tick + at exit but NOT on
+  `shell_detach`: a tab flip is not worth a 256K write, and detach runs under the
+  registry lock, which may never wait on a file lock.
+- **`HISTFILE` in the environment does nothing to zsh on macOS.** `/etc/zshrc:16`
+  sets `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` UNCONDITIONALLY for every
+  interactive shell — export it, ask, and you get `~/.zsh_history` back. Same
+  family as the OSC 7 note above: Apple's `/etc` is in the way, and editing the
+  user's rc files is not the answer. `ZDOTDIR` is the one lever that file
+  honours, so per-tab history rides on it — which means zsh also looks THERE for
+  `.zshenv`/`.zprofile`/`.zshrc`/`.zlogin`, and the generated shims have to hand
+  the user's own environment back **twice**: once in `.zshenv` (their `~/.zshenv`
+  may `export ZDOTDIR=$HOME/.config/zsh`, the standard dotfiles layout — sourced
+  blind, that hijacks the rest of the chain and the tab silently shares the
+  global history again) and once in `.zshrc` before sourcing theirs (a config
+  that does `source $ZDOTDIR/aliases.zsh` has to find its own files). Restoring
+  it there is also what keeps a nested `zsh` on the user's normal history rather
+  than the tab's. `INC_APPEND_HISTORY` is not a nicety: the app SIGHUPs its
+  shells and zsh's default flushes only on a clean exit. String assertions on
+  the generated shims prove nothing here — they pass just as happily if zsh
+  ignores them — so the test that counts spawns a REAL login zsh on a pty with a
+  temp `$HOME`, and it is the one that catches all three mistakes.
+- **xterm's `scrollback` defaults to 1000 lines, and the backend replays 256K.**
+  That is ~3200 lines at 80 columns, so two thirds of every replay was being
+  dropped before anyone could scroll to it — invisible, because what is left
+  looks like a perfectly good terminal. `TERM_SCROLLBACK` (5000) is checked
+  against `SHELL_RING` by `termresize-check.mjs`, the same mirror shape as
+  `dnd-check.mjs`. The reflow that fixes a replay's WIDTH lives in the same
+  place and is safe only because the xterm is brand new when a replay arrives:
+  the temporary grid must never reach `tx.resize` or `sentRef`, or the pty takes
+  a SIGWINCH for a size nobody is looking at and the shell redraws into the ring
+  being restored.
 - **portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL** (crate
   `lib.rs:347`), and an interactive `/bin/sh` on a pty whose master is still
   open SURVIVES it. The app only gets away with this because dropping the
