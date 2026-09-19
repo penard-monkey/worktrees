@@ -12,6 +12,7 @@ pub mod docs;
 pub mod error;
 pub mod git;
 pub mod health;
+pub mod inbox;
 pub mod init;
 pub mod materialize;
 pub mod mcpsetup;

@@ -81,6 +81,35 @@ jq_out() { printf '%s' "$output" | python3 -c "$1"; }
   [[ "$output" == *"without --mutations"* ]]
 }
 
+# `show_doc` writes nothing in the repo but it drives the user's SCREEN, so it
+# sits in the --mutations tier while carrying readOnlyHint: true. HOME is
+# per-test (helpers/common), so the inbox these write to is a throwaway.
+@test "show_doc is in the --mutations tier, not the read tier" {
+  mcp "" '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  [[ "$output" != *show_doc* ]]
+  mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  [[ "$output" == *show_doc* ]]
+}
+
+@test "show_doc queues a request for a repo file and refuses one outside" {
+  printf '# notes\n' > "$REPO/CLAUDE.md"
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_doc","arguments":{"path":"CLAUDE.md"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  # The ask has to actually reach the inbox — a tool that reports success and
+  # queues nothing is the failure this test exists for.
+  run bash -c "cat '$HOME'/.cache/worktrees/inbox/*.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *CLAUDE.md* ]]
+
+  # A path that RESOLVES outside the pinned repo is refused, and queues nothing.
+  rm -f "$HOME"/.cache/worktrees/inbox/*.json
+  mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"show_doc","arguments":{"path":"/etc/hosts"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [[ "$output" == *"outside this repository"* ]]
+  run bash -c "ls '$HOME'/.cache/worktrees/inbox/*.json 2>/dev/null | wc -l"
+  [[ "$output" == *0* ]]
+}
+
 @test "with --mutations the destructive tool appears but still needs confirm" {
   mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"remove_worktree","arguments":{"slug":"x"}}}'
   [[ "$output" == *'"isError":true'* ]]

@@ -25,6 +25,7 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
   worktrees doctor [<name>]             report file drift, declared and un- (--json --strict --config-only)
   worktrees status <name>               health verdict for one worktree (--json)
+  worktrees show <file>                 ask the worktrees app to open a document
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
@@ -164,6 +165,10 @@ fn run() -> i32 {
         // Read-only, so deliberately absent from MUTATING above — a health
         // verdict is part of finding out what a tree is, like `ls` and `doctor`.
         "status" => ops::cmd_status(&project, &mut ui, rest),
+        // Read-only in the same sense as `status`: it writes a request into
+        // `~/.cache/worktrees/inbox` and touches nothing in the repo, so it is
+        // deliberately absent from MUTATING.
+        "show" => worktrees_core::inbox::cmd_show(&project, &mut ui, rest),
         "init" => ops::cmd_init(&project, &mut ui, rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));
