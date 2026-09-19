@@ -1186,8 +1186,11 @@ function BranchCombo({
     }
     if (e.key === "Enter") {
       // A highlighted row wins; otherwise the raw text does, so Enter still
-      // works exactly as it did before the list existed.
-      commit(showPop && options[hi] ? options[hi].branch : value);
+      // works exactly as it did before the list existed. `hi` can be stale by
+      // one render after a filter shrink, so clamp before indexing — the row
+      // the user SAW highlighted is the in-bounds one.
+      const clamped = options.length ? Math.min(hi, options.length - 1) : -1;
+      commit(showPop && clamped >= 0 ? options[clamped].branch : value);
       // Picking from a VISIBLE list is the whole keypress. Without this the
       // dialog hosting the field would also read it as "submit", so choosing a
       // branch would create the worktree before you had touched base or name.
@@ -1210,7 +1213,7 @@ function BranchCombo({
         aria-controls={showPop ? listId : undefined}
         // Focus never leaves the input, so WITHOUT this the arrow keys are
         // silent to a screen reader and Enter commits a row it never announced.
-        aria-activedescendant={showPop && options[hi] ? optId(hi) : undefined}
+        aria-activedescendant={showPop && options.length ? optId(Math.min(hi, options.length - 1)) : undefined}
         data-testid={testid}
         spellCheck={false}
         autoCapitalize="off"
