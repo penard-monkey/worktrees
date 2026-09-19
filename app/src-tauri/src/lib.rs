@@ -4140,9 +4140,9 @@ async fn write_file(app: AppHandle, path: String, content: String, expected_mtim
 
 /// A place's CANONICAL session name + worktree cwd, both derived backend-side
 /// from `repo` + `slug`. The dock never supplies a session name or path — that
-/// keeps the webview from naming/killing arbitrary tmux sessions or opening a
-/// shell outside the workspace, and keeps sidecar names STABLE (a place's
-/// canonical name doesn't change when it briefly runs under an adopted session).
+/// keeps the webview from naming/killing arbitrary sessions or opening a shell
+/// outside the workspace, and a place's canonical name is STABLE (it does not
+/// change when the place briefly runs under an adopted session).
 fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), String> {
     let p = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
     Ok((p.session_name(slug), p.place_dir(slug)))

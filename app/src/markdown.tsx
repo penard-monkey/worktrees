@@ -18,14 +18,23 @@ export type MarkdownProps = {
   renderImage?: (src: string, alt: string, title: string | null) => ReactNode;
   /** Link activation. `href` is verbatim from the doc (may be relative). */
   onLink?: (href: string) => void;
+  /** Per-document heading slugger (de-dupes repeated heading texts). Set by the Markdown component. */
+  slugger?: (text: string) => string;
 };
 
 // marked's lexer leaves the five XML entities encoded in `text` tokens (it
 // escapes at render time, which we skip). Decode them so prose reads right.
 const ENT: Record<string, string> = {
-  "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&apos;": "'", "&nbsp;": " ",
+  "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&apos;": "'", "&nbsp;": " ",
+  "&copy;": "©", "&hellip;": "…", "&mdash;": "—", "&ndash;": "–", "&reg;": "®", "&trade;": "™",
+  "&laquo;": "«", "&raquo;": "»", "&middot;": "·", "&deg;": "°", "&plusmn;": "±", "&times;": "×",
 };
-const decode = (s: string) => s.replace(/&(?:amp|lt|gt|quot|#39|apos|nbsp);/g, (m) => ENT[m] ?? m);
+const decode = (s: string) =>
+  s.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|[a-z]+);/g, (m, dec, hex) => {
+    if (dec) return String.fromCodePoint(Number(dec));
+    if (hex) return String.fromCodePoint(parseInt(hex, 16));
+    return ENT[m] ?? m;
+  });
 
 /**
  * What may appear in a rendered `href`. The click handler alone is NOT a
@@ -51,6 +60,21 @@ function slugify(text: string): string {
     .replace(/[^\w\s-]/g, "")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-");
+}
+
+/**
+ * Slugify with GitHub-style de-duplication: the second "Overview" heading in
+ * one document gets `overview-1`, the third `overview-2`. One slugger per
+ * document render — the counter belongs to the document, not the module.
+ */
+function createSlugger(): (text: string) => string {
+  const seen = new Map<string, number>();
+  return (text: string) => {
+    const base = slugify(text);
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return n === 0 ? base : `${base}-${n}`;
+  };
 }
 
 // Recursion guard. `**`×4000 in an 8 KB file lexes fine and then blows the
@@ -138,7 +162,7 @@ function block(tokens: Token[], ctx: MarkdownProps, keyBase = "b", depth = 0): R
         const d = Math.min(6, Math.max(1, ht.depth));
         const H = (["h1", "h2", "h3", "h4", "h5", "h6"] as const)[d - 1];
         // id + scroll target so in-document links ([x](#heading)) work
-        out.push(<H key={k} id={slugify(ht.text)} className={`md-h md-h${d}`}>{inline(ht.tokens, ctx, k)}</H>);
+        out.push(<H key={k} id={(ctx.slugger ?? slugify)(ht.text)} className={`md-h md-h${d}`}>{inline(ht.tokens, ctx, k)}</H>);
         break;
       }
       case "paragraph":
@@ -291,7 +315,10 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
       return { tokens: [] as Token[], failed: true };
     }
   }, [props.src]);
-  const body = useMemo(() => (parsed.failed ? null : block(parsed.tokens, props)), [parsed, props]);
+  // One slugger per document: repeated heading texts get -1, -2 suffixes,
+  // so in-document links never point at two identical ids.
+  const slugger = useMemo(() => createSlugger(), [props.src]);
+  const body = useMemo(() => (parsed.failed ? null : block(parsed.tokens, { ...props, slugger })), [parsed, props, slugger]);
   if (parsed.failed) {
     return (
       <div className="md">
