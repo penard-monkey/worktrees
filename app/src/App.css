@@ -959,6 +959,12 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 4px var(--accent);
 }
+/* Purple when the only thing pending is an OFFER — the same hue as the band
+   that made it, and the app's existing word for claude. Geometry deliberately
+   unchanged: the dot already teaches "there is news on this square", and a
+   second size would be a second idea (the same reasoning `.usage-badge`
+   records two rules up). */
+.rail-icon.upd.upd-offer::after { background: var(--ai); box-shadow: 0 0 4px var(--ai); }
 .upd-tag {
   margin-left: var(--s2); padding: 1px var(--s2); border-radius: var(--r-sm);
   font-size: var(--fs-micro); font-weight: var(--fw-bold); text-transform: uppercase;
@@ -1301,29 +1307,44 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .mcp-dismiss:hover { color: var(--txt); text-decoration: underline; }
 
-/* ── offers in the release notes ────────────────────────────────────────────
-   The list sits BELOW the notes and above the foot, inside the same scrolling
-   body, so a long changelog does not hide it behind a fold it cannot reach. */
+/* ── the offer band ─────────────────────────────────────────────────────────
+   Pinned between the modal header and `.settings-body`, the only child that
+   scrolls. FULL-BLEED and un-rounded on purpose: the notes below are a column
+   of bordered entries, and a bordered box here would read as one more of them.
+   A band that runs edge to edge is a different kind of object before a word of
+   it is read.
+
+   Tinted with `--ai` over `--bg-tree` — the MODAL's surface, not `--bg-panel`,
+   which this once borrowed by habit and which is a different colour. Purple is
+   the app's existing word for claude (tokens.css), so the tint is semantic
+   rather than decorative, and it cannot be confused with `--accent`, which
+   means "interactive" everywhere else. Measured against the host in all six
+   themes. */
 .wn-offers {
-  display: flex; flex-direction: column; gap: var(--s2);
-  margin-top: var(--s4); padding-top: var(--s4);
-  border-top: 1px solid var(--line);
+  flex: none;
+  display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  background: color-mix(in srgb, var(--ai) 16%, var(--bg-tree));
+  border-bottom: 1px solid var(--line);
 }
 .wn-offers-h {
   font-size: var(--fs-micro); font-weight: var(--fw-med); letter-spacing: 0.06em;
   text-transform: uppercase; color: var(--txt-dim);
 }
-/* `--bg-elev` over the modal's `--bg-panel`: a distance that holds in all six
-   themes. `--bg-input` was the plausible wrong pick — it is identical to
-   --bg-panel in catppuccin-mocha. */
-.wn-offer {
-  display: flex; flex-direction: column; gap: var(--s2);
-  background: var(--bg-elev); border: 1px solid var(--line);
-  border-radius: var(--r-md); padding: var(--s3);
-}
+.wn-offer { display: flex; align-items: flex-start; gap: var(--s3); }
+.wn-offer > svg { flex: none; color: var(--ai); margin-top: 1px; }
+/* `min-width: 0` or a long title refuses to wrap and pushes the actions off
+   the band's right edge — the ratchet `.term-host` taught us about. */
+.wn-offer-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .wn-offer-t { font-size: var(--fs-label); font-weight: var(--fw-med); color: var(--txt-hi); }
 .wn-offer-b { font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt-dim); }
-.wn-offer .ver-actions { margin-top: 0; align-items: center; }
+.wn-offer-acts { flex: none; display: flex; align-items: center; gap: var(--s3); }
+/* Under ~520px the actions drop below the text rather than squeezing the
+   sentence into a column two words wide. */
+@media (max-width: 520px) {
+  .wn-offer { flex-wrap: wrap; }
+  .wn-offer-acts { width: 100%; justify-content: flex-end; }
+}
 
 /* The deep link's landing mark. An OUTLINE, not a border or a background: it
    must not move the section by a pixel (a border would) and must not fight the

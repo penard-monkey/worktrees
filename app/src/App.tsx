@@ -515,29 +515,45 @@ function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceO
           )}
           <button className="icon-btn" title="close" onClick={onClose}><Icons.X size={13} /></button>
         </header>
-        <div className="settings-body">
-          <ReleaseNotes sections={sections} notes={notes} open={open} onToggle={toggle} />
-        </div>
         {offers.length > 0 && (
-          /* The reason this modal is the surface: it has NO preconditions — it
-             fires for every updating user over whatever screen they are on,
-             which is exactly what the Home card could not do. One row per
-             offer, each a link; never an embedded panel, or several offers
-             would need an ordering rule between them. */
+          /* ABOVE the notes and outside `.settings-body`, which is the only
+             part of this modal that scrolls — so the band is pinned and a long
+             changelog cannot push it under a fold. It sat below the notes once;
+             the entry it replaced sat fourth of six INSIDE them. Both were
+             missed by the person who wrote them, which is three variations of
+             the same mistake: the thing to DO was placed after the thing to
+             read.
+
+             Deliberately not a card. The body below is full of bordered
+             entries, so another bordered box would read as one more of them —
+             a full-bleed band is a different KIND of object at a glance. The
+             tint is `--ai`, because purple already means claude everywhere in
+             this app (see tokens.css), which also keeps it distinct from
+             `--accent`, the generic interactive hue. */
           <div className="wn-offers">
-            <div className="wn-offers-h">Not set up yet</div>
+            {offers.length > 1 && (
+              <div className="wn-offers-h">{offers.length} things to set up</div>
+            )}
             {offers.map((o) => (
               <div className="wn-offer" key={o.id}>
-                <div className="wn-offer-t">{o.title}</div>
-                <div className="wn-offer-b">{o.body}</div>
-                <div className="ver-actions">
-                  <button className="ctrl sm" onClick={() => onTakeOffer(o)}>{o.cta}</button>
+                <Icons.SquareTerminal size={15} />
+                <div className="wn-offer-txt">
+                  <div className="wn-offer-t">{o.title}</div>
+                  <div className="wn-offer-b">{o.body}</div>
+                </div>
+                <div className="wn-offer-acts">
+                  {/* The one FILLED button in this modal. Everything else here
+                      is text, so the single accent fill is unambiguous. */}
+                  <button className="enter-btn sm" onClick={() => onTakeOffer(o)}>{o.cta}</button>
                   <button className="mcp-dismiss" onClick={() => onSilenceOffer(o)}>Don't show again</button>
                 </div>
               </div>
             ))}
           </div>
         )}
+        <div className="settings-body">
+          <ReleaseNotes sections={sections} notes={notes} open={open} onToggle={toggle} />
+        </div>
         <div className="modal-foot">Full changelog · Settings → Updates</div>
       </aside>
     </div>
@@ -3464,11 +3480,20 @@ function App() {
   // An unacted offer is the same claim, so it lights the same dot rather than
   // inventing a second indicator next to it.
   const railAlert = updateAvail || offers.length > 0;
-  const railTitle = updateAvail
-    ? "settings — update available"
-    : offers.length > 0
-      ? "settings — setup suggested"
-      : "settings (⌘,)";
+  // An offer is not an update, and until now they painted the same dot: you
+  // could not tell "the CLI is behind" from "you never set the server up"
+  // without hovering a gear, which nobody does. Same 6px dot in the same place
+  // — a second shape would be a second idea — recoloured to the band's purple
+  // when an offer is the only thing pending. With an update ALSO pending the
+  // dot stays accent (the older meaning) and the tooltip names both.
+  const railOfferOnly = offers.length > 0 && !updateAvail;
+  const railTitle = updateAvail && offers.length > 0
+    ? "settings — update available · setup suggested"
+    : updateAvail
+      ? "settings — update available"
+      : offers.length > 0
+        ? "settings — setup suggested"
+        : "settings (⌘,)";
   const recheckTmux = useCallback(async () => {
     try {
       const ok = await invoke<boolean>("tmux_check", { refresh: true });
@@ -6197,7 +6222,7 @@ function App() {
             status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
-        <button className={"rail-icon" + (railAlert ? " upd" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
+        <button className={"rail-icon" + (railAlert ? " upd" : "") + (railOfferOnly ? " upd-offer" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── the sidebar ──

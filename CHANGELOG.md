@@ -38,8 +38,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Changed
 - **A suggestion now arrives where you actually are.** The card offering to wire
   up Claude's MCP server has been replaced: pending setup suggestions are listed
-  in the release notes on the first launch after an update, and anything still
-  unacted leaves a dot on the Settings gear. The card it replaces was correct
+  in a band pinned above the release notes on the first launch after an
+  update, and anything still unacted leaves a dot on the Settings gear — purple
+  rather than the update dot's blue, so the two can be told apart without
+  hovering anything. The card it replaces was correct
   about the machine and reached nobody, because it rendered only on the Home
   screen *and* only once a project existed — two conditions that each read as
   reasonable and multiply to almost never. The notes have no conditions at all,
