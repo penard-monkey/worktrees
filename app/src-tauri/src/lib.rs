@@ -4054,6 +4054,26 @@ async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Resu
     })
 }
 
+/// Is `path` still a readable file inside the workspace? Answers the question
+/// `files_open` restore has to ask before it reopens a remembered path.
+///
+/// **Returns `Ok(false)` where every other FS command returns `Err`** — that is
+/// the whole point of it existing rather than the frontend calling `read_file`
+/// and catching. A remembered file can be deleted, renamed, gitignored or left
+/// behind by a branch switch between visits, and `FileView` routes a failed
+/// read to `onError`, i.e. the app's error banner. Restoring through a command
+/// that *errors* would therefore greet you with a banner for the entirely
+/// ordinary act of deleting a file you once had open — which is exactly why
+/// `PlacePanels` refused to remember the open file at all until this existed.
+///
+/// So: outside the workspace, missing, or not-a-file all collapse to `false`.
+/// The `Err` arm is left in the signature for an IPC-level failure only; the
+/// guard's own rejection is deliberately swallowed.
+#[tauri::command]
+async fn file_readable(app: AppHandle, path: String) -> Result<bool, String> {
+    Ok(guard_under_projects(&app, &path).map(|f| f.is_file()).unwrap_or(false))
+}
+
 /// Raw bytes as base64 — the viewer builds a `data:` URI from it to show an
 /// image inline. Same path guard as every other FS command. The cap is smaller
 /// than `read_file`'s (base64 inflates 4/3, and this crosses the IPC bridge as
@@ -5528,6 +5548,7 @@ pub fn run() {
             changed_files,
             file_diff,
             read_file,
+            file_readable,
             list_docs,
             read_file_base64,
             write_file,
