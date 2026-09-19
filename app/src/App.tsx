@@ -11,7 +11,9 @@ import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
-import { canNudge, McpNudge, type McpStatus } from "./McpPanel";
+import { type McpStatus } from "./McpPanel";
+import { dismissPatch, pendingOffers, type Offer } from "./offers";
+import type { CatId } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
@@ -466,10 +468,16 @@ function ReleaseNotes({ sections, notes, open, onToggle }: {
 // and the header's Show/Hide details toggle are one piece of state that nothing
 // outside the modal reads, and a component defined inside App() would be
 // re-created (and reset) by the 3s poll.
-function WhatsNewModal({ version, notes, manual, onClose }: {
+function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceOffer, onClose }: {
   version: string;
   notes: string;
   manual: boolean;
+  /// Pending offers, listed under the notes. Empty in the MANUAL view: that one
+  /// is opened from Settings, so the reader is already standing where the links
+  /// would send them.
+  offers: Offer[];
+  onTakeOffer: (o: Offer) => void;
+  onSilenceOffer: (o: Offer) => void;
   onClose: () => void;
 }) {
   const sections = useMemo(() => parseNotes(notes), [notes]);
@@ -510,6 +518,26 @@ function WhatsNewModal({ version, notes, manual, onClose }: {
         <div className="settings-body">
           <ReleaseNotes sections={sections} notes={notes} open={open} onToggle={toggle} />
         </div>
+        {offers.length > 0 && (
+          /* The reason this modal is the surface: it has NO preconditions — it
+             fires for every updating user over whatever screen they are on,
+             which is exactly what the Home card could not do. One row per
+             offer, each a link; never an embedded panel, or several offers
+             would need an ordering rule between them. */
+          <div className="wn-offers">
+            <div className="wn-offers-h">Not set up yet</div>
+            {offers.map((o) => (
+              <div className="wn-offer" key={o.id}>
+                <div className="wn-offer-t">{o.title}</div>
+                <div className="wn-offer-b">{o.body}</div>
+                <div className="ver-actions">
+                  <button className="ctrl sm" onClick={() => onTakeOffer(o)}>{o.cta}</button>
+                  <button className="mcp-dismiss" onClick={() => onSilenceOffer(o)}>Don't show again</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="modal-foot">Full changelog · Settings → Updates</div>
       </aside>
     </div>
@@ -3037,7 +3065,14 @@ function App() {
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Where Settings was asked to open. One state, never a boolean beside it:
+  // `settingsOpen` is derived, so "the sheet is up" and "which section it went
+  // to" cannot disagree. `{}`-with-no-cat is the ordinary ⌘, open.
+  const [settingsAt, setSettingsAt] = useState<{ cat: CatId; focus?: string } | null>(null);
+  const settingsOpen = settingsAt !== null;
+  const openSettings = useCallback((at?: { cat: CatId; focus?: string }) => {
+    setSettingsAt(at ?? { cat: "appearance" });
+  }, []);
   const [switchOpen, setSwitchOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
@@ -3408,6 +3443,32 @@ function App() {
   useEffect(() => {
     invoke<McpStatus>("mcp_status", { repo: null }).then(setMcpStatus).catch(() => setMcpStatus(null));
   }, []);
+
+  // Offers: things set up nowhere, listed in the release notes and badged on
+  // the gear until taken or silenced. Derived — no surface computes its own
+  // answer, which is how the Home card and the Settings panel came to disagree
+  // about whether there was anything to say.
+  const offers = useMemo(
+    () => pendingOffers({ mcp: mcpStatus }, settings.offers_dismissed ?? {}),
+    [mcpStatus, settings.offers_dismissed],
+  );
+  const takeOffer = useCallback((o: Offer) => {
+    setSettingsAt(o.to);
+  }, []);
+  const silenceOffer = useCallback((o: Offer) => {
+    updateSettings({ offers_dismissed: dismissPatch(o, settings.offers_dismissed ?? {}) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.offers_dismissed]);
+
+  // The rail dot already means "something in Settings needs you" (an update).
+  // An unacted offer is the same claim, so it lights the same dot rather than
+  // inventing a second indicator next to it.
+  const railAlert = updateAvail || offers.length > 0;
+  const railTitle = updateAvail
+    ? "settings — update available"
+    : offers.length > 0
+      ? "settings — setup suggested"
+      : "settings (⌘,)";
   const recheckTmux = useCallback(async () => {
     try {
       const ok = await invoke<boolean>("tmux_check", { refresh: true });
@@ -5577,7 +5638,7 @@ function App() {
         // ⌘, opens Settings (macOS convention) — a meta chord is safe past the
         // term-host (its passthrough concerns are ctrl-only). Esc already closes.
         e.preventDefault();
-        setSettingsOpen((v) => !v);
+        setSettingsAt((v) => (v ? null : { cat: "appearance" }));
       } else if (e.metaKey && k === "f") {
         // ⌘F — find. Which surface depends on where the user is (see findTarget);
         // a second press re-selects the field rather than toggling the bar shut,
@@ -6136,7 +6197,7 @@ function App() {
             status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
-        <button className={"rail-icon" + (updateAvail ? " upd" : "")} data-track="settings" title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
+        <button className={"rail-icon" + (railAlert ? " upd" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── the sidebar ──
@@ -6575,18 +6636,6 @@ function App() {
                   <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
                   <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
                 </div>
-                {/* Only for `absent`, only once there is a project to use it
-                    on, and only until it is installed or silenced. Home rather
-                    than over the terminal because this is a fact about the
-                    MACHINE, like the version rows and the logo above it — and
-                    because a card here is never in the way of work. */}
-                {canNudge(mcpStatus) && !settings.mcp_nudge_dismissed && (ws?.projects.length ?? 0) > 0 && (
-                  <McpNudge
-                    status={mcpStatus!}
-                    onOpenSettings={() => setSettingsOpen(true)}
-                    onDismiss={() => updateSettings({ mcp_nudge_dismissed: true })}
-                  />
-                )}
                 <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
                 <div className="resume">
                   {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
@@ -6935,7 +6984,7 @@ function App() {
         }}
       />
 
-      <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
+      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onChange={updateSettings} onClose={() => setSettingsAt(null)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
@@ -6956,6 +7005,9 @@ function App() {
       {whatsNew && (
         <WhatsNewModal
           version={whatsNew.version} notes={whatsNew.notes} manual={!!whatsNew.manual}
+          offers={whatsNew.manual ? [] : offers}
+          onTakeOffer={(o) => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); takeOffer(o); }}
+          onSilenceOffer={silenceOffer}
           onClose={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}
         />
       )}

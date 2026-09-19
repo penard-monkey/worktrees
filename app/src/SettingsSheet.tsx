@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
 import * as Icons from "./icons";
@@ -36,7 +36,7 @@ const CATS = [
   // what the app has RECORDED rather than what it will do.
   { id: "usage", label: "Usage" },
 ] as const;
-type CatId = (typeof CATS)[number]["id"];
+export type CatId = (typeof CATS)[number]["id"];
 
 // ── Settings → Usage ────────────────────────────────────────────────────────
 // What this Mac's copy of the app has recorded about itself: where the
@@ -240,6 +240,7 @@ function UsagePanel() {
 // The Version section owns its own update-run state (log/progress) locally.
 export function SettingsSheet({
   open,
+  at,
   settings,
   onChange,
   onClose,
@@ -256,6 +257,9 @@ export function SettingsSheet({
   onMcpChanged,
 }: {
   open: boolean;
+  /// Where the sheet was asked to open, when the caller had somewhere in mind —
+  /// an offer's deep link (`offers.ts`). `null` is the ordinary ⌘, open.
+  at: { cat: CatId; focus?: string } | null;
   settings: Settings;
   onChange: (patch: Partial<Settings>) => void;
   onClose: () => void;
@@ -275,10 +279,37 @@ export function SettingsSheet({
   mcpStatus: McpStatus | null;
   onMcpChanged: (s: McpStatus) => void;
 }) {
-  // Selected category — local, deliberately NOT persisted: the sheet always
-  // opens on Appearance so "where was I" never depends on last session.
+  // Selected category — local, deliberately NOT persisted: the sheet opens on
+  // Appearance so "where was I" never depends on last session.
+  //
+  // An explicit `at` overrides that, and does NOT break the rule: what the rule
+  // forbids is IMPLICIT restoration of wherever you happened to be last time.
+  // A caller naming its destination is the opposite — it is the whole point of
+  // an offer's deep link, which would otherwise drop you on Appearance and make
+  // you hunt for the thing it just offered.
   const [cat, setCat] = useState<CatId>("appearance");
-  useEffect(() => { if (open) setCat("appearance"); }, [open]);
+  useEffect(() => { if (open) setCat(at?.cat ?? "appearance"); }, [open, at]);
+
+  // …and then say which section it meant. A transient class rather than focus:
+  // the sheet body scrolls, and `autoFocus` inside a scrolling box is what
+  // pushed a header 34px out of view once already. `scrollIntoView` with
+  // `block: "nearest"` moves nothing when the section is on screen.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open || !at?.focus) return;
+    // After the category switch has painted — the section does not exist until
+    // `cat` renders it.
+    const id = requestAnimationFrame(() => {
+      const el = bodyRef.current?.querySelector<HTMLElement>(`[data-focus="${at.focus}"]`);
+      if (!el) return;
+      el.scrollIntoView({ block: "nearest" });
+      el.classList.add("focus-flash");
+      // Removed on animation end rather than a timer, so a re-open re-triggers
+      // it: the class must be gone before it can be added again.
+      el.addEventListener("animationend", () => el.classList.remove("focus-flash"), { once: true });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [open, at, cat]);
 
   const [updating, setUpdating] = useState(false);
   const [updateLog, setUpdateLog] = useState("");
@@ -484,7 +515,7 @@ export function SettingsSheet({
           ))}
         </nav>
 
-        <div className="settings-body">
+        <div className="settings-body" ref={bodyRef}>
           {cat === "terminal" && <>
           <section className="setting">
             <label>Terminal font</label>

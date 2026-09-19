@@ -1301,6 +1301,43 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .mcp-dismiss:hover { color: var(--txt); text-decoration: underline; }
 
+/* ── offers in the release notes ────────────────────────────────────────────
+   The list sits BELOW the notes and above the foot, inside the same scrolling
+   body, so a long changelog does not hide it behind a fold it cannot reach. */
+.wn-offers {
+  display: flex; flex-direction: column; gap: var(--s2);
+  margin-top: var(--s4); padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+}
+.wn-offers-h {
+  font-size: var(--fs-micro); font-weight: var(--fw-med); letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--txt-dim);
+}
+/* `--bg-elev` over the modal's `--bg-panel`: a distance that holds in all six
+   themes. `--bg-input` was the plausible wrong pick — it is identical to
+   --bg-panel in catppuccin-mocha. */
+.wn-offer {
+  display: flex; flex-direction: column; gap: var(--s2);
+  background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: var(--r-md); padding: var(--s3);
+}
+.wn-offer-t { font-size: var(--fs-label); font-weight: var(--fw-med); color: var(--txt-hi); }
+.wn-offer-b { font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt-dim); }
+.wn-offer .ver-actions { margin-top: 0; align-items: center; }
+
+/* The deep link's landing mark. An OUTLINE, not a border or a background: it
+   must not move the section by a pixel (a border would) and must not fight the
+   surface tokens the panel already picked. Two pulses, then gone — it says
+   "here", it does not decorate. */
+.focus-flash { animation: focus-flash 700ms var(--ease) 2; border-radius: var(--r-md); }
+@keyframes focus-flash {
+  0%, 100% { outline: 2px solid transparent; outline-offset: 3px; }
+  40% { outline: 2px solid var(--accent); outline-offset: 3px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .focus-flash { animation: none; outline: 2px solid var(--accent); outline-offset: 3px; }
+}
+
 /* The one-line verdict in Settings. `align-items: start` so a wrapped sentence
    keeps its icon on the first line rather than centring it against three. */
 .mcp-verdict {

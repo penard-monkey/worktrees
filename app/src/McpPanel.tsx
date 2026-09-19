@@ -51,14 +51,6 @@ export type McpStatus = {
 /** Mirrors `mcpsetup::Outcome`. */
 export type McpOutcome = { ok: boolean; output: string; status: McpStatus };
 
-/** The one state the passive nudge may appear for — `State::nudgeable` on the
- *  Rust side, repeated here rather than shipped as a field because it is a
- *  question about THIS UI, not about the machine. `stale` and `read-only` are
- *  deliberately not included: they are real problems, and they belong in
- *  Settings where they cannot be dismissed by someone who only ever wanted the
- *  install offer to stop. */
-export const canNudge = (s: McpStatus | null) => s?.state === "absent";
-
 /** One line for the current state, plus how alarmed to look. Shared by both
  *  surfaces so the Home card and the Settings panel say the same thing. */
 function verdict(s: McpStatus): { tone: "ok" | "warn" | "off"; line: string } {
@@ -159,7 +151,7 @@ export function McpSection({ status, repo, onChanged, onReport }: {
   const verb = status.state === "stale" ? "Repair" : status.state === "read-only" ? "Re-install" : "Set up";
 
   return (
-    <section className="setting">
+    <section className="setting" data-focus="mcp-server">
       <label>
         Claude MCP server
         {status.state === "stale" && <span className="upd-tag">broken</span>}
@@ -239,38 +231,5 @@ export function McpSection({ status, repo, onChanged, onReport }: {
       {log && <pre className="update-log">{log}</pre>}
       <div className="hint">Servers are recorded in {status.config_path}. Restart a Claude session for a change to reach it.</div>
     </section>
-  );
-}
-
-/** The passive card on Home. Only ever appears for `absent` (see `canNudge`),
- *  only once there is a project to use it on, and never for a machine whose AI
- *  command is not claude.
- *
- *  There is no "not now" button, deliberately: ignoring it IS "not now". It sits
- *  on Home, never over the terminal, so it costs nothing to leave standing — and
- *  a third button would ask the user to distinguish two kinds of silence when
- *  only one of them is a decision. "Don't show again" is the persisted flag, and
- *  the card retires itself the moment the server exists, so that flag only ever
- *  governs this one case. */
-export function McpNudge({ status, onOpenSettings, onDismiss }: {
-  status: McpStatus;
-  onOpenSettings: () => void;
-  onDismiss: () => void;
-}) {
-  return (
-    <div className="mcp-card">
-      <div className="mcp-card-h">
-        <Icons.SquareTerminal size={14} />
-        Let Claude drive your worktrees
-      </div>
-      <p>
-        Claude can create, inspect and close worktrees as tools instead of running git by hand — one
-        setup, every project. {status.claude_bin ? "We can wire it up for you." : "Settings has the command to run."}
-      </p>
-      <div className="ver-actions">
-        <button className="ctrl sm" onClick={onOpenSettings}>Set up…</button>
-        <button className="mcp-dismiss" onClick={onDismiss}>Don’t show again</button>
-      </div>
-    </div>
   );
 }

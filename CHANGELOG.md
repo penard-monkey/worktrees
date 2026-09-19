@@ -35,6 +35,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   slides in from its own rail, and the rail's usage panel opens toward the
   window instead of back over the rail. Widths, ⌘B and ⌘J are unchanged.
 
+### Changed
+- **A suggestion now arrives where you actually are.** The card offering to wire
+  up Claude's MCP server has been replaced: pending setup suggestions are listed
+  in the release notes on the first launch after an update, and anything still
+  unacted leaves a dot on the Settings gear. The card it replaces was correct
+  about the machine and reached nobody, because it rendered only on the Home
+  screen *and* only once a project existed — two conditions that each read as
+  reasonable and multiply to almost never. The notes have no conditions at all,
+  which is the whole reason they are now the surface.
+
+  A suggestion also no longer tries to finish itself. Its button opens Settings
+  on the section that owns the decision, with that section marked, because
+  "set up" was never one click: a checkbox there decides whether Claude may
+  close and *remove* worktrees, and a button in a modal would either hide that
+  choice or ask it twice. That also keeps several pending suggestions a plain
+  list instead of a stack of panels needing an order.
+
+  `mcp_nudge_dismissed` becomes `offers_dismissed`, which records *what* was
+  dismissed rather than *that* something was — the rule `init_dismissed`
+  already followed, so a suggestion whose substance changes can ask again. An
+  existing dismissal carries over: nobody who silenced the old card is asked
+  a second time. Broken states are untouched and still cannot be silenced: a
+  server whose binary has moved, or one registered read-only, is a problem
+  rather than an offer.
+- `mcp_status` now records its verdict in the app log. Every answer but
+  "not set up" is a silent one by design, so a machine that never showed the
+  suggestion previously left no trace of why.
+
 ## [0.25.1] - 2026-09-18
 
 ### Fixed
