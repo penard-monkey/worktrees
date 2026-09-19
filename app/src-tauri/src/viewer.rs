@@ -52,6 +52,7 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -364,7 +365,10 @@ fn write_tree(
     let links = Links { entries, url: &url_for };
 
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut written: Vec<PathBuf> = Vec::new();
+    // A SET, not the Vec: `prune` asks "is this one kept?" once per file on
+    // disk, and the index's cap is 2,000 — a linear scan makes that four million
+    // path comparisons on a button press, for no reason.
+    let mut written: BTreeSet<PathBuf> = BTreeSet::new();
     for (i, out) in &derived {
         let entry = &entries[*i];
         let body = render_one(Path::new(&entry.path), entry, stale, &links);
@@ -372,7 +376,7 @@ fn write_tree(
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         std::fs::write(out, body).map_err(|e| format!("{}: {e}", out.display()))?;
-        written.push(out.clone());
+        written.insert(out.clone());
     }
     prune(dir, &written);
     Ok(derived)
@@ -381,7 +385,7 @@ fn write_tree(
 /// Remove derived files that are no longer in the index, and the directories
 /// that empties. Bounded to `dir`, which this module created and owns — nothing
 /// here follows a symlink, and a directory we did not make is not descended.
-fn prune(dir: &Path, keep: &[PathBuf]) {
+fn prune(dir: &Path, keep: &BTreeSet<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for ent in rd.flatten() {
         let p = ent.path();
