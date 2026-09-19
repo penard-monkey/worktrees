@@ -1019,6 +1019,7 @@ mod tests {
         let entries = vec![entry("README.md", "Read me", &src)];
         let cfg = tmp("e2e-cfg");
         let v = Viewer::default();
+        let _reap = Reaper(&v);
         let req = Request { root: &src, slug: "e2e-place", path: Some(&entries[0].path), stale: stale() };
 
         // A tree left behind by a previous run — a crash, or a place the user
@@ -1074,6 +1075,22 @@ mod tests {
         assert_eq!(std::fs::read_dir(v.join("state")).unwrap().count(), 0, "the session survived");
         assert!(v.join("viewer.log").is_file(), "the log is not the viewer's state");
         let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    /// Kills the viewer however the test ends.
+    ///
+    /// A `#[test]` that panics before reaching its own `kill` leaves a REAL
+    /// server holding a REAL port, on the machine of whoever ran it. That is not
+    /// hypothetical: proving the tree-wipe assertion red left `mo` listening on
+    /// 53381 until it was found by hand — a test suite reproducing, in miniature,
+    /// the exact failure rule 1 exists to prevent. `kill` takes the slot, so the
+    /// test's own explicit call still means what it says and this is a no-op
+    /// after it.
+    struct Reaper<'a>(&'a Viewer);
+    impl Drop for Reaper<'_> {
+        fn drop(&mut self) {
+            kill(self.0);
+        }
     }
 
     /// A loopback GET, for the test above. Not worth a dependency.
