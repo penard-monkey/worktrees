@@ -9,7 +9,7 @@
 import { initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 
 /** `worktrees_core::docs::DocEntry` — see the `list_docs` case. */
-type MockDoc = { path: string; rel: string; title: string; group: string };
+type MockDoc = { path: string; rel: string; title: string; group: string; mtime_ms: number };
 
 let ws: Workspace = initialWorkspace();
 
@@ -1280,7 +1280,20 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       const root = args.root as string;
       const mode = new URLSearchParams(location.search).get("docs") ?? "";
       const base = "origin/main";
-      const mk = (rel: string, title: string, group = ""): MockDoc => ({ path: `${root}/${rel}`, rel, title, group });
+      // `?docsnew=N` marks the first N entries as modified since the place's
+      // seen epoch — the recency dot's only input. Default 2, because the state
+      // worth developing against is "some are new", and a harness that can only
+      // show none or all cannot tell a working mark from a stuck one. The rest
+      // are backdated a week so no baseline can accidentally include them.
+      const freshN = Number(new URLSearchParams(location.search).get("docsnew") ?? "2");
+      let made = 0;
+      const mk = (rel: string, title: string, group = ""): MockDoc => ({
+        path: `${root}/${rel}`,
+        rel,
+        title,
+        group,
+        mtime_ms: (made++ < freshN ? Date.now() - made * 60_000 : Date.now() - 7 * 86400_000),
+      });
       if (mode === "empty") return { base, entries: [], truncated: false };
       if (mode === "cfg") {
         // `[docs] paths = ["handbook", "packages/db/README.md"]`, `index =
@@ -2101,6 +2114,16 @@ const healthyConfigs: Record<string, MockCfg> = {};
     }
     emitEvent("places:changed", {});
     return path;
+  },
+  /** A Claude session asking the app to show a document — the `app:open-doc`
+   * event `drain_inbox` emits after it has validated a request from
+   * `~/.cache/worktrees/inbox`. Unreachable by clicking: the whole point is
+   * that it arrives from ANOTHER PROCESS, so without this the frontend half of
+   * the feature (select the place, then open the dock on the file, in that
+   * order) could not be driven headlessly at all. */
+  showDoc(repo: string, slug: string, path: string) {
+    emitEvent("app:open-doc", { repo, slug, path });
+    return { repo, slug, path };
   },
   breakConfig(root: string = CDV_ROOT, msg?: string) {
     const cfg = mockConfigs[root];
