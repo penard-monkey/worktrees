@@ -2395,7 +2395,7 @@ async fn get_ai_config() -> Result<AiConfig, String> {
 /// it touches the filesystem.
 ///
 /// Logged, unlike most read-only commands. `mcp_install`/`mcp_uninstall` already
-/// applog, but the state that decides whether the Home card EVER appears is
+/// applog, but the state that decides whether the offer EVER appears is
 /// computed here — and every non-`absent` answer is a silent one, by design. A
 /// user reporting "it never offered" leaves no other trace: without this line
 /// the only way to tell `absent` (card suppressed by something in the UI) from

@@ -118,6 +118,26 @@ if (!row) {
   fail("App.tsx no longer renders the offer list from `offers.length > 0` — "
      + "if a screen or project condition crept back in, that is the original bug");
 } else ok("the offer list is gated on offers alone");
+// …and so is the FEED. Pinning only the render leaves the same bug one line
+// away: `offers={[]}` or `offers={sel ? offers : []}` on the modal passes a
+// check that looks at the render alone (verified — it did).
+const feed = app.match(/offers=\{([^}]*)\}/);
+if (!feed) {
+  fail("App.tsx no longer passes an `offers=` prop to WhatsNewModal");
+} else if (feed[1].trim() !== "whatsNew.manual ? [] : offers") {
+  fail(`WhatsNewModal is fed \`offers={${feed[1].trim()}}\` — the only condition allowed on `
+     + "the feed is the manual-notes view. A screen or project gate here is the v0.25.0 bug "
+     + "moved one line up.");
+} else ok("the modal is fed every pending offer (bar the manual view)");
+
+// The band is once-per-version and absent on a fresh install, so the panel must
+// carry a dismissal of its own or the gear dot has no off switch.
+const panel = read("../src/McpPanel.tsx");
+if (!/offerPending/.test(panel) || !/onSilenceOffer/.test(panel)) {
+  fail("McpPanel has no offerPending/onSilenceOffer — Settings → Claude is the only "
+     + "on-demand surface, and without it a fresh install gets a permanent dot it cannot clear");
+} else ok("Settings → Claude can end the suggestion on demand");
+
 if (/canNudge|McpNudge|mcp_nudge_dismissed/.test(app)) {
   fail("App.tsx still references the retired Home card (canNudge/McpNudge/mcp_nudge_dismissed)");
 } else ok("the Home card and its boolean are gone");

@@ -255,6 +255,8 @@ export function SettingsSheet({
   onReport,
   mcpStatus,
   onMcpChanged,
+  mcpOfferPending,
+  onSilenceMcpOffer,
 }: {
   open: boolean;
   /// Where the sheet was asked to open, when the caller had somewhere in mind —
@@ -278,6 +280,10 @@ export function SettingsSheet({
   /// status), so this panel renders rather than re-probes.
   mcpStatus: McpStatus | null;
   onMcpChanged: (s: McpStatus) => void;
+  /// Is the MCP server still an open suggestion? The Claude panel carries the
+  /// only on-demand way to end it — see `McpSection`.
+  mcpOfferPending: boolean;
+  onSilenceMcpOffer: () => void;
 }) {
   // Selected category — local, deliberately NOT persisted: the sheet opens on
   // Appearance so "where was I" never depends on last session.
@@ -304,9 +310,14 @@ export function SettingsSheet({
       if (!el) return;
       el.scrollIntoView({ block: "nearest" });
       el.classList.add("focus-flash");
-      // Removed on animation end rather than a timer, so a re-open re-triggers
-      // it: the class must be gone before it can be added again.
-      el.addEventListener("animationend", () => el.classList.remove("focus-flash"), { once: true });
+      // Removed on animation end, so a re-open re-triggers it: the class must be
+      // gone before it can be added again. The TIMER is not belt-and-braces —
+      // under `prefers-reduced-motion` the rule is `animation: none`, so
+      // `animationend` never fires at all and the outline would stand until the
+      // section unmounted. A mark that never leaves is not a mark.
+      const done = () => { clearTimeout(timer); el.classList.remove("focus-flash"); };
+      const timer = setTimeout(done, 1600);
+      el.addEventListener("animationend", done, { once: true });
     });
     return () => cancelAnimationFrame(id);
   }, [open, at, cat]);
@@ -505,11 +516,12 @@ export function SettingsSheet({
             >
               {c.label}
               {c.id === "updates" && actionable ? <span className="upd-tag">upd</span> : null}
-              {/* `stale` only. `absent` deliberately does NOT badge the category:
-                  the Home card is already making that offer, and a permanent dot
-                  in Settings for something the user has been asked about and not
-                  acted on turns a suggestion into a chore. A BROKEN server is a
-                  different claim and earns the mark. */}
+              {/* `stale` only, still. The rail's gear now carries the OFFER's
+                  dot (`upd-offer`), so badging this category too would say the
+                  same thing twice on one path — and the panel it points at can
+                  end the suggestion, which is what stops a standing dot being a
+                  chore. A BROKEN server is a different claim and earns the
+                  mark. */}
               {c.id === "claude" && mcpStatus?.state === "stale" ? <span className="upd-tag warn">!</span> : null}
             </button>
           ))}
@@ -534,7 +546,8 @@ export function SettingsSheet({
           {cat === "ai" && <ProfilesPanel key={repo || "none"} repo={repo} onReport={onReport} />}
 
           {cat === "claude" && <>
-          <McpSection status={mcpStatus} repo={repo} onChanged={onMcpChanged} onReport={onReport} />
+          <McpSection status={mcpStatus} repo={repo} offerPending={mcpOfferPending}
+            onSilenceOffer={onSilenceMcpOffer} onChanged={onMcpChanged} onReport={onReport} />
           </>}
 
           {cat === "commands" && <>

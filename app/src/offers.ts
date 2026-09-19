@@ -62,6 +62,12 @@ export type OfferCtx = { mcp: McpStatus | null };
  *
  *  `cli-missing` is likewise not here: its remedy is the installer, which
  *  Settings → Updates already owns and already badges. */
+//  ⚠ `ctx.mcp` is App's startup probe, which runs with NO repo — so it cannot
+//  see a server installed at LOCAL or PROJECT scope (`mcpsetup::status` only
+//  consults those with a repo in hand). Such a machine is covered and will
+//  still be offered the server until Settings → Claude re-probes with the repo
+//  and corrects it. Inherited from the Home card, but it matters more now that
+//  the dot is on every screen rather than one.
 export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>): Offer[] {
   const out: Offer[] = [];
   if (ctx.mcp?.state === "absent") {

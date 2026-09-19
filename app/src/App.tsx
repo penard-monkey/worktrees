@@ -529,7 +529,12 @@ function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceO
              a full-bleed band is a different KIND of object at a glance. The
              tint is `--ai`, because purple already means claude everywhere in
              this app (see tokens.css), which also keeps it distinct from
-             `--accent`, the generic interactive hue. */
+             `--accent`, the generic interactive hue.
+
+             It is NOT the only way to reach the offer, and must not be: this
+             modal appears once per version and never at all on a fresh
+             install, so Settings → Claude carries the same dismissal on
+             demand. */
           <div className="wn-offers">
             {offers.length > 1 && (
               <div className="wn-offers-h">{offers.length} things to set up</div>
@@ -3471,10 +3476,17 @@ function App() {
   const takeOffer = useCallback((o: Offer) => {
     setSettingsAt(o.to);
   }, []);
+  // The FUNCTIONAL form, which `updateSettings`' own docstring requires for a
+  // record-keyed patch: built from a captured `settings`, a second offer
+  // silenced from another surface in the same tick would be erased by whatever
+  // this closure last saw, and the loss reaches disk (ui-state.json is saved
+  // whole). Safe today with one offer id; not safe by construction, which is
+  // the part that rots.
   const silenceOffer = useCallback((o: Offer) => {
-    updateSettings({ offers_dismissed: dismissPatch(o, settings.offers_dismissed ?? {}) });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.offers_dismissed]);
+    updateSettings((prev) => ({ offers_dismissed: dismissPatch(o, prev.offers_dismissed ?? {}) }));
+  }, []);
+  // The MCP offer specifically, for Settings → Claude's "stop suggesting this".
+  const mcpOffer = offers.find((o) => o.id === "mcp-server") ?? null;
 
   // The rail dot already means "something in Settings needs you" (an update).
   // An unacted offer is the same claim, so it lights the same dot rather than
@@ -7013,7 +7025,8 @@ function App() {
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
-        mcpStatus={mcpStatus} onMcpChanged={setMcpStatus} />
+        mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
+        mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)} />
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query
