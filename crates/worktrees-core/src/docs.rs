@@ -162,6 +162,43 @@ fn unquote(s: &str) -> &str {
     t
 }
 
+/// Split a leading YAML frontmatter block off a document: `Some((block, rest))`
+/// where `block` is what sits between the fences and `rest` is everything after
+/// the closing one. `None` when the file does not open with `---`, and — the
+/// part that matters — when that block is never CLOSED.
+///
+/// ONE parser, because two readers of the same block drift. `title_from` needs
+/// the block to find `title:` and the body to find the H1; `derive::document`
+/// needs the body to throw the block away (a viewer renders frontmatter as
+/// noise — `mo` makes an expanded `<details>` "Metadata" block on every page).
+/// Those are the same question asked twice, and the second asker is the one
+/// that DELETES what it decides is frontmatter.
+///
+/// Which is why an unterminated `---` is not frontmatter here. `title_from`
+/// used to consume the rest of the file looking for a fence that never came,
+/// and that cost it nothing — no `# ` line was reachable, so it returned `None`
+/// and the row fell back to the filename. The same reading in the derive would
+/// silently delete the whole document. A lone `---` on line 1 is a thematic
+/// break; treating it as an open block is a guess, and the guess is only free
+/// for the reader that cannot lose anything by it.
+pub fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
+    let open_end = text.find('\n').map(|i| i + 1).unwrap_or(text.len());
+    // `str::lines` strips a trailing `\r`; this is the same test on raw bytes.
+    if text[..open_end].trim_end_matches(['\n', '\r']) != "---" {
+        return None;
+    }
+    let mut pos = open_end;
+    while pos < text.len() {
+        let end = text[pos..].find('\n').map(|i| pos + i + 1).unwrap_or(text.len());
+        let line = text[pos..end].trim_end_matches(['\n', '\r']).trim_end();
+        if line == "---" || line == "..." {
+            return Some((&text[open_end..pos], &text[end..]));
+        }
+        pos = end;
+    }
+    None
+}
+
 /// The title a document declares: frontmatter `title:`, else the first H1.
 ///
 /// `title` is the one key Jekyll, VitePress, Docusaurus and MkDocs all agree
@@ -175,31 +212,25 @@ fn unquote(s: &str) -> &str {
 /// And the H1 scan starts AFTER the frontmatter block, so a `# ` in a YAML
 /// comment cannot win either.
 pub fn title_from(text: &str) -> Option<String> {
-    let mut lines = text.lines().peekable();
+    let (front, body) = match split_frontmatter(text) {
+        Some((f, rest)) => (Some(f), rest),
+        None => (None, text),
+    };
     // ── frontmatter ──
-    if matches!(lines.peek(), Some(&"---")) {
-        lines.next();
-        let mut found: Option<String> = None;
-        for line in lines.by_ref() {
-            let t = line.trim_end();
-            if t == "---" || t == "..." {
-                break;
-            }
+    if let Some(front) = front {
+        for line in front.lines() {
             // Top-level key only: an indented `title:` belongs to some nested
             // map, and guessing which one is per-generator work.
-            if found.is_none() {
-                if let Some(v) = line.strip_prefix("title:") {
-                    found = clean_title(unquote(v));
+            if let Some(v) = line.strip_prefix("title:") {
+                if let Some(found) = clean_title(unquote(v)) {
+                    return Some(found);
                 }
             }
-        }
-        if found.is_some() {
-            return found;
         }
     }
     // ── first H1, outside any fence ──
     let mut fence: Option<String> = None;
-    for line in lines {
+    for line in body.lines() {
         let t = line.trim_start();
         if let Some(open) = &fence {
             if t.starts_with(open.as_str()) {
@@ -559,6 +590,10 @@ mod tests {
         assert_eq!(title_from("---\ntitle: 'single'\n---\n").as_deref(), Some("single"));
         assert_eq!(title_from("---\ntitle:\n---\n# fallback\n").as_deref(), Some("fallback"), "an empty key is no key");
         assert_eq!(title_from("---\nnav:\n  title: nested\n---\n# top\n").as_deref(), Some("top"), "an indented key is some other map's");
+        // An opening `---` with no closing one is a thematic break, not a block
+        // that runs to EOF. `derive::document` DELETES what it calls
+        // frontmatter, so one parser decides this for both of them.
+        assert_eq!(title_from("---\n\n# After a rule\n").as_deref(), Some("After a rule"));
         assert_eq!(title_from("#   Spaced   out   ##\n").as_deref(), Some("Spaced out"));
         assert_eq!(title_from("#no space is not a heading\n# yes it is\n").as_deref(), Some("yes it is"));
     }
