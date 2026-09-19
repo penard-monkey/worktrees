@@ -1371,8 +1371,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       if (args.expectedMtime != null && prev && prev.mtime !== args.expectedMtime) {
         throw new Error("file changed on disk since you opened it — reload to see the latest");
       }
-      fsFiles.set(path, { content: args.content as string, binary: prev?.binary ?? false, mtime: Date.now() });
-      return null;
+      const mtime = Date.now();
+      fsFiles.set(path, { content: args.content as string, binary: prev?.binary ?? false, mtime });
+      // The real command returns the SAVED mtime so the editor can re-base for
+      // the next save (lib.rs). Returning null here would let a second ⌘S pass
+      // in the harness and fail in the app.
+      return mtime;
     }
     // Dock shells are PTYs the backend OWNS (no tmux). The mock models the
     // registry the same way — spawn-or-reattach keyed by repo+slug+index — so a

@@ -6,6 +6,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **You can type in a markdown file's Source view again.** The dock's viewer has
+  been read-only since v0.9.0, and clicking Source on a README put you in front
+  of something that looks exactly like an editor and swallows every keystroke.
+  Source is now a real editor for markdown, saved with ⌘S or the Save button.
+  Only markdown: its source is the one kind the viewer renders without syntax
+  highlighting, so a textarea costs it nothing but the line-number gutter, where
+  a `.rs` file would lose highlighting, the gutter and ⌘F's match painting at
+  once. Everything else still goes through "Open in editor", and no editor
+  library came in.
+
+  The save cannot quietly clobber what Claude is writing in the pane next door:
+  it carries the mtime the edit started from, and the backend refuses it if the
+  file moved. When that happens the header says so and offers **Overwrite** —
+  a second, differently-worded click that is never the default — or **Discard**,
+  which re-reads the file. An unsaved buffer follows the file rather than the
+  pane: flip to Preview (which renders the draft), open Find, switch place or
+  close the dock and it is still there, still labelled "unsaved", until you save
+  it or throw it away. It does not survive quitting the app.
+
 - **Put Places on whichever side you like.** Settings → Navigation → Sides
   mirrors the whole shell: the Places rail and sidebar move to the right edge,
   and the Files / Terminal / Docs rail and dock move to the left. It is one

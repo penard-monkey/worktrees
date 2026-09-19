@@ -877,9 +877,13 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   the overview rather than the terminal. Recorder: `app/scripts/record-readme.{sh,py}`.
   _From: 2026-07-27 readme-media session_
 
-- **Dock file viewer: in-app editing, if it is ever wanted again.** The viewer
-  is now read-only and renders markdown/code/images. Bringing editing back means
-  CodeMirror or equivalent — a real decision, not a default. The read-mode
+- **Dock file viewer: editing beyond markdown.** A markdown file's Source view
+  is now a textarea with ⌘S (`.srcedit`, guarded by `app/scripts/mdedit-check.mjs`),
+  and the exception stops there: markdown source is the one kind rendered
+  WITHOUT highlighting, so it loses only the line-number gutter. Widening it to
+  code means giving up highlighting, the gutter and ⌘F's match painting, or
+  bringing in CodeMirror or equivalent — still a real decision, and one CLAUDE.md
+  currently rules out ("no UI libraries" names editors). The read-mode
   highlighter is hand-rolled (`app/src/highlight.ts`) and deliberately
   approximate: it does not parse, so exotic constructs can mis-colour. Known
   gaps: Rust char literals are uncoloured (the same rule that keeps `&'a str`

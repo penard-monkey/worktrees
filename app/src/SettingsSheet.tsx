@@ -902,6 +902,7 @@ export function SettingsSheet({
                 ["⌘2", "Places — reveal the sidebar and focus the filter"],
                 ["⌘E", "Open selection in editor"],
                 ["⌘F", "Find — in the terminal, or in the open file"],
+                ["⌘S", "Save the markdown file you are editing in Source view"],
                 ["⌘T", "New terminal in the dock"],
                 ["⌘⇧E", "Read the dock's file over the whole pane"],
                 ["⌘+ / ⌘−", "Overall size — the whole window, terminal included"],

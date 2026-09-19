@@ -1,11 +1,21 @@
-// The dock's Files tab: a lazy tree beside (or above) a read-only viewer that
-// renders per file KIND — markdown, source, image, or a named placeholder for
-// everything else.
+// The dock's Files tab: a lazy tree beside (or above) a viewer that renders per
+// file KIND — markdown, source, image, or a named placeholder for everything
+// else.
 //
-// Deliberately NOT an editor. The viewer used to be a textarea with a save
-// path; editing now goes through "Open in editor", which means no editor
-// library, no save-conflict UI, and no way for the dock to clobber what Claude
-// is writing in the pane next door. `write_file` still exists in the backend.
+// Read-only with ONE exception: a markdown file's Source view is a textarea you
+// can type in, saved with ⌘S through `write_file`. The exception is narrow on
+// purpose. Markdown source is the only kind this viewer renders WITHOUT
+// highlighting (`filekind.ts` gives it `lang: ""` — prose has no grammar), so
+// swapping a `<pre>` for a `<textarea>` costs it nothing but the line-number
+// gutter. Do the same to a .rs file and it loses highlighting, the gutter and
+// ⌘F's match painting in one go — the CSS Custom Highlight API cannot paint
+// inside a textarea. Everything else still goes through "Open in editor", and
+// no editor library came in (CLAUDE.md's "no UI libraries" names editors).
+//
+// What keeps this from clobbering what Claude is writing in the pane next door
+// is `write_file`'s compare-and-swap: the save carries the mtime the edit
+// STARTED from, and the backend refuses it if the file moved. Overwriting
+// anyway is a second, separately-labelled click — never the default.
 //
 // Layout: `split` (tree left / content right) past a dock-width threshold,
 // `stack` (tree above) below it, with a manual override. The divider drags and
@@ -13,7 +23,7 @@
 //
 // Everything here is at MODULE scope per CLAUDE.md — components defined inside
 // App() get a new identity every render and would drop tree expansion state.
-import { Component, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 // `openPath` is aliased: this module already has an `openPath` — the prop
 // naming the file the viewer has open — and the two would silently shadow each
@@ -478,9 +488,12 @@ class ViewErrorBoundary extends Component<{ resetKey: string; children: ReactNod
 /** ⌘F over the open file. Mounted only while the bar is up, so a viewer with no
  *  find open walks nothing and holds no Ranges; unmounting is also what clears
  *  the highlight registry. */
-function FindInFile({ bodyRef, token, onClose, contentKey }: {
+function FindInFile({ bodyRef, token, onClose, contentKey, editable = false }: {
   bodyRef: React.RefObject<HTMLElement | null>;
   token: number; onClose?: () => void; contentKey: string;
+  /** the view under this bar is a textarea while Find is closed — say so,
+   *  because the bar is the reason the caret went away */
+  editable?: boolean;
 }) {
   const f = useFileFind(bodyRef, true, contentKey);
   return (
@@ -489,7 +502,94 @@ function FindInFile({ bodyRef, token, onClose, contentKey }: {
       index={f.index} count={f.count} capped={f.capped}
       caseSensitive={f.caseSensitive} onCaseSensitive={f.setCaseSensitive}
       onNext={f.next} onPrev={f.prev} onClose={() => onClose?.()}
-      focusToken={token} hint="Searches the file open in this viewer"
+      focusToken={token}
+      hint={editable
+        ? "Searches the file open in this viewer — editing resumes when you close Find"
+        : "Searches the file open in this viewer"}
+    />
+  );
+}
+
+// ── unsaved edits ────────────────────────────────────────────────────────
+
+/** An edit in progress, keyed by ABSOLUTE path.
+ *
+ *  Module scope, not component state, for two reasons. The same file can be
+ *  open in the dock's viewer AND in the reading overlay at once — App mounts
+ *  both, and two component-held buffers would fork into two answers to "what
+ *  have I typed", with the last save winning silently. And a draft has to
+ *  outlive an unmount: flipping to Preview, switching place or closing the dock
+ *  are all things you do WHILE writing, and none of them should throw the
+ *  writing away.
+ *
+ *  It does not outlive a reload of the webview, and nothing here pretends
+ *  otherwise — an unsaved buffer is unsaved. The header says so in every view
+ *  that can show it.
+ *
+ *  `base` is the mtime the edit STARTED from, never the latest read. It is what
+ *  `write_file` compares against, so a save is refused exactly when the file
+ *  moved under the edit — and keeps being refused after a re-read, which is the
+ *  point. */
+type Draft = { text: string; base: number };
+
+const drafts = new Map<string, Draft>();
+const draftSubs = new Set<() => void>();
+
+function putDraft(path: string, d: Draft | null) {
+  if (d) drafts.set(path, d);
+  else drafts.delete(path);
+  for (const fn of draftSubs) fn();
+}
+
+function subDrafts(fn: () => void) {
+  draftSubs.add(fn);
+  return () => { draftSubs.delete(fn); };
+}
+
+/** The draft for `path`, or null. `getSnapshot` returns the STORED object, so
+ *  its identity only changes when `putDraft` replaces it — a fresh object per
+ *  call would re-render forever. */
+function useDraft(path: string): Draft | null {
+  return useSyncExternalStore(subDrafts, () => drafts.get(path) ?? null);
+}
+
+/** The editable Source view.
+ *
+ *  Module scope per CLAUDE.md, and here the rule has teeth: defined inside
+ *  FileView this would be a new component type on every keystroke, React would
+ *  unmount the textarea and mount a fresh one, and the caret would jump to the
+ *  end of the document with the focus gone. */
+function SourceEditor({ text, wrap, onChange, onSave }: {
+  text: string; wrap: boolean;
+  onChange: (v: string) => void;
+  onSave: () => void;
+}) {
+  // No autofocus. The view becomes editable on a place switch, a dock open and
+  // every Preview→Source flip, and a textarea that grabs focus on each of those
+  // takes it off the terminal mid-command. A caret on click is what an editor
+  // pane is expected to do anyway.
+  return (
+    <textarea
+      className={"srcedit" + (wrap ? " wrap" : "")}
+      // `wrap="off"` is what makes a textarea scroll horizontally instead of
+      // soft-wrapping; the CSS white-space alone does not reach the control.
+      wrap={wrap ? "soft" : "off"}
+      value={text}
+      spellCheck={false}
+      autoCapitalize="off"
+      autoCorrect="off"
+      onChange={(e) => onChange(e.currentTarget.value)}
+      onKeyDown={(e) => {
+        // ⌘S here rather than in App's window listener: this is the only
+        // surface that can save, and a global chord would have to re-derive
+        // which file is open and whether it is dirty. `e.key` is safe for a
+        // plain ⌘ chord (the ⌥ composition trap in CLAUDE.md is about ⌥).
+        if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "s") {
+          e.preventDefault();
+          e.stopPropagation();
+          onSave();
+        }
+      }}
     />
   );
 }
@@ -534,6 +634,15 @@ export function FileView(props: FileViewProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [read, setRead] = useState<FileRead | null>(null);
   const [loading, setLoading] = useState(true);
+  /** what the user has typed and not saved (module store — see `useDraft`) */
+  const draft = useDraft(path);
+  const [saving, setSaving] = useState(false);
+  /** the last save's refusal, kept until the next edit or save. The conflict
+   *  case is the one worth showing INLINE rather than only as a toast: the
+   *  recovery is two buttons that are only meaningful while it stands. */
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+  /** re-read on demand (Discard), without touching the dock-wide token */
+  const [selfToken, setSelfToken] = useState(0);
 
   const isImage = info.kind === "image";
   // Only text has lines to line up. An image or a binary has no diff view, so
@@ -552,9 +661,12 @@ export function FileView(props: FileViewProps) {
       .catch((e) => { if (alive) { setRead(null); onError(e); } })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-    // reloadToken re-reads from disk — safe unconditionally now the viewer owns
-    // no unsaved buffer.
-  }, [path, reloadToken, isImage, onError]);
+    // reloadToken re-reads from disk unconditionally, unsaved buffer or not.
+    // That is safe because `read` is only ever the BASELINE — what is on disk —
+    // and the editor renders the draft on top of it. So a refresh while you are
+    // typing updates what a Discard would return you to, and what the diff and
+    // the byte count describe, without touching a character you wrote.
+  }, [path, reloadToken, selfToken, isImage, onError]);
 
   // The diff is fetched ONLY while it is being shown. It is a git spawn per
   // file, and a viewer that pre-fetched one for every file you clicked would
@@ -621,6 +733,66 @@ export function FileView(props: FileViewProps) {
     return <ImageView key={abs} path={abs} mime={inf.mime} inline alt={alt} />;
   }, [resolve]);
 
+  // ── editing ──────────────────────────────────────────────────────────
+  // Markdown Source only — the module header says why this does not widen to
+  // every text file. `truncated` is excluded by force rather than by taste: the
+  // buffer is the first 1 MiB of the file, and saving it would silently DELETE
+  // everything past the cap.
+  const editable =
+    info.kind === "markdown" && mdSource && !showDiff &&
+    !!read && !read.binary && !read.truncated;
+  // ⌘F paints through the CSS Custom Highlight API, which cannot reach inside a
+  // textarea. Rather than let the bar report "0" over a file full of matches,
+  // an open Find puts the source back in the read-only renderer — rendering the
+  // DRAFT, so you search what you have written and not what is on disk.
+  const editing = editable && !findOpen;
+  const text = draft ? draft.text : read?.content ?? "";
+  const dirty = !!draft;
+
+  const onEdit = useCallback((v: string) => {
+    setSaveErr(null);
+    if (!read) return;
+    // A buffer typed back to exactly what is on disk is not an edit. Clearing
+    // the draft there keeps "unsaved" honest, and lets the next edit re-base on
+    // the current read rather than carrying an mtime from before a refresh.
+    // The base, once set, is NOT re-read: it is the point the edit forked from.
+    putDraft(path, v === read.content ? null : { text: v, base: drafts.get(path)?.base ?? read.mtime });
+  }, [path, read]);
+
+  const save = useCallback(async (force: boolean) => {
+    const d = drafts.get(path);
+    if (!d || saving) return;
+    setSaving(true);
+    try {
+      const mtime = await invoke<number>("write_file", {
+        path, content: d.text, expectedMtime: force ? null : d.base,
+      });
+      // Only the draft we actually sent is cleared. Keystrokes that landed
+      // while the write was in flight are a NEWER draft, and dropping them
+      // would lose typing to a save the user did not know they were racing.
+      if (drafts.get(path) === d) putDraft(path, null);
+      setSaveErr(null);
+      // Adopt what we just wrote as the baseline instead of re-reading it: the
+      // bytes are ours and the ack carries the new mtime, so a re-read would
+      // buy nothing but a round trip and a window in which the next save holds
+      // the wrong `expected_mtime`.
+      setRead((r) => (r ? { ...r, content: d.text, mtime, size: new TextEncoder().encode(d.text).length } : r));
+    } catch (e) {
+      setSaveErr(String(e));
+      onError(e); // toast + app.log — a refusal is never only a local badge
+    } finally {
+      setSaving(false);
+    }
+  }, [path, saving, onError]);
+
+  /** Throw the edit away and go back to what is on disk. The re-read is the
+   *  point after a conflict: the draft was based on bytes that have moved. */
+  const discard = useCallback(() => {
+    putDraft(path, null);
+    setSaveErr(null);
+    setSelfToken((t) => t + 1);
+  }, [path]);
+
   const size = isImage ? null : read?.size;
   const pct = clampMdZoom(mdZoom);
   const zoom = String(pct / 100);
@@ -659,12 +831,20 @@ export function FileView(props: FileViewProps) {
       // --md-zoom rides on the scroll box, not on `.md` itself: App.css reads it
       // through `var(--md-zoom, 1)`, so an unset value is simply "normal" and
       // the document keeps rendering if this ever mounts without a zoom.
+      //
+      // `text`, not `read.content`: Preview renders the DRAFT, so flipping to
+      // it mid-edit shows what you have written rather than a ghost of the file
+      // as it was before you started.
       return (
         <div className="scroll" style={{ "--md-zoom": zoom } as CSSProperties}>
-          <Markdown src={read.content} onLink={onLink} renderImage={renderImage} />
+          <Markdown src={text} onLink={onLink} renderImage={renderImage} />
         </div>
       );
-    return <div className="scroll"><CodeBlock src={read.content} lang={info.lang} wrap={wrap} /></div>;
+    // The editable branch. It is NOT wrapped in `.scroll`: the textarea is its
+    // own scroll box, and a scroller inside a scroller gives the file two
+    // scrollbars and a caret that can be scrolled out of sight.
+    if (editing) return <SourceEditor text={text} wrap={wrap} onChange={onEdit} onSave={() => save(false)} />;
+    return <div className="scroll"><CodeBlock src={text} lang={info.lang} wrap={wrap} /></div>;
   }
 
   const hasPreview = info.kind === "markdown" || info.mime === "image/svg+xml";
@@ -690,6 +870,13 @@ export function FileView(props: FileViewProps) {
         </span>
         <span className="viewer-tag kind">{info.label}</span>
         {read?.truncated && <span className="viewer-tag">truncated</span>}
+        {/* Not gated on `editing`: a draft you left behind by flipping to
+            Preview or opening Find is still unsaved, and the one place that can
+            say so is the header of the file it belongs to. */}
+        {dirty && <span className="viewer-tag" title="Edited here and not written to disk yet">unsaved</span>}
+        {saveErr && (
+          <span className="viewer-tag err" title={saveErr}>save refused</span>
+        )}
         {size ? <span className="viewer-size">{humanSize(size)}</span> : null}
         <span className="dock-spacer" />
         {showDiff && dstate && (dstate.untracked || dstate.base_label) && (
@@ -766,6 +953,36 @@ export function FileView(props: FileViewProps) {
         {showWrap && (
           <button className={"ctrl sm" + (wrap ? " on" : "")} title="Wrap long lines" onClick={() => onWrap(!wrap)}>Wrap</button>
         )}
+        {editable && (
+          // Always present once the view can be edited, disabled while clean.
+          // A save affordance that only appears once you are dirty is a save
+          // affordance you have to discover by accident — and this viewer spent
+          // several versions being read-only, so nothing about the textarea
+          // announces itself.
+          <button
+            className="ctrl sm"
+            data-track="files.save"
+            disabled={!dirty || saving}
+            title={saveErr ? "Save again" : "Save (⌘S)"}
+            onClick={() => save(false)}
+          >{saving ? "Saving…" : "Save"}</button>
+        )}
+        {editable && dirty && (
+          <button className="ctrl sm" data-track="files.discard" title="Throw the edit away and re-read the file" onClick={discard}>Discard</button>
+        )}
+        {editable && dirty && saveErr && (
+          // Only after a refusal, and never the default. `expected_mtime: null`
+          // skips the backend's compare-and-swap, which is the one way for the
+          // dock to overwrite something Claude wrote in the pane next door — so
+          // it is a deliberate second click with its own word on it.
+          <button
+            className="ctrl sm danger"
+            data-track="files.overwrite"
+            disabled={saving}
+            title={`${saveErr}\n\nSave anyway, discarding what is on disk.`}
+            onClick={() => save(true)}
+          >Overwrite</button>
+        )}
         <button className="ctrl sm" data-track="files.expand" title={expanded ? "Collapse (⌘⇧E)" : "Expand over the main pane (⌘⇧E)"} onClick={() => onExpand(!expanded)}>
           {expanded ? "Collapse" : "Expand"}
         </button>
@@ -776,7 +993,8 @@ export function FileView(props: FileViewProps) {
           and button glyphs up as matches. */}
       {findOpen && (
         <FindInFile bodyRef={bodyRef} token={findToken} onClose={onFindClose}
-          contentKey={`${path}|${reloadToken}|${wrap}|${mdSource}|${loading}|${showDiff}|${diffBase}|${dloading}`} />
+          editable={editable}
+          contentKey={`${path}|${reloadToken}|${wrap}|${mdSource}|${loading}|${showDiff}|${diffBase}|${dloading}|${text.length}`} />
       )}
       <div className="viewer-body" ref={bodyRef}>
         <ViewErrorBoundary resetKey={path}>{body}</ViewErrorBoundary>
