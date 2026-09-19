@@ -1731,6 +1731,26 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .srcedit.wrap { white-space: pre-wrap; word-break: break-word; }
 
+/* The editor's formatting bar. It lives INSIDE `.viewer-body`, above the
+   textarea, because it belongs to the editor rather than to the viewer —
+   Preview, Diff and every read-only file must not grow a toolbar they have no
+   use for, and the viewer header is already full. Like `.viewer-h` it scrolls
+   rather than clipping: a control that no longer fits must still be reachable.
+   `.md-*` is the markdown RENDERER's namespace (`.md-h1` &c), hence `.mdbar-`. */
+.mdbar {
+  flex: none; display: flex; align-items: center; gap: var(--s1);
+  padding: var(--s1) var(--s2);
+  border-bottom: 1px solid var(--line); background: var(--bg-panel);
+  overflow-x: auto; scrollbar-width: none;
+}
+.mdbar::-webkit-scrollbar { display: none; }
+/* A floor, so `B` and `I` are not half the width of `H1` — and `flex: none`
+   because a scrolling row would otherwise squeeze them instead of scrolling. */
+.mdbar-btn { flex: none; min-width: 2.4em; font-family: var(--font-mono); }
+.mdbar-bold { font-weight: var(--fw-bold); }
+.mdbar-ital { font-style: italic; }
+.mdbar-sep { flex: none; width: 1px; align-self: stretch; background: var(--line); margin: 0 var(--s1); }
+
 /* ── diff (DiffView.tsx) ──────────────────────────────────────────────────
    ONE grid, not two panes. A pane per side needs its scroll positions synced
    in JS and still drifts the moment a line wraps, because the two sides wrap

@@ -23,7 +23,7 @@
 //
 // Everything here is at MODULE scope per CLAUDE.md — components defined inside
 // App() get a new identity every render and would drop tree expansion state.
-import { Component, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
+import { Component, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 // `openPath` is aliased: this module already has an `openPath` — the prop
 // naming the file the viewer has open — and the two would silently shadow each
@@ -38,6 +38,7 @@ import { FindBar, useFileFind } from "./Find";
 import { Markdown } from "./markdown";
 import { basename, fileInfo, humanSize, relPath, type FileKind } from "./filekind";
 import { MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom, type Settings } from "./settings";
+import { applyMd, spliceRange, type MdAction } from "./mdedit";
 
 // `link` is the symlink target as written (relative stays relative);
 // `link_block` is why the backend will not follow it — absent when it will.
@@ -559,38 +560,129 @@ function useDraft(path: string): Draft | null {
  *  FileView this would be a new component type on every keystroke, React would
  *  unmount the textarea and mount a fresh one, and the caret would jump to the
  *  end of the document with the focus gone. */
+/** The formatting bar's buttons, in order. The label IS the affordance — there
+ *  are no list glyphs in `icons.tsx`, and a word beats a drawn one at 11px.
+ *  `#` is the numbered list, NOT a heading: the headings are the three that say
+ *  so, and the separator before `•` is what keeps the two groups apart. */
+//  `track` is spelled out per row rather than built from `action`. The title is
+//  an expression, so the usage key would otherwise be derived from it — and
+//  `usage-check.mjs` refuses an INTERPOLATED data-track for the same reason it
+//  refuses a title: a key has to be source, not something assembled at runtime.
+const MD_TOOLS: { action: MdAction; label: string; title: string; track: string; cls?: string }[] = [
+  { action: "bold", label: "B", title: "Bold (⌘B)", track: "files.fmt.bold", cls: "mdbar-bold" },
+  { action: "italic", label: "I", title: "Italic (⌘I)", track: "files.fmt.italic", cls: "mdbar-ital" },
+  { action: "h1", label: "H1", title: "Heading 1", track: "files.fmt.h1" },
+  { action: "h2", label: "H2", title: "Heading 2", track: "files.fmt.h2" },
+  { action: "h3", label: "H3", title: "Heading 3", track: "files.fmt.h3" },
+  { action: "ul", label: "•", title: "Bulleted list", track: "files.fmt.ul" },
+  { action: "ol", label: "#", title: "Numbered list", track: "files.fmt.ol" },
+];
+
 function SourceEditor({ text, wrap, onChange, onSave }: {
   text: string; wrap: boolean;
   onChange: (v: string) => void;
   onSave: () => void;
 }) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  /** where the caret has to land once React has re-rendered with the new value.
+   *  Setting it before that would be setting it on the OLD text. */
+  const nextSel = useRef<[number, number] | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const want = nextSel.current;
+    if (!el || !want) return;
+    nextSel.current = null;
+    el.setSelectionRange(want[0], want[1]);
+  });
+
+  const fmt = (action: MdAction) => {
+    const el = ref.current;
+    if (!el) return;
+    const out = applyMd(action, { text, start: el.selectionStart, end: el.selectionEnd });
+    if (out.text === text) { el.setSelectionRange(out.start, out.end); return; }
+    nextSel.current = [out.start, out.end];
+    // Hand the edit to the browser's OWN editing pipeline rather than assigning
+    // a new value through React. Every engine drops a textarea's undo history
+    // when its value is replaced wholesale, so the React route would make
+    // formatting the one edit ⌘Z cannot take back — and undo is not a feature
+    // you can add to a control later, it is a property of how you wrote to it.
+    // `execCommand` is deprecated and has no replacement that reaches the undo
+    // stack; `onChange` below is the correctness fallback, minus the undo entry.
+    const { from, to, insert } = spliceRange(text, out.text);
+    el.focus();
+    el.setSelectionRange(from, to);
+    const done = insert === ""
+      // Inserting an empty string is not specified to delete a selection —
+      // toggling a marker OFF is a pure deletion, and it gets its own command.
+      ? document.execCommand("delete")
+      : document.execCommand("insertText", false, insert);
+    if (!done) onChange(out.text);
+  };
+
   // No autofocus. The view becomes editable on a place switch, a dock open and
   // every Preview→Source flip, and a textarea that grabs focus on each of those
   // takes it off the terminal mid-command. A caret on click is what an editor
   // pane is expected to do anyway.
   return (
-    <textarea
-      className={"srcedit" + (wrap ? " wrap" : "")}
-      // `wrap="off"` is what makes a textarea scroll horizontally instead of
-      // soft-wrapping; the CSS white-space alone does not reach the control.
-      wrap={wrap ? "soft" : "off"}
-      value={text}
-      spellCheck={false}
-      autoCapitalize="off"
-      autoCorrect="off"
-      onChange={(e) => onChange(e.currentTarget.value)}
-      onKeyDown={(e) => {
-        // ⌘S here rather than in App's window listener: this is the only
-        // surface that can save, and a global chord would have to re-derive
-        // which file is open and whether it is dirty. `e.key` is safe for a
-        // plain ⌘ chord (the ⌥ composition trap in CLAUDE.md is about ⌥).
-        if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "s") {
-          e.preventDefault();
-          e.stopPropagation();
-          onSave();
-        }
-      }}
-    />
+    <>
+      <div className="mdbar" role="toolbar" aria-label="Formatting">
+        {MD_TOOLS.map((t, i) => (
+          // Separators before the headings and before the lists — three groups,
+          // because "make this bold" and "make this a list" are different
+          // questions and a run of seven identical chips reads as one.
+          <Fragment key={t.action}>
+            {i === 2 || i === 5 ? <span className="mdbar-sep" aria-hidden="true" /> : null}
+            <button
+              className={"ctrl sm mdbar-btn" + (t.cls ? ` ${t.cls}` : "")}
+              data-track={t.track}
+              title={t.title}
+              // The caret is the input to every one of these, so the press must
+              // not move focus out of the textarea first. preventDefault on
+              // POINTERDOWN is what keeps the selection alive — by the time a
+              // click handler runs, a focused textarea has already lost it.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => fmt(t.action)}
+            >{t.label}</button>
+          </Fragment>
+        ))}
+      </div>
+      <textarea
+        ref={ref}
+        className={"srcedit" + (wrap ? " wrap" : "")}
+        // `wrap="off"` is what makes a textarea scroll horizontally instead of
+        // soft-wrapping; the CSS white-space alone does not reach the control.
+        wrap={wrap ? "soft" : "off"}
+        value={text}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        onChange={(e) => onChange(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          // ⌘S here rather than in App's window listener: this is the only
+          // surface that can save, and a global chord would have to re-derive
+          // which file is open and whether it is dirty. `e.key` is safe for a
+          // plain ⌘ chord (the ⌥ composition trap in CLAUDE.md is about ⌥).
+          if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+          const k = e.key.toLowerCase();
+          if (k === "s") {
+            e.preventDefault();
+            e.stopPropagation();
+            onSave();
+            return;
+          }
+          // ⌘B is the app's sidebar chord everywhere else in the window. Inside
+          // a text editor it is bold, and `stopPropagation` is what keeps the
+          // sidebar out of it — App's listener is on `window`, so this element
+          // handler runs first. It costs the chord only while the caret is in
+          // the editor, which is an explicit act.
+          if (k === "b" || k === "i") {
+            e.preventDefault();
+            e.stopPropagation();
+            fmt(k === "b" ? "bold" : "italic");
+          }
+        }}
+      />
+    </>
   );
 }
 

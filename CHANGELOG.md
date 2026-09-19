@@ -16,6 +16,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   once. Everything else still goes through "Open in editor", and no editor
   library came in.
 
+  It comes with a formatting bar — **B**, *I*, H1/H2/H3, bullets and numbers —
+  and every one of them toggles, so a second click on H2 takes the heading off
+  rather than making `#### ## Title` out of two honest clicks. ⌘B and ⌘I do the
+  same from the keyboard while the editor has focus, which is the one place ⌘B
+  is not the sidebar. Undo, redo, cut, copy, paste and select-all are the
+  system's own: the formatting is applied through the browser's editing
+  pipeline rather than by replacing the field's contents, so ⌘Z takes a heading
+  or a bold back like anything else you typed.
+
   The save cannot quietly clobber what Claude is writing in the pane next door:
   it carries the mtime the edit started from, and the backend refuses it if the
   file moved. When that happens the header says so and offers **Overwrite** —

@@ -57,6 +57,15 @@ const kindJs = (await transformWithEsbuild(
   "filekind.ts", { loader: "ts", format: "esm" })).code;
 const filekind = await import("data:text/javascript;base64," + Buffer.from(kindJs).toString("base64"));
 
+// The formatting actions are pure (text, selection) -> (text, selection) and
+// import nothing, which is the whole reason they live in their own module:
+// where the caret lands is most of the behaviour, and it is untestable through
+// a live textarea.
+const fmtJs = (await transformWithEsbuild(
+  fs.readFileSync(fileURLToPath(new URL("../src/mdedit.ts", import.meta.url)), "utf8"),
+  "mdedit.ts", { loader: "ts", format: "esm" })).code;
+const { applyMd, spliceRange } = await import("data:text/javascript;base64," + Buffer.from(fmtJs).toString("base64"));
+
 // ── FilesPane.tsx, verbatim below its imports ───────────────────────────────
 const body = raw
   .split("\n")
@@ -68,7 +77,8 @@ if (!body.includes("function FileView")) throw new Error("FileView not found in 
 const wrapped = `
 export function build(env) {
   const {
-    Component, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore,
+    Component, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
+    applyMd,
     invoke, openInDefaultApp, openUrl, revealItemInDir, Icons,
     CodeBlock, CtxMenu, DiffView, FindBar, useFileFind, Markdown,
     basename, fileInfo, humanSize, relPath,
@@ -100,9 +110,24 @@ class Component {}
 const h = (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) });
 const F = "fragment";
 
-/** Render every function node in a finished tree down to primitive tags. The
- *  parent's hooks have already run, so this cannot disturb the cursor —
- *  SourceEditor holds no state of its own, which is itself deliberate. */
+/** A hook context per child COMPONENT, so rendering SourceEditor inside `deep`
+ *  does not advance FileView's cursor. Without this the editor's own useRef and
+ *  useLayoutEffect would allocate cells after the parent's, and the first
+ *  render where the editor is absent (Find open) would shift every later cell
+ *  by two — a corruption that reads as random state loss. */
+const scratches = new Map();
+function scratchFor(fn) {
+  let c = scratches.get(fn);
+  if (!c) {
+    const cells = [];
+    c = { cells, i: 0, pending: [], dirty: false, invoke: () => {}, cell: (make) => (cells[c.i++] ??= make()) };
+    scratches.set(fn, c);
+  }
+  c.i = 0;
+  return c;
+}
+
+/** Render every function node in a finished tree down to primitive tags. */
 function deep(node, depth = 0) {
   if (node == null || node === false || depth > 40) return node;
   if (Array.isArray(node)) return node.map((n) => deep(n, depth + 1));
@@ -111,7 +136,10 @@ function deep(node, depth = 0) {
   if (typeof type === "function") {
     // A class component (the viewer's error boundary) is not callable.
     if (type.prototype instanceof Component || type === Component) return deep(children, depth + 1);
-    return deep(type({ ...props, children }), depth + 1);
+    const prev = current;
+    current = scratchFor(type);
+    try { return deep(type({ ...props, children }), depth + 1); }
+    finally { current = prev; }
   }
   return { type, props, children: children.map((c) => deep(c, depth + 1)) };
 }
@@ -140,7 +168,8 @@ let current = null;
 const sameDeps = (a, b) => a && b && a.length === b.length && a.every((v, n) => Object.is(v, b[n]));
 
 const env = {
-  Component,
+  Component, applyMd,
+  Fragment: "fragment",
   invoke: (cmd, args) => current.invoke(cmd, args),
     openInDefaultApp: () => Promise.resolve(),
     openUrl: () => Promise.resolve(),
@@ -178,6 +207,7 @@ const env = {
     return c.v;
   },
   useCallback(fn, deps) { return env.useMemo(() => fn, deps); },
+  useLayoutEffect(fn, deps) { return env.useEffect(fn, deps); },
   useEffect(fn, deps) {
     const ctx = current;
     const c = ctx.cell(() => ({ deps: null, cleanup: null, first: true }));
@@ -243,6 +273,14 @@ function mount(props, { invoke }) {
   self.render();
   return self;
 }
+
+/** Call a component the way `deep` does — under its own hook cells, never the
+ *  caller's. */
+const renderComp = (fn, props) => {
+  const prev = current;
+  current = scratchFor(fn);
+  try { return fn(props); } finally { current = prev; }
+};
 
 // ── the fixture ─────────────────────────────────────────────────────────────
 const PATH = "/w/readme.md";
@@ -446,7 +484,8 @@ const named = (tree, label) => tags(tree, "button").find((b) => textOf(b).trim()
     let prevented = false;
     return { metaKey: false, ctrlKey: false, altKey: false, key: "", preventDefault: () => { prevented = true; }, stopPropagation: () => {}, get prevented() { return prevented; }, ...o };
   };
-  const el = SourceEditor({ text: "x", wrap: false, onChange: () => {}, onSave: () => { saved++; } });
+  const ed = renderComp(SourceEditor, { text: "x", wrap: false, onChange: () => {}, onSave: () => { saved++; } });
+  const el = tags(ed, "textarea")[0];
   const press = (o) => { const e = key(o); el.props.onKeyDown(e); return e; };
   press({ metaKey: true, key: "s" });
   eq(saved, 1, "⌘S in the editor did not save");
@@ -459,7 +498,145 @@ const named = (tree, label) => tags(tree, "button").find((b) => textOf(b).trim()
   // `wrap="off"` is what makes a textarea scroll instead of soft-wrapping; the
   // CSS white-space alone does not reach the control.
   eq(el.props.wrap, "off", "the unwrapped editor soft-wraps anyway");
-  eq(SourceEditor({ text: "x", wrap: true, onChange: () => {}, onSave: () => {} }).props.wrap, "soft", "Wrap does not reach the editor");
+  const wrapped = tags(renderComp(SourceEditor, { text: "x", wrap: true, onChange: () => {}, onSave: () => {} }), "textarea")[0];
+  eq(wrapped.props.wrap, "soft", "Wrap does not reach the editor");
+
+  // ⌘B is the app's SIDEBAR chord on `window`. Inside the editor it is bold,
+  // and only `stopPropagation` keeps the sidebar out of it — App's listener is
+  // an ancestor, so without this the sidebar would toggle on every bold.
+  let stopped = 0;
+  const chord = (o) => {
+    const e = { metaKey: true, ctrlKey: false, altKey: false, key: "", preventDefault: () => {}, stopPropagation: () => { stopped++; }, ...o };
+    el.props.onKeyDown(e);
+    return e;
+  };
+  stopped = 0; chord({ key: "b" });
+  eq(stopped, 1, "⌘B in the editor did not stop propagating — the sidebar toggles when you bold");
+  stopped = 0; chord({ key: "i" });
+  eq(stopped, 1, "⌘I in the editor did not stop propagating");
+  // …and nothing else is claimed. ⌘Z/⌘C/⌘V/⌘X/⌘A are the OS Edit menu's
+  // (Tauri installs the default macOS menu), and an editor that swallowed them
+  // would take undo and the clipboard away from the one control that needs them.
+  for (const k of ["z", "c", "v", "x", "a", "y"]) {
+    stopped = 0; chord({ key: k });
+    eq(stopped, 0, `⌘${k.toUpperCase()} was swallowed by the editor — that chord belongs to the Edit menu`);
+  }
+}
+
+// ── 8. the formatting actions ───────────────────────────────────────────────
+// Written in a notation that shows the SELECTION, because where the caret ends
+// up is most of what these do and an assertion on the text alone would pass
+// while leaving the user's cursor somewhere absurd.
+//   "a [b] c"  — "b" selected        "a|b" — a bare caret
+{
+  const parse = (spec) => {
+    if (spec.includes("[")) {
+      const start = spec.indexOf("[");
+      const end = spec.indexOf("]") - 1;
+      return { text: spec.replace("[", "").replace("]", ""), start, end };
+    }
+    const start = spec.indexOf("|");
+    return { text: spec.replace("|", ""), start, end: start };
+  };
+  const show = (s) => (s.start === s.end
+    ? s.text.slice(0, s.start) + "|" + s.text.slice(s.start)
+    : s.text.slice(0, s.start) + "[" + s.text.slice(s.start, s.end) + "]" + s.text.slice(s.end));
+  const t = (action, input, want) => {
+    const got = show(applyMd(action, parse(input)));
+    if (got !== want) fail(`applyMd ${action} ${JSON.stringify(input)}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+  };
+
+  // bold / italic, and the toggle in both directions
+  t("bold", "say [hello] there", "say **[hello]** there");
+  t("bold", "say **[hello]** there", "say [hello] there");   // markers outside the selection
+  t("bold", "say [**hello**] there", "say [hello] there");   // …and inside it
+  t("bold", "say hel|lo there", "say **[hello]** there");    // a bare caret takes its word
+  t("bold", "|", "**|**");                                   // …and an empty line takes nothing
+  t("italic", "[x]", "*[x]*");
+  t("italic", "*[x]*", "[x]");
+
+  // ⚠ THE ASSERTION. Italic over bold must ADD emphasis, not quietly take the
+  // bold apart — the `*` either side is there to make it bold.
+  t("italic", "**[x]**", "***[x]***");
+  t("bold", "***[x]***", "*[x]*");                           // …and bold still toggles off through it
+
+  // headings: toggle, and REPLACE rather than stack
+  t("h1", "|Title", "[# Title]");
+  t("h1", "[# Title]", "[Title]");
+  t("h2", "[# Title]", "[## Title]");
+  t("h3", "[###### Deep]", "[### Deep]");
+  t("h2", "[- an item]", "[## an item]");                    // a list line becomes a heading
+
+  // lists
+  t("ul", "[one\ntwo]", "[- one\n- two]");
+  t("ul", "[- one\n- two]", "[one\ntwo]");
+  t("ol", "[one\ntwo\nthree]", "[1. one\n2. two\n3. three]");
+  t("ol", "[- one\n- two]", "[1. one\n2. two]");            // switching kind replaces the marker
+  t("ul", "[1. one\n2. two]", "[- one\n- two]");
+  t("ol", "[# One\n# Two]", "[1. One\n2. Two]");
+
+  // a blank line inside a selection is a paragraph break, not an item
+  t("ul", "[one\n\ntwo]", "[- one\n\n- two]");
+  t("h1", "[one\n\ntwo]", "[# one\n\n# two]");
+  // …but an empty document IS the target
+  t("ul", "|", "[- ]");
+
+  // indentation survives, and is what the marker sits under
+  t("ul", "[  nested]", "[  - nested]");
+  t("h1", "[  under]", "[  # under]");
+
+  // a selection ending exactly on a line start took the newline, not the line
+  t("ul", "[one\n]two", "[- one]\ntwo");
+  // …and one that never leaves a line only touches that line
+  t("ul", "one\nt[w]o\nthree", "one\n[- two]\nthree");
+}
+
+// ── 9. the splice that keeps undo working ───────────────────────────────────
+// `fmt` hands the browser the SMALLEST edit, through execCommand, so the change
+// lands on the textarea's own undo stack. A wrong range here is silent: the
+// text still comes out right (React re-renders it), and only ⌘Z misbehaves.
+{
+  const sp = (a, b, want, what) => {
+    const got = spliceRange(a, b);
+    const rebuilt = a.slice(0, got.from) + got.insert + a.slice(got.to);
+    if (rebuilt !== b) fail(`spliceRange(${JSON.stringify(a)}, ${JSON.stringify(b)}) does not rebuild the target: got ${JSON.stringify(rebuilt)}`);
+    const g = `${got.from},${got.to},${JSON.stringify(got.insert)}`;
+    if (g !== want) fail(`spliceRange ${what}: got ${g}, want ${want}`);
+  };
+  sp("say hello", "say **hello**", '4,9,"**hello**"', "wrapping a word");
+  sp("abc", "aXbc", '1,1,"X"', "a pure insertion");
+  sp("aXbc", "abc", '1,2,""', "a pure deletion");
+  // The tail walk keeps "two" — the smallest edit is the head of the block, not
+  // the whole of it, and that is the point of doing this at all.
+  sp("- one\n- two", "one\ntwo", '0,8,"one\\n"', "stripping two markers at once");
+  sp("same", "same", '4,4,""', "no change at all");
+  // A string that is a PREFIX of the other must not have one character counted
+  // by both the head and the tail walk — that would produce a negative span.
+  sp("aa", "aaa", '2,2,"a"', "a prefix of the target");
+  sp("aaa", "aa", '2,3,""', "the target is a prefix");
+}
+
+// ── 10. the toolbar ─────────────────────────────────────────────────────────
+{
+  const be = backend();
+  const m = mount(props(), { invoke: be.invoke });
+  await m.settle();
+  const bar = tags(m.tree, "button").filter((b) => (b.props.className ?? "").includes("mdbar-btn"));
+  eq(bar.length, 7, "the formatting bar does not carry seven actions (B I H1 H2 H3 bullets numbers)");
+  eq(bar.map((b) => textOf(b)).join(" "), "B I H1 H2 H3 • #", "the formatting bar's labels changed");
+  // A press must not move focus out of the textarea first: the SELECTION is the
+  // input to every one of these actions, and a focused textarea has already
+  // lost it by the time a click handler runs.
+  ok(bar.every((b) => typeof b.props.onMouseDown === "function"), "a toolbar button does not hold its press — the caret is gone before the action runs");
+  ok(bar.every((b) => (b.props["data-track"] ?? "").startsWith("files.fmt.")), "a toolbar button has no explicit data-track");
+
+  // …and it belongs to the EDITOR, not the viewer.
+  const prev = mount(props({ mdSource: false }), { invoke: backend().invoke });
+  await prev.settle();
+  ok(!tags(prev.tree, "button").some((b) => (b.props.className ?? "").includes("mdbar-btn")), "Preview grew a formatting bar");
+  const found = mount(props({ findOpen: true }), { invoke: backend().invoke });
+  await found.settle();
+  ok(!tags(found.tree, "button").some((b) => (b.props.className ?? "").includes("mdbar-btn")), "the read-only Find fallback grew a formatting bar");
 }
 
 if (bad) {
