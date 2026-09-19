@@ -1173,8 +1173,12 @@ background failures rather than bannering them" asks for.
 ### 15.6 What is still owed
 
 The **real-app pass**. Everything above was verified against unit tests, the
-Chrome mock and a real `mo` driven from Rust; none of that is WKWebView. Three
-things need `app/scripts/sandbox.sh --app` and a human:
+Chrome mock and a real `mo` driven from Rust; none of that is WKWebView. Two
+things need `app/scripts/sandbox.sh --app` and a human (the third was closed by
+measurement and is struck through below). Stage the viewer for that run with
+`cp ~/workspace/mo/mo app/src-tauri/viewer/mo && codesign --force --sign -
+app/src-tauri/viewer/mo`, or point `WORKTREES_VIEWER_BIN` at it — the binary is
+gitignored and `release.yml` is what normally puts it there:
 
 - `openUrl` to `http://127.0.0.1:<port>/…` from a `tauri://` page. §11.6 left
   this open and it is still open. What has been closed since is the permission
