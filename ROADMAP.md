@@ -5,16 +5,18 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
-- **The MCP setup flow has never been run in the real app.** #218 shipped
-  Settings → Claude and the Home card entirely against the mock harness and
-  headless chromium. `mcp_install` is a ~1s `claude mcp add` subprocess behind a
-  busy state, which is precisely the shape CLAUDE.md records the mock as unable
-  to express — its invokes resolve in a microtask, so no double-click window, no
-  in-flight state, no slow-answer ordering exists there. One pass with
-  `app/scripts/sandbox.sh --app` before the next release: click Set up with the
-  real binary, watch the button while it works, and confirm the Home card retires
-  without a manual refresh.
-  _From: [2026-09-18 mcp-setup-wizard](docs/sessions/2026-09-18-mcp-setup-wizard/summary.md)_
+- **`mcp_install` itself has still never been clicked in the real app.** #218
+  shipped Settings → Claude against the mock and headless chromium; the 2026-09-19
+  session then exercised the surfaces for real in an isolated sandbox (throwaway
+  `HOME`, so the state is genuinely `absent`) — the release-notes band, the deep
+  link, the gear dot and the off switch are all confirmed by hand. What remains
+  unexercised is the ~1s `claude mcp add` subprocess behind the busy state, which
+  is exactly the shape CLAUDE.md records the mock as unable to express: its
+  invokes resolve in a microtask, so no double-click window and no in-flight
+  state exist there. The Home card this item used to name is gone. One pass:
+  press Set up with a real `claude` on PATH and watch the button while it works.
+  _From: [2026-09-18 mcp-setup-wizard](docs/sessions/2026-09-18-mcp-setup-wizard/summary.md),
+  [2026-09-19 mcp-offer-surfaces](docs/sessions/2026-09-19-mcp-offer-surfaces/summary.md)_
 
 - **Two unrelated things are now called "Claude" in Settings.** #216 put a Claude
   *status* indicator (status.claude.com, `StatusDetail`) in the chrome; #218 added
@@ -877,9 +879,13 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   the overview rather than the terminal. Recorder: `app/scripts/record-readme.{sh,py}`.
   _From: 2026-07-27 readme-media session_
 
-- **Dock file viewer: in-app editing, if it is ever wanted again.** The viewer
-  is now read-only and renders markdown/code/images. Bringing editing back means
-  CodeMirror or equivalent — a real decision, not a default. The read-mode
+- **Dock file viewer: editing beyond markdown.** A markdown file's Source view
+  is now a textarea with ⌘S (`.srcedit`, guarded by `app/scripts/mdedit-check.mjs`),
+  and the exception stops there: markdown source is the one kind rendered
+  WITHOUT highlighting, so it loses only the line-number gutter. Widening it to
+  code means giving up highlighting, the gutter and ⌘F's match painting, or
+  bringing in CodeMirror or equivalent — still a real decision, and one CLAUDE.md
+  currently rules out ("no UI libraries" names editors). The read-mode
   highlighter is hand-rolled (`app/src/highlight.ts`) and deliberately
   approximate: it does not parse, so exotic constructs can mis-colour. Known
   gaps: Rust char literals are uncoloured (the same rule that keeps `&'a str`
@@ -1256,3 +1262,40 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   local use only. Today the workaround is running the `rm -rf` + `ditto` steps
   by hand after the bundle lands.
   _From: [2026-08-02 remove-place-delbranch session](docs/sessions/2026-08-02-remove-place-delbranch/summary.md)_
+
+- **An offer cannot see a local- or project-scope MCP install.** `pendingOffers`
+  is fed App's startup probe, which runs with `repo: null`, and
+  `mcpsetup::status` only consults the local and project scopes with a repo in
+  hand. So a machine that registered the server per-project is covered and still
+  gets offered it — a purple gear dot and a release-notes band — until Settings
+  → Claude re-probes with the repo and silently corrects the state. Inherited
+  from the Home card, but that card sat on one screen behind a project
+  precondition and the dot is on every screen. Either re-probe with `sel?.repo`
+  when a place is selected, or probe once with the first project root.
+  _From: [2026-09-19 mcp-offer-surfaces](docs/sessions/2026-09-19-mcp-offer-surfaces/summary.md)_
+
+- **`cli-missing` could become an offer now.** It is deliberately silent so it
+  cannot raise a second banner competing with Settings → Updates, which already
+  owns "install the CLI". Now that an `Offer` carries its own `settingsCat`, an
+  offer pointing AT Updates is not a competing banner — it is the same banner
+  with a route. Worth revisiting; it is the one remaining state where the app
+  knows something is missing and says nothing outside Settings.
+  _From: [2026-09-19 mcp-offer-surfaces](docs/sessions/2026-09-19-mcp-offer-surfaces/summary.md)_
+
+- **`init_dismissed` still has its own store beside `offers_dismissed`.** Both
+  now record a fingerprint per key, for the same reason, and the app half could
+  fold into the offer registry cheaply. Folding BOTH halves cannot happen: the
+  CLI keeps its own marker under `$XDG_STATE_HOME/worktrees/init-hints/` because
+  `ui-state.json` lives in the app's config dir, and unifying would mean the CLI
+  reading an app-owned file — which ADR 0001 refuses. So the question is only
+  whether one concept with two stores is better than one concept with three.
+  _From: [2026-09-19 mcp-offer-surfaces](docs/sessions/2026-09-19-mcp-offer-surfaces/summary.md)_
+
+- **The coachmark stays unbuilt until the band under-reaches.** A popover
+  anchored to the Settings gear was designed and cut: it was the only new chrome
+  and the weakest link, dismissed reflexively, after which you rely on the dot
+  anyway. If the pinned band plus the purple dot still fail to land, it is
+  strictly additive — and by then it would be a measurement rather than a guess.
+  Position it from the anchor's rect, never a side: Places can live on the right
+  since #227.
+  _From: [2026-09-19 mcp-offer-surfaces](docs/sessions/2026-09-19-mcp-offer-surfaces/summary.md)_

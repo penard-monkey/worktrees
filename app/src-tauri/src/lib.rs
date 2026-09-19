@@ -1442,6 +1442,66 @@ fn place_key_for(path: &str, roots: &[String]) -> Option<(String, String)> {
     Some((root, slug))
 }
 
+/// What the frontend is told when a Claude session asks for a document.
+///
+/// `repo`/`slug` and not just the path: the pane that renders a document is
+/// mounted under a SELECTED place, so the request has to name the place before
+/// it can name the file.
+#[derive(Clone, Serialize)]
+struct OpenDoc {
+    repo: String,
+    slug: String,
+    path: String,
+}
+
+/// Serve whatever a session has dropped in `~/.cache/worktrees/inbox`.
+///
+/// Runs on the 3 s watcher tick. The directory is empty essentially always, so
+/// the steady-state cost is one `read_dir` of an empty directory — cheaper than
+/// the tmux fingerprint the same tick already pays for.
+///
+/// Every request is re-validated here even though the writer canonicalised it.
+/// It arrived from another process; `guard_under_projects` is the same check
+/// every file-reading command makes, and this is the one entry point where the
+/// asker is not the user's own click.
+fn drain_inbox(app: &AppHandle) {
+    let reqs = worktrees_core::inbox::drain(sysclock::now_epoch());
+    if reqs.is_empty() {
+        return;
+    }
+    let roots = read_projects(app);
+    for r in reqs {
+        // Not under a registered project → refused, and SAID so. A silent drop
+        // here is a request that vanished with no way to tell whether the app
+        // saw it (CLAUDE.md: never swallow errors).
+        if guard_under_projects(app, &r.path).is_err() {
+            applog("warn", &format!("inbox: refused {} (pid {}) — outside every registered project", r.path, r.pid));
+            continue;
+        }
+        // `place_key_for` runs git in the path it is given, so it needs the
+        // DIRECTORY — `git -C <a file>` is not a thing.
+        let Some(parent) = Path::new(&r.path).parent().map(|p| p.to_string_lossy().to_string()) else {
+            continue;
+        };
+        let Some((repo, slug)) = place_key_for(&parent, &roots) else {
+            applog("warn", &format!("inbox: {} is in no tracked place", r.path));
+            continue;
+        };
+        applog("info", &format!("inbox: open {} in {repo}:{slug} (pid {})", r.path, r.pid));
+        let _ = app.emit("app:open-doc", OpenDoc { repo, slug, path: r.path });
+        // Front and centre — "let me see X" means show it to me NOW. A window
+        // that loads the document behind the terminal the request was typed in
+        // is a feature you have to go looking for.
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            if let Err(e) = w.set_focus() {
+                applog("warn", &format!("inbox: could not focus the window: {e}"));
+            }
+        }
+    }
+}
+
 /// Stamp `last_worked_epoch` forward-only. Returns true when the store actually
 /// moved, so callers only emit an event for a real change. Never fatal: an
 /// untracked path is silent (expected), a write failure is logged.
@@ -2333,9 +2393,29 @@ async fn get_ai_config() -> Result<AiConfig, String> {
 /// (~1.1s, and a false ✘ whenever the cwd is not a repo). Safe to call on a
 /// sheet open or a Home render; still `async`, like every command here, because
 /// it touches the filesystem.
+///
+/// Logged, unlike most read-only commands. `mcp_install`/`mcp_uninstall` already
+/// applog, but the state that decides whether the offer EVER appears is
+/// computed here — and every non-`absent` answer is a silent one, by design. A
+/// user reporting "it never offered" leaves no other trace: without this line
+/// the only way to tell `absent` (card suppressed by something in the UI) from
+/// `cli-missing`/`elsewhere` (card correctly withheld) is to ask them to open
+/// Settings and read it out.
 #[tauri::command]
 async fn mcp_status(repo: Option<String>) -> Result<worktrees_core::mcpsetup::Status, String> {
-    Ok(worktrees_core::mcpsetup::status(repo.as_deref()))
+    let s = worktrees_core::mcpsetup::status(repo.as_deref());
+    applog(
+        "info",
+        &format!(
+            "mcp_status repo={} -> state={:?} found_in={:?} claude={} worktrees={}",
+            repo.as_deref().unwrap_or("-"),
+            s.state,
+            s.found_in,
+            s.claude_bin.as_deref().unwrap_or("-"),
+            s.worktrees_bin.as_deref().unwrap_or("-"),
+        ),
+    );
+    Ok(s)
 }
 
 /// Wire it in (or repair, or re-install with a different `--mutations`).
@@ -4126,8 +4206,14 @@ fn b64_encode(bytes: &[u8]) -> String {
 /// (Claude edited it in another pane), the save is refused rather than silently
 /// clobbering. The write is atomic (temp file + rename) so a crash mid-save
 /// can't leave a half-written file, and preserves the file's mode bits.
+///
+/// Returns the SAVED file's mtime, which is the `expected_mtime` for the next
+/// save in the same sitting. Without it the editor would still hold the mtime
+/// it read before this write, and its second save would be refused as a
+/// conflict with its own first one — the guard firing on the one writer it is
+/// not there to stop.
 #[tauri::command]
-async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<(), String> {
+async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
     let f = guard_under_projects(&app, &path)?;
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
@@ -4147,7 +4233,8 @@ async fn write_file(app: AppHandle, path: String, content: String, expected_mtim
     std::fs::rename(&tmp, &f).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         e.to_string()
-    })
+    })?;
+    Ok(file_mtime_ms(&f))
 }
 
 // ── dock terminal: scratch-shell sidecar sessions ────────────────────────────
@@ -5396,6 +5483,9 @@ pub fn run() {
                         last_fetch = std::time::Instant::now(); // measure gap AFTER the pass
                         let _ = handle.emit("places:changed", ()); // re-pull fresh ahead/behind once
                     }
+                    // Every tick, not every fifth: a request has a 30 s life
+                    // and a person is waiting on it.
+                    drain_inbox(&handle);
                     cwd_ticks += 1;
                     if cwd_ticks >= 5 {
                         cwd_ticks = 0;

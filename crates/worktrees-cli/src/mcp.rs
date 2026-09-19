@@ -574,6 +574,34 @@ impl Server {
                 false,
             ));
             t.push(tool(
+                "show_doc",
+                "Open a file from THIS repository in the worktrees desktop app and bring the \
+                 app to the front. Use it whenever the user asks to see, look at, open or be \
+                 shown a document — \"show me CLAUDE.md\", \"let me see the plan\", \"open the \
+                 ADR\" — instead of, or as well as, printing the file. Markdown is rendered. \
+                 Takes a path relative to the repository root, or an absolute path inside it. \
+                 Does nothing to the file and nothing to git.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Repo-relative (CLAUDE.md, docs/adr/0001.md) or an absolute path inside this repository."
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }),
+                // readOnlyHint TRUE: it writes nothing in the repository, which
+                // is what that hint answers and what the hub-copy guard in
+                // `call` keys off. `--mutations` is a SEPARATE question — this
+                // drives the user's screen, so it is not in the tier a
+                // read-only profile gets (see the `--mutations` block it sits
+                // in). Two different senses of "safe", kept apart on purpose.
+                true,
+                false,
+            ));
+            t.push(tool(
                 "remove_worktree",
                 "DESTRUCTIVE. Remove a worktree directory and its tmux session. Requires \
                  confirm: true. Uncommitted work in that worktree is lost.",
@@ -696,6 +724,47 @@ impl Server {
                     return Ok(text_err(&format!("invalid lifecycle: {life}")));
                 }
                 self.meta(&slug, |d| d.lifecycle = Some(life.clone()))
+            }
+            "show_doc" => {
+                let raw = s("path");
+                if raw.trim().is_empty() {
+                    return Ok(text_err("path is required"));
+                }
+                let root = std::path::PathBuf::from(&self.proj()?.main_root);
+                // Relative resolves against the REPO ROOT, not the process cwd.
+                // The server's cwd is wherever claude was launched, which is
+                // normally a worktree and occasionally a subdirectory of one —
+                // so "CLAUDE.md" would mean different files on different days.
+                let want = if std::path::Path::new(&raw).is_absolute() {
+                    std::path::PathBuf::from(&raw)
+                } else {
+                    root.join(&raw)
+                };
+                let canon = match std::fs::canonicalize(&want) {
+                    Ok(c) => c,
+                    Err(e) => return Ok(text_err(&format!("{raw}: {e}"))),
+                };
+                // The same rule as "no tool takes a repo path" (module note),
+                // restated for an argument that is a FILE: a session lives in
+                // one checkout and may not aim the app at another. Canonicalised
+                // first, so `../../elsewhere/x.md` is refused rather than
+                // resolved.
+                let root_c = std::fs::canonicalize(&root).unwrap_or(root);
+                if !canon.starts_with(&root_c) {
+                    return Ok(text_err(&format!("{} is outside this repository", canon.display())));
+                }
+                match worktrees_core::inbox::request(&canon, worktrees_core::sysclock::now_epoch()) {
+                    // Says what it DID, not what it hopes happened: this process
+                    // cannot see whether the app is running, and a model told
+                    // "opened" would report that to the user as fact.
+                    Ok(_) => Ok(text_ok(&format!(
+                        "asked the worktrees app to show {}. If the app is not running, nothing \
+                         happens and the request expires after {}s.",
+                        canon.display(),
+                        worktrees_core::inbox::MAX_AGE_SECS
+                    ))),
+                    Err(e) => Ok(text_err(&e)),
+                }
             }
             "create_worktree" => {
                 let branch = match safe_arg(&s("branch"), "branch") {
@@ -1431,6 +1500,69 @@ mod tests {
 
         std::fs::write(&places_file, "{\"places\":{}}").unwrap();
         assert_ne!(membership(&wt, &pf), first, "the declared sidecar reaches the list too");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `show_doc` drives the user's SCREEN, so it is in the `--mutations` tier
+    /// even though it writes nothing in the repo — and it may not be aimed
+    /// outside the checkout the server was pinned to, which is the file-shaped
+    /// restatement of "no tool takes a repo path".
+    #[test]
+    fn show_doc_is_gated_and_cannot_leave_the_repository() {
+        use serde_json::json;
+        let base = std::env::temp_dir().join(format!("wt-mcp-showdoc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .expect("git init")
+            .success());
+        std::fs::write(root.join("CLAUDE.md"), "# notes").unwrap();
+        let outside = base.join("elsewhere.md");
+        std::fs::write(&outside, "# not ours").unwrap();
+        // An inbox of its own, so the test neither reads nor writes the real one.
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let names = |m: bool| -> Vec<String> {
+            let p = Project::discover(&root).expect("a git repo");
+            Server { project: Some(p), mutations: m, ready: Default::default() }
+                .tools()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert!(!names(false).contains(&"show_doc".to_string()), "read-only server must not offer it");
+        assert!(names(true).contains(&"show_doc".to_string()), "--mutations server must offer it");
+
+        let p = Project::discover(&root).expect("a git repo");
+        let mut server = Server { project: Some(p), mutations: true, ready: Default::default() };
+
+        // Relative resolves against the repo root, not the process cwd.
+        let r = server.call(&json!({ "name": "show_doc", "arguments": { "path": "CLAUDE.md" } })).unwrap();
+        assert_eq!(r["isError"], json!(false), "{}", r["content"][0]["text"]);
+        let got = worktrees_core::inbox::drain(worktrees_core::sysclock::now_epoch());
+        assert_eq!(got.len(), 1, "the ask must reach the inbox");
+        assert!(got[0].path.ends_with("CLAUDE.md"), "got {}", got[0].path);
+
+        // Outside the pinned repo: refused, and nothing queued.
+        let r = server
+            .call(&json!({ "name": "show_doc", "arguments": { "path": outside.to_string_lossy() } }))
+            .unwrap();
+        assert_eq!(r["isError"], json!(true), "a path outside the repo must be refused");
+        assert!(worktrees_core::inbox::drain(worktrees_core::sysclock::now_epoch()).is_empty());
+
+        // And a traversal that RESOLVES outside is the same refusal — the check
+        // is on the canonicalised path, not on the spelling.
+        let r = server
+            .call(&json!({ "name": "show_doc", "arguments": { "path": "../elsewhere.md" } }))
+            .unwrap();
+        assert_eq!(r["isError"], json!(true), "`..` must not be a way out");
 
         let _ = std::fs::remove_dir_all(&base);
     }
