@@ -78,8 +78,26 @@ pub struct Staleness {
     pub dirty_files: Option<u32>,
     pub last_commit_subject: Option<String>,
     pub last_commit_epoch: Option<i64>,
-    /// Unix seconds "now", passed in rather than read.
+    /// Unix seconds "now", passed in rather than read — and specifically **when
+    /// the git facts above were captured**, which is when the user last pressed
+    /// the button. `age` is measured against it so the commit's age belongs to
+    /// the same reading as the rest of the line.
     pub now_epoch: i64,
+    /// Unix seconds when THIS COPY was written, which is not the same instant.
+    ///
+    /// The app re-derives a registered place on its own tick whenever the
+    /// documents move, so the body of the page can be seconds old while the
+    /// numbers above it are from the last open — and every git fact here costs a
+    /// fan-out to recompute, which §15.3 refused for a click and is worse on a
+    /// timer. Two ages, so the header says two ages: the reader is told when the
+    /// text was copied and, separately, when the status was measured.
+    ///
+    /// A copy that cannot say how old it is, in a feature whose whole purpose is
+    /// to stop people reading stale documents, is §1.1's failure one level in.
+    ///
+    /// `0` means unknown and prints nothing — the same convention `age` uses for
+    /// a missing commit epoch, and the reason `Default` is safe here.
+    pub derived_epoch: i64,
 }
 
 /// The drill-down seam: the index to resolve a diagram node against, and the
@@ -204,10 +222,66 @@ pub fn header(s: &Staleness) -> String {
         out.push_str(">\n");
         out.push_str(&format!("> {}\n", last.join(" · ")));
     }
+    // WHEN THIS COPY WAS MADE. The facts above are about the place; this one is
+    // about the page the reader is holding, and it is the only line that can
+    // tell them the difference between a document the tool copied a moment ago
+    // and one it copied before lunch. A browser tab left open overnight looks
+    // exactly like a fresh one.
+    //
+    // The second stamp appears only when the two instants differ — i.e. after a
+    // background re-derive, where the text is current and the git line is not.
+    // Printing one timestamp for both would say the status was measured when it
+    // was not, which is the whole class of error this header exists to remove.
+    if s.derived_epoch > 0 {
+        let made = utc_stamp(s.derived_epoch);
+        out.push_str(">\n");
+        if s.now_epoch > 0 && s.now_epoch != s.derived_epoch {
+            out.push_str(&format!("> *derived {made} · status as of {}*\n", utc_stamp(s.now_epoch)));
+        } else {
+            out.push_str(&format!("> *derived {made}*\n"));
+        }
+    }
     // A rule under it, so the reader can see where the tool stops talking and
     // the document starts.
     out.push_str("\n---\n\n");
     out
+}
+
+/// Unix seconds → `YYYY-MM-DD HH:MM:SS UTC`.
+///
+/// Pure arithmetic, because this module is a pure transform and `sysclock`
+/// shells out to `date` — a spawn per generated page, times the index's 2,000
+/// cap, on a path that already runs on a timer. UTC rather than local for the
+/// same reason it cannot ask `date`, and it is the app log's own timezone
+/// (CLAUDE.md warns about exactly that cross-reference), so the two read
+/// together.
+///
+/// Howard Hinnant's `civil_from_days`, which is exact for every date this can
+/// be handed and needs no table. Days are floored, so a pre-1970 epoch — a
+/// clock that has not been set yet, say — still produces a real date instead of
+/// a negative month.
+fn utc_stamp(epoch: i64) -> String {
+    let days = epoch.div_euclid(86_400);
+    let secs = epoch.rem_euclid(86_400);
+    // Shift the era so that a year starts on 1 March: February, and therefore
+    // the leap day, lands at the END of it and the month-length pattern becomes
+    // one formula.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
 }
 
 /// Compact age, the dock's `ago()` vocabulary exactly (`DocsPane.tsx:79`).
@@ -716,6 +790,11 @@ mod tests {
             last_commit_subject: Some("docs(runbook): reconcile §4".into()),
             last_commit_epoch: Some(1_000_000),
             now_epoch: 1_000_000 + 7_200,
+            // The open path: the facts were captured at the moment the copy was
+            // made, so the header carries ONE stamp. The tick's case (a copy
+            // newer than its facts) is `a_re_derived_page_dates_its_facts_apart_
+            // from_itself`, which sets them apart deliberately.
+            derived_epoch: 1_000_000 + 7_200,
         }
     }
 
@@ -809,6 +888,88 @@ mod tests {
         let mut s = stale();
         s.last_commit_epoch = None;
         assert!(!header(&s).contains(" · \n"), "{}", header(&s));
+    }
+
+    /// The copy has to date ITSELF, not only the place it came from.
+    ///
+    /// Everything else in this header ages in the reader's hands without saying
+    /// so: a browser tab left open overnight, on a page the tool copied before
+    /// lunch, looks exactly like one generated a second ago. That is §1.1's
+    /// hazard — a document that does not say which world it is from — reproduced
+    /// inside the feature built to prevent it, one level in.
+    #[test]
+    fn a_derived_page_says_when_it_was_copied() {
+        let mut s = stale();
+        s.now_epoch = 1_789_776_000;
+        s.derived_epoch = 1_789_776_000;
+        let h = header(&s);
+        assert!(h.contains("derived 2026-09-19 00:00:00 UTC"), "no derivation stamp: {h}");
+        // One instant, one stamp: the open path captured the facts and wrote the
+        // copy in the same breath, and saying it twice would invite the reader
+        // to look for a difference that is not there.
+        assert_eq!(h.matches("UTC").count(), 1, "{h}");
+        // Inside the blockquote, like every other fact here.
+        assert!(h.lines().any(|l| l.starts_with("> *derived ")), "{h}");
+    }
+
+    /// The tick's case: the text is current, the git line is not.
+    ///
+    /// The app re-derives a registered place whenever its documents move, and it
+    /// does NOT re-run the git fan-out those numbers came from (§15.3 refused
+    /// that for a click; a timer is worse). So one stamp would be a lie about
+    /// whichever fact it was not measuring — and the lie it tells is "this
+    /// status is current", which is the exact error the header exists to remove.
+    #[test]
+    fn a_re_derived_page_dates_its_facts_apart_from_itself() {
+        let mut s = stale();
+        s.now_epoch = 1_789_776_000; // the button press
+        s.derived_epoch = 1_789_779_661; // an hour and a minute of Claude writing
+        let h = header(&s);
+        assert!(h.contains("derived 2026-09-19 01:01:01 UTC"), "{h}");
+        assert!(h.contains("status as of 2026-09-19 00:00:00 UTC"), "{h}");
+        let line = h.lines().find(|l| l.contains("derived ")).unwrap();
+        assert!(
+            line.find("derived ").unwrap() < line.find("status as of ").unwrap(),
+            "the copy's own age comes first — it is the one fact only this line carries: {line}"
+        );
+    }
+
+    /// `0` is "not known", and a header that answers it with `1970-01-01` would
+    /// be stating a fact nobody supplied. Same convention as a missing commit
+    /// epoch, which renders no age rather than "now".
+    #[test]
+    fn an_unknown_derivation_time_says_nothing_rather_than_1970() {
+        let mut s = stale();
+        s.derived_epoch = 0;
+        let h = header(&s);
+        assert!(!h.contains("derived"), "{h}");
+        assert!(!h.contains("1970"), "{h}");
+        // …and the rest of the header is untouched by its absence.
+        assert!(h.contains("25 behind `origin/main`"), "{h}");
+    }
+
+    /// The stamp is arithmetic rather than `date`, because this module is a pure
+    /// transform and `sysclock` spawns a process per call. Arithmetic that is
+    /// wrong is worse than a spawn, so the era/leap-day handling is asserted
+    /// against dates chosen to break it: a leap day, the day after one, a
+    /// century that is NOT a leap year, one that is, and the epoch itself.
+    #[test]
+    fn the_derivation_stamp_is_the_real_calendar_date() {
+        let mut at = |epoch: i64| {
+            let mut s = stale();
+            s.now_epoch = epoch;
+            s.derived_epoch = epoch;
+            let h = header(&s);
+            let line = h.lines().find(|l| l.starts_with("> *derived ")).unwrap_or("").to_string();
+            line.trim_start_matches("> *derived ").trim_end_matches('*').to_string()
+        };
+        assert_eq!(at(1), "1970-01-01 00:00:01 UTC");
+        assert_eq!(at(1_709_164_800), "2024-02-29 00:00:00 UTC"); // a leap day
+        assert_eq!(at(1_709_251_199), "2024-02-29 23:59:59 UTC"); // …its last second
+        assert_eq!(at(1_709_251_200), "2024-03-01 00:00:00 UTC"); // …and the day after
+        assert_eq!(at(951_782_400), "2000-02-29 00:00:00 UTC"); // 2000 IS a leap year
+        assert_eq!(at(4_107_542_400), "2100-03-01 00:00:00 UTC"); // 2100 is NOT
+        assert_eq!(at(1_789_776_000), "2026-09-19 00:00:00 UTC");
     }
 
     /// A commit subject is arbitrary bytes and a branch name may carry a

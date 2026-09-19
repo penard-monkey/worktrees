@@ -154,12 +154,25 @@ fn is_regular_file(p: &Path) -> bool {
 /// still a row. `0` reads as "older than any baseline", so the mark is simply
 /// absent — which is the right way for this to fail.
 fn mtime_ms(p: &Path) -> u64 {
-    std::fs::symlink_metadata(p)
-        .and_then(|m| m.modified())
+    stat_ms_len(p).0
+}
+
+/// Modification time in milliseconds and byte length, from ONE stat.
+///
+/// Two callers want different halves of the same `symlink_metadata` — the index
+/// wants the mtime for its recency mark, the fingerprint wants both — and a
+/// second stat per file is the one cost this module is trying not to pay
+/// (`fingerprint_with`'s note). `(0, 0)` when it cannot be read, for the same
+/// reason `mtime_ms` answers `0`: a row whose stat failed is still a row.
+fn stat_ms_len(p: &Path) -> (u64, u64) {
+    let Ok(md) = std::fs::symlink_metadata(p) else { return (0, 0) };
+    let ms = md
+        .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    (ms, md.len())
 }
 
 /// Collapse whitespace, cap the length, and refuse an empty result.
@@ -314,28 +327,22 @@ fn entry(root: &Path, rel: &str, group: &str) -> DocEntry {
     }
 }
 
-/// The index for the worktree at `root`, by convention alone.
-pub fn index(root: &Path) -> DocsIndex {
-    index_with(root, None)
-}
-
-/// The index for the worktree at `root`, which the caller has already
-/// canonicalised and proved is under a registered project. `docs` is the
-/// project's `[docs]` section when it has one.
+/// The walk itself, with what to MAKE of each row left to the caller.
 ///
-/// Never errors: a place with no documentation is an empty index, not a
-/// failure, and an unreadable subdirectory drops out rather than taking the
-/// listing with it. "Fail per file, loudly" is the dock's rule
-/// (`ViewErrorBoundary`); here the unit that can fail is a row, and a row that
-/// cannot be read simply is not one.
+/// Two callers, and the one thing they may never disagree about is which files
+/// a place has, in which order: `index_with` builds a `DocEntry` per row (a
+/// stat and an 8 KiB read each), `fingerprint_with` stats and stops. Writing
+/// the second walk beside the first would be a mirror of the rule it exists to
+/// follow, and this repo has paid for a silent mirror twice
+/// (`dnd.ts::predictTier`, the new-worktree verdict line) — the tell being that
+/// the mirror's own tests keep passing while it drifts. So the order, the
+/// skips, the dedupe and the cap live here once and the visitor decides only
+/// what a row costs.
 ///
-/// **A declared path that does not exist is skipped, never an error.** Four of
-/// valleos's eleven places have no `apps/docs` on their branch; a config
-/// written on main must not make the index fail on a place that has not
-/// rebased, which would be the inconsistency this tab exists to remove wearing
-/// a different hat.
-pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
-    let mut entries: Vec<DocEntry> = Vec::new();
+/// `visit(root, rel, group)` per row, in listing order; the `bool` is
+/// `truncated`.
+fn walk<T>(root: &Path, docs: Option<&Docs>, mut visit: impl FnMut(&Path, &str, &str) -> T) -> (Vec<T>, bool) {
+    let mut entries: Vec<T> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut truncated = false;
 
@@ -345,36 +352,46 @@ pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
     // would have closed that one route and left the next one open. `false`
     // means the CAP was hit, which is the only thing the caller must report; a
     // duplicate is simply not pushed.
-    let push = |entries: &mut Vec<DocEntry>, seen: &mut BTreeSet<String>, rel: String, group: &str| -> bool {
+    //
+    // A nested `fn` rather than a closure: it has to be generic over `T` and
+    // take `visit` by `&mut`, and everything it touches is already a parameter.
+    fn push<T>(
+        entries: &mut Vec<T>,
+        seen: &mut BTreeSet<String>,
+        root: &Path,
+        visit: &mut impl FnMut(&Path, &str, &str) -> T,
+        rel: String,
+        group: &str,
+    ) -> bool {
         if seen.contains(&rel) {
             return true;
         }
         if entries.len() >= MAX_ENTRIES {
             return false;
         }
-        entries.push(entry(root, &rel, group));
+        entries.push(visit(root, &rel, group));
         seen.insert(rel);
         true
-    };
+    }
 
     // 0. `[docs] index` — where reading starts, ahead of everything. Grouped
     //    with the root files however deep it lives: it is the landing page for
     //    the whole place, so a `docs` header above it would file it under a
     //    tree it is introducing.
     if let Some(i) = docs.and_then(|d| d.index.as_ref()) {
-        if is_regular_file(&root.join(i.as_str())) && !push(&mut entries, &mut seen, i.as_str().to_string(), "") {
+        if is_regular_file(&root.join(i.as_str())) && !push(&mut entries, &mut seen, root, &mut visit, i.as_str().to_string(), "") {
             truncated = true;
         }
     }
     // 1. the named root files, in the order a reader wants them
     for f in ROOT_FILES {
-        if is_regular_file(&root.join(f)) && !push(&mut entries, &mut seen, f.to_string(), "") {
+        if is_regular_file(&root.join(f)) && !push(&mut entries, &mut seen, root, &mut visit, f.to_string(), "") {
             truncated = true;
         }
     }
     // 2. this place's brief — the one document the tool itself writes
     if is_regular_file(&root.join(crate::ops::BRIEF_PATH))
-        && !push(&mut entries, &mut seen, crate::ops::BRIEF_PATH.to_string(), "")
+        && !push(&mut entries, &mut seen, root, &mut visit, crate::ops::BRIEF_PATH.to_string(), "")
     {
         truncated = true;
     }
@@ -394,7 +411,7 @@ pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
     }
     rest.sort_by_key(|r| r.to_lowercase());
     for r in rest {
-        if !push(&mut entries, &mut seen, r, "") {
+        if !push(&mut entries, &mut seen, root, &mut visit, r, "") {
             truncated = true;
             break;
         }
@@ -417,7 +434,7 @@ pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
             // like any other entry.
             if is_md(&rel) {
                 let group = Path::new(&rel).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                if !push(&mut entries, &mut seen, rel.clone(), &group) {
+                if !push(&mut entries, &mut seen, root, &mut visit, rel.clone(), &group) {
                     truncated = true;
                 }
             }
@@ -448,7 +465,7 @@ pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
             }
             files.sort_by_key(|r| r.to_lowercase());
             for r in files {
-                if !push(&mut entries, &mut seen, r, &rel) {
+                if !push(&mut entries, &mut seen, root, &mut visit, r, &rel) {
                     truncated = true;
                     break;
                 }
@@ -464,7 +481,96 @@ pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
             }
         }
     }
+    (entries, truncated)
+}
+
+/// The index for the worktree at `root`, by convention alone.
+pub fn index(root: &Path) -> DocsIndex {
+    index_with(root, None)
+}
+
+/// The index for the worktree at `root`, which the caller has already
+/// canonicalised and proved is under a registered project. `docs` is the
+/// project's `[docs]` section when it has one.
+///
+/// Never errors: a place with no documentation is an empty index, not a
+/// failure, and an unreadable subdirectory drops out rather than taking the
+/// listing with it. "Fail per file, loudly" is the dock's rule
+/// (`ViewErrorBoundary`); here the unit that can fail is a row, and a row that
+/// cannot be read simply is not one.
+///
+/// **A declared path that does not exist is skipped, never an error.** Four of
+/// valleos's eleven places have no `apps/docs` on their branch; a config
+/// written on main must not make the index fail on a place that has not
+/// rebased, which would be the inconsistency this tab exists to remove wearing
+/// a different hat.
+pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
+    let (entries, truncated) = walk(root, docs, entry);
     DocsIndex { entries, truncated }
+}
+
+/// FNV-1a, 64-bit, folded over the bytes the fingerprint is made of.
+///
+/// Not a cryptographic digest and deliberately not one: this compares the
+/// tool's own stat results against the tool's own stat results a few seconds
+/// earlier, so there is nobody to choose colliding inputs and nothing to forge.
+/// `worktrees-core` carries serde and `toml` and nothing else — a dependency
+/// here would be a new supply-chain entry to detect that a file changed.
+fn fnv1a(mut h: u64, bytes: &[u8]) -> u64 {
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// A stat-only digest of everything `index_with` would list: the rows, in
+/// order, each with its size and modification time. `fingerprint(a) !=
+/// fingerprint(b)` means the place's documentation changed between them.
+///
+/// **This exists because `index_with` is too expensive to call on a timer.**
+/// The app re-derives a registered place's browser copy on its own tick, and
+/// the index reads the head of every file to find a title — `TITLE_SNIFF` is
+/// 8 KiB, so a 400-document place is megabytes of reads every few seconds, per
+/// registered place, forever. The fingerprint touches the same paths with
+/// `symlink_metadata` and nothing else, and the full walk runs only when it has
+/// moved.
+///
+/// It covers more than mtimes, on purpose: the ROW SET and its ORDER are in the
+/// digest too, so a file added, removed, renamed, or a `[docs] paths` list read
+/// in a different order all move it even where no surviving file was touched.
+/// A directory's own mtime is never consulted — it is not a reliable signal for
+/// a change two levels down, and the walk is already enumerating.
+///
+/// **What it can miss, said out loud:** a write that lands in the same
+/// MILLISECOND as the last one *and* leaves the byte length identical. The cost
+/// of that is one derived copy staying stale until the next change — which is
+/// the failure this whole feature exists to remove, so it is worth knowing that
+/// the window is a millisecond of wall clock and an exact length match, not a
+/// second's mtime granularity. A content hash would close it and would cost
+/// exactly what the fingerprint exists to avoid.
+pub fn fingerprint(root: &Path) -> u64 {
+    fingerprint_with(root, None)
+}
+
+/// `fingerprint` with the project's `[docs]` section, exactly as `index_with`
+/// takes it. The caller must pass the SAME config it indexes with, or the
+/// digest describes a different set of files than the one it is guarding.
+pub fn fingerprint_with(root: &Path, docs: Option<&Docs>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let (_, truncated) = walk(root, docs, |root, rel, _group| {
+        let (ms, len) = stat_ms_len(&root.join(rel));
+        // A separator between the fields, so `("ab", 1)` and `("a", 0xb1)`
+        // cannot fold to the same state. `rel` is the only variable-length part.
+        h = fnv1a(h, rel.as_bytes());
+        h = fnv1a(h, &[0xff]);
+        h = fnv1a(h, &ms.to_le_bytes());
+        h = fnv1a(h, &len.to_le_bytes());
+    });
+    // The cap is part of the answer: an index that stopped at 2,000 and one
+    // that stopped at 2,000 for a different reason are the same digest, but a
+    // place that CROSSED the cap since the last look has genuinely changed.
+    fnv1a(h, &[truncated as u8])
 }
 
 #[cfg(test)]
@@ -851,5 +957,140 @@ mod tests {
         // …and so is a directory that does not exist at all.
         let gone = index(&t.0.join("nope"));
         assert!(gone.entries.is_empty());
+    }
+
+    // ── the fingerprint ──────────────────────────────────────────────────────
+
+    /// Rewrite a file and make sure the stat the fingerprint reads has actually
+    /// moved. mtime is milliseconds and a test can rewrite inside one of them,
+    /// which would make a change-detection test flaky in the direction that
+    /// reads as a PASS for the broken code — so the helper waits for the stat to
+    /// differ rather than sleeping a guessed amount.
+    fn rewrite(root: &Path, rel: &str, body: &str) {
+        let before = stat_ms_len(&root.join(rel));
+        for _ in 0..200 {
+            write(root, rel, body);
+            if stat_ms_len(&root.join(rel)) != before {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("{rel}: the filesystem never reported a new mtime or length");
+    }
+
+    /// The whole point: an edit moves it, and nothing else does.
+    ///
+    /// The second half is what makes the first one worth anything — a digest
+    /// that changed on every call would also "detect" every edit, and would
+    /// re-derive every registered place on every tick forever.
+    #[test]
+    fn a_touched_document_moves_the_fingerprint_and_a_quiet_place_does_not() {
+        let t = tmp("fp-touch");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        write(r, "docs/a.md", "# a");
+        let first = fingerprint(r);
+        assert_eq!(first, fingerprint(r), "a place nobody touched must read the same twice");
+        rewrite(r, "docs/a.md", "# a\n\nnow with prose\n");
+        assert_ne!(first, fingerprint(r), "an edited document did not move the fingerprint");
+    }
+
+    /// Membership, not just mtimes — and a removal is the case that proves it,
+    /// because deleting a file touches no surviving file's stat at all.
+    ///
+    /// The deleted document is deliberately **not** the most recently written
+    /// one. The obvious cheap answer to "has this place changed" is the newest
+    /// mtime in the tree, and it reads this place as untouched while its index
+    /// has lost a row — so the derived copy in the browser would keep serving a
+    /// document that no longer exists, which is `forget_place`'s hazard arriving
+    /// one file at a time.
+    #[test]
+    fn a_removed_or_added_document_moves_the_fingerprint() {
+        let t = tmp("fp-set");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        write(r, "docs/b.md", "# b");
+        write(r, "docs/a.md", "# a");
+        rewrite(r, "docs/a.md", "# a, and now the newest file here");
+        let with_b = fingerprint(r);
+        fs::remove_file(r.join("docs/b.md")).unwrap();
+        let without_b = fingerprint(r);
+        assert_ne!(with_b, without_b, "a deleted document did not move the fingerprint");
+        write(r, "docs/c.md", "# c");
+        assert_ne!(without_b, fingerprint(r), "a new document did not move the fingerprint");
+    }
+
+    /// It walks EXACTLY what the index lists, because it is the same walk.
+    ///
+    /// Everything written here is something `index_with` refuses — another
+    /// place's documents under `.worktrees/`, a vendored `README.md`, a dotted
+    /// directory, a symlink out of the tree, a file that is not markdown. A
+    /// fingerprint written as its own recursive walk would see all of them, and
+    /// the failure would be silent in the expensive direction: `(main)` contains
+    /// every other place, so every keystroke in every worktree would re-derive
+    /// `(main)`'s browser copy.
+    #[test]
+    fn the_fingerprint_ignores_exactly_what_the_index_ignores() {
+        let t = tmp("fp-skip");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        write(r, "docs/a.md", "# a");
+        let quiet = fingerprint(r);
+        assert_eq!(rels(&index(r)), vec!["README.md", "docs/a.md"]);
+
+        write(r, ".worktrees/other/docs/ghost.md", "# another place entirely");
+        write(r, "docs/node_modules/pkg/README.md", "# somebody else's code");
+        write(r, "docs/.hidden/x.md", "# dotted");
+        write(r, "target/debug/notes.md", "# build output");
+        write(r, "docs/a.txt", "not markdown");
+        let away = t.0.join("..").join(format!("wtdocs-fpaway-{}", std::process::id()));
+        fs::create_dir_all(&away).unwrap();
+        fs::write(away.join("leak.md"), "# leak").unwrap();
+        let _ = fs::remove_file(r.join("docs/out"));
+        std::os::unix::fs::symlink(&away, r.join("docs/out")).unwrap();
+
+        assert_eq!(rels(&index(r)), vec!["README.md", "docs/a.md"], "the index changed; the premise is gone");
+        assert_eq!(quiet, fingerprint(r), "the fingerprint saw files the index does not list");
+        let _ = fs::remove_dir_all(&away);
+    }
+
+    /// The config has to be the SAME config the index was built with, or the
+    /// digest is guarding a different set of files than the one on screen — a
+    /// place whose `[docs] paths` moved documentation out of `docs/` would be
+    /// watched at the wrong address, and the copy in the browser would never
+    /// refresh again.
+    #[test]
+    fn the_fingerprint_follows_the_declared_paths() {
+        let t = tmp("fp-cfg");
+        let r = &t.0;
+        write(r, "README.md", "# r");
+        write(r, "handbook/a.md", "# a");
+        write(r, "docs/ignored.md", "# not declared");
+        let c = cfg(&["handbook"], None);
+        let declared = fingerprint_with(r, Some(&c));
+        // `docs/` is not in the declared set, so nothing that happens there is
+        // this place's documentation.
+        rewrite(r, "docs/ignored.md", "# edited, and still not declared");
+        assert_eq!(declared, fingerprint_with(r, Some(&c)), "an undeclared directory moved the fingerprint");
+        rewrite(r, "handbook/a.md", "# a, edited");
+        assert_ne!(declared, fingerprint_with(r, Some(&c)), "a declared document did not move it");
+        // …and the convention's answer for the same tree is a different one,
+        // which is why the caller may not mix them up.
+        assert_ne!(fingerprint(r), fingerprint_with(r, Some(&c)));
+    }
+
+    /// Declared ORDER is a decision the repo made (`[docs] paths = ["b", "a"]`
+    /// is listed b-then-a on purpose), so a change to it is a change to the
+    /// index — and the digest has to move or the derived copy keeps the old
+    /// order forever.
+    #[test]
+    fn declared_order_is_part_of_the_fingerprint() {
+        let t = tmp("fp-order");
+        let r = &t.0;
+        write(r, "a/one.md", "# 1");
+        write(r, "b/two.md", "# 2");
+        let ab = fingerprint_with(r, Some(&cfg(&["a", "b"], None)));
+        let ba = fingerprint_with(r, Some(&cfg(&["b", "a"], None)));
+        assert_ne!(ab, ba, "the two orders are the same digest, so a re-ordered index cannot be seen");
     }
 }

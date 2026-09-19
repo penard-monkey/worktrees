@@ -120,18 +120,57 @@ const BIN_ENV: &str = "WORKTREES_VIEWER_BIN";
 
 // ── the managed child ────────────────────────────────────────────────────────
 
+/// One place registered with the running viewer, and everything the tick needs
+/// to re-derive it without the frontend saying anything.
+///
+/// The map used to be `(root, group)` — enough to keep two places from
+/// colliding into one `mo` group. It is now everything `write_tree` takes,
+/// because the browser tab has to keep up with the documents on its own: `mo`
+/// watches the DERIVED tree (`-wR`), not the repo, so its live-reload was
+/// reloading a copy that could only change when the button was pressed again.
+struct Group {
+    /// Canonical place root — the walk's root, and the identity of this entry.
+    root: PathBuf,
+    /// The place's slug. Names the tree directory and is the first fact in the
+    /// header; kept so an error about this group can name it.
+    slug: String,
+    /// The `mo` group serving it, for THIS process only.
+    name: String,
+    /// Where the derived copy lives.
+    tree: PathBuf,
+    /// The `[docs]` section the index was walked with, as it stood at the last
+    /// OPEN.
+    ///
+    /// Held rather than re-read, so the tick stays stat-only: re-parsing
+    /// `.worktrees.toml` per place per tick would put a file read and a TOML
+    /// parse back on the path this whole design exists to keep cheap, and
+    /// `list_docs` — which the Docs tab polls every 4 s — already shows the new
+    /// configuration in the dock immediately. The cost is that a `[docs]` EDIT
+    /// does not reach the browser copy until the next open; a document edit,
+    /// which is what changes minute to minute, reaches it on the next tick.
+    docs: Option<worktrees_core::projcfg::Docs>,
+    /// The facts the header states, from the open that registered this place.
+    /// `derived_epoch` is re-stamped on every re-derive; nothing else here is
+    /// re-measured, because every other field costs a git fan-out (§15.3).
+    stale: Staleness,
+    /// `docs::fingerprint_with` as of the last derive. The tick re-derives when
+    /// and only when this moves.
+    fingerprint: u64,
+}
+
 /// One running viewer, and the places already registered with it.
 struct Proc {
     child: std::process::Child,
     port: u16,
-    /// Canonical place root → the `mo` group serving it, for THIS process only.
+    /// The places this process is serving.
     ///
     /// Registration is idempotent in `mo` (verified: re-running the client
-    /// against the same directory leaves the file count unchanged), so this map
-    /// is not correctness — it is the record of which names are taken, which
-    /// `group_name` needs in order to keep two places from colliding into one
-    /// group and showing each other's documents.
-    groups: Vec<(PathBuf, String)>,
+    /// against the same directory leaves the file count unchanged), so this list
+    /// is not correctness for the registration — it is the record of which names
+    /// are taken, which `group_name` needs in order to keep two places from
+    /// colliding into one group and showing each other's documents, and it is
+    /// the tick's whole work list.
+    groups: Vec<Group>,
 }
 
 /// The app's single viewer slot. `None` = nothing has been spawned, or the last
@@ -197,6 +236,20 @@ pub struct Request<'a> {
     pub path: Option<&'a str>,
     /// The staleness facts, as the app already holds them in `Place`.
     pub stale: Staleness,
+    /// The `[docs]` section `entries` was walked with, so the tick can walk the
+    /// same set of files. Cloned into the group's record — see `Group::docs`.
+    pub docs: Option<worktrees_core::projcfg::Docs>,
+    /// `docs::fingerprint_with` over this place, taken by the caller **before**
+    /// it walked the index.
+    ///
+    /// Before, not after, and that is the one ordering rule in this feature: a
+    /// document written between the two walks is then in the index but not in
+    /// the fingerprint, so the next tick sees a difference and re-derives —
+    /// one wasted pass. Taken afterwards, the same write would be sealed in as
+    /// "already derived" and that place's browser copy would sit one edit behind
+    /// until something else changed, which is the failure this is being built to
+    /// remove, reintroduced inside its own registration.
+    pub fingerprint: u64,
 }
 
 // ── the pure parts, which is where the tests live ────────────────────────────
@@ -738,7 +791,12 @@ pub fn open(
     let port = proc.port;
 
     let root = req.root.to_path_buf();
-    let group = group_name(req.slug, &root, &proc.groups);
+    // `group_name` stays a pure function over `(root, name)` pairs — the tie it
+    // breaks has nothing to do with the rest of a `Group`, and its tests say so
+    // in the shape they build.
+    let taken: Vec<(PathBuf, String)> =
+        proc.groups.iter().map(|g| (g.root.clone(), g.name.clone())).collect();
+    let group = group_name(req.slug, &root, &taken);
     let tree = vdir.join("tree").join(tree_key(req.slug, &root));
 
     let derived = write_tree(&tree, entries, &req.stale, port, &group)?;
@@ -750,7 +808,7 @@ pub fn open(
     if derived.is_empty() {
         return Err(format!("{} has no documents to show", req.slug));
     }
-    if !proc.groups.iter().any(|(r, _)| *r == root) {
+    if !proc.groups.iter().any(|g| g.root == root) {
         // Re-checked HERE, not only at the top: `write_tree` above can take a
         // while on a large place, and `register` runs the binary again as a
         // CLIENT. A client that finds the port empty does not fail — it
@@ -773,7 +831,26 @@ pub fn open(
             return Err("the viewer exited while registering documents.".to_string());
         }
         outcome?;
-        proc.groups.push((root, group.clone()));
+        proc.groups.push(Group {
+            root: root.clone(),
+            slug: req.slug.to_string(),
+            name: group.clone(),
+            tree: tree.clone(),
+            docs: req.docs.clone(),
+            stale: req.stale.clone(),
+            fingerprint: req.fingerprint,
+        });
+    }
+    // Every open re-derives, registered or not (`write_tree` above), so the
+    // record has to be brought forward on the re-open path too — otherwise a
+    // place opened twice keeps the FIRST open's fingerprint and facts, and the
+    // tick compares today's documents against a digest from yesterday. It would
+    // re-derive once and then settle, which is the worst version of this bug:
+    // correct-looking, and wrong by exactly one stale header.
+    if let Some(g) = proc.groups.iter_mut().find(|g| g.root == root) {
+        g.docs = req.docs.clone();
+        g.stale = req.stale.clone();
+        g.fingerprint = req.fingerprint;
     }
 
     let Some(want) = req.path else { return Ok(group_url(port, &group)) };
@@ -782,6 +859,77 @@ pub fn open(
         Some((_, p)) => Ok(file_url(port, &group, p)),
         None => Err(format!("{want} is not in this place's documentation index")),
     }
+}
+
+/// Re-derive every registered place whose documents have moved on disk.
+///
+/// **Why this exists.** `mo` watches the DERIVED tree (`-wR`), not the user's
+/// repo, so its live-reload was perfect over a copy that could only change when
+/// the button was pressed again: an edit to a real file, and a file added since
+/// the open, both reached nothing, and refreshing the browser did not help
+/// because the derived document genuinely had not changed. The dock, meanwhile,
+/// re-indexes every 4 s and says "1 document new" beside a tab showing the copy
+/// made at click time.
+///
+/// **The cost is the whole design.** `index_with` sniffs 8 KiB of every file for
+/// its title — measured at 10.1 ms and ~3.2 MB of reads for a 400-document place
+/// — and doing that per registered place every few seconds is not acceptable.
+/// `docs::fingerprint_with` walks the same paths with `symlink_metadata` alone
+/// (1.8 ms, zero bytes read, on the same tree) and the full walk runs only when
+/// it has moved.
+///
+/// Four rules, all of them `Shells`' rules, because this is the same kind of
+/// child:
+///
+/// 1. **Nothing registered, nothing done.** No lock contention, no walk, and in
+///    particular no spawn — a timer may not decide the user wants a viewer.
+/// 2. **Never resurrect a dead one.** `try_wait` says whether the child is
+///    alive; if it is not, the slot is dropped and the next OPEN spawns. A timer
+///    that respawned would put an unauthenticated port back up minutes after the
+///    user stopped using it, with nothing on screen to say so.
+/// 3. **A failed derive keeps its old fingerprint**, so it is retried on the
+///    next tick rather than recorded as done. The caller must dedupe the log
+///    (lib.rs does): a place that fails will fail every 3 s.
+/// 4. **Only `derived_epoch` moves.** Every other fact in the header costs a git
+///    fan-out, which §15.3 refused for a click and which is worse on a timer —
+///    so the page says when it was copied and, separately, when its status was
+///    measured. See `Staleness::derived_epoch`.
+///
+/// Returns one message per place that could not be re-derived. Never panics on
+/// a poisoned lock's account — this runs on the app's tick thread, and taking
+/// the process down over a documentation copy is not a trade worth making.
+pub fn refresh(v: &Viewer, now_epoch: i64) -> Vec<String> {
+    let mut errs: Vec<String> = Vec::new();
+    let Ok(mut slot) = v.0.lock() else {
+        return vec!["the viewer's lock is poisoned; documents will not refresh".to_string()];
+    };
+    // Rule 1: a viewer nobody has opened is the common case, and it must cost
+    // nothing at all.
+    let Some(proc) = slot.as_mut() else { return errs };
+    // Rule 2: ask the handle, the way every read of `Shells` does.
+    if !matches!(proc.child.try_wait(), Ok(None)) {
+        *slot = None;
+        return errs;
+    }
+    let port = proc.port;
+    for g in proc.groups.iter_mut() {
+        let fp = worktrees_core::docs::fingerprint_with(&g.root, g.docs.as_ref());
+        if fp == g.fingerprint {
+            continue;
+        }
+        let idx = worktrees_core::docs::index_with(&g.root, g.docs.as_ref());
+        let mut stale = g.stale.clone();
+        stale.derived_epoch = now_epoch;
+        match write_tree(&g.tree, &idx.entries, &stale, port, &g.name) {
+            Ok(_) => {
+                g.fingerprint = fp;
+                g.stale = stale;
+            }
+            // Rule 3: the fingerprint is NOT advanced, so this is tried again.
+            Err(e) => errs.push(format!("{}: {e}", g.slug)),
+        }
+    }
+    errs
 }
 
 /// The derived tree's directory name for one place: readable, and unique.
@@ -827,6 +975,10 @@ mod tests {
             last_commit_subject: Some("feat(app): the viewer".into()),
             last_commit_epoch: Some(1_000_000),
             now_epoch: 1_000_000 + 60,
+            // The open path's case: the facts were read and the copy was made
+            // in the same breath. `refresh` is what moves them apart, and the
+            // test that asserts it says so where it sets them.
+            derived_epoch: 1_000_000 + 60,
         }
     }
 
@@ -1113,6 +1265,201 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    // ── the tick ────────────────────────────────────────────────────────────
+
+    /// A viewer slot holding a child that is alive and is not a viewer.
+    ///
+    /// `refresh` never talks to the process: it writes files into the tree and
+    /// lets `mo`'s own watcher (`-wR`) notice, which is the whole reason the
+    /// derived tree is written in place rather than recreated. So what the child
+    /// IS does not matter here — what matters is that `try_wait` reports it
+    /// alive, which is the liveness rule this shares with `Shells`. A real `mo`
+    /// is `the_whole_path_works_against_a_real_viewer`'s business.
+    fn registered(place: &Path, tree: &Path, fingerprint: u64, stale: Staleness) -> Viewer {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("120")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a child to stand in for the viewer");
+        let v = Viewer::default();
+        *v.0.lock().unwrap() = Some(Proc {
+            child,
+            port: 6275,
+            groups: vec![Group {
+                root: place.to_path_buf(),
+                slug: "tick-place".into(),
+                name: "tick-place".into(),
+                tree: tree.to_path_buf(),
+                docs: None,
+                stale,
+                fingerprint,
+            }],
+        });
+        v
+    }
+
+    /// Derive a place the way `open` does, and hand back the state the tick
+    /// carries forward.
+    fn first_derive(place: &Path, tree: &Path, st: &Staleness) -> u64 {
+        let fp = worktrees_core::docs::fingerprint(place);
+        let idx = worktrees_core::docs::index(place);
+        write_tree(tree, &idx.entries, st, 6275, "tick-place").unwrap();
+        fp
+    }
+
+    /// **The bug, as one assertion.** `mo` watches the DERIVED tree, not the
+    /// repo, so before this the live-reload was perfect over a copy that could
+    /// only change when the button was pressed again: editing a document reached
+    /// nothing, adding one reached nothing, and refreshing the browser did not
+    /// help because the derived file genuinely had not changed.
+    #[test]
+    fn an_edit_after_the_open_reaches_the_derived_copy() {
+        let place = tmp("tick-edit");
+        let tree = tmp("tick-edit-tree");
+        std::fs::write(place.join("README.md"), "# Read me\n\nbefore\n").unwrap();
+        let st = stale();
+        let fp = first_derive(&place, &tree, &st);
+        assert!(std::fs::read_to_string(tree.join("README.md")).unwrap().contains("before"));
+
+        // The user edits the document, and adds one — the two cases that both
+        // reached nothing.
+        for _ in 0..200 {
+            std::fs::write(place.join("README.md"), "# Read me\n\nAFTER\n").unwrap();
+            if worktrees_core::docs::fingerprint(&place) != fp {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::fs::create_dir_all(place.join("docs")).unwrap();
+        std::fs::write(place.join("docs/new.md"), "# Brand new\n").unwrap();
+
+        let v = registered(&place, &tree, fp, st);
+        let _reap = Reaper(&v);
+        assert!(refresh(&v, 1_000_000 + 600).is_empty(), "the re-derive reported an error");
+
+        let readme = std::fs::read_to_string(tree.join("README.md")).unwrap();
+        assert!(readme.contains("AFTER"), "the edit never reached the derived copy: {readme}");
+        assert!(!readme.contains("before"), "the old text is still being served: {readme}");
+        assert!(tree.join("docs/new.md").is_file(), "a document added after the open was not derived");
+        // …and the tick recorded the new state, so the next one is free.
+        let after = v.0.lock().unwrap().as_ref().unwrap().groups[0].fingerprint;
+        assert_ne!(after, fp, "the fingerprint was not carried forward; every tick would re-derive");
+
+        let _ = std::fs::remove_dir_all(&place);
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// A place nobody has touched must cost a stat per document and NOTHING
+    /// else. The derived file's own mtime is the witness: if it moved, the full
+    /// walk ran — 8 KiB read per document, per place, every three seconds,
+    /// forever — and the fingerprint bought nothing.
+    #[test]
+    fn a_quiet_place_is_not_re_derived() {
+        let place = tmp("tick-quiet");
+        let tree = tmp("tick-quiet-tree");
+        std::fs::write(place.join("README.md"), "# Read me\n").unwrap();
+        let st = stale();
+        let fp = first_derive(&place, &tree, &st);
+        let before = std::fs::metadata(tree.join("README.md")).unwrap().modified().unwrap();
+
+        let v = registered(&place, &tree, fp, st);
+        let _reap = Reaper(&v);
+        // Long enough that a rewrite would land in a later millisecond.
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(refresh(&v, 1_000_000 + 600).is_empty());
+        assert!(refresh(&v, 1_000_000 + 900).is_empty());
+
+        let after = std::fs::metadata(tree.join("README.md")).unwrap().modified().unwrap();
+        assert_eq!(before, after, "an untouched place was re-derived anyway");
+
+        let _ = std::fs::remove_dir_all(&place);
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// The header has to date the COPY, and it may not claim the git facts were
+    /// measured then. Every one of those costs a fan-out to recompute — §15.3
+    /// refused that for a click, and a timer is worse — so after a background
+    /// re-derive the page carries two instants, and the older one belongs to the
+    /// status line.
+    #[test]
+    fn a_re_derived_page_is_stamped_now_and_keeps_the_facts_it_had() {
+        let place = tmp("tick-stamp");
+        let tree = tmp("tick-stamp-tree");
+        std::fs::write(place.join("README.md"), "# Read me\n\nbefore\n").unwrap();
+        let mut st = stale();
+        st.now_epoch = 1_789_776_000;
+        st.derived_epoch = 1_789_776_000;
+        let fp = first_derive(&place, &tree, &st);
+        let first = std::fs::read_to_string(tree.join("README.md")).unwrap();
+        assert!(first.contains("derived 2026-09-19 00:00:00 UTC"), "{first}");
+        assert!(!first.contains("status as of"), "one instant, one stamp: {first}");
+
+        for _ in 0..200 {
+            std::fs::write(place.join("README.md"), "# Read me\n\nAFTER\n").unwrap();
+            if worktrees_core::docs::fingerprint(&place) != fp {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let v = registered(&place, &tree, fp, st);
+        let _reap = Reaper(&v);
+        assert!(refresh(&v, 1_789_779_661).is_empty());
+
+        let out = std::fs::read_to_string(tree.join("README.md")).unwrap();
+        assert!(out.contains("derived 2026-09-19 01:01:01 UTC"), "the copy is not dated now: {out}");
+        assert!(out.contains("status as of 2026-09-19 00:00:00 UTC"), "the facts claim to be fresh: {out}");
+        // The facts themselves are untouched — the tick re-reads documents, not
+        // git.
+        assert!(out.contains("25 behind `origin/main`"), "{out}");
+
+        let _ = std::fs::remove_dir_all(&place);
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// Two refusals that are one rule: a timer may not decide the user wants a
+    /// viewer.
+    ///
+    /// Nothing registered must cost nothing at all, and a viewer that has died
+    /// must stay dead until somebody presses the button — respawning from a
+    /// timer would put an unauthenticated loopback port back up minutes after
+    /// the user stopped using it, with nothing on screen to say so. `Shells`
+    /// makes the same promise for the same reason.
+    #[test]
+    fn the_tick_never_spawns_and_never_resurrects() {
+        let v = Viewer::default();
+        assert!(refresh(&v, 1_000_000).is_empty(), "an idle viewer reported something");
+        assert!(v.0.lock().unwrap().is_none(), "the tick put a viewer in an empty slot");
+
+        let place = tmp("tick-dead");
+        let tree = tmp("tick-dead-tree");
+        std::fs::write(place.join("README.md"), "# Read me\n\nbefore\n").unwrap();
+        let st = stale();
+        let fp = first_derive(&place, &tree, &st);
+        let before = std::fs::metadata(tree.join("README.md")).unwrap().modified().unwrap();
+        std::fs::write(place.join("README.md"), "# Read me\n\nAFTER\n").unwrap();
+
+        let v = registered(&place, &tree, fp, st);
+        {
+            let mut slot = v.0.lock().unwrap();
+            let p = slot.as_mut().unwrap();
+            p.child.kill().unwrap();
+            p.child.wait().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(refresh(&v, 1_000_000 + 600).is_empty());
+        assert!(v.0.lock().unwrap().is_none(), "a dead viewer stayed in the slot");
+        assert_eq!(
+            before,
+            std::fs::metadata(tree.join("README.md")).unwrap().modified().unwrap(),
+            "the tick wrote documents for a viewer that is not running",
+        );
+
+        let _ = std::fs::remove_dir_all(&place);
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
     // ── the gate's WIRING, against a viewer that fails it ───────────────────
 
     /// A viewer binary that answers `200` to everything, including a forged
@@ -1249,7 +1596,14 @@ while True:
         let cfg = tmp("e2e-cfg");
         let v = Viewer::default();
         let _reap = Reaper(&v);
-        let req = Request { root: &src, slug: "e2e-place", path: Some(&entries[0].path), stale: stale() };
+        let req = Request {
+            root: &src,
+            slug: "e2e-place",
+            path: Some(&entries[0].path),
+            stale: stale(),
+            docs: None,
+            fingerprint: worktrees_core::docs::fingerprint(&src),
+        };
 
         // A tree left behind by a previous run — a crash, or a place the user
         // has since removed. The first spawn of a run must take it with it.

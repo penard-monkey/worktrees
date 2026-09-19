@@ -4165,7 +4165,13 @@ async fn open_docs_viewer(
     if let Some(e) = &config_error {
         applog("warn", &format!("open_docs_viewer root={root}: {e}"));
     }
-    let idx = worktrees_core::docs::index_with(&dir, cfg.as_ref().and_then(|c| c.docs.as_ref()));
+    let docs_cfg = cfg.as_ref().and_then(|c| c.docs.as_ref()).cloned();
+    // BEFORE the index walk, deliberately: the tick compares this digest against
+    // a later one, and a document written between the two walks has to read as a
+    // change rather than as something already derived. `viewer::Request::
+    // fingerprint` has the long version.
+    let fingerprint = worktrees_core::docs::fingerprint_with(&dir, docs_cfg.as_ref());
+    let idx = worktrees_core::docs::index_with(&dir, docs_cfg.as_ref());
 
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     // `resource_dir` is absent in `tauri dev` (there is no bundle), which is
@@ -4185,8 +4191,17 @@ async fn open_docs_viewer(
             last_commit_subject: place.last_commit_subject,
             last_commit_epoch: place.last_commit_epoch,
             // The transform may not read the clock; this is not the transform.
+            //
+            // The same instant twice, and they mean different things: the facts
+            // above were captured NOW (the frontend read them off the `Place` it
+            // is rendering), and this copy is being written NOW. The tick moves
+            // the second one alone, which is what makes the two separable at
+            // all — see `Staleness::derived_epoch`.
             now_epoch: sysclock::now_epoch(),
+            derived_epoch: sysclock::now_epoch(),
         },
+        docs: docs_cfg,
+        fingerprint,
     };
     match viewer::open(&v, &config_dir, resource_dir.as_deref(), &idx.entries, &req) {
         Ok(url) => {
@@ -5573,6 +5588,8 @@ pub fn run() {
                 let mut last_draft_counts = (usize::MAX, usize::MAX);
                 // Only the first of a repeating tmux failure is worth a line.
                 let mut last_draft_err = String::new();
+                // …and only the first of a repeating viewer-refresh failure.
+                let mut last_viewer_err = String::new();
                 // Cold start: what happened while the app was closed. Runs before
                 // the first sleep so the nav's afterglow is right on frame one.
                 backfill_worked(&handle);
@@ -5592,6 +5609,28 @@ pub fn run() {
                     // Every tick, not every fifth: a request has a 30 s life
                     // and a person is waiting on it.
                     drain_inbox(&handle);
+                    // And the browser's copy of every place the viewer is
+                    // serving. Every tick for the same reason: somebody is
+                    // watching an agent write, and `mo` live-reloads the moment
+                    // the derived file changes — a slower beat would be a
+                    // browser tab that is visibly behind the dock beside it.
+                    //
+                    // It costs a stat per document per registered place and
+                    // NOTHING when none is registered, which is the normal
+                    // state; `viewer::refresh` is where that is argued. It is
+                    // not gated on window visibility, unlike the pane's own
+                    // poll: the whole point of the browser viewer is the second
+                    // monitor, so "the app is hidden" is exactly when the tab
+                    // most needs to be current.
+                    for e in viewer::refresh(&handle.state::<viewer::Viewer>(), sysclock::now_epoch()) {
+                        // Deduped, like the draft scan below: a place that
+                        // cannot be written will fail every 3 s forever, and a
+                        // log that repeats that is a log nobody reads.
+                        if e != last_viewer_err {
+                            last_viewer_err = e.clone();
+                            applog("error", &format!("viewer refresh: {e}"));
+                        }
+                    }
                     cwd_ticks += 1;
                     if cwd_ticks >= 5 {
                         cwd_ticks = 0;
