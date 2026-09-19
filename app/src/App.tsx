@@ -3212,6 +3212,17 @@ function App() {
   // `toggleDock`, registered once in the keydown effect).
   const selRef = useRef(sel);
   selRef.current = sel;
+  // Settings as they are RIGHT NOW, for an effect that must NOT re-run when
+  // they change. The file restore below is exactly that: its trigger is a place
+  // switch, and a dependency on `settings` would re-fire it on every unrelated
+  // toggle — reopening a file the user had just navigated away from.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  // Bumped once, when persisted settings land. The restore needs it because a
+  // place can be selected before `loadSettings` resolves (the layout effect
+  // awaits an invoke), and reading `files_open` in that window reads DEFAULTS'
+  // empty record — a silent "nothing to restore" that is simply wrong.
+  const [hydratedTick, setHydratedTick] = useState(0);
 
   // rename-in-place for the header name. Transient, and reset on a place switch
   // like dockFile below — a half-typed name must not follow you somewhere else.
@@ -3224,6 +3235,34 @@ function App() {
   // would hide the terminal for no reason.
   const [reading, setReading] = useState(false);
   useEffect(() => { setDockFile(null); setReading(false); setRenaming(false); }, [sel?.repo, sel?.slug]);
+  /** Reopen whatever this place was last viewing (`files_open`).
+   *
+   *  SEPARATE from the reset above, and deliberately so: the reset must stay
+   *  keyed on the place alone, while this also has to re-run when hydration
+   *  lands. Folding them together would mean either resetting the viewer on
+   *  every hydration or never restoring for a place selected before it.
+   *
+   *  The path is VALIDATED first. A remembered file can be deleted, renamed,
+   *  gitignored or left behind by a branch switch between visits, and
+   *  `FileView` routes a failed `read_file` straight to the error banner — so
+   *  restoring optimistically would punish the ordinary act of deleting a file
+   *  you once had open. `file_readable` answers false rather than erroring, and
+   *  a false simply leaves the viewer empty. `reading` (⌘⇧E) deliberately does
+   *  NOT come back with it: a full-pane overlay on arrival hides the terminal
+   *  you just navigated to.
+   *
+   *  `alive` covers A→B→A faster than a stat: without it the first place's
+   *  answer lands last and reopens ITS file over the one you are now in. */
+  useEffect(() => {
+    if (!sel) return;
+    const remembered = settingsRef.current.files_open?.[placeKey(sel.repo, sel.slug)];
+    if (!remembered) return; // no invoke at all for the common case
+    let alive = true;
+    invoke<boolean>("file_readable", { path: remembered })
+      .then((ok) => { if (alive && ok) setDockFile(remembered); })
+      .catch(() => { /* a restore is best-effort — never a banner */ });
+    return () => { alive = false; };
+  }, [sel?.repo, sel?.slug, hydratedTick]);
   useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab.
@@ -3885,6 +3924,9 @@ function App() {
       hydrated.current = true;
       applySettings(merged);
       setSettings(merged);
+      // Lets the file restore run for a place that was selected while this
+      // invoke was still in flight.
+      setHydratedTick((n) => n + 1);
       if (Object.keys(preHydration.current).length > 0) saveSettings(merged);
       setCollapsed(merged.collapsed ?? {});
       // release notes: embedded CHANGELOG vs last-seen version. Fresh install
@@ -3993,6 +4035,23 @@ function App() {
     });
   }, []);
 
+  /** Open a file in the Files tab AND remember it for the selected place.
+   *
+   *  Every path into the viewer goes through here, which is what lets the
+   *  switch-reset stay a plain `setDockFile(null)`: clearing is never a user
+   *  act (nothing closes the viewer but leaving), so "null" never has to mean
+   *  "forget this place's file" and the reset cannot race the restore into
+   *  deleting the very entry it is about to read. */
+  const openDockFile = useCallback((path: string) => {
+    setDockFile(path);
+    const cur = selRef.current;
+    if (!cur) return;
+    const key = placeKey(cur.repo, cur.slug);
+    // Functional: the record must be read as it is at WRITE time, not as it was
+    // when this closure was made — the same rule `manual_order`'s splice follows.
+    updateSettings((prev) => ({ files_open: { ...prev.files_open, [key]: path } }));
+  }, [updateSettings]);
+
   // ── "show me this document", from a Claude session ────────────────────────
   // `worktrees show` / the MCP `show_doc` tool drop a request in
   // `~/.cache/worktrees/inbox`; the backend's 3 s tick validates it and emits
@@ -4016,10 +4075,18 @@ function App() {
   useEffect(() => {
     if (!pendingDoc) return;
     if (sel?.repo !== pendingDoc.repo || sel?.slug !== pendingDoc.slug) return;
-    setDockFile(pendingDoc.path);
+    // Through `openDockFile`, not `setDockFile`: a document Claude put on your
+    // screen is a file you are now viewing in this place, so leaving and coming
+    // back must bring it back like any other. This is also the invariant that
+    // keeps the place-switch reset a plain `setDockFile(null)` — a second way
+    // into the viewer that did not remember would quietly break it.
+    // `selRef.current` is correct by here: this effect is exactly the wait for
+    // the selection to land, which is why the request was parked in the first
+    // place.
+    openDockFile(pendingDoc.path);
     updatePanels({ dock_tab: "files", dock_open: true });
     setPendingDoc(null);
-  }, [pendingDoc, sel, updatePanels]);
+  }, [pendingDoc, sel, updatePanels, openDockFile]);
 
   /** Forget remembered panels for keys matching `shouldDrop`.
    *
@@ -4028,8 +4095,8 @@ function App() {
    *  years ago would still be carrying a dock width. */
   const dropPanels = useCallback((
     shouldDrop: (key: string) => boolean,
-    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs")[] =
-      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs"],
+    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs" | "files_open")[] =
+      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs", "files_open"],
   ) => {
     setSettings((prev) => {
       // The default sweeps EVERY per-place map, not just the panels: they are
@@ -6805,7 +6872,7 @@ function App() {
                     // renderer, which has done markdown since v0.8.0. The dock
                     // is controlled from here (`dockFile`), so this needs no
                     // new plumbing — it sets the same state a tree row does.
-                    onOpen={(p) => { setDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
+                    onOpen={(p) => { openDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
                     onError={fail}
                     findOpen={findOn === "dock"}
                     findToken={findToken}
@@ -6823,7 +6890,7 @@ function App() {
                     showIgnored={settings.files_show_ignored}
                     changedOnly={settings.files_changed_only}
                     reloadToken={placesToken}
-                    onOpen={setDockFile}
+                    onOpen={openDockFile}
                     onOpenEditor={editIn}
                     onError={fail}
                     wrap={settings.files_wrap}
@@ -6873,7 +6940,7 @@ function App() {
                 key={dockFile}
                 path={dockFile}
                 reloadToken={placesToken}
-                onOpen={setDockFile}
+                onOpen={openDockFile}
                 onOpenEditor={editIn}
                 onError={fail}
                 wrap={settings.files_wrap}
