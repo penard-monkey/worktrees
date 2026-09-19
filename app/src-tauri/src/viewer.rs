@@ -108,6 +108,46 @@ const DOC_MAX_BYTES: u64 = 1_000_000;
 /// is a URL path segment; the length is cosmetic, the character set is not.
 const GROUP_MAX: usize = 48;
 
+/// What a document may bring with it into the derived tree.
+///
+/// An ALLOW-LIST, never a denylist: the set of things a browser will execute
+/// grows, and a denylist written today is a list of the attacks that were known
+/// today. Matched on the extension because that is also what the viewer matches
+/// on when it decides what to serve and with which content type — agreeing with
+/// it is the point.
+///
+/// **SVG is deliberately absent, and adding it is not a fix.** An SVG is a live
+/// document: it can carry `<script>`, `<foreignObject>` and external references.
+/// Inside an `<img>` it is script-inert by spec, which is the reading that makes
+/// "it's just an image" sound true — but `mo` serves this tree over HTTP and
+/// hands any raw asset back by direct URL
+/// (`/_/api/groups/{g}/files/{id}/raw/{path}` → `http.ServeFile`), where it is a
+/// top-level document with `image/svg+xml` on it and script runs. We do not
+/// control that content type, the port has no authentication, and the documents
+/// reached through it carry a client's signed agreement (§4.3). So: rasters
+/// only. A place's `logo.svg` stays broken on purpose, and the way to fix that
+/// is a viewer that serves assets with a content type we chose — not a seventh
+/// entry in this array.
+const ASSET_EXTS: [&str; 7] = ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp"];
+
+/// Per-image cap. Ten times `DOC_MAX_BYTES`, because a screenshot is not a
+/// document and 1 MB is an ordinary PNG; past this it is a video frame or a
+/// mistake, and either way the copy is not worth making on a tick.
+const ASSET_MAX_BYTES: u64 = 10_000_000;
+
+/// Per-place cap on everything copied. The derived tree is written on every
+/// re-derive, which happens whenever any document in the place moves, so this
+/// is not a disk limit so much as a bound on what one edit can cost.
+const ASSETS_MAX_TOTAL: u64 = 64_000_000;
+
+/// Hard cap on how many distinct references one place may turn into a stat.
+///
+/// Every candidate is stat'ed on the derive AND folded into the fingerprint, so
+/// this bounds the tick as well as the copy — and the list comes out of
+/// documents, which means its length is chosen by the repo rather than by us.
+/// `MAX_ENTRIES` is the same rule one level up.
+const ASSET_MAX_FILES: usize = 500;
+
 /// Where the viewer binary is looked for, relative to the bundle's resource
 /// directory. `release.yml` puts it here and signs it.
 const RESOURCE_REL: &str = "viewer/mo";
@@ -153,9 +193,19 @@ struct Group {
     /// `derived_epoch` is re-stamped on every re-derive; nothing else here is
     /// re-measured, because every other field costs a git fan-out (§15.3).
     stale: Staleness,
-    /// `docs::fingerprint_with` as of the last derive. The tick re-derives when
+    /// `docs::fingerprint_with`, with this place's images folded in
+    /// (`docs::fold_assets`), as of the last derive. The tick re-derives when
     /// and only when this moves.
     fingerprint: u64,
+    /// The images the last derive considered, relative to `root` — copied ones
+    /// and referenced-but-missing ones alike.
+    ///
+    /// Held for the fingerprint, which has no other way to learn that a
+    /// screenshot changed: the walk lists markdown by design, so without this
+    /// list an edited image moves nothing and the browser keeps serving the
+    /// copy made at click time. See `docs::fold_assets` for what that does and
+    /// does not cover.
+    assets: Vec<String>,
 }
 
 /// One running viewer, and the places already registered with it.
@@ -420,21 +470,44 @@ fn render_one(path: &Path, entry: &DocEntry, stale: &Staleness, links: &Links) -
     }
 }
 
-/// Write the whole derived tree for one place, and return the derived path of
-/// each entry, in index order.
+/// One derived tree, as it stands after a write.
+pub struct Derived {
+    /// The derived path of each entry, in index order — what `open` resolves a
+    /// requested document against.
+    pages: Vec<(usize, PathBuf)>,
+    /// Every image this place's documents ask for, relative to the place root:
+    /// what was copied, plus what was NOT because it is missing. Both belong in
+    /// the fingerprint — a missing image that appears later has to re-derive,
+    /// and it is the only way that transition is ever noticed (`fold_assets`).
+    assets: Vec<String>,
+    /// One line per reference the copy refused, for the app log. Never an error
+    /// return: §2.7 fails per file, and one unreadable screenshot may not cost
+    /// the place its documents.
+    notes: Vec<String>,
+}
+
+/// Write the whole derived tree for one place — every document, and the images
+/// they reference.
 ///
 /// Written IN PLACE rather than wiped and recreated. `mo` watches this directory
 /// (`-wR`), and a delete-then-create cycle is two events per file on a watcher
 /// that is also the thing keeping the user's open tab live; overwriting is one.
 /// Files that are no longer in the index are pruned afterwards, which is the
 /// only removal that has to happen at all.
+///
+/// `root` is the place itself, canonical, and it is here for the images: a
+/// reference is resolved against it and every candidate has to prove it still
+/// lies under it (`copy_assets`). It is passed rather than derived from an
+/// entry's absolute path minus its `rel`, because that subtraction is a third
+/// place that would have to agree with the walk about what a root is.
 fn write_tree(
     dir: &Path,
+    root: &Path,
     entries: &[DocEntry],
     stale: &Staleness,
     port: u16,
     group: &str,
-) -> Result<Vec<(usize, PathBuf)>, String> {
+) -> Result<Derived, String> {
     // The derived path of every entry, decided BEFORE anything is written,
     // because `Links::url` has to be able to answer for a page that has not been
     // generated yet — a diagram on the first page links to the last one.
@@ -455,17 +528,198 @@ fn write_tree(
     // disk, and the index's cap is 2,000 — a linear scan makes that four million
     // path comparisons on a button press, for no reason.
     let mut written: BTreeSet<PathBuf> = BTreeSet::new();
+    // Deduped and ordered: two documents in the same directory usually share
+    // their screenshots, and a set means the file is stat'ed and copied once
+    // however many pages point at it. Sorted, so what the cap below keeps is
+    // the same set on every derive rather than whichever ones the walk reached
+    // first.
+    let mut refs: BTreeSet<String> = BTreeSet::new();
+    let mut notes: Vec<String> = Vec::new();
     for (i, out) in &derived {
         let entry = &entries[*i];
         let body = render_one(Path::new(&entry.path), entry, stale, &links);
+        // Asked of the RENDERED body, not of the file: the transform leaves
+        // every image reference exactly as its author wrote it (that is why the
+        // copy has to mirror the path at all), so the two texts give the same
+        // answer — and reading the document a second time to ask the same
+        // question is the second reader this feature keeps refusing. A stub page
+        // has no references, which is also correct: nothing of it is shown.
+        collect_refs(entry, &body, &mut refs, &mut notes);
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         std::fs::write(out, body).map_err(|e| format!("{}: {e}", out.display()))?;
         written.insert(out.clone());
     }
+    // Before the prune, and into the same `written` set: a copied image is a
+    // file in the tree like any other, so an image that stops being referenced
+    // has to leave with the document that referenced it. Left out of the set it
+    // would be deleted on the very next derive instead — the tree would work
+    // once and then serve broken images — and left out of the prune entirely it
+    // would sit there being served forever.
+    let assets = copy_assets(dir, root, &refs, &mut written, &mut notes);
     prune(dir, &written);
-    Ok(derived)
+    Ok(Derived { pages: derived, assets, notes })
+}
+
+/// The images one document asks for, as paths relative to the place root.
+///
+/// Layer A is `derive::asset_rel`; this adds the extension allow-list and
+/// nothing else. A reference it drops is dropped SILENTLY, with one exception:
+/// almost everything refused here is an ordinary `https://` image or an anchor
+/// a document happens to define, and a log line per external image per derive
+/// would bury the lines that mean something. The exception is SVG, which is
+/// refused for a reason the author cannot guess from a broken image.
+fn collect_refs(entry: &DocEntry, body: &str, out: &mut BTreeSet<String>, notes: &mut Vec<String>) {
+    for r in derive::image_refs(body) {
+        let Some(rel) = derive::asset_rel(&entry.rel, &r) else { continue };
+        match ext_of(&rel) {
+            e if ASSET_EXTS.contains(&e.as_str()) => {
+                out.insert(rel);
+            }
+            e if e == "svg" => notes.push(format!(
+                "{rel}: an SVG is not copied into the derived tree — the viewer serves it by URL, \
+                 where it is a document that can run script rather than an image"
+            )),
+            _ => {}
+        }
+    }
+}
+
+/// A path's extension, lowercased, or `""`. A file with no dot has no extension
+/// — not the whole name as one, which would make `README` an allow-list
+/// question.
+fn ext_of(rel: &str) -> String {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext.to_ascii_lowercase(),
+        _ => String::new(),
+    }
+}
+
+/// Copy the images the documents reference into the derived tree, mirroring
+/// each one's path relative to the place root. Returns every candidate it
+/// considered — copied or missing — which is the list the fingerprint stats.
+///
+/// **Why the path is mirrored and the document is not rewritten.** The viewer
+/// resolves a relative `src` against the directory of the markdown file it is
+/// serving, so a copy at the same relative offset makes the author's own
+/// reference resolve with nothing edited. A derived document that had its links
+/// rewritten would no longer be a faithful copy of the file it claims to show,
+/// on the one surface built to say how faithful it is.
+///
+/// **Layer B, and why Layer A is not enough.** `derive::asset_rel` has already
+/// refused absolute paths, `~`, `$`, URL schemes, empty components, `.git` and
+/// any `..` that escapes — but it is arithmetic on a string, and a string cannot
+/// show a symlink. `docs/assets` may BE a link to `/`, in which case
+/// `docs/assets/x.png` is textually innocent and reads somebody else's file. So
+/// the candidate is `symlink_metadata`'d (never `metadata` — the same rule
+/// `docs.rs` keeps, and for the same `docs/logo.png -> ~/.ssh/id_rsa`) and then
+/// canonicalised and required to start with the canonical root, which resolves
+/// every link in every parent component. The second check is the one that holds.
+///
+/// Every refusal is per file and never fatal (§2.7): one bad image may not cost
+/// a place its documents.
+fn copy_assets(
+    dir: &Path,
+    root: &Path,
+    refs: &BTreeSet<String>,
+    written: &mut BTreeSet<PathBuf>,
+    notes: &mut Vec<String>,
+) -> Vec<String> {
+    // Canonical once, here: `starts_with` is a comparison of components, so a
+    // root that still contains a symlink (`/tmp` is `/private/tmp` on this
+    // platform) would fail to match its own files and quietly copy nothing.
+    let Ok(canon_root) = std::fs::canonicalize(root) else {
+        notes.push(format!("{}: the place could not be resolved; no images were copied", root.display()));
+        return Vec::new();
+    };
+    let mut kept: Vec<String> = Vec::new();
+    let mut total: u64 = 0;
+    let mut over_total: usize = 0;
+    for rel in refs {
+        if kept.len() >= ASSET_MAX_FILES {
+            notes.push(format!(
+                "stopped after {ASSET_MAX_FILES} images; {} more were referenced and not copied",
+                refs.len() - kept.len()
+            ));
+            break;
+        }
+        // Counted as a candidate even when the copy below refuses it: the
+        // fingerprint stats this list, and an image that is missing TODAY is
+        // exactly the one whose arrival tomorrow has to re-derive the place.
+        kept.push(rel.clone());
+        // The write-side shape check the documents get, for the same reason they
+        // get it: this is where a path becomes a file we create.
+        let Some(safe) = safe_rel(rel) else { continue };
+        let src = canon_root.join(safe);
+        // Missing is silent. A document that points at a file the repo does not
+        // have is a broken image in the repo too, and saying so once per derive
+        // per reference would be a log of somebody else's typos.
+        let Ok(md) = std::fs::symlink_metadata(&src) else { continue };
+        if !md.is_file() {
+            notes.push(format!("{rel}: not a regular file — a symlinked image is never followed"));
+            continue;
+        }
+        if md.len() > ASSET_MAX_BYTES {
+            notes.push(format!(
+                "{rel}: {} bytes is over the {ASSET_MAX_BYTES}-byte per-image cap and was not copied",
+                md.len()
+            ));
+            continue;
+        }
+        if total.saturating_add(md.len()) > ASSETS_MAX_TOTAL {
+            over_total += 1;
+            continue;
+        }
+        // The check that actually holds — every parent component resolved.
+        let Ok(canon) = std::fs::canonicalize(&src) else { continue };
+        if !canon.starts_with(&canon_root) {
+            notes.push(format!("{rel}: resolves to {}, which is outside the place", canon.display()));
+            continue;
+        }
+        let dest = dir.join(safe);
+        // Already current? Then leave it alone. `mo` watches this tree, so an
+        // identical rewrite is a reload event in somebody's open tab for no
+        // change at all — and a re-derive happens whenever ANY document in the
+        // place moves, which on a place an agent is writing in is constantly.
+        // The test is the fingerprint's own (length, and a copy no older than
+        // its source); it can only be wrong in the direction the fingerprint is
+        // already wrong in, and that window is documented there.
+        //
+        // Note what `modified()` means on each side here. On macOS
+        // `std::fs::copy` goes through `copyfile`/`clonefile`, which carries the
+        // source's mtime across, so a fresh copy compares EQUAL rather than
+        // newer — which is why the test is `>=`. (It is also why a copy cannot
+        // be detected by watching the destination's mtime; the test that guards
+        // this skip had to mark the copy's bytes instead, and says so.)
+        let fresh = std::fs::symlink_metadata(&dest)
+            .ok()
+            .filter(|d| d.is_file() && d.len() == md.len())
+            .and_then(|d| Some((d.modified().ok()?, md.modified().ok()?)))
+            .map(|(dst, srct)| dst >= srct)
+            .unwrap_or(false);
+        if !fresh {
+            if let Some(parent) = dest.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    notes.push(format!("{rel}: {} could not be created: {e}", parent.display()));
+                    continue;
+                }
+            }
+            if let Err(e) = std::fs::copy(&src, &dest) {
+                notes.push(format!("{rel}: could not be copied into the derived tree: {e}"));
+                continue;
+            }
+        }
+        total += md.len();
+        written.insert(dest);
+    }
+    if over_total > 0 {
+        notes.push(format!(
+            "stopped at {total} bytes of images (cap {ASSETS_MAX_TOTAL}); {over_total} more were not copied"
+        ));
+    }
+    kept
 }
 
 /// Remove derived files that are no longer in the index, and the directories
@@ -749,13 +1003,25 @@ fn shutdown_port(bin: &Path, state_dir: &Path, port: u16) {
 /// `config_dir` and `resource_dir` come from the app handle; `entries` is the
 /// index the caller already walked. Returns the URL for the frontend to hand to
 /// `openUrl`.
+/// What one successful `open` produced: the URL for `openUrl`, and anything the
+/// derive refused along the way.
+///
+/// The notes are not errors — the open succeeded — but they are the only record
+/// that an image the reader is about to not-see was skipped on purpose, so the
+/// caller logs them. Swallowing them would leave a missing screenshot with no
+/// explanation anywhere in the app.
+pub struct Opened {
+    pub url: String,
+    pub notes: Vec<String>,
+}
+
 pub fn open(
     v: &Viewer,
     config_dir: &Path,
     resource_dir: Option<&Path>,
     entries: &[DocEntry],
     req: &Request,
-) -> Result<String, String> {
+) -> Result<Opened, String> {
     let bin = binary_path(resource_dir).ok_or_else(|| {
         "the documentation viewer is not installed with this app (Settings → Health reports it); \
          the Docs tab still lists and reads every document in place"
@@ -799,13 +1065,18 @@ pub fn open(
     let group = group_name(req.slug, &root, &taken);
     let tree = vdir.join("tree").join(tree_key(req.slug, &root));
 
-    let derived = write_tree(&tree, entries, &req.stale, port, &group)?;
+    let derived = write_tree(&tree, &root, entries, &req.stale, port, &group)?;
+    // The images this place brought with it are part of what the tick has to
+    // watch, so the digest recorded below is the caller's (taken BEFORE the
+    // walk, which is the one ordering rule here) with their stats folded in.
+    let fingerprint = worktrees_core::docs::fold_assets(req.fingerprint, &root, &derived.assets);
+    let pages = &derived.pages;
     // A group of no documents is not worth registering, and registering one
     // would put a watch pattern on an empty directory that nothing will ever
     // fill. The footer button is disabled on an empty index, so the way here is
     // the race: the index was walked 30 seconds ago and the place has been
     // emptied since. Say that, rather than opening a blank group.
-    if derived.is_empty() {
+    if pages.is_empty() {
         return Err(format!("{} has no documents to show", req.slug));
     }
     if !proc.groups.iter().any(|g| g.root == root) {
@@ -838,7 +1109,8 @@ pub fn open(
             tree: tree.clone(),
             docs: req.docs.clone(),
             stale: req.stale.clone(),
-            fingerprint: req.fingerprint,
+            fingerprint,
+            assets: derived.assets.clone(),
         });
     }
     // Every open re-derives, registered or not (`write_tree` above), so the
@@ -850,13 +1122,15 @@ pub fn open(
     if let Some(g) = proc.groups.iter_mut().find(|g| g.root == root) {
         g.docs = req.docs.clone();
         g.stale = req.stale.clone();
-        g.fingerprint = req.fingerprint;
+        g.fingerprint = fingerprint;
+        g.assets = derived.assets.clone();
     }
 
-    let Some(want) = req.path else { return Ok(group_url(port, &group)) };
-    let hit = derived.iter().find(|(i, _)| entries[*i].path == want);
+    let notes = derived.notes;
+    let Some(want) = req.path else { return Ok(Opened { url: group_url(port, &group), notes }) };
+    let hit = pages.iter().find(|(i, _)| entries[*i].path == want);
     match hit {
-        Some((_, p)) => Ok(file_url(port, &group, p)),
+        Some((_, p)) => Ok(Opened { url: file_url(port, &group, p), notes }),
         None => Err(format!("{want} is not in this place's documentation index")),
     }
 }
@@ -895,7 +1169,10 @@ pub fn open(
 ///    so the page says when it was copied and, separately, when its status was
 ///    measured. See `Staleness::derived_epoch`.
 ///
-/// Returns one message per place that could not be re-derived. Never panics on
+/// Returns one message per place that could not be re-derived, plus one per
+/// image a derive refused to copy — the same lines `Opened::notes` carries on
+/// the click path, for the same reason: a screenshot that is skipped on purpose
+/// must be findable somewhere other than in this source file. Never panics on
 /// a poisoned lock's account — this runs on the app's tick thread, and taking
 /// the process down over a documentation copy is not a trade worth making.
 pub fn refresh(v: &Viewer, now_epoch: i64) -> Vec<String> {
@@ -913,17 +1190,31 @@ pub fn refresh(v: &Viewer, now_epoch: i64) -> Vec<String> {
     }
     let port = proc.port;
     for g in proc.groups.iter_mut() {
-        let fp = worktrees_core::docs::fingerprint_with(&g.root, g.docs.as_ref());
+        let docs_fp = worktrees_core::docs::fingerprint_with(&g.root, g.docs.as_ref());
+        // The images the last derive knew about, stat'ed alongside the
+        // documents. Without them an edited screenshot moves nothing — the walk
+        // lists markdown by design — and the tab goes on showing the version
+        // that was current when the button was pressed, which is this feature's
+        // own failure wearing a different hat.
+        let fp = worktrees_core::docs::fold_assets(docs_fp, &g.root, &g.assets);
         if fp == g.fingerprint {
             continue;
         }
         let idx = worktrees_core::docs::index_with(&g.root, g.docs.as_ref());
         let mut stale = g.stale.clone();
         stale.derived_epoch = now_epoch;
-        match write_tree(&g.tree, &idx.entries, &stale, port, &g.name) {
-            Ok(_) => {
-                g.fingerprint = fp;
+        match write_tree(&g.tree, &g.root, &idx.entries, &stale, port, &g.name) {
+            Ok(d) => {
+                // Folded over the NEW list rather than storing `fp`: this derive
+                // may have added or dropped an image, and recording a digest
+                // taken over the old list would differ from the next tick's for
+                // no change at all — one re-derive per asset change, forever.
+                g.fingerprint = worktrees_core::docs::fold_assets(docs_fp, &g.root, &d.assets);
+                g.assets = d.assets;
                 g.stale = stale;
+                for n in d.notes {
+                    errs.push(format!("{}: {n}", g.slug));
+                }
             }
             // Rule 3: the fingerprint is NOT advanced, so this is tried again.
             Err(e) => errs.push(format!("{}: {e}", g.slug)),
@@ -1135,7 +1426,7 @@ mod tests {
             vec![entry("README.md", "Read me", &src), entry("docs/adr/0001.md", "ADR", &src)];
         let out = tmp("mirror-out");
 
-        let derived = write_tree(&out, &entries, &stale(), 6275, "g").unwrap();
+        let derived = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap().pages;
         assert_eq!(derived.len(), 2);
         assert!(out.join("README.md").is_file());
         assert!(out.join("docs/adr/0001.md").is_file());
@@ -1171,7 +1462,7 @@ mod tests {
             entry("docs/runbook.md", "Runbook", &src),
         ];
         let out = tmp("click-out");
-        let derived = write_tree(&out, &entries, &stale(), 6275, "g").unwrap();
+        let derived = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap().pages;
 
         let text = std::fs::read_to_string(out.join("docs/overview.md")).unwrap();
         assert!(!text.contains("evil.example"), "an author's click survived: {text}");
@@ -1191,7 +1482,7 @@ mod tests {
         std::fs::write(src.join("bad.md"), [0xffu8, 0xfe, 0xfd]).unwrap();
         let entries = vec![entry("bad.md", "bad", &src)];
         let out = tmp("stub-out");
-        write_tree(&out, &entries, &stale(), 6275, "g").unwrap();
+        write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
         let text = std::fs::read_to_string(out.join("bad.md")).unwrap();
         assert!(text.contains("not valid UTF-8"), "{text}");
         assert!(text.starts_with("> **viewer-guarded**"), "{text}");
@@ -1212,10 +1503,10 @@ mod tests {
         let out = tmp("prune-out");
 
         let both = vec![entry("a.md", "A", &src), entry("docs/b.md", "B", &src)];
-        write_tree(&out, &both, &stale(), 6275, "g").unwrap();
+        write_tree(&out, &src, &both, &stale(), 6275, "g").unwrap();
         assert!(out.join("docs/b.md").is_file());
 
-        write_tree(&out, &both[..1], &stale(), 6275, "g").unwrap();
+        write_tree(&out, &src, &both[..1], &stale(), 6275, "g").unwrap();
         assert!(out.join("a.md").is_file());
         assert!(!out.join("docs/b.md").exists(), "a dropped document stayed in the tree");
         assert!(!out.join("docs").exists(), "the directory it emptied stayed");
@@ -1265,6 +1556,246 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    // ── images ──────────────────────────────────────────────────────────────
+
+    /// A 1×1 PNG. Real bytes rather than a placeholder, because the end-to-end
+    /// test below hands them to a server that decides a content type.
+    const PNG: [u8; 67] = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+        0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+        0x42, 0x60, 0x82,
+    ];
+
+    fn png_at(root: &Path, rel: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, PNG).unwrap();
+    }
+
+    fn doc_at(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// **The bug, as one assertion.** `write_tree` wrote markdown and nothing
+    /// else, and the walk lists markdown by design — so a document's images were
+    /// never in the entry list and nothing copied them. Every illustrated page
+    /// rendered with broken images in the browser while the dock, reading the
+    /// repo itself, showed them perfectly: the viewer was strictly worse than the
+    /// surface it exists to improve on.
+    ///
+    /// The copy mirrors the reference's own relative path, and the document is
+    /// NOT rewritten — asserted here, because a rewrite is the other way to make
+    /// this pass and it would make the derived text stop being a copy.
+    #[test]
+    fn a_referenced_image_is_copied_beside_its_document() {
+        let src = tmp("img");
+        doc_at(
+            &src,
+            "docs/guides/p.md",
+            "# P\n\n![up](../assets/y.png)\n![down](pics/z.png)\n![same](w.png)\n\
+             ![remote](https://example.com/r.png)\n![inline](data:image/png;base64,iVBORw0KGgo=)\n",
+        );
+        png_at(&src, "docs/assets/y.png");
+        png_at(&src, "docs/guides/pics/z.png");
+        png_at(&src, "docs/guides/w.png");
+        let entries = vec![entry("docs/guides/p.md", "P", &src)];
+        let out = tmp("img-out");
+
+        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+
+        for rel in ["docs/assets/y.png", "docs/guides/pics/z.png", "docs/guides/w.png"] {
+            assert!(out.join(rel).is_file(), "{rel} was not copied into the derived tree");
+            assert_eq!(std::fs::read(out.join(rel)).unwrap(), PNG, "{rel} arrived with the wrong bytes");
+        }
+        // The list the fingerprint stats: the local images, and only those. A
+        // URL and a `data:` URI are not files and must never become one.
+        assert_eq!(
+            d.assets,
+            vec!["docs/assets/y.png", "docs/guides/pics/z.png", "docs/guides/w.png"]
+        );
+        assert!(d.notes.is_empty(), "{:?}", d.notes);
+        // The document is untouched — this is a copy, not a rewrite.
+        let text = std::fs::read_to_string(out.join("docs/guides/p.md")).unwrap();
+        assert!(text.contains("![up](../assets/y.png)"), "the reference was rewritten: {text}");
+        assert!(text.contains("![down](pics/z.png)"), "{text}");
+        assert!(text.contains("![remote](https://example.com/r.png)"), "{text}");
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// `symlink_metadata`, never `metadata` — the rule `docs.rs` keeps about
+    /// documents, applied to images for the identical reason. A committed
+    /// `docs/logo.png -> ~/.ssh/id_rsa` must copy NOTHING: the derived tree is
+    /// served on an unauthenticated loopback port, so a copy here is a
+    /// publication.
+    #[test]
+    fn a_symlinked_image_copies_nothing() {
+        let src = tmp("img-link");
+        let secret = tmp("img-link-secret").join("id_rsa");
+        std::fs::write(&secret, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+        doc_at(&src, "docs/p.md", "# P\n\n![logo](logo.png)\n");
+        std::os::unix::fs::symlink(&secret, src.join("docs/logo.png")).unwrap();
+        let entries = vec![entry("docs/p.md", "P", &src)];
+        let out = tmp("img-link-out");
+
+        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+
+        assert!(!out.join("docs/logo.png").exists(), "a symlinked image was copied");
+        assert!(
+            d.notes.iter().any(|n| n.contains("docs/logo.png") && n.contains("regular file")),
+            "the refusal was silent: {:?}",
+            d.notes
+        );
+        // It is still a candidate, so replacing the link with a real file
+        // re-derives the place rather than leaving the image broken forever.
+        assert_eq!(d.assets, vec!["docs/logo.png"]);
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&secret.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// **Layer B, which is the check that actually holds.** Layer A is
+    /// arithmetic on a string and a string cannot show a symlink: with
+    /// `docs/assets` a link to a directory elsewhere, `../assets/x.png` is
+    /// textually innocent, its final component really is a regular file, and
+    /// only canonicalising the whole path says where it is.
+    #[test]
+    fn an_image_that_resolves_outside_the_place_is_refused() {
+        let src = tmp("img-escape");
+        let elsewhere = tmp("img-escape-elsewhere");
+        std::fs::write(elsewhere.join("x.png"), PNG).unwrap();
+        std::fs::create_dir_all(src.join("docs/guides")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, src.join("docs/assets")).unwrap();
+        doc_at(
+            &src,
+            "docs/guides/p.md",
+            "# P\n\n![through a link](../assets/x.png)\n![up and out](../../../../etc/passwd.png)\n\
+             ![absolute](/etc/passwd.png)\n![home](~/.ssh/id_rsa.png)\n",
+        );
+        let entries = vec![entry("docs/guides/p.md", "P", &src)];
+        let out = tmp("img-escape-out");
+
+        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+
+        assert!(!out.join("docs/assets/x.png").exists(), "a file outside the place was copied in");
+        assert!(
+            d.notes.iter().any(|n| n.contains("outside the place")),
+            "the escape was refused silently: {:?}",
+            d.notes
+        );
+        // Layer A refused the other three before any of them reached a stat, so
+        // the only candidate is the one that needed Layer B.
+        assert_eq!(d.assets, vec!["docs/assets/x.png"]);
+        // And the tree holds the document and nothing else.
+        let mut found: Vec<String> = Vec::new();
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                if e.path().is_dir() {
+                    walk(&e.path(), base, out);
+                } else {
+                    out.push(e.path().strip_prefix(base).unwrap().to_string_lossy().into_owned());
+                }
+            }
+        }
+        walk(&out, &out, &mut found);
+        assert_eq!(found, vec!["docs/guides/p.md"], "the derived tree gained a file it should not have");
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// An image over the per-file cap is skipped and SAID — §2.7 is "fail per
+    /// file, loudly", and a screenshot that silently does not arrive is a reader
+    /// wondering whether the document is broken or the tool is.
+    #[test]
+    fn an_over_cap_image_is_skipped_and_said_out_loud() {
+        let src = tmp("img-cap");
+        doc_at(&src, "p.md", "# P\n\n![huge](huge.png)\n![fine](fine.png)\n");
+        png_at(&src, "fine.png");
+        // Sparse: the cap is about bytes the copy would move, and the test is
+        // not about waiting for a disk.
+        std::fs::File::create(src.join("huge.png")).unwrap().set_len(ASSET_MAX_BYTES + 1).unwrap();
+        let entries = vec![entry("p.md", "P", &src)];
+        let out = tmp("img-cap-out");
+
+        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+
+        assert!(!out.join("huge.png").exists(), "an over-cap image was copied");
+        assert!(out.join("fine.png").is_file(), "one refusal took the other image with it");
+        assert!(
+            d.notes.iter().any(|n| n.contains("huge.png") && n.contains("cap")),
+            "the excess was dropped silently: {:?}",
+            d.notes
+        );
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// SVG is not an image here, it is a document that can run script — and the
+    /// viewer hands assets back by URL, where an `<img>`'s inertness does not
+    /// apply. The allow-list carries the long version; this is the assertion
+    /// that stops someone "fixing" a broken logo by adding three letters.
+    #[test]
+    fn an_svg_is_never_copied_however_ordinary_it_looks() {
+        let src = tmp("img-svg");
+        doc_at(&src, "p.md", "# P\n\n![logo](logo.svg)\n![shot](shot.png)\n");
+        std::fs::write(src.join("logo.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>fetch('/_/api/groups')</script></svg>").unwrap();
+        png_at(&src, "shot.png");
+        let entries = vec![entry("p.md", "P", &src)];
+        let out = tmp("img-svg-out");
+
+        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+
+        assert!(!out.join("logo.svg").exists(), "an SVG reached the derived tree");
+        assert!(out.join("shot.png").is_file());
+        assert!(!d.assets.iter().any(|a| a.ends_with(".svg")), "{:?}", d.assets);
+        assert!(
+            d.notes.iter().any(|n| n.contains("logo.svg") && n.contains("script")),
+            "a reader with a broken logo has no way to find out why: {:?}",
+            d.notes
+        );
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// An image must leave the tree when the document that referenced it does —
+    /// the derived copy is served on a port, so a deleted screenshot that stays
+    /// behind is the feature serving something the place no longer has. The
+    /// prune only knows what the write told it, so this is really an assertion
+    /// about the copy joining the `written` set.
+    #[test]
+    fn an_image_that_is_no_longer_referenced_leaves_the_tree() {
+        let src = tmp("img-prune");
+        doc_at(&src, "docs/p.md", "# P\n\n![shot](shots/a.png)\n");
+        png_at(&src, "docs/shots/a.png");
+        let entries = vec![entry("docs/p.md", "P", &src)];
+        let out = tmp("img-prune-out");
+
+        write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        assert!(out.join("docs/shots/a.png").is_file(), "the first derive did not copy it");
+
+        // The author drops the image from the document.
+        doc_at(&src, "docs/p.md", "# P\n\nno picture any more\n");
+        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+
+        assert!(out.join("docs/p.md").is_file(), "the prune took the document too");
+        assert!(!out.join("docs/shots/a.png").exists(), "a dropped image is still being served");
+        assert!(!out.join("docs/shots").exists(), "the directory it emptied stayed");
+        assert!(d.assets.is_empty(), "{:?}", d.assets);
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
     // ── the tick ────────────────────────────────────────────────────────────
 
     /// A viewer slot holding a child that is alive and is not a viewer.
@@ -1275,7 +1806,7 @@ mod tests {
     /// IS does not matter here — what matters is that `try_wait` reports it
     /// alive, which is the liveness rule this shares with `Shells`. A real `mo`
     /// is `the_whole_path_works_against_a_real_viewer`'s business.
-    fn registered(place: &Path, tree: &Path, fingerprint: u64, stale: Staleness) -> Viewer {
+    fn registered(place: &Path, tree: &Path, fingerprint: u64, assets: Vec<String>, stale: Staleness) -> Viewer {
         let child = std::process::Command::new("/bin/sleep")
             .arg("120")
             .stdin(std::process::Stdio::null())
@@ -1295,18 +1826,20 @@ mod tests {
                 docs: None,
                 stale,
                 fingerprint,
+                assets,
             }],
         });
         v
     }
 
     /// Derive a place the way `open` does, and hand back the state the tick
-    /// carries forward.
-    fn first_derive(place: &Path, tree: &Path, st: &Staleness) -> u64 {
+    /// carries forward: the digest with this place's images folded into it, and
+    /// the list of images that fold was over.
+    fn first_derive(place: &Path, tree: &Path, st: &Staleness) -> (u64, Vec<String>) {
         let fp = worktrees_core::docs::fingerprint(place);
         let idx = worktrees_core::docs::index(place);
-        write_tree(tree, &idx.entries, st, 6275, "tick-place").unwrap();
-        fp
+        let d = write_tree(tree, place, &idx.entries, st, 6275, "tick-place").unwrap();
+        (worktrees_core::docs::fold_assets(fp, place, &d.assets), d.assets)
     }
 
     /// **The bug, as one assertion.** `mo` watches the DERIVED tree, not the
@@ -1320,7 +1853,7 @@ mod tests {
         let tree = tmp("tick-edit-tree");
         std::fs::write(place.join("README.md"), "# Read me\n\nbefore\n").unwrap();
         let st = stale();
-        let fp = first_derive(&place, &tree, &st);
+        let (fp, assets) = first_derive(&place, &tree, &st);
         assert!(std::fs::read_to_string(tree.join("README.md")).unwrap().contains("before"));
 
         // The user edits the document, and adds one — the two cases that both
@@ -1335,7 +1868,7 @@ mod tests {
         std::fs::create_dir_all(place.join("docs")).unwrap();
         std::fs::write(place.join("docs/new.md"), "# Brand new\n").unwrap();
 
-        let v = registered(&place, &tree, fp, st);
+        let v = registered(&place, &tree, fp, assets, st);
         let _reap = Reaper(&v);
         assert!(refresh(&v, 1_000_000 + 600).is_empty(), "the re-derive reported an error");
 
@@ -1361,10 +1894,10 @@ mod tests {
         let tree = tmp("tick-quiet-tree");
         std::fs::write(place.join("README.md"), "# Read me\n").unwrap();
         let st = stale();
-        let fp = first_derive(&place, &tree, &st);
+        let (fp, assets) = first_derive(&place, &tree, &st);
         let before = std::fs::metadata(tree.join("README.md")).unwrap().modified().unwrap();
 
-        let v = registered(&place, &tree, fp, st);
+        let v = registered(&place, &tree, fp, assets, st);
         let _reap = Reaper(&v);
         // Long enough that a rewrite would land in a later millisecond.
         std::thread::sleep(Duration::from_millis(20));
@@ -1373,6 +1906,141 @@ mod tests {
 
         let after = std::fs::metadata(tree.join("README.md")).unwrap().modified().unwrap();
         assert_eq!(before, after, "an untouched place was re-derived anyway");
+
+        let _ = std::fs::remove_dir_all(&place);
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// **The fingerprint's blind spot, closed.** `docs::fingerprint_with` is
+    /// stat-only over MARKDOWN — that is what makes it cheap enough to run on a
+    /// timer — so an edited screenshot moved nothing and the tab went on serving
+    /// the copy made at click time, while the dock beside it showed the new one.
+    /// The repair is not to make the digest read documents (that is the cost it
+    /// exists to avoid) but to stat the images the LAST derive already copied,
+    /// whose paths are known.
+    #[test]
+    fn an_edited_image_reaches_the_derived_copy() {
+        let place = tmp("tick-img");
+        let tree = tmp("tick-img-tree");
+        std::fs::write(place.join("README.md"), "# Read me\n\n![shot](shots/a.png)\n").unwrap();
+        png_at(&place, "shots/a.png");
+        let st = stale();
+        let (fp, assets) = first_derive(&place, &tree, &st);
+        assert_eq!(std::fs::read(tree.join("shots/a.png")).unwrap(), PNG, "the first derive did not copy it");
+        assert_eq!(assets, vec!["shots/a.png"]);
+
+        // The user replaces the screenshot. No document changes, nothing is
+        // clicked: before this, that reached nothing at all.
+        let newer = [PNG.to_vec(), vec![0u8; 16]].concat();
+        for _ in 0..200 {
+            std::fs::write(place.join("shots/a.png"), &newer).unwrap();
+            if worktrees_core::docs::fold_assets(
+                worktrees_core::docs::fingerprint(&place),
+                &place,
+                &assets,
+            ) != fp
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let v = registered(&place, &tree, fp, assets, st);
+        let _reap = Reaper(&v);
+        assert!(refresh(&v, 1_000_000 + 600).is_empty(), "the re-derive reported an error");
+
+        assert_eq!(
+            std::fs::read(tree.join("shots/a.png")).unwrap(),
+            newer,
+            "the edited image never reached the derived copy"
+        );
+        let after = v.0.lock().unwrap().as_ref().unwrap().groups[0].fingerprint;
+        assert_ne!(after, fp, "the fingerprint was not carried forward; every tick would re-derive");
+
+        let _ = std::fs::remove_dir_all(&place);
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// An image a document already points at but the repo does not yet have is
+    /// carried in the candidate list as a stat that fails — so the moment it
+    /// ARRIVES the digest moves and the place re-derives. Without that, the one
+    /// broken image nobody can explain is the one that was fixed by adding the
+    /// missing file.
+    #[test]
+    fn an_image_that_arrives_later_re_derives_the_place() {
+        let place = tmp("tick-img-new");
+        let tree = tmp("tick-img-new-tree");
+        std::fs::write(place.join("README.md"), "# Read me\n\n![shot](shots/a.png)\n").unwrap();
+        let st = stale();
+        let (fp, assets) = first_derive(&place, &tree, &st);
+        assert!(!tree.join("shots/a.png").exists(), "there was nothing to copy yet");
+        assert_eq!(assets, vec!["shots/a.png"], "a missing image must still be a candidate");
+
+        png_at(&place, "shots/a.png");
+
+        let v = registered(&place, &tree, fp, assets, st);
+        let _reap = Reaper(&v);
+        assert!(refresh(&v, 1_000_000 + 600).is_empty());
+        assert_eq!(
+            std::fs::read(tree.join("shots/a.png")).unwrap(),
+            PNG,
+            "the image that arrived after the open never reached the tree"
+        );
+
+        let _ = std::fs::remove_dir_all(&place);
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// …and the other half of the same rule: a place whose images are untouched
+    /// re-copies none of them, even on a tick that DOES re-derive because a
+    /// document moved. Every write into this tree is an event for `mo`'s
+    /// watcher, so a re-copied screenshot is a reload in somebody's open tab
+    /// for no change at all.
+    ///
+    /// **The witness is the copy's BYTES, not its mtime**, and that is a trap
+    /// worth naming: on macOS `std::fs::copy` goes through
+    /// `copyfile(COPYFILE_ALL)`, which carries the source's modification time
+    /// over with the data — so a re-copied file has exactly the mtime it had
+    /// before, and an mtime assertion here passes whatever the code does. (It
+    /// did: this test was green with the skip deleted.) Marking the copy with a
+    /// byte of its own, at the same length so the freshness test still reads it
+    /// as current, makes a re-copy visible as the marker being overwritten.
+    #[test]
+    fn a_quiet_place_does_not_re_copy_its_images() {
+        let place = tmp("tick-img-quiet");
+        let tree = tmp("tick-img-quiet-tree");
+        std::fs::write(place.join("README.md"), "# Read me\n\n![shot](shots/a.png)\n").unwrap();
+        png_at(&place, "shots/a.png");
+        let st = stale();
+        let (fp, assets) = first_derive(&place, &tree, &st);
+        let mut marked = PNG.to_vec();
+        marked[PNG.len() - 1] ^= 0xff;
+        std::fs::write(tree.join("shots/a.png"), &marked).unwrap();
+
+        let v = registered(&place, &tree, fp, assets, st);
+        let _reap = Reaper(&v);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(refresh(&v, 1_000_000 + 600).is_empty());
+        assert!(refresh(&v, 1_000_000 + 900).is_empty());
+        assert_eq!(
+            std::fs::read(tree.join("shots/a.png")).unwrap(),
+            marked,
+            "an untouched image was copied again"
+        );
+
+        // And on a tick that really does re-derive: the document changed, the
+        // image did not.
+        std::fs::write(place.join("README.md"), "# Read me\n\nedited\n\n![shot](shots/a.png)\n").unwrap();
+        assert!(refresh(&v, 1_000_000 + 1200).is_empty());
+        assert!(
+            std::fs::read_to_string(tree.join("README.md")).unwrap().contains("edited"),
+            "the document edit did not re-derive, so this proves nothing"
+        );
+        assert_eq!(
+            std::fs::read(tree.join("shots/a.png")).unwrap(),
+            marked,
+            "an unchanged image was re-copied because a document moved"
+        );
 
         let _ = std::fs::remove_dir_all(&place);
         let _ = std::fs::remove_dir_all(&tree);
@@ -1391,7 +2059,7 @@ mod tests {
         let mut st = stale();
         st.now_epoch = 1_789_776_000;
         st.derived_epoch = 1_789_776_000;
-        let fp = first_derive(&place, &tree, &st);
+        let (fp, assets) = first_derive(&place, &tree, &st);
         let first = std::fs::read_to_string(tree.join("README.md")).unwrap();
         assert!(first.contains("derived 2026-09-19 00:00:00 UTC"), "{first}");
         assert!(!first.contains("status as of"), "one instant, one stamp: {first}");
@@ -1403,7 +2071,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        let v = registered(&place, &tree, fp, st);
+        let v = registered(&place, &tree, fp, assets, st);
         let _reap = Reaper(&v);
         assert!(refresh(&v, 1_789_779_661).is_empty());
 
@@ -1436,11 +2104,11 @@ mod tests {
         let tree = tmp("tick-dead-tree");
         std::fs::write(place.join("README.md"), "# Read me\n\nbefore\n").unwrap();
         let st = stale();
-        let fp = first_derive(&place, &tree, &st);
+        let (fp, assets) = first_derive(&place, &tree, &st);
         let before = std::fs::metadata(tree.join("README.md")).unwrap().modified().unwrap();
         std::fs::write(place.join("README.md"), "# Read me\n\nAFTER\n").unwrap();
 
-        let v = registered(&place, &tree, fp, st);
+        let v = registered(&place, &tree, fp, assets, st);
         {
             let mut slot = v.0.lock().unwrap();
             let p = slot.as_mut().unwrap();
@@ -1611,7 +2279,7 @@ while True:
         std::fs::create_dir_all(&stale_tree).unwrap();
         std::fs::write(stale_tree.join("secret.md"), "a client's signed agreement").unwrap();
 
-        let url = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up");
+        let url = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up").url;
         assert!(!stale_tree.exists(), "a previous run's derived documents survived a fresh spawn");
         assert!(url.starts_with("http://127.0.0.1:"), "{url}");
         assert!(derive::is_loopback_target(&url), "{url}");
@@ -1677,7 +2345,7 @@ while True:
             docs: None,
             fingerprint: fp,
         };
-        let url = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up");
+        let url = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up").url;
         let port = v.0.lock().unwrap().as_ref().unwrap().port;
         let id = url.rsplit("file=").next().unwrap().to_string();
         let content = format!("/_/api/groups/e2e-tick/files/{id}/content");
@@ -1711,6 +2379,78 @@ while True:
         assert!(body.contains("derived 2026-09-19 01:01:01 UTC"), "the re-derived page is not dated: {body}");
         assert!(body.contains("status as of"), "the git facts are passed off as current: {body}");
 
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    /// **An image, loaded through the server.** The one assertion that a file on
+    /// disk cannot make: `mo` resolves a relative `src` against the directory of
+    /// the markdown file it is serving and hands the bytes back from
+    /// `/_/api/groups/{group}/files/{id}/raw/{path}`, so the copy is only
+    /// correct if the viewer can actually reach it at the path the author wrote.
+    ///
+    /// **Runs only when `WORKTREES_VIEWER_BIN` names a viewer:**
+    ///
+    /// ```sh
+    /// WORKTREES_VIEWER_BIN=~/workspace/mo/mo cargo test -p app --lib an_image_loads -- --nocapture
+    /// ```
+    ///
+    /// The `../` case is deliberately not asserted over HTTP, and that is a
+    /// finding rather than an omission: `resolveImageSrc` appends the author's
+    /// `src` to that raw prefix verbatim, so `../assets/y.png` builds a URL
+    /// carrying a dot segment — which both the browser and Go's own mux
+    /// normalise away, eating the `/raw/` segment and landing on a route that
+    /// does not exist (probed: 307 to `…/files/{id}/assets/y.png`, which serves
+    /// the SPA shell). The copy below is correct for that reference too — the
+    /// file lands exactly where the reference points — and it is asserted on
+    /// disk; making it *reachable* is a fix in the viewer, not here.
+    #[test]
+    fn an_image_loads_through_a_real_viewer() {
+        if std::env::var(BIN_ENV).is_err() {
+            return;
+        }
+        let src = tmp("e2e-img");
+        let cfg = tmp("e2e-img-cfg");
+        std::fs::write(
+            src.join("README.md"),
+            "# Read me\n\n![beside](shots/a.png)\n![above](../outside.png)\n",
+        )
+        .unwrap();
+        png_at(&src, "shots/a.png");
+        doc_at(&src, "docs/guides/p.md", "# P\n\n![up](../assets/y.png)\n");
+        png_at(&src, "docs/assets/y.png");
+        let entries = worktrees_core::docs::index(&src).entries;
+        let v = Viewer::default();
+        let _reap = Reaper(&v);
+        let req = Request {
+            root: &src,
+            slug: "e2e-image",
+            path: Some(&entries[0].path),
+            stale: stale(),
+            docs: None,
+            fingerprint: worktrees_core::docs::fingerprint(&src),
+        };
+
+        let opened = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up");
+        let port = v.0.lock().unwrap().as_ref().unwrap().port;
+        let tree = v.0.lock().unwrap().as_ref().unwrap().groups[0].tree.clone();
+        let id = opened.url.rsplit("file=").next().unwrap().to_string();
+
+        // The bytes, through the server, at the path the document asked for.
+        let res = http_get(port, &format!("/_/api/groups/e2e-image/files/{id}/raw/shots/a.png"));
+        assert!(res.starts_with("HTTP/1.1 200"), "the image did not load: {}", res.lines().next().unwrap_or(""));
+        assert!(res.contains("Content-Type: image/png"), "{res:?}");
+        assert!(res.contains(&format!("Content-Length: {}", PNG.len())), "{res:?}");
+
+        // The parent-directory reference: copied to exactly where it points,
+        // which is all this side of the seam can do (see the note above).
+        assert!(tree.join("docs/assets/y.png").is_file(), "the parent-directory image was not copied");
+        assert_eq!(std::fs::read(tree.join("docs/assets/y.png")).unwrap(), PNG);
+        // …and a reference pointing OUT of the place copied nothing at all.
+        assert!(!tree.join("outside.png").exists());
+        assert!(!src.parent().unwrap().join("outside.png").exists());
+
+        kill(&v);
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&cfg);
     }

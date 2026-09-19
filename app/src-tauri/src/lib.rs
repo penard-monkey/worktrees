@@ -4204,9 +4204,15 @@ async fn open_docs_viewer(
         fingerprint,
     };
     match viewer::open(&v, &config_dir, resource_dir.as_deref(), &idx.entries, &req) {
-        Ok(url) => {
+        Ok(opened) => {
             applog("info", &format!("open_docs_viewer slug={slug} entries={}", idx.entries.len()));
-            Ok(url)
+            // An image that was referenced and deliberately not copied is a
+            // broken image in the reader's browser with no other explanation
+            // anywhere — the open succeeded, so there is no error to carry it.
+            for n in &opened.notes {
+                applog("warn", &format!("open_docs_viewer slug={slug}: {n}"));
+            }
+            Ok(opened.url)
         }
         Err(e) => {
             // Never swallowed: the viewer is the one part of this feature the

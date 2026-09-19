@@ -573,6 +573,42 @@ pub fn fingerprint_with(root: &Path, docs: Option<&Docs>) -> u64 {
     fnv1a(h, &[truncated as u8])
 }
 
+/// Fold a stat of each of `rels` into an existing fingerprint.
+///
+/// **Why this is separate from the walk.** The digest above is stat-only over
+/// the MARKDOWN the index lists, and a screenshot is not markdown — so an
+/// edited image moved nothing and the browser went on serving the old one. The
+/// obvious repair is to have the fingerprint read documents and find their
+/// references, which is precisely the cost `fingerprint_with` exists to avoid
+/// (8 KiB per file, per place, every few seconds). Instead the caller hands
+/// back the images it copied on the LAST derive — paths it already knows — and
+/// they are stat'ed alongside the documents.
+///
+/// What that catches: an image edited, replaced, truncated or deleted, and an
+/// image that was missing and has now arrived (the caller lists candidates it
+/// could not copy, so a missing file's `(0, 0)` moves when it appears). What it
+/// cannot catch: an image referenced by a document for the FIRST time, because
+/// nothing here has heard of it yet — but a first reference means the document
+/// changed, and that moves the walk's half of the digest in the same tick. The
+/// two halves cover each other; neither does alone.
+///
+/// Order matters, as it does in the walk: this is a fold, not a sum.
+pub fn fold_assets(base: u64, root: &Path, rels: &[String]) -> u64 {
+    let mut h = base;
+    for rel in rels {
+        let (ms, len) = stat_ms_len(&root.join(rel));
+        h = fnv1a(h, rel.as_bytes());
+        // A different separator from the walk's `0xff`, so an image and a
+        // document with the same rel and the same stat cannot fold to the same
+        // state — the two lists are built by different code and may legally
+        // overlap.
+        h = fnv1a(h, &[0xfe]);
+        h = fnv1a(h, &ms.to_le_bytes());
+        h = fnv1a(h, &len.to_le_bytes());
+    }
+    h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,5 +1128,41 @@ mod tests {
         let ab = fingerprint_with(r, Some(&cfg(&["a", "b"], None)));
         let ba = fingerprint_with(r, Some(&cfg(&["b", "a"], None)));
         assert_ne!(ab, ba, "the two orders are the same digest, so a re-ordered index cannot be seen");
+    }
+
+    /// The walk lists markdown, so an IMAGE is invisible to it — which is why a
+    /// re-derived document kept showing the screenshot it was copied with. The
+    /// caller hands back the images it copied and they are stat'ed here; this
+    /// says that each of the four transitions that matter moves the digest, and
+    /// that a place where nothing happened does not.
+    #[test]
+    fn an_image_moves_the_fingerprint_that_the_walk_cannot_see() {
+        let t = tmp("fp-assets");
+        let r = &t.0;
+        write(r, "README.md", "# Read me\n\n![shot](shots/a.png)\n");
+        fs::create_dir_all(r.join("shots")).unwrap();
+        fs::write(r.join("shots/a.png"), b"first").unwrap();
+        let rels = vec!["shots/a.png".to_string()];
+        let docs = fingerprint(r);
+
+        let base = fold_assets(docs, r, &rels);
+        // Nothing happened.
+        assert_eq!(base, fold_assets(docs, r, &rels), "a quiet place does not re-derive");
+        // The walk on its own cannot tell any of the rest apart.
+        fs::write(r.join("shots/a.png"), b"second and longer").unwrap();
+        assert_eq!(docs, fingerprint(r), "the walk is supposed to be blind to this");
+        let edited = fold_assets(docs, r, &rels);
+        assert_ne!(base, edited, "an edited image moved nothing");
+        // Deleted.
+        fs::remove_file(r.join("shots/a.png")).unwrap();
+        let gone = fold_assets(docs, r, &rels);
+        assert_ne!(edited, gone, "a deleted image moved nothing");
+        // Arrived: a candidate that was missing is the only way this is ever
+        // noticed, which is why the caller reports what it could NOT copy too.
+        fs::write(r.join("shots/a.png"), b"first").unwrap();
+        assert_ne!(gone, fold_assets(docs, r, &rels), "an image that arrived moved nothing");
+        // And the list itself is part of the answer: a document that stopped
+        // referencing an image changes what is folded, not just the stats.
+        assert_ne!(base, fold_assets(docs, r, &[]), "the reference list is not in the digest");
     }
 }

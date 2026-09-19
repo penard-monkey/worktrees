@@ -41,6 +41,16 @@
 //!    five seconds after cloning it. Only tool-emitted targets survive, and by
 //!    §5.3 rule 2 a target that is not loopback is not a target.
 //!
+//! And one thing that is not a transform at all: **which local files a page
+//! needs beside it** (`image_refs`, `asset_rel`). A document referencing
+//! `images/x.png` renders as a broken image in the browser until that file is
+//! copied into the derived tree, which is `viewer::copy_assets`' job — but
+//! *which* file, and whether a reference may become a filesystem read at all,
+//! is a decision about a string out of a freshly cloned repo, so it is made
+//! here, next to the rest of the string handling, and tested without a disk.
+//! The document itself is not touched: the reference stays exactly as the
+//! author wrote it and the copy is what makes it resolve.
+//!
 //! **What is deliberately NOT here:** which port, which group, which path hash
 //! — `mo`'s working link form is `http://localhost:<port>/<group>?file=<sha256
 //! of the absolute path>[:8]` and a static renderer would use a relative link.
@@ -765,6 +775,316 @@ fn is_loopback_host(host: &str) -> bool {
     rest.len() == 3 && rest.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()) && p.parse::<u32>().map(|n| n <= 255).unwrap_or(false))
 }
 
+// ── assets ──────────────────────────────────────────────────────────────────
+
+/// Longest reference we will look at. A `src` past this is not a path anybody
+/// typed, and every step after this one is arithmetic on it.
+const REF_MAX: usize = 1024;
+
+/// Every image reference in `text`, as the document wrote it — a REPORT, not a
+/// transform. Nothing here edits the document, and that is the point: the
+/// derived copy keeps the author's `images/x.png` byte for byte, and the viewer
+/// resolves it because the tool copied that file to the same relative place
+/// beside it (`viewer::copy_assets`). Rewriting the reference instead would
+/// make the derived text disagree with the source it claims to be a copy of, on
+/// the one surface whose whole job is to say how faithful it is.
+///
+/// What it finds, in the order a document is read:
+///
+/// - inline images, `![alt](dest)`, including `![alt](dest "title")` and the
+///   angle form `![alt](<dest with spaces>)`;
+/// - link reference definitions, `[label]: dest "title"`, which is how
+///   `![alt][label]` gets its path. The definition is taken without asking
+///   whether a `!`-usage exists: destinations are filtered by extension
+///   downstream, so the worst case is copying a raster that a plain link points
+///   at, and joining usages to definitions here would be a second markdown
+///   parser living next to the one the viewer already has.
+/// - **`<img src="…">` in raw HTML**, which is not an exotic case: it is how a
+///   README centres or sizes a screenshot, and this repo's own does it three
+///   times. §4.3 lets a viewer either show raw HTML as inert text or sanitise it
+///   through an allow-list, and `mo` does the second — `rehype-raw` +
+///   `rehype-sanitize`, whose default schema keeps `img` — so the tag renders
+///   and its `src` needs the same file beside it as any other image. Only a
+///   quoted `src` is read; an unquoted one is left alone rather than guessed at,
+///   and HTML entities are not decoded, for the reason `asset_rel` gives about
+///   percent escapes.
+///
+/// **Fences are skipped.** A `![x](y.png)` inside a ```` ``` ```` block is an
+/// EXAMPLE of a reference, not one — nothing renders it, so copying the file it
+/// names would spend the caps in `viewer` on an image no reader can see.
+///
+/// Not found, and said here rather than discovered later: a reference-style
+/// usage whose definition lives in another file, an unquoted or entity-escaped
+/// HTML `src`, `srcset` (several candidates and their descriptors, which is a
+/// parser of its own), and CSS `url()`. An image this misses stays broken
+/// exactly as it is today; it cannot become a copy of the wrong file.
+pub fn image_refs(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        if let Some((c, n)) = fence {
+            if closes(line, c, n) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some((c, n, _)) = opens(line) {
+            fence = Some((c, n));
+            continue;
+        }
+        inline_images(line, &mut out);
+        html_images(line, &mut out);
+        if let Some(d) = link_definition(line) {
+            out.push(d);
+        }
+    }
+    out
+}
+
+/// Every `![alt](dest …)` on one line, appended to `out`.
+fn inline_images(line: &str, out: &mut Vec<String>) {
+    let b = line.as_bytes();
+    let mut i = 0usize;
+    while i + 1 < b.len() {
+        if b[i] != b'!' || b[i + 1] != b'[' {
+            i += 1;
+            continue;
+        }
+        // The alt text may carry brackets of its own (`![a [b] c](x.png)`), so
+        // the closing one is found by depth rather than by the first `]`.
+        let mut depth = 0i32;
+        let mut j = i + 1;
+        let close = loop {
+            if j >= b.len() {
+                break None;
+            }
+            match b[j] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break Some(j);
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        };
+        let Some(close) = close else { return };
+        if b.get(close + 1) != Some(&b'(') {
+            i = close + 1;
+            continue;
+        }
+        match destination(&line[close + 2..]) {
+            Some((dest, used)) => {
+                if !dest.is_empty() {
+                    out.push(dest.to_string());
+                }
+                i = close + 2 + used;
+            }
+            None => i = close + 2,
+        }
+    }
+}
+
+/// Every quoted `src` of an `<img>` tag on one line, appended to `out`.
+///
+/// Deliberately not an HTML parser: it finds `<img`, then the first quoted
+/// `src=` before that tag closes, and takes what is between the quotes. A tag
+/// spread over several lines, an unquoted value and a `src` that is really
+/// `data-src` all come out as nothing, which is the direction to be wrong in —
+/// a missed image is the broken image we already have, while a mis-parsed one
+/// is a path we then open.
+fn html_images(line: &str, out: &mut Vec<String>) {
+    let lower = line.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(at) = lower[from..].find("<img").map(|i| from + i) {
+        // `<imgx` is not an `<img`; the tag name ends at whitespace or `/>`.
+        let after = at + 4;
+        if !lower[after..].starts_with(|c: char| c.is_whitespace() || c == '/' || c == '>') {
+            from = after;
+            continue;
+        }
+        let end = lower[after..].find('>').map(|i| after + i).unwrap_or(lower.len());
+        let tag = &lower[after..end];
+        from = end.max(after + 1);
+        // `src`, as an attribute of its own: preceded by whitespace so that
+        // `data-src` and `srcset` are not read as one.
+        let mut at_src = None;
+        let mut scan = 0usize;
+        while let Some(i) = tag[scan..].find("src").map(|i| scan + i) {
+            let before_ok = i == 0 || tag[..i].ends_with(|c: char| c.is_whitespace());
+            let rest = tag[i + 3..].trim_start();
+            if before_ok && rest.starts_with('=') {
+                at_src = Some(i + 3 + (tag[i + 3..].len() - rest.len()) + 1);
+                break;
+            }
+            scan = i + 3;
+        }
+        let Some(v) = at_src else { continue };
+        let value = tag[v..].trim_start();
+        let quote = match value.chars().next() {
+            Some(q @ ('"' | '\'')) => q,
+            _ => continue, // unquoted: not guessed at
+        };
+        let rel_start = after + (tag.len() - value.len()) + 1;
+        let Some(len) = value[1..].find(quote) else { continue };
+        // Sliced out of the ORIGINAL line, not the lowercased copy. The
+        // lowercasing exists only to FIND the tag and the attribute; the value
+        // is a path, and the copy has to land under the name the viewer will
+        // ask for. macOS would forgive that and a case-sensitive volume — or
+        // anyone reading the tree by hand — would not. ASCII-lowercasing keeps
+        // the byte length, so the offsets line up in both strings.
+        let dest = &line[rel_start..rel_start + len];
+        if !dest.is_empty() {
+            out.push(dest.to_string());
+        }
+    }
+}
+
+/// The destination at the head of `s`, which begins just after the `(`, and how
+/// many bytes of `s` it consumed.
+///
+/// CommonMark's two spellings: bare, ending at the first whitespace (a title
+/// follows) or at the closing `)`; and `<…>`, which is how a path with a space
+/// in it is written. The title is dropped HERE rather than downstream — it is
+/// prose, and prose arriving at the path layer would be one more string that
+/// layer has to be right about refusing.
+fn destination(s: &str) -> Option<(&str, usize)> {
+    let start = s.len() - s.trim_start().len();
+    let rest = &s[start..];
+    if let Some(inner) = rest.strip_prefix('<') {
+        let end = inner.find('>')?;
+        return Some((&inner[..end], start + 1 + end + 1));
+    }
+    let end = rest.find(|c: char| c.is_whitespace() || c == ')').unwrap_or(rest.len());
+    Some((&rest[..end], start + end))
+}
+
+/// A link reference definition's destination — `[label]: dest "title"` — or
+/// `None` for any other line.
+fn link_definition(line: &str) -> Option<String> {
+    let indent = line.len() - line.trim_start().len();
+    // Four spaces in is an indented code block, which is an example rather than
+    // a definition — the same reading `image_refs` gives a fence.
+    if indent > 3 {
+        return None;
+    }
+    let t = line.trim_start();
+    if !t.starts_with('[') {
+        return None;
+    }
+    let close = t.find("]:")?;
+    let (dest, _) = destination(&t[close + 2..])?;
+    if dest.is_empty() { None } else { Some(dest.to_string()) }
+}
+
+/// **Layer A.** One reference, written in the document at `doc_rel`, resolved
+/// to a path relative to the PLACE ROOT — or `None` for everything we refuse to
+/// turn into a filesystem read.
+///
+/// This is a string out of a document in a repository the user may have cloned
+/// seconds ago, and the caller is about to open what it names and copy it where
+/// a loopback server hands it out. So it gets the walk's treatment (§4.2), one
+/// layer here and the other at the filesystem, and the two are not
+/// interchangeable: this one cannot see through a symlink, which is why
+/// `viewer::copy_assets` canonicalises afterwards and requires the result to be
+/// under the root. Neither layer alone is the boundary.
+///
+/// Refused, each for a failure rather than for tidiness:
+///
+/// - **a URL scheme** — `http:`, `https:`, `data:`, `file:`, `mailto:`, or any
+///   other `scheme:` shape, and the protocol-relative `//host/x`. These are not
+///   local files and are left entirely alone: the viewer fetches them, or does
+///   not, exactly as it would from the repo. (A Windows drive letter, `C:/x`,
+///   is refused by the same test, which is the right answer for a different
+///   reason.)
+/// - **an absolute path** — `/etc/passwd` names a file that has nothing to do
+///   with this place, and `Path::join` would take it whole, so the root would
+///   not even appear in the result.
+/// - **`~` and `$`** — this tool expands neither, so a reference carrying one
+///   is either an author's mistake or an attempt on a shell that is not there.
+///   `~/.ssh/id_rsa` as a literal directory name is not worth the ambiguity.
+/// - **a `..` that escapes the place**, an **empty component** (`a//b`, a
+///   trailing `/`), and a **`.git` component** — the rules `RelPath` already
+///   enforces on a configured path, applied to a reference for the same reasons.
+/// - **a control character**, which has no business in a path and can end a
+///   line in anything that later logs it.
+///
+/// `#fragment` and `?query` are stripped — a browser does not send them as part
+/// of a filename, so neither may we. Percent escapes are deliberately NOT
+/// decoded: decoding would let `%2e%2e` become `..` AFTER this function's own
+/// check on it, and the cost of leaving them alone is that `a%20b.png` resolves
+/// to nothing and stays broken — a broken image rather than a read outside the
+/// place.
+pub fn asset_rel(doc_rel: &str, reference: &str) -> Option<String> {
+    let r = reference.trim();
+    if r.is_empty() || r.len() > REF_MAX {
+        return None;
+    }
+    if r.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    if has_scheme(r) || r.starts_with("//") {
+        return None;
+    }
+    if r.starts_with('/') || r.starts_with('~') || r.contains('$') || r.contains('\\') {
+        return None;
+    }
+    // After the scheme test, never before it: `data:image/png;base64,…#x` is a
+    // URL whose tail happens to look like a fragment, and cutting it off first
+    // would hand the scheme test a shorter string to be wrong about.
+    let r = r.split(['#', '?']).next().unwrap_or("");
+    if r.is_empty() {
+        return None;
+    }
+
+    // The document's own directory is where a relative reference starts. `rel`
+    // comes out of the walk clean, but it arrives here as a field of a struct
+    // rather than from the walk, so it is checked rather than assumed.
+    let mut parts: Vec<&str> = doc_rel.split('/').collect();
+    parts.pop();
+    if parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || *p == ".git") {
+        return None;
+    }
+    for comp in r.split('/') {
+        match comp {
+            "" => return None,
+            "." => continue,
+            // Popping past the document's own directory is popping past the
+            // place root, which is the traversal this function exists for.
+            ".." => {
+                parts.pop()?;
+            }
+            ".git" => return None,
+            _ => parts.push(comp),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let rel = parts.join("/");
+    if rel.len() > REF_MAX { None } else { Some(rel) }
+}
+
+/// Does this reference begin with a URL scheme? `scheme:` per RFC 3986 — a
+/// letter, then letters, digits, `+`, `-` and `.`, then a colon.
+///
+/// Matched by SHAPE rather than against a list of schemes, because the list is
+/// the part that goes out of date: `blob:`, `filesystem:` and whatever a
+/// browser ships next are all things this tool must not open as a file, and a
+/// path with a colon before its first slash is not one a browser would read as
+/// a path either.
+fn has_scheme(r: &str) -> bool {
+    let Some(colon) = r.find(':') else { return false };
+    if colon == 0 || r[..colon].contains('/') {
+        return false;
+    }
+    let mut cs = r[..colon].chars();
+    cs.next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,6 +1527,170 @@ graph TD
             assert_eq!(line.matches('"').count(), 2, "a directive with a third quote is two directives: {line}");
             assert!(!line.contains("evil.example"), "{line}");
         }
+    }
+
+    // ── 4. assets ────────────────────────────────────────────────────────────
+
+    /// The reference forms a document actually uses, and the two pieces of a
+    /// reference that are NOT part of the filename: a markdown title, and a
+    /// `#fragment` / `?query`. A path with either still glued on resolves to
+    /// nothing, which is a broken image the tool went to the filesystem for.
+    #[test]
+    fn an_image_reference_is_found_in_every_form_a_document_writes_it() {
+        let text = concat!(
+            "# Doc\n",
+            "![plain](pipeline.png)\n",
+            "![titled](shots/a.png \"A shot\")\n",
+            "![angled](<shots/with space.png>)\n",
+            "![frag](b.png#fig-1)\n",
+            "![query](c.png?v=2)\n",
+            "![alt [with] brackets](d.png) and ![two](e.png) on one line\n",
+            "[logo]: brand/logo.png \"Logo\"\n",
+        );
+        assert_eq!(
+            image_refs(text),
+            vec![
+                "pipeline.png",
+                "shots/a.png",
+                "shots/with space.png",
+                "b.png#fig-1",
+                "c.png?v=2",
+                "d.png",
+                "e.png",
+                "brand/logo.png",
+            ]
+        );
+        // The fragment and the query are the resolver's to drop, and it does.
+        assert_eq!(asset_rel("docs/x.md", "b.png#fig-1").as_deref(), Some("docs/b.png"));
+        assert_eq!(asset_rel("docs/x.md", "c.png?v=2").as_deref(), Some("docs/c.png"));
+    }
+
+    /// A README centres its screenshots with raw HTML, and `mo` renders that —
+    /// `rehype-raw` into `rehype-sanitize`, whose default schema keeps `img`. So
+    /// a `<img src>` is a real reference, and this repo's own README carries
+    /// three of them. What is NOT read is anything that would have to be
+    /// guessed: an unquoted value, a `data-src`, a `srcset`.
+    #[test]
+    fn a_raw_html_image_is_a_reference_too() {
+        let text = concat!(
+            "<p align=\"center\">\n",
+            "  <img src=\"docs/media/desktop-flow.gif\" width=\"820\" alt=\"flow\">\n",
+            "</p>\n",
+            "<img alt='single quoted' src='shots/B.PNG' />\n",
+            "<img width=100 src=unquoted.png>\n",
+            "<img data-src=\"lazy.png\">\n",
+            "<img srcset=\"a.png 1x, b.png 2x\">\n",
+            "<imgx src=\"nottag.png\">\n",
+            "<img src=\"one.png\"><img src=\"two.png\">\n",
+        );
+        assert_eq!(
+            image_refs(text),
+            vec!["docs/media/desktop-flow.gif", "shots/B.PNG", "one.png", "two.png"]
+        );
+        // Case is preserved: the lowercased copy is only ever used to FIND the
+        // attribute, never to slice the path out.
+        assert_eq!(asset_rel("README.md", "shots/B.PNG").as_deref(), Some("shots/B.PNG"));
+    }
+
+    /// A reference is resolved against the DOCUMENT's directory, not the place
+    /// root — that is what makes `../assets/x.png` from `docs/guides/` mean
+    /// `docs/assets/x.png`, which is the path the copy has to mirror for the
+    /// reference to resolve without being rewritten.
+    #[test]
+    fn a_reference_resolves_against_the_document_that_wrote_it() {
+        assert_eq!(asset_rel("docs/guides/p.md", "../assets/x.png").as_deref(), Some("docs/assets/x.png"));
+        assert_eq!(asset_rel("docs/guides/p.md", "shots/x.png").as_deref(), Some("docs/guides/shots/x.png"));
+        assert_eq!(asset_rel("docs/guides/p.md", "./x.png").as_deref(), Some("docs/guides/x.png"));
+        assert_eq!(asset_rel("README.md", "docs/x.png").as_deref(), Some("docs/x.png"));
+        assert_eq!(asset_rel("README.md", "x.png").as_deref(), Some("x.png"));
+        // Exactly back to the root, which is inside the place and therefore
+        // allowed — one component further is not.
+        assert_eq!(asset_rel("docs/guides/p.md", "../../x.png").as_deref(), Some("x.png"));
+        assert_eq!(asset_rel("docs/guides/p.md", "../../../x.png"), None);
+    }
+
+    /// **Layer A, as one assertion.** Every one of these is a string from a
+    /// document in a repo the user may have cloned seconds ago, and the caller
+    /// turns what comes back into an open() and a copy.
+    #[test]
+    fn a_reference_that_could_leave_the_place_is_never_resolved() {
+        for bad in [
+            // escapes the place
+            "../../../../etc/passwd.png",
+            "../../../../../../../../Users/x/.ssh/id_rsa",
+            // absolute, which `join` would take whole
+            "/etc/passwd",
+            "/Users/x/.ssh/id_rsa.png",
+            // a shell this tool does not have
+            "~/.ssh/id_rsa",
+            "~root/x.png",
+            "$HOME/x.png",
+            "a/$(whoami).png",
+            // the repo's own git directory
+            ".git/config",
+            "../.git/config",
+            "docs/.git/objects/x.png",
+            // empty components, and the separator that is not ours
+            "",
+            "   ",
+            "a//b.png",
+            "docs/",
+            "a\\b.png",
+            "..\\..\\x.png",
+            // control characters, including one that would end a log line
+            "a\nb.png",
+            "a\u{0}b.png",
+        ] {
+            assert!(asset_rel("docs/guides/p.md", bad).is_none(), "{bad:?} must not resolve");
+        }
+        // A reference longer than the cap is not a path anyone typed.
+        let long = format!("{}.png", "a".repeat(2000));
+        assert!(asset_rel("docs/p.md", &long).is_none());
+        // And a document whose own rel is not walk-shaped resolves nothing.
+        assert!(asset_rel("../outside/p.md", "x.png").is_none());
+    }
+
+    /// A URL is not a local file, and the difference is not cosmetic: a
+    /// `data:` or `file:` reference that reached the path layer would be a
+    /// string with slashes in it being joined onto the place root.
+    #[test]
+    fn a_url_is_left_alone_rather_than_opened() {
+        for url in [
+            "http://example.com/x.png",
+            "https://example.com/x.png",
+            "HTTPS://EXAMPLE.COM/x.png",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "data:image/png;base64,iVBORw0KGgo=#x",
+            "file:///etc/passwd",
+            "mailto:a@b.c",
+            "javascript:alert(1)",
+            "blob:http://example.com/1234",
+            "//example.com/x.png",
+            "C:/Windows/x.png",
+        ] {
+            assert!(asset_rel("docs/p.md", url).is_none(), "{url:?} is not a local file");
+        }
+        // …while a colon INSIDE a path segment is just a filename.
+        assert_eq!(asset_rel("docs/p.md", "shots/a:b.png").as_deref(), Some("docs/shots/a:b.png"));
+    }
+
+    /// A reference inside a fence is an example of one. Copying what it names
+    /// spends the viewer's byte caps on an image nothing renders — and the
+    /// documents this tool reads are full of fenced markdown samples.
+    #[test]
+    fn an_image_inside_a_fence_is_not_a_reference() {
+        let text = concat!(
+            "![real](a.png)\n",
+            "```md\n",
+            "![an example](../../../etc/passwd.png)\n",
+            "[x]: ../../../etc/shadow.png\n",
+            "```\n",
+            "~~~\n",
+            "![also fenced](b.png)\n",
+            "~~~\n",
+            "![after](c.png)\n",
+        );
+        assert_eq!(image_refs(text), vec!["a.png", "c.png"]);
     }
 
     #[test]

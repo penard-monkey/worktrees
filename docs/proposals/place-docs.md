@@ -1205,3 +1205,91 @@ gitignored and `release.yml` is what normally puts it there:
 Phase 4 (drill-down beyond node→page) is untouched. The one mapping source §5.3
 lists first — a node id that names exactly one page — is what `derive::targets`
 implements, and the other three arrive at that same seam.
+
+---
+
+## 16. Images — found by using it, 2026-09-19
+
+**Every image in every document was broken in the browser viewer**, and the
+Docs tab's own dock renders the same images fine. `write_tree` wrote rendered
+markdown and nothing else; `docs::index_with` lists markdown *by design*
+(`is_md`), so an image was never in the entry list and nothing copied it. A
+place deriving 14 documents shipped a tree with no `assets/` directory in it at
+all. For any illustrated document the viewer was therefore strictly **worse**
+than the surface it exists to improve on, and better only for mermaid — which
+undercuts the reason it exists.
+
+**What was built.** The referenced images are copied into the derived tree,
+**mirroring each reference's own relative path**, so the author's
+`![x](images/y.png)` resolves with the document left byte-identical. No URL
+rewriting: the derived text stays a copy of the file it claims to show, which
+is the one thing this surface cannot trade away.
+
+The security treatment is §4.2's, in two layers, because a reference is a string
+from a repository the user may have cloned seconds ago and we are turning it
+into a filesystem read:
+
+- **Layer A** (`derive::asset_rel`, pure, no disk) refuses absolute paths, `~`,
+  `$`, every URL scheme (`http:`, `data:`, `file:`, …, matched by shape rather
+  than by a list that goes out of date), empty components, a `.git` component,
+  and any `..` that escapes the place. Fragment, query and markdown title are
+  stripped; percent escapes are deliberately **not** decoded, so `%2e%2e` can
+  never become `..` after the check.
+- **Layer B** (`viewer::copy_assets`) canonicalises the candidate and requires
+  it to start with the canonical place root. This is the check that actually
+  holds: Layer A is arithmetic on a string, and a string cannot show a symlink —
+  with `docs/assets` a link to somewhere else, `../assets/x.png` is textually
+  innocent and its final component really is a regular file.
+  `symlink_metadata`, never `metadata`, for the same
+  `docs/logo.png -> ~/.ssh/id_rsa` that `docs.rs` already refuses.
+- An **allow-list** of raster extensions, per-file and per-place byte caps, and
+  a cap on how many references one place may turn into a stat. A refusal is per
+  file and never fatal (§2.7) and is reported through `applog`, not swallowed.
+
+### 16.1 SVG is not copied, and adding it is not the fix
+
+An SVG is a live document — script, `foreignObject`, external references. Inside
+an `<img>` it is script-inert by spec, which is what makes "it's just an image"
+sound true; but `mo` hands any asset back by direct URL
+(`/_/api/groups/{g}/files/{id}/raw/{path}` → `http.ServeFile`), where it is a
+top-level document served as `image/svg+xml` and script runs. We do not control
+that content type and the port has no authentication. So a place's `logo.svg`
+stays broken on purpose, the reasoning lives beside the allow-list, and a test
+fails if someone adds three letters to it. The way to fix it is a viewer that
+serves assets with a content type we chose.
+
+### 16.2 The fingerprint's blind spot, and how it was closed
+
+`docs::fingerprint_with` is stat-only over markdown — which is what makes it
+cheap enough to run on the tick — so an **edited screenshot moved nothing** and
+the tab kept serving the copy made at click time. Making the digest parse
+documents is exactly the cost it exists to avoid. Instead the tick folds in a
+stat of the images the *last* derive already knew about (`docs::fold_assets`),
+whose paths are held on the `Group`. That catches an image edited, replaced,
+deleted, or missing-and-now-arrived (the candidate list deliberately includes
+what could not be copied). A brand-new reference is caught by the other half:
+it means a document changed, which moves the walk's digest in the same tick.
+Measured on this repo's own place, 80 documents and 6 images: `fold_assets`
+costs **13–16 µs** against the walk's **2.6 ms**.
+
+### 16.3 Two things the viewer cannot currently do, measured not guessed
+
+- **A `../` reference does not resolve in `mo`, however correctly it is
+  copied.** `resolveImageSrc` appends the author's `src` to
+  `/_/api/groups/{g}/files/{id}/raw/` verbatim, so `../assets/y.png` builds a
+  URL carrying a dot segment — and both a browser and Go's own mux normalise it
+  away, eating the `/raw/` segment. Probed against the real binary: the literal
+  form answers `307` to `…/files/{id}/assets/y.png`, which is not a route and
+  serves the SPA shell. Same-directory and subdirectory references
+  (`shots/a.png`, `docs/media/x.png`) return the real bytes with
+  `Content-Type: image/png`, which is asserted end-to-end in
+  `an_image_loads_through_a_real_viewer`. The copy is correct for the `..` case
+  too — the file lands exactly where the reference points — so the remaining fix
+  is upstream, in the viewer's URL construction, and it is not a one-liner: a
+  path relative to the document's directory can never carry `..` through that
+  route, so the raw endpoint has to be keyed on something else.
+- **Raw-HTML `<img>` is a real reference here**, not an exotic one: `mo`
+  renders raw HTML through `rehype-raw` + `rehype-sanitize`, whose default
+  schema keeps `img`, and this repo's own README centres three screenshots that
+  way. The scanner reads a quoted `src`; an unquoted one, an entity-escaped one
+  and `srcset` are left alone rather than guessed at.
