@@ -5,6 +5,29 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The docs viewer survives an app crash, in two halves and only one is
+  closed.** `RunEvent::Exit` kills the child and empties its trees, and startup
+  now sweeps the trees a crash left behind — but a crashed app still leaves the
+  `mo` process itself listening on loopback, serving the derived copies until
+  the user reboots or clicks Docs again (the next spawn picks a free port and
+  empties the tree dir, orphaning the old server with an empty one). It is
+  Host-checked, so only a local process can read it, and a local process can
+  read the repo anyway — which is why this is a line here and not a fix. The
+  real fix is a death-signal tether, which macOS does not have the way Linux's
+  `PR_SET_PDEATHSIG` does; the cheap approximation is recording the port at
+  spawn and `--shutdown`ing it at next launch.
+  _From: the live-docs phase 3 merge_
+
+- **`remove_place` takes the derived tree but not the viewer's registration.**
+  Removing a place deletes `<tree>/<slug>-<hash>`, and the in-memory
+  `proc.groups` still maps that root to its group name. Re-create a place with
+  the same slug and the group name is reused while `mo`'s watch pattern points
+  at a directory that was deleted and recreated underneath it — most likely a
+  blank group until the app restarts, which is unverified. Rare (it needs a
+  remove and a re-create in one app session) and cosmetic when it happens, but
+  the fix is one line in `remove_place`: drop the entry from `proc.groups`.
+  _From: the live-docs phase 3 merge_
+
 - **The MCP setup flow has never been run in the real app.** #218 shipped
   Settings → Claude and the Home card entirely against the mock harness and
   headless chromium. `mcp_install` is a ~1s `claude mcp add` subprocess behind a

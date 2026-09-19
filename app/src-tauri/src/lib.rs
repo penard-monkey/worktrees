@@ -5377,6 +5377,21 @@ pub fn run() {
         .manage(Shells::default())
         .manage(viewer::Viewer::default())
         .setup(|app| {
+            // A crash is the one exit `RunEvent::Exit` never sees, and it
+            // leaves the derived trees on disk: COPIES of the user's documents
+            // — the ones §4.3 says carry a client's signed agreement — outside
+            // the repo's own gitignore, in a directory Spotlight and Time
+            // Machine both index. Sweeping them at startup closes the half of
+            // that a shutdown hook structurally cannot.
+            //
+            // This does not break the rule that nothing about the viewer runs
+            // at launch: it stats no binary, spawns nothing and cannot fail in
+            // a way that matters — it empties two directories this app owns,
+            // ignoring whatever will not go. A missing, quarantined or
+            // wrong-architecture viewer is still unreachable from startup.
+            if let Ok(dir) = app.path().app_config_dir() {
+                viewer::cleanup(&dir);
+            }
             // macOS 26 floats a Writing Tools affordance (AppKit's Campo
             // lightweight UI) over any selection, and hovering the one it puts
             // over the webview trips an assertion inside AppKit —

@@ -93,6 +93,11 @@ const PROBE_HOST: &str = "worktrees-viewer-probe.invalid";
 /// a process that has nothing to do.
 const REGISTER_DEADLINE_SECS: u64 = 15;
 
+/// Shutting down is a single request to a server that is already listening, so
+/// it needs none of `REGISTER_DEADLINE_SECS`' room for a place with 2,000
+/// documents in it. Short enough that a wedged one does not hold the open path.
+const SHUTDOWN_DEADLINE_SECS: u64 = 5;
+
 /// Per-document read cap, matching `read_file`'s. A document over this is not
 /// silently dropped — it gets a stub page saying so (§2.7, "fail per file,
 /// loudly"), because a row that opens onto nothing is the same silent wrongness
@@ -660,6 +665,30 @@ fn register(bin: &Path, state_dir: &Path, port: u16, group: &str, tree: &Path) -
     Err(format!("registering {group} with the viewer failed ({}): {}", out.status, msg.trim()))
 }
 
+/// Ask whatever is listening on `port` to shut down, and do not care much
+/// whether it answers.
+///
+/// Only ever called about a server we did NOT spawn: `register` runs the
+/// viewer binary a second time as a *client*, and `mo`'s client falls through
+/// to starting its own daemonised server when it finds the port empty
+/// (`cmd/root.go` `startBackground`, `setsid`). That process is not our child,
+/// so `RunEvent::Exit` has never heard of it and `kill` cannot reach it — the
+/// one way this app can leave an unauthenticated viewer listening after it
+/// quits, which is precisely the failure `--foreground` exists to prevent,
+/// arriving through the back door.
+///
+/// Best-effort by construction: if the shutdown fails there is nothing further
+/// this process can do about a server it does not own, and the caller has
+/// already failed the open for its own reasons.
+fn shutdown_port(bin: &Path, state_dir: &Path, port: u16) {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(["--shutdown", "--port"]);
+    cmd.arg(port.to_string());
+    cmd.env("XDG_STATE_HOME", state_dir);
+    cmd.stdin(std::process::Stdio::null());
+    let _ = crate::run_deadline(cmd, SHUTDOWN_DEADLINE_SECS);
+}
+
 // ── the command's body ───────────────────────────────────────────────────────
 
 /// Everything `open_docs_viewer` does, minus the Tauri plumbing.
@@ -722,7 +751,28 @@ pub fn open(
         return Err(format!("{} has no documents to show", req.slug));
     }
     if !proc.groups.iter().any(|(r, _)| *r == root) {
-        register(&bin, &state_dir, port, &group, &tree)?;
+        // Re-checked HERE, not only at the top: `write_tree` above can take a
+        // while on a large place, and `register` runs the binary again as a
+        // CLIENT. A client that finds the port empty does not fail — it
+        // daemonises a server of its own (`shutdown_port`). Asking the handle
+        // first shrinks that window to the width of one `try_wait`.
+        if !matches!(proc.child.try_wait(), Ok(None)) {
+            *slot = None;
+            return Err("the viewer exited before its documents could be registered.".to_string());
+        }
+        let outcome = register(&bin, &state_dir, port, &group, &tree);
+        // …and again AFTER, because the window cannot be closed, only narrowed:
+        // the child can die during the registration itself. If it did, the
+        // client we just ran was talking to a server it started rather than to
+        // ours, and that server is nobody's child. Shut the port down instead
+        // of leaving it listening, then fail the open — a success here would
+        // hand the user a URL into a process this app can never kill.
+        if !matches!(proc.child.try_wait(), Ok(None)) {
+            shutdown_port(&bin, &state_dir, port);
+            *slot = None;
+            return Err("the viewer exited while registering documents.".to_string());
+        }
+        outcome?;
         proc.groups.push((root, group.clone()));
     }
 
@@ -1059,6 +1109,110 @@ mod tests {
         empty_dir(&d);
         assert!(d.is_dir(), "the directory itself must survive");
         assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── the gate's WIRING, against a viewer that fails it ───────────────────
+
+    /// A viewer binary that answers `200` to everything, including a forged
+    /// `Host`. Returns `None` when there is no `python3` to build it out of, in
+    /// which case the test skips rather than fails — the fake is a prop, and a
+    /// missing prop is not a defect in the thing being tested.
+    fn fake_viewer_that_answers_200(dir: &Path) -> Option<PathBuf> {
+        if !std::process::Command::new("python3")
+            .arg("-c")
+            .arg("pass")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let path = dir.join("fake-viewer");
+        // Parses only `--port`, ignores the rest of our argv, then serves 200
+        // to any request on that port until it is killed.
+        let script = r#"#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in --port) p="$2"; shift 2 ;; *) shift ;; esac; done
+exec python3 -c '
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    try:
+        c.recv(4096)
+        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    except Exception:
+        pass
+    finally:
+        c.close()
+' "$p"
+"#;
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Some(path)
+    }
+
+    /// `spawn` must consult the gate, not merely contain a correct one.
+    ///
+    /// The end-to-end test below deliberately has no fake, on the grounds that
+    /// one would be "a second answer to the question this test exists to ask".
+    /// That is right about ITS question — does the gate pass against the binary
+    /// we ship — and wrong about this one, which is whether the gate is CALLED.
+    /// Delete the `probe_refuses_foreign_host` line from `spawn` and every
+    /// other test in this file still passes, the end-to-end one included,
+    /// because it reaches the probe directly rather than through `spawn`. Two
+    /// independent reviews found that hole before this test existed; it is the
+    /// only assertion here that goes red for it.
+    ///
+    /// It also pins the consequence, which is the part that matters: a viewer
+    /// that answers a forged `Host` must never reach the user's browser, so
+    /// `spawn` fails AND leaves nothing listening.
+    #[test]
+    fn spawn_refuses_a_viewer_that_serves_a_forged_host() {
+        let d = tmp("gatewire");
+        std::fs::create_dir_all(&d).unwrap();
+        let Some(fake) = fake_viewer_that_answers_200(&d) else {
+            eprintln!("skipped: no python3 to build the fake viewer out of");
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        };
+        let state = d.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        // `Proc` is not `Debug` (it holds a `Child`), so match rather than
+        // `expect_err` — and a spawn that SUCCEEDED must be cleaned up here or
+        // the fake outlives the test.
+        let err = match spawn(&fake, &state, &d.join("viewer.log")) {
+            Err(e) => e,
+            Ok(mut p) => {
+                let _ = p.child.kill();
+                let _ = p.child.wait();
+                panic!("a viewer that serves a forged Host was accepted and handed to the browser");
+            }
+        };
+        assert!(
+            err.contains("foreign Host header"),
+            "the refusal must name what was wrong, got: {err}"
+        );
+        // `spawn`'s failure path kills the child. If it did not, an
+        // unauthenticated server would outlive the open that refused it.
+        assert!(
+            std::process::Command::new("pgrep")
+                .args(["-f", "fake-viewer"])
+                .output()
+                .map(|o| o.stdout.is_empty())
+                .unwrap_or(true),
+            "the refused viewer is still running",
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
