@@ -1664,6 +1664,9 @@ body.dragging .menu-catch { pointer-events: none; }
 .viewer-tag.kind {
   color: var(--txt-dim); border-color: var(--line-strong);
 }
+.viewer-tag.err {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
 .viewer-hint { align-self: center; margin-top: var(--s4); }
 /* wraps whatever the renderer produced — the anchor-scroll query root */
 .viewer-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -1752,6 +1755,46 @@ body.dragging .menu-catch { pointer-events: none; }
   white-space: pre; tab-size: 2; color: var(--txt); font: inherit;
 }
 .code.wrap .code-text { white-space: pre-wrap; word-break: break-word; }
+
+/* The editable Source view (markdown only — see FilesPane.tsx). It has to be
+   the SAME document the read-only renderer shows, and a textarea inherits none
+   of it: form controls do not inherit font, so every value here is copied from
+   `.code` + `.code-text` deliberately rather than left to cascade. Get one
+   wrong and the file re-lays-out the moment you click into it.
+
+   It is its own scroll box (no `.scroll` wrapper): nesting one scroller in
+   another gives the file two scrollbars and lets the caret be scrolled out of
+   sight by the outer one. `--bg-abyss` is what `.scroll` paints, so the swap
+   between reading and editing changes no colour. */
+.srcedit {
+  flex: 1; min-height: 0; width: 100%;
+  margin: 0; padding: var(--s2) var(--s3);
+  border: 0; outline: none; resize: none;
+  background: var(--bg-abyss); color: var(--txt);
+  font-family: var(--term-family); font-size: var(--term-size); line-height: 1.55;
+  white-space: pre; tab-size: 2; overflow: auto;
+}
+.srcedit.wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* The editor's formatting bar. It lives INSIDE `.viewer-body`, above the
+   textarea, because it belongs to the editor rather than to the viewer —
+   Preview, Diff and every read-only file must not grow a toolbar they have no
+   use for, and the viewer header is already full. Like `.viewer-h` it scrolls
+   rather than clipping: a control that no longer fits must still be reachable.
+   `.md-*` is the markdown RENDERER's namespace (`.md-h1` &c), hence `.mdbar-`. */
+.mdbar {
+  flex: none; display: flex; align-items: center; gap: var(--s1);
+  padding: var(--s1) var(--s2);
+  border-bottom: 1px solid var(--line); background: var(--bg-panel);
+  overflow-x: auto; scrollbar-width: none;
+}
+.mdbar::-webkit-scrollbar { display: none; }
+/* A floor, so `B` and `I` are not half the width of `H1` — and `flex: none`
+   because a scrolling row would otherwise squeeze them instead of scrolling. */
+.mdbar-btn { flex: none; min-width: 2.4em; font-family: var(--font-mono); }
+.mdbar-bold { font-weight: var(--fw-bold); }
+.mdbar-ital { font-style: italic; }
+.mdbar-sep { flex: none; width: 1px; align-self: stretch; background: var(--line); margin: 0 var(--s1); }
 
 /* ── diff (DiffView.tsx) ──────────────────────────────────────────────────
    ONE grid, not two panes. A pane per side needs its scroll positions synced

@@ -4186,8 +4186,14 @@ fn b64_encode(bytes: &[u8]) -> String {
 /// (Claude edited it in another pane), the save is refused rather than silently
 /// clobbering. The write is atomic (temp file + rename) so a crash mid-save
 /// can't leave a half-written file, and preserves the file's mode bits.
+///
+/// Returns the SAVED file's mtime, which is the `expected_mtime` for the next
+/// save in the same sitting. Without it the editor would still hold the mtime
+/// it read before this write, and its second save would be refused as a
+/// conflict with its own first one — the guard firing on the one writer it is
+/// not there to stop.
 #[tauri::command]
-async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<(), String> {
+async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
     let f = guard_under_projects(&app, &path)?;
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
@@ -4207,7 +4213,8 @@ async fn write_file(app: AppHandle, path: String, content: String, expected_mtim
     std::fs::rename(&tmp, &f).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         e.to_string()
-    })
+    })?;
+    Ok(file_mtime_ms(&f))
 }
 
 // ── dock terminal: scratch-shell sidecar sessions ────────────────────────────
