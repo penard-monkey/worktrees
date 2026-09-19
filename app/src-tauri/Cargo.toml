@@ -33,6 +33,10 @@ tauri-plugin-process = "2"
 # PID-liveness check for Claude session probes (kill(pid, 0)); already in the
 # lock tree transitively. macOS + Linux.
 libc = "0.2"
+# The docs viewer addresses a file by sha256(absolute path)[..8] — its id, not
+# ours, verified against a running server. Already in the lock tree (tauri's
+# updater pulls it), so this adds a name here and nothing to the supply chain.
+sha2 = "0.10"
 
 
 [target.'cfg(target_os = "macos")'.dependencies]

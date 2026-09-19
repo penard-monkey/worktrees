@@ -49,3 +49,8 @@ dist/
 # local Jekyll builds of docs/ (the GitHub Pages site)
 _site/
 .sass-cache/
+
+# The documentation viewer's helper binary. Built and signed by release.yml into
+# the app bundle's resources; never committed (26 MB of someone else's Go, and
+# the whole point of §13.4 is that we build it rather than vendor it).
+app/src-tauri/viewer/mo

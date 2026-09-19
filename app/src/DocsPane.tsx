@@ -25,7 +25,7 @@
 // core rather than splitting it.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { track } from "./usage";
 
@@ -62,6 +62,9 @@ export type DocsPaneProps = {
   root: string;
   /** The project root, for the base ref. */
   repo: string;
+  /** The place's slug. Names the viewer's group and is the first fact in the
+   *  header it injects into every page — a browser tab has no nav beside it. */
+  slug: string;
   place: DocsPlace;
   /** Bumped by `places:changed` (tmux change, or the 30 s poll). */
   reloadToken: number;
@@ -139,7 +142,7 @@ function group(entries: DocEntry[]): Array<{ name: string; rows: DocEntry[] }> {
   return out;
 }
 
-export function DocsPane({ root, repo, place, reloadToken, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
+export function DocsPane({ root, repo, slug, place, reloadToken, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
   const [idx, setIdx] = useState<DocsIndex | null>(null);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -210,6 +213,59 @@ export function DocsPane({ root, repo, place, reloadToken, onOpen, onError, find
   const total = idx?.entries.length ?? 0;
 
   const open = (e: DocEntry) => { setSel(e.path); onOpen(e.path); };
+
+  // ── the browser viewer (phase 3) ───────────────────────────────────────────
+  //
+  // OPTIMISTIC, like `tmuxOk`'s `useState(true)`: nothing is probed at mount,
+  // no banner can flash on launch, and unavailability is discovered at the point
+  // of use. The blast radius of the whole viewer is these two buttons — a place
+  // with no viewer at all still lists, filters, reads and reveals every
+  // document, which is what phases 1 and 2 shipped.
+  //
+  // `viewerErr` is per pane and per place (the pane is keyed by place in App),
+  // and it is set BESIDE `onError` rather than instead of it: the toast is how
+  // the user hears about it once, the line under the button is how they see it
+  // is still true. Never swallowed, never only-logged.
+  const [viewerErr, setViewerErr] = useState<string | null>(null);
+  const [viewerBusy, setViewerBusy] = useState(false);
+  const browse = useCallback(
+    async (path: string | null) => {
+      setViewerBusy(true);
+      try {
+        const url = await invoke<string | null>("open_docs_viewer", {
+          repo,
+          root,
+          slug,
+          path,
+          // The header's facts, from the same `Place` the header above is
+          // rendering — so the page in the browser and the pane in the dock can
+          // never disagree about how stale this place is. `base` is the
+          // backend's (it is the one fact `Place` does not carry, and §11.4 is
+          // what happens when it is guessed).
+          place: {
+            branch: place.branch,
+            behind: place.behind,
+            dirty: place.dirty,
+            dirty_files: place.dirty_files ?? null,
+            last_commit_subject: place.last_commit_subject ?? null,
+            last_commit_epoch: place.last_commit_epoch ?? null,
+          },
+        });
+        // A typed invoke can still answer `null` — the harness resolves unknown
+        // commands that way, and an older backend has no such command at all.
+        // Opening `null` would be a blank tab with no explanation.
+        if (!url) throw new Error("the documentation viewer is not available in this build");
+        setViewerErr(null);
+        await openUrl(url);
+      } catch (e) {
+        setViewerErr(String(e));
+        onError(e);
+      } finally {
+        setViewerBusy(false);
+      }
+    },
+    [repo, root, slug, place, onError],
+  );
 
   const head = staleness(place, idx?.base ?? "");
   const subject = place.last_commit_subject ?? "";
@@ -307,15 +363,31 @@ export function DocsPane({ root, repo, place, reloadToken, onOpen, onError, find
               >
                 <span className="docs-title">{e.title}</span>
                 <span className="docs-rel">{e.rel}</span>
-                <button
-                  className="docs-reveal"
-                  data-track="docs.reveal"
-                  title="Reveal in Finder"
-                  aria-label={`Reveal ${e.rel} in Finder`}
-                  onClick={(ev) => { ev.stopPropagation(); revealItemInDir(e.path).catch(onError); }}
-                >
-                  <Icons.Folder size={13} />
-                </button>
+                <span className="docs-verbs">
+                  {/* §7.2: the browser becomes the row's other action, and the
+                      in-app read (the row itself) stays the primary one. It is
+                      the only way to see a diagram at all — the dock's renderer
+                      shows a mermaid fence as a code block, by decision. */}
+                  <button
+                    className="docs-verb"
+                    data-track="docs.rowbrowser"
+                    title="Open in the browser"
+                    aria-label={`Open ${e.rel} in the browser`}
+                    disabled={viewerBusy}
+                    onClick={(ev) => { ev.stopPropagation(); void browse(e.path); }}
+                  >
+                    <Icons.ExternalLink size={13} />
+                  </button>
+                  <button
+                    className="docs-verb"
+                    data-track="docs.reveal"
+                    title="Reveal in Finder"
+                    aria-label={`Reveal ${e.rel} in Finder`}
+                    onClick={(ev) => { ev.stopPropagation(); revealItemInDir(e.path).catch(onError); }}
+                  >
+                    <Icons.Folder size={13} />
+                  </button>
+                </span>
               </div>
             ))}
           </div>
@@ -324,6 +396,25 @@ export function DocsPane({ root, repo, place, reloadToken, onOpen, onError, find
           <div className="docs-note docs-trunc">
             Stopped at {total} documents — this place has more. The Files tab lists everything.
           </div>
+        )}
+      </div>
+
+      {/* §7.1's last row. Present and enabled from the first frame — there is no
+          probe deciding whether to show it, because a probe is a thing that can
+          be wrong at launch about a subsystem nothing has needed yet. */}
+      <div className="docs-foot">
+        <button
+          className="ctrl sm docs-browse"
+          data-track="docs.browser"
+          title="Open this place in the browser — diagrams render there"
+          disabled={viewerBusy || !total}
+          onClick={() => void browse(null)}
+        >
+          <Icons.ExternalLink size={13} />
+          <span>Open this place in the browser</span>
+        </button>
+        {viewerErr && (
+          <div className="docs-foot-err" title={viewerErr}>{viewerErr}</div>
         )}
       </div>
     </div>

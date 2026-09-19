@@ -4,7 +4,12 @@ title: "Proposal — per-place docs"
 
 # Proposal — per-place docs
 
-**Status:** **phases 1 and 2 BUILT**, 2026-09-16 — the Docs tab, the staleness header
+**Status:** **phases 1, 2 and 3 BUILT** — 1 and 2 on 2026-09-16, 3 on 2026-09-19
+(§15, which also records two claims in *this* section that the build found
+wrong). The §13 gate is now enforced at runtime on every spawn rather than
+settled once at build time, and §8's "does not ship on a stock `mo`" is an
+assertion in two places rather than a decision someone has to remember.
+Originally: the Docs tab, the staleness header
 and the name filter, behind no new dependency, process or config. §7.3's open
 questions are answered in §11, and **two claims in this document were wrong**;
 both are corrected there, and one of them (§7.1's `behind … upstream`) would
@@ -1046,3 +1051,139 @@ attached — `GHSA-6pff-wf7m-6f5h`, filed 2026-09-16, state `triage`.
 set on our side. If it lands, this fork is deleted and `release.yml` pins the fixed
 release instead — which is the outcome to want, and the reason the patch was
 written to be upstreamable rather than merely to work.
+
+---
+
+## 15. Phase 3 as built — 2026-09-19
+
+The viewer ships. `app/src-tauri/src/viewer.rs` is the whole of it: one
+supervised child, N places as named groups, a derived tree per place, and a URL
+the frontend hands to `openUrl`. §5.1's shape survived contact; §5.2's "A′"
+survived it exactly. What follows is what this document did not decide, what it
+got wrong, and what was measured rather than assumed.
+
+### 15.1 The gate is enforced at RUNTIME, not at build time
+
+§13 set the criterion — *prove the viewer refuses a cross-origin read* — and
+§13.4 answered it by choosing to patch and build from source. That answers it
+for the artefact **we** build. It does not answer it for the binary that is
+actually on the user's disk at the moment the button is pressed, and the
+distance between those two is every way a file gets replaced: a release built
+before the fix landed, a `WORKTREES_VIEWER_BIN` pointed at a Homebrew `mo`, a
+bundle someone repaired by hand.
+
+So the app asks. Every spawn, after the port answers and before any URL is
+returned, `probe_refuses_foreign_host` sends one request carrying
+`Host: worktrees-viewer-probe.invalid` and requires **403**. Anything else —
+including `200` — kills the child and fails the open with the reason. It costs
+one loopback round-trip on a path that is already polling the port.
+
+This turns §13's *decision* into a *precondition*, and it is the difference
+between "we believe we shipped the fixed build" and "this process, now,
+refuses". Proved both ways, against real binaries: the patched build passes
+end to end; an unpatched `mo` built from the commit before the patch answers
+`200` and gets no URL at all.
+
+`release.yml` runs the same gate on the binary it builds, in both directions —
+a build that answered `403` to *everything* would pass a one-sided check while
+being a viewer that serves nothing.
+
+### 15.2 Where the source comes from is a repository variable
+
+§14 keeps the patch off GitHub until upstream ships or declines, and this scope
+asked `release.yml` to ship the viewer. Those pull against each other: a
+`.patch` file in this repo is a published description of an unfixed issue in
+someone else's tool.
+
+`vars.VIEWER_MO_REPO` / `vars.VIEWER_MO_REF` name the source, defaulting to
+upstream's own repo at a pinned tag. **With the defaults, the release fails** —
+the gate refuses the binary it just built. That is the intended behaviour, not
+an oversight: a viewer that cannot prove it refuses a foreign `Host` must not
+reach a user's machine, and a release that quietly shipped one would look
+exactly like a release that did not. Point the variables at a build that carries
+the check — or, when upstream ships, at that tag, and delete nothing else.
+
+### 15.3 Four decisions §5 left open
+
+**The tree lives in the app's config dir and never outlives the process.**
+`<config>/viewer/tree/<slug>-<hash8 of the canonical root>/`, mirroring the
+place's own layout — flattening it would break every relative prose link, which
+`mo` resolves against the file's own directory. It is emptied on a clean exit
+*and* on the first spawn of a run, because a crash cannot honour a shutdown
+hook. These are copies of documents §4.3 describes as carrying a client's signed
+agreement, sitting outside the repo's gitignore in a directory Spotlight and
+Time Machine both index; they do not get to persist for a viewer that is, by
+design, dead.
+
+**Generated per open, registered once per place.** `mo -wR <tree>` registers the
+directory (one argument rather than up to 2,000 — the index's cap — which keeps
+this off `ARG_MAX` entirely) and watches it, so regenerating the tree
+live-reloads a browser tab that is already open. Re-registration is idempotent:
+verified, the group's file count does not change.
+
+**The group name is the slug, reduced to `[a-z0-9-]`, disambiguated by a hash of
+the canonical root.** Two places may legitimately share a slug — the same branch
+name in two projects — and `mo` *merges* same-named groups rather than refusing
+them, so a collision would show one project's documents under the other's name.
+That is §1.1's failure with the axes swapped.
+
+**The staleness facts come from the frontend, the base ref does not.** Every
+field but one is in the `Place` the dock is rendering from at the moment the
+button is pressed; re-deriving them in the backend would be a second git fan-out
+per click *for numbers that would then be allowed to disagree with the ones on
+screen two inches away*. `base` stays the backend's `Project::base_ref()`,
+because it is the one fact `Place` does not carry and the one §11.4 says is
+wrong when guessed.
+
+### 15.4 Two things this document said that the build found wrong
+
+**§8's "phase 3 does not ship on a stock `mo`" is weaker than it reads.** It is
+written as a shipping decision, which is a thing a future release can quietly
+forget. It is now a runtime assertion and a CI assertion, and neither can be
+forgotten by omission — they have to be actively removed.
+
+**"A missing viewer must not break the build" was assumed and is false.**
+Tauri's `bundle.resources` fails the whole build on a glob that matches nothing
+(`glob pattern viewer/* path not found or didn't match any files`) exactly as
+the map form fails on a missing file — so a local build with no viewer, which is
+every local build, would have been broken in order to ship a binary local builds
+do not have. A committed `viewer/README` is what makes the glob always match; it
+is load-bearing and says so in its own text. Measured, not reasoned about, and
+the same call found that `tauri.conf.json` is `deny_unknown_fields`, so the
+explanation could not live beside the key as a `//` comment.
+
+### 15.5 Rule 8's "doctor finding" went to `diagnostics` instead
+
+A missing viewer is reported by `diagnostics` (Settings → Logs), by **stat**,
+beside `git` and `tmux` — on demand, off every hot path, and never a banner.
+Not by `doctor`: `doctor` is `ops::cmd_doctor` in core, it is per **project**,
+and it is shared with the CLI, which has no viewer and never will. A repo-health
+check reporting on an app bundle's helper binary would be the wrong tool
+answering the wrong question on every place. The automatic half is `applog`: the
+first failed open writes the reason to the app log, which is what "logging
+background failures rather than bannering them" asks for.
+
+### 15.6 What is still owed
+
+The **real-app pass**. Everything above was verified against unit tests, the
+Chrome mock and a real `mo` driven from Rust; none of that is WKWebView. Three
+things need `app/scripts/sandbox.sh --app` and a human:
+
+- `openUrl` to `http://127.0.0.1:<port>/…` from a `tauri://` page. §11.6 left
+  this open and it is still open. What has been closed since is the permission
+  question: `opener:default` carries `allow-default-urls`, whose scope is a
+  `glob::Pattern` of `http://*`, and `Pattern::matches` uses
+  `MatchOptions::new()` — `require_literal_separator: false` — so the pattern
+  matches the whole URL including path and query. No capability change is
+  needed. Whether WKWebView's `open` call behaves is still unmeasured.
+- The footer button in WebKit. It is an inner-span flex with a pinned label
+  precisely because a `<button>` that is itself a flex container is shrink-
+  wrapped without its overflow-hidden children — the usage meter's bug. Written
+  to avoid it; not measured in the host that has it.
+- The spawn latency as felt. 0.23 s to listen was measured with 7 files and the
+  tree is registered afterwards, so it should not grow with the place — but
+  "should not" is what a real-app pass is for.
+
+Phase 4 (drill-down beyond node→page) is untouched. The one mapping source §5.3
+lists first — a node id that names exactly one page — is what `derive::targets`
+implements, and the other three arrive at that same seam.

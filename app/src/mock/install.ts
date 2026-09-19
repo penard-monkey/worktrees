@@ -78,6 +78,10 @@ let mockMcp: Record<string, unknown> = (() => {
 // tmux_check case for the two shapes.
 const mockTmuxStuck = location.search.includes("notmux=stuck");
 let mockTmux = !location.search.includes("notmux");
+// `?viewer=died` — the viewer came up once and then went away. Its own latch
+// because "it worked a moment ago" is the state `try_wait`-on-every-open exists
+// for, and a knob that fails from the first call cannot express it.
+let mockViewerUsed = false;
 const MOCK_SETTINGS_KEY = "wt-mock-ui-state"; // sessionStorage: see get_settings
 // Onboarding states a folder pick can land in (probe_dir). Same query-knob shape
 // as ?notmux: the state is chosen at load, and the path itself carries it so a
@@ -1342,6 +1346,74 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         return { base, entries, truncated: true };
       }
       return { base, entries, truncated: false };
+    }
+    case "open_docs_viewer": {
+      // The browser viewer (lib.rs `open_docs_viewer`). The harness cannot spawn
+      // a process, and it must not pretend the happy path is the only one: this
+      // feature's whole design is a list of ways the viewer does not come up,
+      // and every one of them is a state the pane renders.
+      //
+      // `?viewer=` picks which, the same query-knob shape as `?notmux` /
+      // `?notmux=stuck` — which exist for exactly this reason: MISSING and
+      // UNRESPONSIVE are different states and a harness that can only express
+      // "works" tests neither.
+      //
+      //   (default)  a URL, opened by `openUrl`
+      //   missing    the binary is not in the bundle          — the common one
+      //   exec       it is there and will not run             — wrong arch, quarantined
+      //   nolisten   it starts, and never answers on the port — the deadline
+      //   port       no free loopback port
+      //   guard      it listens, and does NOT refuse a foreign Host header —
+      //              the §11.3 gate failing, which must never resolve to a URL
+      //   died       the first open works; every one after it finds a dead child
+      //
+      // `slowviewer[=ms]` is orthogonal: the real spawn takes ~0.25s and the
+      // mock answers in a microtask, so the disabled/busy state of both buttons
+      // is otherwise unobservable.
+      const vmode = new URLSearchParams(location.search).get("viewer") ?? "";
+      const vslow = (() => {
+        const m = /[?&]slowviewer(?:=(\d+))?/.exec(location.search);
+        return m ? Number(m[1] ?? 400) : 0;
+      })();
+      if (vslow) await new Promise((r) => setTimeout(r, vslow));
+      if (vmode === "missing") {
+        throw new Error(
+          "the documentation viewer is not installed with this app (Settings → Health reports it); " +
+            "the Docs tab still lists and reads every document in place",
+        );
+      }
+      if (vmode === "exec") {
+        throw new Error("/Applications/worktrees.app/Contents/Resources/viewer/mo: Bad CPU type in executable (os error 86)");
+      }
+      if (vmode === "nolisten") {
+        throw new Error("the viewer did not listen on 127.0.0.1:6391 within 3000 ms");
+      }
+      if (vmode === "port") {
+        throw new Error("no free loopback port for the documentation viewer");
+      }
+      if (vmode === "guard") {
+        // The gate in §11.3, failing. An unpatched viewer answers a foreign
+        // Host, which means any web page the user has open can read every
+        // document in every place — so this resolves to NO URL, ever.
+        throw new Error(
+          "the viewer answered 200 to a request with a foreign Host header; it must answer 403 " +
+            "(an unpatched viewer is readable by any web page the user has open — proposal §13.2)",
+        );
+      }
+      if (vmode === "died") {
+        if (mockViewerUsed) throw new Error("the viewer exited before it listened (signal: 9, SIGKILL: Killed)");
+        mockViewerUsed = true;
+      }
+      // The real URL form, verified against a running viewer: absolute, with
+      // the port, the group and `sha256(<derived absolute path>)[..8]`. The
+      // harness fakes the hash (no crypto here) but keeps the SHAPE, because
+      // the shape is what the pane hands to `openUrl`.
+      const group = String(args.slug ?? "place").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "place";
+      const wanted = args.path as string | null;
+      if (!wanted) return `http://127.0.0.1:6391/${group}`;
+      let h = 0;
+      for (const c of wanted) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+      return `http://127.0.0.1:6391/${group}?file=${h.toString(16).padStart(8, "0").slice(-8)}`;
     }
     case "read_file": {
       const f = fsFile(args.path as string);

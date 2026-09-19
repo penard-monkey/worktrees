@@ -2579,15 +2579,46 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 /* Hidden until the row is touched, like the tree's row verbs — 240px of dock
  * has no room for a control on every line. `visibility`, not `display`, so the
- * column it occupies never changes width and the titles do not shift. */
-.docs-reveal {
+ * column it occupies never changes width and the titles do not shift — which
+ * matters more with two verbs than it did with one. */
+.docs-verbs {
   grid-area: reveal; visibility: hidden;
+  display: flex; align-items: center; gap: 2px;
+}
+.docs-verb {
+  flex: none;
   background: transparent; border: 0; color: var(--txt-mute);
   padding: 0 var(--s1); line-height: 1; cursor: pointer;
 }
-.docs-row:hover .docs-reveal,
-.docs-row:focus-within .docs-reveal { visibility: visible; }
-.docs-reveal:hover { color: var(--txt-hi); }
+.docs-row:hover .docs-verbs,
+.docs-row:focus-within .docs-verbs { visibility: visible; }
+.docs-verb:hover { color: var(--txt-hi); }
+.docs-verb:disabled { color: var(--txt-mute); opacity: 0.5; cursor: default; }
+
+/* The footer. `flex: none` and a top border, so it is the one row that never
+ * scrolls away — the whole point of the browser action is that it is where the
+ * reading goes when the dock is too narrow for it.
+ *
+ * `align-items: flex-start` rather than the default `stretch`: the error line
+ * below the button is a scrolled column's trailing content, and stretch clamps
+ * it to the container so its last line finishes flush against the dock edge. */
+.docs-foot {
+  flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1);
+  padding: var(--s2); border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+/* An inner span carries the flex, and the label is pinned. A `<button>` that is
+ * itself a flex container is shrink-wrapped by WebKit WITHOUT its
+ * overflow-hidden children, so in the real app (WKWebView, not the Chrome mock)
+ * the label would measure as 0px and the button would render as a bare icon —
+ * the usage meter shipped exactly that way once. */
+.docs-browse { display: inline-flex; align-items: center; gap: var(--s1); max-width: 100%; }
+.docs-browse > span { flex: none; }
+.docs-browse > svg { flex: none; }
+.docs-foot-err {
+  max-width: 100%; color: var(--txt-dim); font-size: var(--fs-micro);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .docs-note { padding: var(--s3) var(--s2); color: var(--txt-dim); font-size: var(--fs-meta); }
 .docs-note-sub { display: block; margin-top: var(--s1); color: var(--txt-mute); }

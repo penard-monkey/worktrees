@@ -6,6 +6,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Read a place's docs in the browser, diagrams and all.** The Docs tab grows
+  an "Open this place in the browser" button and a per-row browser action. The
+  app spawns one small viewer on first use — never at launch — and serves it a
+  *derived* copy of the place's documents rather than the repo's own files: the
+  staleness header is injected into every page (a browser tab is further from
+  the place than the dock is, so it needs it more), YAML frontmatter stops being
+  a "Metadata" block on every page, and a mermaid node whose id names a page in
+  the index becomes a real link to it. A `click` directive the *document* wrote
+  is stripped first — strict mode blocks callbacks but an author-controlled
+  `href` is still an author-controlled href in a repo you cloned five seconds
+  ago. Nothing is written into your tree.
+
+  The viewer is loopback-only and the app **re-proves that on every spawn**: it
+  asks the running process for something while claiming to be a host it is not,
+  and anything other than a refusal kills the child and reports rather than
+  handing back a URL. A loopback bind keeps other machines out; it does not keep
+  out the browser on this one, which runs code from strangers and can reach
+  127.0.0.1 — and these documents are the kind that carry a signed agreement.
+
+  With no viewer installed the Docs tab is exactly what it was: it lists,
+  filters, reads and reveals every document, and only that one button fails,
+  once, out loud.
 - **Put Places on whichever side you like.** Settings → Navigation → Sides
   mirrors the whole shell: the Places rail and sidebar move to the right edge,
   and the Files / Terminal / Docs rail and dock move to the left. It is one

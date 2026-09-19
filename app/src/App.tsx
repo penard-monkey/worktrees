@@ -6662,6 +6662,7 @@ function App() {
                     key={sel.repo + "|" + sel.slug}
                     root={selected.path}
                     repo={sel.repo}
+                    slug={sel.slug}
                     place={selected}
                     reloadToken={placesToken}
                     // Phase 1's Read action: the file goes to the Files tab's

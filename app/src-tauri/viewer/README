@@ -1,0 +1,21 @@
+The documentation viewer's helper binary lives here, as `mo`.
+
+It is NOT in this repository. `release.yml` builds it from source, signs it, and
+asserts its architecture and its Host-header check before the app bundle is
+made; a local build simply has no viewer, which is a supported state — the Docs
+tab lists, filters, reads and reveals every document without one, and only the
+"open in the browser" button needs it.
+
+This file is committed, and it is load-bearing. `tauri.conf.json` bundles
+`viewer/*`, and a glob that matches NOTHING is a hard build failure ("glob
+pattern viewer/* path not found or didn't match any files") — so without a file
+that is always here, every local `tauri build` would break in order to ship a
+binary that local builds do not have. The map form of `resources` fails the same
+way for the same reason. Measured, not assumed.
+
+What the app does with it: `app/src-tauri/src/viewer.rs`. Why it is a patched
+build rather than a release binary: `docs/proposals/place-docs.md` §13-§14 — the
+stock viewer does not validate the Host header, so a loopback bind does not keep
+out the browser on this machine. The app re-proves that check on every spawn and
+refuses to hand out a URL if it fails, so a binary that arrived here by some
+other route cannot quietly serve the user's documents to a web page.

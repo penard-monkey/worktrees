@@ -21,6 +21,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
 use worktrees_core::{config, git, mcpsetup, mention, ops, profile, store, sync, sysclock, tmux, Project, Ui};
 
+// The documentation viewer: one supervised child, N places, and a port. Its own
+// file because it is the only part of this backend that can hand a document to
+// something outside the app, and every rule in it is a refusal — the security
+// surface is worth reading in one piece.
+mod viewer;
+
 // ── app log ──────────────────────────────────────────────────────────────────
 // Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
 // <identifier>/app.log — Console.app finds it). Deliberately AppHandle-free so
@@ -3249,7 +3255,7 @@ fn tool_report(tool: &str) -> (String, String) {
 /// Assemble the diagnostics block. `async` (a login-shell CLI probe can take
 /// ~5s and two ~10s tool probes — must never run on the main thread).
 #[tauri::command]
-async fn diagnostics() -> Result<String, String> {
+async fn diagnostics(app: AppHandle) -> Result<String, String> {
     let app_version = env!("CARGO_PKG_VERSION").to_string();
     let (cli_path, cli_version) = match cli_binary() {
         Some((p, v)) => (p, v),
@@ -3258,6 +3264,16 @@ async fn diagnostics() -> Result<String, String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let (git_path, git_version) = tool_report("git");
     let (tmux_path, tmux_version) = tool_report("tmux");
+    // The documentation viewer, by STAT — never by running it. "It should be
+    // there and it is not" belongs here, on demand, beside the other tools, and
+    // NOT on any path the app takes at launch: a probe that decides whether the
+    // Docs tab exists would let a quarantined helper binary change what the app
+    // looks like before the user has asked for anything. `tool_report` is the
+    // wrong shape for the same reason — it runs `<tool> --version`.
+    let viewer_path = match viewer::binary_path(app.path().resource_dir().ok().as_deref()) {
+        Some(p) => p.to_string_lossy().into_owned(),
+        None => "(not installed — the Docs tab lists and reads without it)".to_string(),
+    };
 
     let ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
     let ai_resume_arg = worktrees_core::config::resolve_ai_resume_arg();
@@ -3281,6 +3297,7 @@ async fn diagnostics() -> Result<String, String> {
          PATH        : {path}\n\
          git         : {git_version} @ {git_path}\n\
          tmux        : {tmux_version} @ {tmux_path}\n\
+         docs viewer : {viewer_path}\n\
          \n\
          core config\n\
          -----------\n\
@@ -4017,6 +4034,112 @@ async fn list_docs(app: AppHandle, repo: String, root: String) -> Result<DocsInd
     };
     let idx = worktrees_core::docs::index_with(&dir, cfg.as_ref().and_then(|c| c.docs.as_ref()));
     Ok(DocsIndex { base, config_error, entries: idx.entries, truncated: idx.truncated })
+}
+
+/// The staleness facts, as the frontend already holds them in `Place`.
+///
+/// Passed in rather than recomputed. Every field is in the `Place` the dock is
+/// rendering from at the moment the button is pressed, and re-deriving them here
+/// would mean a second git fan-out per click — for numbers that would then be
+/// allowed to DISAGREE with the ones on screen two inches away. `base` is the
+/// exception and stays ours (`Project::base_ref`), because it is the one fact
+/// `Place` does not carry and the one the header gets wrong by guessing
+/// (§11.4: it is the base ref, never `upstream`).
+#[derive(Deserialize)]
+struct ViewerPlace {
+    branch: Option<String>,
+    behind: Option<i64>,
+    dirty: Option<bool>,
+    dirty_files: Option<u32>,
+    last_commit_subject: Option<String>,
+    last_commit_epoch: Option<i64>,
+}
+
+/// Open one place's documentation in the user's real browser.
+///
+/// Returns a URL for the frontend to hand to `openUrl` — the same plugin path
+/// `FilesPane` already uses for an `https:` link in a document. Nothing is
+/// opened from here: the app stays a control surface, and the one thing this
+/// command owns is deciding whether there is a URL worth opening at all.
+///
+/// `async fn` like every other handler: this spawns a process, polls a port for
+/// up to three seconds, and writes a few hundred files. On the main thread that
+/// is a frozen window.
+///
+/// **Nothing about this runs at launch.** A missing, quarantined or
+/// wrong-architecture viewer surfaces here, on the click, as one failed invoke —
+/// the Docs tab lists and reads every document with no viewer at all, which is
+/// what phases 1 and 2 shipped. The frontend's optimism (`tmuxOk`'s shape) is
+/// the other half of that rule.
+///
+/// The tree it serves is DERIVED, never the repo's own files: a viewer that
+/// edits what it is viewing is not a viewer, and the `click` directives that
+/// make a diagram navigable have to bake in a port that does not exist until
+/// this function has run (§5.2's answer, "A′").
+#[tauri::command]
+async fn open_docs_viewer(
+    app: AppHandle,
+    v: State<'_, viewer::Viewer>,
+    repo: String,
+    root: String,
+    slug: String,
+    path: Option<String>,
+    place: ViewerPlace,
+) -> Result<String, String> {
+    let dir = guard_under_projects(&app, &root)?;
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {root}"));
+    }
+    // The document, if one was named, is guarded on its own terms rather than
+    // trusted because the place was: `path` is frontend-supplied, and the index
+    // lookup below happens against a walk that has not run yet.
+    let want = match path.as_deref() {
+        None => None,
+        Some(p) => Some(guard_under_projects(&app, p)?.to_string_lossy().into_owned()),
+    };
+    let base = Project::discover(Path::new(&repo)).map(|p| p.base_ref()).unwrap_or_default();
+    let (cfg, config_error) = match worktrees_core::projcfg::load(&dir) {
+        Ok((c, _findings)) => (c, None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    if let Some(e) = &config_error {
+        applog("warn", &format!("open_docs_viewer root={root}: {e}"));
+    }
+    let idx = worktrees_core::docs::index_with(&dir, cfg.as_ref().and_then(|c| c.docs.as_ref()));
+
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    // `resource_dir` is absent in `tauri dev` (there is no bundle), which is
+    // what `WORKTREES_VIEWER_BIN` exists for.
+    let resource_dir = app.path().resource_dir().ok();
+    let req = viewer::Request {
+        root: &dir,
+        slug: &slug,
+        path: want.as_deref(),
+        stale: worktrees_core::derive::Staleness {
+            place: slug.clone(),
+            branch: place.branch,
+            behind: place.behind,
+            base,
+            dirty: place.dirty,
+            dirty_files: place.dirty_files,
+            last_commit_subject: place.last_commit_subject,
+            last_commit_epoch: place.last_commit_epoch,
+            // The transform may not read the clock; this is not the transform.
+            now_epoch: sysclock::now_epoch(),
+        },
+    };
+    match viewer::open(&v, &config_dir, resource_dir.as_deref(), &idx.entries, &req) {
+        Ok(url) => {
+            applog("info", &format!("open_docs_viewer slug={slug} entries={}", idx.entries.len()));
+            Ok(url)
+        }
+        Err(e) => {
+            // Never swallowed: the viewer is the one part of this feature the
+            // user cannot see failing anywhere else.
+            applog("error", &format!("open_docs_viewer slug={slug} root={root}: {e}"));
+            Err(e)
+        }
+    }
 }
 
 /// File contents for the viewer. Capped (default 1 MiB) and binary-guarded
@@ -5238,6 +5361,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Terminals::default())
         .manage(Shells::default())
+        .manage(viewer::Viewer::default())
         .setup(|app| {
             // macOS 26 floats a Writing Tools affordance (AppKit's Campo
             // lightweight UI) over any selection, and hovering the one it puts
@@ -5529,6 +5653,7 @@ pub fn run() {
             file_diff,
             read_file,
             list_docs,
+            open_docs_viewer,
             read_file_base64,
             write_file,
             list_shell_sessions,
@@ -5574,6 +5699,15 @@ pub fn run() {
                 let keys: Vec<ShellKey> = shells.0.lock().unwrap().keys().cloned().collect();
                 for k in &keys {
                     kill_shell(&shells, k);
+                }
+                // And the documentation viewer, for a harder reason than the
+                // shells': what it is holding is an unauthenticated loopback
+                // port onto the user's documents. Surviving the window would
+                // mean serving them to whatever finds the port, with nothing on
+                // screen to say it is still running.
+                viewer::kill(&handle.state::<viewer::Viewer>());
+                if let Ok(d) = handle.path().app_config_dir() {
+                    viewer::cleanup(&d);
                 }
             }
         });
