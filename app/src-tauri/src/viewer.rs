@@ -1639,6 +1639,82 @@ while True:
         let _ = std::fs::remove_dir_all(&cfg);
     }
 
+    /// The tick, against the real thing — the one assertion no stub can make.
+    ///
+    /// `an_edit_after_the_open_reaches_the_derived_copy` proves the bytes on
+    /// disk change. What it cannot prove is the half this feature actually
+    /// depends on: that `mo`, watching the derived tree with `-wR`, SERVES the
+    /// rewritten file to a tab that is already open. That is a claim about
+    /// somebody else's watcher, and the only honest way to make it is to ask a
+    /// running one.
+    ///
+    /// **Runs only when `WORKTREES_VIEWER_BIN` names a viewer**, like the test
+    /// above and for the same reason — CI has no `mo`, and a fake that answered
+    /// this question would be answering it with our own assumption:
+    ///
+    /// ```sh
+    /// WORKTREES_VIEWER_BIN=~/workspace/mo/mo cargo test -p app --lib the_tick_reaches -- --nocapture
+    /// ```
+    #[test]
+    fn the_tick_reaches_a_real_viewers_open_tab() {
+        if std::env::var(BIN_ENV).is_err() {
+            return;
+        }
+        let src = tmp("e2e-tick");
+        let cfg = tmp("e2e-tick-cfg");
+        std::fs::write(src.join("README.md"), "# Read me\n\nBEFORE-THE-EDIT\n").unwrap();
+        // The REAL walk, so the entries and the fingerprint describe the same
+        // place — which is what `open`'s caller does.
+        let fp = worktrees_core::docs::fingerprint(&src);
+        let entries = worktrees_core::docs::index(&src).entries;
+        let v = Viewer::default();
+        let _reap = Reaper(&v);
+        let req = Request {
+            root: &src,
+            slug: "e2e-tick",
+            path: Some(&entries[0].path),
+            stale: stale(),
+            docs: None,
+            fingerprint: fp,
+        };
+        let url = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up");
+        let port = v.0.lock().unwrap().as_ref().unwrap().port;
+        let id = url.rsplit("file=").next().unwrap().to_string();
+        let content = format!("/_/api/groups/e2e-tick/files/{id}/content");
+        assert!(http_get(port, &content).contains("BEFORE-THE-EDIT"), "the first derive did not reach the viewer");
+
+        // The user edits the document. Nothing is clicked.
+        for _ in 0..200 {
+            std::fs::write(src.join("README.md"), "# Read me\n\nAFTER-THE-EDIT\n").unwrap();
+            if worktrees_core::docs::fingerprint(&src) != fp {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(refresh(&v, 1_789_779_661).is_empty(), "the tick reported an error");
+
+        // Polled, not slept: the watcher is another process and the only thing
+        // being asserted is that it gets there, not how fast. A bounded wait
+        // fails loudly; a fixed sleep either flakes or hides a regression.
+        let mut body = String::new();
+        for _ in 0..40 {
+            body = http_get(port, &content);
+            if body.contains("AFTER-THE-EDIT") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(body.contains("AFTER-THE-EDIT"), "the viewer is still serving the copy made at click time: {body}");
+        assert!(!body.contains("BEFORE-THE-EDIT"), "the old text is still being served: {body}");
+        // …and it carries the new stamp, so a reader can tell the copy apart
+        // from the status above it.
+        assert!(body.contains("derived 2026-09-19 01:01:01 UTC"), "the re-derived page is not dated: {body}");
+        assert!(body.contains("status as of"), "the git facts are passed off as current: {body}");
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&cfg);
+    }
+
     /// The derived tree is copies of the user's documents outside the repo's own
     /// gitignore. A viewer that is dead has no business still having them.
     #[test]
