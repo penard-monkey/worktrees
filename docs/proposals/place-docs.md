@@ -1176,10 +1176,17 @@ things need `app/scripts/sandbox.sh --app` and a human:
   `MatchOptions::new()` — `require_literal_separator: false` — so the pattern
   matches the whole URL including path and query. No capability change is
   needed. Whether WKWebView's `open` call behaves is still unmeasured.
-- The footer button in WebKit. It is an inner-span flex with a pinned label
-  precisely because a `<button>` that is itself a flex container is shrink-
-  wrapped without its overflow-hidden children — the usage meter's bug. Written
-  to avoid it; not measured in the host that has it.
+- ~~The footer button in WebKit.~~ **Measured, and the trap does not apply
+  here.** Headless Playwright WebKit against the mock, beside Chromium: the
+  button is 198px, the label 163px, the icon 13px and hit-testable, *identically
+  in both engines*, at 1280px and at `DOCK_MIN`. Forcing the dock to 149px —
+  narrower than the app allows — and removing the label's `flex: none` shrinks
+  it to 103px and the icon to 8px, again identically. So the pin is load-bearing
+  (it changes the layout) and the ENGINES AGREE, because the usage meter's bug
+  needs a button that is being asked to shrink, and `.docs-foot`'s
+  `align-items: flex-start` means this one never is. Worth stating as a
+  measurement rather than deleting the rule: the next control put in that footer
+  may well compete for width.
 - The spawn latency as felt. 0.23 s to listen was measured with 7 files and the
   tree is registered afterwards, so it should not grow with the place — but
   "should not" is what a real-app pass is for.
