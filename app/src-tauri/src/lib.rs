@@ -4584,11 +4584,25 @@ async fn remove_place(
     if force {
         args.push("--force".into());
     }
+    // Resolved BEFORE the removal, because it cannot be afterwards: the derived
+    // tree is keyed by a hash of the canonical directory, and `canonicalize`
+    // needs the directory to exist. A place nobody opened in the browser has no
+    // tree and this resolves to one that is not there, which is fine.
+    let viewer_root = Project::discover(Path::new(&repo))
+        .ok()
+        .map(|p| p.place_dir(&slug_sweep))
+        .and_then(|d| std::fs::canonicalize(d).ok());
     // cmd_rm sweeps this place's dock shell sidecars itself (core, only once the
     // removal proceeds past its dirty/confirm guards — a refused rm keeps them).
     let r = run_op(&format!("rm {slug_log}"), &repo, move |p, ui| ops::cmd_rm(p, ui, &args))?;
     if r.ok {
         kill_place_shells(&shells, &repo, &slug_sweep);
+        // …and the documents the viewer derived from it. `cmd_rm` deleted the
+        // originals; without this the derived copy is the last readable one and
+        // it is on a port.
+        if let (Ok(cfg), Some(root)) = (app.path().app_config_dir(), viewer_root) {
+            viewer::forget_place(&cfg, &slug_sweep, &root);
+        }
         // The place is gone for good, so its remembered directories are too.
         // (A `close` deliberately does NOT do this: closing keeps the tab names,
         // so it has to keep what those tabs point at.)

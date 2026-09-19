@@ -137,6 +137,27 @@ pub fn kill(v: &Viewer) {
     }
 }
 
+/// Drop one place's derived documents, because the place itself is gone.
+///
+/// Called from `remove_place`, and it closes a hole that is small but exactly
+/// the wrong shape for this feature: after `worktrees rm` the worktree's
+/// documents are deleted from disk, and the derived copy would be the LAST
+/// readable copy of them — served, on a port, until the app quit. A staleness
+/// viewer serving documents that no longer exist anywhere is the joke this whole
+/// proposal is built to avoid.
+///
+/// Removing the tree is a complete deregistration and needs no second call.
+/// `mo` watches the directory (`-wR`), and it drops what leaves it: verified —
+/// two seconds after the tree was removed the group listed zero files and the
+/// content endpoint answered 404.
+///
+/// Best-effort and silent: a place with no tree (never opened in the browser) is
+/// the common case, not an error.
+pub fn forget_place(config_dir: &Path, slug: &str, canonical_root: &Path) {
+    let dir = viewer_dir(config_dir).join("tree").join(tree_key(slug, canonical_root));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Drop what the viewer left on disk. Called from `RunEvent::Exit` after `kill`.
 ///
 /// The derived trees are copies of the user's documents in a directory that is
@@ -971,6 +992,32 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A removed place's derived documents are the LAST readable copy of them —
+    /// `cmd_rm` deleted the originals — and they would be on a port. Keyed by
+    /// the canonical root, so the same slug in another project keeps its own.
+    #[test]
+    fn removing_a_place_takes_its_derived_documents_with_it() {
+        let cfg = tmp("forget");
+        let gone = PathBuf::from("/w/one/.worktrees/docs");
+        let other = PathBuf::from("/w/two/.worktrees/docs");
+        let trees = viewer_dir(&cfg).join("tree");
+        for root in [&gone, &other] {
+            let d = trees.join(tree_key("docs", root));
+            std::fs::create_dir_all(d.join("sub")).unwrap();
+            std::fs::write(d.join("sub/x.md"), "a client's signed agreement").unwrap();
+        }
+        assert_eq!(std::fs::read_dir(&trees).unwrap().count(), 2);
+
+        forget_place(&cfg, "docs", &gone);
+        assert!(!trees.join(tree_key("docs", &gone)).exists(), "the removed place's documents stayed");
+        assert!(trees.join(tree_key("docs", &other)).is_file() || trees.join(tree_key("docs", &other)).is_dir(),
+            "the same slug in another project lost its tree");
+        // And a place that was never opened in the browser has no tree at all,
+        // which is the common case and not an error.
+        forget_place(&cfg, "never-opened", &gone);
+        let _ = std::fs::remove_dir_all(&cfg);
     }
 
     /// `mo`'s session file is keyed by PORT and restores whatever that port

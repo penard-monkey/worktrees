@@ -1115,6 +1115,13 @@ agreement, sitting outside the repo's gitignore in a directory Spotlight and
 Time Machine both index; they do not get to persist for a viewer that is, by
 design, dead.
 
+**A removed place's derived documents go with it.** `remove_place` deletes the
+tree, resolving the canonical root *before* the removal because it cannot be
+resolved after. `cmd_rm` deletes the originals, so without this the derived copy
+would be the last readable one — and it would be on a port. Removing the
+directory is a complete deregistration: `mo` watches it and drops what leaves,
+verified at two seconds to zero files and a 404 from the content endpoint.
+
 **Generated per open, registered once per place.** `mo -wR <tree>` registers the
 directory (one argument rather than up to 2,000 — the index's cap — which keeps
 this off `ARG_MAX` entirely) and watches it, so regenerating the tree
