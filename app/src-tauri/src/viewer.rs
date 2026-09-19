@@ -694,6 +694,14 @@ pub fn open(
     let tree = vdir.join("tree").join(tree_key(req.slug, &root));
 
     let derived = write_tree(&tree, entries, &req.stale, port, &group)?;
+    // A group of no documents is not worth registering, and registering one
+    // would put a watch pattern on an empty directory that nothing will ever
+    // fill. The footer button is disabled on an empty index, so the way here is
+    // the race: the index was walked 30 seconds ago and the place has been
+    // emptied since. Say that, rather than opening a blank group.
+    if derived.is_empty() {
+        return Err(format!("{} has no documents to show", req.slug));
+    }
     if !proc.groups.iter().any(|(r, _)| *r == root) {
         register(&bin, &state_dir, port, &group, &tree)?;
         proc.groups.push((root, group.clone()));
