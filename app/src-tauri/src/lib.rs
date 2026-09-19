@@ -2393,9 +2393,29 @@ async fn get_ai_config() -> Result<AiConfig, String> {
 /// (~1.1s, and a false ✘ whenever the cwd is not a repo). Safe to call on a
 /// sheet open or a Home render; still `async`, like every command here, because
 /// it touches the filesystem.
+///
+/// Logged, unlike most read-only commands. `mcp_install`/`mcp_uninstall` already
+/// applog, but the state that decides whether the offer EVER appears is
+/// computed here — and every non-`absent` answer is a silent one, by design. A
+/// user reporting "it never offered" leaves no other trace: without this line
+/// the only way to tell `absent` (card suppressed by something in the UI) from
+/// `cli-missing`/`elsewhere` (card correctly withheld) is to ask them to open
+/// Settings and read it out.
 #[tauri::command]
 async fn mcp_status(repo: Option<String>) -> Result<worktrees_core::mcpsetup::Status, String> {
-    Ok(worktrees_core::mcpsetup::status(repo.as_deref()))
+    let s = worktrees_core::mcpsetup::status(repo.as_deref());
+    applog(
+        "info",
+        &format!(
+            "mcp_status repo={} -> state={:?} found_in={:?} claude={} worktrees={}",
+            repo.as_deref().unwrap_or("-"),
+            s.state,
+            s.found_in,
+            s.claude_bin.as_deref().unwrap_or("-"),
+            s.worktrees_bin.as_deref().unwrap_or("-"),
+        ),
+    );
+    Ok(s)
 }
 
 /// Wire it in (or repair, or re-install with a different `--mutations`).

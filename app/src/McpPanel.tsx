@@ -51,16 +51,10 @@ export type McpStatus = {
 /** Mirrors `mcpsetup::Outcome`. */
 export type McpOutcome = { ok: boolean; output: string; status: McpStatus };
 
-/** The one state the passive nudge may appear for — `State::nudgeable` on the
- *  Rust side, repeated here rather than shipped as a field because it is a
- *  question about THIS UI, not about the machine. `stale` and `read-only` are
- *  deliberately not included: they are real problems, and they belong in
- *  Settings where they cannot be dismissed by someone who only ever wanted the
- *  install offer to stop. */
-export const canNudge = (s: McpStatus | null) => s?.state === "absent";
-
-/** One line for the current state, plus how alarmed to look. Shared by both
- *  surfaces so the Home card and the Settings panel say the same thing. */
+/** One line for the current state, plus how alarmed to look. The panel is the
+ *  only surface that renders it now — the release-notes band says what the
+ *  OFFER is (`offers.ts`), which is a different sentence on purpose: one
+ *  describes a machine, the other proposes a thing to do. */
 function verdict(s: McpStatus): { tone: "ok" | "warn" | "off"; line: string } {
   switch (s.state) {
     case "installed":
@@ -96,15 +90,23 @@ function verdict(s: McpStatus): { tone: "ok" | "warn" | "off"; line: string } {
 
 /** Settings → Claude. The permanent home: the real state, the actions, and the
  *  command spelled out for anyone who would rather run it themselves. */
-export function McpSection({ status, repo, onChanged, onReport }: {
+export function McpSection({ status, repo, offerPending, onSilenceOffer, onChanged, onReport }: {
   status: McpStatus | null;
   /** The project in focus, or "" — only used to check the local/project scopes. */
   repo: string;
+  /** Is this still an un-taken, un-silenced offer (`offers.ts`)? If so this
+   *  panel must be able to END it, because the gear dot that sent you here is
+   *  lit by exactly that fact and this is the only surface reachable on demand.
+   *  The release-notes band carries the same button, but it appears once per
+   *  version and never at all on a fresh install — so without this, the most
+   *  common way to meet the offer is a permanent dot with no off switch. */
+  offerPending: boolean;
+  onSilenceOffer: () => void;
   onChanged: (s: McpStatus) => void;
   onReport: (msg: string) => void;
 }) {
-  // App's startup probe runs with NO repo — it is for the Home card, which is a
-  // machine-level offer and has no project in focus. The local and project
+  // App's startup probe runs with NO repo — it feeds the offer registry, which
+  // is a machine-level question and has no project in focus. The local and project
   // scopes can only be consulted with one, so the panel re-reads on mount with
   // the repo in hand. ON DEMAND, never on a timer: the same discipline `doctor`
   // keeps, for the same reason — nothing here belongs on the poll path.
@@ -159,7 +161,7 @@ export function McpSection({ status, repo, onChanged, onReport }: {
   const verb = status.state === "stale" ? "Repair" : status.state === "read-only" ? "Re-install" : "Set up";
 
   return (
-    <section className="setting">
+    <section className="setting" data-focus="mcp-server">
       <label>
         Claude MCP server
         {status.state === "stale" && <span className="upd-tag">broken</span>}
@@ -214,6 +216,12 @@ export function McpSection({ status, repo, onChanged, onReport }: {
         {status.command && (
           <button className="ctrl sm" onClick={copy}>{copied ? "Copied" : "Copy command"}</button>
         )}
+        {/* Ends the SUGGESTION, not the feature: the panel stays exactly as it
+            is, still says what is not set up and still offers to do it. All
+            this retires is the nudging — the band and the dot on the gear. */}
+        {offerPending && (
+          <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>
+        )}
         {installed && status.state !== "foreign" && (
           <button
             className={"ctrl sm danger" + (removeArmed ? " armed" : "")}
@@ -239,38 +247,5 @@ export function McpSection({ status, repo, onChanged, onReport }: {
       {log && <pre className="update-log">{log}</pre>}
       <div className="hint">Servers are recorded in {status.config_path}. Restart a Claude session for a change to reach it.</div>
     </section>
-  );
-}
-
-/** The passive card on Home. Only ever appears for `absent` (see `canNudge`),
- *  only once there is a project to use it on, and never for a machine whose AI
- *  command is not claude.
- *
- *  There is no "not now" button, deliberately: ignoring it IS "not now". It sits
- *  on Home, never over the terminal, so it costs nothing to leave standing — and
- *  a third button would ask the user to distinguish two kinds of silence when
- *  only one of them is a decision. "Don't show again" is the persisted flag, and
- *  the card retires itself the moment the server exists, so that flag only ever
- *  governs this one case. */
-export function McpNudge({ status, onOpenSettings, onDismiss }: {
-  status: McpStatus;
-  onOpenSettings: () => void;
-  onDismiss: () => void;
-}) {
-  return (
-    <div className="mcp-card">
-      <div className="mcp-card-h">
-        <Icons.SquareTerminal size={14} />
-        Let Claude drive your worktrees
-      </div>
-      <p>
-        Claude can create, inspect and close worktrees as tools instead of running git by hand — one
-        setup, every project. {status.claude_bin ? "We can wire it up for you." : "Settings has the command to run."}
-      </p>
-      <div className="ver-actions">
-        <button className="ctrl sm" onClick={onOpenSettings}>Set up…</button>
-        <button className="mcp-dismiss" onClick={onDismiss}>Don’t show again</button>
-      </div>
-    </div>
   );
 }
