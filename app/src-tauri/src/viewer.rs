@@ -532,12 +532,25 @@ fn empty_dir(dir: &Path) {
 /// off the hot path; executing a candidate to find out would put an exec of an
 /// unknown binary on app launch, which is the opposite of what rule 2 asks for.
 pub fn binary_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
-    if let Ok(p) = std::env::var(BIN_ENV) {
-        let p = PathBuf::from(p);
-        return std::fs::metadata(&p).ok().filter(|m| m.is_file()).map(|_| p);
+    resolve_binary(std::env::var(BIN_ENV).ok().as_deref(), resource_dir)
+}
+
+/// The resolution itself, with the environment as an ARGUMENT.
+///
+/// Split out so its test can state the precedence instead of depending on the
+/// ambient environment — which it did, and which made the suite fail the moment
+/// it was run the way the end-to-end test asks to be run
+/// (`WORKTREES_VIEWER_BIN=… cargo test`). A test that passes only when nobody is
+/// exercising the feature is not a test.
+fn resolve_binary(from_env: Option<&str>, resource_dir: Option<&Path>) -> Option<PathBuf> {
+    let is_file = |p: PathBuf| std::fs::metadata(&p).ok().filter(|m| m.is_file()).map(|_| p);
+    // The override WINS, and a broken override does not fall through to the
+    // bundle: someone who set it is testing that binary, and quietly running a
+    // different one is how you spend an afternoon.
+    if let Some(p) = from_env {
+        return is_file(PathBuf::from(p));
     }
-    let p = resource_dir?.join(RESOURCE_REL);
-    std::fs::metadata(&p).ok().filter(|m| m.is_file()).map(|_| p)
+    is_file(resource_dir?.join(RESOURCE_REL))
 }
 
 /// Spawn a viewer, wait for it, and prove it refuses a foreign `Host`.
@@ -579,7 +592,10 @@ fn spawn(bin: &Path, state_dir: &Path, log: &Path) -> Result<Proc, String> {
     cmd.stdout(std::process::Stdio::from(out));
     cmd.stderr(std::process::Stdio::from(err));
 
-    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", e_with_path(bin, &e)))?;
+    // The PATH in the message, not just the errno: "No such file or directory"
+    // alone names nothing, and the two cases a user can act on — it is missing,
+    // it is the wrong architecture — read identically without it.
+    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
     let fail = |child: &mut std::process::Child, msg: String| -> String {
         let _ = child.kill();
         let _ = child.wait();
@@ -592,13 +608,6 @@ fn spawn(bin: &Path, state_dir: &Path, log: &Path) -> Result<Proc, String> {
         return Err(fail(&mut child, e));
     }
     Ok(Proc { child, port, groups: Vec::new() })
-}
-
-/// A spawn error with the path in it — `No such file or directory` alone names
-/// nothing, and the two cases a user can actually fix (it is missing, it is the
-/// wrong architecture) look identical without it.
-fn e_with_path(bin: &Path, e: &std::io::Error) -> String {
-    format!("{}: {e}", bin.display())
 }
 
 /// The last few lines of the viewer's log, for an error message. A child that
@@ -1169,12 +1178,27 @@ mod tests {
     #[test]
     fn a_missing_viewer_is_absent_rather_than_an_error() {
         let d = tmp("bin");
-        assert!(binary_path(Some(&d)).is_none());
-        assert!(binary_path(None).is_none());
-        std::fs::create_dir_all(d.join("viewer")).unwrap();
+        assert!(resolve_binary(None, Some(&d)).is_none(), "an empty resource dir is not an install");
+        assert!(resolve_binary(None, None).is_none(), "no resource dir at all is not an install");
+
         // A DIRECTORY where the binary should be is still "not installed".
         std::fs::create_dir_all(d.join(RESOURCE_REL)).unwrap();
-        assert!(binary_path(Some(&d)).is_none());
+        assert!(resolve_binary(None, Some(&d)).is_none(), "a directory passed as the binary");
+        let _ = std::fs::remove_dir_all(d.join(RESOURCE_REL));
+
+        let real = d.join("viewer/mo");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "#!/bin/sh\n").unwrap();
+        assert_eq!(resolve_binary(None, Some(&d)).as_deref(), Some(real.as_path()));
+
+        // The override wins, and a BROKEN override does not fall through to the
+        // bundled one — running a different binary than the one you named is how
+        // an afternoon goes missing.
+        let other = d.join("other-mo");
+        std::fs::write(&other, "#!/bin/sh\n").unwrap();
+        assert_eq!(resolve_binary(Some(other.to_str().unwrap()), Some(&d)).as_deref(), Some(other.as_path()));
+        assert!(resolve_binary(Some("/does/not/exist/mo"), Some(&d)).is_none());
+
         let _ = std::fs::remove_dir_all(&d);
     }
 }
