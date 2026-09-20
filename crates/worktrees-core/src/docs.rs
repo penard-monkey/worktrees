@@ -214,7 +214,7 @@ fn unquote(s: &str) -> &str {
 /// part that matters — when that block is never CLOSED.
 ///
 /// ONE parser, because two readers of the same block drift. `title_from` needs
-/// the block to find `title:` and the body to find the H1; `derive::document`
+/// the block to find `title:` and the body to find the H1; `derive::body`
 /// needs the body to throw the block away (a viewer renders frontmatter as
 /// noise — `mo` makes an expanded `<details>` "Metadata" block on every page).
 /// Those are the same question asked twice, and the second asker is the one
@@ -227,6 +227,15 @@ fn unquote(s: &str) -> &str {
 /// silently delete the whole document. A lone `---` on line 1 is a thematic
 /// break; treating it as an open block is a guess, and the guess is only free
 /// for the reader that cannot lose anything by it.
+///
+/// **And a TERMINATED one is not frontmatter either, unless the block opens a
+/// YAML mapping.** The same thematic break with any later `---` under it — and
+/// `---` is a spelling this repo's own prose uses — closed a block that was
+/// never opened, so everything between them was metadata and the derive deleted
+/// the top of the document. Jekyll and gray-matter read it the same way, which
+/// is why this survived: it is ecosystem-consistent and still wrong for the one
+/// reader that DELETES. So the block is asked one question, `opens_a_mapping`,
+/// and prose fails it.
 pub fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     let open_end = text.find('\n').map(|i| i + 1).unwrap_or(text.len());
     // `str::lines` strips a trailing `\r`; this is the same test on raw bytes.
@@ -238,11 +247,62 @@ pub fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
         let end = text[pos..].find('\n').map(|i| pos + i + 1).unwrap_or(text.len());
         let line = text[pos..end].trim_end_matches(['\n', '\r']).trim_end();
         if line == "---" || line == "..." {
-            return Some((&text[open_end..pos], &text[end..]));
+            let block = &text[open_end..pos];
+            return opens_a_mapping(block).then(|| (block, &text[end..]));
         }
         pos = end;
     }
     None
+}
+
+/// Does this block read as a YAML MAPPING — the only thing frontmatter ever is?
+///
+/// One question, of the first non-blank line, because that is where the answer
+/// is and a fuller parse would be a YAML reader living in a markdown tool. An
+/// EMPTY block passes: `---\n---\n` is a legal, if pointless, frontmatter.
+///
+/// A `#` line is deliberately NOT skipped as a YAML comment. `# Heading` is the
+/// far more likely reading of those bytes in a file this tool only ever meets
+/// as markdown, and skipping it would hand a document that opens with a rule
+/// and a heading straight back to the deleter — the failure this exists to
+/// stop, wearing the fix's own clothes.
+fn opens_a_mapping(block: &str) -> bool {
+    for line in block.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        return yaml_key(t);
+    }
+    true
+}
+
+/// Does `t` begin `key:` — a bare key ending at the colon, or a quoted one?
+///
+/// The key may not contain whitespace, which is what separates a mapping from
+/// most English: `See the note below: it matters` fails on the space. A key
+/// with a space in it is legal YAML and vanishingly rare in frontmatter, and
+/// the cost of refusing one is an unstripped block that renders as visible text
+/// — not a deleted document, which is the whole asymmetry here.
+///
+/// What this does NOT separate, said out loud: a paragraph whose first word is
+/// followed by a colon (`Note: …`) is a mapping key by every rule any generator
+/// applies, and it is read as one here too. That ambiguity is in the bytes. The
+/// rule removes the shape that actually bit — a rule, a blank line, and prose —
+/// and does not pretend to more.
+fn yaml_key(t: &str) -> bool {
+    let key_end = match t.chars().next() {
+        Some(q @ ('"' | '\'')) => match t[1..].find(q) {
+            Some(i) => 1 + i + q.len_utf8(),
+            None => return false,
+        },
+        Some(c) if c.is_ascii_alphanumeric() || c == '_' => match t.find(|c: char| c == ':' || c.is_whitespace()) {
+            Some(i) => i,
+            None => return false,
+        },
+        _ => return false,
+    };
+    t[key_end..].starts_with(':') && t[key_end + 1..].chars().next().map(char::is_whitespace).unwrap_or(true)
 }
 
 /// The title a document declares: frontmatter `title:`, else the first H1.
@@ -312,6 +372,66 @@ fn title_of(path: &Path, name: &str) -> String {
     title_from(&String::from_utf8_lossy(&buf)).unwrap_or_else(stem)
 }
 
+/// The filesystem's own spelling of `want` among `names`, or `None`.
+///
+/// **Exact first, case-insensitively only as a fallback**, and the order is the
+/// whole point. `is_regular_file(root.join("README.md"))` is TRUE on APFS for a
+/// file actually named `Readme.md`, so a stat can never answer this: it hands
+/// back a name that is not on disk, and every later comparison — `seen`, the
+/// row's `rel`, the path `write_tree` writes — is then made against a spelling
+/// the volume merely tolerates. Only a listing knows what the entries are
+/// called.
+///
+/// The fallback is not a case-insensitive lookup wearing a hat. A
+/// case-SENSITIVE filesystem may legitimately carry both `README.md` and
+/// `Readme.md`; there the exact match wins the named slot and the other file is
+/// an ordinary root document, which is what it is. The fallback fires only when
+/// no entry is spelled the way the constant is, i.e. on the volume that could
+/// not have told them apart anyway. Several inexact matches and no exact one is
+/// a shape only a case-sensitive volume can produce, so the smallest is taken
+/// for a deterministic answer and the rest fall through to the root sweep.
+fn resolve_name(names: &[String], want: &str) -> Option<String> {
+    let mut ci: Option<&String> = None;
+    for n in names {
+        if n == want {
+            return Some(n.clone());
+        }
+        if n.eq_ignore_ascii_case(want) && ci.map(|c| n < c).unwrap_or(true) {
+            ci = Some(n);
+        }
+    }
+    ci.cloned()
+}
+
+/// `resolve_name`, component by component, for a path the project DECLARED
+/// (`[docs] index = "docs/index.md"` against a file named `docs/Index.md`).
+/// `None` unless every component resolves and the result is a regular file.
+///
+/// A listing per component rather than one stat, for the reason `resolve_name`
+/// gives — and it is affordable here because there is at most one declared
+/// index per place, two or three components deep.
+fn resolve_rel(root: &Path, rel: &str) -> Option<String> {
+    let mut dir = root.to_path_buf();
+    let mut parts: Vec<String> = Vec::new();
+    for want in rel.split('/').filter(|c| !c.is_empty()) {
+        let names = dir_names(&dir);
+        let name = resolve_name(&names, want)?;
+        dir = dir.join(&name);
+        parts.push(name);
+    }
+    if parts.is_empty() || !is_regular_file(&dir) {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
+/// Every entry name in `dir`, or an empty list when it cannot be read — the
+/// module's "a row that cannot be read simply is not one" applied to a listing.
+fn dir_names(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()
+}
+
 /// Build one entry. `rel` is the caller's business — it is what the row shows —
 /// and so is `group`, which is NOT simply `rel`'s parent: the brief lives in
 /// `.planning/` and belongs with the root files anyway (see `DocEntry::group`).
@@ -374,19 +494,34 @@ fn walk<T>(root: &Path, docs: Option<&Docs>, mut visit: impl FnMut(&Path, &str, 
         true
     }
 
+    // ONE listing of the root, shared by the named-file pass and the sweep
+    // below it. A stat cannot resolve a named file on a case-insensitive volume
+    // (`resolve_name`), and two passes reading the same directory through
+    // different eyes is how the same file came out twice.
+    let root_names: Vec<String> = dir_names(root)
+        .into_iter()
+        .filter(|n| is_regular_file(&root.join(n)))
+        .collect();
+
     // 0. `[docs] index` — where reading starts, ahead of everything. Grouped
     //    with the root files however deep it lives: it is the landing page for
     //    the whole place, so a `docs` header above it would file it under a
     //    tree it is introducing.
     if let Some(i) = docs.and_then(|d| d.index.as_ref()) {
-        if is_regular_file(&root.join(i.as_str())) && !push(&mut entries, &mut seen, root, &mut visit, i.as_str().to_string(), "") {
-            truncated = true;
+        if let Some(rel) = resolve_rel(root, i.as_str()) {
+            if !push(&mut entries, &mut seen, root, &mut visit, rel, "") {
+                truncated = true;
+            }
         }
     }
-    // 1. the named root files, in the order a reader wants them
+    // 1. the named root files, in the order a reader wants them — each under
+    //    the name the filesystem really gives it, which is also the key `seen`
+    //    then carries into step 3.
     for f in ROOT_FILES {
-        if is_regular_file(&root.join(f)) && !push(&mut entries, &mut seen, root, &mut visit, f.to_string(), "") {
-            truncated = true;
+        if let Some(rel) = resolve_name(&root_names, f) {
+            if !push(&mut entries, &mut seen, root, &mut visit, rel, "") {
+                truncated = true;
+            }
         }
     }
     // 2. this place's brief — the one document the tool itself writes
@@ -398,15 +533,9 @@ fn walk<T>(root: &Path, docs: Option<&Docs>, mut visit: impl FnMut(&Path, &str, 
     // 3. whatever other markdown is at the root — with the named files above,
     //    not stranded below the tree (see the module note)
     let mut rest: Vec<String> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(root) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if !is_md(&name) || seen.contains(&name) {
-                continue;
-            }
-            if std::fs::symlink_metadata(e.path()).map(|m| m.is_file()).unwrap_or(false) {
-                rest.push(name);
-            }
+    for name in &root_names {
+        if is_md(name) && !seen.contains(name) {
+            rest.push(name.clone());
         }
     }
     rest.sort_by_key(|r| r.to_lowercase());
@@ -708,6 +837,25 @@ mod tests {
         assert_eq!(runs, vec!["", "docs", "docs/sub"]);
     }
 
+    /// APFS answers `symlink_metadata("README.md")` for a file actually named
+    /// `Readme.md`, so the named-file pass used to push the CANONICAL spelling
+    /// — a `rel`/`path` that does not exist on disk — and the root sweep, whose
+    /// `seen` check is a case-SENSITIVE compare, then pushed the real entry a
+    /// second time. Two rows for one file, and `viewer::write_tree` wrote both
+    /// names, which collide back to one file on the same volume.
+    #[test]
+    fn a_root_file_is_listed_once_under_the_name_it_really_has() {
+        let t = tmp("rootcase");
+        let r = &t.0;
+        write(r, "Readme.md", "# readme");
+        write(r, "changelog.md", "# changes");
+        let i = index(r);
+        assert_eq!(rels(&i), vec!["Readme.md", "changelog.md"], "the disk's own spelling, once each");
+        for e in &i.entries {
+            assert!(Path::new(&e.path).exists(), "{} names a path that is not there", e.path);
+        }
+    }
+
     #[test]
     fn the_brief_is_grouped_with_the_root_files_not_under_planning() {
         let t = tmp("briefgroup");
@@ -761,16 +909,26 @@ mod tests {
         assert!(i.truncated, "an index that silently stops is the lie this tab exists to remove");
     }
 
+    /// BOTH sides of the cap, because only one of them is a cap. A test that
+    /// writes a file far past `MAX_DEPTH` and finds it absent passes for an
+    /// off-by-one in either direction — and the direction that costs something
+    /// is the one where the limit arrived early and a real document went
+    /// missing with no truncation flag to say so.
     #[test]
-    fn the_depth_cap_stops_the_walk() {
+    fn the_depth_cap_stops_the_walk_at_max_depth_and_not_before_it() {
         let t = tmp("depth");
         let r = &t.0;
-        let deep: String = (1..=MAX_DEPTH + 2).map(|i| format!("d{i}/")).collect();
-        write(r, &format!("docs/{deep}far.md"), "# far");
+        let dirs = |n: usize| -> String { (1..=n).map(|i| format!("d{i}/")).collect() };
+        // `docs/` itself is depth 0, so `docs/d1/…/d{MAX_DEPTH}` is the last
+        // directory the walk may descend into.
+        write(r, &format!("docs/{}deepest.md", dirs(MAX_DEPTH)), "# deepest");
+        write(r, &format!("docs/{}past.md", dirs(MAX_DEPTH + 1)), "# past");
         write(r, "docs/near.md", "# near");
         let i = index(r);
-        assert!(i.entries.iter().all(|e| !e.rel.ends_with("far.md")), "past MAX_DEPTH: {:?}", rels(&i));
-        assert!(i.entries.iter().any(|e| e.rel == "docs/near.md"));
+        let listed = rels(&i);
+        assert!(listed.iter().any(|r| r.ends_with("/deepest.md")), "MAX_DEPTH is listed, not cut: {listed:?}");
+        assert!(!listed.iter().any(|r| r.ends_with("/past.md")), "MAX_DEPTH + 1 was walked: {listed:?}");
+        assert!(listed.contains(&"docs/near.md"));
     }
 
     #[test]
@@ -798,11 +956,53 @@ mod tests {
         assert_eq!(title_from("---\ntitle:\n---\n# fallback\n").as_deref(), Some("fallback"), "an empty key is no key");
         assert_eq!(title_from("---\nnav:\n  title: nested\n---\n# top\n").as_deref(), Some("top"), "an indented key is some other map's");
         // An opening `---` with no closing one is a thematic break, not a block
-        // that runs to EOF. `derive::document` DELETES what it calls
+        // that runs to EOF. `derive::body` DELETES what it calls
         // frontmatter, so one parser decides this for both of them.
         assert_eq!(title_from("---\n\n# After a rule\n").as_deref(), Some("After a rule"));
         assert_eq!(title_from("#   Spaced   out   ##\n").as_deref(), Some("Spaced out"));
         assert_eq!(title_from("#no space is not a heading\n# yes it is\n").as_deref(), Some("yes it is"));
+    }
+
+    /// A document may OPEN with a thematic break — and `---` is the spelling
+    /// this repo's own prose uses. Any later `---` then closed a block that was
+    /// never opened, and everything between them was frontmatter: `title_from`
+    /// merely lost a title to that, but `derive::body` DELETES what this call
+    /// says is frontmatter, so the reader lost the top of the document with no
+    /// sign that anything was there.
+    ///
+    /// The tightening is one question asked of the block's first non-blank
+    /// line: does it open a YAML MAPPING (`key:`)? Every frontmatter dialect
+    /// this tool meets writes one, and prose does not. A `#` line is not
+    /// skipped as a YAML comment on purpose — `# Heading` is the far more
+    /// likely reading of the same bytes, and skipping it would hand a heading's
+    /// document back to the deleter.
+    #[test]
+    fn a_thematic_break_is_not_an_unclosed_frontmatter_block() {
+        let doc = "---\n\nThe opening paragraph, under a rule.\n\n---\n\nMore prose.\n";
+        assert_eq!(split_frontmatter(doc), None, "prose between two rules was read as metadata");
+        assert_eq!(title_from("---\n\n# The Real Title\n\n---\n\nbody\n").as_deref(), Some("The Real Title"));
+        // A block whose first line is a mapping key still is frontmatter, in
+        // every shape a generator writes it.
+        for front in [
+            "---\ntitle: X\n---\nbody\n",
+            "---\n\ntitle: X\n---\nbody\n",
+            "---\nnav:\n  title: nested\n---\nbody\n",
+            "---\ntitle:\n---\nbody\n",
+            "---\n\"quoted key\": X\n---\nbody\n",
+            "---\ndate: 2026-09-19 10:00:00\n---\nbody\n",
+            "---\n---\nbody\n",
+        ] {
+            assert!(split_frontmatter(front).is_some(), "real frontmatter refused: {front:?}");
+            assert_eq!(split_frontmatter(front).unwrap().1, "body\n", "{front:?}");
+        }
+        // A sentence whose colon is not its first word's is prose, because a
+        // key may not carry whitespace.
+        assert_eq!(split_frontmatter("---\nSee the note below: it matters.\n\nmore\n---\nbody\n"), None);
+        // What is NOT claimed: `Note: something` is a mapping key by every
+        // rule any generator applies, and this reads it as one too. The
+        // ambiguity is in the bytes, not in the test — it is recorded so the
+        // next reader does not take the rule for more than it is.
+        assert!(split_frontmatter("---\nNote: a paragraph opening with one word and a colon.\n---\nbody\n").is_some());
     }
 
     #[test]
@@ -928,6 +1128,36 @@ mod tests {
         // …and it is not listed TWICE when the convention would have found it
         assert_eq!(rels(&i).iter().filter(|r| **r == "docs/index.md").count(), 1);
         assert_eq!(rels(&i), vec!["docs/index.md", "README.md", "CLAUDE.md"]);
+    }
+
+    /// The same family one level in: a declared `index` is a path the PROJECT
+    /// spelled, and the file it names may be spelled differently on disk.
+    #[test]
+    fn a_declared_index_is_found_under_the_filesystems_own_spelling() {
+        let t = tmp("cfgindexcase");
+        let r = &t.0;
+        write(r, "docs/Index.md", "# landing");
+        let i = index_with(r, Some(&cfg(&[], Some("docs/index.md"))));
+        assert_eq!(rels(&i), vec!["docs/Index.md"], "listed once, under the name it really has");
+        assert!(Path::new(&i.entries[0].path).exists(), "{}", i.entries[0].path);
+    }
+
+    /// The fallback's boundary, stated where a filesystem cannot be used to
+    /// state it: this machine is APFS, so the case-SENSITIVE half of the rule
+    /// has no way to exist on disk here. An exact entry always wins its slot,
+    /// and only the volume that could never have told the spellings apart falls
+    /// back — otherwise a Linux checkout carrying both files would lose one.
+    #[test]
+    fn an_exact_entry_wins_its_slot_and_only_a_missing_one_falls_back() {
+        let both = vec!["README.md".to_string(), "Readme.md".to_string()];
+        assert_eq!(resolve_name(&both, "README.md").as_deref(), Some("README.md"));
+        let only_odd = vec!["Readme.md".to_string()];
+        assert_eq!(resolve_name(&only_odd, "README.md").as_deref(), Some("Readme.md"));
+        assert_eq!(resolve_name(&only_odd, "CHANGELOG.md"), None);
+        // Several inexact and no exact: deterministic, and the rest are left to
+        // the root sweep rather than dropped.
+        let many = vec!["readme.md".to_string(), "ReadMe.md".to_string()];
+        assert_eq!(resolve_name(&many, "README.md").as_deref(), Some("ReadMe.md"), "byte order, so the answer is stable");
     }
 
     #[test]
