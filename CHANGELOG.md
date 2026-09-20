@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.26.0] - 2026-09-19
 
 ### Added
 - **"Show me that file" now works from a Claude session.** Ask the session to
