@@ -103,6 +103,52 @@ else {
   else ok("the viewer reuses app/src/markdown.tsx rather than a second renderer");
 }
 
+// ── 2b. the raw-HTML allow-list stays an allow-list ─────────────────────────
+// The viewer sanitises raw HTML where the dock shows it as text, and that is
+// only defensible while the list is short and three specific things stay off
+// it. Each has a reason a future reader will not reconstruct from the diff:
+// `style` because `style-src 'unsafe-inline'` is REQUIRED by this page (mermaid
+// needs it), so an inline style attribute really applies and a document can
+// park a `position: fixed` box over the staleness header — measured; `class`
+// because the page identifies its own chrome by class; `id` because it collides
+// with the heading-anchor namespace. And `svg` because rendering a document's
+// inline SVG means owning an allow-list over `<use>`, `<foreignObject>` and
+// `<animate>` forever, for a construct mermaid already covers better.
+const rawPath = path.join(APP, "viewer/rawhtml.tsx");
+if (!fs.existsSync(rawPath)) fail("app/viewer/rawhtml.tsx not found — the viewer's raw-HTML policy has no home");
+else {
+  const raw = fs.readFileSync(rawPath, "utf8");
+  const listed = (name) => {
+    const m = new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\)`).exec(raw);
+    return m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : null;
+  };
+  const tags = listed("TAGS");
+  if (!tags) fail("could not find the TAGS allow-list in rawhtml.tsx — did it get renamed?");
+  else {
+    const banned = ["script", "style", "iframe", "object", "embed", "svg", "math", "link", "meta", "base", "form", "input"];
+    const leaked = banned.filter((t) => tags.includes(t));
+    if (leaked.length) fail(`these tags are on the raw-HTML allow-list and must not be: ${leaked.join(", ")}`);
+    else ok(`raw-HTML tag allow-list is ${tags.length} tags and admits none of ${banned.join("/")}`);
+  }
+  const attrBlock = /const ATTRS[\s\S]*?\n};/.exec(raw)?.[0] ?? "";
+  const badAttrs = ["style", "class", "id", "srcset", "background", "formaction"].filter((a) =>
+    new RegExp(`"${a}"`).test(attrBlock));
+  if (badAttrs.length) fail(`these attributes are on the raw-HTML allow-list and must not be: ${badAttrs.join(", ")}`);
+  else ok("raw-HTML attribute allow-list admits no style/class/id");
+  if (/on[a-z]+"/.test(attrBlock)) fail("an on* handler attribute appears in the raw-HTML attribute allow-list");
+  else ok("no on* handler is allow-listed");
+  // The namespace check is what refuses <svg>'s CHILDREN — a tag-name list
+  // alone would let a standalone `<a>` inside an SVG through.
+  // Anchored on the whole statement, not the phrase: `if (false && el.namespaceURI
+  // !== HTML_NS)` matched a looser pattern and the guard read as present. A
+  // static check can always be outwitted; it should at least cost more than a
+  // two-word edit.
+  if (!/if \(el\.namespaceURI !== HTML_NS\)/.test(raw)) fail("rawhtml.tsx no longer refuses elements by namespace — an <a> or <use> inside an <svg> is not the HTML element of that name");
+  else ok("rawhtml.tsx refuses every element outside the HTML namespace");
+  if (!/safeHref/.test(raw)) fail("rawhtml.tsx does not route href through markdown.tsx's safeHref — that is a second link policy");
+  else ok("raw-HTML links go through the same safeHref as markdown links");
+}
+
 // ── 3. two builds, two outputs ──────────────────────────────────────────────
 const appCfg = fs.readFileSync(path.join(APP, "vite.config.ts"), "utf8");
 const viewerCfgPath = path.join(APP, "vite.viewer.config.ts");
