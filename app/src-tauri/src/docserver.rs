@@ -1412,17 +1412,47 @@ mod tests {
         assert_eq!(status(&js), 404, "{js}");
     }
 
+    /// This machine's own non-loopback IPv4 address, or `None` if it has only
+    /// `lo`. `std` cannot enumerate interfaces, so the address is obtained the
+    /// portable way: a UDP socket "connected" to an unroutable TEST-NET address
+    /// sends no packet, but the kernel picks a source address for the route and
+    /// `local_addr` reads it back. Measured to answer on both CI platforms.
+    fn own_lan_addr() -> Option<std::net::Ipv4Addr> {
+        let s = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        s.connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+        match s.local_addr().ok()?.ip() {
+            std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+            _ => None,
+        }
+    }
+
     /// Bound to loopback, and to nothing else. The one-line version of §4.3:
     /// these documents carry a client's signed agreement, and a docs server
     /// reachable from the LAN is a data leak with a nice font.
     ///
-    /// **The witness is a second bind.** `0.0.0.0:<our port>` succeeds while a
-    /// loopback-only listener holds that port, and fails with `EADDRINUSE` if
-    /// the listener is on the wildcard — so this goes red the moment the bind
-    /// address widens, which nothing else here would notice. (Measured on this
-    /// platform before it was written down; a bind assertion that is really a
-    /// tautology is worse than none, and the first version of this test was
-    /// one.)
+    /// **The witness is a connection, because a bind is not portable.** The
+    /// first version of this test bound `0.0.0.0:<our port>` and asserted it
+    /// succeeded — true of a loopback-only listener on macOS, where it was
+    /// measured, and false on Linux, which refuses a wildcard bind over ANY
+    /// holder of that port. It passed here and went red in CI for a server that
+    /// was bound correctly. Its mirror image (bind our own LAN address) fails
+    /// the other way round: it discriminates on Linux and is satisfied by a
+    /// wildcard listener on macOS. Measured, all four cases, on both:
+    ///
+    /// | witness bind | macOS | Linux |
+    /// | --- | --- | --- |
+    /// | `0.0.0.0:P`  | tells them apart | `EADDRINUSE` either way |
+    /// | `<lan ip>:P` | succeeds either way | tells them apart |
+    ///
+    /// So there is no bind that means the same thing twice, and the rule above
+    /// does not talk about binds anyway — it talks about who can REACH this
+    /// server. A connect asks that directly and answers identically on both
+    /// platforms: refused via the LAN address while loopback-only, accepted via
+    /// it the moment the bind widens.
+    ///
+    /// The loopback connect is not scenery. Without it a dead server passes —
+    /// every connect fails, including the one that must — and this test's whole
+    /// job is to notice a server listening somewhere it should not be.
     #[test]
     fn the_server_is_bound_to_loopback_and_its_token_is_fresh_each_time() {
         let a = live("bind-a");
@@ -1430,11 +1460,26 @@ mod tests {
         assert_ne!(a.h.token, b.h.token, "two launches shared a token");
         assert_eq!(a.h.token.len(), 32);
         assert!(a.h.token.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let wait = std::time::Duration::from_secs(5);
+        let via_lo = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, a.h.port));
         assert!(
-            std::net::TcpListener::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), a.h.port)).is_ok(),
-            "0.0.0.0:{} is taken, so the server is not bound to loopback alone",
-            a.h.port
+            std::net::TcpStream::connect_timeout(&via_lo, wait).is_ok(),
+            "the server did not answer on loopback, so the refusal below would prove nothing"
         );
+
+        match own_lan_addr() {
+            // A firewall that DROPs rather than refuses shows up as a timeout,
+            // which is also an `Err` — the fail-safe direction.
+            Some(ip) => {
+                let via_lan = SocketAddr::from((ip, a.h.port));
+                assert!(
+                    std::net::TcpStream::connect_timeout(&via_lan, wait).is_err(),
+                    "{via_lan} answered, so the server is reachable off loopback"
+                );
+            }
+            None => eprintln!("no non-loopback IPv4 on this host; the LAN half did not run"),
+        }
     }
 
     /// The allow-list and the content types are two tables that have to agree:
