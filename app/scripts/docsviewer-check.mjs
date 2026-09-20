@@ -476,8 +476,25 @@ console.log("── the mermaid click rule ──");
   // `derive.rs` writes the directive; `stripClickDirectives` decides whether it
   // survives. Two files, two languages, one shape — the drift-check pattern this
   // repo uses for `dnd.ts::predictTier` and for `place_url` vs `routeHash`.
-  const rust = fs.readFileSync(DERIVE, "utf8");
-  const emit = /format!\("([^"\\]*(?:\\.[^"\\]*)*click[^"\\]*(?:\\.[^"\\]*)*)"\)/.exec(rust)?.[1];
+  const whole = fs.readFileSync(DERIVE, "utf8");
+  // Production only: `mod tests` writes `format!`s containing the word "click"
+  // as FIXTURES, and they are not the emitter.
+  const cut = whole.search(/^#\[cfg\(test\)\]$/m);
+  const rust = cut === -1 ? whole : whole.slice(0, cut);
+  // EVERY candidate, not the first. Taking the first made this check silently
+  // repointable: a `format!` carrying the word "click" added above the emitter
+  // would become the thing asserted, and the real emitter could then drift away
+  // from the strip rule with this check still green. Exactly one line may claim
+  // to be the emitter; if that stops being true, this fails and asks a human.
+  const all = [...rust.matchAll(/format!\("([^"\\]*(?:\\.[^"\\]*)*click[^"\\]*(?:\\.[^"\\]*)*)"\)/g)]
+    .map((m) => m[1]);
+  const uniq = [...new Set(all)];
+  if (uniq.length > 1) {
+    fail(`derive.rs has ${uniq.length} distinct \`format!("…click…")\` lines, so this check cannot\n`
+      + "     know which one is the emitter. Name the emitter or narrow this pattern.\n"
+      + uniq.map((u) => `       ${JSON.stringify(u)}`).join("\n"));
+  }
+  const emit = uniq[0];
   if (!emit) {
     fail("no `format!(\"…click…\")` in derive.rs — that is the line this strip rule exists to spare.\n"
       + "     If the emitter moved, re-point this check at it; the two halves must not drift apart.");

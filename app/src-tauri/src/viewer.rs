@@ -352,6 +352,19 @@ pub struct Request<'a> {
 /// (`docserver::place_key_ok`), so anything with a `/`, a `?` or a `%` in it
 /// would not be the segment we emitted.
 pub fn place_key(slug: &str, root: &Path, taken: &[(PathBuf, String)]) -> String {
+    let mut issued = ISSUED.lock().unwrap_or_else(|e| e.into_inner());
+    place_key_in(&mut issued, slug, root, taken)
+}
+
+/// `place_key` against a caller's own claims. See `claim_in` for why this seam
+/// exists: the global is shared by every test in the crate, so a pure test that
+/// asserts an exact segment has to own the map it asserts against.
+fn place_key_in(
+    issued: &mut std::collections::BTreeMap<String, PathBuf>,
+    slug: &str,
+    root: &Path,
+    taken: &[(PathBuf, String)],
+) -> String {
     if let Some((_, name)) = taken.iter().find(|(r, _)| r == root) {
         return name.clone();
     }
@@ -376,7 +389,7 @@ pub fn place_key(slug: &str, root: &Path, taken: &[(PathBuf, String)]) -> String
         base = "place".to_string();
     }
     let clash = taken.iter().any(|(_, n)| *n == base);
-    claim(base, root, clash)
+    claim_in(issued, base, root, clash)
 }
 
 /// Every route segment issued in this launch, and the place root it was issued
@@ -408,10 +421,31 @@ static ISSUED: Mutex<std::collections::BTreeMap<String, PathBuf>> =
 /// worth making.
 fn claim(base: String, root: &Path, clash: bool) -> String {
     let mut issued = ISSUED.lock().unwrap_or_else(|e| e.into_inner());
+    claim_in(&mut issued, base, root, clash)
+}
+
+/// `claim` against a caller's own map.
+///
+/// **This split exists for the tests, and it is not a convenience.** `ISSUED`
+/// is process-global, so every test in the crate shares it — and a claim made
+/// by one test is visible to the next. `two_places_with_one_slug_do_not_share_a_route`
+/// asserted `place_key("docs", "/w/one", …) == "docs"`, which held only while
+/// no other test had already claimed `docs` for a different root; an `open()`
+/// test using a tmp root with that slug made it fail, and the full suite passed
+/// only on the accident that the tests sort in an order where the claim lands
+/// first. That is a test that reads as a `place_key` regression and is not one.
+/// The pure tests pass their own map and are order-independent; the `open()`
+/// path keeps the global, which is the thing under test there.
+fn claim_in(
+    issued: &mut std::collections::BTreeMap<String, PathBuf>,
+    base: String,
+    root: &Path,
+    clash: bool,
+) -> String {
     let mine = |k: &str, m: &std::collections::BTreeMap<String, PathBuf>| {
         m.get(k).map(|r| r.as_path() == root).unwrap_or(true)
     };
-    if !clash && mine(&base, &issued) {
+    if !clash && mine(&base, issued) {
         issued.insert(base.clone(), root.to_path_buf());
         return base;
     }
@@ -1318,7 +1352,15 @@ pub fn refresh(v: &Viewer, now_epoch: i64) -> Vec<Note> {
         // that was current when the button was pressed, which is this feature's
         // own failure wearing a different hat.
         let fp = tick_fingerprint(&g.root, docs_fp, &g.assets);
-        if fp == g.fingerprint {
+        // A BROKEN place is retried even when nothing moved. The digest answers
+        // "have the user's documents changed?", and that is the wrong question
+        // for a place whose last derive failed in OUR tree: the disk filled, or
+        // the directory went unwritable, and the documents are exactly as they
+        // were. `open`'s failure arm marks the place without advancing the
+        // digest it never advanced, so this comparison would skip it on every
+        // tick and the `503` would outlive the condition that caused it —
+        // until the user pressed the button again, which is not a recovery.
+        if fp == g.fingerprint && !g.broken {
             continue;
         }
         // The digest has already moved, so this is the one tick in which
@@ -1506,18 +1548,22 @@ pub(crate) mod tests {
     fn two_places_with_one_slug_do_not_share_a_route() {
         let a = PathBuf::from("/w/one/.worktrees/docs");
         let b = PathBuf::from("/w/two/.worktrees/docs");
+        // Our own claims: `ISSUED` is process-global, so asserting an exact
+        // segment against it makes this test depend on which other test ran
+        // first. See `claim_in`.
+        let mut issued = std::collections::BTreeMap::new();
         let mut taken = Vec::new();
-        let ga = place_key("docs", &a, &taken);
+        let ga = place_key_in(&mut issued, "docs", &a, &taken);
         taken.push((a.clone(), ga.clone()));
-        let gb = place_key("docs", &b, &taken);
+        let gb = place_key_in(&mut issued, "docs", &b, &taken);
         assert_eq!(ga, "docs");
         assert_ne!(ga, gb, "a second place must not land on the first one's route");
         assert!(gb.starts_with("docs-"), "{gb}");
         // And asking again for a place already registered gives the same key,
         // or a re-open would keep making new routes.
         taken.push((b.clone(), gb.clone()));
-        assert_eq!(place_key("docs", &a, &taken), ga);
-        assert_eq!(place_key("docs", &b, &taken), gb);
+        assert_eq!(place_key_in(&mut issued, "docs", &a, &taken), ga);
+        assert_eq!(place_key_in(&mut issued, "docs", &b, &taken), gb);
     }
 
     /// **A route segment is never handed on, not even after the place is
@@ -1533,11 +1579,12 @@ pub(crate) mod tests {
     fn a_forgotten_place_does_not_hand_its_route_to_another_project() {
         let a = PathBuf::from("/w/one/.worktrees/docs");
         let b = PathBuf::from("/w/two/.worktrees/docs");
+        let mut issued = std::collections::BTreeMap::new();
         let mut taken = Vec::new();
-        let ga = place_key("docs", &a, &taken);
+        let ga = place_key_in(&mut issued, "docs", &a, &taken);
         taken.push((a.clone(), ga.clone()));
         taken.retain(|(r, _)| r != &a);            // forget_place drops the entry
-        let gb = place_key("docs", &b, &taken);
+        let gb = place_key_in(&mut issued, "docs", &b, &taken);
         assert_ne!(gb, ga, "project two took the route segment project one's open tab is still pointing at");
     }
 
@@ -1546,14 +1593,15 @@ pub(crate) mod tests {
     #[test]
     fn a_place_key_can_only_be_a_url_path_segment() {
         let r = PathBuf::from("/w/p");
+        let mut issued = std::collections::BTreeMap::new();
         for slug in ["_", "../etc", "a/b", "%2e%2e", "", "   ", "Feature/PLACE.1", "ünïcødé"] {
-            let g = place_key(slug, &r, &[]);
+            let g = place_key_in(&mut issued, slug, &r, &[]);
             assert!(!g.is_empty(), "{slug:?} gave an empty key");
             assert!(g.len() <= PLACE_KEY_MAX, "{slug:?} gave {g}");
             assert!(crate::docserver::place_key_ok(&g), "{slug:?} gave {g}, which the server refuses");
             assert!(g.starts_with(|c: char| c.is_ascii_alphanumeric()), "{slug:?} gave {g}");
         }
-        assert_eq!(place_key("Feature/PLACE.1", &r, &[]), "feature-place-1");
+        assert_eq!(place_key_in(&mut issued, "Feature/PLACE.1", &r, &[]), "feature-place-1");
     }
 
     // ── writing ─────────────────────────────────────────────────────────────
@@ -2579,6 +2627,54 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&place);
         let _ = std::fs::remove_dir_all(&blocked);
         let _ = std::fs::remove_dir_all(&good);
+    }
+
+    /// **A place broken by a RE-OPEN recovers on its own, with no edit.**
+    ///
+    /// The tick's own failure arm is safe by rule 3: it is reached only after
+    /// the fingerprint comparison has already let it through, and it does not
+    /// advance the digest, so the next tick tries again. `open`'s failure arm
+    /// is not the same shape. It marks the place without touching the
+    /// fingerprint — and on that path the fingerprint was never advanced to
+    /// begin with, so "unadvanced" means "equal to what the next tick will
+    /// compute", and the tick skips the place at the first comparison. Nothing
+    /// in the place has changed, because the failure was in OUR tree and not in
+    /// the user's documents, so nothing ever will change it: the place answers
+    /// `503` until the button is pressed again, contradicting both `broken`'s
+    /// docstring and the words in the 503 body.
+    ///
+    /// The test above cannot see this: it hands the recovery tick a fingerprint
+    /// of `0` by hand, which is the very skip being asserted away.
+    #[test]
+    fn a_place_broken_by_a_re_open_is_retried_without_an_edit() {
+        let place = tmp("reopen-broken");
+        std::fs::write(place.join("README.md"), "# Read me\n\nbefore\n").unwrap();
+        let tree = tmp("reopen-broken-tree");
+
+        let v = registered(&place, &tree, 0, Vec::new(), stale());
+        let _reap = Reaper(&v);
+        // Settle, so the place holds the digest a tick would compute — which is
+        // what a successful open leaves behind, and the state `open`'s failure
+        // arm marks on top of.
+        assert!(refresh(&v, 1_000_000 + 600).is_empty(), "the first derive failed");
+        let settled = v.places.lock().unwrap()[0].fingerprint;
+        assert_ne!(settled, 0, "the place never recorded a digest");
+
+        // Exactly what `open`'s failure arm does: mark, and leave the digest.
+        v.places.lock().unwrap()[0].broken = true;
+
+        assert!(refresh(&v, 1_000_000 + 900).is_empty(), "the retry reported an error");
+        assert!(
+            !v.places.lock().unwrap()[0].broken,
+            "nothing in the place changed, so the tick skipped it and the 503 is permanent",
+        );
+        assert_eq!(
+            v.places.lock().unwrap()[0].fingerprint, settled,
+            "a recovery must not invent a digest the place does not have",
+        );
+
+        let _ = std::fs::remove_dir_all(&place);
+        let _ = std::fs::remove_dir_all(&tree);
     }
 
     /// **A document is never readable half-written.** `std::fs::write` opens

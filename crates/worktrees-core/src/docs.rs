@@ -385,9 +385,14 @@ fn title_of(path: &Path, name: &str) -> String {
 /// The fallback is not a case-insensitive lookup wearing a hat. A
 /// case-SENSITIVE filesystem may legitimately carry both `README.md` and
 /// `Readme.md`; there the exact match wins the named slot and the other file is
-/// an ordinary root document, which is what it is. The fallback fires only when
-/// no entry is spelled the way the constant is, i.e. on the volume that could
-/// not have told them apart anyway. Several inexact matches and no exact one is
+/// an ordinary root document, which is what it is. The fallback fires whenever
+/// no entry is spelled the way the constant is — which is the case-insensitive
+/// volume, but ALSO a case-sensitive one carrying only `Readme.md`, where it
+/// promotes that file into the README slot instead of leaving it to the
+/// alphabetical sweep. That is the better answer (a reader wants the readme
+/// first), but it means this is a promotion rule and not merely a
+/// disambiguation, so a test that pins the ORDER of a case-variant root file is
+/// pinning this, not the de-duplication. Several inexact matches and no exact one is
 /// a shape only a case-sensitive volume can produce, so the smallest is taken
 /// for a deterministic answer and the rest fall through to the root sweep.
 fn resolve_name(names: &[String], want: &str) -> Option<String> {
