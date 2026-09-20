@@ -209,45 +209,14 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     // Everything below needs a project: the resource list IS the places in it,
     // and the watcher exists to notice them changing. With none there is nothing
     // to publish and nothing to watch, so the watcher is not spawned at all —
-    // rather than started against a path that does not exist. `dlog` still has
-    // somewhere to write: the directory we looked in.
+    // rather than started against a path that does not exist.
     let watch = project
         .as_ref()
-        .map(|p| (p.wt_root_dir().to_string(), format!("{}/.worktrees.places.json", p.main_root), p.main_root.clone()));
-    let log_root =
-        project.as_ref().map(|p| p.main_root.clone()).unwrap_or_else(|| root.to_string_lossy().into_owned());
+        .map(|p| (p.wt_root_dir().to_string(), format!("{}/.worktrees.places.json", p.main_root)));
     let mut server = Server { project, mutations, ready: ready.clone() };
 
-    dlog(
-        &log_root,
-        &format!(
-            "start v{} mutations={} log={:?} REMOVE_THIS_LOG_AT_v{}.{}",
-            env!("CARGO_PKG_VERSION"),
-            mutations,
-            debug_log_path(),
-            REMOVE_AT_VERSION.0,
-            REMOVE_AT_VERSION.1
-        ),
-    );
-    // One line on stderr so the log is findable from `claude --debug` without
-    // the per-request noise going there too. stderr is human-facing by this
-    // module's own rule; stdout stays protocol.
-    if let Some(p) = debug_log_path() {
-        // NOT `eprintln!`: Rust ignores SIGPIPE, so a write to a closed stderr
-        // returns EPIPE and `eprintln!` PANICS on it. Every other `eprintln!`
-        // here is an error path taken once; this one runs on every launch, so a
-        // client that pipes stderr and closes its read end would kill the
-        // server at startup, every time.
-        let _ = writeln!(
-            std::io::stderr(),
-            "worktrees mcp: debug log -> {} (temporary; goes at v{}.{})",
-            p.display(),
-            REMOVE_AT_VERSION.0,
-            REMOVE_AT_VERSION.1
-        );
-    }
-    if let Some((wt_root, places_file, main_root)) = watch {
-        spawn_list_watcher(wt_root, places_file, main_root, ready);
+    if let Some((wt_root, places_file)) = watch {
+        spawn_list_watcher(wt_root, places_file, ready);
     }
 
     let stdin = std::io::stdin();
@@ -311,7 +280,6 @@ const WATCH_JITTER_MS: u64 = 800;
 fn spawn_list_watcher(
     wt_root: String,
     places_file: String,
-    repo: String,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let jitter = (std::process::id() as u64) % WATCH_JITTER_MS;
@@ -330,7 +298,6 @@ fn spawn_list_watcher(
             if now == last {
                 continue;
             }
-            dlog(&repo, &format!("list_changed {}", changed_summary(&last, &now)));
             last = now;
             if !emit(&serde_json::json!({
                 "jsonrpc": "2.0",
@@ -338,39 +305,12 @@ fn spawn_list_watcher(
             })
             .to_string())
             {
-                dlog(&repo, "stdout closed; watcher stopping");
                 return; // client hung up; the read loop will notice too
             }
         }
     });
 }
 
-/// What moved between two `membership` signals, for the debug log.
-///
-/// The signal is opaque on purpose (it only has to differ), so this re-derives
-/// the names — the question a real report will ask is "did it notice MY new
-/// worktree", and `+beta` answers it where a changed hash does not.
-fn changed_summary(before: &str, after: &str) -> String {
-    let names = |s: &str| -> Vec<String> {
-        s.split('|')
-            .next()
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect()
-    };
-    let (a, b) = (names(before), names(after));
-    let mut parts: Vec<String> = b.iter().filter(|n| !a.contains(n)).map(|n| format!("+{n}")).collect();
-    parts.extend(a.iter().filter(|n| !b.contains(n)).map(|n| format!("-{n}")));
-    if parts.is_empty() {
-        // Same places, so it was the declared sidecar — a title or lifecycle
-        // edit, which reaches the picker's description.
-        "sidecar".to_string()
-    } else {
-        parts.join(" ")
-    }
-}
 
 impl Server {
     /// One JSON-RPC message in, at most one out.
@@ -392,7 +332,6 @@ impl Server {
         let Some(id) = id else {
             if method == Some("notifications/initialized") {
                 self.ready.store(true, std::sync::atomic::Ordering::Relaxed);
-                dlog(self.log_root(), "client initialized; watcher unmuted");
             }
             return None;
         };
@@ -839,13 +778,6 @@ impl Server {
     /// project, and `call` refuses an unadvertised name — but the type has to be
     /// discharged somewhere, and a real message beats an `unwrap` that would take
     /// the transport down with it.
-    /// Where `dlog` writes. The project's root when there is one; otherwise the
-    /// directory the server was launched in, so a no-project session still
-    /// leaves a trace rather than silently having nowhere to put one.
-    fn log_root(&self) -> &str {
-        self.project.as_ref().map(|p| p.main_root.as_str()).unwrap_or(".")
-    }
-
     fn proj(&self) -> Result<&Project, String> {
         self.project.as_ref().ok_or_else(|| NO_PROJECT.to_string())
     }
@@ -883,7 +815,6 @@ impl Server {
     /// sidecar is one file read. Dirty/tmux/agent state deliberately stays out
     /// — that belongs in `resources/read`, which runs per mention, on demand.
     fn resources(&self) -> serde_json::Value {
-        let t0 = std::time::Instant::now();
         // No repo, no places — so no resources, for the same reason `tools()`
         // returns nothing: publishing entries that every read would refuse is a
         // worse lie than an empty list.
@@ -923,15 +854,6 @@ impl Server {
                 })
             })
             .collect();
-        dlog(
-            self.log_root(),
-            &format!(
-                "resources/list n={} took={}ms uris=[{}]",
-                list.len(),
-                since_ms(t0),
-                list.iter().filter_map(|r| r["uri"].as_str()).collect::<Vec<_>>().join(" ")
-            ),
-        );
         serde_json::json!({ "resources": list })
     }
 
@@ -957,12 +879,7 @@ impl Server {
         // A missing or non-string `uri` is a MALFORMED REQUEST (-32602). Only a
         // well-formed uri that names nothing is -32002; collapsing the two
         // answered "no such resource: " to a caller that never sent one.
-        let t0 = std::time::Instant::now();
         let uri = params.get("uri").and_then(|v| v.as_str()).ok_or_else(|| {
-            dlog(
-                self.log_root(),
-                &format!("resources/read MALFORMED params={}", clip(&params.to_string(), FREE_TEXT_MAX)),
-            );
             (-32602_i64, "uri is required and must be a string".to_string())
         })?;
 
@@ -984,13 +901,6 @@ impl Server {
                 // The interesting failure: a uri the client offered but cannot
                 // resolve means the list it cached and the list we serve have
                 // diverged — which is the whole risk the watcher exists to cover.
-                dlog(
-                    self.log_root(),
-                    &format!(
-                        "resources/read MISS uri={uri} known=[{}]",
-                        uri_map(&places).iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>().join(" ")
-                    ),
-                );
                 (-32002_i64, format!("no such resource: {uri}"))
             })?;
 
@@ -1029,16 +939,6 @@ impl Server {
             "slug": found.slug,
             "place": v,
         });
-        dlog(
-            self.log_root(),
-            &format!(
-                "resources/read uri={uri} slug={} branch={:?} took={}ms agents={}",
-                found.slug,
-                place.branch,
-                since_ms(t0),
-                agents.len()
-            ),
-        );
         Ok(serde_json::json!({
             "contents": [{
                 "uri": uri,
@@ -1099,148 +999,6 @@ fn safe_arg(v: &str, what: &str) -> Result<String, String> {
         return Err(format!("{what} contains characters that are not allowed"));
     }
     Ok(t.to_string())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TEMPORARY — feature-debug logging for the MCP resource surface.
-//
-// The `@`-mention path cannot be tested here: there is no fake claude, so the
-// only way to learn what the picker and the expansion actually DO is to watch a
-// real session use them. This writes what the server saw to a file the user can
-// tail, and it is meant to come OUT once the feature has been exercised.
-//
-// `REMOVE_AT_VERSION` is enforced: `the_debug_log_is_temporary_and_says_so`
-// fails once the workspace version reaches it, and its message names everything
-// to delete. That is the reminder — a comment would not be one.
-//
-// A version, not a date. A date bomb fires on whatever unrelated PR happens to
-// be open that morning, needs a working `date` (a runner without one passes
-// SILENTLY — the one thing a reminder must never do), and drags in timezones.
-// The version gate fires in the release-bump PR, which is exactly when the
-// CHANGELOG line promising this removal is being edited anyway.
-//
-// Off with `WORKTREES_MCP_DEBUG=0`; path overridable with
-// `WORKTREES_MCP_DEBUG_LOG`. stdout is never touched: the transport lives there.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Delete the debug logging when the workspace version reaches this. See the
-/// test — it is what enforces it. `0.25.0` is this feature's release, so the
-/// original `(0, 26)` bought exactly one release cycle of real use.
-///
-/// DEFERRED ONCE, at the v0.26.0 bump, and the reason is not "it is still
-/// earning its keep" — it is that it never got to try. The tripwire fired as
-/// designed, and the evidence it asks for was not there to read: no
-/// `~/.cache/worktrees/mcp-debug.log` anywhere, because the `worktrees` MCP
-/// server was not registered in `~/.claude.json` at all. No registration, no
-/// `resources/list`, nothing to log. The cycle this was meant to buy did not
-/// happen, so deleting it now would retire an experiment that never ran and
-/// answer none of the questions it was added to answer.
-///
-/// That makes this a ONE-TIME extension with a condition attached: register
-/// the server (`claude mcp add -s user worktrees -- worktrees mcp --mutations`)
-/// and actually exercise `@worktrees:place://…` from a real session this
-/// cycle. If 0.27 arrives and the log is empty again, the answer is no longer
-/// "defer" — it is that real use is never going to arrive, and the whole
-/// apparatus goes regardless of what it did or did not learn. Do not extend it
-/// a second time on the same reasoning.
-const REMOVE_AT_VERSION: (u32, u32) = (0, 27);
-
-/// `CARGO_PKG_VERSION` as (major, minor), or `None` if it is not the usual
-/// shape. Parsed rather than string-compared: `"0.9.0" < "0.26.0"` is FALSE
-/// lexicographically, so the obvious `<` would have stopped firing the moment
-/// a minor went past 9 — a reminder that silently never fires.
-fn version_major_minor(v: &str) -> Option<(u32, u32)> {
-    let mut it = v.split('.');
-    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
-}
-
-/// Rotate once past this size. On by default and written per request, so it
-/// must not be able to fill a disk while nobody is looking.
-const DEBUG_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
-
-/// The path rule, as a PURE function of the three inputs it depends on.
-///
-/// Split out so the test can exercise the rule without touching process-global
-/// env vars: `cargo test` runs threads, `set_var` is process-wide, and any other
-/// test that logged while a mutation was in flight would race it (in newer Rust
-/// it is outright unsound). Passing the values in removes the race rather than
-/// narrowing it.
-fn debug_log_path_from(
-    switch: Option<&str>,
-    explicit: Option<&str>,
-    home: Option<&str>,
-) -> Option<std::path::PathBuf> {
-    if matches!(switch, Some("0") | Some("false")) {
-        return None;
-    }
-    if let Some(p) = explicit.filter(|p| !p.is_empty()) {
-        return Some(std::path::PathBuf::from(p));
-    }
-    // Under `~/.cache/worktrees/` because that is already this repo's word for
-    // "throwaway artifacts" (CLAUDE.md). One file for every session in every
-    // repo: the useful question is "what happened across my worktrees just
-    // now", and each line carries the pid and the repo to sort them back out.
-    let home = home.filter(|h| !h.is_empty())?;
-    Some(std::path::Path::new(home).join(".cache/worktrees/mcp-debug.log"))
-}
-
-/// Where the debug log goes, or `None` when it is switched off.
-fn debug_log_path() -> Option<std::path::PathBuf> {
-    debug_log_path_from(
-        std::env::var("WORKTREES_MCP_DEBUG").ok().as_deref(),
-        std::env::var("WORKTREES_MCP_DEBUG_LOG").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-    )
-}
-
-/// Append one line. Never fails loudly: a debug log that can break the server
-/// it is debugging is worse than no debug log.
-///
-/// One `write_all` of a whole line to an `O_APPEND` fd is what keeps N sessions
-/// from interleaving mid-line — the same single-writer discipline `emit` uses
-/// for stdout, for the same reason.
-fn dlog(repo: &str, msg: &str) {
-    // The suite must never write here. The whole deliverable is a log a HUMAN
-    // reads after real use, and the first version of this filled it with
-    // `repo=repo` from the check script's temp repo and `repo=wt-mcp-caps-<pid>`
-    // from a unit test — 11 lines, not one of them from a session. `dlog_to`
-    // stays drivable, so the writer is still tested; only this entry point,
-    // which resolves the real path from the environment, is muted.
-    if cfg!(test) {
-        return;
-    }
-    dlog_to(debug_log_path().as_deref(), repo, msg);
-}
-
-fn dlog_to(path: Option<&std::path::Path>, repo: &str, msg: &str) {
-    let Some(path) = path else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    // Rotate rather than truncate, so the window that was just lost is still
-    // readable in `.1` — the report this log exists for usually arrives AFTER
-    // the interesting minute. A rename race between sessions is benign: one
-    // wins and the others append to the fresh file.
-    if std::fs::metadata(path).is_ok_and(|m| m.len() > DEBUG_LOG_MAX_BYTES) {
-        let _ = std::fs::rename(path, path.with_extension("log.1"));
-    }
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let line = format!("{ms} pid={} repo={} {msg}\n", std::process::id(), short_repo(repo));
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = f.write_all(line.as_bytes());
-    }
-}
-
-fn short_repo(repo: &str) -> &str {
-    repo.rsplit('/').next().unwrap_or(repo)
-}
-
-/// Milliseconds since `t`, for the `took=` fields.
-fn since_ms(t: std::time::Instant) -> u128 {
-    t.elapsed().as_millis()
 }
 
 /// Shorten for the picker: the client truncates a suggestion's description to
@@ -1639,129 +1397,6 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// THE REMINDER. A comment asking someone to remove temporary code is not a
-    /// reminder; a red build is. This goes off when the workspace version
-    /// reaches `REMOVE_AT_VERSION` and names the whole removal in its failure
-    /// message, so whoever hits it does not have to reconstruct what "the debug
-    /// logging" meant.
-    ///
-    /// It fires during the release bump (Release step 2 in CLAUDE.md), which is
-    /// the moment the CHANGELOG line promising this removal is being written.
-    /// No clock, no `date`, no timezone — and no way to pass silently.
-    #[test]
-    fn the_debug_log_is_temporary_and_says_so() {
-        let here = version_major_minor(env!("CARGO_PKG_VERSION"))
-            .expect("the workspace version should be major.minor.patch");
-        assert!(
-            here < REMOVE_AT_VERSION,
-            "The MCP resource debug logging has outlived its welcome \
-             (this is v{}, and it was to go at v{}.{}).\n\
-             \n\
-             It was added to learn how a REAL claude session uses \
-             `@worktrees:place://\u{2026}`, because nothing in this suite can exercise that. \
-             Read `~/.cache/worktrees/mcp-debug.log` FIRST — whatever it caught should \
-             become a test or a ROADMAP note. Then remove:\n\
-             \n\
-               - `REMOVE_AT_VERSION`, `version_major_minor`, `DEBUG_LOG_MAX_BYTES`, \
-                 `debug_log_path{{,_from}}`, `dlog{{,_to}}`, `short_repo`, `since_ms`, \
-                 `changed_summary`, and this test plus \
-                 `the_debug_log_is_switchable_and_never_fatal`, in mcp.rs\n\
-               - every `dlog(` call site, and the stderr banner in `cmd_mcp`\n\
-               - the `repo` parameter threaded into `spawn_list_watcher` for it\n\
-               - `WORKTREES_MCP_DEBUG=0` in test/mcp.bats and the env in \
-                 scripts/mcp-resources-check.py\n\
-               - the ROADMAP entry, the CHANGELOG note, and the \
-                 `WORKTREES_MCP_DEBUG` section in docs/ai-profiles-manual-checks.md\n\
-             \n\
-             If it is still earning its keep, raise REMOVE_AT_VERSION and say why here.",
-            env!("CARGO_PKG_VERSION"),
-            REMOVE_AT_VERSION.0,
-            REMOVE_AT_VERSION.1,
-        );
-    }
-
-    /// The parse the reminder rests on. A lexicographic `<` would have made the
-    /// gate stop firing at minor 10 — silently, which is the one failure a
-    /// reminder cannot have.
-    #[test]
-    fn the_removal_gate_compares_versions_numerically() {
-        assert_eq!(version_major_minor("0.24.0"), Some((0, 24)));
-        assert_eq!(version_major_minor("1.2.3-rc1"), Some((1, 2)));
-        assert_eq!(version_major_minor("nonsense"), None);
-        assert!(version_major_minor("0.9.0").unwrap() < REMOVE_AT_VERSION);
-        // Tracks REMOVE_AT_VERSION deliberately: these two pin the BOUNDARY, so
-        // the version below the gate must stay below it and the gate version
-        // must still fire. Left at 0.26 they would assert the opposite of the
-        // constant and go green while the tripwire never fired again.
-        assert!(version_major_minor("0.26.0").unwrap() < REMOVE_AT_VERSION, "one minor below must NOT fire");
-        assert!(version_major_minor("0.27.0").unwrap() >= REMOVE_AT_VERSION, "must fire AT the version");
-        assert!(version_major_minor("0.100.0").unwrap() >= REMOVE_AT_VERSION, "and past it");
-        assert!(
-            "0.9.0" > "0.26.0",
-            "the lexicographic trap this exists to avoid: string compare says 0.9.0 is NEWER"
-        );
-    }
-
-    /// The log must never be able to break the server it is debugging.
-    ///
-    /// No env mutation anywhere here: `cargo test` runs threads and `set_var`
-    /// is process-global, so a test that set `WORKTREES_MCP_DEBUG` would race
-    /// every other test that logs. The rule is a pure function and the writer
-    /// takes its path, so both can be exercised directly.
-    #[test]
-    fn the_debug_log_is_switchable_and_never_fatal() {
-        let home = Some("/Users/x");
-        assert!(
-            debug_log_path_from(Some("0"), None, home).is_none(),
-            "WORKTREES_MCP_DEBUG=0 must disable it"
-        );
-        assert!(debug_log_path_from(Some("false"), None, home).is_none());
-        assert_eq!(
-            debug_log_path_from(None, None, home),
-            Some(std::path::PathBuf::from("/Users/x/.cache/worktrees/mcp-debug.log")),
-        );
-        assert_eq!(
-            debug_log_path_from(None, Some("/tmp/elsewhere.log"), home),
-            Some(std::path::PathBuf::from("/tmp/elsewhere.log")),
-            "an explicit path wins"
-        );
-        assert_eq!(
-            debug_log_path_from(None, Some(""), home),
-            debug_log_path_from(None, None, home),
-            "an EMPTY override is not a path: fall back to the default, never to \"\""
-        );
-        assert!(
-            debug_log_path_from(None, None, None).is_none(),
-            "no HOME, no default path — and no panic"
-        );
-
-        // An unwritable path is survivable: no panic, no propagated error.
-        dlog_to(Some(std::path::Path::new("/proc/nope/cannot/write.log")), "/tmp/r", "must not panic");
-
-        let dir = std::env::temp_dir().join(format!("wt-mcp-dlog-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("d.log");
-        dlog_to(Some(&path), "/Users/x/work/myrepo", "hello");
-        let body = std::fs::read_to_string(&path).unwrap_or_default();
-        assert!(body.contains("pid="), "no pid in {body:?}");
-        assert!(body.contains("repo=myrepo"), "repo should be the basename, got {body:?}");
-        assert!(body.trim_end().ends_with("hello"), "got {body:?}");
-
-        // It is on by default and written per request, so it must not be able
-        // to grow without bound — and the rotated window must still be there.
-        std::fs::write(&path, vec![b'x'; (DEBUG_LOG_MAX_BYTES + 1) as usize]).unwrap();
-        dlog_to(Some(&path), "/tmp/r", "after rotation");
-        assert!(
-            std::fs::metadata(&path).unwrap().len() < DEBUG_LOG_MAX_BYTES,
-            "the live log should have been rotated away"
-        );
-        assert!(
-            dir.join("d.log.1").exists(),
-            "…and the previous window kept, not discarded"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -42,15 +42,9 @@ try:
     git("commit", "-q", "--allow-empty", "-m", "x")
     os.makedirs(os.path.join(guard(REPO), ".worktrees", "alpha"))
 
-    # Point the temporary debug log into our own tempdir. Two reasons: the real
-    # one at ~/.cache/worktrees/mcp-debug.log exists for a human reading REAL
-    # sessions and a gate must not fill it with fixture noise; and having it
-    # here lets the run assert the logging works instead of merely not breaking.
-    debug_log = os.path.join(TMP, "mcp-debug.log")
     proc = subprocess.Popen([BIN, "mcp"], cwd=guard(REPO), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, bufsize=1,
-                            env={**os.environ, "WORKTREES_MCP_DEBUG_LOG": debug_log})
+                            text=True, bufsize=1)
     lines, bad = [], []
     def reader():
         for raw in proc.stdout:
@@ -159,21 +153,10 @@ try:
     check(not bad, f"every stdout line parsed as JSON (torn lines: {bad[:2]})")
     # stderr is where human-facing output BELONGS ("stdout carries protocol
     # only"), so the check is not that it is empty — it is that nothing
-    # UNEXPECTED is on it. The one allowed line announces the temporary debug
-    # log; when that logging is removed this list goes back to empty, and any
-    # other stderr line fails here in the meantime.
-    allowed = ("worktrees mcp: debug log -> ",)
-    stray = [l for l in (proc.stderr.read() or "").strip().splitlines()
-             if l.strip() and not l.startswith(allowed)]
+    # UNEXPECTED is on it. With the temporary debug-log banner gone the server
+    # prints nothing at all on a clean run, so any line here is a finding.
+    stray = [l for l in (proc.stderr.read() or "").strip().splitlines() if l.strip()]
     check(not stray, f"nothing unexpected on stderr: {stray[:2]}")
-
-    # The temporary debug log is the only way a real session will be diagnosed,
-    # so check it actually recorded the run — and that it wrote nowhere else.
-    logged = open(debug_log).read() if os.path.exists(debug_log) else ""
-    for want in ("resources/list", "resources/read", "MISS", "list_changed"):
-        check(want in logged, f"the debug log records {want!r}")
-    check(all(l.split()[0].isdigit() for l in logged.splitlines() if l.strip()),
-          "every debug line starts with a timestamp")
 finally:
     shutil.rmtree(TMP, ignore_errors=True)
 

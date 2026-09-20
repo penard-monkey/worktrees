@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.27.0] - 2026-09-20
 
 ### Added
 - **The Docs tab is a tree.** Flat sections headed `DOCS/ADR` are gone; the
@@ -62,6 +62,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   changes nothing; both switch off in Settings → Terminal, and Settings → Data &
   Logs says how much is stored and clears it. Your own rc files are read exactly
   as before and are never modified.
+
+### Removed
+- **The MCP server's temporary debug log is gone.** `worktrees mcp` no longer
+  writes `~/.cache/worktrees/mcp-debug.log`, and `WORKTREES_MCP_DEBUG` /
+  `WORKTREES_MCP_DEBUG_LOG` no longer do anything. It was added in v0.25.0 to
+  learn how a real Claude session uses `@worktrees:place://…`, since nothing in
+  the suite can exercise that, and it was scheduled to go at this version. It
+  did its job: two days of real use across 21 sessions showed the resource
+  watcher notifying overwhelmingly on sidecar writes that cannot change what
+  the list shows — the measurements, and the fix they point at, are in ROADMAP.
+  Delete the file if you still have one; nothing writes to it now.
 
 ### Fixed
 - **Your named terminal tabs come back.** Reopen the app, go to a place's

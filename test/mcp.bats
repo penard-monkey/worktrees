@@ -15,9 +15,7 @@ setup() { common_setup; }
 mcp() {
   local extra="$1"; shift
   printf '%s\n' "$@" > "$BATS_TEST_TMPDIR/in.jsonl"
-  # WORKTREES_MCP_DEBUG=0: the server's temporary debug log is for a human
-  # reading real sessions, and an unmuted suite fills it with fixture noise.
-  run bash -c "cd '$REPO' && WORKTREES_MCP_DEBUG=0 '$WT_BIN' mcp $extra < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  run bash -c "cd '$REPO' && '$WT_BIN' mcp $extra < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
 }
 
 # Pull one field out of the reply stream with a real JSON parser, so assertions
