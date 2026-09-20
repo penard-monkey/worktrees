@@ -18,6 +18,89 @@
 html, body, #root { height: auto; overflow: visible; }
 body { background: var(--bg-abyss); }
 
+/* ── the layout ────────────────────────────────────────────────────────────
+ * THE WINDOW STAYS THE SCROLLER. The nav is `position: fixed` with its own
+ * internal overflow and `.page` is pushed over by a margin — it is NOT a flex
+ * row with a scrolling content column. That distinction is the whole reason
+ * adding a column did not cost the measurement this feature exists for:
+ *   - `blocks.tsx`'s scroll anchor reads `window.scrollY` and calls
+ *     `window.scrollBy`. Move the scroll into a div and both address a box that
+ *     no longer scrolls, silently, and an update starts moving the reader.
+ *   - `.chrome` is `position: sticky; top: 0`, which resolves against the
+ *     nearest SCROLLING ancestor. Inside a scrolling child it would stick to
+ *     that child's top, which looks identical until the page is short.
+ *   - the browsers' own scroll anchoring is on the document scroller.
+ * Measured with the column in: scroll 400→400, sel 55→55, read position held
+ * to the pixel, in both engines. */
+.shell { min-height: 100vh; }
+.page { margin-left: var(--dnav-w); }
+:root { --dnav-w: 264px; }
+
+.dnav {
+  position: fixed; top: 0; left: 0; bottom: 0; width: var(--dnav-w);
+  display: flex; flex-direction: column;
+  background: var(--bg-tree);
+  border-right: 1px solid var(--line);
+  font-family: var(--font-ui);
+  z-index: 20; /* over the sticky chrome, which is the document's, not the app's */
+}
+.dnav-head { display: flex; gap: var(--s2); align-items: center; padding: var(--s3); border-bottom: 1px solid var(--line); }
+.dnav-filter {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--bg-input); color: var(--txt);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  padding: var(--s1) var(--s2);
+  font-size: var(--fs-label); font-family: var(--font-ui);
+}
+.dnav-filter:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.dnav-total { flex: none; font-size: var(--fs-micro); color: var(--txt-mute); font-variant-numeric: tabular-nums; }
+/* The tree owns the scroll, not the window — a 424-document place must not make
+ * the nav as tall as the list. */
+.dnav-tree { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--s2) 0 var(--s5); }
+.dnav-empty { color: var(--txt-mute); font-size: var(--fs-meta); padding: var(--s3); }
+
+.dnav-dir, .dnav-row {
+  display: flex; align-items: center; gap: var(--s2);
+  width: 100%; text-align: left; text-decoration: none;
+  padding: 3px var(--s3) 3px calc(var(--s3) + var(--depth, 0) * var(--ind));
+  background: none; border: 0; color: inherit;
+  font-size: var(--fs-label); line-height: var(--lh-row);
+}
+.dnav-dir:hover, .dnav-row:hover { background: var(--bg-elev); }
+.dnav-chev { flex: none; width: 10px; color: var(--txt-mute); font-size: 11px; line-height: 1; }
+.dnav-dirname { color: var(--txt-dim); font-weight: var(--fw-med); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dnav-count { margin-left: auto; flex: none; color: var(--txt-mute); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
+.dnav-title { color: var(--txt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The current document. A FILL plus a weight change, never coloured words —
+ * `--accent` as small type measures 3.1:1 in tokyo-day (CLAUDE.md). The bar is
+ * the hue; the title just gets brighter and heavier. */
+.dnav-row.is-current { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.dnav-row.is-current .dnav-title { color: var(--txt-hi); font-weight: var(--fw-med); }
+
+.dnav-scrim { display: none; }
+.nav-toggle {
+  display: none;
+  background: none; border: 0; padding: 0;
+  color: var(--accent); font-size: var(--fs-meta); font-family: var(--font-ui);
+}
+
+/* ── narrow: the nav gets OUT OF THE WAY, it does not squeeze the prose ─────
+ * The measure is 78ch. At 264px of nav plus the document's own padding, a
+ * window under ~900px starts eating into it, and a docs viewer that reflows
+ * prose to 40 columns to keep a tree on screen has chosen the wrong one. Below
+ * the breakpoint the nav becomes an off-canvas drawer over the content, opened
+ * from the header's `☰ documents`, and `.page` takes the full width — so the
+ * prose is never narrower than it would be with no nav at all. */
+@media (max-width: 900px) {
+  .page { margin-left: 0; }
+  .dnav { transform: translateX(-100%); transition: transform var(--dur-fast, 120ms) ease; box-shadow: var(--shadow-lg, 0 8px 32px rgba(0,0,0,0.5)); }
+  .shell[data-drawer="open"] .dnav { transform: none; }
+  .shell[data-drawer="open"] .dnav-scrim {
+    display: block; position: fixed; inset: 0; z-index: 15; background: var(--scrim);
+  }
+  .nav-toggle { display: inline-block; }
+}
+
 /* ── the staleness header ──────────────────────────────────────────────────
  * Sticky at the top of the document scroll. `z-index` over the prose, and an
  * opaque background, because a translucent one over scrolling text is a header
