@@ -100,6 +100,21 @@ body { background: var(--bg-abyss); }
   cursor: help;
 }
 
+/* Raw HTML a document wrote, after `rawhtml.tsx`'s allow-list. It gets the
+ * document's own constraints back — the app's `.md-img img` rule only reaches
+ * images the markdown path built, and a raw `<img width="99999">` would
+ * otherwise be free to overhang the measure. */
+.md-rawhtml-render img { max-width: 100%; height: auto; }
+.md-rawhtml-render table { border-collapse: collapse; }
+.md-rawhtml-render th, .md-rawhtml-render td {
+  border: 1px solid var(--line); padding: var(--md-s1) var(--md-s3);
+}
+/* Said out loud, in the reader's own text flow: something in this document was
+ * refused. The same honesty as a refused image or a stripped `click` directive
+ * — a reader who cannot see what the author wrote needs to know it was a
+ * decision and not a bug. */
+.md-rawhtml-dropped { color: var(--txt-mute); font-size: var(--fs-meta); }
+
 /* ── mermaid ──────────────────────────────────────────────────────────────
  * The diagram is content, not chrome; it gets a recessed surface so it reads as
  * a figure. `--bg-panel` rather than `--bg-abyss` because the page background
