@@ -70,6 +70,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   spent fifteen real requests inside a single minute, which is a good way to
   keep a rate limit open. A failure now buys the same quiet as a success, for
   sixty seconds.
+- **The unread ring no longer comes back on every restart.** Places whose Claude
+  session stays up in tmux were being re-dated to "just finished" at each
+  launch: the startup backfill read the session transcript's file timestamp, and
+  Claude Code keeps rewriting a live session's transcript for hours after its
+  last turn — up to 34 hours ahead of the newest entry in the file, measured
+  across a day's sessions. The backfill now dates a session by the timestamps
+  *inside* the transcript, so a place that finished this morning says so, both
+  in the dot and in the row's age and sort order.
+- **Looking at a place whose session is waiting on you now counts as looking.**
+  The ack was gated on the dot: while a session was busy or waiting, the amber
+  or green dot took the slot, and the visit spent nothing — so the ring returned
+  as soon as that session went quiet. Selecting or entering a place now records
+  the visit whatever its session is doing, while the dot still shows live state
+  ahead of the afterglow.
 
 ## [0.26.0] - 2026-09-19
 

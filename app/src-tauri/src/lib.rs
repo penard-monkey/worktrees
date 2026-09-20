@@ -1544,6 +1544,13 @@ const BACKFILL_WINDOW_SECS: i64 = 12 * 3600;
 /// Tail of `history.jsonl` to read. The file is append-only and grows without
 /// bound (MBs), but 12h of prompts is a few KB; this is slack for pasted blobs.
 const HISTORY_TAIL_BYTES: u64 = 512 * 1024;
+/// Tail of a session TRANSCRIPT to read when dating its last turn. Transcripts
+/// reach tens of MB (one line per message, tool results included), and only the
+/// newest timestamp is wanted — but a single line can be a pasted file or a
+/// whole tool result, so this is slack for a few of those rather than a line
+/// count. A tail that lands inside one enormous line yields no whole line at
+/// all, which `transcript_epoch` reports as "no answer" rather than a wrong one.
+const TRANSCRIPT_TAIL_BYTES: u64 = 256 * 1024;
 /// Slash commands that are session HOUSEKEEPING, not a task. They land in
 /// history.jsonl exactly like a prompt, and without this a `/clear` ten minutes
 /// ago would light a place where nothing was done. Unknown slash commands are
@@ -1575,6 +1582,38 @@ fn hist_epoch(v: &serde_json::Value) -> Option<i64> {
         .map(|ms| ms / 1000)
 }
 
+/// When a transcript entry was written. Transcript lines carry ISO-8601
+/// (`2026-09-20T01:49:52.243Z`); `history.jsonl`'s epoch-millis shape is
+/// accepted too, tried second so a date string is never mistaken for a number.
+fn entry_epoch(v: &serde_json::Value) -> Option<i64> {
+    v.as_str().and_then(parse_iso8601).or_else(|| hist_epoch(v))
+}
+
+/// When a session transcript's newest entry was written, per the timestamps the
+/// FILE carries. `None` when the file is missing, unreadable, or its tail holds
+/// no whole line with a timestamp.
+///
+/// ⚠ Deliberately not the file's mtime, which this used to read and which is
+/// not a fact about the work. Claude Code keeps rewriting a live session's
+/// `.jsonl` long after its last turn: measured across every transcript touched
+/// in a day, 24 of 28 had an mtime running from 12 minutes to 34 HOURS ahead of
+/// the last entry inside the file. Since the stamp is forward-only and the
+/// backfill runs on every launch, reading the mtime re-dated every place with a
+/// still-open session to "just finished" at each restart — which the unread
+/// rule then renders as a place shouting for attention it has already had, and
+/// which the nav reads as the row's age and sort key.
+///
+/// The max over the tail rather than the last line with a timestamp: a
+/// transcript is not strictly ordered (a rewritten summary lands at the end
+/// carrying an older stamp), and the caller bounds the answer by `now` anyway.
+fn transcript_epoch(path: &Path) -> Option<i64> {
+    tail_lines(path, TRANSCRIPT_TAIL_BYTES)
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v.get("timestamp").and_then(entry_epoch))
+        .max()
+}
+
 fn is_work_prompt(display: &str) -> bool {
     let t = display.trim();
     if t.is_empty() {
@@ -1602,12 +1641,12 @@ fn tail_lines(path: &Path, max_bytes: u64) -> Vec<String> {
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let partial = len > max_bytes;
     if partial && f.seek(std::io::SeekFrom::Start(len - max_bytes)).is_err() {
-        applog("warn", &format!("history tail seek failed: {}", path.display()));
+        applog("warn", &format!("tail seek failed: {}", path.display()));
         return Vec::new();
     }
     let mut buf = Vec::new();
     if let Err(e) = f.read_to_end(&mut buf) {
-        applog("warn", &format!("history tail read failed ({e}): {}", path.display()));
+        applog("warn", &format!("tail read failed ({e}): {}", path.display()));
         return Vec::new();
     }
     let text = String::from_utf8_lossy(&buf);
@@ -1623,10 +1662,13 @@ fn tail_lines(path: &Path, max_bytes: u64) -> Vec<String> {
 /// (the poll thread) can only see completions while the app runs; this is the
 /// half that survives a cold start.
 ///
-/// Prompt time is when work STARTED, so where a transcript exists its newest
-/// `.jsonl` mtime is taken as the better completion time — bounded by now, and
-/// only for places a qualifying prompt already vouched for. mtime alone would
-/// re-light every place merely opened, which is exactly what must not happen.
+/// Prompt time is when work STARTED, so where a transcript exists the newest
+/// timestamp INSIDE it is taken as the better completion time — bounded by now,
+/// and only for places a qualifying prompt already vouched for. Dating by a
+/// transcript with no prompt vouching for it would re-light every place merely
+/// opened, which is exactly what must not happen — and dating by that file's
+/// MTIME re-lights every place whose session is still UP, on every launch,
+/// which is what this used to do (see `transcript_epoch`).
 fn backfill_worked(handle: &AppHandle) {
     let roots = read_projects(handle);
     if roots.is_empty() {
@@ -1635,6 +1677,9 @@ fn backfill_worked(handle: &AppHandle) {
     let now = sysclock::now_epoch();
     let cutoff = now - BACKFILL_WINDOW_SECS;
     let mut newest: HashMap<String, i64> = HashMap::new();
+    // One read per transcript, not per prompt: a busy afternoon leaves dozens of
+    // history lines naming the same session file, and each read is a 256K tail.
+    let mut landed: HashMap<PathBuf, Option<i64>> = HashMap::new();
     for root in worktrees_core::profile::claude_config_dirs_all() {
         for line in tail_lines(&root.join("history.jsonl"), HISTORY_TAIL_BYTES) {
             let Ok(h) = serde_json::from_str::<HistLine>(&line) else {
@@ -1656,7 +1701,8 @@ fn backfill_worked(handle: &AppHandle) {
             if let Some(sid) = h.session_id.as_deref() {
                 let cdir = worktrees_core::project::claude_dir_in(&root, &project);
                 let jsonl = Path::new(&cdir).join(format!("{sid}.jsonl"));
-                if let Some(m) = mtime_epoch(&jsonl) {
+                let m = *landed.entry(jsonl.clone()).or_insert_with(|| transcript_epoch(&jsonl));
+                if let Some(m) = m {
                     if m > stamp {
                         stamp = m.min(now);
                     }
@@ -1681,16 +1727,6 @@ fn backfill_worked(handle: &AppHandle) {
     if stamped {
         let _ = handle.emit("places:changed", ());
     }
-}
-
-/// mtime in epoch seconds, or `None` for anything unreadable.
-fn mtime_epoch(path: &Path) -> Option<i64> {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs() as i64)
 }
 
 // ── Claude plan usage (nav footer widget) ────────────────────────────────────
@@ -6572,6 +6608,71 @@ mod tests {
         assert_eq!(hist_epoch(&json!("1786318766274")), Some(1_786_318_766));
         assert_eq!(hist_epoch(&json!(null)), None);
         assert_eq!(hist_epoch(&json!("not-a-number")), None);
+    }
+
+    /// A transcript line carries ISO-8601; history.jsonl carries epoch millis.
+    /// One parser reads both, and a date string must never fall through to the
+    /// number branch.
+    #[test]
+    fn entry_epoch_accepts_iso_and_epoch_millis() {
+        use serde_json::json;
+        assert_eq!(entry_epoch(&json!("2026-09-20T01:49:52.243Z")), Some(1_789_868_992));
+        assert_eq!(entry_epoch(&json!("2026-09-20T01:49:52Z")), Some(1_789_868_992));
+        assert_eq!(entry_epoch(&json!(1_786_318_766_274i64)), Some(1_786_318_766));
+        assert_eq!(entry_epoch(&json!("nope")), None);
+        assert_eq!(entry_epoch(&json!(null)), None);
+    }
+
+    /// ⚠ THE regression this function exists for. A transcript is dated by the
+    /// timestamps inside it, never by its mtime: Claude Code rewrites a live
+    /// session's `.jsonl` for hours after its last turn, and the backfill runs
+    /// on every launch with a forward-only stamp — so an mtime read re-dated
+    /// every still-open place to "just finished" at each restart, and the unread
+    /// ring came back on all of them. The file here is written NOW, so its mtime
+    /// is now and its content is hours old: the two answers cannot be confused.
+    #[test]
+    fn transcript_epoch_dates_a_session_by_its_content_not_its_mtime() {
+        let p = std::env::temp_dir().join(format!("wt-tsx-{}.jsonl", std::process::id()));
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"type":"user","timestamp":"2026-09-20T01:40:00.000Z"}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-09-20T01:49:52.243Z"}"#,
+                "\n",
+                // No timestamp at all: skipped, not treated as a zero.
+                r#"{"type":"system","subtype":"turn_duration","durationMs":210986}"#,
+                "\n",
+                // Out of order — a rewritten summary lands last carrying an
+                // older stamp, and the newest entry must still win.
+                r#"{"type":"summary","timestamp":"2026-09-20T01:45:00.000Z"}"#,
+                "\n",
+                "not json at all\n",
+            ),
+        )
+        .unwrap();
+        let got = transcript_epoch(&p).expect("a transcript with timestamps must date");
+        assert_eq!(got, 1_789_868_992, "the NEWEST timestamp in the file, 01:49:52Z");
+        let now = worktrees_core::sysclock::now_epoch();
+        assert!(
+            now - got > 3600,
+            "transcript_epoch returned {got}, within an hour of now ({now}) — that is the \
+             file's mtime, which is exactly the bug: a session idle since this morning would \
+             be stamped as having just finished on every restart"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Everything unreadable degrades to "no answer", so the backfill falls back
+    /// to the prompt time instead of inventing one.
+    #[test]
+    fn transcript_epoch_has_no_answer_for_a_file_it_cannot_date() {
+        let miss = std::env::temp_dir().join(format!("wt-tsx-missing-{}.jsonl", std::process::id()));
+        assert_eq!(transcript_epoch(&miss), None);
+        let p = std::env::temp_dir().join(format!("wt-tsx-blank-{}.jsonl", std::process::id()));
+        std::fs::write(&p, "{\"type\":\"user\"}\nnot json\n").unwrap();
+        assert_eq!(transcript_epoch(&p), None);
+        let _ = std::fs::remove_file(&p);
     }
 
     /// A tail read starts mid-line by construction; that fragment must be
