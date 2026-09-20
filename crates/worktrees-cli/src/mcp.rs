@@ -1124,9 +1124,26 @@ fn safe_arg(v: &str, what: &str) -> Result<String, String> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Delete the debug logging when the workspace version reaches this. See the
-/// test — it is what enforces it. `0.25.0` is this feature's release, so this
-/// buys exactly one release cycle of real use.
-const REMOVE_AT_VERSION: (u32, u32) = (0, 26);
+/// test — it is what enforces it. `0.25.0` is this feature's release, so the
+/// original `(0, 26)` bought exactly one release cycle of real use.
+///
+/// DEFERRED ONCE, at the v0.26.0 bump, and the reason is not "it is still
+/// earning its keep" — it is that it never got to try. The tripwire fired as
+/// designed, and the evidence it asks for was not there to read: no
+/// `~/.cache/worktrees/mcp-debug.log` anywhere, because the `worktrees` MCP
+/// server was not registered in `~/.claude.json` at all. No registration, no
+/// `resources/list`, nothing to log. The cycle this was meant to buy did not
+/// happen, so deleting it now would retire an experiment that never ran and
+/// answer none of the questions it was added to answer.
+///
+/// That makes this a ONE-TIME extension with a condition attached: register
+/// the server (`claude mcp add -s user worktrees -- worktrees mcp --mutations`)
+/// and actually exercise `@worktrees:place://…` from a real session this
+/// cycle. If 0.27 arrives and the log is empty again, the answer is no longer
+/// "defer" — it is that real use is never going to arrive, and the whole
+/// apparatus goes regardless of what it did or did not learn. Do not extend it
+/// a second time on the same reasoning.
+const REMOVE_AT_VERSION: (u32, u32) = (0, 27);
 
 /// `CARGO_PKG_VERSION` as (major, minor), or `None` if it is not the usual
 /// shape. Parsed rather than string-compared: `"0.9.0" < "0.26.0"` is FALSE
@@ -1674,7 +1691,12 @@ mod tests {
         assert_eq!(version_major_minor("1.2.3-rc1"), Some((1, 2)));
         assert_eq!(version_major_minor("nonsense"), None);
         assert!(version_major_minor("0.9.0").unwrap() < REMOVE_AT_VERSION);
-        assert!(version_major_minor("0.26.0").unwrap() >= REMOVE_AT_VERSION, "must fire AT the version");
+        // Tracks REMOVE_AT_VERSION deliberately: these two pin the BOUNDARY, so
+        // the version below the gate must stay below it and the gate version
+        // must still fire. Left at 0.26 they would assert the opposite of the
+        // constant and go green while the tripwire never fired again.
+        assert!(version_major_minor("0.26.0").unwrap() < REMOVE_AT_VERSION, "one minor below must NOT fire");
+        assert!(version_major_minor("0.27.0").unwrap() >= REMOVE_AT_VERSION, "must fire AT the version");
         assert!(version_major_minor("0.100.0").unwrap() >= REMOVE_AT_VERSION, "and past it");
         assert!(
             "0.9.0" > "0.26.0",

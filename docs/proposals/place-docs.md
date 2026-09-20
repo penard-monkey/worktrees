@@ -455,13 +455,21 @@ point. The edits, at `29671fc`:
 | `crates/worktrees-core/src/projcfg.rs:252` | `ProjectConfig` gains `docs: Option<Docs>`; `[docs]` enters the known-key set; `RelPath` for every path. Phase 2. |
 | a new managed `Viewer` state | §5.1. Phase 3. |
 
-Two per-place-memory rules carry over unchanged. `place_panels` remembers the
-active tab, so a place you were reading docs in reopens on Docs — free, via
-`panelsFor` (`settings.ts:84-105`). It deliberately does **not** remember the
-open file (`settings.ts:45-48`: a remembered path can be deleted or renamed
-between visits), and the Docs tab follows that: it remembers being open, and
-nothing else. Any new optional field there must stay optional or the seed
-freezes (CLAUDE.md:470-479).
+Two per-place-memory rules carry over. `place_panels` remembers the active
+tab, so a place you were reading docs in reopens on Docs — free, via
+`panelsFor` (`settings.ts`). The open file is remembered too, since #302 —
+but NOT in `place_panels`: it lives in its own `files_open` record (keyed
+`repo|slug`, beside `term_tab_active` and this proposal's `docs_collapsed`),
+because every `place_panels` key needs a global twin that seeds unvisited
+places, and one place's path means nothing in another. The objection that
+kept it unstored for a year (a remembered path can be deleted, renamed or
+gitignored between visits, and a failed read is an error banner) is answered
+rather than dropped: the restore asks `file_readable` first and silently
+opens nothing when the path is gone. A document opened from the Docs tab goes
+through the same `openDockFile`, so it comes back with the place like any
+file-tree row. Any new optional field in `place_panels` must stay optional or
+the seed freezes (CLAUDE.md, "a `place_panels` field whose global twin is a
+SEED").
 
 One seam I could not confirm from source: whether `FilesPane` (`FilesPane.tsx:822`)
 can be told from outside to open a given path. Phase 1's row action depends on

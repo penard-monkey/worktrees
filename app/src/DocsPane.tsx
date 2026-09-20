@@ -405,7 +405,10 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
     return () => clearInterval(t);
   }, [load, pageVisible]);
   // A half-typed filter must not follow you to another place — the same rule
-  // the dock's open file and the header rename already follow.
+  // the header rename follows. (The dock's open file used to be the other
+  // example; since #302 it is reset and then RESTORED per place from
+  // `files_open`, because a file you were reading is a different kind of state
+  // from something half-typed. A filter has nothing to restore.)
   useEffect(() => { setQ(""); setSel(null); }, [root]);
 
   useEffect(() => {

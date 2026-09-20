@@ -2399,9 +2399,29 @@ async fn get_ai_config() -> Result<AiConfig, String> {
 /// (~1.1s, and a false ✘ whenever the cwd is not a repo). Safe to call on a
 /// sheet open or a Home render; still `async`, like every command here, because
 /// it touches the filesystem.
+///
+/// Logged, unlike most read-only commands. `mcp_install`/`mcp_uninstall` already
+/// applog, but the state that decides whether the offer EVER appears is
+/// computed here — and every non-`absent` answer is a silent one, by design. A
+/// user reporting "it never offered" leaves no other trace: without this line
+/// the only way to tell `absent` (card suppressed by something in the UI) from
+/// `cli-missing`/`elsewhere` (card correctly withheld) is to ask them to open
+/// Settings and read it out.
 #[tauri::command]
 async fn mcp_status(repo: Option<String>) -> Result<worktrees_core::mcpsetup::Status, String> {
-    Ok(worktrees_core::mcpsetup::status(repo.as_deref()))
+    let s = worktrees_core::mcpsetup::status(repo.as_deref());
+    applog(
+        "info",
+        &format!(
+            "mcp_status repo={} -> state={:?} found_in={:?} claude={} worktrees={}",
+            repo.as_deref().unwrap_or("-"),
+            s.state,
+            s.found_in,
+            s.claude_bin.as_deref().unwrap_or("-"),
+            s.worktrees_bin.as_deref().unwrap_or("-"),
+        ),
+    );
+    Ok(s)
 }
 
 /// Wire it in (or repair, or re-install with a different `--mutations`).
@@ -4258,6 +4278,26 @@ async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Resu
     })
 }
 
+/// Is `path` still a readable file inside the workspace? Answers the question
+/// `files_open` restore has to ask before it reopens a remembered path.
+///
+/// **Returns `Ok(false)` where every other FS command returns `Err`** — that is
+/// the whole point of it existing rather than the frontend calling `read_file`
+/// and catching. A remembered file can be deleted, renamed, gitignored or left
+/// behind by a branch switch between visits, and `FileView` routes a failed
+/// read to `onError`, i.e. the app's error banner. Restoring through a command
+/// that *errors* would therefore greet you with a banner for the entirely
+/// ordinary act of deleting a file you once had open — which is exactly why
+/// `PlacePanels` refused to remember the open file at all until this existed.
+///
+/// So: outside the workspace, missing, or not-a-file all collapse to `false`.
+/// The `Err` arm is left in the signature for an IPC-level failure only; the
+/// guard's own rejection is deliberately swallowed.
+#[tauri::command]
+async fn file_readable(app: AppHandle, path: String) -> Result<bool, String> {
+    Ok(guard_under_projects(&app, &path).map(|f| f.is_file()).unwrap_or(false))
+}
+
 /// Raw bytes as base64 — the viewer builds a `data:` URI from it to show an
 /// image inline. Same path guard as every other FS command. The cap is smaller
 /// than `read_file`'s (base64 inflates 4/3, and this crosses the IPC bridge as
@@ -4310,8 +4350,14 @@ fn b64_encode(bytes: &[u8]) -> String {
 /// (Claude edited it in another pane), the save is refused rather than silently
 /// clobbering. The write is atomic (temp file + rename) so a crash mid-save
 /// can't leave a half-written file, and preserves the file's mode bits.
+///
+/// Returns the SAVED file's mtime, which is the `expected_mtime` for the next
+/// save in the same sitting. Without it the editor would still hold the mtime
+/// it read before this write, and its second save would be refused as a
+/// conflict with its own first one — the guard firing on the one writer it is
+/// not there to stop.
 #[tauri::command]
-async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<(), String> {
+async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
     let f = guard_under_projects(&app, &path)?;
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
@@ -4331,7 +4377,8 @@ async fn write_file(app: AppHandle, path: String, content: String, expected_mtim
     std::fs::rename(&tmp, &f).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         e.to_string()
-    })
+    })?;
+    Ok(file_mtime_ms(&f))
 }
 
 // ── dock terminal: scratch-shell sidecar sessions ────────────────────────────
@@ -5789,6 +5836,7 @@ pub fn run() {
             changed_files,
             file_diff,
             read_file,
+            file_readable,
             list_docs,
             open_docs_viewer,
             read_file_base64,

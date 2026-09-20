@@ -959,6 +959,12 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 4px var(--accent);
 }
+/* Purple when the only thing pending is an OFFER — the same hue as the band
+   that made it, and the app's existing word for claude. Geometry deliberately
+   unchanged: the dot already teaches "there is news on this square", and a
+   second size would be a second idea (the same reasoning `.usage-badge`
+   records two rules up). */
+.rail-icon.upd.upd-offer::after { background: var(--ai); box-shadow: 0 0 4px var(--ai); }
 .upd-tag {
   margin-left: var(--s2); padding: 1px var(--s2); border-radius: var(--r-sm);
   font-size: var(--fs-micro); font-weight: var(--fw-bold); text-transform: uppercase;
@@ -1271,7 +1277,7 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .init-banner .ver-actions { margin-top: 0; }
 
-/* ── Claude MCP setup: the Home card + the Settings verdict line ──────────────
+/* ── Claude MCP setup: the Settings verdict line ──────────────────────────────
    The card borrows `.init-banner`'s box treatment (the app's one "here is
    something you could set up" idiom) but NOT its amber edge: nothing is wrong,
    and the amber in this app means "needs a human". It sits on `.briefing`, which
@@ -1279,27 +1285,66 @@ body.dragging .menu-catch { pointer-events: none; }
    the `.term-status .update-log` rule two hundred lines up spells out: a
    recessed box over a token EQUAL to its host has zero contrast in every theme
    and is carried by a 1px border that tokyo-day cannot carry. */
-.mcp-card {
-  display: flex; flex-direction: column; gap: var(--s2);
-  margin-bottom: var(--s5); padding: var(--s3);
-  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-md);
-}
-.mcp-card-h {
-  display: flex; align-items: center; gap: var(--s2);
-  font-size: var(--fs-meta); color: var(--txt-hi); font-weight: var(--fw-med);
-}
-.mcp-card p {
-  margin: 0; font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt-dim);
-}
-.mcp-card .ver-actions { margin-top: 0; align-items: center; }
-/* Quieter than a `.ctrl`: dismissing is not an action of equal weight to the one
-   the card is asking for, and a second bordered button reads as a choice
-   between two things rather than an offer with a way out. */
 .mcp-dismiss {
   background: none; border: 0; padding: 0 var(--s1); cursor: pointer;
   font: inherit; font-size: var(--fs-micro); color: var(--txt-dim);
 }
 .mcp-dismiss:hover { color: var(--txt); text-decoration: underline; }
+
+/* ── the offer band ─────────────────────────────────────────────────────────
+   Pinned between the modal header and `.settings-body`, the only child that
+   scrolls. FULL-BLEED and un-rounded on purpose: the notes below are a column
+   of bordered entries, and a bordered box here would read as one more of them.
+   A band that runs edge to edge is a different kind of object before a word of
+   it is read.
+
+   Tinted with `--ai` over `--bg-tree` — the MODAL's surface, not `--bg-panel`,
+   which this once borrowed by habit and which is a different colour. Purple is
+   the app's existing word for claude (tokens.css), so the tint is semantic
+   rather than decorative, and it cannot be confused with `--accent`, which
+   means "interactive" everywhere else. Measured against the host in all six
+   themes. */
+.wn-offers {
+  flex: none;
+  display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  background: color-mix(in srgb, var(--ai) 16%, var(--bg-tree));
+  border-bottom: 1px solid var(--line);
+}
+.wn-offers-h {
+  font-size: var(--fs-micro); font-weight: var(--fw-med); letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--txt-dim);
+}
+.wn-offer { display: flex; align-items: flex-start; gap: var(--s3); }
+.wn-offer > svg { flex: none; color: var(--ai); margin-top: 1px; }
+/* `min-width: 0` or a long title refuses to wrap and pushes the actions off
+   the band's right edge — the ratchet `.term-host` taught us about. */
+.wn-offer-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.wn-offer-t { font-size: var(--fs-label); font-weight: var(--fw-med); color: var(--txt-hi); }
+.wn-offer-b { font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt-dim); }
+.wn-offer-acts { flex: none; display: flex; align-items: center; gap: var(--s3); }
+/* Under a 520px WINDOW the actions drop below the text rather than squeezing
+   the sentence into a column two words wide. Deliberately not a container
+   query: the modal is `min(640px, 100%)`, so its width only leaves that range
+   when the window does, and `min-width: 0` on `.wn-offer-txt` covers the rest
+   by letting the text give way first. */
+@media (max-width: 520px) {
+  .wn-offer { flex-wrap: wrap; }
+  .wn-offer-acts { width: 100%; justify-content: flex-end; }
+}
+
+/* The deep link's landing mark. An OUTLINE, not a border or a background: it
+   must not move the section by a pixel (a border would) and must not fight the
+   surface tokens the panel already picked. Two pulses, then gone — it says
+   "here", it does not decorate. */
+.focus-flash { animation: focus-flash 700ms var(--ease) 2; border-radius: var(--r-md); }
+@keyframes focus-flash {
+  0%, 100% { outline: 2px solid transparent; outline-offset: 3px; }
+  40% { outline: 2px solid var(--accent); outline-offset: 3px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .focus-flash { animation: none; outline: 2px solid var(--accent); outline-offset: 3px; }
+}
 
 /* The one-line verdict in Settings. `align-items: start` so a wrapped sentence
    keeps its icon on the first line rather than centring it against three. */
@@ -1619,6 +1664,9 @@ body.dragging .menu-catch { pointer-events: none; }
 .viewer-tag.kind {
   color: var(--txt-dim); border-color: var(--line-strong);
 }
+.viewer-tag.err {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
 .viewer-hint { align-self: center; margin-top: var(--s4); }
 /* wraps whatever the renderer produced — the anchor-scroll query root */
 .viewer-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -1707,6 +1755,46 @@ body.dragging .menu-catch { pointer-events: none; }
   white-space: pre; tab-size: 2; color: var(--txt); font: inherit;
 }
 .code.wrap .code-text { white-space: pre-wrap; word-break: break-word; }
+
+/* The editable Source view (markdown only — see FilesPane.tsx). It has to be
+   the SAME document the read-only renderer shows, and a textarea inherits none
+   of it: form controls do not inherit font, so every value here is copied from
+   `.code` + `.code-text` deliberately rather than left to cascade. Get one
+   wrong and the file re-lays-out the moment you click into it.
+
+   It is its own scroll box (no `.scroll` wrapper): nesting one scroller in
+   another gives the file two scrollbars and lets the caret be scrolled out of
+   sight by the outer one. `--bg-abyss` is what `.scroll` paints, so the swap
+   between reading and editing changes no colour. */
+.srcedit {
+  flex: 1; min-height: 0; width: 100%;
+  margin: 0; padding: var(--s2) var(--s3);
+  border: 0; outline: none; resize: none;
+  background: var(--bg-abyss); color: var(--txt);
+  font-family: var(--term-family); font-size: var(--term-size); line-height: 1.55;
+  white-space: pre; tab-size: 2; overflow: auto;
+}
+.srcedit.wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* The editor's formatting bar. It lives INSIDE `.viewer-body`, above the
+   textarea, because it belongs to the editor rather than to the viewer —
+   Preview, Diff and every read-only file must not grow a toolbar they have no
+   use for, and the viewer header is already full. Like `.viewer-h` it scrolls
+   rather than clipping: a control that no longer fits must still be reachable.
+   `.md-*` is the markdown RENDERER's namespace (`.md-h1` &c), hence `.mdbar-`. */
+.mdbar {
+  flex: none; display: flex; align-items: center; gap: var(--s1);
+  padding: var(--s1) var(--s2);
+  border-bottom: 1px solid var(--line); background: var(--bg-panel);
+  overflow-x: auto; scrollbar-width: none;
+}
+.mdbar::-webkit-scrollbar { display: none; }
+/* A floor, so `B` and `I` are not half the width of `H1` — and `flex: none`
+   because a scrolling row would otherwise squeeze them instead of scrolling. */
+.mdbar-btn { flex: none; min-width: 2.4em; font-family: var(--font-mono); }
+.mdbar-bold { font-weight: var(--fw-bold); }
+.mdbar-ital { font-style: italic; }
+.mdbar-sep { flex: none; width: 1px; align-self: stretch; background: var(--line); margin: 0 var(--s1); }
 
 /* ── diff (DiffView.tsx) ──────────────────────────────────────────────────
    ONE grid, not two panes. A pane per side needs its scroll positions synced

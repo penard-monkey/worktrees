@@ -43,9 +43,16 @@ export function resolveTheme(s: Pick<Settings, "theme" | "theme_light" | "theme_
  *  returns `{...s, ...p}`), which doubles as the seed for a place that has none
  *  — see `term_tab_active` for the case where that seeding is exactly wrong.
  *
- *  The open FILE is not here either. A remembered path can be deleted, renamed
- *  or gitignored between visits, which turns "restore what I left" into an
- *  error banner on arrival. */
+ *  The open FILE is not here either, but it IS remembered now — as
+ *  `files_open` below, for the same reason `term_tab_active` lives out here:
+ *  every key in this record needs a global twin that doubles as a seed, and a
+ *  global "last open file" would hand one place another place's path. The
+ *  objection this comment used to record still stands and is answered rather
+ *  than dismissed: a remembered path can be deleted, renamed, gitignored or
+ *  left behind by a branch switch between visits, and `FileView` routes a
+ *  failed read to the app's error banner — so the restore VALIDATES through
+ *  `file_readable` (which answers false instead of erroring) and silently
+ *  opens nothing when the path is gone. */
 export type PlacePanels = {
   dock_open: boolean;
   /** WIDENING ONLY, and that direction matters. A record written by an older
@@ -249,6 +256,25 @@ export type Settings = {
   //
   // Pruned with the other per-place maps when a place goes away (`dropPanels`).
   docs_collapsed: Record<string, string[]>;
+  // Which file the Files tab was viewing, per place: `repo|slug` → path.
+  // Restored when you come back to a space, so navigating away and returning
+  // does not cost you the file you were reading.
+  //
+  // Out here rather than in `PlacePanels`, for `term_tab_active`'s exact
+  // reason: every key there must also exist as a GLOBAL, and a global would
+  // seed one place's file into another's. `src/lib.rs` in one worktree says
+  // nothing about the next — and unlike a tab index it would be a path that
+  // does not even exist over there.
+  //
+  // Read the same way as `term_tab_active` too: a remembered value that no
+  // longer resolves falls back to nothing, silently. `App.tsx` checks the path
+  // with `file_readable` before opening it, because a deleted or renamed file
+  // would otherwise greet you with an error banner on arrival — the objection
+  // that kept this from being stored at all until now.
+  //
+  // NOT a `| null` and never written empty: absence IS "no file open", and a
+  // key whose value is "" would be a path the viewer would try to read.
+  files_open: Record<string, string>;
   // Per-place panel state, keyed `repo|slug` (the same scheme as
   // `term_tab_names`). An entry here means "this place has been SET UP"; its
   // absence means the dock has never been opened there, and such a place starts
@@ -289,22 +315,15 @@ export type Settings = {
   // the same re-suggest rule, and unifying them would mean the CLI reading an
   // app-owned file — a worse dependency than a duplicated boolean-shaped fact.
   init_dismissed: Record<string, string>;
-  // The Home card offering to wire the worktrees MCP server into claude,
-  // silenced for good. A plain BOOLEAN, unlike `init_dismissed` above — and the
-  // difference is worth stating, because that key's whole point is that a
-  // boolean was the wrong shape there.
+  // Offers silenced by the user, id -> the FINGERPRINT that was dismissed
+  // (`offers.ts`). Deliberately the same shape as `init_dismissed` above and not
+  // the boolean this replaced: `mcp_nudge_dismissed` was safe only because its
+  // one suggestion could never change, which stops being true the moment a
+  // second offer exists. A boolean here would silence a question nobody asked.
   //
-  // It is the right shape here because the card has nothing to re-suggest. The
-  // suggestion's content never changes (it is always "install the server"), and
-  // the states that DO change something — the server going stale, or being
-  // read-only — are deliberately not this card and are not covered by this flag
-  // (`State::nudgeable` in mcpsetup.rs is `Absent` and nothing else). A user who
-  // silenced "install this" has not agreed to be silent about "the thing you
-  // installed is broken".
-  //
-  // It also only ever governs the ABSENT case: the card retires itself the
-  // moment the server exists, so the flag is unreachable in every other state.
-  mcp_nudge_dismissed: boolean;
+  // Only ever holds ids that are OFFERS. The states that are problems — a stale
+  // or read-only server — are not dismissible and never reach this store.
+  offers_dismissed: Record<string, string>;
   // Bumped when a DEFAULT changes in a way that has to reach installs which
   // already persisted the old value. Without it a default flip is invisible to
   // exactly the people who have been running the app — see `migrate`.
@@ -312,7 +331,7 @@ export type Settings = {
 };
 
 /** Current settings revision. Bump ONLY together with a step in `migrate`. */
-export const SETTINGS_REV = 2;
+export const SETTINGS_REV = 3;
 
 export const DEFAULTS: Settings = {
   ui_rem: 15,
@@ -348,6 +367,7 @@ export const DEFAULTS: Settings = {
   term_tabs: {},
   term_tab_active: {},
   docs_collapsed: {},
+  files_open: {},
   place_panels: {},
   editor_cmd: "code",
   terminal_cmd: "",
@@ -363,7 +383,7 @@ export const DEFAULTS: Settings = {
   manual_order: {},
   last_seen_version: "",
   init_dismissed: {},
-  mcp_nudge_dismissed: false,
+  offers_dismissed: {},
   settings_rev: SETTINGS_REV,
 };
 
@@ -557,6 +577,16 @@ function migrate(s: Settings, from: number): boolean {
     delete (s as Partial<Settings> & { lens?: unknown }).lens;
     s.nav_pinned = DEFAULTS.nav_pinned;
     s.nav_hover_reveal = DEFAULTS.nav_hover_reveal;
+  }
+  if (from < 3) {
+    // A user who silenced the Home card stays silenced: carry the boolean over
+    // as the fingerprint the card actually stood for. Dropping it instead would
+    // re-ask a question they already answered, on the very release that claims
+    // to have fixed how we ask.
+    const legacy = (s as Partial<Settings> & { mcp_nudge_dismissed?: unknown }).mcp_nudge_dismissed;
+    s.offers_dismissed = { ...DEFAULTS.offers_dismissed, ...(s.offers_dismissed ?? {}) };
+    if (legacy === true) s.offers_dismissed["mcp-server"] = "absent";
+    delete (s as Partial<Settings> & { mcp_nudge_dismissed?: unknown }).mcp_nudge_dismissed;
   }
   s.settings_rev = SETTINGS_REV;
   return true;

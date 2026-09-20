@@ -11,7 +11,9 @@ import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
-import { canNudge, McpNudge, type McpStatus } from "./McpPanel";
+import { type McpStatus } from "./McpPanel";
+import { dismissPatch, pendingOffers, type Offer } from "./offers";
+import type { CatId } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
   type DoctorReport, type InitSuggestion,
@@ -471,10 +473,16 @@ function ReleaseNotes({ sections, notes, open, onToggle }: {
 // and the header's Show/Hide details toggle are one piece of state that nothing
 // outside the modal reads, and a component defined inside App() would be
 // re-created (and reset) by the 3s poll.
-function WhatsNewModal({ version, notes, manual, onClose }: {
+function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceOffer, onClose }: {
   version: string;
   notes: string;
   manual: boolean;
+  /// Pending offers, listed under the notes. Empty in the MANUAL view: that one
+  /// is opened from Settings, so the reader is already standing where the links
+  /// would send them.
+  offers: Offer[];
+  onTakeOffer: (o: Offer) => void;
+  onSilenceOffer: (o: Offer) => void;
   onClose: () => void;
 }) {
   const sections = useMemo(() => parseNotes(notes), [notes]);
@@ -512,6 +520,47 @@ function WhatsNewModal({ version, notes, manual, onClose }: {
           )}
           <button className="icon-btn" title="close" onClick={onClose}><Icons.X size={13} /></button>
         </header>
+        {offers.length > 0 && (
+          /* ABOVE the notes and outside `.settings-body`, which is the only
+             part of this modal that scrolls — so the band is pinned and a long
+             changelog cannot push it under a fold. It sat below the notes once;
+             the entry it replaced sat fourth of six INSIDE them. Both were
+             missed by the person who wrote them, which is three variations of
+             the same mistake: the thing to DO was placed after the thing to
+             read.
+
+             Deliberately not a card. The body below is full of bordered
+             entries, so another bordered box would read as one more of them —
+             a full-bleed band is a different KIND of object at a glance. The
+             tint is `--ai`, because purple already means claude everywhere in
+             this app (see tokens.css), which also keeps it distinct from
+             `--accent`, the generic interactive hue.
+
+             It is NOT the only way to reach the offer, and must not be: this
+             modal appears once per version and never at all on a fresh
+             install, so Settings → Claude carries the same dismissal on
+             demand. */
+          <div className="wn-offers">
+            {offers.length > 1 && (
+              <div className="wn-offers-h">{offers.length} things to set up</div>
+            )}
+            {offers.map((o) => (
+              <div className="wn-offer" key={o.id}>
+                <Icons.SquareTerminal size={15} />
+                <div className="wn-offer-txt">
+                  <div className="wn-offer-t">{o.title}</div>
+                  <div className="wn-offer-b">{o.body}</div>
+                </div>
+                <div className="wn-offer-acts">
+                  {/* The one FILLED button in this modal. Everything else here
+                      is text, so the single accent fill is unambiguous. */}
+                  <button className="enter-btn sm" onClick={() => onTakeOffer(o)}>{o.cta}</button>
+                  <button className="mcp-dismiss" onClick={() => onSilenceOffer(o)}>Don't show again</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="settings-body">
           <ReleaseNotes sections={sections} notes={notes} open={open} onToggle={toggle} />
         </div>
@@ -3042,7 +3091,14 @@ function App() {
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Where Settings was asked to open. One state, never a boolean beside it:
+  // `settingsOpen` is derived, so "the sheet is up" and "which section it went
+  // to" cannot disagree. `{}`-with-no-cat is the ordinary ⌘, open.
+  const [settingsAt, setSettingsAt] = useState<{ cat: CatId; focus?: string } | null>(null);
+  const settingsOpen = settingsAt !== null;
+  const openSettings = useCallback((at?: { cat: CatId; focus?: string }) => {
+    setSettingsAt(at ?? { cat: "appearance" });
+  }, []);
   const [switchOpen, setSwitchOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
@@ -3161,18 +3217,58 @@ function App() {
   // `toggleDock`, registered once in the keydown effect).
   const selRef = useRef(sel);
   selRef.current = sel;
+  // Settings as they are RIGHT NOW, for an effect that must NOT re-run when
+  // they change. The file restore below is exactly that: its trigger is a place
+  // switch, and a dependency on `settings` would re-fire it on every unrelated
+  // toggle — reopening a file the user had just navigated away from.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  // Bumped once, when persisted settings land. The restore needs it because a
+  // place can be selected before `loadSettings` resolves (the layout effect
+  // awaits an invoke), and reading `files_open` in that window reads DEFAULTS'
+  // empty record — a silent "nothing to restore" that is simply wrong.
+  const [hydratedTick, setHydratedTick] = useState(0);
 
   // rename-in-place for the header name. Transient, and reset on a place switch
   // like dockFile below — a half-typed name must not follow you somewhere else.
   const [renaming, setRenaming] = useState(false);
 
-  // right dock: which file the Files tab is viewing (null = none). Reset per place.
+  // right dock: which file the Files tab is viewing (null = none). Reset per
+  // place, then restored from `files_open` by the effect below the reset.
   const [dockFile, setDockFile] = useState<string | null>(null);
   // Reading mode (⌘⇧E): the open file takes over the main pane. Closed by a
   // place switch or by the file going away — an overlay with nothing under it
   // would hide the terminal for no reason.
   const [reading, setReading] = useState(false);
   useEffect(() => { setDockFile(null); setReading(false); setRenaming(false); }, [sel?.repo, sel?.slug]);
+  /** Reopen whatever this place was last viewing (`files_open`).
+   *
+   *  SEPARATE from the reset above, and deliberately so: the reset must stay
+   *  keyed on the place alone, while this also has to re-run when hydration
+   *  lands. Folding them together would mean either resetting the viewer on
+   *  every hydration or never restoring for a place selected before it.
+   *
+   *  The path is VALIDATED first. A remembered file can be deleted, renamed,
+   *  gitignored or left behind by a branch switch between visits, and
+   *  `FileView` routes a failed `read_file` straight to the error banner — so
+   *  restoring optimistically would punish the ordinary act of deleting a file
+   *  you once had open. `file_readable` answers false rather than erroring, and
+   *  a false simply leaves the viewer empty. `reading` (⌘⇧E) deliberately does
+   *  NOT come back with it: a full-pane overlay on arrival hides the terminal
+   *  you just navigated to.
+   *
+   *  `alive` covers A→B→A faster than a stat: without it the first place's
+   *  answer lands last and reopens ITS file over the one you are now in. */
+  useEffect(() => {
+    if (!sel) return;
+    const remembered = settingsRef.current.files_open?.[placeKey(sel.repo, sel.slug)];
+    if (!remembered) return; // no invoke at all for the common case
+    let alive = true;
+    invoke<boolean>("file_readable", { path: remembered })
+      .then((ok) => { if (alive && ok) setDockFile(remembered); })
+      .catch(() => { /* a restore is best-effort — never a banner */ });
+    return () => { alive = false; };
+  }, [sel?.repo, sel?.slug, hydratedTick]);
   useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab.
@@ -3413,6 +3509,48 @@ function App() {
   useEffect(() => {
     invoke<McpStatus>("mcp_status", { repo: null }).then(setMcpStatus).catch(() => setMcpStatus(null));
   }, []);
+
+  // Offers: things set up nowhere, listed in the release notes and badged on
+  // the gear until taken or silenced. Derived — no surface computes its own
+  // answer, which is how the Home card and the Settings panel came to disagree
+  // about whether there was anything to say.
+  const offers = useMemo(
+    () => pendingOffers({ mcp: mcpStatus }, settings.offers_dismissed ?? {}),
+    [mcpStatus, settings.offers_dismissed],
+  );
+  const takeOffer = useCallback((o: Offer) => {
+    setSettingsAt(o.to);
+  }, []);
+  // The FUNCTIONAL form, which `updateSettings`' own docstring requires for a
+  // record-keyed patch: built from a captured `settings`, a second offer
+  // silenced from another surface in the same tick would be erased by whatever
+  // this closure last saw, and the loss reaches disk (ui-state.json is saved
+  // whole). Safe today with one offer id; not safe by construction, which is
+  // the part that rots.
+  const silenceOffer = useCallback((o: Offer) => {
+    updateSettings((prev) => ({ offers_dismissed: dismissPatch(o, prev.offers_dismissed ?? {}) }));
+  }, []);
+  // The MCP offer specifically, for Settings → Claude's "stop suggesting this".
+  const mcpOffer = offers.find((o) => o.id === "mcp-server") ?? null;
+
+  // The rail dot already means "something in Settings needs you" (an update).
+  // An unacted offer is the same claim, so it lights the same dot rather than
+  // inventing a second indicator next to it.
+  const railAlert = updateAvail || offers.length > 0;
+  // An offer is not an update, and until now they painted the same dot: you
+  // could not tell "the CLI is behind" from "you never set the server up"
+  // without hovering a gear, which nobody does. Same 6px dot in the same place
+  // — a second shape would be a second idea — recoloured to the band's purple
+  // when an offer is the only thing pending. With an update ALSO pending the
+  // dot stays accent (the older meaning) and the tooltip names both.
+  const railOfferOnly = offers.length > 0 && !updateAvail;
+  const railTitle = updateAvail && offers.length > 0
+    ? "settings — update available · setup suggested"
+    : updateAvail
+      ? "settings — update available"
+      : offers.length > 0
+        ? "settings — setup suggested"
+        : "settings (⌘,)";
   const recheckTmux = useCallback(async () => {
     try {
       const ok = await invoke<boolean>("tmux_check", { refresh: true });
@@ -3792,6 +3930,9 @@ function App() {
       hydrated.current = true;
       applySettings(merged);
       setSettings(merged);
+      // Lets the file restore run for a place that was selected while this
+      // invoke was still in flight.
+      setHydratedTick((n) => n + 1);
       if (Object.keys(preHydration.current).length > 0) saveSettings(merged);
       setCollapsed(merged.collapsed ?? {});
       // release notes: embedded CHANGELOG vs last-seen version. Fresh install
@@ -3900,6 +4041,23 @@ function App() {
     });
   }, []);
 
+  /** Open a file in the Files tab AND remember it for the selected place.
+   *
+   *  Every path into the viewer goes through here, which is what lets the
+   *  switch-reset stay a plain `setDockFile(null)`: clearing is never a user
+   *  act (nothing closes the viewer but leaving), so "null" never has to mean
+   *  "forget this place's file" and the reset cannot race the restore into
+   *  deleting the very entry it is about to read. */
+  const openDockFile = useCallback((path: string) => {
+    setDockFile(path);
+    const cur = selRef.current;
+    if (!cur) return;
+    const key = placeKey(cur.repo, cur.slug);
+    // Functional: the record must be read as it is at WRITE time, not as it was
+    // when this closure was made — the same rule `manual_order`'s splice follows.
+    updateSettings((prev) => ({ files_open: { ...prev.files_open, [key]: path } }));
+  }, [updateSettings]);
+
   // ── "show me this document", from a Claude session ────────────────────────
   // `worktrees show` / the MCP `show_doc` tool drop a request in
   // `~/.cache/worktrees/inbox`; the backend's 3 s tick validates it and emits
@@ -3923,10 +4081,18 @@ function App() {
   useEffect(() => {
     if (!pendingDoc) return;
     if (sel?.repo !== pendingDoc.repo || sel?.slug !== pendingDoc.slug) return;
-    setDockFile(pendingDoc.path);
+    // Through `openDockFile`, not `setDockFile`: a document Claude put on your
+    // screen is a file you are now viewing in this place, so leaving and coming
+    // back must bring it back like any other. This is also the invariant that
+    // keeps the place-switch reset a plain `setDockFile(null)` — a second way
+    // into the viewer that did not remember would quietly break it.
+    // `selRef.current` is correct by here: this effect is exactly the wait for
+    // the selection to land, which is why the request was parked in the first
+    // place.
+    openDockFile(pendingDoc.path);
     updatePanels({ dock_tab: "files", dock_open: true });
     setPendingDoc(null);
-  }, [pendingDoc, sel, updatePanels]);
+  }, [pendingDoc, sel, updatePanels, openDockFile]);
 
   /** Forget remembered panels for keys matching `shouldDrop`.
    *
@@ -3935,8 +4101,8 @@ function App() {
    *  years ago would still be carrying a dock width. */
   const dropPanels = useCallback((
     shouldDrop: (key: string) => boolean,
-    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs" | "docs_collapsed")[] =
-      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs", "docs_collapsed"],
+    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs" | "docs_collapsed" | "files_open")[] =
+      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs", "docs_collapsed", "files_open"],
   ) => {
     setSettings((prev) => {
       // The default sweeps EVERY per-place map, not just the panels: they are
@@ -5596,7 +5762,7 @@ function App() {
         // ⌘, opens Settings (macOS convention) — a meta chord is safe past the
         // term-host (its passthrough concerns are ctrl-only). Esc already closes.
         e.preventDefault();
-        setSettingsOpen((v) => !v);
+        setSettingsAt((v) => (v ? null : { cat: "appearance" }));
       } else if (e.metaKey && k === "f") {
         // ⌘F — find. Which surface depends on where the user is (see findTarget);
         // a second press re-selects the field rather than toggling the bar shut,
@@ -6155,7 +6321,7 @@ function App() {
             status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
-        <button className={"rail-icon" + (updateAvail ? " upd" : "")} data-track="settings" title={updateAvail ? "settings — update available" : "settings (⌘,)"} onClick={() => setSettingsOpen(true)}><Icons.Settings size={17} /></button>
+        <button className={"rail-icon" + (railAlert ? " upd" : "") + (railOfferOnly ? " upd-offer" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── the sidebar ──
@@ -6594,18 +6760,6 @@ function App() {
                   <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
                   <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
                 </div>
-                {/* Only for `absent`, only once there is a project to use it
-                    on, and only until it is installed or silenced. Home rather
-                    than over the terminal because this is a fact about the
-                    MACHINE, like the version rows and the logo above it — and
-                    because a card here is never in the way of work. */}
-                {canNudge(mcpStatus) && !settings.mcp_nudge_dismissed && (ws?.projects.length ?? 0) > 0 && (
-                  <McpNudge
-                    status={mcpStatus!}
-                    onOpenSettings={() => setSettingsOpen(true)}
-                    onDismiss={() => updateSettings({ mcp_nudge_dismissed: true })}
-                  />
-                )}
                 <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
                 <div className="resume">
                   {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
@@ -6746,7 +6900,7 @@ function App() {
                     // renderer, which has done markdown since v0.8.0. The dock
                     // is controlled from here (`dockFile`), so this needs no
                     // new plumbing — it sets the same state a tree row does.
-                    onOpen={(p) => { setDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
+                    onOpen={(p) => { openDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
                     onError={fail}
                     findOpen={findOn === "dock"}
                     findToken={findToken}
@@ -6764,7 +6918,7 @@ function App() {
                     showIgnored={settings.files_show_ignored}
                     changedOnly={settings.files_changed_only}
                     reloadToken={placesToken}
-                    onOpen={setDockFile}
+                    onOpen={openDockFile}
                     onOpenEditor={editIn}
                     onError={fail}
                     wrap={settings.files_wrap}
@@ -6814,7 +6968,7 @@ function App() {
                 key={dockFile}
                 path={dockFile}
                 reloadToken={placesToken}
-                onOpen={setDockFile}
+                onOpen={openDockFile}
                 onOpenEditor={editIn}
                 onError={fail}
                 wrap={settings.files_wrap}
@@ -6962,11 +7116,12 @@ function App() {
         }}
       />
 
-      <SettingsSheet open={settingsOpen} settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)}
+      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onChange={updateSettings} onClose={() => setSettingsAt(null)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
-        mcpStatus={mcpStatus} onMcpChanged={setMcpStatus} />
+        mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
+        mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)} />
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query
@@ -6983,6 +7138,9 @@ function App() {
       {whatsNew && (
         <WhatsNewModal
           version={whatsNew.version} notes={whatsNew.notes} manual={!!whatsNew.manual}
+          offers={whatsNew.manual ? [] : offers}
+          onTakeOffer={(o) => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); takeOffer(o); }}
+          onSilenceOffer={silenceOffer}
           onClose={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}
         />
       )}

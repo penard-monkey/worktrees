@@ -1445,6 +1445,16 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       const size = f.binary ? b64Bytes(f.b64 ?? "") : new TextEncoder().encode(f.content).length;
       return { content: f.content, truncated: false, binary: f.binary, mtime: f.mtime, size };
     }
+    case "file_readable": {
+      // Backend parity matters more here than anywhere else in this file: the
+      // real command answers FALSE for a missing path instead of throwing, and
+      // the whole point of `files_open`'s restore is that a stale path is
+      // silent. A mock that threw would make the harness the one place where
+      // the feature looks broken. `?stalefile` forces the miss, so the silent
+      // path is drivable without editing fixtures.
+      if (location.search.includes("stalefile")) return false;
+      return !!fsFile(args.path as string);
+    }
     case "read_file_base64": {
       // Backend parity: this encodes ANY regular file, not just images — the
       // caller decides what the bytes mean. A text fixture is encoded on the
@@ -1465,8 +1475,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       if (args.expectedMtime != null && prev && prev.mtime !== args.expectedMtime) {
         throw new Error("file changed on disk since you opened it — reload to see the latest");
       }
-      fsFiles.set(path, { content: args.content as string, binary: prev?.binary ?? false, mtime: Date.now() });
-      return null;
+      const mtime = Date.now();
+      fsFiles.set(path, { content: args.content as string, binary: prev?.binary ?? false, mtime });
+      // The real command returns the SAVED mtime so the editor can re-base for
+      // the next save (lib.rs). Returning null here would let a second ⌘S pass
+      // in the harness and fail in the app.
+      return mtime;
     }
     // Dock shells are PTYs the backend OWNS (no tmux). The mock models the
     // registry the same way — spawn-or-reattach keyed by repo+slug+index — so a
