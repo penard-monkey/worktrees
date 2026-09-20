@@ -6,11 +6,11 @@
 // 1. `securityLevel: "strict"`, always. `loose` is the level at which a `click
 //    NODE call fn()` directive WRITTEN INSIDE THE DOCUMENT runs a callback.
 //    This page's hot path is a repo cloned seconds ago.
-// 2. Every author-supplied `click` directive is stripped before mermaid sees
+// 2. Every AUTHOR-supplied `click` directive is stripped before mermaid sees
 //    the source. Strict blocks `call fn()`, but `click NODE "<href>"` is still
 //    an author-controlled href, and the proposal's §5.3 rule is that only
-//    TOOL-emitted targets may survive. This server emits none, so the correct
-//    number of click directives in a rendered diagram is zero.
+//    TOOL-emitted targets may survive. The tool emits exactly one shape, and
+//    only that shape survives — see `TOOL_CLICK` below.
 // 3. The returned SVG is never assigned to `innerHTML` of a live node. It is
 //    parsed into an INERT document, stripped of `<script>` and of every
 //    event-handler attribute, and then `importNode`d. `markdown.tsx` exists
@@ -66,15 +66,44 @@ function boot(): void {
 }
 
 /**
+ * THE ONE `click` SHAPE THE TOOL EMITS, and the only one that survives.
+ *
+ * `click <id> href "#/<rel>"`, anchored at both ends, with the id confined to
+ * mermaid's own identifier characters and the target confined to a SAME-PAGE
+ * FRAGMENT. A fragment is all the drill-down needs: the viewer routes on
+ * `location.hash`, so `#/docs/adr/0001.md` is a navigation inside this page and
+ * carries no scheme, no host, no port and no token — nothing that could point
+ * a reader off the page, and nothing that goes stale when the server is
+ * relaunched on a different port.
+ *
+ * It is also the reason this regex can be this strict. An author cannot forge
+ * it into anything dangerous: the anchors leave no room for a second directive
+ * or a trailing comment, `[^"]*` cannot close the quote early, and even a
+ * hostile `#/…` is only ever a route into this same place's documents — which
+ * the reader could already reach from the nav. `svgFromString` below keeps its
+ * independent rule that an `href` must start with `#`, so a change here cannot
+ * on its own let a remote target through.
+ */
+const TOOL_CLICK = /^\s*click\s+[A-Za-z0-9_-]+\s+href\s+"#\/[^"]*"\s*$/;
+
+/**
  * Rule 2. A `click` directive is a whole line in mermaid's grammar, so the line
- * is the unit to remove. It is removed rather than neutered so that nothing
- * downstream has to decide whether a surviving one was ours.
+ * is the unit to remove.
+ *
+ * THIS USED TO STRIP EVERY LINE, INCLUDING THE TOOL'S OWN — which killed the
+ * drill-down twice over (`svgFromString` also dropped the resulting `href`,
+ * since it was an absolute loopback URL rather than a fragment) and then
+ * reported the tool's own directives to the reader as "N author click
+ * directives removed". `stripped` is the count of what was ACTUALLY removed, so
+ * a diagram carrying nothing but tool links says nothing at all, which is what
+ * a note claiming an author was overruled has to mean.
  */
 export function stripClickDirectives(src: string): { src: string; stripped: number } {
   let stripped = 0;
   const out = src
     .split("\n")
     .filter((line) => {
+      if (TOOL_CLICK.test(line)) return true;
       if (/^\s*click\s+\S/.test(line)) { stripped++; return false; }
       return true;
     })

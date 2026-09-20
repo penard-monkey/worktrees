@@ -14,8 +14,13 @@
 // degradation, and it arrives as "the docs viewer is broken". A conditional GET
 // costs 410 bytes and 0.149 ms against 11 018 bytes for the document, holds no
 // connection, and puts the change signal in HTTP rather than in machinery we
-// own. On 304 this code does nothing at all — literally nothing: no state is
-// written, so React does not render, so no DOM node is touched.
+// own. On 304 this code writes no DOCUMENT state — so React does not render,
+// so no DOM node is touched. (It may clear a stale error banner, through a ref
+// that makes "already null" cost nothing; a 304 after an outage is the only
+// signal that the server came back, and a banner that outlives the outage is a
+// worse lie than the outage.) What the 304 does NOT do is supply the text, so
+// the payload of every document visited is cached per path beside its ETag —
+// see `DOC_CACHE_MAX`.
 //
 // A CHAINED setTimeout, never setInterval: a server that takes longer than the
 // interval must not accumulate a queue of overlapping requests.
@@ -31,20 +36,52 @@ import {
 
 const POLL_MS = 1000;
 
+/**
+ * How many documents' payloads are kept so that going BACK to one is instant.
+ *
+ * Bounded because a place can hold hundreds of documents and a payload is the
+ * whole text (11 KB for a typical one, measured in docs-transport §3.1) — a map
+ * that only grows would hold a place's entire docs tree in memory for a reader
+ * who wandered through it. 24 is far more than the handful a reader moves
+ * between and small enough to be uninteresting (~0.3 MB at that size). Eviction
+ * is by least-recently-updated, and it drops the ETag with the body.
+ */
+const DOC_CACHE_MAX = 24;
+
+/** One cached document: the body AND the ETag that describes it, together. */
+type DocEntryCache = { etag: string | null; payload: DocPayload };
+
 export type Route = { kind: "index" } | { kind: "doc"; path: string; anchor: string | null };
 
+/**
+ * `#/<path>` → a document; anything else → the index.
+ *
+ * THE WHOLE BODY IS IN A `try`, because `decodeURIComponent` throws `URIError`
+ * on a stray `%` — and a URL with one is not exotic: a document named `100%.md`
+ * produces `#/100%.md` the moment anything writes an unescaped href (which
+ * `DocsNav` did). This function is called from a `useState` INITIALISER, so a
+ * throw there is a render-time throw with no error boundary above it: a blank
+ * page. It is also called from the `hashchange` listener, where a throw freezes
+ * the route at whatever was last parsed — the viewer simply stops navigating,
+ * silently. Falling back to the index is the one behaviour that is visibly
+ * wrong rather than invisibly broken.
+ */
 export function parseRoute(hash: string): Route {
-  const h = hash.startsWith("#") ? hash.slice(1) : hash;
-  if (!h.startsWith("/")) return { kind: "index" };
-  const raw = h.slice(1);
-  if (!raw) return { kind: "index" };
-  const q = raw.indexOf("?h=");
-  if (q < 0) return { kind: "doc", path: decodeURIComponent(raw), anchor: null };
-  return {
-    kind: "doc",
-    path: decodeURIComponent(raw.slice(0, q)),
-    anchor: decodeURIComponent(raw.slice(q + 3)) || null,
-  };
+  try {
+    const h = hash.startsWith("#") ? hash.slice(1) : hash;
+    if (!h.startsWith("/")) return { kind: "index" };
+    const raw = h.slice(1);
+    if (!raw) return { kind: "index" };
+    const q = raw.indexOf("?h=");
+    if (q < 0) return { kind: "doc", path: decodeURIComponent(raw), anchor: null };
+    return {
+      kind: "doc",
+      path: decodeURIComponent(raw.slice(0, q)),
+      anchor: decodeURIComponent(raw.slice(q + 3)) || null,
+    };
+  } catch {
+    return { kind: "index" };
+  }
 }
 
 export function routeHash(route: Route): string {
@@ -81,25 +118,65 @@ export function Viewer() {
   // there and this flag is ignored.
   const [drawer, setDrawer] = useState(false);
   const etags = useRef(new Map<string, string | null>());
+  const docs = useRef(new Map<string, DocEntryCache>());
+  const navFilter = useRef<HTMLInputElement | null>(null);
 
   const path = route.kind === "doc" ? route.path : null;
 
+  // The banner, written through a ref so that "nothing changed" really writes
+  // nothing. A bare `setErr(null)` on every 304 would re-render the whole page
+  // once a second, which is the one thing the conditional GET exists to avoid.
+  const errRef = useRef<string | null>(null);
+  const showErr = useCallback((m: string | null) => {
+    if (errRef.current === m) return;
+    errRef.current = m;
+    setErr(m);
+  }, []);
+
   // ── the doc poll ────────────────────────────────────────────────────────
+  //
+  // THE ETAG AND THE PAYLOAD ARE ONE ENTRY, and that is the fix for the bug
+  // this loop shipped with. They used to be separate: the ETag was remembered
+  // per path forever and the document was a single slot written only on a 200.
+  // So A → B → A sent A's `If-None-Match`, the server correctly answered 304,
+  // the 304 branch deliberately does nothing, and the slot still held B — the
+  // page said `loading docs/a.md…` at 1 Hz until some file in the place
+  // happened to change. Back button, `#/` deep link and a nav click all hit it,
+  // and `cache: "no-store"` means the browser cache cannot paper over it.
+  //
+  // Keeping them together makes the 304 mean what it says ("what you have is
+  // current") and makes eviction safe: drop the entry and the next request is
+  // unconditional, because the ETag left with the body it described. An entry
+  // that kept its ETag after losing its payload would be the same bug again,
+  // permanently, for that path.
   useEffect(() => {
     if (gone || path === null) return;
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const key = `doc:${path}`;
     const tick = async () => {
-      const r = await fetchDoc(base, path, etags.current.get(key) ?? null);
+      const r = await fetchDoc(base, path, docs.current.get(path)?.etag ?? null);
       if (stop) return;
       if (r.kind === "gone") { setGone(true); return; }
-      if (r.kind === "error") setErr(r.message);
-      // A 304 is the common case and it does nothing — not even a setState,
-      // because a state write with an equal value still re-renders once.
+      if (r.kind === "error") showErr(r.message);
+      // A 304 writes no document state — not even a setState, because a state
+      // write with an equal value still re-renders once. It DOES clear the
+      // banner: a transient failure followed by a 304 is a server that came
+      // back, and a red "cannot reach the docs server" that outlives the
+      // outage is a worse lie than the outage was.
+      if (r.kind === "same") showErr(null);
       if (r.kind === "data") {
-        etags.current.set(key, r.etag);
-        setErr(null);
+        const c = docs.current;
+        // Delete-then-set so the insertion order is recency: `Map` keeps the
+        // original position on a plain overwrite, which would evict the
+        // document being read.
+        c.delete(path);
+        c.set(path, { etag: r.etag, payload: r.data });
+        while (c.size > DOC_CACHE_MAX) {
+          const oldest = c.keys().next();
+          if (oldest.done) break;
+          c.delete(oldest.value);
+        }
+        showErr(null);
         setDoc({ path, payload: r.data });
         setUpdates((n) => n + 1);
       }
@@ -107,20 +184,22 @@ export function Viewer() {
     };
     void tick();
     return () => { stop = true; if (timer) clearTimeout(timer); };
-  }, [base, path, gone]);
+  }, [base, path, gone, showErr]);
 
   // ── the index poll ──────────────────────────────────────────────────────
-  // Polled while it is on screen; fetched once, lazily, when a document is open
-  // (the chrome's "documents" link needs it to exist, not to be fresh).
+  //
+  // Polled on BOTH routes, at the same 1 Hz as the document. It used to be
+  // fetched once, lazily, while a document was open, because it was a screen
+  // you had left; it is now the navigation and is on screen the whole time, so
+  // a document added to the place has to appear in the list while you are
+  // looking at the list. (A `const once = false` and a `!once` survived that
+  // change as dead code, together with a comment describing the behaviour it
+  // had switched off — removed, because a reader has no way to tell a disabled
+  // knob from one that is about to be turned back on.)
   useEffect(() => {
     if (gone) return;
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    // Previously the index was fetched once, lazily, while a document was open,
-    // because it was a screen you had left. It is now the navigation and is on
-    // screen the whole time, so it is polled on both routes — a document added
-    // to the place has to appear in the list while you are looking at the list.
-    const once = false;
     const tick = async () => {
       const r = await fetchIndex(base, etags.current.get("index") ?? null);
       if (stop) return;
@@ -129,18 +208,40 @@ export function Viewer() {
         etags.current.set("index", r.etag);
         setIndex(r.data);
       }
-      if (r.kind === "error" && route.kind === "index") setErr(r.message);
-      if (!stop && !once) timer = setTimeout(tick, POLL_MS);
+      // The banner is owned by the ROUTE's own poll, which is why both writes
+      // are guarded: on a document route the doc poll is the only writer, and
+      // on the index route this one is. Two unguarded writers would fight once
+      // a second over which failure the reader is being shown. And `same`
+      // clears as well as `data`, because a recovered index IS a 304 — without
+      // that line the red banner outlives every outage it describes, on the one
+      // route where nothing else ever clears it.
+      if (route.kind === "index") {
+        if (r.kind === "error") showErr(r.message);
+        if (r.kind === "data" || r.kind === "same") showErr(null);
+      }
+      if (!stop) timer = setTimeout(tick, POLL_MS);
     };
     void tick();
     return () => { stop = true; if (timer) clearTimeout(timer); };
-  }, [base, route.kind, gone]);
+  }, [base, route.kind, gone, showErr]);
+
+  // ── what is on screen ───────────────────────────────────────────────────
+  //
+  // READ FROM THE CACHE DURING RENDER, never from a "current document" slot.
+  // That is what makes going back instant AND correct: the route changes, this
+  // render already finds the payload, and the conditional GET that follows a
+  // beat later merely confirms it with a 304. A slot filled by an effect would
+  // paint one frame of `loading …` on every revisit even with the cache in
+  // place — and would go back to painting it forever the moment a 304 arrived
+  // first, which is exactly the bug. `docs` is a ref, so this read is a plain
+  // `Map.get` with no extra render; `doc` state below is what schedules the
+  // render when a poll brings something new.
+  const payload: DocPayload | null = path === null ? null : docs.current.get(path)?.payload ?? null;
 
   // ── meta ────────────────────────────────────────────────────────────────
   // The document's meta is preferred: it is the one that arrived with the text
   // on screen. The index's is the fallback for the index screen itself.
-  const meta: Meta | null =
-    (route.kind === "doc" && doc?.path === path ? doc.payload.meta : null) ?? index?.meta ?? doc?.payload.meta ?? null;
+  const meta: Meta | null = payload?.meta ?? index?.meta ?? doc?.payload.meta ?? null;
 
   useEffect(() => {
     // `<place> · <doc>`, place FIRST — a tab strip truncates from the right, so
@@ -164,13 +265,44 @@ export function Viewer() {
   // would undo the very thing block patching is for.
   const scrolled = useRef<string | null>(null);
   useEffect(() => {
-    if (route.kind !== "doc" || doc?.path !== route.path) return;
+    if (route.kind !== "doc" || !payload) return;
     const want = `${route.path}#${route.anchor ?? ""}`;
     if (scrolled.current === want) return;
     scrolled.current = want;
     if (!route.anchor) { window.scrollTo(0, 0); return; }
+    // `block: "start"` lands the heading at the top of the SCROLLPORT, which
+    // is underneath the sticky `.chrome`. `scroll-margin-top` on the target is
+    // what the browser subtracts here and for `:target`-style navigation alike
+    // — see `.doc [id]` in viewer.css, which resolves it against the header's
+    // measured height rather than a guess.
     document.getElementById(route.anchor)?.scrollIntoView({ block: "start" });
-  }, [route, doc]);
+  }, [route, payload]);
+
+  // ── `/` focuses the filter ──────────────────────────────────────────────
+  //
+  // ONE registration, here, because there were two: `DocsNav` and `IndexView`
+  // each installed a capture-phase `/` handler with its own filter state, and
+  // on the index route both are mounted. The later registration wins a capture
+  // listener that calls `preventDefault`, so the NAV's filter — the one that is
+  // on screen on every route — was unreachable from the keyboard, silently.
+  //
+  // It opens the drawer first: below the breakpoint the nav is translated
+  // off-canvas rather than hidden, so focusing its input without opening it
+  // would put the caret in a box the reader cannot see. Above the breakpoint
+  // the flag is ignored, so this costs nothing there.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      setDrawer(true);
+      navFilter.current?.focus();
+      navFilter.current?.select();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
 
   const ctx: DocCtx = useMemo(
     () => ({
@@ -197,7 +329,9 @@ export function Viewer() {
           there is nothing left to read and nothing left to poll.
         </p>
         <p className="gone-note">
-          Whatever is on screen behind this message is the last state that existed. It is not being updated.
+          Nothing is left on screen to read: this replaces the whole page, because the document it was showing
+          belonged to a worktree that no longer exists. Close the tab, or reopen the documents from a place that
+          is still there.
         </p>
       </div>
     );
@@ -222,6 +356,7 @@ export function Viewer() {
   );
 
   const open = (p: string) => { setDrawer(false); go({ kind: "doc", path: p, anchor: null }); };
+  const docHref = (p: string) => routeHash({ kind: "doc", path: p, anchor: null });
 
   return (
     <div className="shell" data-drawer={drawer ? "open" : "closed"}>
@@ -231,6 +366,15 @@ export function Viewer() {
           place={meta?.place ?? "unknown"}
           current={route.kind === "doc" ? route.path : null}
           onOpen={open}
+          // Both surfaces render a REAL href (middle-click, copy-link, the
+          // status bar), and both wrote it by hand as `#/${rel}` — unescaped.
+          // A document called `100%.md` then produced `#/100%.md`, which is the
+          // input that made `decodeURIComponent` throw. `routeHash` is the one
+          // function that names a document in a URL; it is passed down rather
+          // than imported to keep the module graph acyclic (this file already
+          // imports both components).
+          hrefFor={docHref}
+          filterRef={navFilter}
         />
       )}
       {/* Closes the drawer by clicking beside it. Only ever hit-testable in
@@ -243,13 +387,13 @@ export function Viewer() {
           {err && <div className="err" role="alert">{err}</div>}
           {route.kind === "index" &&
             (index ? (
-              <IndexView entries={index.entries} current={null} onOpen={open} />
+              <IndexView entries={index.entries} current={null} onOpen={open} hrefFor={docHref} />
             ) : (
               <div className="loading">loading the document list…</div>
             ))}
           {route.kind === "doc" &&
-            (doc?.path === route.path ? (
-              <DocBody blocks={doc.payload.blocks} ctx={ctx} />
+            (payload ? (
+              <DocBody blocks={payload.blocks} ctx={ctx} />
             ) : (
               <div className="loading">loading {route.path}…</div>
             ))}

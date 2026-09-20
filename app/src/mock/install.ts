@@ -1420,10 +1420,16 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         throw new Error(`${String(args.path ?? "?")} is not in this place's documentation index`);
       }
       // The real URL form: the port, the per-launch path token, the place's
-      // route segment, and the document as a query. The harness fakes the token
-      // (no crypto here) but keeps the SHAPE, because the shape is what the
-      // pane hands to `openUrl` — and a shape that drifts from the server's is
-      // a link that 404s only in the real app.
+      // route segment, and the document as a FRAGMENT. The harness fakes the
+      // token (no crypto here) but keeps the SHAPE, because the shape is what
+      // the pane hands to `openUrl` — and a shape that drifts from the
+      // server's is a link that opens the wrong thing only in the real app.
+      //
+      // It drifted once, in exactly that way. This emitted `?path=<rel>` while
+      // `viewer::place_url` emits `…/#/<rel>`, and `place_url`'s own docstring
+      // records `?path=` as a MEASURED bug — the page routes on `location.hash`
+      // and ignores the query, so a deep link landed on the place's INDEX. The
+      // harness was certifying the shape the real app gets wrong.
       const key = String(args.slug ?? "place").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "place";
       const token = "0123456789abcdef0123456789abcdef";
       const base = `http://127.0.0.1:6391/${token}/p/${key}/`;
@@ -1433,7 +1439,9 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // absolute path, so it takes the tail after the place root's last slash
       // — enough to keep the query's shape honest.
       const rel = wanted.split("/").slice(-2).join("/");
-      return `${base}?path=${encodeURIComponent(rel).replace(/%2F/g, "/")}`;
+      // Escaped per segment, which is what `routeHash` in the viewer does and
+      // what its `decodeURIComponent` undoes.
+      return `${base}#/${encodeURIComponent(rel).replace(/%2F/g, "/")}`;
     }
     case "read_file": {
       const f = fsFile(args.path as string);

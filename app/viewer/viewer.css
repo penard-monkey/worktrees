@@ -172,6 +172,38 @@ body { background: var(--bg-abyss); }
 .mdb, .mdb-md { display: block; }
 .doc > .mdb:first-child > .mdb-md > :first-child { margin-top: 0; }
 
+/* ── an anchored heading must clear the sticky header ──────────────────────
+ * `.chrome` is `position: sticky; top: 0` on the DOCUMENT scroller, so it sits
+ * over the top of the scrollport — and `scrollIntoView({ block: "start" })`,
+ * which is where every `[x](#section)` click and every `?h=<slug>` deep link
+ * ends up, aligns the target with that same top. Without this the heading you
+ * asked for is behind the band, every time, and what you read is the paragraph
+ * after it. `scroll-margin-top` is the one declaration the scrolling algorithms
+ * (programmatic, fragment navigation and `scroll-behavior` alike) subtract.
+ *
+ * `--chrome-h` is MEASURED and published by `Chrome.tsx` — the band is two or
+ * three rows depending on whether the timestamps disagree and on how far a long
+ * commit subject wraps, so a constant is wrong every time it changes shape. The
+ * fallback covers the first paint (and any run where `ResizeObserver` is
+ * missing) with the two-row height; `--s3` is the breathing room that keeps the
+ * heading from touching the band.
+ *
+ * Every `[id]` in the document, not just `.md-h`: `markdown.tsx` is not the
+ * only thing that can carry one (the raw-HTML path has an allow-list of its
+ * own), and a target that is not a heading has the same problem. */
+.doc [id] { scroll-margin-top: calc(var(--chrome-h, 64px) + var(--s3)); }
+
+/* A block whose render threw. One block, never the page — see `BlockBoundary`
+ * in blocks.tsx. Tint plus a rule, words on --txt-dim: an accent as small text
+ * fails contrast in the light themes (CLAUDE.md). */
+.mdb-err {
+  margin: var(--md-s3, 12px) 0;
+  padding: var(--s2) var(--s3);
+  border-left: 3px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg-panel));
+  color: var(--txt-dim); font-size: var(--fs-meta); font-family: var(--font-ui);
+}
+
 /* A relative link to something that is not a document does not navigate (see
  * blocks.tsx::onLink — a top-level SVG document executes script, and how the
  * asset route labels its bytes is the server's half). Marked so it does not

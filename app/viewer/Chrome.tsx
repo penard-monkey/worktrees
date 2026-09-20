@@ -26,8 +26,50 @@
 // without re-running the second, so collapsing them into one line would assert
 // that the staleness numbers are as fresh as the prose. When they agree there
 // is nothing to disambiguate and a second timestamp is just noise.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Meta } from "./contract";
+
+/**
+ * The header's height, published on `:root` as `--chrome-h`.
+ *
+ * `.chrome` is `position: sticky; top: 0`, so it covers the top of the
+ * scrollport — and `scrollIntoView({ block: "start" })`, which is what every
+ * `[x](#section)` link and every `?h=<slug>` deep link ends in, lands the
+ * heading at the top of that scrollport, i.e. UNDERNEATH it. The target is
+ * simply not visible; the reader arrives at a link and sees the paragraph after
+ * the one they asked for. `scroll-margin-top` is the declaration that fixes it,
+ * and it needs a NUMBER: this header is two or three rows depending on whether
+ * the two timestamps disagree and on how far a long subject wraps, so a
+ * constant would be wrong in one direction or the other every time the band
+ * changes shape. A `ResizeObserver` keeps the number true — it fires on the
+ * wrap, on a zoom step, and on the timestamps splitting apart.
+ *
+ * Written to `documentElement` rather than to the element itself because the
+ * consumer is `.doc [id]`, which is not a descendant of the header.
+ *
+ * A CALLBACK REF, not an effect. This component re-renders once a second (the
+ * ages count up), and an effect without a dependency array would tear down and
+ * rebuild the observer on every one of those renders, while an effect WITH `[]`
+ * would keep observing the old node if React ever swapped the header out. The
+ * callback form is called exactly when the node attaches and again with `null`
+ * when it detaches, which is the event this actually cares about.
+ */
+export function usePublishedHeight(): (node: HTMLElement | null) => void {
+  const ro = useRef<ResizeObserver | null>(null);
+  return useCallback((node: HTMLElement | null) => {
+    ro.current?.disconnect();
+    ro.current = null;
+    if (!node) return;
+    const publish = () => {
+      const h = Math.round(node.getBoundingClientRect().height);
+      if (h > 0) document.documentElement.style.setProperty("--chrome-h", `${h}px`);
+    };
+    publish();
+    if (typeof ResizeObserver === "undefined") return;
+    ro.current = new ResizeObserver(publish);
+    ro.current.observe(node);
+  }, []);
+}
 
 /** Seconds → "just now" / "42s ago" / "7m ago" / "3h ago" / "2d ago". */
 export function ago(epoch: number, now: number): string {
@@ -50,6 +92,7 @@ export function staleness(meta: Meta): "clean" | "dirty" | "unknown" {
 }
 
 export function Chrome({ meta, nav }: { meta: Meta | null; nav: React.ReactNode }) {
+  const host = usePublishedHeight();
   // Ticks so the ages keep counting. If the server stops answering, the header
   // is the thing that visibly grows old — silence has to look like something.
   const [now, setNow] = useState(() => Date.now() / 1000);
@@ -60,7 +103,7 @@ export function Chrome({ meta, nav }: { meta: Meta | null; nav: React.ReactNode 
 
   if (!meta) {
     return (
-      <header className="chrome chrome-unknown" data-chrome="1">
+      <header className="chrome chrome-unknown" data-chrome="1" ref={host}>
         <div className="chrome-row">
           <span className="chrome-dot" data-state="unknown" />
           <span className="chrome-place">place unknown</span>
@@ -84,7 +127,7 @@ export function Chrome({ meta, nav }: { meta: Meta | null; nav: React.ReactNode 
   const split = meta.status_epoch !== 0 && meta.status_epoch !== meta.derived_epoch;
 
   return (
-    <header className="chrome" data-chrome="1" data-state={state}>
+    <header className="chrome" data-chrome="1" data-state={state} ref={host}>
       <div className="chrome-row">
         <span className="chrome-dot" data-state={state} />
         <span className="chrome-place" title="the place (worktree) these documents come from">{meta.place}</span>

@@ -1433,10 +1433,12 @@ lazy continuations, and HTML comment / `<script>` / `<pre>` / `<style>` /
 The partition is exact: concatenating every block's `md` reproduces the input
 byte for byte, asserted over every document in this repository.
 
-**The staleness header left the markdown.** `derive::document` is now
-`header` + `body` and the server sends `body`; the page renders the facts from
-`meta`, live. A blockquote baked into the text would be a second, frozen copy
-of numbers the reader watches change above it.
+**The staleness header left the markdown.** The server sends `derive::body` and
+the page renders the facts from `meta`, live. A blockquote baked into the text
+would be a second, frozen copy of numbers the reader watches change above it.
+(`derive::document` — `header` + `body` — was the first shape of this and was
+deleted once nothing called it: with the facts coming from `meta`, the markdown
+header had no reader, and its tests were guarding prose that never shipped.)
 
 ### 17.4 What owning the server bought, beyond being able to ship
 

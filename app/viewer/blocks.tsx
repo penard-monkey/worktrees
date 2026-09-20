@@ -29,7 +29,7 @@
 // and the measurement the brief asks for is explicitly "change a block
 // ELSEWHERE". The server's `id` is still carried, onto `data-block-id`, so the
 // two can be compared from a probe.
-import { memo, useLayoutEffect, useMemo, useRef } from "react";
+import { Component, memo, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 import { marked } from "marked";
 import { Markdown } from "../src/markdown";
 import { Mermaid } from "./Mermaid";
@@ -64,6 +64,54 @@ export function blockKeys(blocks: Block[]): string[] {
   });
 }
 
+/**
+ * Every link/image DEFINITION in the document, as markdown, for re-appending.
+ *
+ * REFERENCE LINKS SPAN BLOCKS AND THE RENDERER DOES NOT. `[ci][badge]` in one
+ * block and `[badge]: https://…` in another are one document to a reader and
+ * two independent lexes here — each block gets its own `marked` run with its
+ * own (empty) definition table, so the reference resolves against nothing and
+ * renders as the literal text `[ci][badge]`. It worked in the dock, which lexes
+ * the whole file at once, and broke in the browser, on exactly the documents
+ * that use it most: a README's badge row and footnote-style links.
+ *
+ * `marked.lexer()` hangs the table off the token list as `.links`, so this is
+ * the lexer's own answer rather than a second definition-line parser — which
+ * would have to know about fenced code, indented code and `\[`, and would be
+ * wrong about one of them. The lines are rebuilt from the parsed values, which
+ * is why no escaping is needed: `href` and `title` come back already unwrapped.
+ */
+type Defs = Record<string, { href: string; title?: string | null }>;
+
+export function collectDefs(blocks: Block[]): string {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const b of blocks) {
+    let links: Defs | undefined;
+    try {
+      links = (marked.lexer(b.md, { gfm: true, breaks: false }) as { links?: Defs }).links;
+    } catch {
+      continue;
+    }
+    for (const [tag, v] of Object.entries(links ?? {})) {
+      // First definition wins, which is markdown's own rule for a repeated
+      // label — so appending these to a block that already carries one of them
+      // changes nothing.
+      if (seen.has(tag) || !v || typeof v.href !== "string") continue;
+      seen.add(tag);
+      // `[x]: <a b>` parses to the href `a b`; re-emitting it bare would end
+      // the destination at the space and swallow the rest as a title. The
+      // angle form is how markdown spells a destination containing one, and
+      // it is always legal, so it is used whenever the round trip is not
+      // obviously safe.
+      const href = /[\s<>]/.test(v.href) ? `<${v.href.replace(/[<>]/g, "")}>` : v.href;
+      const title = typeof v.title === "string" && v.title ? ` "${v.title.replace(/"/g, "&quot;")}"` : "";
+      out.push(`[${tag}]: ${href}${title}`);
+    }
+  }
+  return out.join("\n");
+}
+
 /** A block that is nothing but a ```mermaid fence, via the same lexer the
  *  renderer uses — so "is this a diagram?" has exactly one answer. */
 function mermaidSource(md: string): string | null {
@@ -80,9 +128,14 @@ function mermaidSource(md: string): string | null {
 }
 
 const BlockView = memo(function BlockView(
-  { md, id, dataKey, ctx }: { md: string; id: string; dataKey: string; ctx: DocCtx },
+  { md, defs, id, dataKey, ctx }: { md: string; defs: string; id: string; dataKey: string; ctx: DocCtx },
 ) {
+  // ON THE ORIGINAL `md`, NEVER ON `src`. A block that is nothing but a
+  // ```mermaid fence is one token; append a definition line and it is two, so
+  // the diagram test stops matching and every diagram in the place renders as
+  // a code fence. The defs only ever reach the markdown path.
   const diagram = useMemo(() => mermaidSource(md), [md]);
+  const src = useMemo(() => (defs && diagram === null ? `${md}\n\n${defs}` : md), [md, defs, diagram]);
   return (
     // `data-block-id` is the SERVER's id, carried so a probe can compare the two
     // notions of identity; `data-key` is the content key React actually
@@ -92,7 +145,7 @@ const BlockView = memo(function BlockView(
         <Mermaid code={diagram} />
       ) : (
         <Markdown
-          src={md}
+          src={src}
           className="mdb-md"
           renderImage={(s, alt, t) => renderImage(ctx, s, alt, t)}
           onLink={(h) => onLink(ctx, h)}
@@ -120,6 +173,32 @@ const BlockView = memo(function BlockView(
     </div>
   );
 });
+
+/**
+ * One broken block must not take the page.
+ *
+ * The same rule the terminal's search addon taught this repo (CLAUDE.md: "losing
+ * a search is survivable, losing the terminal is not"). A document is arbitrary
+ * text from a worktree, run through a lexer, a sanitiser and — for a fence — a
+ * 5 MB diagram library; a throw anywhere in there unmounts the whole viewer and
+ * leaves a blank page with the poll still running behind it. Bounded per block,
+ * the reader loses one paragraph and can still read, navigate and see which
+ * block failed.
+ *
+ * A class, because that is the only form an error boundary has in React.
+ * `key`ed by the block's content key at the call site, so a block that changes
+ * gets a fresh boundary and a fixed document recovers on its own.
+ */
+class BlockBoundary extends Component<{ children: ReactNode }, { err: string | null }> {
+  state: { err: string | null } = { err: null };
+  static getDerivedStateFromError(e: unknown) {
+    return { err: String((e as Error)?.message ?? e) };
+  }
+  render() {
+    if (this.state.err === null) return this.props.children;
+    return <div className="mdb-err">this block could not be rendered — {this.state.err}</div>;
+  }
+}
 
 /**
  * Scroll anchoring, by hand.
@@ -185,13 +264,22 @@ function useBlockScrollAnchor(host: React.RefObject<HTMLElement | null>) {
 }
 
 export function DocBody({ blocks, ctx }: { blocks: Block[]; ctx: DocCtx }) {
+  // KEYED ON THE ORIGINAL MARKDOWN, deliberately, even though what is rendered
+  // is `md + defs`. Keys are how React decides what to keep; folding the defs
+  // into them would re-key — and therefore replace the DOM subtree of — every
+  // block in the document the moment someone edits one unrelated `[x]: url`
+  // line, which is precisely the selection-and-scroll churn this file's whole
+  // design exists to prevent.
   const keys = useMemo(() => blockKeys(blocks), [blocks]);
+  const defs = useMemo(() => collectDefs(blocks), [blocks]);
   const host = useRef<HTMLElement | null>(null);
   useBlockScrollAnchor(host);
   return (
     <article className="doc md" ref={host}>
       {blocks.map((b, i) => (
-        <BlockView key={keys[i]} dataKey={keys[i]} md={b.md} id={b.id} ctx={ctx} />
+        <BlockBoundary key={keys[i]}>
+          <BlockView dataKey={keys[i]} md={b.md} defs={defs} id={b.id} ctx={ctx} />
+        </BlockBoundary>
       ))}
     </article>
   );
