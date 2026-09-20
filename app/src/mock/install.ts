@@ -1341,6 +1341,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         mk("docs/architecture/message-flow.md", "Message flow", "docs/architecture"),
         mk("docs/proposals/place-docs.md", "Proposal — per-place docs", "docs/proposals"),
         mk("docs/proposals/project-settings.md", "Proposal — project settings", "docs/proposals"),
+        // Depth THREE, under a directory that also has files of its own — the
+        // tree has to nest these rather than show two sibling headers, and the
+        // indent is only visible past the second level.
+        mk("docs/architecture/services/gateway.md", "Gateway", "docs/architecture/services"),
+        // …and a directory nobody named: nothing is grouped under `docs/rfc`,
+        // so that node exists ONLY because this row's group names it. A tree
+        // that built its parents out of rows rather than out of paths drops
+        // this one, and the row lands at the root looking like a README.
+        mk("docs/rfc/2026/one.md", "RFC 1 — the first one", "docs/rfc/2026"),
       ];
       if (mode === "badcfg") {
         return {
@@ -1355,6 +1364,61 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         return { base, entries, truncated: true };
       }
       return { base, entries, truncated: false };
+    }
+    case "open_docs_viewer": {
+      // The browser viewer (lib.rs `open_docs_viewer`). The harness cannot bind
+      // a port, and it must not pretend the happy path is the only one: every
+      // way this can fail is a state the pane renders.
+      //
+      // **The failure set shrank when `mo` went.** Four of the seven modes this
+      // arm used to carry — the binary is missing, it is the wrong
+      // architecture, it started and never listened, it failed the Host-header
+      // probe — described a child process the app no longer has. What is left
+      // is what an in-process server can still fail at.
+      //
+      // `?viewer=` picks which, the same query-knob shape as `?notmux` /
+      // `?notmux=stuck` — which exist for exactly this reason: a harness that
+      // can only express "works" tests nothing else.
+      //
+      //   (default)   a URL, opened by `openUrl`
+      //   port        no free loopback port
+      //   empty       the index was walked a minute ago and the place has been
+      //               emptied since — the race the disabled button cannot close
+      //   notindexed  a document that is no longer in the place's index
+      //
+      // `slowviewer[=ms]` is orthogonal: the real open walks the place and
+      // writes its derived tree, and the mock answers in a microtask, so the
+      // disabled/busy state of both buttons is otherwise unobservable.
+      const vmode = new URLSearchParams(location.search).get("viewer") ?? "";
+      const vslow = (() => {
+        const m = /[?&]slowviewer(?:=(\d+))?/.exec(location.search);
+        return m ? Number(m[1] ?? 400) : 0;
+      })();
+      if (vslow) await new Promise((r) => setTimeout(r, vslow));
+      if (vmode === "port") {
+        throw new Error("the documentation server could not bind a loopback port: Address already in use (os error 48)");
+      }
+      if (vmode === "empty") {
+        throw new Error(`${String(args.slug ?? "place")} has no documents to show`);
+      }
+      if (vmode === "notindexed") {
+        throw new Error(`${String(args.path ?? "?")} is not in this place's documentation index`);
+      }
+      // The real URL form: the port, the per-launch path token, the place's
+      // route segment, and the document as a query. The harness fakes the token
+      // (no crypto here) but keeps the SHAPE, because the shape is what the
+      // pane hands to `openUrl` — and a shape that drifts from the server's is
+      // a link that 404s only in the real app.
+      const key = String(args.slug ?? "place").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "place";
+      const token = "0123456789abcdef0123456789abcdef";
+      const base = `http://127.0.0.1:6391/${token}/p/${key}/`;
+      const wanted = args.path as string | null;
+      if (!wanted) return base;
+      // `rel` is what the server names a document by; the harness only has the
+      // absolute path, so it takes the tail after the place root's last slash
+      // — enough to keep the query's shape honest.
+      const rel = wanted.split("/").slice(-2).join("/");
+      return `${base}?path=${encodeURIComponent(rel).replace(/%2F/g, "/")}`;
     }
     case "read_file": {
       const f = fsFile(args.path as string);

@@ -1,0 +1,26 @@
+The documentation viewer's browser bundle lives here, as `viewer.js`.
+
+It is NOT in this repository. `release.yml` builds it from `app/viewer/` and
+copies it here before the app bundle is made; a local build simply has no
+bundle, which is a supported state — the Docs tab lists, filters, reads and
+reveals every document without one, and only the "open in the browser" button
+needs it. Point `WORKTREES_VIEWER_JS` at a build of your own to work on the
+page (`pnpm -C app build:viewer` writes `app/viewer/dist/viewer.js`).
+
+This file is committed, and it is load-bearing. `tauri.conf.json` bundles
+`viewer/*`, and a glob that matches NOTHING is a hard build failure ("glob
+pattern viewer/* path not found or didn't match any files") — so without a file
+that is always here, every local `tauri build` would break in order to ship a
+file that local builds do not have. The map form of `resources` fails the same
+way for the same reason. Measured, not assumed.
+
+What the app does with it: `app/src-tauri/src/docserver.rs` serves it at
+`GET /<token>/viewer.js`, and nothing ever executes it — it is a file the
+browser fetches, not a program this app runs.
+
+There used to be a Go binary here instead (`mo`), and it is worth knowing why
+there is not: it did not validate the `Host` header, so a loopback bind kept
+other machines out while leaving the browser on this one — which runs code from
+strangers — able to read every document in every place by DNS rebinding.
+`docs/proposals/place-docs.md` §13-§14 and §17 have the whole of it. The server
+is ours now, and the check is one line of `docserver::host_ok`.

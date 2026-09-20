@@ -4,7 +4,12 @@ title: "Proposal — per-place docs"
 
 # Proposal — per-place docs
 
-**Status:** **phases 1 and 2 BUILT**, 2026-09-16 — the Docs tab, the staleness header
+**Status:** **phases 1, 2 and 3 BUILT** — 1 and 2 on 2026-09-16, 3 on 2026-09-19
+(§15, which also records two claims in *this* section that the build found
+wrong). The §13 gate is now enforced at runtime on every spawn rather than
+settled once at build time, and §8's "does not ship on a stock `mo`" is an
+assertion in two places rather than a decision someone has to remember.
+Originally: the Docs tab, the staleness header
 and the name filter, behind no new dependency, process or config. §7.3's open
 questions are answered in §11, and **two claims in this document were wrong**;
 both are corrected there, and one of them (§7.1's `behind … upstream`) would
@@ -450,13 +455,21 @@ point. The edits, at `29671fc`:
 | `crates/worktrees-core/src/projcfg.rs:252` | `ProjectConfig` gains `docs: Option<Docs>`; `[docs]` enters the known-key set; `RelPath` for every path. Phase 2. |
 | a new managed `Viewer` state | §5.1. Phase 3. |
 
-Two per-place-memory rules carry over unchanged. `place_panels` remembers the
-active tab, so a place you were reading docs in reopens on Docs — free, via
-`panelsFor` (`settings.ts:84-105`). It deliberately does **not** remember the
-open file (`settings.ts:45-48`: a remembered path can be deleted or renamed
-between visits), and the Docs tab follows that: it remembers being open, and
-nothing else. Any new optional field there must stay optional or the seed
-freezes (CLAUDE.md:470-479).
+Two per-place-memory rules carry over. `place_panels` remembers the active
+tab, so a place you were reading docs in reopens on Docs — free, via
+`panelsFor` (`settings.ts`). The open file is remembered too, since #302 —
+but NOT in `place_panels`: it lives in its own `files_open` record (keyed
+`repo|slug`, beside `term_tab_active` and this proposal's `docs_collapsed`),
+because every `place_panels` key needs a global twin that seeds unvisited
+places, and one place's path means nothing in another. The objection that
+kept it unstored for a year (a remembered path can be deleted, renamed or
+gitignored between visits, and a failed read is an error banner) is answered
+rather than dropped: the restore asks `file_readable` first and silently
+opens nothing when the path is gone. A document opened from the Docs tab goes
+through the same `openDockFile`, so it comes back with the place like any
+file-tree row. Any new optional field in `place_panels` must stay optional or
+the seed freezes (CLAUDE.md, "a `place_panels` field whose global twin is a
+SEED").
 
 One seam I could not confirm from source: whether `FilesPane` (`FilesPane.tsx:822`)
 can be told from outside to open a given path. Phase 1's row action depends on
@@ -996,7 +1009,10 @@ whichever way this goes — the derived tree, the generated `click` directives,
 the staleness header injected into the documents — because none of it depends
 on which process serves the bytes.
 
-**Chosen: patch `mo` and build it from source.** It is Go and MIT; the check is
+**Chosen: patch `mo` and build it from source.** *(Superseded 2026-09-19 —
+§17. The patch and the gates were built and worked; what did not work was
+having our ability to release depend on somebody else's. We serve the
+documents ourselves now, and `mo` is not in the tree.)* It is Go and MIT; the check is
 a small middleware, and it is upstreamable. This is not the "fork in all but
 name" §5.2 rejected — that was a proxy injecting scripts keyed on class names
 in a 2 MB minified bundle. It does change the supply chain §11.5 priced: a Go
@@ -1046,3 +1062,441 @@ attached — `GHSA-6pff-wf7m-6f5h`, filed 2026-09-16, state `triage`.
 set on our side. If it lands, this fork is deleted and `release.yml` pins the fixed
 release instead — which is the outcome to want, and the reason the patch was
 written to be upstreamable rather than merely to work.
+
+---
+
+## 15. Phase 3 as built — 2026-09-19
+
+> **Superseded the same day by §17.** What this section describes was built,
+> shipped its gates, and was then removed with `mo`. It is kept because the
+> rules in §15.3 survived the rewrite unchanged and the reasoning is where
+> they were argued; read `vars.VIEWER_MO_*`, `--foreground`,
+> `probe_refuses_foreign_host` and "the group name" as history.
+
+The viewer ships. `app/src-tauri/src/viewer.rs` is the whole of it: one
+supervised child, N places as named groups, a derived tree per place, and a URL
+the frontend hands to `openUrl`. §5.1's shape survived contact; §5.2's "A′"
+survived it exactly. What follows is what this document did not decide, what it
+got wrong, and what was measured rather than assumed.
+
+### 15.1 The gate is enforced at RUNTIME, not at build time
+
+§13 set the criterion — *prove the viewer refuses a cross-origin read* — and
+§13.4 answered it by choosing to patch and build from source. That answers it
+for the artefact **we** build. It does not answer it for the binary that is
+actually on the user's disk at the moment the button is pressed, and the
+distance between those two is every way a file gets replaced: a release built
+before the fix landed, a `WORKTREES_VIEWER_BIN` pointed at a Homebrew `mo`, a
+bundle someone repaired by hand.
+
+So the app asks. Every spawn, after the port answers and before any URL is
+returned, `probe_refuses_foreign_host` sends one request carrying
+`Host: worktrees-viewer-probe.invalid` and requires **403**. Anything else —
+including `200` — kills the child and fails the open with the reason. It costs
+one loopback round-trip on a path that is already polling the port.
+
+This turns §13's *decision* into a *precondition*, and it is the difference
+between "we believe we shipped the fixed build" and "this process, now,
+refuses". Proved both ways, against real binaries: the patched build passes
+end to end; an unpatched `mo` built from the commit before the patch answers
+`200` and gets no URL at all.
+
+`release.yml` runs the same gate on the binary it builds, in both directions —
+a build that answered `403` to *everything* would pass a one-sided check while
+being a viewer that serves nothing.
+
+### 15.2 Where the source comes from is a repository variable
+
+§14 keeps the patch off GitHub until upstream ships or declines, and this scope
+asked `release.yml` to ship the viewer. Those pull against each other: a
+`.patch` file in this repo is a published description of an unfixed issue in
+someone else's tool.
+
+`vars.VIEWER_MO_REPO` / `vars.VIEWER_MO_REF` name the source, defaulting to
+upstream's own repo at a pinned tag. **With the defaults, the release fails** —
+the gate refuses the binary it just built. That is the intended behaviour, not
+an oversight: a viewer that cannot prove it refuses a foreign `Host` must not
+reach a user's machine, and a release that quietly shipped one would look
+exactly like a release that did not. Point the variables at a build that carries
+the check — or, when upstream ships, at that tag, and delete nothing else.
+
+### 15.3 Four decisions §5 left open
+
+**The tree lives in the app's config dir and never outlives the process.**
+`<config>/viewer/tree/<slug>-<hash8 of the canonical root>/`, mirroring the
+place's own layout — flattening it would break every relative prose link, which
+`mo` resolves against the file's own directory. It is emptied on a clean exit
+*and* on the first spawn of a run, because a crash cannot honour a shutdown
+hook. These are copies of documents §4.3 describes as carrying a client's signed
+agreement, sitting outside the repo's gitignore in a directory Spotlight and
+Time Machine both index; they do not get to persist for a viewer that is, by
+design, dead.
+
+**A removed place's derived documents go with it.** `remove_place` deletes the
+tree, resolving the canonical root *before* the removal because it cannot be
+resolved after. `cmd_rm` deletes the originals, so without this the derived copy
+would be the last readable one — and it would be on a port. Removing the
+directory is a complete deregistration: `mo` watches it and drops what leaves,
+verified at two seconds to zero files and a 404 from the content endpoint.
+
+**Generated per open, registered once per place.** `mo -wR <tree>` registers the
+directory (one argument rather than up to 2,000 — the index's cap — which keeps
+this off `ARG_MAX` entirely) and watches it, so regenerating the tree
+live-reloads a browser tab that is already open. Re-registration is idempotent:
+verified, the group's file count does not change.
+
+**The group name is the slug, reduced to `[a-z0-9-]`, disambiguated by a hash of
+the canonical root.** Two places may legitimately share a slug — the same branch
+name in two projects — and `mo` *merges* same-named groups rather than refusing
+them, so a collision would show one project's documents under the other's name.
+That is §1.1's failure with the axes swapped.
+
+**The staleness facts come from the frontend, the base ref does not.** Every
+field but one is in the `Place` the dock is rendering from at the moment the
+button is pressed; re-deriving them in the backend would be a second git fan-out
+per click *for numbers that would then be allowed to disagree with the ones on
+screen two inches away*. `base` stays the backend's `Project::base_ref()`,
+because it is the one fact `Place` does not carry and the one §11.4 says is
+wrong when guessed.
+
+### 15.4 Two things this document said that the build found wrong
+
+**§8's "phase 3 does not ship on a stock `mo`" is weaker than it reads.** It is
+written as a shipping decision, which is a thing a future release can quietly
+forget. It is now a runtime assertion and a CI assertion, and neither can be
+forgotten by omission — they have to be actively removed.
+
+**"A missing viewer must not break the build" was assumed and is false.**
+Tauri's `bundle.resources` fails the whole build on a glob that matches nothing
+(`glob pattern viewer/* path not found or didn't match any files`) exactly as
+the map form fails on a missing file — so a local build with no viewer, which is
+every local build, would have been broken in order to ship a binary local builds
+do not have. A committed `viewer/README` is what makes the glob always match; it
+is load-bearing and says so in its own text. Measured, not reasoned about, and
+the same call found that `tauri.conf.json` is `deny_unknown_fields`, so the
+explanation could not live beside the key as a `//` comment.
+
+### 15.5 Rule 8's "doctor finding" went to `diagnostics` instead
+
+A missing viewer is reported by `diagnostics` (Settings → Logs), by **stat**,
+beside `git` and `tmux` — on demand, off every hot path, and never a banner.
+Not by `doctor`: `doctor` is `ops::cmd_doctor` in core, it is per **project**,
+and it is shared with the CLI, which has no viewer and never will. A repo-health
+check reporting on an app bundle's helper binary would be the wrong tool
+answering the wrong question on every place. The automatic half is `applog`: the
+first failed open writes the reason to the app log, which is what "logging
+background failures rather than bannering them" asks for.
+
+### 15.6 What is still owed
+
+The **real-app pass**. Everything above was verified against unit tests, the
+Chrome mock and a real `mo` driven from Rust; none of that is WKWebView. Two
+things need `app/scripts/sandbox.sh --app` and a human (the third was closed by
+measurement and is struck through below). Stage the viewer for that run with
+`cp ~/workspace/mo/mo app/src-tauri/viewer/mo && codesign --force --sign -
+app/src-tauri/viewer/mo`, or point `WORKTREES_VIEWER_BIN` at it — the binary is
+gitignored and `release.yml` is what normally puts it there:
+
+- `openUrl` to `http://127.0.0.1:<port>/…` from a `tauri://` page. §11.6 left
+  this open and it is still open. What has been closed since is the permission
+  question: `opener:default` carries `allow-default-urls`, whose scope is a
+  `glob::Pattern` of `http://*`, and `Pattern::matches` uses
+  `MatchOptions::new()` — `require_literal_separator: false` — so the pattern
+  matches the whole URL including path and query. No capability change is
+  needed. Whether WKWebView's `open` call behaves is still unmeasured.
+- ~~The footer button in WebKit.~~ **Measured, and the trap does not apply
+  here.** Headless Playwright WebKit against the mock, beside Chromium: the
+  button is 198px, the label 163px, the icon 13px and hit-testable, *identically
+  in both engines*, at 1280px and at `DOCK_MIN`. Forcing the dock to 149px —
+  narrower than the app allows — and removing the label's `flex: none` shrinks
+  it to 103px and the icon to 8px, again identically. So the pin is load-bearing
+  (it changes the layout) and the ENGINES AGREE, because the usage meter's bug
+  needs a button that is being asked to shrink, and `.docs-foot`'s
+  `align-items: flex-start` means this one never is. Worth stating as a
+  measurement rather than deleting the rule: the next control put in that footer
+  may well compete for width.
+- The spawn latency as felt. 0.23 s to listen was measured with 7 files and the
+  tree is registered afterwards, so it should not grow with the place — but
+  "should not" is what a real-app pass is for.
+
+Phase 4 (drill-down beyond node→page) is untouched. The one mapping source §5.3
+lists first — a node id that names exactly one page — is what `derive::targets`
+implements, and the other three arrive at that same seam.
+
+---
+
+## 16. Images — found by using it, 2026-09-19
+
+**Every image in every document was broken in the browser viewer**, and the
+Docs tab's own dock renders the same images fine. `write_tree` wrote rendered
+markdown and nothing else; `docs::index_with` lists markdown *by design*
+(`is_md`), so an image was never in the entry list and nothing copied it. A
+place deriving 14 documents shipped a tree with no `assets/` directory in it at
+all. For any illustrated document the viewer was therefore strictly **worse**
+than the surface it exists to improve on, and better only for mermaid — which
+undercuts the reason it exists.
+
+**What was built.** The referenced images are copied into the derived tree,
+**mirroring each reference's own relative path**, so the author's
+`![x](images/y.png)` resolves with the document left byte-identical. No URL
+rewriting: the derived text stays a copy of the file it claims to show, which
+is the one thing this surface cannot trade away.
+
+The security treatment is §4.2's, in two layers, because a reference is a string
+from a repository the user may have cloned seconds ago and we are turning it
+into a filesystem read:
+
+- **Layer A** (`derive::asset_rel`, pure, no disk) refuses absolute paths, `~`,
+  `$`, every URL scheme (`http:`, `data:`, `file:`, …, matched by shape rather
+  than by a list that goes out of date), empty components, a `.git` component,
+  and any `..` that escapes the place. Fragment, query and markdown title are
+  stripped; percent escapes are deliberately **not** decoded, so `%2e%2e` can
+  never become `..` after the check.
+- **Layer B** (`viewer::copy_assets`) canonicalises the candidate and requires
+  it to start with the canonical place root. This is the check that actually
+  holds: Layer A is arithmetic on a string, and a string cannot show a symlink —
+  with `docs/assets` a link to somewhere else, `../assets/x.png` is textually
+  innocent and its final component really is a regular file.
+  `symlink_metadata`, never `metadata`, for the same
+  `docs/logo.png -> ~/.ssh/id_rsa` that `docs.rs` already refuses.
+- An **allow-list** of raster extensions, per-file and per-place byte caps, and
+  a cap on how many references one place may turn into a stat. A refusal is per
+  file and never fatal (§2.7) and is reported through `applog`, not swallowed.
+
+### 16.1 SVG is not copied, and adding it is not the fix
+
+> **Superseded 2026-09-19 — §17.4.** Every sentence below is true *of `mo`*,
+> and the last one names the fix: "a viewer that serves assets with a content
+> type we chose". That is what we built. SVG is copied again, and the
+> allow-list entry and the `default-src 'none'` header that makes it inert are
+> one decision, asserted together.
+
+An SVG is a live document — script, `foreignObject`, external references. Inside
+an `<img>` it is script-inert by spec, which is what makes "it's just an image"
+sound true; but `mo` hands any asset back by direct URL
+(`/_/api/groups/{g}/files/{id}/raw/{path}` → `http.ServeFile`), where it is a
+top-level document served as `image/svg+xml` and script runs. We do not control
+that content type and the port has no authentication. So a place's `logo.svg`
+stays broken on purpose, the reasoning lives beside the allow-list, and a test
+fails if someone adds three letters to it. The way to fix it is a viewer that
+serves assets with a content type we chose.
+
+### 16.2 The fingerprint's blind spot, and how it was closed
+
+`docs::fingerprint_with` is stat-only over markdown — which is what makes it
+cheap enough to run on the tick — so an **edited screenshot moved nothing** and
+the tab kept serving the copy made at click time. Making the digest parse
+documents is exactly the cost it exists to avoid. Instead the tick folds in a
+stat of the images the *last* derive already knew about (`docs::fold_assets`),
+whose paths are held on the `Group`. That catches an image edited, replaced,
+deleted, or missing-and-now-arrived (the candidate list deliberately includes
+what could not be copied). A brand-new reference is caught by the other half:
+it means a document changed, which moves the walk's digest in the same tick.
+Measured on this repo's own place, 80 documents and 6 images: `fold_assets`
+costs **13–16 µs** against the walk's **2.6 ms**.
+
+### 16.3 Two things the viewer cannot currently do, measured not guessed
+
+- **A `../` reference does not resolve in `mo`, however correctly it is
+  copied.** `resolveImageSrc` appends the author's `src` to
+  `/_/api/groups/{g}/files/{id}/raw/` verbatim, so `../assets/y.png` builds a
+  URL carrying a dot segment — and both a browser and Go's own mux normalise it
+  away, eating the `/raw/` segment. Probed against the real binary: the literal
+  form answers `307` to `…/files/{id}/assets/y.png`, which is not a route and
+  serves the SPA shell. Same-directory and subdirectory references
+  (`shots/a.png`, `docs/media/x.png`) return the real bytes with
+  `Content-Type: image/png`, which is asserted end-to-end in
+  `an_image_loads_through_a_real_viewer`. The copy is correct for the `..` case
+  too — the file lands exactly where the reference points — so the remaining fix
+  is upstream, in the viewer's URL construction, and it is not a one-liner: a
+  path relative to the document's directory can never carry `..` through that
+  route, so the raw endpoint has to be keyed on something else.
+- **Raw-HTML `<img>` is a real reference here**, not an exotic one: `mo`
+  renders raw HTML through `rehype-raw` + `rehype-sanitize`, whose default
+  schema keeps `img`, and this repo's own README centres three screenshots that
+  way. The scanner reads a quoted `src`; an unquoted one, an entity-escaped one
+  and `srcset` are left alone rather than guessed at.
+
+---
+
+## 17. Phase 3, rebuilt — 2026-09-19. **`mo` is gone; we serve the docs.**
+
+§13.4 chose to patch `mo` and build it from source, and §15 shipped on that
+choice with a runtime gate and a CI gate in front of it. Both gates worked;
+the position they left us in did not. `release.yml`'s defaults failed the
+app-bundle job **on purpose** (§15.2), so there was no release at all until
+either upstream shipped the fix or a patched fork was pushed somewhere CI
+could clone it — a feature whose ability to ship was somebody else's decision.
+
+The move is the one §8.2 of the `docs-transport` findings names: **own the
+server.** `mo`'s failure was a missing *policy* check, not a parser bug, and
+the policy is about twelve lines. What the tool gains beyond shipping again is
+in §17.4.
+
+### 17.1 What was removed, and what survived
+
+Removed from `app/src-tauri/src/viewer.rs`: the supervised child and
+`--foreground`, `probe_refuses_foreign_host` and `probe_verdict`, registration
+through `mo`'s own CLI (`--target … -wR`), `shutdown_port`, `XDG_STATE_HOME`
+isolation and the state wipe it needed, `pick_port` and the three-second listen
+deadline, `binary_path`/`resolve_binary`, and `mo`'s URL form
+(`/{group}?file=<sha256 of the absolute path>[..8]`). Removed from
+`release.yml`: the Go toolchain, the `git clone`, the `go generate`, the
+cross-build, the `codesign` of a nested Mach-O, the arch assertion, and
+`vars.VIEWER_MO_REPO`/`VIEWER_MO_REF`.
+
+Survived, and deliberately unedited where possible: `derive.rs` (the document
+transform), `docs::index_with`/`fingerprint_with`/`fold_assets`, the derived
+tree and its prune, the two-layer asset copy with its caps, the Docs tab, and
+`docs-check.mjs`. The four lifecycle rules of §15 survived as rules — lazy
+start, liveness at the point of use, killed in `RunEvent::Exit`, and the
+startup sweep that covers a crash — with `Handle::alive()` standing where
+`Child::try_wait` stood.
+
+### 17.2 The contract
+
+Base: `http://127.0.0.1:<port>/<token>/`, where `<token>` is 16 bytes of the OS
+CSPRNG as hex, regenerated every launch.
+
+| route | returns |
+|---|---|
+| `GET /<token>/p/<place>/` | `text/html` — the shell |
+| `GET /<token>/p/<place>` | `308` to the slashed form |
+| `GET /<token>/p/<place>/doc?path=<rel>` | `application/json`, conditional |
+| `GET /<token>/p/<place>/index` | `application/json` |
+| `GET /<token>/p/<place>/asset/<rel>` | raw bytes, typed |
+| `GET /<token>/viewer.js` | the browser bundle, straight off disk |
+
+`meta`, identical in both JSON bodies:
+
+```json
+{ "place": "docs-server", "branch": "docs-server", "behind": 25,
+  "base": "origin/main", "dirty": 3, "subject": "feat(app): …",
+  "last_commit_epoch": 1789776000,
+  "derived_epoch": 1789779661, "status_epoch": 1789776000 }
+```
+
+`dirty` is the COUNT: `0` for a clean place, `null` when it was not computed —
+those are different answers and a `null` that rendered as "clean" would be this
+proposal's own §1.1. `derived_epoch` is when this copy was written,
+`status_epoch` when the git facts were measured; the tick moves only the first,
+which is why there are two. `last_commit_epoch` is not in the original contract
+and is sent anyway: `subject` without an age is half of the dock's third line.
+
+`doc`:
+
+```json
+{ "meta": { … }, "blocks": [ { "id": "b3f9…", "md": "…one top-level block…" } ] }
+```
+
+`index`:
+
+```json
+{ "meta": { … },
+  "entries": [ { "path": "docs/adr/0001.md", "title": "ADR 0001 — …",
+                 "group": "docs/adr", "mtime_ms": 1789776000000 } ],
+  "truncated": false }
+```
+
+`path` is the **place-relative** path (`DocEntry::rel`) — the same string
+`doc?path=` takes back. Not the absolute one the dock uses: the page has no use
+for the user's home directory and no business being told it. `mtime_ms` and
+`truncated` are extras, for the recency mark and the 2,000-entry cap.
+
+A place that is no longer registered, or whose tree or worktree has left the
+disk, answers **`410 Gone`** — not `404`. The difference is what lets a polling
+page say "this place was removed" instead of retrying forever.
+
+### 17.3 Blocks, and why the id is a hash
+
+The page replaces only the blocks whose source changed, which is measured to
+hold `scroll 400→400, sel 55→55` across an edit where whole-document
+replacement measures `sel 70→0` (findings §3.3). `derive::blocks` is that split.
+
+**The id is a hash of the block's own markdown, with an occurrence counter for
+repeats.** The contract's first draft showed `b0`, `b1`, and that is wrong in a
+way that would not have shown up: a positional id is stable only while nothing
+is inserted, so adding a paragraph at the top slides every id below it onto its
+neighbour's text and the page replaces the whole document — the `sel 70→0`
+failure arriving on the most ordinary edit there is. Both worktrees reached
+this independently.
+
+**The split biases to OVER-group, always.** Cutting one construct in two is a
+rendering change that no join test can see — a loose list becomes two `<ul>`s,
+a fence becomes prose and a stray ```` ``` ````, a setext heading is
+decapitated into a paragraph and a horizontal rule. Grouping two adjacent
+constructs into one block renders identically and costs one extra block
+redrawn. So fenced code, indented code, loose lists with their nested lists and
+lazy continuations, and HTML comment / `<script>` / `<pre>` / `<style>` /
+`<textarea>` blocks are each held whole, and the ambiguous cases continue.
+
+The partition is exact: concatenating every block's `md` reproduces the input
+byte for byte, asserted over every document in this repository.
+
+**The staleness header left the markdown.** `derive::document` is now
+`header` + `body` and the server sends `body`; the page renders the facts from
+`meta`, live. A blockquote baked into the text would be a second, frozen copy
+of numbers the reader watches change above it.
+
+### 17.4 What owning the server bought, beyond being able to ship
+
+**SVG is copied again.** §16.1 excluded it, correctly, because `mo` handed any
+asset back by direct URL with a content type we did not choose — and a
+top-level `image/svg+xml` document runs script. Every asset now goes out with
+`Content-Security-Policy: default-src 'none'` and
+`X-Content-Type-Options: nosniff`, under which a navigated SVG can neither run
+its inline script nor fetch anything. This is findings §6.4 collected. **The
+allow-list entry and those headers are one decision**, and
+`an_svg_is_copied_only_because_the_response_makes_it_inert` asserts both halves
+so that deleting the header cannot quietly re-arm every `logo.svg` in every
+cloned repository.
+
+**`../` references resolve.** §16.3 recorded that `mo` could not serve them:
+it appended the author's `src` to a `…/raw/` route verbatim, and both a browser
+and Go's own mux normalise the dot segment away, eating the route. Our
+`asset/<rel>` route takes the relative path the page resolved, so the copy that
+was always correct is now reachable.
+
+**The failure surface shrank.** Four of the seven ways the button could fail —
+the binary is missing, it is the wrong architecture, it started and never
+listened, it failed the Host probe — described a child process that no longer
+exists. `app/src/mock/install.ts` carries what is left.
+
+### 17.5 The gate, and why it is no longer a `curl`
+
+§15.1 made the §11.3 criterion a runtime assertion because the binary on disk
+was not necessarily the binary we built. That distance is gone: the server is
+this repository's own source, so the gate is the boundary tests, run in
+`release.yml` by exact name, starting the real server and speaking HTTP to it
+over a raw loopback socket. Both directions, as before — a server that answered
+`403` to everything would pass a one-sided check while serving nothing.
+
+Raw sockets rather than `curl` for a measured reason: **`curl` silently
+collapses duplicate `Host` headers** and sends only one, which made the first
+run of that case a false pass in the findings' own probe (§6.1). And the step
+greps for `test result: ok. 4 passed`, because `--exact` against a renamed test
+is a filter that matches nothing and exits **0** — a gate that never ran looks
+exactly like a gate that passed.
+
+Each refusal was proved red before it was believed: the `Host` check (by
+reintroducing `mo`'s bug), the loopback-name check (by accepting a suffix), the
+`Origin` check, the token, the `..` component check, `symlink_metadata`, the
+method check, `If-None-Match`, `410`, the asset CSP, and the trailing-slash
+redirect.
+
+### 17.6 What is still owed
+
+The **real-app pass** §15.6 asked for is still owed, and one of its two items
+is now moot: there is no `openUrl` to a spawned helper's port, but there is
+still an `openUrl` from a `tauri://` page to `http://127.0.0.1`, and whether
+WKWebView's `open` behaves is still unmeasured. The other — spawn latency as
+felt — is smaller than it was, because binding a port is not starting a
+process.
+
+Two smaller things. `refresh` holds the registry lock across a derive, so a
+poll arriving mid-derive waits it out; at one request per second per tab that
+is unobservable, and the alternative is a second copy of the registry, which is
+a drift bug. And the `ETag` is per PLACE, not per document, so editing one
+document costs every open tab in that place one full response — the
+alternative is hashing each file's bytes on every conditional request, which is
+the disk read the `304` exists to avoid.

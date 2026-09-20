@@ -5,6 +5,35 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The docs viewer has never been opened in a real browser from a real app.**
+  Everything about the server is proved by unit tests over real loopback
+  sockets, and everything about the page is proved in its own worktree; none of
+  that is WKWebView calling `openUrl` on a `http://127.0.0.1` URL from a
+  `tauri://` page, which `place-docs.md` §11.6 left open and §17.6 still
+  leaves open. The permission question is closed (`opener:default` carries
+  `allow-default-urls`, whose `http://*` pattern matches the whole URL); whether
+  WKWebView's `open` behaves is not. Needs `app/scripts/sandbox.sh --app`, a
+  human, and `WORKTREES_VIEWER_JS` pointed at a built page.
+  _From: the docs-server rewrite_
+
+- **The docs `ETag` is per PLACE, not per document.** `docs::fingerprint_with`
+  is stat-only over the whole place, so editing one document changes every
+  document's tag in it and every open tab pays one full response. Correct, just
+  wasteful. The tighter version — hashing each derived file's own bytes — puts
+  a disk read on the `304` path, which is the read conditional GET exists to
+  avoid (measured: 0.149 ms and 410 bytes per poll, with no file IO at all). If
+  it ever matters, the answer is probably a per-file stat folded in at derive
+  time, not at request time.
+  _From: the docs-server rewrite_
+
+- **`viewer::refresh` holds the registry lock across a derive.** A poll that
+  arrives mid-derive waits it out. At one request per second per tab that is
+  unobservable, and the alternative — a second copy of the registry for the
+  server to read — is a drift bug of exactly the kind `dnd.ts::predictTier`
+  needs a check script for. Worth revisiting only if a place ever derives
+  slowly enough to be felt.
+  _From: the docs-server rewrite_
+
 - **`mcp_install` itself has still never been clicked in the real app.** #218
   shipped Settings → Claude against the mock and headless chromium; the 2026-09-19
   session then exercised the surfaces for real in an isolated sandbox (throwaway

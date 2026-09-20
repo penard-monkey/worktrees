@@ -1,0 +1,267 @@
+/* The viewer's own sheet. It loads AFTER tokens.css and App.css and overrides
+ * the handful of rules that are true of an app shell and false of a document.
+ *
+ * App.css is imported WHOLE rather than sliced. The dock's markdown styling is
+ * its rules — `.md-*`, `.code*`, `.tk-*` — and copying them here would be a
+ * mirror, which is the failure this repo keeps re-learning (dnd.ts::predictTier
+ * needed a check script; the new-worktree verdict line shipped four wrong cases
+ * with every test passing). A fence in a document therefore colours exactly
+ * like the same fence in the dock, permanently, with nothing to keep in sync.
+ * The cost is some dead chrome CSS (about 60 KB unminified) against a bundle
+ * dominated by 5 MB of mermaid. */
+
+/* An APP shell never scrolls at the document level; a DOCUMENT is nothing but
+ * document-level scroll. App.css:9 is the rule being reversed, and it has to be
+ * reversed rather than worked around: `position: sticky` resolves against the
+ * nearest scrolling ancestor, so a header inside a scrolling child would not
+ * stick to the window. */
+html, body, #root { height: auto; overflow: visible; }
+body { background: var(--bg-abyss); }
+
+/* ── the layout ────────────────────────────────────────────────────────────
+ * THE WINDOW STAYS THE SCROLLER. The nav is `position: fixed` with its own
+ * internal overflow and `.page` is pushed over by a margin — it is NOT a flex
+ * row with a scrolling content column. That distinction is the whole reason
+ * adding a column did not cost the measurement this feature exists for:
+ *   - `blocks.tsx`'s scroll anchor reads `window.scrollY` and calls
+ *     `window.scrollBy`. Move the scroll into a div and both address a box that
+ *     no longer scrolls, silently, and an update starts moving the reader.
+ *   - `.chrome` is `position: sticky; top: 0`, which resolves against the
+ *     nearest SCROLLING ancestor. Inside a scrolling child it would stick to
+ *     that child's top, which looks identical until the page is short.
+ *   - the browsers' own scroll anchoring is on the document scroller.
+ * Measured with the column in: scroll 400→400, sel 55→55, read position held
+ * to the pixel, in both engines. */
+.shell { min-height: 100vh; }
+.page { margin-left: var(--dnav-w); }
+:root { --dnav-w: 264px; }
+
+.dnav {
+  position: fixed; top: 0; left: 0; bottom: 0; width: var(--dnav-w);
+  display: flex; flex-direction: column;
+  background: var(--bg-tree);
+  border-right: 1px solid var(--line);
+  font-family: var(--font-ui);
+  z-index: 20; /* over the sticky chrome, which is the document's, not the app's */
+}
+.dnav-head { display: flex; gap: var(--s2); align-items: center; padding: var(--s3); border-bottom: 1px solid var(--line); }
+.dnav-filter {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--bg-input); color: var(--txt);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  padding: var(--s1) var(--s2);
+  font-size: var(--fs-label); font-family: var(--font-ui);
+}
+.dnav-filter:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.dnav-total { flex: none; font-size: var(--fs-micro); color: var(--txt-mute); font-variant-numeric: tabular-nums; }
+/* The tree owns the scroll, not the window — a 424-document place must not make
+ * the nav as tall as the list. */
+.dnav-tree { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--s2) 0 var(--s5); }
+.dnav-empty { color: var(--txt-mute); font-size: var(--fs-meta); padding: var(--s3); }
+
+.dnav-dir, .dnav-row {
+  display: flex; align-items: center; gap: var(--s2);
+  width: 100%; text-align: left; text-decoration: none;
+  padding: 3px var(--s3) 3px calc(var(--s3) + var(--depth, 0) * var(--ind));
+  background: none; border: 0; color: inherit;
+  font-size: var(--fs-label); line-height: var(--lh-row);
+}
+.dnav-dir:hover, .dnav-row:hover { background: var(--bg-elev); }
+.dnav-chev { flex: none; width: 10px; color: var(--txt-mute); font-size: 11px; line-height: 1; }
+.dnav-dirname { color: var(--txt-dim); font-weight: var(--fw-med); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dnav-count { margin-left: auto; flex: none; color: var(--txt-mute); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
+.dnav-title { color: var(--txt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The current document. A FILL plus a weight change, never coloured words —
+ * `--accent` as small type measures 3.1:1 in tokyo-day (CLAUDE.md). The bar is
+ * the hue; the title just gets brighter and heavier. */
+.dnav-row.is-current { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.dnav-row.is-current .dnav-title { color: var(--txt-hi); font-weight: var(--fw-med); }
+
+.dnav-scrim { display: none; }
+.nav-toggle {
+  display: none;
+  background: none; border: 0; padding: 0;
+  color: var(--accent); font-size: var(--fs-meta); font-family: var(--font-ui);
+}
+
+/* ── narrow: the nav gets OUT OF THE WAY, it does not squeeze the prose ─────
+ * The measure is 78ch. At 264px of nav plus the document's own padding, a
+ * window under ~900px starts eating into it, and a docs viewer that reflows
+ * prose to 40 columns to keep a tree on screen has chosen the wrong one. Below
+ * the breakpoint the nav becomes an off-canvas drawer over the content, opened
+ * from the header's `☰ documents`, and `.page` takes the full width — so the
+ * prose is never narrower than it would be with no nav at all. */
+@media (max-width: 900px) {
+  .page { margin-left: 0; }
+  .dnav { transform: translateX(-100%); transition: transform var(--dur-fast, 120ms) ease; box-shadow: var(--shadow-lg, 0 8px 32px rgba(0,0,0,0.5)); }
+  .shell[data-drawer="open"] .dnav { transform: none; }
+  .shell[data-drawer="open"] .dnav-scrim {
+    display: block; position: fixed; inset: 0; z-index: 15; background: var(--scrim);
+  }
+  .nav-toggle { display: inline-block; }
+}
+
+/* ── the staleness header ──────────────────────────────────────────────────
+ * Sticky at the top of the document scroll. `z-index` over the prose, and an
+ * opaque background, because a translucent one over scrolling text is a header
+ * you stop reading. */
+.chrome {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line);
+  padding: var(--s2) var(--s4);
+  display: flex; flex-direction: column; gap: 2px;
+  font-family: var(--font-ui);
+}
+/* Hue arrives as a FILL — the band's tint and the dot — never as coloured text.
+ * `--dirty` as small text measures 3.1:1 in tokyo-day and worse in
+ * catppuccin-latte; the words stay on --txt-hi / --txt-dim, which is the rule
+ * the rest of this app already follows (.status-row, .status-chip). */
+.chrome[data-state="dirty"] {
+  background: color-mix(in srgb, var(--dirty) 12%, var(--bg-panel));
+  box-shadow: inset 3px 0 0 var(--dirty);
+}
+.chrome[data-state="clean"] { box-shadow: inset 3px 0 0 var(--ok); }
+.chrome-unknown, .chrome[data-state="unknown"] {
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-panel));
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+.chrome-row { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
+.chrome-dot {
+  width: 8px; height: 8px; border-radius: var(--r-full); flex: none;
+  align-self: center; background: var(--ok);
+}
+.chrome-dot[data-state="dirty"] { background: var(--dirty); }
+.chrome-dot[data-state="unknown"] { background: var(--danger); }
+.chrome-place {
+  font-size: var(--fs-title); font-weight: var(--fw-bold); color: var(--txt-hi);
+  letter-spacing: 0.01em;
+}
+.chrome-branch { font-size: var(--fs-label); color: var(--branch); font-family: var(--font-mono); }
+.chrome-behind, .chrome-dirty { font-size: var(--fs-label); color: var(--txt-dim); }
+.chrome-behind[data-behind="1"], .chrome-dirty[data-dirty="1"] { color: var(--txt-hi); font-weight: var(--fw-med); }
+.chrome-sep { color: var(--txt-mute); }
+.chrome-meta { gap: var(--s4); justify-content: space-between; }
+.chrome-subject {
+  font-size: var(--fs-meta); color: var(--txt-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60ch;
+}
+.chrome-times { display: flex; gap: var(--s3); flex: none; }
+.chrome-time { font-size: var(--fs-meta); color: var(--txt-mute); white-space: nowrap; }
+/* The second timestamp only exists when it DISAGREES with the first, so it is
+ * the interesting one when it is there at all. */
+.chrome-time-split { color: var(--txt-dim); }
+.chrome-warn { font-size: var(--fs-label); color: var(--txt-hi); }
+.chrome-nav { gap: var(--s3); padding-top: 2px; }
+.nav-link { font-size: var(--fs-meta); color: var(--accent); text-decoration: none; }
+.nav-link:hover { text-decoration: underline; }
+.nav-path { font-size: var(--fs-meta); color: var(--txt-mute); font-family: var(--font-mono); }
+
+/* ── the document ─────────────────────────────────────────────────────────
+ * `.doc` also carries `.md`, which is where the padding, the 78ch measure, the
+ * body size and the whole `--md-s*` scale live. Custom properties inherit, so
+ * every block below gets that scale without being `.md` itself — which is the
+ * point: `.md`'s padding and `> *:first-child { margin-top: 0 }` are properties
+ * of a DOCUMENT and would otherwise be applied once per block. */
+.body { min-height: 60vh; }
+.doc { margin: 0 auto; }
+/* `.mdb` and `.mdb-md` must stay bare — no padding, no border, no overflow, no
+ * display change. Each would open a block formatting context and stop the
+ * adjacent blocks' margins collapsing through the wrappers, turning every gap
+ * in the document into the SUM of two margins instead of the larger one. */
+.mdb, .mdb-md { display: block; }
+.doc > .mdb:first-child > .mdb-md > :first-child { margin-top: 0; }
+
+/* A relative link to something that is not a document does not navigate (see
+ * blocks.tsx::onLink — a top-level SVG document executes script, and how the
+ * asset route labels its bytes is the server's half). Marked so it does not
+ * read as a link that is merely broken, in the same visual language
+ * `markdown.tsx` already uses for a refused scheme (`.md-link-blocked`). */
+.doc a.md-link[href]:not([href^="#"]):not([href^="http"]):not([href$=".md"]):not([href*=".md#"]):not([href$=".markdown"]) {
+  color: var(--txt-dim);
+  border-bottom: 1px dotted var(--txt-mute);
+  cursor: help;
+}
+
+/* Raw HTML a document wrote, after `rawhtml.tsx`'s allow-list. It gets the
+ * document's own constraints back — the app's `.md-img img` rule only reaches
+ * images the markdown path built, and a raw `<img width="99999">` would
+ * otherwise be free to overhang the measure. */
+.md-rawhtml-render img { max-width: 100%; height: auto; }
+.md-rawhtml-render table { border-collapse: collapse; }
+.md-rawhtml-render th, .md-rawhtml-render td {
+  border: 1px solid var(--line); padding: var(--md-s1) var(--md-s3);
+}
+/* Said out loud, in the reader's own text flow: something in this document was
+ * refused. The same honesty as a refused image or a stripped `click` directive
+ * — a reader who cannot see what the author wrote needs to know it was a
+ * decision and not a bug. */
+.md-rawhtml-dropped { color: var(--txt-mute); font-size: var(--fs-meta); }
+
+/* ── mermaid ──────────────────────────────────────────────────────────────
+ * The diagram is content, not chrome; it gets a recessed surface so it reads as
+ * a figure. `--bg-panel` rather than `--bg-abyss` because the page background
+ * IS `--bg-abyss` and a recessed box is only recessed against a surface it does
+ * not equal — the two are identical in six themes, which leaves a 1px border to
+ * carry the box, and tokyo-day's `--line` is about 5 RGB units from its
+ * background. */
+.mermaid-block {
+  margin: var(--md-s5) 0;
+  padding: var(--md-s3);
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow-x: auto;
+}
+.mermaid-host svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+.mermaid-note { font-size: var(--fs-meta); color: var(--txt-dim); margin-top: var(--md-s2); }
+.mermaid-err { color: var(--txt-hi); }
+.mermaid-note code { font-family: var(--font-mono); }
+
+/* ── the index ────────────────────────────────────────────────────────────*/
+.index { max-width: 78ch; margin: 0 auto; padding: var(--s5) var(--s5) var(--s6); }
+.index-head { display: flex; align-items: center; gap: var(--s3); margin-bottom: var(--s5); }
+.index-filter {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--bg-input); color: var(--txt);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  padding: var(--s2) var(--s3);
+  font-size: var(--fs-body); font-family: var(--font-ui);
+}
+.index-filter:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.index-count { flex: none; font-size: var(--fs-meta); color: var(--txt-dim); }
+.index-empty { color: var(--txt-mute); font-size: var(--fs-body); padding: var(--s4) 0; }
+.index-group { margin-bottom: var(--s5); }
+.index-dir {
+  font-size: var(--fs-meta); font-weight: var(--fw-med); color: var(--txt-mute);
+  font-family: var(--font-mono); text-transform: none;
+  margin: 0 0 var(--s2); padding-bottom: var(--s1); border-bottom: 1px solid var(--line);
+}
+.index-list { list-style: none; margin: 0; padding: 0; }
+.index-row {
+  display: flex; align-items: baseline; gap: var(--s3);
+  padding: var(--row-pad-v) var(--row-pad-h);
+  border-radius: var(--r-sm); text-decoration: none; color: inherit;
+}
+.index-row:hover { background: var(--bg-elev); }
+.index-row.is-current { background: var(--bg-elev); }
+.index-title { font-size: var(--fs-row); color: var(--txt-hi); }
+.index-path {
+  font-size: var(--fs-meta); color: var(--txt-mute); font-family: var(--font-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── states ───────────────────────────────────────────────────────────────*/
+.loading { color: var(--txt-mute); font-size: var(--fs-body); padding: var(--s5); }
+.err {
+  margin: var(--s4) auto; max-width: 78ch;
+  padding: var(--s3) var(--s4);
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel));
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  color: var(--txt-hi); font-size: var(--fs-body);
+}
+.gone { max-width: 60ch; margin: 0 auto; padding: var(--s6) var(--s5); font-family: var(--font-ui); }
+.gone h1 { color: var(--txt-hi); font-size: var(--fs-title); margin: 0 0 var(--s4); }
+.gone p { color: var(--txt); font-size: var(--fs-body); line-height: var(--lh-prose); }
+.gone code { font-family: var(--font-mono); color: var(--txt-hi); }
+.gone-note { color: var(--txt-dim); }

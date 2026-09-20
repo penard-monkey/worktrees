@@ -2643,19 +2643,57 @@ body.dragging .menu-catch { pointer-events: none; }
 .docs-q::placeholder { color: var(--txt-mute); }
 
 .docs-list { flex: 1; min-height: 0; min-width: 0; overflow: auto; padding-bottom: var(--s2); }
-.docs-ghead {
-  display: flex; align-items: baseline; gap: var(--s2);
-  padding: var(--s2) var(--s2) var(--s1);
-  color: var(--txt-mute); font-size: var(--fs-meta);
+.docs-gcount { flex: none; }
+
+/* THE TREE. One directory row per level, and the depth arrives as a custom
+ * property on the row itself (`--depth`, set inline by `DocRows`) so the
+ * arithmetic stays here with the spacing scale rather than being px computed in
+ * TSX. A step of 10px rather than a full `--s3`: the dock's floor is 240px and a
+ * `docs/architecture/adr` is three steps in before its title starts.
+ *
+ * The indent is PADDING on a full-width row, never a margin: the hover and
+ * selection backgrounds have to run the whole width of the list or a nested row
+ * reads as a different kind of thing from a root one. */
+.docs-dir {
+  display: flex; align-items: center; gap: var(--s1);
+  width: 100%;
+  padding: var(--s1) var(--s2) var(--s1) calc(var(--s2) + var(--depth, 0) * 10px);
+  background: transparent; border: 0; text-align: left; cursor: pointer;
+  color: var(--txt-mute); font: inherit; font-size: var(--fs-meta);
   letter-spacing: 0.06em; text-transform: uppercase;
 }
-.docs-gname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.docs-gcount { flex: none; }
+.docs-dir:hover { background: var(--bg-elev); color: var(--txt-hi); }
+.docs-dir:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* The NAME takes all the slack; the chevron and the count keep their size.
+ *
+ * MEASURED, because a flex layout inside a `<button>` is the shape of the usage
+ * meter's WebKit-only bug (CLAUDE.md): headless WebKit beside Chromium, at the
+ * dock's 240px floor, agree to the pixel — button 239, chevron 12, name 177,
+ * count 6, no horizontal overflow, the name hit-testable. The trap does not
+ * reach this row because `width: 100%` means the button is never asked to
+ * shrink-wrap, which is the same reason `.docs-browse` came out identical in
+ * both engines (proposal §15.6).
+ *
+ * The `flex: none` below is therefore a belt and not the thing holding this up:
+ * forced to 149px — narrower than the app allows — the name shrinks to 86px and
+ * REMOVING the pins changes nothing, because an SVG at a fixed px size and a
+ * two-character count have no shrinkable content to give. Worth keeping and
+ * worth not believing: the next control put in this row may well be the one
+ * that competes for width, and then it has to be measured again. */
+.docs-chev { flex: none; display: flex; align-items: center; color: var(--txt-mute); }
+.docs-dirname {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .docs-row {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
   grid-template-areas: "dot title title reveal" "dot rel when reveal";
   align-items: center; column-gap: var(--s1);
+  /* The shorthand FIRST and the indent after it — the other way round and
+     `padding` resets the left edge back to the gutter, silently, on every row
+     in the tree. */
   padding: 3px var(--s2); min-width: 0; cursor: pointer;
+  padding-left: calc(var(--s2) + var(--depth, 0) * 10px);
 }
 .docs-row:hover { background: var(--bg-elev); }
 .docs-row.sel { background: var(--bg-elev); color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); }
@@ -2671,7 +2709,7 @@ body.dragging .menu-catch { pointer-events: none; }
  * panel measures 3.1:1 in tokyo-day, which this app already treats as the floor
  * it does not put words below (the status chip learned it the expensive way).
  *
- * `visibility`, not a conditional render, for the same reason `.docs-reveal`
+ * `visibility`, not a conditional render, for the same reason `.docs-verbs`
  * uses it — the column must keep its width on every row, or a marked row and
  * an unmarked one start their titles in different places and the whole list
  * looks ragged as documents are touched. */
@@ -2696,15 +2734,46 @@ body.dragging .menu-catch { pointer-events: none; }
 .docs-fresh .docs-new { flex: none; }
 /* Hidden until the row is touched, like the tree's row verbs — 240px of dock
  * has no room for a control on every line. `visibility`, not `display`, so the
- * column it occupies never changes width and the titles do not shift. */
-.docs-reveal {
+ * column it occupies never changes width and the titles do not shift — which
+ * matters more with two verbs than it did with one. */
+.docs-verbs {
   grid-area: reveal; visibility: hidden;
+  display: flex; align-items: center; gap: 2px;
+}
+.docs-verb {
+  flex: none;
   background: transparent; border: 0; color: var(--txt-mute);
   padding: 0 var(--s1); line-height: 1; cursor: pointer;
 }
-.docs-row:hover .docs-reveal,
-.docs-row:focus-within .docs-reveal { visibility: visible; }
-.docs-reveal:hover { color: var(--txt-hi); }
+.docs-row:hover .docs-verbs,
+.docs-row:focus-within .docs-verbs { visibility: visible; }
+.docs-verb:hover { color: var(--txt-hi); }
+.docs-verb:disabled { color: var(--txt-mute); opacity: 0.5; cursor: default; }
+
+/* The footer. `flex: none` and a top border, so it is the one row that never
+ * scrolls away — the whole point of the browser action is that it is where the
+ * reading goes when the dock is too narrow for it.
+ *
+ * `align-items: flex-start` rather than the default `stretch`: the error line
+ * below the button is a scrolled column's trailing content, and stretch clamps
+ * it to the container so its last line finishes flush against the dock edge. */
+.docs-foot {
+  flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1);
+  padding: var(--s2); border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+/* An inner span carries the flex, and the label is pinned. A `<button>` that is
+ * itself a flex container is shrink-wrapped by WebKit WITHOUT its
+ * overflow-hidden children, so in the real app (WKWebView, not the Chrome mock)
+ * the label would measure as 0px and the button would render as a bare icon —
+ * the usage meter shipped exactly that way once. */
+.docs-browse { display: inline-flex; align-items: center; gap: var(--s1); max-width: 100%; }
+.docs-browse > span { flex: none; }
+.docs-browse > svg { flex: none; }
+.docs-foot-err {
+  max-width: 100%; color: var(--txt-dim); font-size: var(--fs-micro);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .docs-note { padding: var(--s3) var(--s2); color: var(--txt-dim); font-size: var(--fs-meta); }
 .docs-note-sub { display: block; margin-top: var(--s1); color: var(--txt-mute); }

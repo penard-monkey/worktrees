@@ -33,6 +33,26 @@ tauri-plugin-process = "2"
 # PID-liveness check for Claude session probes (kill(pid, 0)); already in the
 # lock tree transitively. macOS + Linux.
 libc = "0.2"
+# A place's route segment and its derived tree are disambiguated by
+# sha256(canonical root)[..8] — two projects may legitimately hold the same
+# slug. Already in the lock tree (tauri's updater pulls it), so this adds a
+# name here and nothing to the supply chain.
+sha2 = "0.10"
+# The documentation server (`docserver.rs`). Every one of these is ALREADY in
+# Cargo.lock by way of tauri's own HTTP stack, so naming them here adds no
+# supply chain — which is the whole reason the `docs-transport` findings'
+# std-only recommendation was not taken (its own §8.2 argues hyper is the right
+# call wherever hyper is already present, and it is). What we write is routing
+# and policy; the `mo` bug this rewrite exists to remove was a missing policy
+# check, not a parser bug, and a parser we wrote would be one more thing to be
+# wrong about.
+hyper = { version = "1.11", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time"] }
+# 16 bytes for the per-launch path token. The OS's CSPRNG, not a clock and a
+# pid: a token anyone can reconstruct is not a token.
+getrandom = "0.3"
 
 
 [target.'cfg(target_os = "macos")'.dependencies]

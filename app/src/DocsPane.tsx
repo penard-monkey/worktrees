@@ -23,18 +23,15 @@
 // rendered verbatim. Nothing here re-derives a core rule, so there is nothing
 // for a `docs-check.mjs` to guard — which is the point of putting the walk in
 // core rather than splitting it.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { track } from "./usage";
+import { tree, type DocEntry, type DocNode } from "./doctree";
 
-/** `worktrees_core::docs::DocEntry`. `mtime_ms` is milliseconds, and it is
- *  mtime rather than git status because the documents the mark exists for —
- *  `task_plan.md`, the brief, everything under `.planning/` — are gitignored
- *  and can never carry one (the field's docstring in `docs.rs` has the long
- *  version). */
-export type DocEntry = { path: string; rel: string; title: string; group: string; mtime_ms: number };
+export type { DocEntry, DocNode };
+
 /** `DocsIndex` (lib.rs). `base` is the ref `behind` counts against — the
  *  project's base ref, never `Place::upstream`. `""` when the project could not
  *  be discovered, in which case the header says "N behind" and names nothing,
@@ -66,6 +63,9 @@ export type DocsPaneProps = {
   root: string;
   /** The project root, for the base ref. */
   repo: string;
+  /** The place's slug. Names the viewer's group and is the first fact in the
+   *  header it injects into every page — a browser tab has no nav beside it. */
+  slug: string;
   place: DocsPlace;
   /** Bumped by `places:changed` (tmux change, or the 30 s poll). */
   reloadToken: number;
@@ -82,6 +82,12 @@ export type DocsPaneProps = {
    *  post-ack value, every badge would be cleared by the act of arriving to
    *  read it, and the feature would appear to do nothing at all. */
   seenEpoch: number;
+  /** Directory paths this place has COLLAPSED (`settings.docs_collapsed`), in
+   *  `DocEntry::group`'s spelling. Empty — the state of a place nobody has
+   *  customised — is a fully open tree, which is what the flat list this
+   *  replaced showed. */
+  collapsed: string[];
+  onCollapsed: (paths: string[]) => void;
   /** Open a document in the Files tab's renderer. */
   onOpen: (path: string) => void;
   onError: (e: unknown) => void;
@@ -149,20 +155,118 @@ function matches(e: DocEntry, terms: string[]): boolean {
  *  that would justify a filesystem watcher (see the effect that uses it). */
 const DOCS_POLL_MS = 4000;
 
-/** Entries in backend order, cut into the groups the backend assigned. Order of
- *  FIRST APPEARANCE, never re-sorted: the walk already decided, and a second
- *  opinion here is the mirror this component exists without. */
-function group(entries: DocEntry[]): Array<{ name: string; rows: DocEntry[] }> {
-  const out: Array<{ name: string; rows: DocEntry[] }> = [];
-  for (const e of entries) {
-    const last = out[out.length - 1];
-    if (last && last.name === e.group) last.rows.push(e);
-    else out.push({ name: e.group, rows: [e] });
-  }
-  return out;
+/** One level of the tree, and then itself.
+ *
+ *  At MODULE scope with props, not inside `DocsPane`: a component declared in
+ *  another component's body is a new identity on every render, so React would
+ *  unmount and remount the whole subtree every time a keystroke changed the
+ *  filter — losing focus and scroll position on the way (CLAUDE.md). */
+function DocRows(p: {
+  nodes: DocNode[];
+  depth: number;
+  /** Directory paths the user has collapsed. */
+  closed: ReadonlySet<string>;
+  /** A filter is active, so children are shown whatever `closed` says. */
+  filtering: boolean;
+  onToggle: (path: string) => void;
+  sel: string | null;
+  isNew: (e: DocEntry) => boolean;
+  onOpenDoc: (e: DocEntry) => void;
+  onBrowse: (path: string) => void;
+  viewerBusy: boolean;
+  onError: (e: unknown) => void;
+}) {
+  return (
+    <>
+      {p.nodes.map((n) => {
+        if (n.kind === "dir") {
+          const open = !p.closed.has(n.path);
+          // The chevron follows what the user CHOSE; the children follow what
+          // the filter needs. A match hidden inside a collapsed directory is a
+          // filter that looks broken, and a chevron that ignores a click is a
+          // control that looks broken — so a filtered view can show a closed
+          // directory's matches, which is also the most informative thing it
+          // could say about where they came from.
+          const show = open || p.filtering;
+          return (
+            <div className="docs-branch-node" key={"dir:" + n.path}>
+              <button
+                className="docs-dir"
+                style={{ "--depth": p.depth } as CSSProperties}
+                data-track="docs.dir"
+                aria-expanded={open}
+                title={n.path}
+                onClick={() => p.onToggle(n.path)}
+              >
+                <span className="docs-chev" aria-hidden>
+                  {open ? <Icons.ChevronDown size={12} /> : <Icons.ChevronRight size={12} />}
+                </span>
+                <span className="docs-dirname">{n.name}</span>
+                <span className="docs-gcount">{n.count}</span>
+              </button>
+              {show && <DocRows {...p} nodes={n.kids} depth={p.depth + 1} />}
+            </div>
+          );
+        }
+        const e = n.entry;
+        return (
+          <div
+            key={e.path}
+            className={"docs-row" + (p.sel === e.path ? " sel" : "")}
+            style={{ "--depth": p.depth } as CSSProperties}
+            role="button"
+            tabIndex={0}
+            data-track="docs.row"
+            title={e.rel}
+            onClick={() => p.onOpenDoc(e)}
+            onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); p.onOpenDoc(e); } }}
+          >
+            {/* A DOT, never coloured text. `--accent` as 11px type on its
+                own tint measures 3.1:1 in tokyo-day and worse in latte
+                (CLAUDE.md); hue goes in the dot, the words take a text
+                token. `aria-hidden` because the label beside it already
+                says the same thing to a reader. */}
+            <span className={"docs-new" + (p.isNew(e) ? " on" : "")} aria-hidden />
+            <span className="docs-title">{e.title}</span>
+            <span className="docs-rel">{e.rel}</span>
+            {p.isNew(e) && (
+              <span className="docs-when" title={`modified ${new Date(e.mtime_ms).toLocaleString()}`}>
+                {ago(Math.floor(e.mtime_ms / 1000))}
+              </span>
+            )}
+            <span className="docs-verbs">
+              {/* §7.2: the browser becomes the row's other action, and the
+                  in-app read (the row itself) stays the primary one. It is
+                  the only way to see a diagram at all — the dock's renderer
+                  shows a mermaid fence as a code block, by decision. */}
+              <button
+                className="docs-verb"
+                data-track="docs.rowbrowser"
+                title="Open in the browser"
+                aria-label={`Open ${e.rel} in the browser`}
+                disabled={p.viewerBusy}
+                onClick={(ev) => { ev.stopPropagation(); p.onBrowse(e.path); }}
+              >
+                <Icons.ExternalLink size={13} />
+              </button>
+              <button
+                className="docs-verb"
+                data-track="docs.reveal"
+                title="Reveal in Finder"
+                aria-label={`Reveal ${e.rel} in Finder`}
+                onClick={(ev) => { ev.stopPropagation(); revealItemInDir(e.path).catch(p.onError); }}
+              >
+                <Icons.Folder size={13} />
+              </button>
+            </span>
+          </div>
+        );
+      })}
+    </>
+  );
 }
 
-export function DocsPane({ root, repo, place, reloadToken, pageVisible, seenEpoch, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
+export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, seenEpoch, collapsed, onCollapsed, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
   const [idx, setIdx] = useState<DocsIndex | null>(null);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -246,7 +350,10 @@ export function DocsPane({ root, repo, place, reloadToken, pageVisible, seenEpoc
     return () => clearInterval(t);
   }, [load, pageVisible]);
   // A half-typed filter must not follow you to another place — the same rule
-  // the dock's open file and the header rename already follow.
+  // the header rename follows. (The dock's open file used to be the other
+  // example; since #302 it is reset and then RESTORED per place from
+  // `files_open`, because a file you were reading is a different kind of state
+  // from something half-typed. A filter has nothing to restore.)
   useEffect(() => { setQ(""); setSel(null); }, [root]);
 
   useEffect(() => {
@@ -262,7 +369,18 @@ export function DocsPane({ root, repo, place, reloadToken, pageVisible, seenEpoc
 
   const terms = useMemo(() => q.toLowerCase().split(/\s+/).filter(Boolean), [q]);
   const shown = useMemo(() => (idx ? idx.entries.filter((e) => matches(e, terms)) : []), [idx, terms]);
-  const groups = useMemo(() => group(shown), [shown]);
+  const nodes = useMemo(() => tree(shown), [shown]);
+  const closed = useMemo(() => new Set(collapsed), [collapsed]);
+  // The persisted set is edited even while a filter is on — the chevron shows
+  // the choice, the filter shows the matches, and clearing the filter reveals
+  // what was actually chosen. Writing through the prop rather than holding a
+  // local copy keeps ONE source of truth: the settings blob is written whole
+  // (ui-state.json), so a component-local set would be silently overwritten by
+  // the next save from anywhere else.
+  const toggle = useCallback(
+    (path: string) => onCollapsed(collapsed.includes(path) ? collapsed.filter((p) => p !== path) : [...collapsed, path]),
+    [collapsed, onCollapsed],
+  );
   const total = idx?.entries.length ?? 0;
   // `0` is how `docs.rs` reports a stat it could not read, and it must never
   // mark: it would otherwise light up every row in a place whose baseline is
@@ -274,6 +392,59 @@ export function DocsPane({ root, repo, place, reloadToken, pageVisible, seenEpoc
   const fresh = useMemo(() => (idx ? idx.entries.filter(isNew).length : 0), [idx, isNew]);
 
   const open = (e: DocEntry) => { setSel(e.path); onOpen(e.path); };
+
+  // ── the browser viewer (phase 3) ───────────────────────────────────────────
+  //
+  // OPTIMISTIC, like `tmuxOk`'s `useState(true)`: nothing is probed at mount,
+  // no banner can flash on launch, and unavailability is discovered at the point
+  // of use. The blast radius of the whole viewer is these two buttons — a place
+  // with no viewer at all still lists, filters, reads and reveals every
+  // document, which is what phases 1 and 2 shipped.
+  //
+  // `viewerErr` is per pane and per place (the pane is keyed by place in App),
+  // and it is set BESIDE `onError` rather than instead of it: the toast is how
+  // the user hears about it once, the line under the button is how they see it
+  // is still true. Never swallowed, never only-logged.
+  const [viewerErr, setViewerErr] = useState<string | null>(null);
+  const [viewerBusy, setViewerBusy] = useState(false);
+  const browse = useCallback(
+    async (path: string | null) => {
+      setViewerBusy(true);
+      try {
+        const url = await invoke<string | null>("open_docs_viewer", {
+          repo,
+          root,
+          slug,
+          path,
+          // The header's facts, from the same `Place` the header above is
+          // rendering — so the page in the browser and the pane in the dock can
+          // never disagree about how stale this place is. `base` is the
+          // backend's (it is the one fact `Place` does not carry, and §11.4 is
+          // what happens when it is guessed).
+          place: {
+            branch: place.branch,
+            behind: place.behind,
+            dirty: place.dirty,
+            dirty_files: place.dirty_files ?? null,
+            last_commit_subject: place.last_commit_subject ?? null,
+            last_commit_epoch: place.last_commit_epoch ?? null,
+          },
+        });
+        // A typed invoke can still answer `null` — the harness resolves unknown
+        // commands that way, and an older backend has no such command at all.
+        // Opening `null` would be a blank tab with no explanation.
+        if (!url) throw new Error("the documentation viewer is not available in this build");
+        setViewerErr(null);
+        await openUrl(url);
+      } catch (e) {
+        setViewerErr(String(e));
+        onError(e);
+      } finally {
+        setViewerBusy(false);
+      }
+    },
+    [repo, root, slug, place, onError],
+  );
 
   const head = staleness(place, idx?.base ?? "");
   const subject = place.last_commit_subject ?? "";
@@ -351,62 +522,49 @@ export function DocsPane({ root, repo, place, reloadToken, pageVisible, seenEpoc
           </div>
         )}
         {idx && !!total && !shown.length && <div className="docs-note">Nothing matches “{q}”.</div>}
-        {/* Keyed on the first row's PATH, not on the group name. Core promises
-            each group is one contiguous run (`every_group_is_one_contiguous_run`),
-            so the name would do — but it did not, once: the walk used to emit
-            the leftover root files after the tree, giving two `""` runs and two
-            siblings keyed `(root)`, which React answers by duplicating and
-            omitting children. A path is unique by construction, so a future
-            reordering can be wrong without also being silently wrong. */}
-        {groups.map((g) => (
-          <div className="docs-group" key={g.rows[0].path}>
-            {g.name && (
-              <div className="docs-ghead">
-                <span className="docs-gname">{g.name}</span>
-                <span className="docs-gcount">{g.rows.length}</span>
-              </div>
-            )}
-            {g.rows.map((e) => (
-              <div
-                key={e.path}
-                className={"docs-row" + (sel === e.path ? " sel" : "")}
-                role="button"
-                tabIndex={0}
-                data-track="docs.row"
-                title={e.rel}
-                onClick={() => open(e)}
-                onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(e); } }}
-              >
-                {/* A DOT, never coloured text. `--accent` as 11px type on its
-                    own tint measures 3.1:1 in tokyo-day and worse in latte
-                    (CLAUDE.md); hue goes in the dot, the words take a text
-                    token. `aria-hidden` because the label beside it already
-                    says the same thing to a reader. */}
-                <span className={"docs-new" + (isNew(e) ? " on" : "")} aria-hidden />
-                <span className="docs-title">{e.title}</span>
-                <span className="docs-rel">{e.rel}</span>
-                {isNew(e) && (
-                  <span className="docs-when" title={`modified ${new Date(e.mtime_ms).toLocaleString()}`}>
-                    {ago(Math.floor(e.mtime_ms / 1000))}
-                  </span>
-                )}
-                <button
-                  className="docs-reveal"
-                  data-track="docs.reveal"
-                  title="Reveal in Finder"
-                  aria-label={`Reveal ${e.rel} in Finder`}
-                  onClick={(ev) => { ev.stopPropagation(); revealItemInDir(e.path).catch(onError); }}
-                >
-                  <Icons.Folder size={13} />
-                </button>
-              </div>
-            ))}
-          </div>
-        ))}
+        {/* THE TREE. Nested by `DocEntry::group`, in first-appearance order,
+            and there is deliberately no flat/tree toggle: two ways to read the
+            same list is a preference nobody has an opinion about until it is
+            set wrong. Every key is a PATH, which is unique by construction —
+            the flat version keyed groups by NAME and the walk once emitted two
+            separate `""` runs, which React answers by duplicating a sibling and
+            omitting its children. */}
+        <DocRows
+          nodes={nodes}
+          depth={0}
+          closed={closed}
+          filtering={!!terms.length}
+          onToggle={toggle}
+          sel={sel}
+          isNew={isNew}
+          onOpenDoc={open}
+          onBrowse={(path) => void browse(path)}
+          viewerBusy={viewerBusy}
+          onError={onError}
+        />
         {idx?.truncated && (
           <div className="docs-note docs-trunc">
             Stopped at {total} documents — this place has more. The Files tab lists everything.
           </div>
+        )}
+      </div>
+
+      {/* §7.1's last row. Present and enabled from the first frame — there is no
+          probe deciding whether to show it, because a probe is a thing that can
+          be wrong at launch about a subsystem nothing has needed yet. */}
+      <div className="docs-foot">
+        <button
+          className="ctrl sm docs-browse"
+          data-track="docs.browser"
+          title="Open this place in the browser — diagrams render there"
+          disabled={viewerBusy || !total}
+          onClick={() => void browse(null)}
+        >
+          <Icons.ExternalLink size={13} />
+          <span>Open this place in the browser</span>
+        </button>
+        {viewerErr && (
+          <div className="docs-foot-err" title={viewerErr}>{viewerErr}</div>
         )}
       </div>
     </div>

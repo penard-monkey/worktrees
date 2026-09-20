@@ -18,6 +18,37 @@ export type MarkdownProps = {
   renderImage?: (src: string, alt: string, title: string | null) => ReactNode;
   /** Link activation. `href` is verbatim from the doc (may be relative). */
   onLink?: (href: string) => void;
+  /**
+   * Raw HTML in the source. DEFAULT — and the dock's permanent behaviour — is
+   * to render it as literal, visible, inert text (`2026-08-03-files-viewer`
+   * D2: "a doc with an <img> tag shows the tag, which is honest"). That rule is
+   * right for the dock, which renders inside the app's own `tauri://` webview,
+   * where a document's HTML would be a code-execution path INTO the app.
+   *
+   * It is wrong for the browser viewer, and only because that page is a
+   * different place: a separate loopback origin behind a per-launch token,
+   * under `default-src 'none'; script-src 'self'` with no `'unsafe-inline'`,
+   * where a `<script>` or an `onerror=` in a document is already inert. There,
+   * a `<p align="center"><img src="logo.svg"></p>` — the way half the READMEs
+   * in the world centre a logo — showing as a code block is just a viewer that
+   * cannot read its own documents. The viewer supplies a sanitiser here
+   * (`app/viewer/rawhtml.tsx`), exactly as it supplies `renderImage`.
+   *
+   * `where` says which position the token was in, because the inert fallback
+   * differs: a `<span>` inline, a `<pre>` in block position.
+   */
+  renderHtml?: (raw: string, where: "inline" | "block") => ReactNode;
+  /**
+   * Container class, default `"md"`. The dock renders one document per
+   * `Markdown`; the browser viewer renders one TOP-LEVEL BLOCK per `Markdown`
+   * so it can replace only the blocks whose source changed. It therefore needs
+   * its blocks NOT to be `.md` — that rule carries the padding, the reading
+   * measure, the `--md-s*` scale and `> *:first-child { margin-top: 0 }`, all
+   * of which are properties of the document and would be applied once per
+   * block. The viewer puts `.md` on the document wrapper instead (the custom
+   * properties inherit) and passes its own class here.
+   */
+  className?: string;
 };
 
 // marked's lexer leaves the five XML entities encoded in `text` tokens (it
@@ -34,7 +65,7 @@ const decode = (s: string) => s.replace(/&(?:amp|lt|gt|quot|#39|apos|nbsp);/g, (
  * that is not http(s), a relative path, or an in-document anchor therefore gets
  * NO href at all — it renders as inert text carrying its own label.
  */
-function safeHref(href: string): string | undefined {
+export function safeHref(href: string): string | undefined {
   const h = href.trim();
   if (!h) return undefined;
   if (h.startsWith("#")) return h;
@@ -114,9 +145,15 @@ function inline(tokens: Token[] | undefined, ctx: MarkdownProps, keyBase = "i", 
         const it = t as Tokens.Image;
         return <span key={k}>{ctx.renderImage?.(it.href, it.text, it.title ?? null) ?? <em>{it.text}</em>}</span>;
       }
-      case "html":
-        // literal, inert — see the file header
-        return <span key={k} className="md-rawhtml">{(t as Tokens.HTML).raw}</span>;
+      case "html": {
+        // literal, inert — see the file header — unless a host supplies its own
+        // policy. `?? literal` means a sanitiser that refuses a fragment gets
+        // the honest fallback rather than dropping the document's content.
+        const raw = (t as Tokens.HTML).raw;
+        const own = ctx.renderHtml?.(raw, "inline");
+        if (own != null) return <span key={k}>{own}</span>;
+        return <span key={k} className="md-rawhtml">{raw}</span>;
+      }
       default:
         return <span key={k}>{decode((t as Tokens.Generic).raw ?? "")}</span>;
     }
@@ -214,9 +251,13 @@ function block(tokens: Token[], ctx: MarkdownProps, keyBase = "b", depth = 0): R
       case "hr":
         out.push(<hr key={k} className="md-hr" />);
         break;
-      case "html":
-        out.push(<pre key={k} className="md-rawhtml-block">{(t as Tokens.HTML).raw.replace(/\n+$/, "")}</pre>);
+      case "html": {
+        const raw = (t as Tokens.HTML).raw;
+        const own = ctx.renderHtml?.(raw, "block");
+        if (own != null) out.push(<div key={k}>{own}</div>);
+        else out.push(<pre key={k} className="md-rawhtml-block">{raw.replace(/\n+$/, "")}</pre>);
         break;
+      }
       case "def":
         break; // link reference definition — consumed by the lexer, nothing to draw
       default: {
@@ -294,11 +335,11 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
   const body = useMemo(() => (parsed.failed ? null : block(parsed.tokens, props)), [parsed, props]);
   if (parsed.failed) {
     return (
-      <div className="md">
+      <div className={props.className ?? "md"}>
         <div className="tree-note">too deeply nested to render as markdown — showing the source</div>
         <pre className="md-rawhtml-block">{props.src}</pre>
       </div>
     );
   }
-  return <div className="md">{body}</div>;
+  return <div className={props.className ?? "md"}>{body}</div>;
 });

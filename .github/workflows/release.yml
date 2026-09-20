@@ -75,6 +75,72 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
+      # ── the documentation viewer ──────────────────────────────────────────
+      #
+      # The browser page. It ships INSIDE the bundle (tauri.conf.json bundles
+      # `viewer/*` into Contents/Resources/) and is served by the app's own
+      # loopback server at `GET /<token>/viewer.js`. Nothing executes it: it is
+      # a file the user's browser fetches.
+      #
+      # There used to be a Go toolchain here, a `git clone` of a third-party
+      # viewer, and a gate against it, because the viewer was `mo` and `mo`
+      # does not validate the `Host` header (proposal §13.2). The server is
+      # ours now — `app/src-tauri/src/docserver.rs` — so what is gated is our
+      # own source, and the gate below runs it.
+      - name: build the documentation viewer's browser bundle
+        run: |
+          set -euo pipefail
+          pnpm -C app install --frozen-lockfile
+          # A named error, because the raw one ("Command \"build:viewer\" not
+          # found") reads as a broken checkout rather than as the branch that
+          # owns the page not having landed. Read from package.json rather than
+          # from `pnpm run`'s listing, which indents and would never match.
+          grep -q '"build:viewer"' app/package.json \
+            || { echo "::error::app/package.json has no build:viewer script"; exit 1; }
+          pnpm -C app build:viewer
+          out="$GITHUB_WORKSPACE/app/src-tauri/viewer/viewer.js"
+          mkdir -p "$(dirname "$out")"
+          cp app/viewer/dist/viewer.js "$out"
+          # A bundle that built to nothing is a blank page with no error, on
+          # every machine but the one that built it.
+          bytes=$(wc -c < "$out")
+          [ "$bytes" -gt 10000 ] \
+            || { echo "::error::the viewer bundle is $bytes bytes, which is not a bundle"; exit 1; }
+          echo "viewer bundle: $(du -h "$out" | cut -f1)"
+
+      # ── THE GATE ──────────────────────────────────────────────────────────
+      #
+      # The release criterion §11.3 set, executed: prove the server refuses a
+      # request that lies about who it is talking to, and prove it still serves
+      # one that does not. BOTH directions, because a server that answered 403
+      # to everything would pass a one-sided check while serving nothing at all
+      # — the same class of "the test passes and the feature is broken" this
+      # repo keeps finding.
+      #
+      # **Why this is not a `curl`.** The previous gate curled a third-party
+      # binary, because a binary was the only thing we had; the server is now
+      # our source, and the honest instrument is the test that starts it and
+      # speaks HTTP to it over a real loopback socket. Raw sockets are also
+      # strictly better than curl here: **curl silently collapses duplicate
+      # `Host` headers** and sends only one, which made the first run of that
+      # case in the transport findings a false pass (§6.1). `--exact` so a
+      # rename cannot turn this step into a filter that matches nothing and
+      # exits 0 — which is the shape a gate fails in.
+      - name: GATE — the docs server refuses a forged Host and serves a loopback one
+        run: |
+          set -euo pipefail
+          cargo test -p app --lib --locked -- --exact --nocapture \
+            docserver::tests::a_forged_host_is_refused_and_a_loopback_one_is_served \
+            docserver::tests::a_duplicate_host_header_is_refused_rather_than_resolved \
+            docserver::tests::a_cross_origin_request_is_refused_and_nothing_says_otherwise \
+            docserver::tests::a_missing_token_or_a_traversal_reaches_nothing \
+            2>&1 | tee /tmp/gate.log
+          # A pipeline's exit status is the LAST stage's, and `tee` always
+          # succeeds — so the run reads green whatever cargo said unless the
+          # count is checked too.
+          grep -q '^test result: ok. 4 passed' /tmp/gate.log \
+            || { echo "::error::the docs-server gate did not run all four cases"; exit 1; }
+
       - name: build the app bundle (signed updater artifacts)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -82,6 +148,22 @@ jobs:
           rustup target add "${{ matrix.target }}"
           pnpm -C app install --frozen-lockfile
           pnpm -C app tauri build --target "${{ matrix.target }}"
+      # Rule 10's other half: assert the bundle is IN the thing that ships, not
+      # merely in the directory the bundler was pointed at. A glob that silently
+      # matched nothing, a resources key lost in a merge, or a bundler that put
+      # it somewhere else all look identical from outside — and all of them
+      # produce a release whose Docs button opens a blank tab on every machine
+      # but ours.
+      - name: assert the viewer bundle is inside the app bundle
+        run: |
+          set -euo pipefail
+          app="target/${{ matrix.target }}/release/bundle/macos/worktrees.app"
+          v="$app/Contents/Resources/viewer/viewer.js"
+          [ -f "$v" ] || { echo "::error::no bundle at Contents/Resources/viewer/viewer.js"; ls -R "$app/Contents/Resources" || true; exit 1; }
+          bytes=$(wc -c < "$v")
+          [ "$bytes" -gt 10000 ] || { echo "::error::the bundled viewer is $bytes bytes"; exit 1; }
+          echo "bundled viewer: $(du -h "$v" | cut -f1)"
+
       - name: package + checksum
         run: |
           mkdir -p dist

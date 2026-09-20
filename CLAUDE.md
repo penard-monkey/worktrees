@@ -596,6 +596,26 @@ is invisible to the bats suite — there is no fake claude. Re-run
   PARSER that emits data we render ourselves is allowed, and `marked` (lexer
   only, for the dock's markdown) is the one instance. Syntax highlighting is
   hand-rolled in `app/src/highlight.ts` for the same reason.
+  **`mermaid` is the SECOND admitted exception, and only inside the docs viewer
+  bundle (`app/viewer/`) — never `app/src`.** It does not fit through the
+  `marked` door and should not be let in through it: it is not a parser that
+  hands back data, it renders; it owns layout and theming; it injects ~4.4 KB of
+  its own `<style>` into every SVG; it ships a sanitiser, which is a library
+  telling you it puts untrusted input in a DOM; and it is 5.3 MB, about 95% of
+  that bundle. It is admitted because a diagram is CONTENT, in a surface this
+  app deliberately does not own, and because the alternative is not a weekend —
+  it is Sugiyama layering and orthogonal edge routing. What makes it defensible
+  is the boundary, not the argument: the viewer is a separate vite build
+  (`vite.viewer.config.ts`, classic IIFE) and **never a second input to the
+  app's**, so no shared chunk can hoist mermaid into `app/src`.
+  `app/scripts/viewer-boundary-check.mjs` asserts that by walking the app's real
+  import graph and, when a build exists, grepping `app/dist` — because
+  "it is isolated" is otherwise a claim about a config file, and a config can be
+  edited. Two traps that build found: **vite's LIB MODE does not define
+  `process.env.NODE_ENV`**, so the bundle silently shipped React's development
+  build (+1.9 MB, and the only symptom was a large file), and **a hash added to
+  `style-src` beside `'unsafe-inline'` voids the keyword** and makes every
+  diagram vanish while the prose still renders perfectly.
 - **Driving the sandbox app by NAME drives the INSTALLED app — and it has no
   bundle id to address instead.** `sandbox.sh --app` runs `tauri dev`, which
   execs the UNBUNDLED binary (`<worktree>/target/debug/app` — the workspace
@@ -665,6 +685,17 @@ is invisible to the bats suite — there is no fake claude. Re-run
    binary via include_str!).
 2. Bump workspace `Cargo.toml` → PR → merge.
 3. `make release VERSION=x.y.z` → `git push origin main vx.y.z`.
+   ⚠ **The app-bundle job builds the docs viewer's browser bundle and gates
+   the server that serves it**: the gate step runs the docs-server boundary
+   tests by exact name, which start the real server and, over a raw loopback
+   socket, require `403` for a foreign `Host` and *not* 403 for a loopback one
+   — both directions, so a server that refuses everything cannot ship either.
+   It greps for `test result: ok. 4 passed`, because a renamed test turns
+   `--exact` into a filter that matches nothing and exits **0**. `mo`, the
+   third-party viewer this used to build from source and the reason the gate
+   existed, is gone (it never validated `Host` — GHSA-6pff-wf7m-6f5h, reported
+   2026-09-16); `place-docs.md` §17 is what replaced it, and there is no
+   `vars.VIEWER_MO_*` any more.
 4. release.yml: CLI ×4 targets + SIGNED app bundles ×2 + latest.json.
    Updater signing key: repo secret `TAURI_SIGNING_PRIVATE_KEY`; local backup
    `~/.tauri/worktrees-updater.key` — irreplaceable, never commit it.

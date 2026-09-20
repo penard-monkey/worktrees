@@ -3,6 +3,54 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **The Docs tab is a tree.** Flat sections headed `DOCS/ADR` are gone; the
+  index nests the way the directories do, every folder collapses, and what you
+  collapsed is remembered per place across restarts. It remembers what you
+  CLOSED rather than what you opened, so a place you have never touched opens
+  fully expanded and a directory added tomorrow appears instead of hiding
+  inside a set recorded before it existed. The name filter reaches into closed
+  folders — a match three levels down opens its way out rather than staying
+  hidden behind a chevron, which is a filter that looks broken. Order is still
+  the walk's: a `[docs] paths = ["b", "a"]` lists `b` first, because that is
+  what the repo asked for and sorting it would quietly overrule them. The
+  browser page gets the same tree as a left navigation that never leaves, so
+  you can read one document and see where it sits among the rest — built from
+  the same function the dock uses, because two implementations of one order
+  are two chances to disagree about it.
+
+- **Read a place's docs in the browser, diagrams and all.** The Docs tab grows
+  an "Open this place in the browser" button and a per-row browser action. The
+  app starts one small documentation server on first use — never at launch —
+  and serves a *derived* copy of the place's documents rather than the repo's
+  own files: YAML frontmatter stops being a "Metadata" block on every page, the
+  staleness facts are shown as a live header rather than baked into the text,
+  and a mermaid node whose id names a page in the index becomes a real link to
+  it. A `click` directive the *document* wrote is stripped first — strict mode
+  blocks callbacks but an author-controlled `href` is still an
+  author-controlled href in a repo you cloned five seconds ago. Nothing is
+  written into your tree.
+
+  The page stays live as you work. It asks the app about once a second whether
+  anything moved, gets a 410-byte "no" when nothing has, and when something has
+  it replaces only the paragraphs whose text actually changed — so your scroll
+  position, your selection and your place in a long document survive an edit
+  landing underneath you. A reload does not; that is why it is not a reload.
+
+  The server is loopback-only, holds an unguessable token that is new every
+  launch, refuses any request that does not name the loopback interface it is
+  bound to, refuses any cross-origin request outright, sends no CORS header to
+  anyone, serves nothing outside the copy it generated, and dies with the app.
+  A loopback bind keeps other machines out; it does not keep out the browser on
+  this one, which runs code from strangers and can reach 127.0.0.1 — and these
+  documents are the kind that carry a signed agreement.
+
+  With no viewer bundle installed the Docs tab is exactly what it was: it
+  lists, filters, reads and reveals every document, and only the browser page
+  is missing.
+
 ## [0.26.0] - 2026-09-19
 
 ### Added

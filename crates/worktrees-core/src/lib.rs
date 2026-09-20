@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod derive;
 pub mod diag;
 pub mod docs;
 pub mod error;
