@@ -18,6 +18,17 @@ export type MarkdownProps = {
   renderImage?: (src: string, alt: string, title: string | null) => ReactNode;
   /** Link activation. `href` is verbatim from the doc (may be relative). */
   onLink?: (href: string) => void;
+  /**
+   * Container class, default `"md"`. The dock renders one document per
+   * `Markdown`; the browser viewer renders one TOP-LEVEL BLOCK per `Markdown`
+   * so it can replace only the blocks whose source changed. It therefore needs
+   * its blocks NOT to be `.md` — that rule carries the padding, the reading
+   * measure, the `--md-s*` scale and `> *:first-child { margin-top: 0 }`, all
+   * of which are properties of the document and would be applied once per
+   * block. The viewer puts `.md` on the document wrapper instead (the custom
+   * properties inherit) and passes its own class here.
+   */
+  className?: string;
 };
 
 // marked's lexer leaves the five XML entities encoded in `text` tokens (it
@@ -294,11 +305,11 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
   const body = useMemo(() => (parsed.failed ? null : block(parsed.tokens, props)), [parsed, props]);
   if (parsed.failed) {
     return (
-      <div className="md">
+      <div className={props.className ?? "md"}>
         <div className="tree-note">too deeply nested to render as markdown — showing the source</div>
         <pre className="md-rawhtml-block">{props.src}</pre>
       </div>
     );
   }
-  return <div className="md">{body}</div>;
+  return <div className={props.className ?? "md"}>{body}</div>;
 });
