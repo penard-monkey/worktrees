@@ -288,6 +288,25 @@ export type Settings = {
   ai_auto_resume: boolean; // single-click Enter resumes an existing Claude conversation (Claude only)
   update_auto_check: boolean; // check for updates ~3s after launch (manual check always works)
   fetch_interval_min: number; // background `git fetch origin` cadence (0 = off, else 5 | 15 | 60)
+  // ── what a dock shell tab keeps between runs ────────────────────────────
+  // Both are FLAT globals, deliberately not `place_panels` keys: they are how
+  // YOU want your shells to behave, like `files_diff_base`, not something one
+  // worktree can mean differently from the next — so the seed-freeze trap that
+  // forces `files_md_zoom` to be optional does not apply.
+  //
+  // The backend cannot read them (the settings blob is frontend-owned and
+  // written whole), so App pushes both through `set_term_history_opts`, exactly
+  // as it pushes `fetch_interval_min`.
+
+  // Save each tab's scrollback and replay it when the tab reopens. This is the
+  // only thing that writes a terminal's OUTPUT to disk — anything a script
+  // echoed, secrets included — which is why Settings says where it lands.
+  term_persist_scrollback: boolean;
+  // Give each tab its own command history instead of the one
+  // `~/.zsh_history` every terminal on the machine shares. Costs a generated
+  // ZDOTDIR per tab (zsh's rc files move with it, so the directory carries
+  // shims that source the user's own); zsh and bash only.
+  term_per_tab_history: boolean;
   restore_last: boolean; // on launch, SELECT the most recently opened place (selection-only, never enters)
   // Sync modal: ferry the Claude transcripts along with the tree. GLOBAL and
   // flat, deliberately not part of `place_panels` — it is a property of how YOU
@@ -374,6 +393,8 @@ export const DEFAULTS: Settings = {
   ai_auto_resume: true,
   update_auto_check: true,
   fetch_interval_min: 0,
+  term_persist_scrollback: true,
+  term_per_tab_history: true,
   restore_last: false,
   sync_with_sessions: false,
   collapsed: {},

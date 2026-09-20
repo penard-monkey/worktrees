@@ -386,7 +386,18 @@ const shellSidecars = new Map<string, Set<number>>();
 // restore path must see them dead, not just the transient shell:exit event
 const deadShells = new Map<string, Set<number>>();
 let shellGen = 0; // attach generation counter (real backend: per-shell)
+// What a tab "saved" on a previous run, keyed "repo|slug|index" → text + the
+// width it was recorded at. The real backend keeps this in term-history/ on
+// disk; here it is just a map, seeded by __mock.restoreScrollback so the restore
+// path — a FIRST open that replays — is reachable headlessly. Nothing writes to
+// it on its own: the mock owns no shells and no time.
+const savedScrollback = new Map<string, { text: string; cols: number }>();
+// What each live "shell" has written since it was spawned — the mock's stand-in
+// for the backend's 256K ring, and the reason a re-attach replays the RESTORED
+// output rather than only the banner. Keyed like savedScrollback.
+const mockRings = new Map<string, string>();
 const sidecarKey = (repo: string, slug: string) => `${repo}|${slug}`;
+const tabKey = (repo: string, slug: string, index: number) => `${repo}|${slug}|${index}`;
 
 /** Fixture lookup that SEEDS the parent directory on demand. Content is
  *  materialized when a directory is listed, so a file referenced before its
@@ -965,6 +976,18 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "fetch_origin":
       console.info("[mock] fetch_origin:", args); // no ahead/behind state to model in the harness
       return null;
+    case "set_term_history_opts":
+      console.info("[mock] set_term_history_opts:", args);
+      return null;
+    case "term_history_info": {
+      let bytes = 0;
+      savedScrollback.forEach((v) => { bytes += v.text.length; });
+      return { dir: "/Users/demo/Library/Application Support/net.casadelvalle.worktrees/term-history", bytes, tabs: savedScrollback.size };
+    }
+    case "term_history_clear":
+      savedScrollback.clear();
+      mockRings.clear(); // the live rings go too, as lib.rs clears them
+      return null;
     case "set_fetch_interval":
       console.info("[mock] set_fetch_interval:", args);
       return null;
@@ -1493,21 +1516,49 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // tab flip re-renders the banner exactly where the real one replays its ring.
     case "shell_open": {
       const i = (args.index as number) ?? 1;
-      const set = shellSidecars.get(sidecarKey(args.repo, args.slug)) ?? new Set<number>();
-      set.add(i); shellSidecars.set(sidecarKey(args.repo, args.slug), set);
+      const k = sidecarKey(args.repo, args.slug);
+      const tk = tabKey(args.repo as string, args.slug as string, i);
+      const set = shellSidecars.get(k) ?? new Set<number>();
+      // SPAWN vs RE-ATTACH, decided the way lib.rs decides it: is this tab
+      // already in the registry? NOT by the generation counter — `shellGen` is
+      // global here while the real `gen` is per-shell, so keying on it made the
+      // restore reachable only for the very first shell of a session.
+      const isSpawn = !set.has(i);
+      set.add(i); shellSidecars.set(k, set);
+      deadShells.get(k)?.delete(i); // reattach of a restarted tab
+      const ch = args.onBytes;
+      const send = (text: string, delay: number) => setTimeout(() => {
+        try { ch?.onmessage?.(new TextEncoder().encode(text).buffer); } catch { /* ignore */ }
+      }, delay);
+
+      const saved = savedScrollback.get(tk);
       const banner =
         "\x1b[38;5;110m worktrees \x1b[0m mock shell — design harness\r\n" +
         "\x1b[90m(a real login shell only in the Tauri app)\x1b[0m\r\n\r\n" +
         `\x1b[32m➜\x1b[0m  \x1b[36m${args.slug} sh ${i}\x1b[0m $ \x1b[5m▌\x1b[0m\r\n`;
-      const ch = args.onBytes;
-      setTimeout(() => {
-        try { ch?.onmessage?.(new TextEncoder().encode(banner).buffer); } catch { /* ignore */ }
-      }, 40);
-      deadShells.get(sidecarKey(args.repo, args.slug))?.delete(i); // reattach of a restarted tab
-      // attach generation — see shell_detach in lib.rs. The banner stands in for
-      // the ring replay, so it is reported as one (a re-attach) or not (a spawn).
+      // `replay_cols` is snake_case because it comes off a Rust struct verbatim
+      // (serde is pass-through here, as for `app_version`).
       const gen = ++shellGen;
-      return { gen, replay: gen > 1 ? banner.length : 0 };
+      if (isSpawn) {
+        // A fresh shell starts with whatever the tab saved on a previous run —
+        // the shape that did not exist before tabs kept their history, and the
+        // reason `replay` can no longer be read as "this is a re-attach".
+        const replay = saved
+          ? `${saved.text}\x18\x1b\\\r\n\x1b[2m── restored · 2026-09-18 14:22:07 ──\x1b[0m\r\n`
+          : "";
+        if (replay) send(replay, 0);
+        send(banner, 40); // the new shell's own first output, live
+        // The ring is seeded with the replay SEAM INCLUDED, as lib.rs seeds it:
+        // a re-attach replays the ring and nothing else, so a seam left out of
+        // it would vanish on the first tab flip — which under StrictMode is
+        // before anyone has seen it.
+        mockRings.set(tk, replay + banner);
+        return { gen, replay: replay.length, replay_cols: saved ? saved.cols : null };
+      }
+      // Re-attach: the whole ring, exactly as `shell_open`'s hit branch does.
+      const ring = mockRings.get(tk) ?? banner;
+      send(ring, 0);
+      return { gen, replay: ring.length, replay_cols: saved ? saved.cols : 80 };
     }
     case "shell_write":
     case "shell_resize":
@@ -1531,6 +1582,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         throw "invalid args `keepCwd` for command `close_shell_session`: expected a boolean";
       shellSidecars.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
       deadShells.get(sidecarKey(args.repo, args.slug))?.delete(args.index as number);
+      // The one place `keepCwd` IS state-visible here: a closed tab drops its
+      // saved output, a restarted one keeps it (lib.rs `close_shell_session`).
+      if (args.keepCwd === false) {
+        savedScrollback.delete(tabKey(args.repo as string, args.slug as string, args.index as number));
+      }
+      mockRings.delete(tabKey(args.repo as string, args.slug as string, args.index as number));
       return null;
     }
 
@@ -1967,6 +2024,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // last_seen_version → the What's-new sheet.
     case "get_settings": {
       if (location.search.includes("whatsnew")) return { last_seen_version: "0.2.0" };
+      // ?slowsettings=<ms> — the real get_settings is an IPC round trip, and the
+      // mock's microtask hides every restore that reads settings before they
+      // land. See ?slowlist for the same idea on list_workspace.
+      {
+        const m = /slowsettings=(\d+)/.exec(location.search);
+        if (m) await new Promise((r) => setTimeout(r, Number(m[1])));
+      }
       try {
         const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY);
         return raw ? JSON.parse(raw) : null;
@@ -2201,6 +2265,14 @@ const healthyConfigs: Record<string, MockCfg> = {};
     emitEvent("shell:exit", { repo, slug, index });
     return { repo, slug, index };
   },
+  /** Pretend this tab saved scrollback on a previous run, so the next FIRST
+   * open of it restores. The real thing needs an app restart to reach; the
+   * mock owns no disk and no time, so this is the only way to drive the
+   * restore path — including the reflow, via `cols`. */
+  restoreScrollback(repo: string, slug: string, index = 1, text = "$ make build\r\nbuilt 42 targets\r\n", cols = 174) {
+    savedScrollback.set(tabKey(repo, slug, index), { text, cols });
+    return { repo, slug, index, cols };
+  },
   /** Add a file to the virtual FS the way a working session would. Nothing in
    * the UI writes files, so "a file appeared on disk while the tree was open"
    * — the state that used to leave an expanded directory stale forever — is
@@ -2274,4 +2346,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/createFile/finishTask/syncFail/syncLive/uiEvents)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/finishTask/syncFail/syncLive/uiEvents)");
