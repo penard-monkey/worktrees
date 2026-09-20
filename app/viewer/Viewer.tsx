@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chrome } from "./Chrome";
 import { DocBody, type DocCtx } from "./blocks";
+import { DocsNav } from "./DocsNav";
 import { IndexView } from "./IndexView";
 import {
   apiBase, basename, fetchDoc, fetchIndex,
@@ -75,6 +76,10 @@ export function Viewer() {
   const [gone, setGone] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [updates, setUpdates] = useState(0);
+  // The nav is a DRAWER below NARROW_PX and a column above it. Open-ness only
+  // means anything in drawer mode; above the breakpoint the column is always
+  // there and this flag is ignored.
+  const [drawer, setDrawer] = useState(false);
   const etags = useRef(new Map<string, string | null>());
 
   const path = route.kind === "doc" ? route.path : null;
@@ -111,8 +116,11 @@ export function Viewer() {
     if (gone) return;
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const once = route.kind === "doc";
-    if (once && index) return;
+    // Previously the index was fetched once, lazily, while a document was open,
+    // because it was a screen you had left. It is now the navigation and is on
+    // screen the whole time, so it is polled on both routes — a document added
+    // to the place has to appear in the list while you are looking at the list.
+    const once = false;
     const tick = async () => {
       const r = await fetchIndex(base, etags.current.get("index") ?? null);
       if (stop) return;
@@ -126,7 +134,7 @@ export function Viewer() {
     };
     void tick();
     return () => { stop = true; if (timer) clearTimeout(timer); };
-  }, [base, route.kind, gone, index]);
+  }, [base, route.kind, gone]);
 
   // ── meta ────────────────────────────────────────────────────────────────
   // The document's meta is preferred: it is the one that arrived with the text
@@ -195,36 +203,58 @@ export function Viewer() {
     );
   }
 
-  const nav =
-    route.kind === "doc" ? (
-      <>
-        <a className="nav-link" href="#" onClick={(e) => { e.preventDefault(); go({ kind: "index" }); }}>
-          ← all documents
-        </a>
-        <span className="nav-path">{route.path}</span>
-      </>
-    ) : (
-      <span className="nav-path">documents in this place</span>
-    );
+  // `← all documents` is GONE, deliberately. It was a way back to a screen, and
+  // the screen is now a column that never leaves — a link to the place you are
+  // already looking at. What replaces it is the drawer toggle, which is the
+  // only thing that link still meant on a narrow window.
+  const nav = (
+    <>
+      <button
+        className="nav-toggle"
+        aria-expanded={drawer}
+        onClick={() => setDrawer((d) => !d)}
+        title="show or hide the document list"
+      >
+        ☰ documents
+      </button>
+      <span className="nav-path">{route.kind === "doc" ? route.path : "documents in this place"}</span>
+    </>
+  );
+
+  const open = (p: string) => { setDrawer(false); go({ kind: "doc", path: p, anchor: null }); };
 
   return (
-    <>
-      <Chrome meta={meta} nav={nav} />
-      <main className="body">
-        {err && <div className="err" role="alert">{err}</div>}
-        {route.kind === "index" &&
-          (index ? (
-            <IndexView entries={index.entries} current={null} onOpen={(p) => go({ kind: "doc", path: p, anchor: null })} />
-          ) : (
-            <div className="loading">loading the document list…</div>
-          ))}
-        {route.kind === "doc" &&
-          (doc?.path === route.path ? (
-            <DocBody blocks={doc.payload.blocks} ctx={ctx} />
-          ) : (
-            <div className="loading">loading {route.path}…</div>
-          ))}
-      </main>
-    </>
+    <div className="shell" data-drawer={drawer ? "open" : "closed"}>
+      {index && (
+        <DocsNav
+          entries={index.entries}
+          place={meta?.place ?? "unknown"}
+          current={route.kind === "doc" ? route.path : null}
+          onOpen={open}
+        />
+      )}
+      {/* Closes the drawer by clicking beside it. Only ever hit-testable in
+          drawer mode — above the breakpoint it is `display: none`, so it can
+          never sit invisibly over the prose. */}
+      <div className="dnav-scrim" onClick={() => setDrawer(false)} aria-hidden />
+      <div className="page">
+        <Chrome meta={meta} nav={nav} />
+        <main className="body">
+          {err && <div className="err" role="alert">{err}</div>}
+          {route.kind === "index" &&
+            (index ? (
+              <IndexView entries={index.entries} current={null} onOpen={open} />
+            ) : (
+              <div className="loading">loading the document list…</div>
+            ))}
+          {route.kind === "doc" &&
+            (doc?.path === route.path ? (
+              <DocBody blocks={doc.payload.blocks} ctx={ctx} />
+            ) : (
+              <div className="loading">loading {route.path}…</div>
+            ))}
+        </main>
+      </div>
+    </div>
   );
 }

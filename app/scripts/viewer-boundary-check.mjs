@@ -149,6 +149,26 @@ else {
   else ok("raw-HTML links go through the same safeHref as markdown links");
 }
 
+// ── 2c. ONE tree, two surfaces ──────────────────────────────────────────────
+// The viewer's nav and the app's Docs tab render the same tree, and the ORDER
+// is the repo's own decision — `docs::index_with` fixes the root files' reading
+// order and `[docs] paths = ["b", "a"]` is b-then-a because a project said so.
+// A second implementation here, or a `.sort()` added to tidy the display, would
+// overrule that and nothing would fail. `docs-check.mjs` guards `tree()` itself;
+// this guards that the viewer USES it.
+const navPath = path.join(APP, "viewer/DocsNav.tsx");
+if (!fs.existsSync(navPath)) ok("app/viewer/DocsNav.tsx absent — no second tree to guard");
+else {
+  const nav = fs.readFileSync(navPath, "utf8");
+  if (!/from "\.\.\/src\/doctree"/.test(nav)) fail("DocsNav.tsx does not import from app/src/doctree — a second tree implementation is the drift docs-check.mjs exists to prevent");
+  else ok("the viewer's nav imports tree() from app/src/doctree");
+  const code = nav.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+  if (/\.sort\s*\(/.test(code)) fail("DocsNav.tsx sorts — the backend's order is the repo's choice, and sorting overrules it silently");
+  else ok("the viewer's nav never sorts");
+  if (!/e\.group/.test(code)) fail("DocsNav.tsx no longer passes `group` through — nesting would fall back to the path, and the brief would be filed under `.planning`");
+  else ok("the viewer's nav nests on `group`, not on the path");
+}
+
 // ── 3. two builds, two outputs ──────────────────────────────────────────────
 const appCfg = fs.readFileSync(path.join(APP, "vite.config.ts"), "utf8");
 const viewerCfgPath = path.join(APP, "vite.viewer.config.ts");

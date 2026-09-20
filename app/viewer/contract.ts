@@ -29,8 +29,17 @@ export type Block = { id: string; md: string };
 
 export type DocPayload = { meta: Meta; blocks: Block[] };
 
-/** One row of the `index` route. See `normalizeIndex` for what is tolerated. */
-export type IndexEntry = { path: string; title: string };
+/**
+ * One row of the `index` route. See `normalizeIndex` for what is tolerated.
+ *
+ * `group` is the backend's OWN nesting decision and is deliberately not always
+ * `path`'s directory part: `.planning/brief.md` is grouped with the ROOT files,
+ * because a group of one under a gitignored directory name reads as an accident
+ * (`DocEntry::group` in `docs.rs`). Deriving it from the path would file the
+ * brief under a directory the walk does not show — so it is used verbatim when
+ * the server sends it, and only FALLS BACK to the dirname when it does not.
+ */
+export type IndexEntry = { path: string; title: string; group: string };
 
 export type IndexPayload = { meta: Meta | null; entries: IndexEntry[] };
 
@@ -134,12 +143,16 @@ function parseDoc(body: unknown): DocPayload {
  */
 export function normalizeIndex(body: unknown): IndexPayload {
   const asEntry = (x: unknown): IndexEntry | null => {
-    if (typeof x === "string") return { path: x, title: basename(x) };
+    if (typeof x === "string") return { path: x, title: basename(x), group: dirOf(x) };
     if (!x || typeof x !== "object") return null;
     const o = x as Record<string, unknown>;
     const path = str(o.path) || str(o.rel) || str(o.href) || str(o.file);
     if (!path) return null;
-    return { path, title: str(o.title) || str(o.name) || basename(path) };
+    // `"group" in o` rather than `str(o.group) || dirOf(path)`: a root-level
+    // document's group is the empty string, and truthiness cannot tell "the
+    // server said root" from "the server said nothing".
+    const group = "group" in o ? str(o.group) : dirOf(path);
+    return { path, title: str(o.title) || str(o.name) || basename(path), group };
   };
   const list = (v: unknown): IndexEntry[] =>
     Array.isArray(v) ? v.map(asEntry).filter((e): e is IndexEntry => e !== null) : [];

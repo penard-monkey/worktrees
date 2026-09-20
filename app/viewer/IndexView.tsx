@@ -12,25 +12,12 @@
 // in its heading, and a reader arriving from a code review has the path while a
 // reader arriving from a conversation has the title.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { dirOf, type IndexEntry } from "./contract";
-
-/** Case-insensitive subsequence over the haystack — "dadr" finds `docs/adr`. */
-function subseq(hay: string, needle: string): boolean {
-  let i = 0;
-  for (const ch of hay) {
-    if (ch === needle[i]) i++;
-    if (i === needle.length) return true;
-  }
-  return i === needle.length;
-}
-
-export function matches(entry: IndexEntry, q: string): boolean {
-  const n = q.trim().toLowerCase();
-  if (!n) return true;
-  const path = entry.path.toLowerCase();
-  const title = entry.title.toLowerCase();
-  return path.includes(n) || title.includes(n) || subseq(path, n) || subseq(title, n);
-}
+import type { IndexEntry } from "./contract";
+// ONE filter rule. It lives with the nav, which is where the filter now
+// primarily is; this screen is the landing view and the drawer's stand-in on a
+// narrow window, and a second definition of "does this row match?" would drift
+// the moment either was tuned.
+import { matches } from "./DocsNav";
 
 export function IndexView({
   entries,
@@ -64,7 +51,14 @@ export function IndexView({
     const hit = entries.filter((e) => matches(e, q));
     const by = new Map<string, IndexEntry[]>();
     for (const e of hit) {
-      const d = dirOf(e.path) || ".";
+      // `e.group`, NEVER `dirOf(e.path)`. They differ on exactly the row where
+      // it matters: `.planning/brief.md` is grouped with the ROOT files by the
+      // backend, and deriving the group from the path filed it under a
+      // `.planning` heading here while the nav — which uses `tree()`, which
+      // uses `group` — correctly put it at the root. Two surfaces on the SAME
+      // PAGE disagreeing about where a document lives, which is the mirror this
+      // whole extraction exists to avoid, one level smaller.
+      const d = e.group || ".";
       const list = by.get(d);
       if (list) list.push(e);
       else by.set(d, [e]);
