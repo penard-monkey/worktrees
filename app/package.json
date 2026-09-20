@@ -8,7 +8,8 @@
     "dev:mock": "VITE_MOCK=1 vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:viewer": "vite build --config vite.viewer.config.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -21,6 +22,7 @@
     "@xterm/addon-unicode-graphemes": "^0.4.0",
     "@xterm/xterm": "^5.5.0",
     "marked": "^18.0.7",
+    "mermaid": "^12.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
