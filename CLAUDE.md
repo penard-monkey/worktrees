@@ -74,6 +74,16 @@ The skip applies only when EVERY changed file matches the list; mix in one code
 file and the full suite runs. `CHANGELOG.md` is deliberately NOT on the list —
 it ships inside the app binary via `include_str!`.
 
+**A CHANGELOG entry can rebase CLEANLY into the wrong release.** An entry
+written under `## [Unreleased]` while a release is cut underneath you applies
+with no conflict into the now-published `## [x.y.z]` section — the surrounding
+context still matches, so git has nothing to complain about — and the change is
+then documented as part of a release it is not in, which release.yml has already
+published and the app already ships. #309 did exactly this across v0.26.0. A
+rebase exit code of 0 says the patch applied, not that it applied where you
+meant; after any rebase that crosses a release boundary, look at which section
+the entry actually landed in.
+
 **A stale release binary does not only make bats FAIL — it can make it PASS.**
 The note above says "fail mysteriously", which is the friendlier half. Edit a
 crate *after* the release build and `make test` happily green-lights the OLD
@@ -208,6 +218,17 @@ is invisible to the bats suite — there is no fake claude. Re-run
   `refresh`/`commitWs`/`patchDeclared`/`mutate` source under controlled
   promise-resolution orders (`node app/scripts/race-check.mjs [App.tsx]`, exits
   non-zero on failure — it fails on v0.12.0, which is how it earns trust).
+- **A harness tab that is not FRONTMOST never polls, and that reads as a broken
+  render.** `useUsage` (and every poll gated the same way) skips both the
+  immediate pull and the interval when `document.visibilityState` is `hidden` —
+  correct behaviour, and it means a tab driven while your terminal has focus
+  shows no usage meter at all, no matter how right the code is. Force it with
+  `window.dispatchEvent(new Event("focus"))`: the hook's `focus` listener is
+  registered unconditionally, so the pull lands without faking visibility.
+  Two more from driving that widget in an unfocused tab: `element.focus()` fires
+  no `focus` event there, and a synthetic `pointerenter` does not reach React's
+  `onPointerEnter` — but `element.click()` does reach `onClick`, which is why
+  pinning the panel works when hovering it does not.
 - **HMR is dead inside `.worktrees/`** — chokidar ignores dot-directories, so
   vite never sees the edit and keeps serving the PRE-edit file. A reload and a
   `touch` both "work" and change nothing; a real fix looks like it failed.

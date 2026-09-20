@@ -27,6 +27,29 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   key) and was deliberately not bundled with the fix.
   _From: [2026-09-20 unread-ring restart](docs/sessions/2026-09-20-unread-ring-restart/summary.md)_
 
+- **`claude_status` still has no negative TTL.** `claude_usage` gained one
+  (`USAGE_FAIL_AT`, 60s) after a 429 that the app itself held open: the 120s
+  floor between real fetches had only ever applied after a SUCCESS, because
+  nothing was written to the cache on failure, so every window-focus pull went
+  straight back out — 15 real requests inside one minute. `claude_status` is
+  written the same way: `STATUS_CACHE` is written only on success, so the
+  `STATUS_TTL_SECS` check misses and every pull re-fetches for as long as the
+  page is unreachable. Lower stakes (unauthenticated Statuspage GET, no
+  credentials, it did not fire once during the usage episode), which is why it
+  was left alone rather than fixed opportunistically — but it is the same
+  defect, and the shape of the fix is already in the file directly above it.
+  _From: [2026-09-19 usage-meter degrade](docs/sessions/2026-09-19-usage-meter-degrade/summary.md)_
+
+- **`claude_usage` has no seam around its fetch, and both review findings lived
+  there.** The command calls `usage_from_oauth` directly, so the two defects
+  review caught in #309 — degrading from a pre-fetch snapshot of the cache, and
+  the fallback tie-break — could only be found by reading, and the first is
+  guarded by a comment rather than a test. Pinning it needs a controlled
+  interleaving of two network results, i.e. the fetch injected rather than
+  called. Not worth restructuring for its own sake; worth doing the next time
+  this path grows a third state.
+  _From: [2026-09-19 usage-meter degrade](docs/sessions/2026-09-19-usage-meter-degrade/summary.md)_
+
 - **The docs viewer has never been opened in a real browser from a real app.**
   Everything about the server is proved by unit tests over real loopback
   sockets, and everything about the page is proved in its own worktree; none of
