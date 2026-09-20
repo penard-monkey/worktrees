@@ -322,16 +322,6 @@ used to check this in: `resources/list` (ask it to list the MCP resources) and
 `resources/read` (ask it to read `place://<slug>` with `ReadMcpResourceTool`).
 Both exercise the server; only a real typed `@` exercises the picker.
 
-While checking any of the above, the server is writing what it saw to
-`~/.cache/worktrees/mcp-debug.log` — `tail -f` it in another pane. A
-`resources/read MISS` line is the one to care about: it means the list claude
-cached and the list the server serves have diverged, which is exactly what the
-watcher exists to prevent. `WORKTREES_MCP_DEBUG=0` switches it off,
-`WORKTREES_MCP_DEBUG_LOG=<path>` moves it. **This logging is temporary** — see
-ROADMAP; a test fails once the workspace version reaches 0.26.0 to make sure it
-goes. The suite does not write here — bats and `make test-mcp` both redirect it
-— so anything in this file came from a real session.
-
 If mentions expand nowhere at all, check the switches that disable the whole
 attachment path before suspecting this feature: `CLAUDE_CODE_DISABLE_ATTACHMENTS`,
 `CLAUDE_CODE_SIMPLE`, `restricted` mode, and `blockReadsOutsideWorkingDirectories`.
