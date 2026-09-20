@@ -1306,6 +1306,44 @@ mod tests {
         }
     }
 
+    /// The Rust deep link must be the shape the page's router reads.
+    ///
+    /// Three copies of "a document is `#/<rel>`" exist — `viewer::place_url`
+    /// here, `routeHash` in `app/viewer/Viewer.tsx`, and `parseRoute` beside
+    /// it — and nothing tied them together until this. That gap already cost
+    /// one silent defect: `place_url` emitted `?path=<rel>`, the page routes on
+    /// `location.hash` and ignores the query entirely, so the Docs tab's
+    /// per-row action and every mermaid drill-down opened the right PLACE at
+    /// the wrong DOCUMENT, with both halves passing their own tests. Same
+    /// shape as the mount-id bug: the contract named the routes and never said
+    /// how a document is named in a URL.
+    ///
+    /// So this reads the prefix out of `routeHash` rather than restating it —
+    /// the drift-check shape this repo uses for `dnd.ts::predictTier`.
+    #[test]
+    fn the_deep_link_is_the_fragment_the_page_routes_on() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../viewer/Viewer.tsx"),
+        )
+        .expect("app/viewer/Viewer.tsx — the page's router; renamed?");
+        let body = src
+            .split_once("export function routeHash")
+            .map(|(_, rest)| rest)
+            .expect("routeHash is gone from Viewer.tsx — find what names a document now");
+        assert!(
+            body.contains("`#/${p}`"),
+            "routeHash no longer builds `#/<path>`; place_url would emit a URL the page cannot route:\n{}",
+            body.lines().take(8).collect::<Vec<_>>().join("\n"),
+        );
+
+        let url = crate::viewer::place_url(1234, "tok", "place", Some("docs/a.md"));
+        assert_eq!(url, "http://127.0.0.1:1234/tok/p/place/#/docs/a.md", "{url}");
+        assert!(
+            !url.contains('?'),
+            "a query is not read by the page's router — that was the bug: {url}",
+        );
+    }
+
     /// The shell must mount where the bundle actually looks.
     ///
     /// This is the test whose absence let the two halves of this feature ship

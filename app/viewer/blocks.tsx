@@ -95,9 +95,23 @@ function renderImage(ctx: DocCtx, src: string, alt: string, title: string | null
   }
   const rel = resolveRel(ctx.dir, s);
   if (!rel) return <span className="md-img-note">[image refused — path escapes the place root: {s}]</span>;
+  // NOT `loading="lazy"`. Chrome defers a lazy image past a viewport-distance
+  // threshold (~2500px), and a deferred image has made no request at all —
+  // `complete: false`, `naturalWidth: 0`, `currentSrc` empty, and nothing in
+  // the network log to explain it. That reads exactly like a hung server, and
+  // it cost a round of debugging pointed at the wrong component: a control
+  // using `new Image()` "proved" the URL was fine, when all it proved was that
+  // a constructed image is never lazy.
+  //
+  // Laziness buys nothing here and the arithmetic is not close. These are
+  // local files already copied into the derived tree, extension-allow-listed,
+  // capped at 10 MB each and 64 MB per place, served over loopback. What it
+  // costs is every reader that does not scroll: a print, a screenshot, a
+  // find-in-page landing below the fold, and any engine whose threshold
+  // differs from the one this was measured against.
   return (
     <span className="md-img">
-      <img src={assetUrl(ctx.base, rel)} alt={alt} title={title ?? undefined} loading="lazy" />
+      <img src={assetUrl(ctx.base, rel)} alt={alt} title={title ?? undefined} />
     </span>
   );
 }
