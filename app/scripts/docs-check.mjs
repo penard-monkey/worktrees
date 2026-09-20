@@ -15,14 +15,21 @@
 // component: it evaluates the REAL source text of `tree()` out of DocsPane.tsx,
 // so running it before and after an edit tests the edit itself.
 //
-//   node docs-check.mjs [path/to/DocsPane.tsx]        exits non-zero on failure
+// `tree()` moved out of `DocsPane.tsx` into `app/src/doctree.ts` when the
+// browser viewer's persistent nav became a second renderer of the same tree —
+// ONE implementation, two surfaces. This path had to move with it: a slice that
+// cannot find its function throws, but a check pointed at a file that no longer
+// holds the rule would simply stop guarding, and a guard that stopped guarding
+// looks exactly like a guard that passed.
+//
+//   node docs-check.mjs [path/to/doctree.ts]           exits non-zero on failure
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 // vite's esbuild re-export — bare "esbuild" does not resolve under pnpm's
 // strict layout, vite does (a direct dependency).
 import { transformWithEsbuild } from "vite";
 
-const SRC = process.argv[2] || fileURLToPath(new URL("../src/DocsPane.tsx", import.meta.url));
+const SRC = process.argv[2] || fileURLToPath(new URL("../src/doctree.ts", import.meta.url));
 const raw = fs.readFileSync(SRC, "utf8");
 
 let failures = 0;

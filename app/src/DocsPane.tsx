@@ -28,13 +28,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { track } from "./usage";
+import { tree, type DocEntry, type DocNode } from "./doctree";
 
-/** `worktrees_core::docs::DocEntry`. `mtime_ms` is milliseconds, and it is
- *  mtime rather than git status because the documents the mark exists for —
- *  `task_plan.md`, the brief, everything under `.planning/` — are gitignored
- *  and can never carry one (the field's docstring in `docs.rs` has the long
- *  version). */
-export type DocEntry = { path: string; rel: string; title: string; group: string; mtime_ms: number };
+export type { DocEntry, DocNode };
+
 /** `DocsIndex` (lib.rs). `base` is the ref `behind` counts against — the
  *  project's base ref, never `Place::upstream`. `""` when the project could not
  *  be discovered, in which case the header says "N behind" and names nothing,
@@ -157,58 +154,6 @@ function matches(e: DocEntry, terms: string[]): boolean {
  *  still looking at the list that should be marking it, and far below the cost
  *  that would justify a filesystem watcher (see the effect that uses it). */
 const DOCS_POLL_MS = 4000;
-
-/** A row in the tree: a document, or a directory holding more rows. */
-export type DocNode =
-  | { kind: "doc"; entry: DocEntry }
-  | { kind: "dir"; path: string; name: string; kids: DocNode[]; count: number };
-
-/** Entries in backend order, nested into the directories the backend named.
- *
- *  **Insertion order is the whole algorithm.** Every node is appended where it
- *  is FIRST seen and never sorted, at any level, because the order is the
- *  backend's decision and some of it is the repo's: `docs::index_with` puts the
- *  root files in a fixed reading order, and `[docs] paths = ["b", "a"]` is
- *  listed b-then-a because the repo said so (`declared_paths_keep_one_
- *  contiguous_run_per_group`). Alphabetising here would quietly overrule that
- *  and nothing would fail — the list would just be subtly not what the project
- *  asked for, which is the silent-mirror failure this component was built
- *  without (see the file note).
- *
- *  The nesting comes from `group`, never from `rel`'s directory part. They
- *  differ on the one row where it matters: the brief lives at
- *  `.planning/brief.md` and is grouped with the ROOT files on purpose, because
- *  a group of one under a gitignored directory name reads as an accident
- *  (`DocEntry::group`). Deriving the parent from `rel` would file it under a
- *  `.planning/` directory the walk deliberately does not show. */
-export function tree(entries: DocEntry[]): DocNode[] {
-  const roots: DocNode[] = [];
-  const dirs = new Map<string, Extract<DocNode, { kind: "dir" }>>();
-  for (const e of entries) {
-    let into = roots;
-    if (e.group) {
-      let path = "";
-      for (const seg of e.group.split("/")) {
-        path = path ? `${path}/${seg}` : seg;
-        let dir = dirs.get(path);
-        if (!dir) {
-          dir = { kind: "dir", path, name: seg, kids: [], count: 0 };
-          dirs.set(path, dir);
-          into.push(dir);
-        }
-        into = dir.kids;
-      }
-    }
-    into.push({ kind: "doc", entry: e });
-  }
-  // The count on a directory row is its WHOLE subtree, which is the number a
-  // collapsed row has to state — "archive (31)" while showing nothing is the
-  // only thing telling you what is behind it.
-  const count = (n: DocNode): number =>
-    n.kind === "doc" ? 1 : (n.count = n.kids.reduce((a, k) => a + count(k), 0));
-  roots.forEach(count);
-  return roots;
-}
 
 /** One level of the tree, and then itself.
  *
