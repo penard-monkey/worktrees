@@ -5,6 +5,54 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Terminal history has never been run in the real app.** Scrollback restore,
+  the width reflow and per-tab history all shipped on gates, guard scripts and
+  the browser harness — and CLAUDE.md is explicit that the mock answers in a
+  microtask, models no shells and no time, and that three v0.12.x bugs passed
+  every gate before being found by running the app. The matrix that matters:
+  a tab with `vim` open when you quit (the replay-mute burst, now carried
+  across a restart rather than dying with the process); quitting wide and
+  reopening narrow (the reflow's payoff); `exit` then Restart; closing a tab;
+  arrow-up in two tabs with `wc -l ~/.zsh_history` either side; `kill -9` to
+  confirm `INC_APPEND_HISTORY` held. `app/scripts/sandbox.sh --app`.
+  _From: [2026-09-20 terminal-history](docs/sessions/2026-09-20-terminal-history/summary.md)_
+
+- **Per-tab shell history does nothing under fish.** The scheme is ZDOTDIR,
+  which is zsh-only; bash gets a plain `HISTFILE` and everything else is left
+  alone with one log line. That "everything else" includes fish, which is the
+  login shell on the machine this was built on — so the feature ships off for
+  its first user. `fish_history` in the environment probably selects a session
+  file, but that was not verified and a guess is worse than a skip.
+  _From: [2026-09-20 terminal-history](docs/sessions/2026-09-20-terminal-history/summary.md)_
+
+- **An xterm crash nobody has explained.** `TypeError: undefined is not an
+  object (evaluating 'this._renderer.value.dimensions')` from `Viewport.
+  syncScrollArea` — 123 occurrences in `app.log`, first seen 2026-09-19
+  05:01:55Z, and reproducible in the mock harness against an unmodified
+  frontend. An unhandled throw inside an effect unmounts the whole surface,
+  which is the shape of "the terminal pane lost something", so it is worth
+  chasing even though nothing has been traced to it yet. It looks like
+  `resize`/`syncScrollArea` reaching a terminal whose renderer is already
+  disposed.
+  _From: [2026-09-20 terminal-history](docs/sessions/2026-09-20-terminal-history/summary.md)_
+
+- **`fn claim` is never used** (`app/src-tauri/src/viewer.rs`) — the one
+  warning `cargo check -p app` now emits. Arrived with #311; left alone here
+  because silently editing another change's file inside an unrelated PR is
+  worse than the warning.
+  _From: [2026-09-20 terminal-history](docs/sessions/2026-09-20-terminal-history/summary.md)_
+
+- **The personal skills repo has no remote, and that already cost it once.**
+  `~/workspace/claude-skills` — which CLAUDE.md and `.claude/close-out.md`
+  both point at — was gone from the machine. The 2026-08-10 session that
+  created it recorded the gap in its own follow-ups ("it exists on this
+  machine only") and it went unfixed. The skill was reconstructed from the
+  pre-move `SKILL.md` at `ff5ebf8^`, that summary's account of what the move
+  changed, and the step numbering `.claude/close-out.md` still refers to — so
+  it is faithful in substance, not byte-identical. Nothing in THIS repo
+  prevents a recurrence.
+  _From: [2026-09-20 terminal-history](docs/sessions/2026-09-20-terminal-history/summary.md)_
+
 - **`sessions:busy` has no mount-time pull.** The backend emits it only when
   the busy/waiting set CHANGES, and the frontend only ever listens — so a
   webview that mounts after the first poll tick holds empty sets until some
