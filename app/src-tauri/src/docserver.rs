@@ -754,6 +754,19 @@ fn bundle(ctx: &Ctx) -> Response<Full<Bytes>> {
     }
 }
 
+/// The element the bundle mounts on — `app/viewer/main.tsx`'s
+/// `document.getElementById(…)`.
+///
+/// It is a constant with a test behind it because the two halves of this
+/// feature were built in separate worktrees and disagreed about it: the server
+/// emitted `app`, the bundle looked for `root`, and the result was a **blank
+/// page with no console error** — a missing mount point is not an exception, so
+/// nothing anywhere said a word. Every route answered 200 and the whole thing
+/// was silently dead. `the_shell_mounts_where_the_bundle_looks` reads the id
+/// back out of `main.tsx` rather than repeating it here, so the two cannot
+/// drift apart again without going red.
+const MOUNT_ID: &str = "root";
+
 /// The shell: a small HTML file that loads the bundle and gets out of the way.
 ///
 /// It carries no data of its own — no facts, no document, not even the place's
@@ -769,7 +782,7 @@ fn shell(place: &str) -> Response<Full<Bytes>> {
          <meta name=\"referrer\" content=\"no-referrer\">\n\
          <meta name=\"worktrees-place\" content=\"{p}\">\n\
          <title>{p} — docs</title>\n\
-         </head>\n<body>\n<div id=\"app\"></div>\n\
+         </head>\n<body>\n<div id=\"{MOUNT_ID}\">loading the documents viewer…</div>\n\
          <script src=\"../../viewer.js\" defer></script>\n\
          </body>\n</html>\n"
     );
@@ -1285,6 +1298,45 @@ mod tests {
             assert_eq!(header(&resp, "connection").as_deref(), Some("close"), "{path}");
             assert_eq!(header(&resp, "x-content-type-options").as_deref(), Some("nosniff"), "{path}");
         }
+    }
+
+    /// The shell must mount where the bundle actually looks.
+    ///
+    /// This is the test whose absence let the two halves of this feature ship
+    /// past each other: the server emitted `<div id="app">`, `main.tsx` called
+    /// `getElementById("root")`, and every route answered 200 while the page
+    /// rendered **nothing at all** — no exception, no console message, because
+    /// a mount point that is not there is not an error, it is an absence. Two
+    /// worktrees each measured their own half green.
+    ///
+    /// So it reads the id back out of `main.tsx` instead of restating it. A
+    /// literal here would be a third copy of the same fact and would pass
+    /// happily while the bundle moved underneath it — the drift-check shape
+    /// this repo already uses for `dnd.ts::predictTier` and the usage tokens.
+    #[test]
+    fn the_shell_mounts_where_the_bundle_looks() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../viewer/main.tsx"),
+        )
+        .expect("app/viewer/main.tsx — the bundle's entry point; renamed?");
+        let want = src
+            .split_once("getElementById(\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(id, _)| id.to_string())
+            .expect("main.tsx no longer mounts with getElementById — find what it does now");
+        assert_eq!(
+            MOUNT_ID, want,
+            "the shell mounts #{MOUNT_ID} and the bundle looks for #{want}: the page would render nothing, silently",
+        );
+
+        let l = live("mount");
+        let (p, t) = (l.h.port, l.h.token.clone());
+        let host = format!("127.0.0.1:{p}");
+        let body = body(&get(p, &format!("/{t}/p/one/"), &host, ""));
+        assert!(
+            body.contains(&format!("id=\"{want}\"")),
+            "the served shell carries no #{want} for the bundle to mount on:\n{body}",
+        );
     }
 
     /// The shell loads the bundle and nothing else, and it is only reachable at
