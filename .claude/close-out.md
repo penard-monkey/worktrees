@@ -39,6 +39,12 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
   should be empty — and check for untracked files and stashes, because the
   reflog will NOT show the move (it only records this tree's own checkouts).
   Give every tree its own `<tree>-next`.
+- **`git checkout -B <tree>-next origin/main` makes the idle base TRACK main.**
+  Step 8's own command, run to park a tree, sets the new branch's upstream to
+  `origin/main` — so a later bare `git push` from that parked worktree targets
+  main directly, and `git status` reads "up to date with origin/main" on a
+  branch that is not it. Finish with `git branch --unset-upstream`; the idle
+  bases have no remote counterpart and are not meant to.
 - **The archive PR is docs-only and CI skips it by design** (`ci.yml`
   `paths-ignore`: `docs/**`, `ROADMAP.md`, `CLAUDE.md`, `.claude/**`, root
   prose docs). Zero checks on the PR is the expected state — merge without
