@@ -8,26 +8,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 - **Read a place's docs in the browser, diagrams and all.** The Docs tab grows
   an "Open this place in the browser" button and a per-row browser action. The
-  app spawns one small viewer on first use — never at launch — and serves it a
-  *derived* copy of the place's documents rather than the repo's own files: the
-  staleness header is injected into every page (a browser tab is further from
-  the place than the dock is, so it needs it more), YAML frontmatter stops being
-  a "Metadata" block on every page, and a mermaid node whose id names a page in
-  the index becomes a real link to it. A `click` directive the *document* wrote
-  is stripped first — strict mode blocks callbacks but an author-controlled
-  `href` is still an author-controlled href in a repo you cloned five seconds
-  ago. Nothing is written into your tree.
+  app starts one small documentation server on first use — never at launch —
+  and serves a *derived* copy of the place's documents rather than the repo's
+  own files: YAML frontmatter stops being a "Metadata" block on every page, the
+  staleness facts are shown as a live header rather than baked into the text,
+  and a mermaid node whose id names a page in the index becomes a real link to
+  it. A `click` directive the *document* wrote is stripped first — strict mode
+  blocks callbacks but an author-controlled `href` is still an
+  author-controlled href in a repo you cloned five seconds ago. Nothing is
+  written into your tree.
 
-  The viewer is loopback-only and the app **re-proves that on every spawn**: it
-  asks the running process for something while claiming to be a host it is not,
-  and anything other than a refusal kills the child and reports rather than
-  handing back a URL. A loopback bind keeps other machines out; it does not keep
-  out the browser on this one, which runs code from strangers and can reach
-  127.0.0.1 — and these documents are the kind that carry a signed agreement.
+  The page stays live as you work. It asks the app about once a second whether
+  anything moved, gets a 410-byte "no" when nothing has, and when something has
+  it replaces only the paragraphs whose text actually changed — so your scroll
+  position, your selection and your place in a long document survive an edit
+  landing underneath you. A reload does not; that is why it is not a reload.
 
-  With no viewer installed the Docs tab is exactly what it was: it lists,
-  filters, reads and reveals every document, and only that one button fails,
-  once, out loud.
+  The server is loopback-only, holds an unguessable token that is new every
+  launch, refuses any request that does not name the loopback interface it is
+  bound to, refuses any cross-origin request outright, sends no CORS header to
+  anyone, serves nothing outside the copy it generated, and dies with the app.
+  A loopback bind keeps other machines out; it does not keep out the browser on
+  this one, which runs code from strangers and can reach 127.0.0.1 — and these
+  documents are the kind that carry a signed agreement.
+
+  With no viewer bundle installed the Docs tab is exactly what it was: it
+  lists, filters, reads and reveals every document, and only the browser page
+  is missing.
 
 ## [0.26.0] - 2026-09-19
 

@@ -61,7 +61,7 @@ use hyper::body::Bytes;
 use hyper::header::{HeaderValue, CACHE_CONTROL, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, ORIGIN};
 use hyper::{Method, Request, Response, StatusCode};
 
-use crate::viewer::{Group, ASSET_EXTS, DOC_MAX_BYTES, PLACE_KEY_MAX};
+use crate::viewer::{Group, DOC_MAX_BYTES, PLACE_KEY_MAX};
 
 /// How long one connection gets, start to finish. A loopback client that has
 /// opened a socket and then says nothing holds a task and a file descriptor;
@@ -103,14 +103,10 @@ const SHELL_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'
 /// `default-src 'none'` cannot run script even when navigated to directly.
 /// Sent on every asset, not only the ones that could carry script, because an
 /// allow-list that grows is the thing that forgets.
-const ASSET_CSP: &str = "default-src 'none'";
-
-/// The asset policy, for the allow-list's test to assert against. Re-admitting
-/// `svg` to `viewer::ASSET_EXTS` and sending this header are ONE decision, and
-/// a constant a test can read is what keeps them from being separated.
-pub fn asset_csp() -> &'static str {
-    ASSET_CSP
-}
+/// Re-admitting `svg` to `viewer::ASSET_EXTS` and sending this header are ONE
+/// decision, so the allow-list's own test reads this constant — see
+/// `viewer::tests::an_svg_is_copied_only_because_the_response_makes_it_inert`.
+pub(crate) const ASSET_CSP: &str = "default-src 'none'";
 
 // ── the running server ───────────────────────────────────────────────────────
 
@@ -730,7 +726,6 @@ fn asset(p: &Snapshot, rel_encoded: &str) -> Response<Full<Bytes>> {
     else {
         return text(StatusCode::NOT_FOUND, "no such asset");
     };
-    debug_assert!(ASSET_EXTS.contains(&ext.as_deref().unwrap_or("")));
     let Some(file) = safe_under(&p.tree, &rel) else {
         return text(StatusCode::NOT_FOUND, "no such asset");
     };
@@ -1028,11 +1023,18 @@ mod tests {
     struct Live {
         h: Handle,
         tree: PathBuf,
-        _rt: (),
     }
 
+    /// Stops the server however the test ends.
+    ///
+    /// A `#[test]` that panics before its own teardown leaves a REAL server
+    /// holding a REAL port on the machine of whoever ran it — a test suite
+    /// reproducing, in miniature, the exact failure the lifecycle rules exist
+    /// to prevent. It happened once in this lineage, on port 53381, and was
+    /// found by hand.
     impl Drop for Live {
         fn drop(&mut self) {
+            self.h.abort_for_test();
             let _ = std::fs::remove_dir_all(&self.tree);
         }
     }
@@ -1057,7 +1059,7 @@ mod tests {
         )]));
         let _g = crate::viewer::tests::rt().enter();
         let h = start(places, None).unwrap();
-        Live { h, tree, _rt: () }
+        Live { h, tree }
     }
 
     /// One raw request, byte for byte as given. Raw sockets rather than `curl`
@@ -1121,7 +1123,6 @@ mod tests {
         assert_eq!(status(&loopback), 200, "{loopback}");
         assert!(body(&loopback).contains("README.md"), "{loopback}");
 
-        l.h.abort_for_test();
     }
 
     /// Two `Host` headers is not an ambiguity to resolve — it is a request built
@@ -1138,7 +1139,6 @@ mod tests {
         );
         assert!(status(&resp) == 400 || status(&resp) == 403, "{resp}");
         assert!(!body(&resp).contains("README"), "{resp}");
-        l.h.abort_for_test();
     }
 
     /// No CORS header is ever sent, to anyone — a cross-origin request is
@@ -1157,7 +1157,6 @@ mod tests {
         for r in [&ok] {
             assert!(header(r, "access-control-allow-origin").is_none(), "a CORS header was sent: {r}");
         }
-        l.h.abort_for_test();
     }
 
     /// A wrong token, a missing one, and a traversal are all the same flat
@@ -1181,7 +1180,6 @@ mod tests {
             assert_eq!(status(&resp), 404, "{path}: {resp}");
             assert!(!body(&resp).contains("not ours"), "{path} served a file outside the tree");
         }
-        l.h.abort_for_test();
     }
 
     /// `GET` only, and no request body on anything.
@@ -1203,7 +1201,6 @@ mod tests {
             ),
         );
         assert_eq!(status(&bodied), 400, "{bodied}");
-        l.h.abort_for_test();
     }
 
     /// The conditional GET the whole transport rests on: the page sends what it
@@ -1235,7 +1232,6 @@ mod tests {
         // may not share one.
         let idx = get(p, &format!("/{t}/p/one/index"), &host, "");
         assert_ne!(header(&idx, "etag").unwrap(), etag);
-        l.h.abort_for_test();
     }
 
     /// A place that is no longer served answers `410 Gone`, not `404`. The
@@ -1253,7 +1249,6 @@ mod tests {
         // two answers keep meaning different things.
         let resp = get(p, &format!("/{t}/p/NOT_A_KEY/index"), &host, "");
         assert_eq!(status(&resp), 404, "{resp}");
-        l.h.abort_for_test();
     }
 
     /// An asset states its own type and forbids everything else.
@@ -1274,7 +1269,6 @@ mod tests {
         assert_eq!(header(&resp, "x-content-type-options").as_deref(), Some("nosniff"));
         assert_eq!(header(&resp, "content-security-policy").as_deref(), Some("default-src 'none'"));
         assert_eq!(header(&resp, "referrer-policy").as_deref(), Some("no-referrer"));
-        l.h.abort_for_test();
     }
 
     /// The token is in the URL, so a document's outbound link must not carry it
@@ -1291,7 +1285,6 @@ mod tests {
             assert_eq!(header(&resp, "connection").as_deref(), Some("close"), "{path}");
             assert_eq!(header(&resp, "x-content-type-options").as_deref(), Some("nosniff"), "{path}");
         }
-        l.h.abort_for_test();
     }
 
     /// The shell loads the bundle and nothing else, and it is only reachable at
@@ -1321,12 +1314,19 @@ mod tests {
         // serving an empty file the page would fail to parse.
         let js = get(p, &format!("/{t}/viewer.js"), &host, "");
         assert_eq!(status(&js), 404, "{js}");
-        l.h.abort_for_test();
     }
 
     /// Bound to loopback, and to nothing else. The one-line version of §4.3:
     /// these documents carry a client's signed agreement, and a docs server
     /// reachable from the LAN is a data leak with a nice font.
+    ///
+    /// **The witness is a second bind.** `0.0.0.0:<our port>` succeeds while a
+    /// loopback-only listener holds that port, and fails with `EADDRINUSE` if
+    /// the listener is on the wildcard — so this goes red the moment the bind
+    /// address widens, which nothing else here would notice. (Measured on this
+    /// platform before it was written down; a bind assertion that is really a
+    /// tautology is worse than none, and the first version of this test was
+    /// one.)
     #[test]
     fn the_server_is_bound_to_loopback_and_its_token_is_fresh_each_time() {
         let a = live("bind-a");
@@ -1334,11 +1334,23 @@ mod tests {
         assert_ne!(a.h.token, b.h.token, "two launches shared a token");
         assert_eq!(a.h.token.len(), 32);
         assert!(a.h.token.chars().all(|c| c.is_ascii_hexdigit()));
-        // A non-loopback address cannot reach it: binding the same port on a
-        // routable interface succeeds precisely because the server is not there.
-        let ext = std::net::TcpListener::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), a.h.port));
-        assert!(ext.is_err() || ext.is_ok(), "the bind is what it is; the assertion is the token above");
-        a.h.abort_for_test();
-        b.h.abort_for_test();
+        assert!(
+            std::net::TcpListener::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), a.h.port)).is_ok(),
+            "0.0.0.0:{} is taken, so the server is not bound to loopback alone",
+            a.h.port
+        );
+    }
+
+    /// The allow-list and the content types are two tables that have to agree:
+    /// an extension copied into the tree with no type here is a `404` on an
+    /// image that is sitting right there, and a type here with no allow-list
+    /// entry is a route onto a file that is never copied.
+    #[test]
+    fn the_asset_allow_list_and_the_content_types_are_the_same_set() {
+        let mut a: Vec<&str> = crate::viewer::ASSET_EXTS.to_vec();
+        let mut b: Vec<&str> = ASSET_TYPES.iter().map(|(e, _)| *e).collect();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
     }
 }

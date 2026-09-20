@@ -1614,7 +1614,7 @@ pub(crate) mod tests {
         // the assertion that ties it to the allow-list, so that deleting the
         // header cannot quietly re-arm every `logo.svg` in every place.
         assert!(
-            crate::docserver::asset_csp().contains("default-src 'none'"),
+            crate::docserver::ASSET_CSP.contains("default-src 'none'"),
             "an SVG is served with no policy on it"
         );
 
