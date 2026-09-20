@@ -64,6 +64,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   as before and are never modified.
 
 ### Fixed
+- **Your named terminal tabs come back.** Reopen the app, go to a place's
+  Terminal tab, and the strip could collapse to a single unnamed `sh 1` — while
+  the tabs you had named sat untouched in `ui-state.json`, invisible until you
+  left the place and came back. The restore reads the remembered strip from
+  persisted settings, and the effect that loads those settings awaits an IPC
+  round trip: a place entered inside that window read the empty defaults, found
+  nothing to union with the (also empty, post-restart) live shell list, and fell
+  back to one default tab. It never wrote that fallback back — which is why
+  nothing was lost — but nothing re-ran the restore either, so the tabs stayed
+  gone. It now re-runs when settings land, the same signal the Files viewer's
+  restore already used for exactly this.
 - **The usage meter no longer disappears when a poll fails.** The endpoint it
   reads rate-limits in bursts — one episode lasted four and three-quarter
   minutes — and a single refusal used to take the whole widget off screen until

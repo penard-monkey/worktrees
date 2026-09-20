@@ -2024,6 +2024,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // last_seen_version → the What's-new sheet.
     case "get_settings": {
       if (location.search.includes("whatsnew")) return { last_seen_version: "0.2.0" };
+      // ?slowsettings=<ms> — the real get_settings is an IPC round trip, and the
+      // mock's microtask hides every restore that reads settings before they
+      // land. See ?slowlist for the same idea on list_workspace.
+      {
+        const m = /slowsettings=(\d+)/.exec(location.search);
+        if (m) await new Promise((r) => setTimeout(r, Number(m[1])));
+      }
       try {
         const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY);
         return raw ? JSON.parse(raw) : null;

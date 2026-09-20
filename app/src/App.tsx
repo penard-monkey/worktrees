@@ -894,8 +894,10 @@ function TermTabRename({ initial, onCommit, onCancel }: {
   );
 }
 
-function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError, findOpen, findToken, onFindClose }: {
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, hydratedTick, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError, findOpen, findToken, onFindClose }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
+  /** Bumped once, when persisted settings land — see the restore below. */
+  hydratedTick: number;
   names: Record<number, string>; onRename: (index: number, name: string | null) => void;
   tabs: number[]; onTabs: (ids: number[]) => void;
   activeTab: number | null; onActiveTab: (index: number | null) => void;
@@ -994,8 +996,18 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     // sessionUp intentionally excluded — its transitions are handled below so a
     // flip doesn't clobber the user's tabs mid-session. `upToken` is that
     // handling for down→up: a fresh restore, rather than the raw flip.
+    //
+    // `hydratedTick` is here for the reason the Files viewer's restore already
+    // depends on it: the settings layout effect AWAITS an invoke, so a place
+    // entered before it resolves reads DEFAULTS' empty `term_tabs`/
+    // `term_tab_names`. The union is then empty and the restore falls back to a
+    // single unnamed `sh 1` — while the real strip sits untouched on disk,
+    // because the restore deliberately never writes its fallback back. Nothing
+    // else re-runs it, so the tabs stay gone until you leave the place and
+    // return. Re-running on hydration is safe: the union includes the live
+    // shells, so a tab added in that window survives it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo, slug, upToken]);
+  }, [repo, slug, upToken, hydratedTick]);
 
   // When the place's session goes DOWN, Close swept its dock shells too (same
   // rule as the tmux era: scratch shells die with the place) — clear the tabs so
@@ -6990,6 +7002,7 @@ function App() {
                   <TerminalTabs key={sel.repo + "|" + sel.slug}
                     repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
                     termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
+                    hydratedTick={hydratedTick}
                     names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
                     onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
                     tabs={(settings.term_tabs ?? {})[sel.repo + "|" + sel.slug] ?? []}
