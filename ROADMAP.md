@@ -85,16 +85,24 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   prefix is the only thing left holding it up.
   _From: [2026-09-18 claude-status-indicator](docs/sessions/2026-09-18-claude-status-indicator/summary.md)_
 
-- **Remove the MCP resource debug logging (gate: workspace version 0.26.0).** The
+- **Remove the MCP resource debug logging (gate: workspace version 0.27.0 —
+  DEFERRED ONCE from 0.26.0, and not for a good reason).** The
   `@worktrees:place://…` path cannot be tested here — there is no fake claude —
   so `worktrees mcp` currently appends every `resources/list`, every
   `resources/read` (including a MISS, which means the client's cached list and
   ours have diverged), and every `list_changed` with the places that moved, to
   `~/.cache/worktrees/mcp-debug.log`. It is there to find the issues only real
   use will surface. `mcp::tests::the_debug_log_is_temporary_and_says_so` goes
-  red when the workspace version reaches 0.26.0 — the release bump after this
-  feature ships — and its message lists everything to delete, so this entry is a
-  pointer, not the reminder. (A version, not a date: a date bomb fires on
+  red when the workspace version reaches `REMOVE_AT_VERSION` and its message
+  lists everything to delete, so this entry is a pointer, not the reminder. It
+  fired on schedule at the v0.26.0 bump and was extended by one cycle, because
+  the evidence it asks for did not exist: no `mcp-debug.log` anywhere, because
+  the server was never registered in `~/.claude.json`. Nothing was learned
+  because nothing ran. The extension therefore carries a CONDITION — register
+  the server and actually use `@worktrees:place://…` this cycle. If 0.27 finds
+  the log empty again, delete the apparatus regardless: that is the answer that
+  real use is not coming, and a second extension on the same reasoning is how a
+  temporary thing becomes permanent. (A version, not a date: a date bomb fires on
   whatever unrelated PR is open that morning, and passes SILENTLY on a runner
   with no `date`.) Before removing it, read the log: whatever it caught should
   become a test or a note here.
