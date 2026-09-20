@@ -25,21 +25,26 @@
 //!    back as an H1 — `DocEntry::title` already holds it, extracted once by the
 //!    walk, and re-parsing it here would be that same second reader.
 //!
-//! 2. **Inject the staleness header**, first thing, on every page. §1.1's whole
-//!    hazard is a document that does not say which place it is from: seven of
-//!    valleos's eleven places carry the pre-restructure `docs/` tree and four
-//!    carry the new one, and an unlabelled 53-commits-old ADR reads as current.
-//!    A browser tab is FURTHER from the place than the dock is (§7.4), so it
-//!    needs the header more, not less. The facts are `DocsPane.tsx`'s — and so
-//!    is the ref `behind` is measured against: the project's BASE ref, never
-//!    `Place::upstream`. §11.4 has the evidence and the draft had it wrong.
+//! 2. **Restore the title** the frontmatter carried, when stripping it took the
+//!    document's only one.
+//!
+//! The staleness facts (§1.1: a document that does not say which place it is
+//! from reads as current when it is 53 commits old — seven of valleos's eleven
+//! places carry the pre-restructure `docs/` tree and four carry the new one)
+//! are NOT a transform. They are `Staleness`, which the app fills and the
+//! server hands the page as DATA (`doc`'s `meta`), rendered live beside the
+//! text. A markdown copy composed into the body would be a second, frozen
+//! answer two inches from the first. What must never drift is the fact set and
+//! the ref `behind` is counted against — the project's BASE ref, never
+//! `Place::upstream` (§11.4 has the evidence and the draft had it wrong).
 //!
 //! 3. **Strip every author-supplied mermaid `click` directive**, then emit our
 //!    own. §5.3 rule 1, and it is security rather than tidiness: strict mode
 //!    blocks `click … call fn()` but renders `click NODE "<href>"` as a real
 //!    anchor, and that href was written by a repo this tool will happily open
 //!    five seconds after cloning it. Only tool-emitted targets survive, and by
-//!    §5.3 rule 2 a target that is not loopback is not a target.
+//!    §5.3 rule 2 a target that is not a same-page `#/` fragment is not a
+//!    target (`is_fragment_target`).
 //!
 //! And one thing that is not a transform at all: **which local files a page
 //! needs beside it** (`image_refs`, `asset_rel`). A document referencing
@@ -62,7 +67,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::docs::{self, DocEntry};
 
-/// The facts the staleness header states, as the app already holds them.
+/// The facts the page states about the place a document came from, as the app
+/// already holds them — handed to the browser as `doc`'s `meta` and rendered
+/// there, never composed into the document's text (see the module note).
 ///
 /// Field-for-field a subset of `Place` (`model.rs`) plus the two things `Place`
 /// cannot carry: `base`, which `list_docs` gets from `Project::base_ref()`, and
@@ -99,14 +106,14 @@ pub struct Staleness {
     /// documents move, so the body of the page can be seconds old while the
     /// numbers above it are from the last open — and every git fact here costs a
     /// fan-out to recompute, which §15.3 refused for a click and is worse on a
-    /// timer. Two ages, so the header says two ages: the reader is told when the
+    /// timer. Two ages, so the page shows two ages: the reader is told when the
     /// text was copied and, separately, when the status was measured.
     ///
     /// A copy that cannot say how old it is, in a feature whose whole purpose is
     /// to stop people reading stale documents, is §1.1's failure one level in.
     ///
-    /// `0` means unknown and prints nothing — the same convention `age` uses for
-    /// a missing commit epoch, and the reason `Default` is safe here.
+    /// `0` means unknown and shows nothing — the same convention the page uses
+    /// for a missing commit epoch, and the reason `Default` is safe here.
     pub derived_epoch: i64,
 }
 
@@ -115,7 +122,7 @@ pub struct Staleness {
 ///
 /// `url` is the whole viewer-specific surface of this module. It returns `None`
 /// for a page the viewer is not serving, and whatever it returns is still put
-/// through `is_loopback_target` before anything is emitted — the rule is
+/// through `is_fragment_target` before anything is emitted — the rule is
 /// enforced here, on the way out, not trusted to the caller that built the
 /// string.
 pub struct Links<'a> {
@@ -163,30 +170,18 @@ const KEYWORDS: [&str; 12] = [
 /// where one node id ends and the next begins.
 const LINK_CHARS: [char; 7] = ['-', '=', '.', '<', '>', '~', '&'];
 
-/// One document, transformed: the staleness header, then the body.
+/// One document, transformed: frontmatter stripped, the title restored if
+/// stripping took it, diagram `click` directives rewritten.
 ///
-/// `entry` is the row `docs::index_with` produced for it, `text` is the file's
-/// content, and nothing else is read.
-///
-/// **The header is prose here and DATA in the server** (`doc`'s `meta`), which
-/// is why the split below exists rather than being tidiness: a surface that
-/// renders the facts itself must not also receive them as a blockquote, or the
-/// reader is told twice and the second copy cannot update. `body` is that
-/// surface's half; this composition is the one that writes a self-contained
-/// markdown file, and its output is unchanged.
-pub fn document(entry: &DocEntry, text: &str, stale: &Staleness, links: &Links) -> String {
-    let mut out = header(stale);
-    out.push_str(&body(entry, text, links));
-    out
-}
-
-/// `document` without the staleness header — frontmatter stripped, the title
-/// restored if stripping took it, diagram `click` directives rewritten.
-///
-/// This is what the browser page is served as blocks, because the page renders
-/// the same facts from `doc`'s `meta` and renders them LIVE: the header baked
-/// into the text would be a second, frozen copy of numbers the reader is
-/// looking at two inches away. §1.1's hazard with the axes swapped.
+/// This is what the browser page is served as blocks, and it is the WHOLE
+/// transform: there is no second entry point that prepends the staleness facts
+/// as prose. The page renders them itself, LIVE, from `doc`'s `meta`
+/// (`viewer.rs`), and a copy baked into the text would be a second, frozen copy
+/// of numbers the reader is looking at two inches away — §1.1's hazard with the
+/// axes swapped. A markdown header composed here existed for a self-contained
+/// `.md` file that nothing ever asked for; it was dead code carrying a
+/// security-shaped promise about author-controlled strings, which is the worst
+/// kind to keep warm.
 pub fn body(entry: &DocEntry, text: &str, links: &Links) -> String {
     let (had_front, body) = match docs::split_frontmatter(text) {
         Some((_, rest)) => (true, rest),
@@ -204,145 +199,15 @@ pub fn body(entry: &DocEntry, text: &str, links: &Links) -> String {
     out
 }
 
-/// The staleness header, as markdown.
+/// One line of plain text, safe to write into a document we are generating.
 ///
-/// The dock splits these facts over THREE lines because its floor is 240px and
-/// the run that ellipsised first was `origin/main` — the one fact in the header
-/// that appears nowhere else in the app (`DocsPane.tsx`, the note above
-/// `staleness()`). A browser window has no such floor, so the identity facts
-/// share a line and the commit keeps its own paragraph. The WORDS are the
-/// dock's on purpose, so the two surfaces read the same; what must never drift
-/// is smaller and harder than the wording — the fact set, and which ref
-/// `behind` is counted against.
-pub fn header(s: &Staleness) -> String {
-    let mut facts: Vec<String> = Vec::new();
-    if !s.place.trim().is_empty() {
-        facts.push(format!("**{}**", oneline(&s.place)));
-    }
-    let branch = oneline(s.branch.as_deref().unwrap_or(""));
-    facts.push(if branch.is_empty() { "detached".to_string() } else { format!("`{branch}`") });
-    let n = s.dirty_files.unwrap_or(0);
-    facts.push(match (s.dirty.unwrap_or(false), n) {
-        (false, _) => "clean".to_string(),
-        (true, 1) => "1 dirty".to_string(),
-        (true, n) => format!("{n} dirty"),
-    });
-    // `behind: 0` is said out loud. "Up to date" is the state a reader most
-    // wants confirmed, and a line that is simply absent reads identically to
-    // one that could not be computed — which is what `None` means here.
-    if let Some(b) = s.behind {
-        let base = oneline(&s.base);
-        facts.push(match (b, base.is_empty()) {
-            (0, true) => "up to date".to_string(),
-            (0, false) => format!("up to date with `{base}`"),
-            (n, true) => format!("{n} behind"),
-            (n, false) => format!("{n} behind `{base}`"),
-        });
-    }
-    let mut out = format!("> {}\n", facts.join(" · "));
-
-    let subject = oneline(s.last_commit_subject.as_deref().unwrap_or(""));
-    let age = age(s.last_commit_epoch, s.now_epoch);
-    if !subject.is_empty() || !age.is_empty() {
-        let mut last: Vec<String> = Vec::new();
-        if !subject.is_empty() {
-            last.push(format!("`{subject}`"));
-        }
-        if !age.is_empty() {
-            last.push(age);
-        }
-        out.push_str(">\n");
-        out.push_str(&format!("> {}\n", last.join(" · ")));
-    }
-    // WHEN THIS COPY WAS MADE. The facts above are about the place; this one is
-    // about the page the reader is holding, and it is the only line that can
-    // tell them the difference between a document the tool copied a moment ago
-    // and one it copied before lunch. A browser tab left open overnight looks
-    // exactly like a fresh one.
-    //
-    // The second stamp appears only when the two instants differ — i.e. after a
-    // background re-derive, where the text is current and the git line is not.
-    // Printing one timestamp for both would say the status was measured when it
-    // was not, which is the whole class of error this header exists to remove.
-    if s.derived_epoch > 0 {
-        let made = utc_stamp(s.derived_epoch);
-        out.push_str(">\n");
-        if s.now_epoch > 0 && s.now_epoch != s.derived_epoch {
-            out.push_str(&format!("> *derived {made} · status as of {}*\n", utc_stamp(s.now_epoch)));
-        } else {
-            out.push_str(&format!("> *derived {made}*\n"));
-        }
-    }
-    // A rule under it, so the reader can see where the tool stops talking and
-    // the document starts.
-    out.push_str("\n---\n\n");
-    out
-}
-
-/// Unix seconds → `YYYY-MM-DD HH:MM:SS UTC`.
-///
-/// Pure arithmetic, because this module is a pure transform and `sysclock`
-/// shells out to `date` — a spawn per generated page, times the index's 2,000
-/// cap, on a path that already runs on a timer. UTC rather than local for the
-/// same reason it cannot ask `date`, and it is the app log's own timezone
-/// (CLAUDE.md warns about exactly that cross-reference), so the two read
-/// together.
-///
-/// Howard Hinnant's `civil_from_days`, which is exact for every date this can
-/// be handed and needs no table. Days are floored, so a pre-1970 epoch — a
-/// clock that has not been set yet, say — still produces a real date instead of
-/// a negative month.
-fn utc_stamp(epoch: i64) -> String {
-    let days = epoch.div_euclid(86_400);
-    let secs = epoch.rem_euclid(86_400);
-    // Shift the era so that a year starts on 1 March: February, and therefore
-    // the leap day, lands at the END of it and the month-length pattern becomes
-    // one formula.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60
-    )
-}
-
-/// Compact age, the dock's `ago()` vocabulary exactly (`DocsPane.tsx:79`).
-/// A missing or zero epoch is "" rather than "now" — the dock's `if (!epoch)`.
-fn age(epoch: Option<i64>, now: i64) -> String {
-    let Some(e) = epoch.filter(|e| *e != 0) else { return String::new() };
-    let s = now - e;
-    if s < 60 {
-        "now".to_string()
-    } else if s < 3600 {
-        format!("{}m", s / 60)
-    } else if s < 86_400 {
-        format!("{}h", s / 3600)
-    } else {
-        format!("{}d", s / 86_400)
-    }
-}
-
-/// One line of plain text, safe to put inside a code span in a document we are
-/// generating.
-///
-/// Every string in the header is author-controlled: a commit subject is
-/// arbitrary bytes, and `git check-ref-format` lets a BRANCH name carry a
-/// backtick (it forbids space, `~`, `^`, `:`, `?`, `*`, `[` and `\`, not that).
-/// A backtick ends the code span, and the rest of the subject becomes markdown
-/// — including a newline, which ends the blockquote, which puts attacker text
-/// in the document's own voice at the top of every page. Collapse the
-/// whitespace, drop the controls, and neuter the one character that can open a
-/// span.
+/// `body`'s one call site is the restored title, and `DocEntry::title` is
+/// author-controlled: it comes from a `title:` key or an H1 in a repository the
+/// user may have cloned seconds ago. It is written as `# {title}`, so a newline
+/// in it ends the heading and everything after it continues in the document's
+/// own voice, and a backtick opens a code span the rest of the page then lives
+/// inside. Collapse the whitespace, drop the controls, and neuter the one
+/// character that can open a span.
 fn oneline(s: &str) -> String {
     let mut out = String::new();
     let mut space = false;
@@ -427,7 +292,17 @@ pub fn diagrams(text: &str, links: &Links) -> String {
 }
 
 /// An opening fence: three or more backticks or tildes, plus its info string.
+///
+/// Indented by at most three, because CommonMark makes the fourth space an
+/// indented CODE BLOCK whose content is literal. `blocks::fence_at` has always
+/// said so; this said any indentation would do, and the two readings of one
+/// line disagreed in both directions — an indented EXAMPLE of a diagram was
+/// rewritten as if it were one, and an indented fence that never closed
+/// swallowed the rest of the document into a diagram nobody wrote.
 fn opens(line: &str) -> Option<(char, usize, String)> {
+    if indent_of(line) > 3 {
+        return None;
+    }
     let t = line.trim_start();
     let c = t.chars().next()?;
     if c != '`' && c != '~' {
@@ -507,16 +382,34 @@ fn declick(line: &str) -> Option<String> {
     }
 }
 
-/// Split a line on top-level `;`. A `;` inside a quoted label (`A["a; b"]`) is
-/// part of the label, and splitting there would cut a node in half.
+/// Split a line on top-level `;`. A `;` inside a label is part of the label,
+/// and splitting there cuts a node in half.
+///
+/// Quotes are not enough, because the quotes are optional. Mermaid 12 lexes
+/// label text as `/^(?:[^\[\]\(\)\{\}\|\"]+)/` — every character but the
+/// delimiters themselves, `;` included — so `A[Step 2; click Save]` is ONE
+/// vertex with an ordinary English label. Split on that `;` and `declick`
+/// deletes the half beginning `click`, leaving `A[Step 2`, which mermaid
+/// refuses outright (`Expecting 'SQE'`). The rule that exists to protect the
+/// diagram is then the only thing that broke it.
+///
+/// So bracket depth, the way `labels_off` already tracks it. What is
+/// deliberately NOT tracked is the pipe form (`A -->|text| B`): `|` is a
+/// toggle rather than a pair, so an odd one anywhere on a line would suppress
+/// splitting for the whole rest of it — and this split is what finds a `click`
+/// hidden behind a `;`. A `;` inside a pipe label is still split; the cost is a
+/// diagram, the alternative risks an author-controlled href.
 fn statements(line: &str) -> Vec<&str> {
     let b = line.as_bytes();
-    let (mut out, mut start, mut quoted) = (Vec::new(), 0usize, false);
+    let (mut out, mut start, mut quoted, mut depth) = (Vec::new(), 0usize, false, 0i32);
     // ASCII-only tests, so no index here can land inside a multi-byte char.
     for i in 0..b.len() {
         match b[i] {
             b'"' => quoted = !quoted,
-            b';' if !quoted => {
+            _ if quoted => {}
+            b'[' | b'(' | b'{' => depth += 1,
+            b']' | b')' | b'}' => depth = (depth - 1).max(0),
+            b';' if depth == 0 => {
                 out.push(&line[start..i]);
                 start = i + 1;
             }
@@ -530,19 +423,27 @@ fn statements(line: &str) -> Vec<&str> {
 /// Is this statement a `click` directive?
 ///
 /// Case-insensitively, because being wrong in that direction costs a stripped
-/// line and being wrong in the other costs an author-controlled href. The one
-/// thing that collides is an EDGE whose node is called `click` — `Click --> B`
-/// — and a link operator can never be a click directive's second token, which
-/// is the whole test. `click-->B` does not even reach it: the first token runs
-/// to the `-`.
+/// line and being wrong in the other costs an author-controlled href.
+///
+/// Two things collide with the keyword, and mermaid's own lexer separates both
+/// with one rule: its CLICK token is `/^(?:click[\s]+)/`, the word only when
+/// WHITESPACE follows. So `click[User clicks Save] --> save` is an ordinary
+/// vertex whose id happens to be the word — accepting `[` as the second token
+/// deleted the node and its edge from a diagram this module only meant to read
+/// — and `click --> B` is an edge whose node is called `click`, which the
+/// LINK_CHARS test still catches after the space. `click-->B` does not even
+/// reach either check: the head runs to the `-`.
 fn is_click(stmt: &str) -> bool {
     let t = stmt.trim_start();
     let head: String = t.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
     if !head.eq_ignore_ascii_case("click") {
         return false;
     }
-    let rest = t[head.len()..].trim_start();
-    match rest.chars().next() {
+    let rest = &t[head.len()..];
+    if !rest.starts_with(char::is_whitespace) {
+        return false;
+    }
+    match rest.trim_start().chars().next() {
         None => false,
         Some(c) => !LINK_CHARS.contains(&c),
     }
@@ -582,7 +483,10 @@ fn targets(lines: &[String], links: &Links) -> Vec<(String, String)> {
         let Some(hits) = by_slug.get(&id.to_ascii_lowercase()) else { continue };
         let [entry] = hits[..] else { continue };
         let Some(url) = (links.url)(entry) else { continue };
-        if is_loopback_target(&url) {
+        // Rule 2, enforced HERE rather than trusted to the caller that built
+        // the string: whatever the seam hands back, only a same-page fragment
+        // is ever written into a diagram.
+        if is_fragment_target(&url) {
             out.push((id, url));
         }
     }
@@ -597,11 +501,28 @@ fn slug(rel: &str) -> String {
 
 /// The node ids a flowchart declares, first appearance first.
 ///
-/// This scan can MISS a node; it cannot invent one. Every id it returns is a
-/// token that stood in node position in the source, and a target is only
-/// emitted when that token also names exactly one page — so the failure mode is
-/// a node that did not become a link, never a directive pointing at a node that
-/// is not there.
+/// **This scan can miss a node, and it can also invent one** — the second half
+/// used to be denied here, and the denial was wrong. `labels_off` only removes
+/// a label that is bracketed, quoted or piped; mermaid's OTHER edge-label
+/// spelling has none of those (`A -- text --> B`), so `text` survives into the
+/// tokeniser and stands where a node id would. Hand that diagram a place with a
+/// `text.md` in it and a `click text` is emitted for a node that does not
+/// exist.
+///
+/// It is left alone rather than fixed, because what the emitted directive costs
+/// is bounded and small: mermaid ignores a `click` naming an unknown id, so the
+/// visible result is nothing at all, and the id still had to name exactly one
+/// page in this place's own index before a URL was even asked for. Narrowing it
+/// means teaching this function the unquoted edge-label grammar, which is the
+/// mermaid parser this module exists not to be. Recorded so the next reader
+/// does not take "cannot invent one" as a promise something else may lean on.
+///
+/// One more mismatch worth stating, for the same reason: `seen` dedupes on the
+/// LOWERCASED id while mermaid ids are case-sensitive. `Overview` and
+/// `OVERVIEW` are two nodes to mermaid and one to this, so only the first is
+/// offered a directive. That is the safe direction (a missing link, not a wrong
+/// one) and it matches `slug`, which is lowercased too — but it is a real
+/// divergence from the grammar, not a coincidence.
 fn node_ids(lines: &[String]) -> Vec<String> {
     let (mut out, mut seen) = (Vec::new(), BTreeSet::new());
     let mut first = true;
@@ -708,93 +629,36 @@ fn arrows_off(s: &str) -> String {
     out
 }
 
-/// §5.3 rule 2: a target that is not loopback is not a target.
+/// §5.3 rule 2: a target that is not a SAME-PAGE FRAGMENT is not a target.
 ///
-/// The threat is not another local process — anything running as this user can
-/// read `docs/` without our help (§11.3). It is a WEB PAGE: script in any tab
-/// the user has open can reach `127.0.0.1` where it cannot reach the
-/// filesystem, and these documents carry a client's signed agreement (§4.3).
-/// An href we emit is the one string in a generated page that can point
-/// anywhere, so it is checked here, on the way out, rather than trusted to the
-/// code that built it.
+/// The drill-down used to bake `http://127.0.0.1:<port>/<token>/…` into the
+/// derived text, which made every emitted href a string that could point
+/// anywhere — so the rule was a loopback check, and it had to enumerate the
+/// shapes a prefix test passes (`127.0.0.1.evil.example`, a userinfo `@`, a
+/// `javascript:` scheme, a `\` a browser normalises). A fragment has no
+/// authority to be wrong about: `#/<rel>` is a route inside the page that is
+/// already open, it names no host, opens no socket, and survives the port
+/// changing on the next launch.
 ///
-/// Four shapes this refuses that a `starts_with("http://127.0.0.1")` would not:
+/// What is left to check is therefore small and exact, and it is still checked
+/// on the way OUT rather than trusted to the caller:
 ///
-/// - `http://127.0.0.1.evil.com/` — a host that merely BEGINS with the literal;
-/// - `http://127.0.0.1@evil.com/` — the loopback literal is USERINFO here and
-///   the browser connects to `evil.com`. Any `@` in the authority is refused
-///   outright rather than parsed past: a URL this tool generates for its own
-///   viewer has no credentials in it, so the only thing userinfo can do in a
-///   drill-down target is make the host read as something it is not;
-/// - `javascript:x("http://127.0.0.1")` — a scheme that never opens a socket;
-/// - `http:/\evil.com` and friends — a browser normalises `\` to `/`, so a URL
-///   carrying one does not mean what it reads as.
-///
-/// And the emitted form is `click ID href "<url>"`, so a URL containing a quote
-/// or a newline would not be a bad link — it would be a second directive.
-///
-/// The PORT is deliberately not checked. This module does not know which port
-/// the viewer got; the caller that built the URL does, and narrowing loopback
-/// to one port is its business, not the transform's.
-pub fn is_loopback_target(url: &str) -> bool {
-    if url.is_empty() || url.len() > 2048 {
+/// - it must BEGIN `#/` and name something after it. Not `#x` (an in-page
+///   anchor, which is the author's business and not a drill-down), not a bare
+///   `#`, not `#/` alone — a route to no page is a link that silently does
+///   nothing — and not anything with a scheme: a `javascript:` or `http://`
+///   target is refused by the same test that accepts the only form this module
+///   emits.
+/// - it may not carry a quote, a backslash, an angle bracket, a backtick,
+///   whitespace or a control character. The emitted form is
+///   `click ID href "<url>"`, so a quote or a newline in the target would not
+///   be a bad link — it would be a SECOND directive, with an href nobody here
+///   wrote.
+pub fn is_fragment_target(url: &str) -> bool {
+    if !url.starts_with("#/") || url.len() <= 2 || url.len() > 2048 {
         return false;
     }
-    if url.chars().any(|c| c.is_whitespace() || c.is_control() || "\"'\\<>`".contains(c)) {
-        return false;
-    }
-    let Some((scheme, rest)) = url.split_once("://") else { return false };
-    if !scheme.eq_ignore_ascii_case("http") {
-        return false;
-    }
-    let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if host_port.contains('@') {
-        return false;
-    }
-    let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
-        // IPv6 literal: the colons inside the brackets are not the port's — and
-        // what follows the `]` is a port or NOTHING. `http://[::1].evil.example/`
-        // is the bracketed spelling of the same trick the dotted suffix plays,
-        // and treating the tail as decoration accepts it. (Which this did, until
-        // its own test said so.)
-        match rest.split_once(']') {
-            Some((h, "")) => (h.to_string(), String::new()),
-            Some((h, tail)) => match tail.strip_prefix(':') {
-                Some(p) => (h.to_string(), p.to_string()),
-                None => return false,
-            },
-            None => return false,
-        }
-    } else {
-        match host_port.split_once(':') {
-            Some((h, p)) => (h.to_string(), p.to_string()),
-            None => (host_port.to_string(), String::new()),
-        }
-    };
-    if !port.is_empty() && (!port.chars().all(|c| c.is_ascii_digit()) || port.parse::<u32>().map(|p| p == 0 || p > 65535).unwrap_or(true)) {
-        return false;
-    }
-    is_loopback_host(&host)
-}
-
-/// `localhost`, any `127.0.0.0/8` literal, or `::1`. The same three the `mo`
-/// patch serves (§14) — a name the browser can be pointed at by the user's own
-/// hosts file is still the user's decision, and refusing `localhost` would
-/// reject the form that project's own README documents.
-fn is_loopback_host(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    if host == "::1" || host == "0:0:0:0:0:0:0:1" {
-        return true;
-    }
-    let mut parts = host.split('.');
-    let Some(first) = parts.next() else { return false };
-    if first != "127" {
-        return false;
-    }
-    let rest: Vec<&str> = parts.collect();
-    rest.len() == 3 && rest.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()) && p.parse::<u32>().map(|n| n <= 255).unwrap_or(false))
+    !url.chars().any(|c| c.is_whitespace() || c.is_control() || "\"'\\<>`".contains(c))
 }
 
 // ── assets ──────────────────────────────────────────────────────────────────
@@ -892,7 +756,15 @@ fn inline_images(line: &str, out: &mut Vec<String>) {
             }
             j += 1;
         };
-        let Some(close) = close else { return };
+        // An unclosed `![` is not a reference, but the rest of the line may
+        // still hold one — `![ oops and ![real](a.png)` used to yield NOTHING,
+        // so one stray bracket rendered every image after it broken. Step past
+        // the marker (never past `i` alone, or this does not terminate) and
+        // keep scanning.
+        let Some(close) = close else {
+            i += 2;
+            continue;
+        };
         if b.get(close + 1) != Some(&b'(') {
             i = close + 1;
             continue;
@@ -1030,6 +902,11 @@ fn link_definition(line: &str) -> Option<String> {
 /// - **a `..` that escapes the place**, an **empty component** (`a//b`, a
 ///   trailing `/`), and a **`.git` component** — the rules `RelPath` already
 ///   enforces on a configured path, applied to a reference for the same reasons.
+///   The `.git` test is case-INSENSITIVE: on a case-insensitive volume — this
+///   machine's APFS — `.GIT` names that same directory, so the spelling the
+///   filesystem answers to is the one to refuse. The extension allow-list and
+///   the canonical containment check downstream make the practical impact ~0;
+///   the point is that both layers state the same rule.
 /// - **a control character**, which has no business in a path and can end a
 ///   line in anything that later logs it.
 ///
@@ -1066,7 +943,7 @@ pub fn asset_rel(doc_rel: &str, reference: &str) -> Option<String> {
     // rather than from the walk, so it is checked rather than assumed.
     let mut parts: Vec<&str> = doc_rel.split('/').collect();
     parts.pop();
-    if parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || *p == ".git") {
+    if parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || p.eq_ignore_ascii_case(".git")) {
         return None;
     }
     for comp in r.split('/') {
@@ -1078,7 +955,7 @@ pub fn asset_rel(doc_rel: &str, reference: &str) -> Option<String> {
             ".." => {
                 parts.pop()?;
             }
-            ".git" => return None,
+            _ if comp.eq_ignore_ascii_case(".git") => return None,
             _ => parts.push(comp),
         }
     }
@@ -1512,29 +1389,11 @@ mod tests {
         }
     }
 
-    fn stale() -> Staleness {
-        Staleness {
-            place: "live-docs".into(),
-            branch: Some("live-docs-derive".into()),
-            behind: Some(25),
-            base: "origin/main".into(),
-            dirty: Some(true),
-            dirty_files: Some(3),
-            last_commit_subject: Some("docs(runbook): reconcile §4".into()),
-            last_commit_epoch: Some(1_000_000),
-            now_epoch: 1_000_000 + 7_200,
-            // The open path: the facts were captured at the moment the copy was
-            // made, so the header carries ONE stamp. The tick's case (a copy
-            // newer than its facts) is `a_re_derived_page_dates_its_facts_apart_
-            // from_itself`, which sets them apart deliberately.
-            derived_epoch: 1_000_000 + 7_200,
-        }
-    }
-
-    /// A URL form that is plausible and viewer-shaped, so the tests exercise the
-    /// seam rather than a bare "http://127.0.0.1/".
+    /// The form `viewer::url_for` produces: a SAME-PAGE fragment, so a
+    /// drill-down is a route change in the page already open rather than a
+    /// navigation to a baked-in port.
     fn viewer(e: &DocEntry) -> Option<String> {
-        Some(format!("http://127.0.0.1:6275/live-docs?file={}", e.rel))
+        Some(format!("#/{}", e.rel))
     }
 
     // ── 1. frontmatter ───────────────────────────────────────────────────────
@@ -1543,16 +1402,16 @@ mod tests {
     fn frontmatter_goes_away_and_the_title_it_carried_comes_back_as_a_heading() {
         let e = entry("docs/a.md", "From Frontmatter");
         let src = "---\ntitle: From Frontmatter\nlayout: page\n---\n\nprose here\n";
-        let out = document(&e, src, &stale(), &Links::NONE);
+        let out = body(&e, src, &Links::NONE);
         assert!(!out.contains("layout: page"), "the metadata block survived: {out}");
-        assert!(out.contains("# From Frontmatter"), "the only title the document had is gone: {out}");
+        assert!(out.starts_with("# From Frontmatter"), "the only title the document had is gone: {out}");
         assert!(out.contains("prose here"));
         // …and it is NOT re-added when the body already has its own H1.
         let src = "---\ntitle: From Frontmatter\n---\n# An H1\n";
-        let out = document(&e, src, &stale(), &Links::NONE);
+        let out = body(&e, src, &Links::NONE);
         assert_eq!(out.matches("# ").count(), 1, "two titles: {out}");
         // …nor invented for a document that never had one.
-        let out = document(&entry("docs/b.md", "b"), "just prose\n", &stale(), &Links::NONE);
+        let out = body(&entry("docs/b.md", "b"), "just prose\n", &Links::NONE);
         assert!(!out.contains("# b"), "an H1 the author never wrote: {out}");
     }
 
@@ -1562,166 +1421,27 @@ mod tests {
     #[test]
     fn an_unterminated_rule_is_not_frontmatter_and_the_document_survives() {
         let src = "---\n\n# The Real Title\n\nthe whole document\n";
-        let out = document(&entry("docs/a.md", "a"), src, &stale(), &Links::NONE);
+        let out = body(&entry("docs/a.md", "a"), src, &Links::NONE);
         assert!(out.contains("the whole document"), "the document was deleted: {out}");
         assert_eq!(docs::title_from(src).as_deref(), Some("The Real Title"));
     }
 
-    // ── 2. the staleness header ──────────────────────────────────────────────
-
+    /// `DocEntry::title` is author-controlled — a `title:` key or an H1 out of
+    /// a repository cloned seconds ago — and the restore writes it as
+    /// `# {title}`. A newline in it ends the heading, and everything after it
+    /// continues in the DOCUMENT's own voice rather than the author's; a
+    /// backtick opens a code span the rest of the page then lives inside.
     #[test]
-    fn the_header_is_the_first_thing_in_the_document_and_names_the_base_ref() {
-        let out = document(&entry("docs/a.md", "a"), "# A\n", &stale(), &Links::NONE);
-        assert!(out.starts_with("> "), "the header is not first: {out}");
-        let head = out.split("\n---\n").next().unwrap();
-        assert!(head.contains("**live-docs**"), "{head}");
-        assert!(head.contains("`live-docs-derive`"), "{head}");
-        assert!(head.contains("3 dirty"), "{head}");
-        // …against the BASE ref (§11.4). There is no assertion that it is not
-        // `upstream`, because `Staleness` has no `upstream` field to get it
-        // wrong with — the struct is the guard, and it is a stronger one than a
-        // string test would be.
-        assert!(head.contains("25 behind `origin/main`"), "{head}");
-        assert!(head.contains("2h"), "{head}");
-        assert!(out.ends_with("# A\n"), "{out}");
-    }
-
-    #[test]
-    fn the_headers_words_are_the_docks_words() {
-        let mut s = stale();
-        // `DocsPane.tsx::staleness` / `ago`, fact for fact.
-        s.dirty_files = Some(1);
-        assert!(header(&s).contains("1 dirty"));
-        s.dirty = Some(false);
-        assert!(header(&s).contains("clean"));
-        s.behind = Some(0);
-        assert!(header(&s).contains("up to date with `origin/main`"), "{}", header(&s));
-        s.base = String::new();
-        assert!(header(&s).contains("up to date"));
-        s.behind = Some(4);
-        assert!(header(&s).contains("4 behind"), "no ref is honest; the wrong ref is not: {}", header(&s));
-        assert!(!header(&s).contains("behind `"));
-        // `behind: None` is "not computed", which is not zero and does not render.
-        s.behind = None;
-        assert!(!header(&s).contains("behind"), "{}", header(&s));
-        assert!(!header(&s).contains("up to date"), "{}", header(&s));
-        s.branch = None;
-        assert!(header(&s).contains("detached"), "{}", header(&s));
-        // the age buckets
-        let at = |secs: i64| {
-            let mut s = stale();
-            s.last_commit_epoch = Some(1_000_000);
-            s.now_epoch = 1_000_000 + secs;
-            header(&s)
-        };
-        assert!(at(30).contains("· now\n"));
-        assert!(at(600).contains("· 10m\n"));
-        assert!(at(7_200).contains("· 2h\n"));
-        assert!(at(200_000).contains("· 2d\n"));
-        let mut s = stale();
-        s.last_commit_epoch = None;
-        assert!(!header(&s).contains(" · \n"), "{}", header(&s));
-    }
-
-    /// The copy has to date ITSELF, not only the place it came from.
-    ///
-    /// Everything else in this header ages in the reader's hands without saying
-    /// so: a browser tab left open overnight, on a page the tool copied before
-    /// lunch, looks exactly like one generated a second ago. That is §1.1's
-    /// hazard — a document that does not say which world it is from — reproduced
-    /// inside the feature built to prevent it, one level in.
-    #[test]
-    fn a_derived_page_says_when_it_was_copied() {
-        let mut s = stale();
-        s.now_epoch = 1_789_776_000;
-        s.derived_epoch = 1_789_776_000;
-        let h = header(&s);
-        assert!(h.contains("derived 2026-09-19 00:00:00 UTC"), "no derivation stamp: {h}");
-        // One instant, one stamp: the open path captured the facts and wrote the
-        // copy in the same breath, and saying it twice would invite the reader
-        // to look for a difference that is not there.
-        assert_eq!(h.matches("UTC").count(), 1, "{h}");
-        // Inside the blockquote, like every other fact here.
-        assert!(h.lines().any(|l| l.starts_with("> *derived ")), "{h}");
-    }
-
-    /// The tick's case: the text is current, the git line is not.
-    ///
-    /// The app re-derives a registered place whenever its documents move, and it
-    /// does NOT re-run the git fan-out those numbers came from (§15.3 refused
-    /// that for a click; a timer is worse). So one stamp would be a lie about
-    /// whichever fact it was not measuring — and the lie it tells is "this
-    /// status is current", which is the exact error the header exists to remove.
-    #[test]
-    fn a_re_derived_page_dates_its_facts_apart_from_itself() {
-        let mut s = stale();
-        s.now_epoch = 1_789_776_000; // the button press
-        s.derived_epoch = 1_789_779_661; // an hour and a minute of Claude writing
-        let h = header(&s);
-        assert!(h.contains("derived 2026-09-19 01:01:01 UTC"), "{h}");
-        assert!(h.contains("status as of 2026-09-19 00:00:00 UTC"), "{h}");
-        let line = h.lines().find(|l| l.contains("derived ")).unwrap();
-        assert!(
-            line.find("derived ").unwrap() < line.find("status as of ").unwrap(),
-            "the copy's own age comes first — it is the one fact only this line carries: {line}"
-        );
-    }
-
-    /// `0` is "not known", and a header that answers it with `1970-01-01` would
-    /// be stating a fact nobody supplied. Same convention as a missing commit
-    /// epoch, which renders no age rather than "now".
-    #[test]
-    fn an_unknown_derivation_time_says_nothing_rather_than_1970() {
-        let mut s = stale();
-        s.derived_epoch = 0;
-        let h = header(&s);
-        assert!(!h.contains("derived"), "{h}");
-        assert!(!h.contains("1970"), "{h}");
-        // …and the rest of the header is untouched by its absence.
-        assert!(h.contains("25 behind `origin/main`"), "{h}");
-    }
-
-    /// The stamp is arithmetic rather than `date`, because this module is a pure
-    /// transform and `sysclock` spawns a process per call. Arithmetic that is
-    /// wrong is worse than a spawn, so the era/leap-day handling is asserted
-    /// against dates chosen to break it: a leap day, the day after one, a
-    /// century that is NOT a leap year, one that is, and the epoch itself.
-    #[test]
-    fn the_derivation_stamp_is_the_real_calendar_date() {
-        let mut at = |epoch: i64| {
-            let mut s = stale();
-            s.now_epoch = epoch;
-            s.derived_epoch = epoch;
-            let h = header(&s);
-            let line = h.lines().find(|l| l.starts_with("> *derived ")).unwrap_or("").to_string();
-            line.trim_start_matches("> *derived ").trim_end_matches('*').to_string()
-        };
-        assert_eq!(at(1), "1970-01-01 00:00:01 UTC");
-        assert_eq!(at(1_709_164_800), "2024-02-29 00:00:00 UTC"); // a leap day
-        assert_eq!(at(1_709_251_199), "2024-02-29 23:59:59 UTC"); // …its last second
-        assert_eq!(at(1_709_251_200), "2024-03-01 00:00:00 UTC"); // …and the day after
-        assert_eq!(at(951_782_400), "2000-02-29 00:00:00 UTC"); // 2000 IS a leap year
-        assert_eq!(at(4_107_542_400), "2100-03-01 00:00:00 UTC"); // 2100 is NOT
-        assert_eq!(at(1_789_776_000), "2026-09-19 00:00:00 UTC");
-    }
-
-    /// A commit subject is arbitrary bytes and a branch name may carry a
-    /// backtick. Both land inside a code span in a blockquote WE write, at the
-    /// top of every page — so a backtick plus a newline would end the span, end
-    /// the quote, and continue in the document's own voice.
-    #[test]
-    fn an_author_controlled_fact_cannot_break_out_of_the_header() {
-        let mut s = stale();
-        s.last_commit_subject = Some("ok`\n\n# Trusted heading\n\nfine print".into());
-        s.branch = Some("feat/`x`".into());
-        let h = header(&s);
-        let quote: Vec<&str> = h.lines().take_while(|l| l.starts_with('>')).collect();
-        assert_eq!(quote.len(), h.lines().filter(|l| !l.trim().is_empty() && *l != "---").count(), "text escaped the blockquote: {h}");
-        // The words survive, as WORDS — inside the code span, on one line. What
-        // must not survive is their markdown meaning.
-        assert!(!h.lines().any(|l| l.trim_start().starts_with('#')), "a heading in the tool's own voice: {h}");
-        assert!(h.contains("Trusted heading"), "the subject was not shown at all: {h}");
-        assert_eq!(h.matches('`').count() % 2, 0, "unbalanced code spans: {h}");
+    fn an_author_controlled_title_cannot_break_out_of_the_heading_it_is_restored_into() {
+        let e = entry("docs/a.md", "ok`\n\n## Trusted subheading\n\nfine print");
+        let out = body(&e, "---\ntitle: x\n---\n\nthe real document\n", &Links::NONE);
+        let first = out.lines().next().unwrap_or("");
+        assert!(first.starts_with("# "), "the restore is a heading: {out:?}");
+        // Exactly ONE heading, and the words survive as WORDS inside it.
+        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with('#')).count(), 1, "a heading in the tool's voice: {out:?}");
+        assert!(first.contains("Trusted subheading"), "the title was not shown at all: {out:?}");
+        assert_eq!(first.matches('`').count() % 2, 0, "unbalanced code spans: {first:?}");
+        assert!(out.contains("the real document"));
     }
 
     // ── 3. author `click` directives ─────────────────────────────────────────
@@ -1786,6 +1506,77 @@ graph TD
         assert!(out.contains("A[\"Step 2; click Save\"] --> B"), "a label was cut in half:\n{out}");
     }
 
+    /// The UNQUOTED spelling, which is the one an author writes. Mermaid 12's
+    /// lexer reads label text with `/^(?:[^\[\]\(\)\{\}\|\"]+)/` — `;` is
+    /// ordinary label text — so a quote-only split cuts the node in half, and
+    /// `declick` then deletes the second half as a directive. What survives is
+    /// `  A[Step 2`, which mermaid refuses with `Expecting 'SQE'`: the rule that
+    /// exists to protect the diagram is the thing that broke it.
+    #[test]
+    fn a_semicolon_inside_an_unquoted_label_is_not_a_statement_separator() {
+        let src = "```mermaid\nflowchart TD\n  A[Step 2; click Save] --> B\n```\n";
+        let out = diagrams(src, &Links::NONE);
+        assert!(out.contains("A[Step 2; click Save] --> B"), "a label was cut in half:\n{out}");
+        // …and the same for the other two bracket shapes the lexer excludes.
+        for (open, close) in [("(", ")"), ("{", "}")] {
+            let src = format!("```mermaid\nflowchart TD\n  A{open}Step 2; click Save{close} --> B\n```\n");
+            let out = diagrams(&src, &Links::NONE);
+            assert!(out.contains(&format!("A{open}Step 2; click Save{close} --> B")), "cut in half:\n{out}");
+        }
+        // The protection itself is unchanged: a real second statement still goes.
+        let src = "```mermaid\nflowchart TD\n  A[Step 2] --> B; click A \"https://evil.example\"\n```\n";
+        let out = diagrams(src, &Links::NONE);
+        assert!(!out.contains("evil.example"), "a directive sharing a line survived:\n{out}");
+        assert!(out.contains("A[Step 2] --> B"), "{out}");
+    }
+
+    /// Mermaid's CLICK token is `/^(?:click[\s]+)/` — the keyword only when
+    /// whitespace follows. `click[User clicks Save] --> save` is an ordinary
+    /// vertex whose id happens to be the word, and stripping it deletes the node
+    /// AND its edge from a diagram this tool only meant to read.
+    #[test]
+    fn a_node_whose_id_is_click_keeps_its_label_and_its_edge() {
+        let src = "```mermaid\nflowchart TD\n  click[User clicks Save] --> save\n  clickable(Also fine) --> B\n```\n";
+        let out = diagrams(src, &Links::NONE);
+        assert!(out.contains("click[User clicks Save] --> save"), "a vertex was read as a directive:\n{out}");
+        assert!(out.contains("clickable(Also fine) --> B"), "{out}");
+    }
+
+    /// The wart `node_ids` documents, pinned so the docstring is a fact rather
+    /// than a recollection. An unquoted edge label is NOT bracketed, quoted or
+    /// piped, so `labels_off` cannot remove it and the word stands where a node
+    /// id would — this scan can invent a node after all. It is harmless and
+    /// bounded (mermaid ignores a `click` naming an unknown id) and the fix is
+    /// a mermaid parser, so the behaviour stays and the claim is corrected.
+    #[test]
+    fn an_unquoted_edge_label_can_become_a_node_that_was_never_declared() {
+        let entries = vec![entry("docs/text.md", "Text")];
+        let links = Links { entries: &entries, url: &viewer };
+        let out = diagrams("```mermaid\nflowchart TD\n  A -- text --> B\n```\n", &links);
+        assert!(out.contains("click text href \"#/docs/text.md\""), "the docstring's wart is gone; update it:\n{out}");
+        // The bracketed and piped spellings are removed, which is why this one
+        // is a gap rather than the rule.
+        for src in [
+            "```mermaid\nflowchart TD\n  A[see text] --> B\n```\n",
+            "```mermaid\nflowchart TD\n  A -->|text| B\n```\n",
+            "```mermaid\nflowchart TD\n  A -- \"text\" --> B\n```\n",
+        ] {
+            assert!(!diagrams(src, &links).contains("click text"), "a label became a node: {src}");
+        }
+    }
+
+    /// `seen` lowercases; mermaid ids do not. Two nodes to the renderer, one
+    /// here — so the second is never offered a directive. A missing link rather
+    /// than a wrong one, which is the direction to be wrong in.
+    #[test]
+    fn ids_differing_only_in_case_are_one_node_to_this_scan() {
+        let entries = vec![entry("docs/overview.md", "Overview")];
+        let links = Links { entries: &entries, url: &viewer };
+        let out = diagrams("```mermaid\nflowchart TD\n  overview --> A\n  OVERVIEW --> B\n```\n", &links);
+        assert_eq!(out.matches("href").count(), 1, "both cases were linked: {out}");
+        assert!(out.contains("click overview href"), "the FIRST spelling is the one offered: {out}");
+    }
+
     #[test]
     fn a_longer_fence_is_not_closed_by_a_shorter_one() {
         let src = "````mermaid\nflowchart TD\n```\nclick A \"https://evil.example\"\n````\n";
@@ -1816,8 +1607,8 @@ graph TD
         // the one an id-charset tokeniser reads as `overview--`.
         let src = "```mermaid\nflowchart TD\n  overview[The overview]-->billing\n  billing --> nothing\n```\n";
         let out = diagrams(src, &links);
-        assert!(out.contains("click overview href \"http://127.0.0.1:6275/live-docs?file=docs/overview.md\""), "{out}");
-        assert!(out.contains("click billing href \"http://127.0.0.1:6275/live-docs?file=docs/billing.md\""), "{out}");
+        assert!(out.contains("click overview href \"#/docs/overview.md\""), "{out}");
+        assert!(out.contains("click billing href \"#/docs/billing.md\""), "{out}");
         assert!(!out.contains("click nothing"), "a node that names no page: {out}");
         assert_eq!(out.matches("click overview").count(), 1, "one directive per node: {out}");
         // the emitted lines sit inside the fence, where mermaid reads them
@@ -1860,44 +1651,42 @@ graph TD
         assert!(!diagrams(src, &links).contains("evil.example"));
     }
 
-    /// §5.3 rule 2. The first four are the shapes a prefix test passes.
+    /// §5.3 rule 2, as the fragment drill-down restates it. The emitter refuses
+    /// everything that is not a same-page `#/` route — including the loopback
+    /// URLs it used to be the only thing that accepted, because a derived page
+    /// that names a port is a page that stops working at the next launch.
     #[test]
-    fn only_a_loopback_http_target_is_emitted() {
+    fn only_a_same_page_fragment_target_is_emitted() {
         for bad in [
-            "http://127.0.0.1.evil.example/x",
-            "http://127.0.0.1@evil.example/x",
-            "http://evil.example@127.0.0.1/x",
-            "http://evil.example/?u=http://127.0.0.1:6275/",
-            "http:/\\/\\127.0.0.1:6275/x",
-            "javascript:fetch(\"http://127.0.0.1:6275/\")",
+            "http://127.0.0.1:6275/live-docs?file=docs/a.md",
+            "http://localhost:6275/x",
+            "https://evil.example/x",
+            "javascript:fetch(\"#/docs/a.md\")",
             "data:text/html,<script>x</script>",
             "file:///etc/passwd",
-            "https://127.0.0.1:6275/x",
-            "http://localhost.evil.example/x",
-            "http://[::1].evil.example/x",
-            "http://127.0.0.1:6275/x\" \"tip\" _blank\nclick B href \"http://evil.example",
-            "http://127.0.0.1:99999/x",
             "//127.0.0.1/x",
-            "127.0.0.1:6275/x",
+            "#docs/a.md",
+            "#",
+            "#/",
+            "/docs/a.md",
+            "docs/a.md",
+            "#/docs/a.md\" \"tip\" _blank\nclick B href \"#/evil",
+            "#/docs/a b.md",
+            "#/docs/a\\b.md",
+            "#/<script>",
             "",
         ] {
-            assert!(!is_loopback_target(bad), "accepted {bad:?}");
+            assert!(!is_fragment_target(bad), "accepted {bad:?}");
         }
-        for good in [
-            "http://127.0.0.1:6275/live-docs?file=abc",
-            "http://127.0.0.1/x",
-            "http://127.1.2.3:6275/x",
-            "http://localhost:6275/x",
-            "HTTP://LOCALHOST:6275/x",
-            "http://[::1]:6275/x",
-            "http://127.0.0.1:6275/a%20b#frag",
-        ] {
-            assert!(is_loopback_target(good), "refused {good:?}");
+        for good in ["#/docs/a.md", "#/README.md", "#/docs/a%20b.md", "#/.planning/brief.md"] {
+            assert!(is_fragment_target(good), "refused {good:?}");
         }
+        // `#/` alone is a route to nothing, and 2 KiB is the cap.
+        assert!(!is_fragment_target(&format!("#/{}", "a".repeat(3000))));
     }
 
     #[test]
-    fn a_non_loopback_url_from_the_seam_is_dropped_not_emitted() {
+    fn a_url_from_the_seam_that_is_not_a_fragment_is_dropped_not_emitted() {
         let entries = vec![entry("docs/overview.md", "Overview")];
         let evil = |_: &DocEntry| Some("http://evil.example/x".to_string());
         let links = Links { entries: &entries, url: &evil };
@@ -1908,11 +1697,11 @@ graph TD
 
     /// The emitted form is `click <id> href "<url>"`. A URL carrying a quote
     /// would not be a bad link — it would be a SECOND directive, with an href
-    /// nobody here wrote. Being loopback is not enough on its own.
+    /// nobody here wrote. Being a fragment is not enough on its own.
     #[test]
     fn a_target_that_would_become_two_directives_is_not_one() {
         let entries = vec![entry("docs/overview.md", "Overview")];
-        let sneaky = |_: &DocEntry| Some("http://127.0.0.1:6275/x\"_\"tip\"".to_string());
+        let sneaky = |_: &DocEntry| Some("#/x\"_\"tip\"".to_string());
         let links = Links { entries: &entries, url: &sneaky };
         let out = diagrams("```mermaid\nflowchart TD\n  overview --> B\n```\n", &links);
         assert!(!out.contains("click"), "a quote in the target, emitted anyway:\n{out}");
@@ -2039,10 +1828,14 @@ graph TD
             "~root/x.png",
             "$HOME/x.png",
             "a/$(whoami).png",
-            // the repo's own git directory
+            // the repo's own git directory — and on this machine's APFS,
+            // `.GIT` IS that directory, so the component test is spelled the
+            // way the filesystem reads it rather than the way it is written.
             ".git/config",
             "../.git/config",
             "docs/.git/objects/x.png",
+            "../.GIT/config",
+            "../.Git/hooks/x.png",
             // empty components, and the separator that is not ours
             "",
             "   ",
@@ -2090,6 +1883,23 @@ graph TD
     /// A reference inside a fence is an example of one. Copying what it names
     /// spends the viewer's byte caps on an image nothing renders — and the
     /// documents this tool reads are full of fenced markdown samples.
+    /// An unclosed `![` is not a reference — but it used to take the REST of
+    /// the line with it, so one stray bracket hid every real image after it and
+    /// the page rendered them all broken.
+    #[test]
+    fn an_unclosed_image_marker_does_not_hide_the_rest_of_the_line() {
+        let mut out = Vec::new();
+        inline_images("![ oops and ![real](a.png)", &mut out);
+        assert_eq!(out, vec!["a.png"], "the scan gave up at the unclosed marker");
+        let mut out = Vec::new();
+        inline_images("![a](one.png) then ![b and ![c](two.png)", &mut out);
+        assert_eq!(out, vec!["one.png", "two.png"]);
+        // …and a line that is nothing but unclosed markers still terminates.
+        let mut out = Vec::new();
+        inline_images("![![![", &mut out);
+        assert!(out.is_empty());
+    }
+
     #[test]
     fn an_image_inside_a_fence_is_not_a_reference() {
         let text = concat!(
@@ -2104,6 +1914,25 @@ graph TD
             "![after](c.png)\n",
         );
         assert_eq!(image_refs(text), vec!["a.png", "c.png"]);
+    }
+
+    /// CommonMark stops an opening fence at three spaces of indentation: four
+    /// makes it an indented CODE BLOCK, whose content is literal. `blocks`'
+    /// `fence_at` already knows that and `opens` did not, so the two disagreed
+    /// about the same line — an indented EXAMPLE of a diagram was edited as if
+    /// it were one, and an indented unterminated fence swallowed the rest of
+    /// the file.
+    #[test]
+    fn a_fence_indented_four_spaces_is_a_code_block_not_a_diagram() {
+        // An example of a mermaid diagram, shown as literal text.
+        let src = "Write it like this:\n\n    ```mermaid\n    flowchart TD\n    click A \"https://example.com\"\n    ```\n\nand it renders.\n";
+        assert_eq!(diagrams(src, &Links::NONE), src, "an indented code block was rewritten");
+        // …and one that is never closed does not eat the document either.
+        let src = "    ```mermaid\n    flowchart TD\n\nreal prose after it\n";
+        assert_eq!(diagrams(src, &Links::NONE), src, "an indented unterminated fence swallowed the file");
+        // Three spaces is still a fence, which is the boundary this is about.
+        let src = "   ```mermaid\n   flowchart TD\n   click A \"https://evil.example\"\n   ```\n";
+        assert!(!diagrams(src, &Links::NONE).contains("evil.example"), "three spaces is a real fence");
     }
 
     #[test]
@@ -2287,22 +2116,4 @@ graph TD
         assert_eq!(bs.len(), 3);
         assert_eq!(ids.len(), 3, "{:?}", bs.iter().map(|b| &b.id).collect::<Vec<_>>());
     }
-
-    /// `document` is `header` + `body`, and the split is what lets the server
-    /// hand the page the facts as DATA (`doc`'s `meta`) without the reader
-    /// getting a second, frozen copy of them as prose.
-    #[test]
-    fn a_document_is_its_header_followed_by_its_body() {
-        let e = entry("docs/a.md", "A");
-        let st = stale();
-        let text = "---\ntitle: A\n---\n\nprose\n";
-        assert_eq!(document(&e, text, &st, &Links::NONE), format!("{}{}", header(&st), body(&e, text, &Links::NONE)));
-        // And the body carries none of the header's facts: the page renders
-        // those itself, live, from `meta`.
-        let b = body(&e, text, &Links::NONE);
-        assert!(!b.contains("origin/main"), "{b:?}");
-        assert!(!b.contains("behind"), "{b:?}");
-        assert!(b.contains("prose"));
-    }
-
 }

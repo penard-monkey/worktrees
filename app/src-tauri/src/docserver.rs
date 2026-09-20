@@ -69,6 +69,12 @@ use crate::viewer::{Group, DOC_MAX_BYTES, PLACE_KEY_MAX};
 /// keep-alive timeout to do it (there is no keep-alive).
 const CONN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// How long the accept loop waits after a failed `accept()`. Long enough that a
+/// persistent error (the process is out of file descriptors) costs 20 wakeups a
+/// second rather than a pegged core, short enough that the one dropped
+/// connection behind a transient one is not felt.
+const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// The content type served for each extension in `viewer::ASSET_EXTS`. Paired
 /// with the allow-list rather than sniffed: `X-Content-Type-Options: nosniff`
 /// is only worth sending if we are sure of the type we send with it.
@@ -195,12 +201,34 @@ pub fn start(
     let ctx = Ctx { token: Arc::from(token.as_str()), port, places, bundle };
 
     let task = tokio::spawn(async move {
+        // Said once per run of failures, not once per failure: `EMFILE` does
+        // not clear on its own and a line every 50 ms would be the log.
+        let mut said = false;
         loop {
-            let Ok((stream, peer)) = listener.accept().await else {
-                // An accept error is per connection, not per server: a client
-                // that hung up between SYN and accept must not take the port
-                // down with it.
-                continue;
+            let (stream, peer) = match listener.accept().await {
+                Ok(v) => {
+                    said = false;
+                    v
+                }
+                Err(e) => {
+                    // **An accept error is per connection — except when it is
+                    // not.** A client that hung up between SYN and accept must
+                    // not take the port down, so this continues; but tokio
+                    // clears readiness only on `WouldBlock`, so a process-wide
+                    // `EMFILE`/`ENFILE` makes the next `accept()` return `Err`
+                    // immediately and this loop pegs a worker until some other
+                    // task happens to close a descriptor — with nothing logged
+                    // and `alive()` still reporting a healthy server. The sleep
+                    // is hyper's `sleep_on_errors` shape: it costs a dropped
+                    // connection nothing (there is no connection) and turns a
+                    // spin into a retry.
+                    if !said {
+                        said = true;
+                        crate::applog("error", &format!("docs server: accept failed: {e}"));
+                    }
+                    tokio::time::sleep(ACCEPT_RETRY).await;
+                    continue;
+                }
             };
             // The bind already guarantees this; asserted anyway, because it is
             // one comparison and the cost of being wrong is the whole feature.
@@ -562,7 +590,20 @@ fn respond(ctx: &Ctx, req: &Request<hyper::body::Incoming>) -> Response<Full<Byt
             "this server answers only to the loopback interface it is bound to",
         );
     }
-    let origin = headers.get(ORIGIN).and_then(|v| v.to_str().ok());
+    // A header that is PRESENT and unreadable is not an absent one. `to_str`
+    // fails on any byte above 7-bit ASCII, which a `HeaderValue` happily
+    // carries, and `and_then(…ok())` folded that into `None` — which
+    // `origin_ok` accepts, because our own same-origin page sends no `Origin`
+    // at all. The same shape on `Host` one branch up is a refusal, and its
+    // docstring says why: "I could not tell" and "it is ours" may not collapse
+    // into one answer when only one of them is safe.
+    let origin = match headers.get(ORIGIN).map(|v| v.to_str()) {
+        None => None,
+        Some(Ok(o)) => Some(o),
+        Some(Err(_)) => {
+            return text(StatusCode::FORBIDDEN, "cross-origin requests are not served")
+        }
+    };
     if !origin_ok(origin, ctx.port) {
         return text(StatusCode::FORBIDDEN, "cross-origin requests are not served");
     }
@@ -610,6 +651,8 @@ struct Snapshot {
     etag: String,
     meta: Arc<str>,
     index: Arc<str>,
+    /// The last derive of this place failed — see `viewer::Group::broken`.
+    broken: bool,
 }
 
 /// Resolve the route's place, or answer `410 Gone`.
@@ -636,6 +679,7 @@ fn with_place(
             etag: g.etag.clone(),
             meta: g.meta.clone(),
             index: g.index.clone(),
+            broken: g.broken,
         })
     };
     let Some(snap) = snap else {
@@ -643,6 +687,24 @@ fn with_place(
     };
     if !snap.tree.is_dir() || !snap.root.is_dir() {
         return text(StatusCode::GONE, "this place is no longer on disk");
+    }
+    // After the two `410`s, deliberately: a place that has been removed says so
+    // in the terms the page already handles, and a failed derive on a place
+    // that no longer exists is the removal, not a fault.
+    //
+    // **`503`, because the tree is a MIXTURE.** A derive rewrites every
+    // document; one that died part way through left some new and some old,
+    // under an `etag` and an `index` that describe the last good pass — so
+    // serving it answers `304` for documents that HAVE changed and renders half
+    // of one version beside half of another, with a header claiming both are
+    // current. The tick retries until one succeeds (`viewer::refresh` rule 3),
+    // which is what makes "ask again" the true answer.
+    if snap.broken {
+        return text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this place's documents could not be re-derived; what is on disk is part old and \
+             part new, so nothing is served until the next attempt succeeds",
+        );
     }
     f(snap)
 }
@@ -773,6 +835,29 @@ fn bundle(ctx: &Ctx) -> Response<Full<Bytes>> {
 /// drift apart again without going red.
 const MOUNT_ID: &str = "root";
 
+/// What the mount point says until the bundle replaces it.
+///
+/// **It states the failure, not the success.** The text used to be "loading the
+/// documents viewer…", which is indistinguishable from the one state worth
+/// naming: a build with no `viewer.js`, where the script 404s, no exception is
+/// raised anywhere and that placeholder is the whole of the page, forever.
+/// React's `createRoot(...).render(...)` clears the container's children on its
+/// first commit, so on every working build this is on screen for one loopback
+/// round-trip and then gone.
+///
+/// **Why not `onerror` on the `<script>`, which is the obvious fix.** It is an
+/// inline event handler, and `SHELL_CSP` is `script-src 'self'` with no
+/// `'unsafe-inline'` — the browser would refuse to run it. A handler that never
+/// fires is the same silent failure it was added to remove, and buying it back
+/// with `'unsafe-hashes'` would weaken the one header standing between a
+/// document's markup and this origin. Static text needs no script at all.
+/// `viewer::open` is the other half: since it refuses an open outright when
+/// there is no bundle on disk, the only way to see this is a bundle that
+/// vanished or broke under a running app.
+const FALLBACK: &str = "Loading the documents viewer… If this line stays, viewer.js did not \
+     load: this build may carry no browser bundle (see the app log, and Settings \u{2192} \
+     Diagnostics).";
+
 /// The shell: a small HTML file that loads the bundle and gets out of the way.
 ///
 /// It carries no data of its own — no facts, no document, not even the place's
@@ -788,7 +873,7 @@ fn shell(place: &str) -> Response<Full<Bytes>> {
          <meta name=\"referrer\" content=\"no-referrer\">\n\
          <meta name=\"worktrees-place\" content=\"{p}\">\n\
          <title>{p} — docs</title>\n\
-         </head>\n<body>\n<div id=\"{MOUNT_ID}\">loading the documents viewer…</div>\n\
+         </head>\n<body>\n<div id=\"{MOUNT_ID}\">{FALLBACK}</div>\n\
          <script src=\"../../viewer.js\" defer></script>\n\
          </body>\n</html>\n"
     );
@@ -1042,6 +1127,10 @@ mod tests {
     struct Live {
         h: Handle,
         tree: PathBuf,
+        /// The same `Vec` the server reads, so a test can change what is
+        /// registered under a running server — which is the only way to reach
+        /// the states `viewer::refresh` puts a place into.
+        places: Arc<Mutex<Vec<Group>>>,
     }
 
     /// Stops the server however the test ends.
@@ -1077,8 +1166,8 @@ mod tests {
             "{\"meta\":{\"place\":\"one\"},\"entries\":[{\"path\":\"README.md\",\"title\":\"Read me\",\"group\":\"\"}]}",
         )]));
         let _g = crate::viewer::tests::rt().enter();
-        let h = start(places, None).unwrap();
-        Live { h, tree }
+        let h = start(places.clone(), None).unwrap();
+        Live { h, tree, places }
     }
 
     /// One raw request, byte for byte as given. Raw sockets rather than `curl`
@@ -1180,6 +1269,26 @@ mod tests {
 
     /// A wrong token, a missing one, and a traversal are all the same flat
     /// `404`, and none of them reaches a file.
+    /// **A present `Origin` we cannot read is a refusal, not an absence.**
+    /// `to_str()` fails on any byte above 7-bit ASCII, and the header used to
+    /// be read as `None` — which `origin_ok` accepts. The same shape on `Host`
+    /// is a `403` whose docstring says "I could not tell" and "it is ours" must
+    /// never collapse into one branch; this is that rule, applied to the header
+    /// beside it.
+    #[test]
+    fn an_origin_we_cannot_read_is_refused_rather_than_ignored() {
+        let l = live("origin-unreadable");
+        let (p, t) = (l.h.port, l.h.token.clone());
+        let host = format!("127.0.0.1:{p}");
+        // Legal in a `HeaderValue` (obs-text), refused by `to_str`.
+        let bad = get(p, &format!("/{t}/p/one/index"), &host, "Origin: http://\u{e9}.example\r\n");
+        assert_eq!(status(&bad), 403, "an unreadable Origin was served:\n{bad}");
+        // And the readable, correct one is still served — both directions, or
+        // a server that refuses everything passes half of this.
+        let ours = get(p, &format!("/{t}/p/one/index"), &host, &format!("Origin: http://{host}\r\n"));
+        assert_eq!(status(&ours), 200, "{ours}");
+    }
+
     #[test]
     fn a_missing_token_or_a_traversal_reaches_nothing() {
         let l = live("token");
@@ -1277,6 +1386,28 @@ mod tests {
     /// can neither run its inline script nor fetch anything, and `nosniff`
     /// stops the type being second-guessed. Remove either and an SVG in any
     /// cloned repository is live again.
+    /// **A place whose last derive failed is not served at all.** The derive
+    /// rewrites every document, so one that dies part way through leaves the
+    /// tree a mixture of two versions under an `etag` that still describes the
+    /// old one — a polling tab is answered `304` for documents that HAVE
+    /// changed, and a fresh load reads half of each with a header claiming both
+    /// are current. `503` says "ask again", which is true: the tick retries
+    /// until one succeeds.
+    #[test]
+    fn a_place_whose_derive_failed_is_not_served_as_if_it_had_not() {
+        let l = live("mixture");
+        let (p, t) = (l.h.port, l.h.token.clone());
+        let host = format!("127.0.0.1:{p}");
+        let ok = get(p, &format!("/{t}/p/one/index"), &host, "");
+        assert_eq!(status(&ok), 200, "{ok}");
+
+        l.places.lock().unwrap()[0].broken = true;
+        for route in ["index", "doc?path=README.md", "", "asset/docs/a.png"] {
+            let r = get(p, &format!("/{t}/p/one/{route}"), &host, "");
+            assert_eq!(status(&r), 503, "/{route} served a mixture:\n{r}");
+        }
+    }
+
     #[test]
     fn an_asset_states_its_type_and_forbids_everything_else() {
         let l = live("asset");
@@ -1380,6 +1511,38 @@ mod tests {
         assert!(
             body.contains(&format!("id=\"{want}\"")),
             "the served shell carries no #{want} for the bundle to mount on:\n{body}",
+        );
+    }
+
+    /// **The mount point states the failure, and it cannot be an `onerror`.**
+    /// A build with no `viewer.js` used to leave "loading the documents
+    /// viewer…" on screen forever: the script 404s, no exception is raised, and
+    /// nothing anywhere says a word. The obvious fix — `onerror` on the
+    /// `<script>` — is an INLINE HANDLER, and this page's CSP is
+    /// `script-src 'self'` with no `'unsafe-inline'`, so the browser would
+    /// refuse to run it: a handler that never fires is the same silence it was
+    /// added to remove. So the two halves are asserted together, the way the
+    /// SVG allow-list and its header are: static text that React replaces on
+    /// mount, and a `script-src` that still forbids inline script.
+    #[test]
+    fn the_mount_point_says_so_when_the_bundle_never_arrives() {
+        let l = live("fallback");
+        let (p, t) = (l.h.port, l.h.token.clone());
+        let host = format!("127.0.0.1:{p}");
+        let body = body(&get(p, &format!("/{t}/p/one/"), &host, ""));
+        assert!(
+            body.contains("viewer.js did not"),
+            "the mount point does not say what it means when it stays:\n{body}",
+        );
+        assert!(!body.contains("onerror"), "an inline handler this page's CSP would refuse:\n{body}");
+        let script = SHELL_CSP
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src"))
+            .expect("script-src left SHELL_CSP");
+        assert!(
+            !script.contains("unsafe-inline") && !script.contains("unsafe-hashes"),
+            "inline script is allowed again — then an onerror handler is the better fallback: {script}",
         );
     }
 

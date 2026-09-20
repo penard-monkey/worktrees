@@ -410,8 +410,17 @@ the document.
    emitting our own. Strict mode blocks `call fn()`, but `click NODE "<href>"`
    is still an author-controlled href in a document this tool will happily open
    from a repo cloned five seconds ago. Only tool-emitted targets survive.
-2. **Emit only loopback targets on the viewer's own port and group.** Anything
-   that is not `http://127.0.0.1:<our port>/…` is not a drill-down target.
+2. **Emit only same-page fragments.** A drill-down target is `#/<rel>` and
+   nothing else — not a URL, not another origin, not even our own.
+
+   *This rule was originally "emit only loopback targets on the viewer's own
+   port and group", i.e. `http://127.0.0.1:<our port>/…`. That shipped, and the
+   drill-down was dead: the browser strips every `click` line it finds, so the
+   tool's own directives were removed alongside the author's and reported to the
+   reader as author ones — while the per-launch token, baked into each of those
+   URLs, was written to disk for a feature that could not use it. A fragment is
+   what the page already routes on, so the link works AND no derived file
+   contains the token or the port.*
 
 The mapping sources, cheapest to author first:
 
@@ -1123,11 +1132,15 @@ the check — or, when upstream ships, at that tag, and delete nothing else.
 ### 15.3 Four decisions §5 left open
 
 **The tree lives in the app's config dir and never outlives the process.**
-`<config>/viewer/tree/<slug>-<hash8 of the canonical root>/`, mirroring the
-place's own layout — flattening it would break every relative prose link, which
-`mo` resolves against the file's own directory. It is emptied on a clean exit
-*and* on the first spawn of a run, because a crash cannot honour a shutdown
-hook. These are copies of documents §4.3 describes as carrying a client's signed
+`<config>/viewer/tree/<pid>/<slug>-<hash8 of the canonical root>/`, mirroring
+the place's own layout — flattening it would break every relative prose link,
+which `mo` resolves against the file's own directory. It is emptied on a clean
+exit *and* on the first spawn of a run, because a crash cannot honour a shutdown
+hook. (The `<pid>` level was added after the fact: without it two instances
+sharing the identifier — the installed app and a `tauri dev` beside it — emptied
+each other's LIVE trees, and the victim answered `410` for every request while
+its own tick declined to repair a place whose documents had not changed. The
+startup sweep now keeps only directories naming a live, foreign pid.) These are copies of documents §4.3 describes as carrying a client's signed
 agreement, sitting outside the repo's gitignore in a directory Spotlight and
 Time Machine both index; they do not get to persist for a viewer that is, by
 design, dead.
@@ -1433,10 +1446,12 @@ lazy continuations, and HTML comment / `<script>` / `<pre>` / `<style>` /
 The partition is exact: concatenating every block's `md` reproduces the input
 byte for byte, asserted over every document in this repository.
 
-**The staleness header left the markdown.** `derive::document` is now
-`header` + `body` and the server sends `body`; the page renders the facts from
-`meta`, live. A blockquote baked into the text would be a second, frozen copy
-of numbers the reader watches change above it.
+**The staleness header left the markdown.** The server sends `derive::body` and
+the page renders the facts from `meta`, live. A blockquote baked into the text
+would be a second, frozen copy of numbers the reader watches change above it.
+(`derive::document` — `header` + `body` — was the first shape of this and was
+deleted once nothing called it: with the facts coming from `meta`, the markdown
+header had no reader, and its tests were guarding prose that never shipped.)
 
 ### 17.4 What owning the server bought, beyond being able to ship
 

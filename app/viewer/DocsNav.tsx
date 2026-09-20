@@ -18,7 +18,7 @@
 // rows carry a modified-since-you-looked dot, an mtime, a "browse" action and a
 // busy state, none of which exist here. What must not be duplicated is the
 // rule, and the rule is `tree()`.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { tree, type DocEntry, type DocNode } from "../src/doctree";
 import type { IndexEntry } from "./contract";
 
@@ -85,6 +85,8 @@ function useCollapsed(place: string): [Set<string>, (path: string) => void] {
 function Rows(p: {
   nodes: DocNode[];
   depth: number;
+  /** `routeHash`, passed down from the Viewer — see `hrefFor` below. */
+  hrefFor: (path: string) => string;
   closed: ReadonlySet<string>;
   /** A filter is active, so children show whatever `closed` says. A match
    *  hidden inside a collapsed directory is a filter that looks broken. */
@@ -128,7 +130,7 @@ function Rows(p: {
             key={e.path}
             className={`dnav-row${isCurrent ? " is-current" : ""}`}
             style={{ ["--depth" as string]: p.depth }}
-            href={`#/${e.rel}`}
+            href={p.hrefFor(e.rel)}
             title={e.rel}
             // `aria-current` rather than only a class: the mark has to be the
             // document's state, not just a colour.
@@ -144,31 +146,35 @@ function Rows(p: {
 }
 
 export function DocsNav({
-  entries, place, current, onOpen,
+  entries, place, current, onOpen, hrefFor, filterRef,
 }: {
   entries: IndexEntry[];
   place: string;
   current: string | null;
   onOpen: (path: string) => void;
+  /**
+   * How a document is named in a URL — `Viewer`'s `routeHash`, passed in.
+   *
+   * This file wrote `href={`#/${e.rel}`}` by hand, which is a MIRROR of that
+   * function missing its escaping half: a document called `100%.md` produced
+   * `#/100%.md`, and the router's `decodeURIComponent` throws `URIError` on a
+   * stray `%`. The prop keeps one implementation without an import cycle
+   * (`Viewer` imports this file).
+   */
+  hrefFor: (path: string) => string;
+  /**
+   * The filter input, owned by the Viewer.
+   *
+   * `/` used to be bound HERE and again in `IndexView`, both capture-phase,
+   * both calling `preventDefault` — and on the index route both are mounted, so
+   * the later registration swallowed the key and this filter could not be
+   * reached from the keyboard at all. The shortcut now lives in one place and
+   * reaches this input through the ref.
+   */
+  filterRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const [q, setQ] = useState("");
   const [closed, toggle] = useCollapsed(place);
-  const input = useRef<HTMLInputElement | null>(null);
-
-  // `/` focuses the filter — one shortcut, on a reading surface. Capture phase
-  // with an explicit target check so it never steals a keystroke from a field.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      e.preventDefault();
-      input.current?.focus();
-      input.current?.select();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
 
   const filtering = q.trim() !== "";
   // Filter the ENTRIES and then build the tree from the survivors, so a
@@ -187,7 +193,7 @@ export function DocsNav({
     <nav className="dnav" aria-label="documents in this place">
       <div className="dnav-head">
         <input
-          ref={input}
+          ref={filterRef}
           className="dnav-filter"
           type="search"
           placeholder="filter…  (/)"
@@ -203,7 +209,10 @@ export function DocsNav({
       <div className="dnav-tree">
         {entries.length === 0 && <div className="dnav-empty">no documents</div>}
         {entries.length > 0 && shown === 0 && <div className="dnav-empty">nothing matches “{q}”</div>}
-        <Rows nodes={nodes} depth={0} closed={closed} filtering={filtering} current={current} onToggle={toggle} onOpen={onOpen} />
+        <Rows
+          nodes={nodes} depth={0} closed={closed} filtering={filtering}
+          current={current} onToggle={toggle} onOpen={onOpen} hrefFor={hrefFor}
+        />
       </div>
     </nav>
   );

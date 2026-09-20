@@ -11,7 +11,7 @@
 // `docs/adr/0007-one-engine.md` is found by "adr", by "0007" and by the words
 // in its heading, and a reader arriving from a code review has the path while a
 // reader arriving from a conversation has the title.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import type { IndexEntry } from "./contract";
 // ONE filter rule. It lives with the nav, which is where the filter now
 // primarily is; this screen is the landing view and the drawer's stand-in on a
@@ -23,29 +23,22 @@ export function IndexView({
   entries,
   current,
   onOpen,
+  hrefFor,
 }: {
   entries: IndexEntry[];
   current: string | null;
   onOpen: (path: string) => void;
+  /** `Viewer`'s `routeHash`. The hand-written `#/${e.path}` this replaced was
+   *  unescaped, and a `%` in a filename is what makes the router throw. */
+  hrefFor: (path: string) => string;
 }) {
   const [q, setQ] = useState("");
-  const input = useRef<HTMLInputElement | null>(null);
 
-  // `/` focuses the filter, the one shortcut worth having on a reading surface.
-  // Capture phase and an explicit target check so it never steals a keystroke
-  // from the field itself.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      e.preventDefault();
-      input.current?.focus();
-      input.current?.select();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
+  // `/` IS NOT BOUND HERE. It used to be, in capture phase, and `DocsNav` bound
+  // it too — on this route both are on screen, so the later registration won
+  // and the nav's filter was unreachable from the keyboard. One handler now
+  // lives in `Viewer` and reaches the nav's input; this screen's own box stays
+  // click-to-focus.
 
   const groups = useMemo(() => {
     const hit = entries.filter((e) => matches(e, q));
@@ -63,7 +56,15 @@ export function IndexView({
       if (list) list.push(e);
       else by.set(d, [e]);
     }
-    return [...by.entries()].sort((a, b) => (a[0] === "." ? -1 : b[0] === "." ? 1 : a[0].localeCompare(b[0])));
+    // NOT SORTED. The nav beside this on the very same route deliberately
+    // refuses to sort — `docs::index_with` puts the root files in a fixed
+    // reading order and `[docs] paths = ["b", "a"]` is listed b-then-a because
+    // the repo said so (`app/scripts/docs-check.mjs` exists to keep that true).
+    // A `localeCompare` here overruled the project's own choice on one of the
+    // two surfaces, so the index and the tree showed the same documents in
+    // DIFFERENT orders, side by side, and nothing failed. Insertion order is
+    // the server's order, which is the answer both surfaces must give.
+    return [...by.entries()];
   }, [entries, q]);
 
   const shown = groups.reduce((n, g) => n + g[1].length, 0);
@@ -72,10 +73,11 @@ export function IndexView({
     <div className="index">
       <div className="index-head">
         <input
-          ref={input}
           className="index-filter"
           type="search"
-          placeholder="filter by title or path…   (/)"
+          // No `(/)` any more: the shortcut reaches the NAV's filter, and two
+          // boxes advertising the same key is how the collision read on screen.
+          placeholder="filter by title or path…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           spellCheck={false}
@@ -95,7 +97,7 @@ export function IndexView({
               <li key={e.path}>
                 <a
                   className={`index-row${e.path === current ? " is-current" : ""}`}
-                  href={`#/${e.path}`}
+                  href={hrefFor(e.path)}
                   onClick={(ev) => { ev.preventDefault(); onOpen(e.path); }}
                 >
                   <span className="index-title">{e.title}</span>

@@ -9,18 +9,27 @@
 // that the app already owned. `app/scripts/viewer-boundary-check.mjs` asserts
 // it, because a config can be edited and a grep cannot be argued with.
 //
-//   pnpm -C app build:viewer     → app/viewer/dist/{viewer.js, shell.html}
+//   pnpm -C app build:viewer     → app/viewer/dist/viewer.js
+//
+// THE PAGE THAT LOADS THIS BUNDLE IS NOT HERE. It is `docserver::shell()`, a
+// format! in Rust, and it always was — an `app/viewer/shell.html` sat beside
+// this config being copied into `dist/` and served to nobody. The two had
+// already drifted (different CSPs: `font-src 'none'` versus `'self' data:`, no
+// `blob:`), so a reviewer reading the file next to the code was reading a
+// policy that is not in force. Deleted rather than pinned with a test: the
+// release ships `viewer.js` alone, and a second copy of a security policy earns
+// its keep only if something reads it.
 //
 // IIFE, one file, minified:
 //   - a CLASSIC script is the only script a `file://` page can load at all
-//     (measured in both Chromium and WebKit), and it is what shell.html uses;
+//     (measured in both Chromium and WebKit), and it is what the server's shell
+//     emits: `<script src="../../viewer.js" defer>`, no `type="module"`;
 //   - mermaid resolves its diagram types through `await import()`, which leaves
 //     37 fetch sites in a code-split build and zero in a forced single file —
 //     under `default-src 'none'` those 37 are 37 ways for a diagram to be
 //     silently absent. `iife` inlines every one of them.
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { copyFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
@@ -28,16 +37,6 @@ const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 export default defineConfig({
   plugins: [
     react(),
-    {
-      // The shell is a source file rather than a build product so the server
-      // side can read it, and it is copied into `dist/` so the two halves the
-      // server serves — the page and the bundle it references — always ship
-      // from one directory and cannot be taken from different builds.
-      name: "copy-shell",
-      closeBundle() {
-        copyFileSync(here("viewer/shell.html"), here("viewer/dist/shell.html"));
-      },
-    },
   ],
   // LIB MODE DOES NOT DEFINE `process.env.NODE_ENV`. That is correct for a
   // library (the consumer decides) and wrong for us: without it the bundle

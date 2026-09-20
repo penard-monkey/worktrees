@@ -5778,8 +5778,17 @@ pub fn run() {
                 let mut last_draft_counts = (usize::MAX, usize::MAX);
                 // Only the first of a repeating tmux failure is worth a line.
                 let mut last_draft_err = String::new();
-                // …and only the first of a repeating viewer-refresh failure.
-                let mut last_viewer_err = String::new();
+                // …and only the first of a repeating viewer-refresh line.
+                //
+                // A SET, not the last message: the tick emits one line per
+                // failing place and one per image a derive refused, so two
+                // places (or one place and one skipped screenshot) alternate
+                // and a one-slot dedup logs both of them every 3 s forever.
+                // Cleared when a tick has nothing to say, so a fault that comes
+                // back after a recovery is heard again, and capped so a place
+                // producing fresh text on every tick cannot grow it without
+                // bound.
+                let mut said_viewer: std::collections::HashSet<String> = std::collections::HashSet::new();
                 // Cold start: what happened while the app was closed. Runs before
                 // the first sleep so the nav's afterglow is right on frame one.
                 backfill_worked(&handle);
@@ -5813,13 +5822,22 @@ pub fn run() {
                     // poll: the whole point of the browser viewer is the second
                     // monitor, so "the app is hidden" is exactly when the tab
                     // most needs to be current.
-                    for e in viewer::refresh(&handle.state::<viewer::Viewer>(), sysclock::now_epoch()) {
+                    let notes = viewer::refresh(&handle.state::<viewer::Viewer>(), sysclock::now_epoch());
+                    if notes.is_empty() {
+                        said_viewer.clear();
+                    }
+                    for n in notes {
                         // Deduped, like the draft scan below: a place that
                         // cannot be written will fail every 3 s forever, and a
-                        // log that repeats that is a log nobody reads.
-                        if e != last_viewer_err {
-                            last_viewer_err = e.clone();
-                            applog("error", &format!("viewer refresh: {e}"));
+                        // log that repeats that is a log nobody reads. The
+                        // LEVEL is the tick's, not this call site's: a skipped
+                        // image is the same event `open_docs_viewer` logs at
+                        // "warn", and saying it louder here made one event two.
+                        if said_viewer.len() > 64 {
+                            said_viewer.clear();
+                        }
+                        if said_viewer.insert(n.msg.clone()) {
+                            applog(n.level, &format!("viewer refresh: {}", n.msg));
                         }
                     }
                     cwd_ticks += 1;
