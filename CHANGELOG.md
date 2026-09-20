@@ -58,9 +58,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the next successful poll, up to three minutes later. A failed fetch now keeps
   the last live reading on screen, dimmed and labelled "last good reading" with
   the time it was taken, the same bargain the service-status indicator already
-  struck. It is bounded at thirty minutes, because a percentage from before a
-  window rolled over is not old data, it is wrong data; past that, the widget
-  hides as before.
+  struck. Same three bars, same colours: it keeps the shape the live widget
+  had, rather than falling back to the thinner statusline snapshot that may
+  well be newer. It is bounded at thirty minutes, because a percentage from
+  before a window rolled over is not old data, it is wrong data; past that, the
+  snapshot takes over and, failing that, the widget hides as before.
 - **A failed usage fetch no longer hammers the endpoint that refused it.** The
   120-second floor between real fetches only ever applied after a SUCCESS —
   nothing was cached on failure, so every window-focus pull went straight back

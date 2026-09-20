@@ -1944,16 +1944,26 @@ fn usage_in_backoff(now: i64, failed_at: Option<i64>) -> bool {
 /// bar — was thrown away to show nothing at all. Degrading to it keeps the
 /// answer on screen and keeps the layout still.
 ///
-/// Fresher wins between the two fallbacks. The cached reading is the richer one
-/// (severity tiers, the model bucket) so it takes ties, but a statusline
-/// snapshot written since is simply better data.
+/// The cached reading wins while it is inside the ceiling, even against a
+/// FRESHER statusline snapshot — the one place this does not simply prefer
+/// newer data, and deliberately.
+///
+/// The snapshot is often the newer of the two: the statusline rewrites
+/// `rate_limits.json` on every Claude Code prompt, while the cached reading is
+/// by construction at least `USAGE_TTL_SECS` old by the time this runs. But it
+/// is a POORER SHAPE — two rows instead of three, no severity tiers, no model
+/// bucket. Preferring it would drop a bar and lose the amber tier for the
+/// length of an outage and then put them back, which is the layout moving
+/// exactly when this function exists to hold it still. The percentages here
+/// measure 5h and 7d windows; between a reading two minutes old and one five
+/// seconds old there is nothing to choose, and the ceiling already guarantees
+/// the older one is not misleading. So: same shape as the live widget for as
+/// long as that is honest, and the snapshot as the fallback for when it is not.
 fn usage_degraded(now: i64, cached: Option<UsageInfo>, snapshot: Option<UsageInfo>) -> UsageInfo {
-    let cached = cached.filter(|c| now - c.fetched_at <= USAGE_STALE_MAX_SECS);
-    match (cached, snapshot) {
-        (Some(c), Some(s)) if s.fetched_at > c.fetched_at => s,
-        (Some(c), _) => UsageInfo { source: "cached".into(), ..c },
-        (None, Some(s)) => s,
-        (None, None) => UsageInfo { source: "unavailable".into(), fetched_at: now, limits: Vec::new() },
+    match cached.filter(|c| now - c.fetched_at <= USAGE_STALE_MAX_SECS) {
+        Some(c) => UsageInfo { source: "cached".into(), ..c },
+        None => snapshot
+            .unwrap_or(UsageInfo { source: "unavailable".into(), fetched_at: now, limits: Vec::new() }),
     }
 }
 
@@ -1985,6 +1995,26 @@ async fn claude_usage() -> Result<UsageInfo, String> {
         }
         Err(why) => {
             *USAGE_FAIL_AT.lock().unwrap() = Some(now);
+            // Re-read the cache rather than degrading from the copy taken at
+            // the top: curl just spent up to 15 seconds, and two pulls overlap
+            // ROUTINELY here — the focus listener and the interval both invoke
+            // this command, which is the doubled-pull shape the backoff above
+            // exists to damp. If the other one succeeded while we were out, the
+            // cache now holds a reading fresher than anything we could degrade
+            // to, and the frontend takes whichever response lands LAST: serving
+            // the pre-fetch copy would dim a live widget — or hide it outright
+            // on a cold start — for up to a full poll period, purely because
+            // the loser of a race answered second.
+            let cached = USAGE_CACHE.lock().unwrap().clone();
+            // …and if that reading is inside the positive TTL, it is not a
+            // fallback at all. Answer exactly as the check at the top of this
+            // function would have, had we arrived a moment later.
+            if let Some(c) = cached.as_ref() {
+                if now - c.fetched_at < USAGE_TTL_SECS {
+                    applog("warn", &format!("claude_usage: oauth unavailable: {why} — another pull succeeded, serving that"));
+                    return Ok(c.clone());
+                }
+            }
             let out = usage_degraded(now, cached, usage_from_statusline());
             // What the user will SEE, next to why — the old pair of lines said
             // "widget hidden" unconditionally, which was about to stop being
@@ -6022,17 +6052,23 @@ mod tests {
         assert_eq!(usage_degraded(1_000, at(USAGE_STALE_MAX_SECS + 1), None).source, "unavailable");
     }
 
-    /// Fresher wins, and the cached reading takes ties — it is the richer of
-    /// the two (severity tiers, the model bucket), so it is only displaced by
-    /// data that is actually newer.
+    /// The cached reading beats a statusline snapshot even when the snapshot is
+    /// NEWER, which is the one place this does not prefer fresher data. The
+    /// statusline rewrites its file on every Claude Code prompt, so on a machine
+    /// that runs one the snapshot is almost always newer — and it is two rows
+    /// with no severity and no model bucket. Preferring it would drop a bar for
+    /// the length of an outage and put it back afterwards, which is the layout
+    /// moving exactly when this function exists to hold it still.
     #[test]
-    fn the_fresher_fallback_wins_and_cached_takes_ties() {
-        let newer_snap = usage_degraded(1_000, Some(reading("oauth", 800, 35.0)), Some(reading("statusline", 900, 61.0)));
-        assert_eq!(newer_snap.source, "statusline");
-        let older_snap = usage_degraded(1_000, Some(reading("oauth", 900, 35.0)), Some(reading("statusline", 800, 61.0)));
-        assert_eq!(older_snap.source, "cached");
-        let tie = usage_degraded(1_000, Some(reading("oauth", 900, 35.0)), Some(reading("statusline", 900, 61.0)));
-        assert_eq!(tie.source, "cached");
+    fn the_cached_reading_outranks_a_fresher_snapshot() {
+        let out = usage_degraded(1_000, Some(reading("oauth", 800, 35.0)), Some(reading("statusline", 995, 61.0)));
+        assert_eq!(out.source, "cached");
+        assert_eq!(out.limits[0].percent, 35.0, "…and it is the cached NUMBERS, not just the label");
+        // once it is past the ceiling the snapshot is all that is left, and then
+        // it is served whatever its age
+        let out = usage_degraded(1_000, Some(reading("oauth", 1_000 - USAGE_STALE_MAX_SECS - 1, 35.0)), Some(reading("statusline", 995, 61.0)));
+        assert_eq!(out.source, "statusline");
+        assert_eq!(out.limits[0].percent, 61.0);
     }
 
     /// Hiding is still the answer when there is nothing left to show — and a
