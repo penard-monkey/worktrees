@@ -50,7 +50,10 @@ dist/
 _site/
 .sass-cache/
 
-# The documentation viewer's helper binary. Built and signed by release.yml into
-# the app bundle's resources; never committed (26 MB of someone else's Go, and
-# the whole point of §13.4 is that we build it rather than vendor it).
-app/src-tauri/viewer/mo
+# The documentation viewer's browser bundle. Built from app/viewer/ by
+# release.yml into the app bundle's resources, and never committed: a built
+# artefact of source that is already in this repo, which would otherwise be
+# reviewed as a minified diff on every page change.
+app/src-tauri/viewer/viewer.js
+# …and what `pnpm -C app build:viewer` writes locally.
+app/viewer/dist/

@@ -665,15 +665,17 @@ is invisible to the bats suite — there is no fake claude. Re-run
    binary via include_str!).
 2. Bump workspace `Cargo.toml` → PR → merge.
 3. `make release VERSION=x.y.z` → `git push origin main vx.y.z`.
-   ⚠ **The app-bundle job builds the docs viewer from source and gates it**: it
-   curls the built binary with a foreign `Host` and requires `403`, and with a
-   loopback `Host` requiring *not* 403, so neither an unpatched viewer nor one
-   that refuses everything can ship. `vars.VIEWER_MO_REPO`/`VIEWER_MO_REF`
-   default to upstream `v1.6.8`, **which fails that gate on purpose** — upstream
-   has no `Host` check yet (GHSA-6pff-wf7m-6f5h, reported 2026-09-16). Until it
-   lands or the patched fork is pushed somewhere CI can clone, the app-bundle
-   job fails and there is no release. That is the gate working, not a broken
-   pipeline; the decision it is waiting on is in `place-docs.md` §13.4/§14.
+   ⚠ **The app-bundle job builds the docs viewer's browser bundle and gates
+   the server that serves it**: the gate step runs the docs-server boundary
+   tests by exact name, which start the real server and, over a raw loopback
+   socket, require `403` for a foreign `Host` and *not* 403 for a loopback one
+   — both directions, so a server that refuses everything cannot ship either.
+   It greps for `test result: ok. 4 passed`, because a renamed test turns
+   `--exact` into a filter that matches nothing and exits **0**. `mo`, the
+   third-party viewer this used to build from source and the reason the gate
+   existed, is gone (it never validated `Host` — GHSA-6pff-wf7m-6f5h, reported
+   2026-09-16); `place-docs.md` §17 is what replaced it, and there is no
+   `vars.VIEWER_MO_*` any more.
 4. release.yml: CLI ×4 targets + SIGNED app bundles ×2 + latest.json.
    Updater signing key: repo secret `TAURI_SIGNING_PRIVATE_KEY`; local backup
    `~/.tauri/worktrees-updater.key` — irreplaceable, never commit it.

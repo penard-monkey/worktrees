@@ -1009,7 +1009,10 @@ whichever way this goes — the derived tree, the generated `click` directives,
 the staleness header injected into the documents — because none of it depends
 on which process serves the bytes.
 
-**Chosen: patch `mo` and build it from source.** It is Go and MIT; the check is
+**Chosen: patch `mo` and build it from source.** *(Superseded 2026-09-19 —
+§17. The patch and the gates were built and worked; what did not work was
+having our ability to release depend on somebody else's. We serve the
+documents ourselves now, and `mo` is not in the tree.)* It is Go and MIT; the check is
 a small middleware, and it is upstreamable. This is not the "fork in all but
 name" §5.2 rejected — that was a proxy injecting scripts keyed on class names
 in a 2 MB minified bundle. It does change the supply chain §11.5 priced: a Go
@@ -1063,6 +1066,12 @@ written to be upstreamable rather than merely to work.
 ---
 
 ## 15. Phase 3 as built — 2026-09-19
+
+> **Superseded the same day by §17.** What this section describes was built,
+> shipped its gates, and was then removed with `mo`. It is kept because the
+> rules in §15.3 survived the rewrite unchanged and the reasoning is where
+> they were argued; read `vars.VIEWER_MO_*`, `--foreground`,
+> `probe_refuses_foreign_host` and "the group name" as history.
 
 The viewer ships. `app/src-tauri/src/viewer.rs` is the whole of it: one
 supervised child, N places as named groups, a derived tree per place, and a URL
@@ -1256,6 +1265,12 @@ into a filesystem read:
 
 ### 16.1 SVG is not copied, and adding it is not the fix
 
+> **Superseded 2026-09-19 — §17.4.** Every sentence below is true *of `mo`*,
+> and the last one names the fix: "a viewer that serves assets with a content
+> type we chose". That is what we built. SVG is copied again, and the
+> allow-list entry and the `default-src 'none'` header that makes it inert are
+> one decision, asserted together.
+
 An SVG is a live document — script, `foreignObject`, external references. Inside
 an `<img>` it is script-inert by spec, which is what makes "it's just an image"
 sound true; but `mo` hands any asset back by direct URL
@@ -1301,3 +1316,187 @@ costs **13–16 µs** against the walk's **2.6 ms**.
   schema keeps `img`, and this repo's own README centres three screenshots that
   way. The scanner reads a quoted `src`; an unquoted one, an entity-escaped one
   and `srcset` are left alone rather than guessed at.
+
+---
+
+## 17. Phase 3, rebuilt — 2026-09-19. **`mo` is gone; we serve the docs.**
+
+§13.4 chose to patch `mo` and build it from source, and §15 shipped on that
+choice with a runtime gate and a CI gate in front of it. Both gates worked;
+the position they left us in did not. `release.yml`'s defaults failed the
+app-bundle job **on purpose** (§15.2), so there was no release at all until
+either upstream shipped the fix or a patched fork was pushed somewhere CI
+could clone it — a feature whose ability to ship was somebody else's decision.
+
+The move is the one §8.2 of the `docs-transport` findings names: **own the
+server.** `mo`'s failure was a missing *policy* check, not a parser bug, and
+the policy is about twelve lines. What the tool gains beyond shipping again is
+in §17.4.
+
+### 17.1 What was removed, and what survived
+
+Removed from `app/src-tauri/src/viewer.rs`: the supervised child and
+`--foreground`, `probe_refuses_foreign_host` and `probe_verdict`, registration
+through `mo`'s own CLI (`--target … -wR`), `shutdown_port`, `XDG_STATE_HOME`
+isolation and the state wipe it needed, `pick_port` and the three-second listen
+deadline, `binary_path`/`resolve_binary`, and `mo`'s URL form
+(`/{group}?file=<sha256 of the absolute path>[..8]`). Removed from
+`release.yml`: the Go toolchain, the `git clone`, the `go generate`, the
+cross-build, the `codesign` of a nested Mach-O, the arch assertion, and
+`vars.VIEWER_MO_REPO`/`VIEWER_MO_REF`.
+
+Survived, and deliberately unedited where possible: `derive.rs` (the document
+transform), `docs::index_with`/`fingerprint_with`/`fold_assets`, the derived
+tree and its prune, the two-layer asset copy with its caps, the Docs tab, and
+`docs-check.mjs`. The four lifecycle rules of §15 survived as rules — lazy
+start, liveness at the point of use, killed in `RunEvent::Exit`, and the
+startup sweep that covers a crash — with `Handle::alive()` standing where
+`Child::try_wait` stood.
+
+### 17.2 The contract
+
+Base: `http://127.0.0.1:<port>/<token>/`, where `<token>` is 16 bytes of the OS
+CSPRNG as hex, regenerated every launch.
+
+| route | returns |
+|---|---|
+| `GET /<token>/p/<place>/` | `text/html` — the shell |
+| `GET /<token>/p/<place>` | `308` to the slashed form |
+| `GET /<token>/p/<place>/doc?path=<rel>` | `application/json`, conditional |
+| `GET /<token>/p/<place>/index` | `application/json` |
+| `GET /<token>/p/<place>/asset/<rel>` | raw bytes, typed |
+| `GET /<token>/viewer.js` | the browser bundle, straight off disk |
+
+`meta`, identical in both JSON bodies:
+
+```json
+{ "place": "docs-server", "branch": "docs-server", "behind": 25,
+  "base": "origin/main", "dirty": 3, "subject": "feat(app): …",
+  "last_commit_epoch": 1789776000,
+  "derived_epoch": 1789779661, "status_epoch": 1789776000 }
+```
+
+`dirty` is the COUNT: `0` for a clean place, `null` when it was not computed —
+those are different answers and a `null` that rendered as "clean" would be this
+proposal's own §1.1. `derived_epoch` is when this copy was written,
+`status_epoch` when the git facts were measured; the tick moves only the first,
+which is why there are two. `last_commit_epoch` is not in the original contract
+and is sent anyway: `subject` without an age is half of the dock's third line.
+
+`doc`:
+
+```json
+{ "meta": { … }, "blocks": [ { "id": "b3f9…", "md": "…one top-level block…" } ] }
+```
+
+`index`:
+
+```json
+{ "meta": { … },
+  "entries": [ { "path": "docs/adr/0001.md", "title": "ADR 0001 — …",
+                 "group": "docs/adr", "mtime_ms": 1789776000000 } ],
+  "truncated": false }
+```
+
+`path` is the **place-relative** path (`DocEntry::rel`) — the same string
+`doc?path=` takes back. Not the absolute one the dock uses: the page has no use
+for the user's home directory and no business being told it. `mtime_ms` and
+`truncated` are extras, for the recency mark and the 2,000-entry cap.
+
+A place that is no longer registered, or whose tree or worktree has left the
+disk, answers **`410 Gone`** — not `404`. The difference is what lets a polling
+page say "this place was removed" instead of retrying forever.
+
+### 17.3 Blocks, and why the id is a hash
+
+The page replaces only the blocks whose source changed, which is measured to
+hold `scroll 400→400, sel 55→55` across an edit where whole-document
+replacement measures `sel 70→0` (findings §3.3). `derive::blocks` is that split.
+
+**The id is a hash of the block's own markdown, with an occurrence counter for
+repeats.** The contract's first draft showed `b0`, `b1`, and that is wrong in a
+way that would not have shown up: a positional id is stable only while nothing
+is inserted, so adding a paragraph at the top slides every id below it onto its
+neighbour's text and the page replaces the whole document — the `sel 70→0`
+failure arriving on the most ordinary edit there is. Both worktrees reached
+this independently.
+
+**The split biases to OVER-group, always.** Cutting one construct in two is a
+rendering change that no join test can see — a loose list becomes two `<ul>`s,
+a fence becomes prose and a stray ```` ``` ````, a setext heading is
+decapitated into a paragraph and a horizontal rule. Grouping two adjacent
+constructs into one block renders identically and costs one extra block
+redrawn. So fenced code, indented code, loose lists with their nested lists and
+lazy continuations, and HTML comment / `<script>` / `<pre>` / `<style>` /
+`<textarea>` blocks are each held whole, and the ambiguous cases continue.
+
+The partition is exact: concatenating every block's `md` reproduces the input
+byte for byte, asserted over every document in this repository.
+
+**The staleness header left the markdown.** `derive::document` is now
+`header` + `body` and the server sends `body`; the page renders the facts from
+`meta`, live. A blockquote baked into the text would be a second, frozen copy
+of numbers the reader watches change above it.
+
+### 17.4 What owning the server bought, beyond being able to ship
+
+**SVG is copied again.** §16.1 excluded it, correctly, because `mo` handed any
+asset back by direct URL with a content type we did not choose — and a
+top-level `image/svg+xml` document runs script. Every asset now goes out with
+`Content-Security-Policy: default-src 'none'` and
+`X-Content-Type-Options: nosniff`, under which a navigated SVG can neither run
+its inline script nor fetch anything. This is findings §6.4 collected. **The
+allow-list entry and those headers are one decision**, and
+`an_svg_is_copied_only_because_the_response_makes_it_inert` asserts both halves
+so that deleting the header cannot quietly re-arm every `logo.svg` in every
+cloned repository.
+
+**`../` references resolve.** §16.3 recorded that `mo` could not serve them:
+it appended the author's `src` to a `…/raw/` route verbatim, and both a browser
+and Go's own mux normalise the dot segment away, eating the route. Our
+`asset/<rel>` route takes the relative path the page resolved, so the copy that
+was always correct is now reachable.
+
+**The failure surface shrank.** Four of the seven ways the button could fail —
+the binary is missing, it is the wrong architecture, it started and never
+listened, it failed the Host probe — described a child process that no longer
+exists. `app/src/mock/install.ts` carries what is left.
+
+### 17.5 The gate, and why it is no longer a `curl`
+
+§15.1 made the §11.3 criterion a runtime assertion because the binary on disk
+was not necessarily the binary we built. That distance is gone: the server is
+this repository's own source, so the gate is the boundary tests, run in
+`release.yml` by exact name, starting the real server and speaking HTTP to it
+over a raw loopback socket. Both directions, as before — a server that answered
+`403` to everything would pass a one-sided check while serving nothing.
+
+Raw sockets rather than `curl` for a measured reason: **`curl` silently
+collapses duplicate `Host` headers** and sends only one, which made the first
+run of that case a false pass in the findings' own probe (§6.1). And the step
+greps for `test result: ok. 4 passed`, because `--exact` against a renamed test
+is a filter that matches nothing and exits **0** — a gate that never ran looks
+exactly like a gate that passed.
+
+Each refusal was proved red before it was believed: the `Host` check (by
+reintroducing `mo`'s bug), the loopback-name check (by accepting a suffix), the
+`Origin` check, the token, the `..` component check, `symlink_metadata`, the
+method check, `If-None-Match`, `410`, the asset CSP, and the trailing-slash
+redirect.
+
+### 17.6 What is still owed
+
+The **real-app pass** §15.6 asked for is still owed, and one of its two items
+is now moot: there is no `openUrl` to a spawned helper's port, but there is
+still an `openUrl` from a `tauri://` page to `http://127.0.0.1`, and whether
+WKWebView's `open` behaves is still unmeasured. The other — spawn latency as
+felt — is smaller than it was, because binding a port is not starting a
+process.
+
+Two smaller things. `refresh` holds the registry lock across a derive, so a
+poll arriving mid-derive waits it out; at one request per second per tab that
+is unobservable, and the alternative is a second copy of the registry, which is
+a drift bug. And the `ETag` is per PLACE, not per document, so editing one
+document costs every open tab in that place one full response — the
+alternative is hashing each file's bytes on every conditional request, which is
+the disk read the `304` exists to avoid.

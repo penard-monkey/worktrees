@@ -78,10 +78,6 @@ let mockMcp: Record<string, unknown> = (() => {
 // tmux_check case for the two shapes.
 const mockTmuxStuck = location.search.includes("notmux=stuck");
 let mockTmux = !location.search.includes("notmux");
-// `?viewer=died` — the viewer came up once and then went away. Its own latch
-// because "it worked a moment ago" is the state `try_wait`-on-every-open exists
-// for, and a knob that fails from the first call cannot express it.
-let mockViewerUsed = false;
 const MOCK_SETTINGS_KEY = "wt-mock-ui-state"; // sessionStorage: see get_settings
 // Onboarding states a folder pick can land in (probe_dir). Same query-knob shape
 // as ?notmux: the state is chosen at load, and the path itself carries it so a
@@ -1370,72 +1366,59 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return { base, entries, truncated: false };
     }
     case "open_docs_viewer": {
-      // The browser viewer (lib.rs `open_docs_viewer`). The harness cannot spawn
-      // a process, and it must not pretend the happy path is the only one: this
-      // feature's whole design is a list of ways the viewer does not come up,
-      // and every one of them is a state the pane renders.
+      // The browser viewer (lib.rs `open_docs_viewer`). The harness cannot bind
+      // a port, and it must not pretend the happy path is the only one: every
+      // way this can fail is a state the pane renders.
+      //
+      // **The failure set shrank when `mo` went.** Four of the seven modes this
+      // arm used to carry — the binary is missing, it is the wrong
+      // architecture, it started and never listened, it failed the Host-header
+      // probe — described a child process the app no longer has. What is left
+      // is what an in-process server can still fail at.
       //
       // `?viewer=` picks which, the same query-knob shape as `?notmux` /
-      // `?notmux=stuck` — which exist for exactly this reason: MISSING and
-      // UNRESPONSIVE are different states and a harness that can only express
-      // "works" tests neither.
+      // `?notmux=stuck` — which exist for exactly this reason: a harness that
+      // can only express "works" tests nothing else.
       //
-      //   (default)  a URL, opened by `openUrl`
-      //   missing    the binary is not in the bundle          — the common one
-      //   exec       it is there and will not run             — wrong arch, quarantined
-      //   nolisten   it starts, and never answers on the port — the deadline
-      //   port       no free loopback port
-      //   guard      it listens, and does NOT refuse a foreign Host header —
-      //              the §11.3 gate failing, which must never resolve to a URL
-      //   died       the first open works; every one after it finds a dead child
+      //   (default)   a URL, opened by `openUrl`
+      //   port        no free loopback port
+      //   empty       the index was walked a minute ago and the place has been
+      //               emptied since — the race the disabled button cannot close
+      //   notindexed  a document that is no longer in the place's index
       //
-      // `slowviewer[=ms]` is orthogonal: the real spawn takes ~0.25s and the
-      // mock answers in a microtask, so the disabled/busy state of both buttons
-      // is otherwise unobservable.
+      // `slowviewer[=ms]` is orthogonal: the real open walks the place and
+      // writes its derived tree, and the mock answers in a microtask, so the
+      // disabled/busy state of both buttons is otherwise unobservable.
       const vmode = new URLSearchParams(location.search).get("viewer") ?? "";
       const vslow = (() => {
         const m = /[?&]slowviewer(?:=(\d+))?/.exec(location.search);
         return m ? Number(m[1] ?? 400) : 0;
       })();
       if (vslow) await new Promise((r) => setTimeout(r, vslow));
-      if (vmode === "missing") {
-        throw new Error(
-          "the documentation viewer is not installed with this app (Settings → Health reports it); " +
-            "the Docs tab still lists and reads every document in place",
-        );
-      }
-      if (vmode === "exec") {
-        throw new Error("/Applications/worktrees.app/Contents/Resources/viewer/mo: Bad CPU type in executable (os error 86)");
-      }
-      if (vmode === "nolisten") {
-        throw new Error("the viewer did not listen on 127.0.0.1:6391 within 3000 ms");
-      }
       if (vmode === "port") {
-        throw new Error("no free loopback port for the documentation viewer");
+        throw new Error("the documentation server could not bind a loopback port: Address already in use (os error 48)");
       }
-      if (vmode === "guard") {
-        // The gate in §11.3, failing. An unpatched viewer answers a foreign
-        // Host, which means any web page the user has open can read every
-        // document in every place — so this resolves to NO URL, ever.
-        throw new Error(
-          "the viewer answered 200 to a request with a foreign Host header; it must answer 403 " +
-            "(an unpatched viewer is readable by any web page the user has open — proposal §13.2)",
-        );
+      if (vmode === "empty") {
+        throw new Error(`${String(args.slug ?? "place")} has no documents to show`);
       }
-      if (vmode === "died") {
-        if (mockViewerUsed) throw new Error("the viewer exited before it listened (signal: 9, SIGKILL: Killed)");
-        mockViewerUsed = true;
+      if (vmode === "notindexed") {
+        throw new Error(`${String(args.path ?? "?")} is not in this place's documentation index`);
       }
-      // The real URL form, verified against a running viewer: absolute, with
-      // the port, the group and `sha256(<derived absolute path>)[..8]`. The
-      // harness fakes the hash (no crypto here) but keeps the SHAPE, because
-      // the shape is what the pane hands to `openUrl`.
-      const group = String(args.slug ?? "place").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "place";
+      // The real URL form: the port, the per-launch path token, the place's
+      // route segment, and the document as a query. The harness fakes the token
+      // (no crypto here) but keeps the SHAPE, because the shape is what the
+      // pane hands to `openUrl` — and a shape that drifts from the server's is
+      // a link that 404s only in the real app.
+      const key = String(args.slug ?? "place").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "place";
+      const token = "0123456789abcdef0123456789abcdef";
+      const base = `http://127.0.0.1:6391/${token}/p/${key}/`;
       const wanted = args.path as string | null;
-      if (!wanted) return `http://127.0.0.1:6391/${group}`;
-      let h = 0;
-      for (const c of wanted) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-      return `http://127.0.0.1:6391/${group}?file=${h.toString(16).padStart(8, "0").slice(-8)}`;
+      if (!wanted) return base;
+      // `rel` is what the server names a document by; the harness only has the
+      // absolute path, so it takes the tail after the place root's last slash
+      // — enough to keep the query's shape honest.
+      const rel = wanted.split("/").slice(-2).join("/");
+      return `${base}?path=${encodeURIComponent(rel).replace(/%2F/g, "/")}`;
     }
     case "read_file": {
       const f = fsFile(args.path as string);
