@@ -15,7 +15,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   folders — a match three levels down opens its way out rather than staying
   hidden behind a chevron, which is a filter that looks broken. Order is still
   the walk's: a `[docs] paths = ["b", "a"]` lists `b` first, because that is
-  what the repo asked for and sorting it would quietly overrule them.
+  what the repo asked for and sorting it would quietly overrule them. The
+  browser page gets the same tree as a left navigation that never leaves, so
+  you can read one document and see where it sits among the rest — built from
+  the same function the dock uses, because two implementations of one order
+  are two chances to disagree about it.
 
 - **Read a place's docs in the browser, diagrams and all.** The Docs tab grows
   an "Open this place in the browser" button and a per-row browser action. The
