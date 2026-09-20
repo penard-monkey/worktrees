@@ -1366,3 +1366,48 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   Position it from the anchor's rect, never a side: Places can live on the right
   since #227.
   _From: [2026-09-19 mcp-offer-surfaces](docs/sessions/2026-09-19-mcp-offer-surfaces/summary.md)_
+
+- **Derive outside the `srv`/`places` locks.** `viewer::open` holds both across
+  the whole derive — up to 2,000 documents and 64 MB of asset copies — and
+  `refresh` holds `places` across every place's derive, so every server request
+  stalls for the duration and a root on a dead network mount stalls them
+  indefinitely. The shape is derive outside, swap the `Group` in under the lock.
+  Attempted and deliberately abandoned: `open`'s fresh-server branch empties our
+  pid tree and mints a new token, so deriving first risks attaching a
+  registration to a dead token, and a verify-the-generation scheme was more
+  machinery than that pass warranted. The main obstacle is now gone —
+  `write_tree` no longer takes `port`/`token`/`key` and is a pure function of
+  `(tree, root, entries)`.
+  _From: [2026-09-20 live-docs-viewer](docs/sessions/2026-09-20-live-docs-viewer/summary.md)_
+
+- **A workflow that fails to PARSE is invisible to every PR check.** `release.yml`
+  was broken YAML for the length of a branch and nothing said so: GitHub answers
+  an unparsable workflow with a startup-failure run carrying zero jobs and no
+  annotations, which never appears in `gh pr checks`. It runs only on `v*` tags,
+  so the first exercise would have been a release. A ~5-line "parse every file in
+  `.github/workflows/`" step in the `lint` job closes the whole class. Found by
+  a human opening the run.
+  _From: [2026-09-20 live-docs-viewer](docs/sessions/2026-09-20-live-docs-viewer/summary.md)_
+
+- **`image_refs` reports images inside 4-space indented code blocks.** It has no
+  notion of indented code at all. The naive fix breaks real references, because a
+  4-space line can equally be a lazy paragraph continuation whose image genuinely
+  renders — the test was written, watched go red, and backed out as over-reach.
+  `link_definition` already refuses `indent > 3`, so the module half-intends
+  this; the inconsistency pre-dates the viewer.
+  _From: [2026-09-20 live-docs-viewer](docs/sessions/2026-09-20-live-docs-viewer/summary.md)_
+
+- **Small, known, and written down rather than fixed:** the docs server accepts a
+  DUPLICATE `Origin` where `Host` refuses one (an unreadable Origin is now a 403,
+  but two of them are not); the accept-loop's `EMFILE` backoff has no test,
+  because reproducing it needs process-wide fd exhaustion; and
+  `derive::is_fragment_target` caps a target at 2048 bytes, so a rel escaping
+  longer than that loses its drill-down silently.
+  _From: [2026-09-20 live-docs-viewer](docs/sessions/2026-09-20-live-docs-viewer/summary.md)_
+
+- **GHSA-6pff-wf7m-6f5h.** `mo` — the third-party viewer this feature was
+  originally designed around — does not validate the `Host` header, so any web
+  page can reach it by DNS rebinding. Reported upstream 2026-09-16; the
+  dependency was dropped rather than waited on. Nothing here depends on it any
+  more; the entry exists so the reason is not relearned.
+  _From: [2026-09-20 live-docs-viewer](docs/sessions/2026-09-20-live-docs-viewer/summary.md)_

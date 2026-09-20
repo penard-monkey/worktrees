@@ -139,6 +139,56 @@ worth knowing too: **bash expands every assignment on a `local a=1 b="$a"` line
 before binding any of them**, so `b` is empty — and under `set -u` the function
 dies mid-way inside a command substitution, leaving the caller with "".
 
+**"Measured on this platform" has to say WHICH platform.** A test asserted that
+binding `0.0.0.0:<our port>` succeeds while a loopback-only listener holds it,
+and its comment said it had been measured — on macOS. Linux refuses a wildcard
+bind over ANY holder of the port, so it went red in CI for a server that was
+bound exactly right. The mirror witness fails the other way round. Measured, all
+four, on both: `0.0.0.0:P` tells them apart on macOS and is `EADDRINUSE` either
+way on Linux; `<lan ip>:P` succeeds either way on macOS and tells them apart on
+Linux. **No bind means the same thing twice** — and the rule being guarded never
+mentioned binds, it said "reachable from the LAN is a data leak", so the witness
+is a CONNECT, which answers identically on both. Two corollaries: an assertion
+about OS behaviour needs the second platform measured before it is written down
+(`docker run --rm -v "$PWD":/w node:22-alpine` is enough), and the loopback
+connect that precedes the LAN one is load-bearing, because without it a DEAD
+server passes — every connect fails, including the one that must.
+
+**A workflow that fails to PARSE is invisible.** GitHub answers an unparsable
+workflow with a startup-failure run carrying **zero jobs and no annotations**;
+it never appears in `gh pr checks`, so a PR shows all-green beside it. A pasted
+block that landed at line 1 of `release.yml` — above `name:`/`on:` — left it
+broken for a whole branch, and since it runs only on `v*` tags the first
+exercise would have been a release. `gh run list --commit <sha>` shows the runs
+`gh pr checks` does not. The twin trap: that same paste was meant to REPLACE a
+step and instead duplicated it, leaving an assertion for a binary the branch
+deleted, so valid YAML would only have moved the failure later.
+
+**A process-global `static` makes unit tests order-dependent, and the suite
+hides it.** `viewer::ISSUED` is per-launch by design, so a test asserting an
+exact route segment passed only while no other test had claimed it — and the
+full suite passed on an accident of ALPHABETICAL order, microseconds apart. A
+filtered run, a new test sorting earlier, or a slower runner turns it red with a
+message that reads like a `place_key` regression. Check with
+`cargo test -p app --lib -- --test-threads=1 <a> <b>`; the fix is a `_in` seam
+so pure tests own the map they assert against, leaving the global to the tests
+that are actually about it.
+
+**A recovery test that hand-clears the blocker asserts the bug away.** The
+failed-derive test set `fingerprint = 0` before checking that a broken place
+recovers — which was precisely the comparison preventing recovery, so a place
+broken by a re-open stayed `503` until the button was pressed again. If a test
+pokes state to reach the thing it is asserting, ask what the poke is standing in
+for and whether production ever does it.
+
+**A drift check that takes the FIRST match can be silently repointed.**
+`docsviewer-check.mjs` found the emitter by the first `format!("…click…")` in
+`derive.rs`; a later one added above it would become the thing asserted while
+the real emitter drifted from the strip rule, green throughout. Slice off `mod
+tests` (its `format!`s are fixtures) and fail when more than one line claims to
+be the emitter, rather than guessing. Same family as the mirror-drift rule
+below: a guard that cannot be wrong is a guard that cannot fail.
+
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old
