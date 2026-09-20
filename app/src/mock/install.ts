@@ -1022,12 +1022,27 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
 
     // Claude plan usage → the nav-footer bars. Mirrors the oauth shape from
     // lib.rs: a Fable bucket at severity "warning" so the amber tier is
-    // exercisable, and `?usage=stale` / `?usage=off` for the two degraded
-    // sources (statusline snapshot → dimmed; unavailable → widget hidden).
+    // exercisable, and `?usage=stale` / `?usage=cached` / `?usage=off` for the
+    // three degraded sources (statusline snapshot and last-good-reading → both
+    // dimmed, named apart in the panel; unavailable → widget hidden).
     // `?usage=edge` drives the reset-countdown formatter through every branch.
     case "claude_usage": {
       const t = now();
       if (location.search.includes("usage=off")) return { source: "unavailable", fetched_at: t, limits: [] };
+      // What a failed poll now answers instead of hiding the widget: the last
+      // live reading, minutes old, with its full shape (severity + model
+      // bucket) intact — that richness is why it beats a statusline snapshot.
+      if (location.search.includes("usage=cached")) {
+        return {
+          source: "cached",
+          fetched_at: t - 4 * 60, // the 429 episode that motivated this lasted ~5m
+          limits: [
+            { kind: "session", label: "Session", percent: 35, severity: "normal", resets_at: t + 3 * 3600 },
+            { kind: "weekly_all", label: "Weekly", percent: 59, severity: "normal", resets_at: t + 2 * 86400 },
+            { kind: "weekly_scoped", label: "Fable", percent: 80, severity: "warning", resets_at: t + 2 * 86400 },
+          ],
+        };
+      }
       if (location.search.includes("usage=stale")) {
         return {
           source: "statusline",

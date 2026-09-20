@@ -1896,7 +1896,20 @@ type UsageLimit = {
   severity: string;
   resets_at: number | null;
 };
+// source: oauth | cached | statusline | unavailable (lib.rs). Everything that
+// is not "oauth" is a reading we are STANDING IN with — dimmed, and named in
+// the panel — rather than a live one.
 type UsageInfo = { source: string; fetched_at: number; limits: UsageLimit[] };
+
+/** What the widget is actually showing, for the tooltip and the panel's head.
+ *  "cached" is the last live answer, kept on screen through a failed poll: the
+ *  endpoint 429s for minutes at a time and the widget used to vanish for the
+ *  whole episode. */
+function usageSourceLabel(source: string): string {
+  return source === "oauth" ? "live"
+    : source === "cached" ? "last good reading"
+      : "statusline snapshot";
+}
 
 // 180s — the endpoint is undocumented and has rate-limited hard before; the
 // backend also caps real fetches at one per 120s.
@@ -2137,8 +2150,11 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
     setHovering(false);
   };
 
-  // statusline = a local snapshot only as fresh as the last Claude Code session
-  const stale = info.source === "statusline";
+  // anything but a live oauth answer: a local statusline snapshot, or the last
+  // good reading held over a failed poll. Both are dimmed and both say so in
+  // the panel — the distinction that matters here is live / not live, and the
+  // `.stale` styling is written once against that.
+  const stale = info.source !== "oauth";
   const segs = info.limits.map((l) => {
     const pct = Math.max(0, Math.min(100, Math.round(l.percent)));
     return {
@@ -2161,7 +2177,7 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
         aria-expanded={shown}
         title={
           (stale
-            ? `Claude usage — statusline snapshot from ${new Date(info.fetched_at * 1000).toLocaleString()}`
+            ? `Claude usage — ${usageSourceLabel(info.source)} from ${new Date(info.fetched_at * 1000).toLocaleString()}`
             : `Claude plan usage — ${worst.tick} at ${worst.pct}%`) + " · click to keep open"
         }
         onPointerEnter={arm}
@@ -2222,7 +2238,7 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
           )}
           <div className="usage-pop-head">
             <span>Claude plan usage</span>
-            <span>{stale ? "statusline snapshot" : "live"}</span>
+            <span>{usageSourceLabel(info.source)}</span>
           </div>
           <UsageRows info={info} nowSec={nowSec} />
         </div>

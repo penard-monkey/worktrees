@@ -51,6 +51,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   lists, filters, reads and reveals every document, and only the browser page
   is missing.
 
+### Fixed
+- **The usage meter no longer disappears when a poll fails.** The endpoint it
+  reads rate-limits in bursts — one episode lasted four and three-quarter
+  minutes — and a single refusal used to take the whole widget off screen until
+  the next successful poll, up to three minutes later. A failed fetch now keeps
+  the last live reading on screen, dimmed and labelled "last good reading" with
+  the time it was taken, the same bargain the service-status indicator already
+  struck. Same three bars, same colours: it keeps the shape the live widget
+  had, rather than falling back to the thinner statusline snapshot that may
+  well be newer. It is bounded at thirty minutes, because a percentage from
+  before a window rolled over is not old data, it is wrong data; past that, the
+  snapshot takes over and, failing that, the widget hides as before.
+- **A failed usage fetch no longer hammers the endpoint that refused it.** The
+  120-second floor between real fetches only ever applied after a SUCCESS —
+  nothing was cached on failure, so every window-focus pull went straight back
+  out. Switching between the app and a terminal during one rate-limit episode
+  spent fifteen real requests inside a single minute, which is a good way to
+  keep a rate limit open. A failure now buys the same quiet as a success, for
+  sixty seconds.
+
 ## [0.26.0] - 2026-09-19
 
 ### Added
