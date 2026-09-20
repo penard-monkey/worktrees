@@ -25,6 +25,7 @@ use worktrees_core::{config, git, mcpsetup, mention, ops, profile, store, sync, 
 // file because it is the only part of this backend that can hand a document to
 // something outside the app, and every rule in it is a refusal — the security
 // surface is worth reading in one piece.
+mod docserver;
 mod viewer;
 
 // ── app log ──────────────────────────────────────────────────────────────────
@@ -3344,15 +3345,16 @@ async fn diagnostics(app: AppHandle) -> Result<String, String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let (git_path, git_version) = tool_report("git");
     let (tmux_path, tmux_version) = tool_report("tmux");
-    // The documentation viewer, by STAT — never by running it. "It should be
-    // there and it is not" belongs here, on demand, beside the other tools, and
-    // NOT on any path the app takes at launch: a probe that decides whether the
-    // Docs tab exists would let a quarantined helper binary change what the app
-    // looks like before the user has asked for anything. `tool_report` is the
-    // wrong shape for the same reason — it runs `<tool> --version`.
-    let viewer_path = match viewer::binary_path(app.path().resource_dir().ok().as_deref()) {
+    // The documentation viewer's BROWSER BUNDLE, by STAT — never by running
+    // anything. "It should be there and it is not" belongs here, on demand,
+    // beside the other tools, and NOT on any path the app takes at launch: a
+    // probe that decides whether the Docs tab exists would let a missing file
+    // change what the app looks like before the user has asked for anything.
+    // `tool_report` is the wrong shape for the same reason — it runs
+    // `<tool> --version`, and this is a JavaScript file.
+    let viewer_path = match viewer::bundle_path(app.path().resource_dir().ok().as_deref()) {
         Some(p) => p.to_string_lossy().into_owned(),
-        None => "(not installed — the Docs tab lists and reads without it)".to_string(),
+        None => "(no browser bundle — the Docs tab lists and reads without it)".to_string(),
     };
 
     let ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
@@ -4142,20 +4144,21 @@ struct ViewerPlace {
 /// opened from here: the app stays a control surface, and the one thing this
 /// command owns is deciding whether there is a URL worth opening at all.
 ///
-/// `async fn` like every other handler: this spawns a process, polls a port for
-/// up to three seconds, and writes a few hundred files. On the main thread that
-/// is a frozen window.
+/// `async fn` like every other handler, and for a harder reason than most: it
+/// binds a port, walks the place, and writes a few hundred files. On the main
+/// thread that is a frozen window. It is also what puts this call inside a
+/// tokio runtime, which is what `docserver::start` needs in order to spawn its
+/// accept loop.
 ///
-/// **Nothing about this runs at launch.** A missing, quarantined or
-/// wrong-architecture viewer surfaces here, on the click, as one failed invoke —
-/// the Docs tab lists and reads every document with no viewer at all, which is
-/// what phases 1 and 2 shipped. The frontend's optimism (`tmuxOk`'s shape) is
-/// the other half of that rule.
+/// **Nothing about this runs at launch.** A missing browser bundle surfaces
+/// here, on the click, as one failed invoke — the Docs tab lists and reads
+/// every document with no server at all, which is what phases 1 and 2 shipped.
+/// The frontend's optimism (`tmuxOk`'s shape) is the other half of that rule.
 ///
 /// The tree it serves is DERIVED, never the repo's own files: a viewer that
 /// edits what it is viewing is not a viewer, and the `click` directives that
-/// make a diagram navigable have to bake in a port that does not exist until
-/// this function has run (§5.2's answer, "A′").
+/// make a diagram navigable have to bake in a port and a token that do not
+/// exist until this function has run (§5.2's answer, "A′").
 #[tauri::command]
 async fn open_docs_viewer(
     app: AppHandle,
@@ -4223,7 +4226,7 @@ async fn open_docs_viewer(
         docs: docs_cfg,
         fingerprint,
     };
-    match viewer::open(&v, &config_dir, resource_dir.as_deref(), &idx.entries, &req) {
+    match viewer::open(&v, &config_dir, resource_dir.as_deref(), &idx, &req) {
         Ok(opened) => {
             applog("info", &format!("open_docs_viewer slug={slug} entries={}", idx.entries.len()));
             // An image that was referenced and deliberately not copied is a
@@ -4729,7 +4732,7 @@ async fn remove_place(
         // originals; without this the derived copy is the last readable one and
         // it is on a port.
         if let (Ok(cfg), Some(root)) = (app.path().app_config_dir(), viewer_root) {
-            viewer::forget_place(&cfg, &slug_sweep, &root);
+            viewer::forget_place(&app.state::<viewer::Viewer>(), &cfg, &slug_sweep, &root);
         }
         // The place is gone for good, so its remembered directories are too.
         // (A `close` deliberately does NOT do this: closing keeps the tab names,
@@ -5513,10 +5516,11 @@ pub fn run() {
             // that a shutdown hook structurally cannot.
             //
             // This does not break the rule that nothing about the viewer runs
-            // at launch: it stats no binary, spawns nothing and cannot fail in
-            // a way that matters — it empties two directories this app owns,
-            // ignoring whatever will not go. A missing, quarantined or
-            // wrong-architecture viewer is still unreachable from startup.
+            // at launch: it binds no port, reads no configuration and cannot
+            // fail in a way that matters — it empties one directory this app
+            // owns, ignoring whatever will not go. The server itself is still
+            // unreachable from startup; the first press of the button is what
+            // starts it.
             if let Ok(dir) = app.path().app_config_dir() {
                 viewer::cleanup(&dir);
             }
@@ -5662,11 +5666,12 @@ pub fn run() {
                     // Every tick, not every fifth: a request has a 30 s life
                     // and a person is waiting on it.
                     drain_inbox(&handle);
-                    // And the browser's copy of every place the viewer is
+                    // And the browser's copy of every place the server is
                     // serving. Every tick for the same reason: somebody is
-                    // watching an agent write, and `mo` live-reloads the moment
-                    // the derived file changes — a slower beat would be a
-                    // browser tab that is visibly behind the dock beside it.
+                    // watching an agent write, and the page polls its `ETag`
+                    // about once a second — a slower beat here would be a
+                    // browser tab that is visibly behind the dock beside it,
+                    // with a conditional GET saying nothing has changed.
                     //
                     // It costs a stat per document per registered place and
                     // NOTHING when none is registered, which is the normal
@@ -5885,11 +5890,11 @@ pub fn run() {
                 for k in &keys {
                     kill_shell(&shells, k);
                 }
-                // And the documentation viewer, for a harder reason than the
-                // shells': what it is holding is an unauthenticated loopback
-                // port onto the user's documents. Surviving the window would
-                // mean serving them to whatever finds the port, with nothing on
-                // screen to say it is still running.
+                // And the documentation server, for a harder reason than the
+                // shells': what it is holding is a loopback port onto the
+                // user's documents. Surviving the window would mean serving
+                // them to whatever finds the port, with nothing on screen to
+                // say it is still running.
                 viewer::kill(&handle.state::<viewer::Viewer>());
                 if let Ok(d) = handle.path().app_config_dir() {
                     viewer::cleanup(&d);

@@ -1,134 +1,98 @@
-//! The tool-owned documentation viewer — one supervised child, N places.
+//! The tool-owned documentation viewer — the derived tree, and the places the
+//! server may serve from it.
 //!
 //! `docs.rs` decides which documents a place has; `derive.rs` decides what each
 //! one looks like once a viewer gets hold of it. This is the third part: where
-//! the derived tree lands on disk, what process serves it, and what URL the
-//! frontend hands to `openUrl`. It is the only part of the feature that holds a
-//! port, so it is the only part that can leak a client's signed agreement to a
-//! web page — which is why almost every rule below is a refusal.
+//! the derived tree lands on disk, which places are registered against it, and
+//! what URL the frontend hands to `openUrl`. `docserver.rs` is the fourth —
+//! the loopback server that answers for them, and the one part that holds a
+//! port.
 //!
-//! **The viewer is `mo`, patched** (proposal §13.4, §14). Stock `mo` fails the
-//! §11.3 gate: it does not validate the `Host` header, so a loopback bind keeps
-//! other MACHINES out while leaving the browser on this one — which runs code
-//! from strangers and can reach `127.0.0.1` — able to read every document in
-//! every group via DNS rebinding. §5.1's "one process for the whole app" makes
-//! that blast radius total rather than per place.
+//! **What used to be here.** Until this branch the viewer was `mo`, a
+//! third-party Go binary the app spawned, supervised and probed. It is gone,
+//! and the reason it is gone is the reason the server exists: `mo` does not
+//! validate the `Host` header (proposal §13.2), which makes a loopback server
+//! readable by any web page through DNS rebinding, and §5.1's
+//! one-process-for-the-whole-app made that blast radius every document in
+//! every place at once. A patch was written and reported upstream; waiting on
+//! somebody else's release to be allowed to ship is not a position this feature
+//! should be in, and the server we needed instead is routing and policy —
+//! which is where `mo`'s bug actually was.
 //!
-//! So the binary is not trusted to be the patched one. **Every spawn proves it**
-//! (`probe_refuses_foreign_host`): one request carrying a foreign `Host`, and
-//! anything but `403` kills the child and fails the open. That costs one
-//! round-trip on a path that is already polling the port, and it is the
-//! difference between "we believe we shipped the fixed build" and "this process,
-//! now, refuses". A release built from an unpatched upstream, a binary swapped
-//! on disk, a `WORKTREES_VIEWER_BIN` pointed at a stock `mo` — all three fail
-//! closed, and none of them is detectable any other way.
+//! **What survived, and why.** The derived tree is the durable asset here. It
+//! is generated the same way it always was, by the same transform, with the
+//! same asset copying and the same caps; only the thing that served it changed.
+//! Four of its rules came from real defects and are kept verbatim:
 //!
-//! Five more rules, each of them a failure this app or the research already had:
+//! 1. **Nothing happens at launch.** The first `open_docs_viewer` starts the
+//!    server; there is deliberately no probe at startup deciding whether to
+//!    show the Docs tab, and the blast radius of the whole subsystem is one
+//!    button. Phases 1–2 work with nothing serving at all.
+//! 2. **Liveness at the point of use, never a timer.** `Handle::alive` on
+//!    every open, the way `Shells` asks `try_wait`. A timer that respawned
+//!    would put a port back up minutes after the user stopped using it, with
+//!    nothing on screen to say so.
+//! 3. **The derived trees never outlive the process.** They are copies of the
+//!    user's documents — the ones §4.3 says carry a client's signed agreement —
+//!    in a directory Spotlight and Time Machine both index. `cleanup` empties
+//!    them on a clean exit; the sweep on the first start of a run is what
+//!    covers a crash, which a shutdown hook cannot.
+//! 4. **A removed place's derived documents go with it.** `cmd_rm` deletes the
+//!    originals, so without `forget_place` the derived copy would be the last
+//!    readable one — and it would be on a port.
 //!
-//! 1. **Foreground, under our supervision.** `mo` daemonises by default: spawn
-//!    it without `--foreground` and the `Child` we hold is a launcher that has
-//!    already exited, `RunEvent::Exit` kills nothing, and an unauthenticated
-//!    server keeps the user's documents on a port after the app has quit.
-//! 2. **Nothing happens at launch.** The first `open_docs_viewer` spawns; a
-//!    missing, quarantined or wrong-architecture binary cannot touch startup,
-//!    and the Docs tab (phases 1–2) keeps working with no viewer at all. There
-//!    is deliberately no launch probe deciding whether to show the tab — the
-//!    blast radius of the whole subsystem is one button.
-//! 3. **A bounded deadline, never a sleep.** The spike measured 0.23 s to
-//!    listen; `START_DEADLINE` is an order of magnitude over that, polled, and
-//!    a child that misses it is killed and reported rather than waited on.
-//! 4. **Liveness the way `Shells` does it** — `try_wait` on every open, respawn
-//!    on the next one, no health-check timer. Nothing here samples by pid: a
-//!    reaped pid keeps answering (`portable_pty`'s `process_id`, CLAUDE.md), and
-//!    the `Child` handle is the only honest liveness signal we have.
-//! 5. **`mo`'s own state is isolated and wiped.** It keeps a session under
-//!    `$XDG_STATE_HOME/mo/` keyed by PORT and RESTORES the previous groups when
-//!    a server starts on that port — so a reused port resurrects places the user
-//!    removed, and sharing the default directory with a `mo` the user runs by
-//!    hand would mix the two. `XDG_STATE_HOME` is honoured (verified, not
-//!    inferred: with it set, `~/.local/state/mo` was never created), so it is
-//!    pointed inside the app's own config dir and that directory is emptied
-//!    before each spawn.
+//! The tick (`refresh`) is the fifth, and it is what makes the browser copy
+//! keep up with the place: `docs::fingerprint_with` is stat-only (1.8 ms on a
+//! 400-document place against `index_with`'s 10.1 ms and 3.2 MB of reads), so
+//! the full walk runs only when the digest has moved.
 
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use worktrees_core::derive::{self, Links, Staleness};
 use worktrees_core::docs::DocEntry;
 
-/// How long a spawned viewer gets to answer on its port before it is killed.
-///
-/// The spike measured **0.23 s** from exec to listening with 7 files, and the
-/// tree we hand it is registered afterwards rather than on the command line, so
-/// startup does not grow with the place. An order of magnitude over the measured
-/// figure absorbs a cold page cache and a first-launch Gatekeeper check without
-/// ever becoming an unbounded wait — which is the failure mode that matters,
-/// because it happens on the UI's click path.
-const START_DEADLINE: Duration = Duration::from_millis(3_000);
-
-/// Poll interval while waiting for the port. Small enough that the common case
-/// (0.23 s) costs about nine connect attempts, each of which fails instantly on
-/// a loopback address nobody is listening on.
-const POLL_EVERY: Duration = Duration::from_millis(25);
-
-/// Deadline for the `Host`-header probe and for the registration client. Both
-/// talk to a process that has just proved it is listening, so anything slower
-/// than this is a hang rather than a slow answer.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(2_000);
-
-/// The `Host` a browser would only send if it had been rebound. `.invalid` is
-/// reserved by RFC 2606 and can never resolve, so the probe cannot accidentally
-/// name something real.
-const PROBE_HOST: &str = "worktrees-viewer-probe.invalid";
-
-/// How long the registration client gets. It is not the startup path — the
-/// server is already up and proven — but it does scale with the place: the
-/// index's cap is 2,000 documents and the client waits while the server reads a
-/// title out of each. Deliberately several times `PROBE_TIMEOUT`, which talks to
-/// a process that has nothing to do.
-const REGISTER_DEADLINE_SECS: u64 = 15;
-
-/// Shutting down is a single request to a server that is already listening, so
-/// it needs none of `REGISTER_DEADLINE_SECS`' room for a place with 2,000
-/// documents in it. Short enough that a wedged one does not hold the open path.
-const SHUTDOWN_DEADLINE_SECS: u64 = 5;
-
 /// Per-document read cap, matching `read_file`'s. A document over this is not
 /// silently dropped — it gets a stub page saying so (§2.7, "fail per file,
 /// loudly"), because a row that opens onto nothing is the same silent wrongness
 /// the staleness header exists to prevent.
-const DOC_MAX_BYTES: u64 = 1_000_000;
+pub(crate) const DOC_MAX_BYTES: u64 = 1_000_000;
 
-/// Longest group name we will build. `mo` serves a group at `/{name}`, so this
-/// is a URL path segment; the length is cosmetic, the character set is not.
-const GROUP_MAX: usize = 48;
+/// Longest place key we will build. It is a URL path segment
+/// (`/<token>/p/<place>/`), so the length is cosmetic and the character set is
+/// not.
+pub(crate) const PLACE_KEY_MAX: usize = 48;
 
 /// What a document may bring with it into the derived tree.
 ///
 /// An ALLOW-LIST, never a denylist: the set of things a browser will execute
 /// grows, and a denylist written today is a list of the attacks that were known
-/// today. Matched on the extension because that is also what the viewer matches
-/// on when it decides what to serve and with which content type — agreeing with
-/// it is the point.
+/// today. Matched on the extension because that is also what the server matches
+/// on when it picks a content type — agreeing with it is the point
+/// (`docserver::ASSET_TYPES` carries the other half, and a debug assertion ties
+/// them together).
 ///
-/// **SVG is deliberately absent, and adding it is not a fix.** An SVG is a live
-/// document: it can carry `<script>`, `<foreignObject>` and external references.
-/// Inside an `<img>` it is script-inert by spec, which is the reading that makes
-/// "it's just an image" sound true — but `mo` serves this tree over HTTP and
-/// hands any raw asset back by direct URL
-/// (`/_/api/groups/{g}/files/{id}/raw/{path}` → `http.ServeFile`), where it is a
-/// top-level document with `image/svg+xml` on it and script runs. We do not
-/// control that content type, the port has no authentication, and the documents
-/// reached through it carry a client's signed agreement (§4.3). So: rasters
-/// only. A place's `logo.svg` stays broken on purpose, and the way to fix that
-/// is a viewer that serves assets with a content type we chose — not a seventh
-/// entry in this array.
-const ASSET_EXTS: [&str; 7] = ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp"];
+/// **SVG is here again, and only because the RESPONSE changed.** It was
+/// excluded under `mo`, which handed any raw asset back by direct URL as
+/// `image/svg+xml` — where an SVG is not an image but a top-level document,
+/// and its `<script>` runs. Inside an `<img>` it is script-inert by spec,
+/// which is the reading that makes "it's just an image" sound true; served by
+/// URL with a content type we did not choose, it is not. Owning the server is
+/// exactly what findings §6.4 said would turn that permanent amputation into a
+/// header, and it has: every asset goes out with
+/// `Content-Security-Policy: default-src 'none'` and
+/// `X-Content-Type-Options: nosniff`, under which a navigated SVG can neither
+/// run inline script nor fetch anything.
+///
+/// **So this entry and that header are ONE decision.** Delete the header and
+/// every `logo.svg` in every place is live again, with nothing in this file
+/// saying so — which is why `an_svg_is_copied_only_because_the_response_makes_it_inert`
+/// asserts both halves and goes red if either leaves.
+pub(crate) const ASSET_EXTS: [&str; 8] =
+    ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg"];
 
 /// Per-image cap. Ten times `DOC_MAX_BYTES`, because a screenshot is not a
 /// document and 1 MB is an ordinary PNG; past this it is a video frame or a
@@ -148,36 +112,37 @@ const ASSETS_MAX_TOTAL: u64 = 64_000_000;
 /// `MAX_ENTRIES` is the same rule one level up.
 const ASSET_MAX_FILES: usize = 500;
 
-/// Where the viewer binary is looked for, relative to the bundle's resource
-/// directory. `release.yml` puts it here and signs it.
-const RESOURCE_REL: &str = "viewer/mo";
+/// Where the browser bundle is looked for, relative to the bundle's resource
+/// directory. `release.yml` puts it here.
+const BUNDLE_REL: &str = "viewer/viewer.js";
 
-/// Development / test escape hatch: an absolute path to a viewer binary. This is
-/// the USER's environment, never a cloned repo's file, so ADR 0001 is untouched
-/// — the repo still cannot name a program to run. It exists because `tauri dev`
-/// has no bundle and therefore no resource directory.
-const BIN_ENV: &str = "WORKTREES_VIEWER_BIN";
+/// Development escape hatch: an absolute path to a browser bundle. This is the
+/// USER's environment, never a cloned repo's file, so ADR 0001 is untouched —
+/// the repo still cannot name a program to run, and this names no program at
+/// all. It exists because `tauri dev` has no bundle and therefore no resource
+/// directory, and because the page is built in a different worktree.
+const BUNDLE_ENV: &str = "WORKTREES_VIEWER_JS";
 
-// ── the managed child ────────────────────────────────────────────────────────
+// ── what the server is allowed to serve ──────────────────────────────────────
 
-/// One place registered with the running viewer, and everything the tick needs
-/// to re-derive it without the frontend saying anything.
+/// One place, as both the tick and the server see it.
 ///
-/// The map used to be `(root, group)` — enough to keep two places from
-/// colliding into one `mo` group. It is now everything `write_tree` takes,
-/// because the browser tab has to keep up with the documents on its own: `mo`
-/// watches the DERIVED tree (`-wR`), not the repo, so its live-reload was
-/// reloading a copy that could only change when the button was pressed again.
-struct Group {
+/// **One list, shared.** `docserver` reads this same `Vec` under the same
+/// mutex rather than keeping a projection of its own: two lists that must agree
+/// about which places exist is a drift bug, and the fields the server reads
+/// (`key`, `tree`, `root`, `etag`, `meta`, `index`) are exactly the fields the
+/// derive writes.
+pub(crate) struct Group {
     /// Canonical place root — the walk's root, and the identity of this entry.
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     /// The place's slug. Names the tree directory and is the first fact in the
     /// header; kept so an error about this group can name it.
     slug: String,
-    /// The `mo` group serving it, for THIS process only.
-    name: String,
-    /// Where the derived copy lives.
-    tree: PathBuf,
+    /// The URL path segment serving it, for THIS launch only.
+    pub(crate) key: String,
+    /// Where the derived copy lives. The server's root for this place, and the
+    /// only directory a request about it may reach.
+    pub(crate) tree: PathBuf,
     /// The `[docs]` section the index was walked with, as it stood at the last
     /// OPEN.
     ///
@@ -206,35 +171,42 @@ struct Group {
     /// copy made at click time. See `docs::fold_assets` for what that does and
     /// does not cover.
     assets: Vec<String>,
-}
-
-/// One running viewer, and the places already registered with it.
-struct Proc {
-    child: std::process::Child,
-    port: u16,
-    /// The places this process is serving.
+    /// The `ETag` stem for everything this place serves.
     ///
-    /// Registration is idempotent in `mo` (verified: re-running the client
-    /// against the same directory leaves the file count unchanged), so this list
-    /// is not correctness for the registration — it is the record of which names
-    /// are taken, which `group_name` needs in order to keep two places from
-    /// colliding into one group and showing each other's documents, and it is
-    /// the tick's whole work list.
-    groups: Vec<Group>,
+    /// The fingerprint AND both epochs, because a re-open re-derives and
+    /// re-stamps the header without the documents having moved: a tag built
+    /// from the digest alone would still match, and the reader would keep a
+    /// status line from the last open while the app showed a new one.
+    pub(crate) etag: String,
+    /// The `meta` object of the contract, pre-serialized. Built by the derive,
+    /// spliced into every `doc` response.
+    pub(crate) meta: Arc<str>,
+    /// The whole `index` response body, pre-serialized. Up to 2,000 entries,
+    /// built once per derive rather than once per poll.
+    pub(crate) index: Arc<str>,
 }
 
-/// The app's single viewer slot. `None` = nothing has been spawned, or the last
-/// one died and has not been replaced yet. Both states are normal.
+/// The app's single server slot and the places it serves.
+///
+/// `None` = nothing has been started, or the last one died and has not been
+/// replaced yet. Both states are normal.
 #[derive(Default)]
-pub struct Viewer(Mutex<Option<Proc>>);
+pub struct Viewer {
+    srv: Mutex<Option<crate::docserver::Handle>>,
+    places: Arc<Mutex<Vec<Group>>>,
+}
 
-/// Kill the viewer, if there is one. Called from `RunEvent::Exit` next to the
-/// shells: the child dies with the app deliberately, because what it is holding
-/// is an unauthenticated port onto the user's documents.
+/// Stop the server, if there is one. Called from `RunEvent::Exit` next to the
+/// shells: what it is holding is an unauthenticated port onto the user's
+/// documents, and it dies with the app deliberately.
 pub fn kill(v: &Viewer) {
-    if let Some(mut p) = v.0.lock().unwrap().take() {
-        let _ = p.child.kill();
-        let _ = p.child.wait();
+    if let Ok(mut slot) = v.srv.lock() {
+        if let Some(h) = slot.take() {
+            h.stop();
+        }
+    }
+    if let Ok(mut places) = v.places.lock() {
+        places.clear();
     }
 }
 
@@ -247,29 +219,31 @@ pub fn kill(v: &Viewer) {
 /// viewer serving documents that no longer exist anywhere is the joke this whole
 /// proposal is built to avoid.
 ///
-/// Removing the tree is a complete deregistration and needs no second call.
-/// `mo` watches the directory (`-wR`), and it drops what leaves it: verified —
-/// two seconds after the tree was removed the group listed zero files and the
-/// content endpoint answered 404.
+/// The registration goes with the tree, so the route answers `410 Gone`
+/// immediately rather than after the next tick — a page open on that place says
+/// so instead of polling a hole. (`with_place` also refuses a place whose tree
+/// has left the disk, which is what covers the removal this never hears about.)
 ///
 /// Best-effort and silent: a place with no tree (never opened in the browser) is
 /// the common case, not an error.
-pub fn forget_place(config_dir: &Path, slug: &str, canonical_root: &Path) {
-    let dir = viewer_dir(config_dir).join("tree").join(tree_key(slug, canonical_root));
+pub fn forget_place(v: &Viewer, config_dir: &Path, slug: &str, canonical_root: &Path) {
+    let key = tree_key(slug, canonical_root);
+    if let Ok(mut places) = v.places.lock() {
+        places.retain(|g| tree_key(&g.slug, &g.root) != key);
+    }
+    let dir = viewer_dir(config_dir).join("tree").join(key);
     let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Drop what the viewer left on disk. Called from `RunEvent::Exit` after `kill`.
 ///
 /// The derived trees are copies of the user's documents in a directory that is
-/// neither the repo nor covered by its gitignore; the session file is `mo`'s own
-/// and would restore removed places onto a reused port. Neither is worth keeping
-/// for a viewer that is, by design, dead. Best-effort: a file that will not go is
-/// not worth failing a shutdown over, and `spawn` empties both again anyway.
+/// neither the repo nor covered by its gitignore. They are not worth keeping for
+/// a server that is, by design, dead. Best-effort: a file that will not go is
+/// not worth failing a shutdown over, and the first start of the next run empties
+/// the directory again anyway.
 pub fn cleanup(config_dir: &Path) {
-    let v = viewer_dir(config_dir);
-    empty_dir(&v.join("tree"));
-    empty_dir(&v.join("state"));
+    empty_dir(&viewer_dir(config_dir).join("tree"));
 }
 
 // ── what the command is asked for ────────────────────────────────────────────
@@ -279,7 +253,8 @@ pub struct Request<'a> {
     /// The place directory. Already through `guard_under_projects` by the time
     /// it arrives here.
     pub root: &'a Path,
-    /// The place's slug. Names the group, and is the first fact in the header.
+    /// The place's slug. Names the route segment, and is the first fact in the
+    /// header.
     pub slug: &'a str,
     /// The document to open, as an absolute path out of the index, or `None`
     /// for the place's landing page.
@@ -304,45 +279,20 @@ pub struct Request<'a> {
 
 // ── the pure parts, which is where the tests live ────────────────────────────
 
-/// The verdict on the `Host`-header probe, from the response's first line.
-///
-/// Anything but `403` is a failure, INCLUDING a success: a viewer that answers
-/// `200` to a request claiming to be `worktrees-viewer-probe.invalid` is a
-/// viewer that would answer a rebound page the same way, and that is the whole
-/// of §13.2. A malformed or empty first line is also a failure — "I could not
-/// tell" and "it refused" must never collapse into the same branch, because
-/// only one of them is safe.
-pub fn probe_verdict(first_line: &str) -> Result<(), String> {
-    let mut parts = first_line.trim_end().split(' ');
-    let version = parts.next().unwrap_or("");
-    let code = parts.next().unwrap_or("");
-    if !version.starts_with("HTTP/") {
-        return Err(format!("no HTTP status line from the viewer (got {first_line:?})"));
-    }
-    match code {
-        "403" => Ok(()),
-        "" => Err("the viewer sent a status line with no code".into()),
-        other => Err(format!(
-            "the viewer answered {other} to a request with a foreign Host header; it must answer 403 \
-             (an unpatched viewer is readable by any web page the user has open — proposal §13.2)"
-        )),
-    }
-}
-
-/// A place's `mo` group name: the slug, reduced to what can stand in a URL path
-/// segment, disambiguated against the names already taken.
+/// A place's route segment: the slug, reduced to what can stand in a URL path
+/// segment, disambiguated against the segments already taken.
 ///
 /// Two places may legitimately share a slug — the same branch name in two
-/// projects — and `mo` merges same-named groups rather than rejecting them, so a
-/// collision would silently show one project's documents under the other's
-/// name. That is §1.1's failure with the axes swapped, so the tie is broken by
-/// a hash of the canonical root, which is the one thing that cannot collide.
+/// projects — and a collision would silently show one project's documents under
+/// the other's name. That is §1.1's failure with the axes swapped, so the tie is
+/// broken by a hash of the canonical root, which is the one thing that cannot
+/// collide.
 ///
-/// The character set is not cosmetic. `mo` reserves `/_/` for its own API, and
-/// anything with a `/`, a `?` or a `%` in it would not be the segment we then
-/// bake into a `click` directive — so the name is reduced to `[a-z0-9-]`,
-/// forced to start with a letter or digit, and never left empty.
-pub fn group_name(slug: &str, root: &Path, taken: &[(PathBuf, String)]) -> String {
+/// The character set is not cosmetic: this becomes a path segment in a URL the
+/// tool generates and then validates on the way back in
+/// (`docserver::place_key_ok`), so anything with a `/`, a `?` or a `%` in it
+/// would not be the segment we emitted.
+pub fn place_key(slug: &str, root: &Path, taken: &[(PathBuf, String)]) -> String {
     if let Some((_, name)) = taken.iter().find(|(r, _)| r == root) {
         return name.clone();
     }
@@ -358,12 +308,11 @@ pub fn group_name(slug: &str, root: &Path, taken: &[(PathBuf, String)]) -> Strin
         } else {
             dash = true;
         }
-        if base.len() >= GROUP_MAX {
+        if base.len() >= PLACE_KEY_MAX {
             break;
         }
     }
-    // A slug of nothing but punctuation, and the place whose slug is literally
-    // `_` — `mo`'s own namespace — both land here.
+    // A slug of nothing but punctuation lands here.
     if base.is_empty() {
         base = "place".to_string();
     }
@@ -371,36 +320,33 @@ pub fn group_name(slug: &str, root: &Path, taken: &[(PathBuf, String)]) -> Strin
         return base;
     }
     let suffix = &id8(root.as_os_str().as_encoded_bytes());
-    let keep = GROUP_MAX.saturating_sub(suffix.len() + 1);
+    let keep = PLACE_KEY_MAX.saturating_sub(suffix.len() + 1);
     format!("{}-{}", &base[..base.len().min(keep)], suffix)
 }
 
-/// `mo`'s file id: the first 8 hex characters of the sha256 of the file's
-/// ABSOLUTE path. Verified against a running server, not read off the source —
-/// `sha256("…/a.md")[..8]` was `10ca7322` and so was the id in `/_/api/groups`.
+/// The first 8 hex characters of a sha256. Used to break a tie between two
+/// places that share a slug, in the route segment and in the tree's directory
+/// name — never as a secret, and never as anything a request may supply.
 fn id8(bytes: &[u8]) -> String {
     let d = Sha256::digest(bytes);
     d.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-/// The URL for one derived file, in the form the spike proved is the working
-/// one: absolute, with the port, the group and the path hash baked in.
+/// The URL of one place's shell, and optionally of one document inside it.
 ///
-/// A relative `./x.md` in a `click` directive misroutes to another group
-/// entirely (spike, Test 1), which is why none of this can be committed into the
-/// user's own files and why the derived tree is generated at launch.
-///
-/// `127.0.0.1` rather than `localhost`: it is what `derive::is_loopback_target`
-/// will accept on the way out, it needs no resolver, and it is the literal the
-/// patched viewer's `Host` check will see.
-pub fn file_url(port: u16, group: &str, derived: &Path) -> String {
-    format!("http://127.0.0.1:{port}/{group}?file={}", id8(derived.as_os_str().as_encoded_bytes()))
-}
-
-/// The URL for a place's landing page — what the "Open this place in the
-/// browser" button opens.
-pub fn group_url(port: u16, group: &str) -> String {
-    format!("http://127.0.0.1:{port}/{group}")
+/// `127.0.0.1` rather than `localhost`: it needs no resolver, it cannot be
+/// pointed anywhere by a hosts file, and it is the literal the server's own
+/// `Host` check will see. The document is a QUERY rather than a path segment
+/// because the shell is one page — the page fetches `doc?path=` for whatever it
+/// is showing, and a deep link is the same page told where to start.
+pub fn place_url(port: u16, token: &str, key: &str, rel: Option<&str>) -> String {
+    match rel {
+        None => format!("http://127.0.0.1:{port}/{token}/p/{key}/"),
+        Some(r) => format!(
+            "http://127.0.0.1:{port}/{token}/p/{key}/?path={}",
+            crate::docserver::query_escape(r)
+        ),
+    }
 }
 
 /// A relative path we are willing to CREATE under the derived tree, or `None`.
@@ -438,9 +384,8 @@ pub fn safe_rel(rel: &str) -> Option<&str> {
 /// did"*. The alternative — dropping the row — makes the viewer disagree with
 /// the index the user just clicked in, and disagreeing silently is the shape
 /// this whole feature exists to remove.
-fn stub(entry: &DocEntry, stale: &Staleness, why: &str) -> String {
-    let mut s = derive::header(stale);
-    s.push_str(&format!("# {}\n\n", entry.title.replace(['\n', '\r'], " ")));
+fn stub(entry: &DocEntry, why: &str) -> String {
+    let mut s = format!("# {}\n\n", entry.title.replace(['\n', '\r'], " "));
     s.push_str(&format!("*This document was not rendered: {why}.*\n\n"));
     s.push_str(&format!("`{}`\n", entry.rel.replace('`', "'")));
     s
@@ -449,24 +394,24 @@ fn stub(entry: &DocEntry, stale: &Staleness, why: &str) -> String {
 // ── generating the tree ──────────────────────────────────────────────────────
 
 /// Read one document and transform it, or produce the stub that says why not.
-fn render_one(path: &Path, entry: &DocEntry, stale: &Staleness, links: &Links) -> String {
+fn render_one(path: &Path, entry: &DocEntry, links: &Links) -> String {
     let Ok(file) = std::fs::File::open(path) else {
-        return stub(entry, stale, "it could not be opened");
+        return stub(entry, "it could not be opened");
     };
     let mut bytes = Vec::new();
     if file.take(DOC_MAX_BYTES + 1).read_to_end(&mut bytes).is_err() {
-        return stub(entry, stale, "it could not be read");
+        return stub(entry, "it could not be read");
     }
     if bytes.len() as u64 > DOC_MAX_BYTES {
-        return stub(entry, stale, "it is larger than 1 MB");
+        return stub(entry, "it is larger than 1 MB");
     }
     match String::from_utf8(bytes) {
         // Not lossy. A document with a broken byte in it is a document whose
         // author would want to know, and a silently mangled page is indis-
         // tinguishable from the real thing — which is exactly what `mo` does on
         // its own (it skips an invalid-UTF-8 file with no log line at all).
-        Err(_) => stub(entry, stale, "it is not valid UTF-8"),
-        Ok(text) => derive::document(entry, &text, stale, links),
+        Err(_) => stub(entry, "it is not valid UTF-8"),
+        Ok(text) => derive::body(entry, &text, links),
     }
 }
 
@@ -495,18 +440,23 @@ pub struct Derived {
 /// Files that are no longer in the index are pruned afterwards, which is the
 /// only removal that has to happen at all.
 ///
+/// The staleness facts are NOT passed: the derived text no longer carries the
+/// header, because the page renders it from `doc`'s `meta` and a second copy
+/// in the prose could only be a stale one.
+///
 /// `root` is the place itself, canonical, and it is here for the images: a
 /// reference is resolved against it and every candidate has to prove it still
 /// lies under it (`copy_assets`). It is passed rather than derived from an
 /// entry's absolute path minus its `rel`, because that subtraction is a third
 /// place that would have to agree with the walk about what a root is.
+#[allow(clippy::too_many_arguments)]
 fn write_tree(
     dir: &Path,
     root: &Path,
     entries: &[DocEntry],
-    stale: &Staleness,
     port: u16,
-    group: &str,
+    token: &str,
+    key: &str,
 ) -> Result<Derived, String> {
     // The derived path of every entry, decided BEFORE anything is written,
     // because `Links::url` has to be able to answer for a page that has not been
@@ -518,8 +468,8 @@ fn write_tree(
         }
     }
     let url_for = |e: &DocEntry| -> Option<String> {
-        let (_, p) = derived.iter().find(|(i, _)| entries[*i].path == e.path)?;
-        Some(file_url(port, group, p))
+        let (_i, _p) = derived.iter().find(|(i, _)| entries[*i].path == e.path)?;
+        Some(place_url(port, token, key, Some(&entries[*_i].rel)))
     };
     let links = Links { entries, url: &url_for };
 
@@ -537,14 +487,14 @@ fn write_tree(
     let mut notes: Vec<String> = Vec::new();
     for (i, out) in &derived {
         let entry = &entries[*i];
-        let body = render_one(Path::new(&entry.path), entry, stale, &links);
+        let body = render_one(Path::new(&entry.path), entry, &links);
         // Asked of the RENDERED body, not of the file: the transform leaves
         // every image reference exactly as its author wrote it (that is why the
         // copy has to mirror the path at all), so the two texts give the same
         // answer — and reading the document a second time to ask the same
         // question is the second reader this feature keeps refusing. A stub page
         // has no references, which is also correct: nothing of it is shown.
-        collect_refs(entry, &body, &mut refs, &mut notes);
+        collect_refs(entry, &body, &mut refs);
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
@@ -565,22 +515,18 @@ fn write_tree(
 /// The images one document asks for, as paths relative to the place root.
 ///
 /// Layer A is `derive::asset_rel`; this adds the extension allow-list and
-/// nothing else. A reference it drops is dropped SILENTLY, with one exception:
-/// almost everything refused here is an ordinary `https://` image or an anchor
-/// a document happens to define, and a log line per external image per derive
-/// would bury the lines that mean something. The exception is SVG, which is
-/// refused for a reason the author cannot guess from a broken image.
-fn collect_refs(entry: &DocEntry, body: &str, out: &mut BTreeSet<String>, notes: &mut Vec<String>) {
+/// nothing else. A reference it drops is dropped SILENTLY: almost everything
+/// refused here is an ordinary `https://` image or an anchor a document happens
+/// to define, and a log line per external image per derive would bury the lines
+/// that mean something. The refusals worth SAYING are the ones a local file
+/// reached and failed — `copy_assets` writes those.
+fn collect_refs(entry: &DocEntry, body: &str, out: &mut BTreeSet<String>) {
     for r in derive::image_refs(body) {
         let Some(rel) = derive::asset_rel(&entry.rel, &r) else { continue };
         match ext_of(&rel) {
             e if ASSET_EXTS.contains(&e.as_str()) => {
                 out.insert(rel);
             }
-            e if e == "svg" => notes.push(format!(
-                "{rel}: an SVG is not copied into the derived tree — the viewer serves it by URL, \
-                 where it is a document that can run script rather than an image"
-            )),
             _ => {}
         }
     }
@@ -741,97 +687,15 @@ fn prune(dir: &Path, keep: &BTreeSet<PathBuf>) {
     }
 }
 
-// ── spawning, and proving what was spawned ───────────────────────────────────
-
-/// A free loopback port.
-///
-/// The OS picks it (`bind` to port 0, read it back, close), then
-/// `provision::port_free` — the repo's own probe — confirms it. The window
-/// between closing and the viewer binding is real and is deliberately not
-/// papered over: a port that was taken in that gap shows up as "started but
-/// never listened", which the deadline already handles by killing the child and
-/// saying so.
-fn pick_port() -> Result<u16, String> {
-    for _ in 0..16 {
-        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
-        let port = l.local_addr().map_err(|e| e.to_string())?.port();
-        drop(l);
-        if worktrees_core::provision::port_free(port as u32) {
-            return Ok(port);
-        }
-    }
-    Err("no free loopback port for the documentation viewer".into())
-}
-
-/// Ask the viewer for something, claiming to be a host it is not, and require a
-/// refusal.
-///
-/// This is §11.3's acceptance criterion executed rather than assumed. The threat
-/// is not another local process — anything running as this user can read `docs/`
-/// without our help — it is a **web page**: script in a tab the user already has
-/// open can re-resolve its own domain to `127.0.0.1` and is then same-origin
-/// with the viewer, so no CORS check applies and `/_/api/groups` returns every
-/// document in every place. The browser always sends the name it believes it is
-/// talking to and cannot be made to lie about it, so a viewer that checks `Host`
-/// is immune and one that does not is wide open. There is no third state, and no
-/// proxy in front fixes it — the page can reach the viewer's own port directly
-/// (§13.3).
-fn probe_refuses_foreign_host(port: u16) -> Result<(), String> {
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut s = TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).map_err(|e| e.to_string())?;
-    s.set_read_timeout(Some(PROBE_TIMEOUT)).map_err(|e| e.to_string())?;
-    s.set_write_timeout(Some(PROBE_TIMEOUT)).map_err(|e| e.to_string())?;
-    // `/_/api/groups` on purpose: it is the endpoint that hands back every
-    // document in every group at once, so it is the one the gate is about.
-    let req = format!(
-        "GET /_/api/groups HTTP/1.1\r\nHost: {PROBE_HOST}\r\nUser-Agent: worktrees-viewer-probe\r\nConnection: close\r\n\r\n"
-    );
-    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
-    s.flush().map_err(|e| e.to_string())?;
-    // The status line and nothing more. A bounded read, because the body of a
-    // 200 here would be the documents themselves and this process has no reason
-    // to hold them.
-    let mut buf = [0u8; 256];
-    let n = s.read(&mut buf).map_err(|e| e.to_string())?;
-    let head = String::from_utf8_lossy(&buf[..n]);
-    probe_verdict(head.lines().next().unwrap_or(""))
-}
-
-/// Wait for the port, or for the child to die trying.
-fn await_listening(child: &mut std::process::Child, port: u16) -> Result<(), String> {
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let deadline = Instant::now() + START_DEADLINE;
-    loop {
-        // The child first: a viewer that exited is answerable now, and polling a
-        // port nobody will ever bind for the whole deadline turns an instant
-        // failure into a three-second one on the UI's click path.
-        match child.try_wait() {
-            Ok(Some(st)) => return Err(format!("the viewer exited before it listened ({st})")),
-            Ok(None) => {}
-            Err(e) => return Err(format!("the viewer could not be waited on: {e}")),
-        }
-        if TcpStream::connect_timeout(&addr, POLL_EVERY).is_ok() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "the viewer did not listen on 127.0.0.1:{port} within {} ms",
-                START_DEADLINE.as_millis()
-            ));
-        }
-        std::thread::sleep(POLL_EVERY);
-    }
-}
-
 /// Where the viewer's own state lives, and where the derived trees go.
 fn viewer_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("viewer")
 }
 
-/// Empty a directory without removing it, ignoring what will not go. Used on the
-/// `mo` state root before every spawn: its session file is keyed by PORT and
-/// restores whatever that port served last time, so a port the OS hands us twice
-/// would resurrect a place the user has since removed.
+/// Empty a directory without removing it, ignoring what will not go. Used on
+/// the derived-tree root at the first start of a run: a crash cannot honour a
+/// shutdown hook, so this is what stops one run's copies of the user's
+/// documents outliving it into the next.
 fn empty_dir(dir: &Path) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for ent in rd.flatten() {
@@ -845,383 +709,6 @@ fn empty_dir(dir: &Path) {
     }
 }
 
-/// The viewer binary, by STAT — never by running it.
-///
-/// "It should be there and it is not" is a `doctor` finding, which already runs
-/// off the hot path; executing a candidate to find out would put an exec of an
-/// unknown binary on app launch, which is the opposite of what rule 2 asks for.
-pub fn binary_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
-    resolve_binary(std::env::var(BIN_ENV).ok().as_deref(), resource_dir)
-}
-
-/// The resolution itself, with the environment as an ARGUMENT.
-///
-/// Split out so its test can state the precedence instead of depending on the
-/// ambient environment — which it did, and which made the suite fail the moment
-/// it was run the way the end-to-end test asks to be run
-/// (`WORKTREES_VIEWER_BIN=… cargo test`). A test that passes only when nobody is
-/// exercising the feature is not a test.
-fn resolve_binary(from_env: Option<&str>, resource_dir: Option<&Path>) -> Option<PathBuf> {
-    let is_file = |p: PathBuf| std::fs::metadata(&p).ok().filter(|m| m.is_file()).map(|_| p);
-    // The override WINS, and a broken override does not fall through to the
-    // bundle: someone who set it is testing that binary, and quietly running a
-    // different one is how you spend an afternoon.
-    if let Some(p) = from_env {
-        return is_file(PathBuf::from(p));
-    }
-    is_file(resource_dir?.join(RESOURCE_REL))
-}
-
-/// Spawn a viewer, wait for it, and prove it refuses a foreign `Host`.
-///
-/// Every failure past the spawn kills the child before returning. A viewer we
-/// could not vouch for is worse than no viewer: it is an unauthenticated server
-/// holding the user's documents, with nothing in the UI saying so.
-fn spawn(bin: &Path, state_dir: &Path, log: &Path) -> Result<Proc, String> {
-    std::fs::create_dir_all(state_dir).map_err(|e| format!("{}: {e}", state_dir.display()))?;
-    empty_dir(state_dir);
-    let port = pick_port()?;
-
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args([
-        // Without this it daemonises and the handle we keep is a launcher that
-        // has already exited — `RunEvent::Exit` would kill nothing.
-        "--foreground",
-        // We open the URL ourselves, through the same `openUrl` path the rest of
-        // the app uses.
-        "--no-open",
-        "--bind",
-        // The literal rather than `localhost`: no resolver, no chance of an
-        // `::1`/`127.0.0.1` split, and it is the name the patched Host check
-        // sees.
-        "127.0.0.1",
-        "--port",
-    ]);
-    cmd.arg(port.to_string());
-    // Its session lives where we say, not in `~/.local/state/mo` beside a copy
-    // the user runs by hand.
-    cmd.env("XDG_STATE_HOME", state_dir);
-    cmd.stdin(std::process::Stdio::null());
-    // A file rather than a pipe. `mo` logs a JSON line per file event, and a pipe
-    // nobody drains fills and wedges the child — the same trap `run_deadline`
-    // spawns reader threads for. A file also survives the failure we most need
-    // to explain, which is a child that died before it listened.
-    let out = std::fs::File::create(log).map_err(|e| format!("{}: {e}", log.display()))?;
-    let err = out.try_clone().map_err(|e| e.to_string())?;
-    cmd.stdout(std::process::Stdio::from(out));
-    cmd.stderr(std::process::Stdio::from(err));
-
-    // The PATH in the message, not just the errno: "No such file or directory"
-    // alone names nothing, and the two cases a user can act on — it is missing,
-    // it is the wrong architecture — read identically without it.
-    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
-    let fail = |child: &mut std::process::Child, msg: String| -> String {
-        let _ = child.kill();
-        let _ = child.wait();
-        msg
-    };
-    if let Err(e) = await_listening(&mut child, port) {
-        return Err(fail(&mut child, format!("{e}{}", log_tail(log))));
-    }
-    if let Err(e) = probe_refuses_foreign_host(port) {
-        return Err(fail(&mut child, e));
-    }
-    Ok(Proc { child, port, groups: Vec::new() })
-}
-
-/// The last few lines of the viewer's log, for an error message. A child that
-/// exited before it listened put its reason here and nowhere else.
-fn log_tail(log: &Path) -> String {
-    let Ok(s) = std::fs::read_to_string(log) else { return String::new() };
-    let tail: Vec<&str> = s.lines().rev().take(3).filter(|l| !l.trim().is_empty()).collect();
-    if tail.is_empty() {
-        return String::new();
-    }
-    format!(" — {}", tail.into_iter().rev().collect::<Vec<_>>().join(" / "))
-}
-
-/// Register a place's derived tree as a group on the running viewer.
-///
-/// `-wR <dir>` rather than a file list: one argument instead of up to 2,000
-/// (the index's cap), which keeps this off `ARG_MAX` entirely, and the watch is
-/// what makes a regenerated tree refresh an already-open browser tab. Verified
-/// idempotent — re-running it against the same directory leaves the group's file
-/// count unchanged.
-fn register(bin: &Path, state_dir: &Path, port: u16, group: &str, tree: &Path) -> Result<(), String> {
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(["--no-open", "--port"]);
-    cmd.arg(port.to_string());
-    cmd.args(["--target", group, "-wR"]);
-    cmd.arg(tree);
-    cmd.env("XDG_STATE_HOME", state_dir);
-    cmd.stdin(std::process::Stdio::null());
-    // `run_deadline` sets stdout and stderr itself and spawns a thread to drain
-    // each — setting them here would be overwritten, and the draining is the
-    // point: a >64KB burst on an undrained pipe deadlocks `try_wait`, and this
-    // client prints a line per file registered.
-    //
-    // This is a short-lived CLIENT: it talks to the server over loopback and
-    // exits. It is not the supervised child, so it gets a deadline of its own
-    // rather than a `try_wait` loop.
-    let out = crate::run_deadline(cmd, REGISTER_DEADLINE_SECS)
-        .map_err(|e| format!("registering {group} with the viewer: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let msg = String::from_utf8_lossy(&out.stderr);
-    Err(format!("registering {group} with the viewer failed ({}): {}", out.status, msg.trim()))
-}
-
-/// Ask whatever is listening on `port` to shut down, and do not care much
-/// whether it answers.
-///
-/// Only ever called about a server we did NOT spawn: `register` runs the
-/// viewer binary a second time as a *client*, and `mo`'s client falls through
-/// to starting its own daemonised server when it finds the port empty
-/// (`cmd/root.go` `startBackground`, `setsid`). That process is not our child,
-/// so `RunEvent::Exit` has never heard of it and `kill` cannot reach it — the
-/// one way this app can leave an unauthenticated viewer listening after it
-/// quits, which is precisely the failure `--foreground` exists to prevent,
-/// arriving through the back door.
-///
-/// Best-effort by construction: if the shutdown fails there is nothing further
-/// this process can do about a server it does not own, and the caller has
-/// already failed the open for its own reasons.
-fn shutdown_port(bin: &Path, state_dir: &Path, port: u16) {
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(["--shutdown", "--port"]);
-    cmd.arg(port.to_string());
-    cmd.env("XDG_STATE_HOME", state_dir);
-    cmd.stdin(std::process::Stdio::null());
-    let _ = crate::run_deadline(cmd, SHUTDOWN_DEADLINE_SECS);
-}
-
-// ── the command's body ───────────────────────────────────────────────────────
-
-/// Everything `open_docs_viewer` does, minus the Tauri plumbing.
-///
-/// `config_dir` and `resource_dir` come from the app handle; `entries` is the
-/// index the caller already walked. Returns the URL for the frontend to hand to
-/// `openUrl`.
-/// What one successful `open` produced: the URL for `openUrl`, and anything the
-/// derive refused along the way.
-///
-/// The notes are not errors — the open succeeded — but they are the only record
-/// that an image the reader is about to not-see was skipped on purpose, so the
-/// caller logs them. Swallowing them would leave a missing screenshot with no
-/// explanation anywhere in the app.
-pub struct Opened {
-    pub url: String,
-    pub notes: Vec<String>,
-}
-
-pub fn open(
-    v: &Viewer,
-    config_dir: &Path,
-    resource_dir: Option<&Path>,
-    entries: &[DocEntry],
-    req: &Request,
-) -> Result<Opened, String> {
-    let bin = binary_path(resource_dir).ok_or_else(|| {
-        "the documentation viewer is not installed with this app (Settings → Health reports it); \
-         the Docs tab still lists and reads every document in place"
-            .to_string()
-    })?;
-    let vdir = viewer_dir(config_dir);
-    let state_dir = vdir.join("state");
-    let log = vdir.join("viewer.log");
-    std::fs::create_dir_all(&vdir).map_err(|e| format!("{}: {e}", vdir.display()))?;
-
-    let mut slot = v.0.lock().unwrap();
-    // Liveness the way `Shells` does it: ask the handle we hold, on every open,
-    // and never a timer. A viewer that died takes the whole slot with it —
-    // including the group map, because the next process knows nothing about what
-    // the last one was serving.
-    if let Some(p) = slot.as_mut() {
-        if !matches!(p.child.try_wait(), Ok(None)) {
-            *slot = None;
-        }
-    }
-    if slot.is_none() {
-        *slot = Some(spawn(&bin, &state_dir, &log)?);
-        // A fresh viewer serves nothing yet, so this is the moment the old
-        // trees stop being anybody's. They are COPIES of the user's documents —
-        // the ones §4.3 says carry a client's signed agreement — sitting outside
-        // the repo's own gitignore in a directory Spotlight and Time Machine
-        // both index, so they do not get to outlive the process that needed
-        // them. `cleanup` does the same on a clean exit; this is what covers a
-        // crash, which is the case a shutdown hook cannot.
-        empty_dir(&vdir.join("tree"));
-    }
-    let proc = slot.as_mut().expect("spawned or returned");
-    let port = proc.port;
-
-    let root = req.root.to_path_buf();
-    // `group_name` stays a pure function over `(root, name)` pairs — the tie it
-    // breaks has nothing to do with the rest of a `Group`, and its tests say so
-    // in the shape they build.
-    let taken: Vec<(PathBuf, String)> =
-        proc.groups.iter().map(|g| (g.root.clone(), g.name.clone())).collect();
-    let group = group_name(req.slug, &root, &taken);
-    let tree = vdir.join("tree").join(tree_key(req.slug, &root));
-
-    let derived = write_tree(&tree, &root, entries, &req.stale, port, &group)?;
-    // The images this place brought with it are part of what the tick has to
-    // watch, so the digest recorded below is the caller's (taken BEFORE the
-    // walk, which is the one ordering rule here) with their stats folded in.
-    let fingerprint = worktrees_core::docs::fold_assets(req.fingerprint, &root, &derived.assets);
-    let pages = &derived.pages;
-    // A group of no documents is not worth registering, and registering one
-    // would put a watch pattern on an empty directory that nothing will ever
-    // fill. The footer button is disabled on an empty index, so the way here is
-    // the race: the index was walked 30 seconds ago and the place has been
-    // emptied since. Say that, rather than opening a blank group.
-    if pages.is_empty() {
-        return Err(format!("{} has no documents to show", req.slug));
-    }
-    if !proc.groups.iter().any(|g| g.root == root) {
-        // Re-checked HERE, not only at the top: `write_tree` above can take a
-        // while on a large place, and `register` runs the binary again as a
-        // CLIENT. A client that finds the port empty does not fail — it
-        // daemonises a server of its own (`shutdown_port`). Asking the handle
-        // first shrinks that window to the width of one `try_wait`.
-        if !matches!(proc.child.try_wait(), Ok(None)) {
-            *slot = None;
-            return Err("the viewer exited before its documents could be registered.".to_string());
-        }
-        let outcome = register(&bin, &state_dir, port, &group, &tree);
-        // …and again AFTER, because the window cannot be closed, only narrowed:
-        // the child can die during the registration itself. If it did, the
-        // client we just ran was talking to a server it started rather than to
-        // ours, and that server is nobody's child. Shut the port down instead
-        // of leaving it listening, then fail the open — a success here would
-        // hand the user a URL into a process this app can never kill.
-        if !matches!(proc.child.try_wait(), Ok(None)) {
-            shutdown_port(&bin, &state_dir, port);
-            *slot = None;
-            return Err("the viewer exited while registering documents.".to_string());
-        }
-        outcome?;
-        proc.groups.push(Group {
-            root: root.clone(),
-            slug: req.slug.to_string(),
-            name: group.clone(),
-            tree: tree.clone(),
-            docs: req.docs.clone(),
-            stale: req.stale.clone(),
-            fingerprint,
-            assets: derived.assets.clone(),
-        });
-    }
-    // Every open re-derives, registered or not (`write_tree` above), so the
-    // record has to be brought forward on the re-open path too — otherwise a
-    // place opened twice keeps the FIRST open's fingerprint and facts, and the
-    // tick compares today's documents against a digest from yesterday. It would
-    // re-derive once and then settle, which is the worst version of this bug:
-    // correct-looking, and wrong by exactly one stale header.
-    if let Some(g) = proc.groups.iter_mut().find(|g| g.root == root) {
-        g.docs = req.docs.clone();
-        g.stale = req.stale.clone();
-        g.fingerprint = fingerprint;
-        g.assets = derived.assets.clone();
-    }
-
-    let notes = derived.notes;
-    let Some(want) = req.path else { return Ok(Opened { url: group_url(port, &group), notes }) };
-    let hit = pages.iter().find(|(i, _)| entries[*i].path == want);
-    match hit {
-        Some((_, p)) => Ok(Opened { url: file_url(port, &group, p), notes }),
-        None => Err(format!("{want} is not in this place's documentation index")),
-    }
-}
-
-/// Re-derive every registered place whose documents have moved on disk.
-///
-/// **Why this exists.** `mo` watches the DERIVED tree (`-wR`), not the user's
-/// repo, so its live-reload was perfect over a copy that could only change when
-/// the button was pressed again: an edit to a real file, and a file added since
-/// the open, both reached nothing, and refreshing the browser did not help
-/// because the derived document genuinely had not changed. The dock, meanwhile,
-/// re-indexes every 4 s and says "1 document new" beside a tab showing the copy
-/// made at click time.
-///
-/// **The cost is the whole design.** `index_with` sniffs 8 KiB of every file for
-/// its title — measured at 10.1 ms and ~3.2 MB of reads for a 400-document place
-/// — and doing that per registered place every few seconds is not acceptable.
-/// `docs::fingerprint_with` walks the same paths with `symlink_metadata` alone
-/// (1.8 ms, zero bytes read, on the same tree) and the full walk runs only when
-/// it has moved.
-///
-/// Four rules, all of them `Shells`' rules, because this is the same kind of
-/// child:
-///
-/// 1. **Nothing registered, nothing done.** No lock contention, no walk, and in
-///    particular no spawn — a timer may not decide the user wants a viewer.
-/// 2. **Never resurrect a dead one.** `try_wait` says whether the child is
-///    alive; if it is not, the slot is dropped and the next OPEN spawns. A timer
-///    that respawned would put an unauthenticated port back up minutes after the
-///    user stopped using it, with nothing on screen to say so.
-/// 3. **A failed derive keeps its old fingerprint**, so it is retried on the
-///    next tick rather than recorded as done. The caller must dedupe the log
-///    (lib.rs does): a place that fails will fail every 3 s.
-/// 4. **Only `derived_epoch` moves.** Every other fact in the header costs a git
-///    fan-out, which §15.3 refused for a click and which is worse on a timer —
-///    so the page says when it was copied and, separately, when its status was
-///    measured. See `Staleness::derived_epoch`.
-///
-/// Returns one message per place that could not be re-derived, plus one per
-/// image a derive refused to copy — the same lines `Opened::notes` carries on
-/// the click path, for the same reason: a screenshot that is skipped on purpose
-/// must be findable somewhere other than in this source file. Never panics on
-/// a poisoned lock's account — this runs on the app's tick thread, and taking
-/// the process down over a documentation copy is not a trade worth making.
-pub fn refresh(v: &Viewer, now_epoch: i64) -> Vec<String> {
-    let mut errs: Vec<String> = Vec::new();
-    let Ok(mut slot) = v.0.lock() else {
-        return vec!["the viewer's lock is poisoned; documents will not refresh".to_string()];
-    };
-    // Rule 1: a viewer nobody has opened is the common case, and it must cost
-    // nothing at all.
-    let Some(proc) = slot.as_mut() else { return errs };
-    // Rule 2: ask the handle, the way every read of `Shells` does.
-    if !matches!(proc.child.try_wait(), Ok(None)) {
-        *slot = None;
-        return errs;
-    }
-    let port = proc.port;
-    for g in proc.groups.iter_mut() {
-        let docs_fp = worktrees_core::docs::fingerprint_with(&g.root, g.docs.as_ref());
-        // The images the last derive knew about, stat'ed alongside the
-        // documents. Without them an edited screenshot moves nothing — the walk
-        // lists markdown by design — and the tab goes on showing the version
-        // that was current when the button was pressed, which is this feature's
-        // own failure wearing a different hat.
-        let fp = worktrees_core::docs::fold_assets(docs_fp, &g.root, &g.assets);
-        if fp == g.fingerprint {
-            continue;
-        }
-        let idx = worktrees_core::docs::index_with(&g.root, g.docs.as_ref());
-        let mut stale = g.stale.clone();
-        stale.derived_epoch = now_epoch;
-        match write_tree(&g.tree, &g.root, &idx.entries, &stale, port, &g.name) {
-            Ok(d) => {
-                // Folded over the NEW list rather than storing `fp`: this derive
-                // may have added or dropped an image, and recording a digest
-                // taken over the old list would differ from the next tick's for
-                // no change at all — one re-derive per asset change, forever.
-                g.fingerprint = worktrees_core::docs::fold_assets(docs_fp, &g.root, &d.assets);
-                g.assets = d.assets;
-                g.stale = stale;
-                for n in d.notes {
-                    errs.push(format!("{}: {n}", g.slug));
-                }
-            }
-            // Rule 3: the fingerprint is NOT advanced, so this is tried again.
-            Err(e) => errs.push(format!("{}: {e}", g.slug)),
-        }
-    }
-    errs
-}
 
 /// The derived tree's directory name for one place: readable, and unique.
 ///
@@ -1241,9 +728,342 @@ fn tree_key(slug: &str, root: &Path) -> String {
     format!("{s}-{}", id8(root.as_os_str().as_encoded_bytes()))
 }
 
+// ── the contract's JSON, built by the derive rather than by the poll ─────────
+
+/// The `meta` object every response carries: the staleness facts, as data.
+///
+/// The dock renders these from the `Place` it is holding and the browser page
+/// renders them from here, so the two surfaces state the same facts — which is
+/// §1.1's whole hazard and the reason the header exists at all. They are DATA
+/// and not the markdown header `derive::header` writes, because the page
+/// refreshes them live: a blockquote baked into the document would be a second,
+/// frozen copy of numbers the reader can see changing above it.
+fn meta_json(slug: &str, s: &Staleness) -> String {
+    // `dirty` is the COUNT, per the contract. `dirty: Some(false)` with no
+    // count is a clean place and says `0`; `None` on both is "not computed",
+    // which is not zero and must not render as it.
+    let dirty = match (s.dirty, s.dirty_files) {
+        (_, Some(n)) => serde_json::json!(n),
+        (Some(false), None) => serde_json::json!(0),
+        _ => serde_json::Value::Null,
+    };
+    serde_json::json!({
+        "place": slug,
+        "branch": s.branch,
+        "behind": s.behind,
+        "base": s.base,
+        "dirty": dirty,
+        "subject": s.last_commit_subject,
+        // Not in the contract's table, and sent anyway: `subject` without an
+        // age is half of the dock's third line, and the page has no other way
+        // to say "2h ago". An extra field costs a reader nothing.
+        "last_commit_epoch": s.last_commit_epoch,
+        "derived_epoch": s.derived_epoch,
+        "status_epoch": s.now_epoch,
+    })
+    .to_string()
+}
+
+/// The whole `index` response body, built once per derive.
+///
+/// `path` is the PLACE-RELATIVE path (`DocEntry::rel`), not the absolute one
+/// the dock uses — the page addresses a document by the same string it passes
+/// back to `doc?path=`, and an absolute path would hand the browser the user's
+/// home directory for nothing.
+fn index_json(meta: &str, idx: &worktrees_core::docs::DocsIndex) -> String {
+    let entries: Vec<serde_json::Value> = idx
+        .entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "path": e.rel,
+                "title": e.title,
+                "group": e.group,
+                // Extras, for the same reason as `last_commit_epoch`: the
+                // dock's recency mark is `mtime_ms` against the place's seen
+                // epoch, and a browser tab that cannot show it is the surface
+                // §7.4 says needs the staleness signal MORE, not less.
+                "mtime_ms": e.mtime_ms,
+            })
+        })
+        .collect();
+    format!(
+        "{{\"meta\":{},\"entries\":{},\"truncated\":{}}}",
+        meta,
+        serde_json::to_string(&entries).unwrap_or_else(|_| "[]".into()),
+        idx.truncated
+    )
+}
+
+/// A registry row, for the server's own tests. Nothing in production builds
+/// one: `open` is the only thing that registers a place, and it is the only
+/// thing that may.
 #[cfg(test)]
-mod tests {
+pub(crate) fn test_group(key: &str, root: &Path, tree: &Path, meta: &str, index: &str) -> Group {
+    Group {
+        root: root.to_path_buf(),
+        slug: key.to_string(),
+        key: key.to_string(),
+        tree: tree.to_path_buf(),
+        docs: None,
+        stale: Staleness::default(),
+        fingerprint: 0,
+        assets: Vec::new(),
+        etag: "fp0".into(),
+        meta: Arc::from(meta),
+        index: Arc::from(index),
+    }
+}
+
+/// The `ETag` stem for a place: its digest and both epochs.
+fn etag_stem(fingerprint: u64, s: &Staleness) -> String {
+    format!("{fingerprint:016x}{:x}{:x}", s.derived_epoch, s.now_epoch)
+}
+
+// ── the command's body ───────────────────────────────────────────────────────
+
+/// What one successful `open` produced: the URL for `openUrl`, and anything the
+/// derive refused along the way.
+///
+/// The notes are not errors — the open succeeded — but they are the only record
+/// that an image the reader is about to not-see was skipped on purpose, so the
+/// caller logs them. Swallowing them would leave a missing screenshot with no
+/// explanation anywhere in the app.
+pub struct Opened {
+    pub url: String,
+    pub notes: Vec<String>,
+}
+
+/// Everything `open_docs_viewer` does, minus the Tauri plumbing.
+///
+/// `config_dir` and `resource_dir` come from the app handle; `entries` is the
+/// index the caller already walked. Returns the URL for the frontend to hand to
+/// `openUrl`.
+pub fn open(
+    v: &Viewer,
+    config_dir: &Path,
+    resource_dir: Option<&Path>,
+    idx: &worktrees_core::docs::DocsIndex,
+    req: &Request,
+) -> Result<Opened, String> {
+    let vdir = viewer_dir(config_dir);
+    std::fs::create_dir_all(&vdir).map_err(|e| format!("{}: {e}", vdir.display()))?;
+
+    let mut slot = v.srv.lock().map_err(|_| "the documentation server's lock is poisoned")?;
+    // Liveness the way `Shells` does it: ask the handle we hold, on every open,
+    // and never a timer. A server whose accept loop is gone takes the whole
+    // slot with it — including the registry, because a fresh server has a fresh
+    // token and nothing registered against the old one is reachable.
+    if slot.as_ref().map(|h| !h.alive()).unwrap_or(false) {
+        *slot = None;
+    }
+    if slot.is_none() {
+        if let Ok(mut places) = v.places.lock() {
+            places.clear();
+        }
+        *slot = Some(crate::docserver::start(v.places.clone(), bundle_path(resource_dir))?);
+        // A fresh server serves nothing yet, so this is the moment the old
+        // trees stop being anybody's. They are COPIES of the user's documents —
+        // the ones §4.3 says carry a client's signed agreement — sitting outside
+        // the repo's own gitignore in a directory Spotlight and Time Machine
+        // both index, so they do not get to outlive the process that needed
+        // them. `cleanup` does the same on a clean exit; this is what covers a
+        // crash, which a shutdown hook cannot.
+        empty_dir(&vdir.join("tree"));
+    }
+    let srv = slot.as_ref().expect("started or returned");
+    let (port, token) = (srv.port, srv.token.clone());
+
+    let root = req.root.to_path_buf();
+    let mut places = v.places.lock().map_err(|_| "the place registry is poisoned")?;
+    // `place_key` stays a pure function over `(root, key)` pairs — the tie it
+    // breaks has nothing to do with the rest of a `Group`, and its tests say so
+    // in the shape they build.
+    let taken: Vec<(PathBuf, String)> =
+        places.iter().map(|g| (g.root.clone(), g.key.clone())).collect();
+    let key = place_key(req.slug, &root, &taken);
+    let tree = vdir.join("tree").join(tree_key(req.slug, &root));
+
+    let derived = write_tree(&tree, &root, &idx.entries, port, &token, &key)?;
+    // The images this place brought with it are part of what the tick has to
+    // watch, so the digest recorded below is the caller's (taken BEFORE the
+    // walk, which is the one ordering rule here) with their stats folded in.
+    let fingerprint = worktrees_core::docs::fold_assets(req.fingerprint, &root, &derived.assets);
+    // A place of no documents is not worth registering, and a route onto it
+    // would be a shell over an empty index. The footer button is disabled on an
+    // empty index, so the way here is the race: the index was walked 30 seconds
+    // ago and the place has been emptied since. Say that, rather than opening a
+    // blank page.
+    if derived.pages.is_empty() {
+        return Err(format!("{} has no documents to show", req.slug));
+    }
+    let meta = meta_json(req.slug, &req.stale);
+    let group = Group {
+        root: root.clone(),
+        slug: req.slug.to_string(),
+        key: key.clone(),
+        tree,
+        docs: req.docs.clone(),
+        stale: req.stale.clone(),
+        fingerprint,
+        assets: derived.assets.clone(),
+        etag: etag_stem(fingerprint, &req.stale),
+        index: Arc::from(index_json(&meta, idx).as_str()),
+        meta: Arc::from(meta.as_str()),
+    };
+    // Every open re-derives, registered or not (`write_tree` above), so the
+    // record is REPLACED on the re-open path too — otherwise a place opened
+    // twice keeps the FIRST open's fingerprint and facts, and the tick compares
+    // today's documents against a digest from yesterday. It would re-derive
+    // once and then settle, which is the worst version of this bug:
+    // correct-looking, and wrong by exactly one stale header.
+    match places.iter_mut().find(|g| g.root == root) {
+        Some(g) => *g = group,
+        None => places.push(group),
+    }
+    drop(places);
+
+    let notes = derived.notes;
+    let Some(want) = req.path else {
+        return Ok(Opened { url: place_url(port, &token, &key, None), notes });
+    };
+    match idx.entries.iter().find(|e| e.path == want) {
+        Some(e) => Ok(Opened { url: place_url(port, &token, &key, Some(&e.rel)), notes }),
+        None => Err(format!("{want} is not in this place's documentation index")),
+    }
+}
+
+/// The browser bundle on disk, by STAT — never by running anything.
+pub fn bundle_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    resolve_bundle(std::env::var(BUNDLE_ENV).ok().as_deref(), resource_dir)
+}
+
+/// The resolution itself, with the environment as an ARGUMENT.
+///
+/// Split out so its test can state the precedence instead of depending on the
+/// ambient environment — which the `mo` version of this did, and which made the
+/// suite fail the moment it was run the way its own end-to-end test asked to be
+/// run. A test that passes only when nobody is exercising the feature is not a
+/// test.
+fn resolve_bundle(from_env: Option<&str>, resource_dir: Option<&Path>) -> Option<PathBuf> {
+    let is_file = |p: PathBuf| std::fs::metadata(&p).ok().filter(|m| m.is_file()).map(|_| p);
+    // The override WINS, and a broken override does not fall through to the
+    // bundle: someone who set it is testing that file, and quietly serving a
+    // different one is how you spend an afternoon.
+    if let Some(p) = from_env {
+        return is_file(PathBuf::from(p));
+    }
+    is_file(resource_dir?.join(BUNDLE_REL))
+}
+
+/// Re-derive every registered place whose documents have moved on disk.
+///
+/// **Why this exists.** The server reads the DERIVED tree, not the user's repo,
+/// so without this an edit to a real file reaches nothing: the page would poll
+/// a copy that could only change when the button was pressed again, while the
+/// dock re-indexes every 4 s and says "1 document new" beside it.
+///
+/// **The cost is the whole design.** `index_with` sniffs 8 KiB of every file
+/// for its title — measured at 10.1 ms and ~3.2 MB of reads for a 400-document
+/// place — and doing that per registered place every few seconds is not
+/// acceptable. `docs::fingerprint_with` walks the same paths with
+/// `symlink_metadata` alone (1.8 ms, zero bytes read, on the same tree) and the
+/// full walk runs only when it has moved.
+///
+/// Four rules, all of them `Shells`' rules, because this is the same kind of
+/// thing:
+///
+/// 1. **Nothing registered, nothing done.** No lock contention, no walk, and in
+///    particular no start — a timer may not decide the user wants a server.
+/// 2. **Never resurrect a dead one.** `Handle::alive` says whether the accept
+///    loop is running; if it is not, the slot is dropped and the next OPEN
+///    starts one. A timer that restarted would put a port back up minutes after
+///    the user stopped using it, with nothing on screen to say so.
+/// 3. **A failed derive keeps its old fingerprint**, so it is retried on the
+///    next tick rather than recorded as done. The caller must dedupe the log
+///    (lib.rs does): a place that fails will fail every 3 s.
+/// 4. **Only `derived_epoch` moves.** Every other fact in the header costs a
+///    git fan-out, which §15.3 refused for a click and which is worse on a
+///    timer — so the page says when it was copied and, separately, when its
+///    status was measured.
+///
+/// Returns one message per place that could not be re-derived, plus one per
+/// image a derive refused to copy. Never panics on a poisoned lock's account —
+/// this runs on the app's tick thread, and taking the process down over a
+/// documentation copy is not a trade worth making.
+pub fn refresh(v: &Viewer, now_epoch: i64) -> Vec<String> {
+    let mut errs: Vec<String> = Vec::new();
+    let Ok(slot) = v.srv.lock() else {
+        return vec!["the documentation server's lock is poisoned; documents will not refresh".into()];
+    };
+    // Rule 1: a server nobody has opened is the common case, and it must cost
+    // nothing at all.
+    let Some(srv) = slot.as_ref() else { return errs };
+    // Rule 2: ask the handle, the way every read of `Shells` does.
+    if !srv.alive() {
+        drop(slot);
+        if let Ok(mut s) = v.srv.lock() {
+            *s = None;
+        }
+        if let Ok(mut p) = v.places.lock() {
+            p.clear();
+        }
+        return errs;
+    }
+    let (port, token) = (srv.port, srv.token.clone());
+    drop(slot);
+    let Ok(mut places) = v.places.lock() else {
+        return vec!["the place registry is poisoned; documents will not refresh".into()];
+    };
+    for g in places.iter_mut() {
+        let docs_fp = worktrees_core::docs::fingerprint_with(&g.root, g.docs.as_ref());
+        // The images the last derive knew about, stat'ed alongside the
+        // documents. Without them an edited screenshot moves nothing — the walk
+        // lists markdown by design — and the tab goes on showing the version
+        // that was current when the button was pressed, which is this feature's
+        // own failure wearing a different hat.
+        let fp = worktrees_core::docs::fold_assets(docs_fp, &g.root, &g.assets);
+        if fp == g.fingerprint {
+            continue;
+        }
+        let idx = worktrees_core::docs::index_with(&g.root, g.docs.as_ref());
+        let mut stale = g.stale.clone();
+        stale.derived_epoch = now_epoch;
+        match write_tree(&g.tree, &g.root, &idx.entries, port, &token, &g.key) {
+            Ok(d) => {
+                // Folded over the NEW list rather than storing `fp`: this derive
+                // may have added or dropped an image, and recording a digest
+                // taken over the old list would differ from the next tick's for
+                // no change at all — one re-derive per asset change, forever.
+                let fingerprint =
+                    worktrees_core::docs::fold_assets(docs_fp, &g.root, &d.assets);
+                let meta = meta_json(&g.slug, &stale);
+                g.index = Arc::from(index_json(&meta, &idx).as_str());
+                g.meta = Arc::from(meta.as_str());
+                g.etag = etag_stem(fingerprint, &stale);
+                g.fingerprint = fingerprint;
+                g.assets = d.assets;
+                g.stale = stale;
+                for n in d.notes {
+                    errs.push(format!("{}: {n}", g.slug));
+                }
+            }
+            // Rule 3: the fingerprint is NOT advanced, so this is tried again.
+            Err(e) => errs.push(format!("{}: {e}", g.slug)),
+        }
+    }
+    errs
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
+
+    /// The token and route segment every `write_tree` in these tests derives
+    /// against. Fixed, so an assertion about a URL can spell it out.
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    const KEY: &str = "tick-place";
+    const PORT: u16 = 6275;
 
     fn entry(rel: &str, title: &str, root: &Path) -> DocEntry {
         DocEntry {
@@ -1280,111 +1100,86 @@ mod tests {
         d
     }
 
-    // ── the gate ────────────────────────────────────────────────────────────
-
-    /// The whole of §11.3, as one assertion. A viewer that SERVES a request
-    /// carrying a foreign Host is a viewer any web page can read, and the shape
-    /// this must never take is "200 looked fine, so we carried on".
-    #[test]
-    fn only_a_refusal_passes_the_host_probe() {
-        assert!(probe_verdict("HTTP/1.1 403 Forbidden").is_ok());
-        assert!(probe_verdict("HTTP/1.0 403 Forbidden\r\n").is_ok());
-        for bad in [
-            "HTTP/1.1 200 OK",
-            "HTTP/1.1 404 Not Found",
-            "HTTP/1.1 405 Method Not Allowed",
-            "HTTP/1.1 500 Internal Server Error",
-        ] {
-            assert!(probe_verdict(bad).is_err(), "{bad} must not pass the gate");
-        }
-        // Not an answer at all. "I could not tell" and "it refused" must not
-        // collapse into the same branch — only one of them is safe.
-        //
-        // The last two are why the status line is checked for `HTTP/` at all:
-        // the port was chosen by us but bound by something else in the window
-        // between the probe and the bind (`pick_port`), and a protocol that
-        // greets rather than answers can put `403` in the second field by pure
-        // coincidence. Without those two cases the version check is dead code
-        // and a mutation that deletes it passes — which is how they got here.
-        for junk in ["", "403", "HTTP/1.1", "hello", "\0\0\0", "SSH-2.0-OpenSSH 403 x", "RFB 403 x"] {
-            assert!(probe_verdict(junk).is_err(), "{junk:?} must not pass the gate");
-        }
-    }
-
-    /// The message a failed gate produces has to say what happened, because the
-    /// only place it is ever read is a toast in the app.
-    #[test]
-    fn a_served_probe_says_what_it_means() {
-        let e = probe_verdict("HTTP/1.1 200 OK").unwrap_err();
-        assert!(e.contains("200"), "{e}");
-        assert!(e.contains("403"), "{e}");
+    /// `write_tree` with this module's fixed URL parts.
+    fn derive_tree(
+        out: &Path,
+        src: &Path,
+        entries: &[DocEntry],
+        _st: &Staleness,
+    ) -> Result<Derived, String> {
+        write_tree(out, src, entries, PORT, TOKEN, KEY)
     }
 
     // ── URLs ────────────────────────────────────────────────────────────────
-
-    /// The id is `mo`'s, verified against a running server rather than read out
-    /// of its source: `sha256(<absolute path>)[..8]`.
-    #[test]
-    fn a_file_url_carries_the_viewers_own_path_hash() {
-        let p = Path::new("/tmp/x/a.md");
-        let want = {
-            let d = Sha256::digest(p.as_os_str().as_encoded_bytes());
-            d.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>()
-        };
-        assert_eq!(file_url(6275, "g", p), format!("http://127.0.0.1:6275/g?file={want}"));
-        assert_eq!(want.len(), 8);
-    }
 
     /// Every URL this module emits has to survive the check `derive` applies on
     /// the way into a `click` directive — otherwise the drill-down silently
     /// emits nothing and every test still passes.
     #[test]
     fn every_url_we_build_is_a_loopback_target() {
-        let p = Path::new("/tmp/x/a.md");
-        assert!(derive::is_loopback_target(&file_url(6275, "docs", p)));
-        assert!(derive::is_loopback_target(&group_url(6275, "docs")));
-        assert!(derive::is_loopback_target(&file_url(65535, "a-b-c", p)));
+        assert!(derive::is_loopback_target(&place_url(PORT, TOKEN, "docs", None)));
+        assert!(derive::is_loopback_target(&place_url(PORT, TOKEN, "docs", Some("docs/a.md"))));
+        assert!(derive::is_loopback_target(&place_url(65535, TOKEN, "a-b-c", Some("x.md"))));
     }
 
-    // ── group names ─────────────────────────────────────────────────────────
+    /// A deep link names the document in a QUERY, and the document's own name
+    /// may not end the value or start a second parameter — a file called
+    /// `a&path=../x.md` is legal on disk, and a URL is the one place in this
+    /// feature where a filename becomes syntax.
+    #[test]
+    fn a_deep_link_cannot_be_escaped_by_the_name_it_carries() {
+        let u = place_url(PORT, TOKEN, "p", Some("docs/a&path=../../etc/passwd#x .md"));
+        assert_eq!(
+            u,
+            format!(
+                "http://127.0.0.1:{PORT}/{TOKEN}/p/p/?path=docs/a%26path%3D../../etc/passwd%23x%20.md"
+            )
+        );
+        assert!(derive::is_loopback_target(&u), "{u}");
+        // And it comes back as exactly the string that went in.
+        let q = u.split_once("?path=").unwrap().1;
+        assert_eq!(
+            crate::docserver::pct_decode_once(q).as_deref(),
+            Some("docs/a&path=../../etc/passwd#x .md")
+        );
+    }
+
+    // ── place keys ──────────────────────────────────────────────────────────
 
     /// Two places may share a slug — the same branch name in two projects — and
-    /// `mo` MERGES same-named groups rather than refusing them, so a collision
-    /// shows one project's documents under the other's name.
+    /// one route segment for both would show one project's documents under the
+    /// other's name. §1.1's failure with the axes swapped.
     #[test]
-    fn two_places_with_one_slug_do_not_share_a_group() {
+    fn two_places_with_one_slug_do_not_share_a_route() {
         let a = PathBuf::from("/w/one/.worktrees/docs");
         let b = PathBuf::from("/w/two/.worktrees/docs");
         let mut taken = Vec::new();
-        let ga = group_name("docs", &a, &taken);
+        let ga = place_key("docs", &a, &taken);
         taken.push((a.clone(), ga.clone()));
-        let gb = group_name("docs", &b, &taken);
+        let gb = place_key("docs", &b, &taken);
         assert_eq!(ga, "docs");
-        assert_ne!(ga, gb, "a second place must not land in the first one's group");
+        assert_ne!(ga, gb, "a second place must not land on the first one's route");
         assert!(gb.starts_with("docs-"), "{gb}");
-        // And asking again for a place already registered gives the same name,
-        // or a re-open would keep making new groups.
+        // And asking again for a place already registered gives the same key,
+        // or a re-open would keep making new routes.
         taken.push((b.clone(), gb.clone()));
-        assert_eq!(group_name("docs", &a, &taken), ga);
-        assert_eq!(group_name("docs", &b, &taken), gb);
+        assert_eq!(place_key("docs", &a, &taken), ga);
+        assert_eq!(place_key("docs", &b, &taken), gb);
     }
 
-    /// `mo` reserves `/_/` for its own API and a group is a URL path segment, so
-    /// the name may only ever be `[a-z0-9-]` — and may never be empty.
+    /// A place key is a URL path segment the server validates on the way back
+    /// in, so it may only ever be `[a-z0-9-]` — and may never be empty.
     #[test]
-    fn a_group_name_can_only_be_a_url_path_segment() {
+    fn a_place_key_can_only_be_a_url_path_segment() {
         let r = PathBuf::from("/w/p");
         for slug in ["_", "../etc", "a/b", "%2e%2e", "", "   ", "Feature/PLACE.1", "ünïcødé"] {
-            let g = group_name(slug, &r, &[]);
-            assert!(!g.is_empty(), "{slug:?} gave an empty group");
-            assert!(g.len() <= GROUP_MAX, "{slug:?} gave {g}");
-            assert!(
-                g.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-                "{slug:?} gave {g}"
-            );
+            let g = place_key(slug, &r, &[]);
+            assert!(!g.is_empty(), "{slug:?} gave an empty key");
+            assert!(g.len() <= PLACE_KEY_MAX, "{slug:?} gave {g}");
+            assert!(crate::docserver::place_key_ok(&g), "{slug:?} gave {g}, which the server refuses");
             assert!(g.starts_with(|c: char| c.is_ascii_alphanumeric()), "{slug:?} gave {g}");
         }
-        assert_eq!(group_name("Feature/PLACE.1", &r, &[]), "feature-place-1");
+        assert_eq!(place_key("Feature/PLACE.1", &r, &[]), "feature-place-1");
     }
 
     // ── writing ─────────────────────────────────────────────────────────────
@@ -1412,12 +1207,17 @@ mod tests {
         }
     }
 
-    /// The tree is what the viewer serves, so it has to carry the header and the
-    /// derived links, and it has to MIRROR the place's layout — `mo` resolves a
-    /// prose `[x](./x.md)` against the file's own directory, so flattening the
-    /// tree would break every relative link in the user's documents.
+    /// The tree is what the server reads, so it has to MIRROR the place's
+    /// layout — a prose `[x](./x.md)` resolves against the file's own
+    /// directory, and flattening the tree would break every relative link in
+    /// the user's documents.
+    ///
+    /// And it carries **no staleness header**. That moved to `doc`'s `meta`
+    /// when the page took over rendering it: a blockquote in the text would be
+    /// a second, frozen copy of numbers the reader watches change above it, and
+    /// two disagreeing statements of how stale a place is are §1.1 exactly.
     #[test]
-    fn the_derived_tree_mirrors_the_place_and_carries_the_header() {
+    fn the_derived_tree_mirrors_the_place_and_leaves_the_header_to_meta() {
         let src = tmp("mirror");
         std::fs::create_dir_all(src.join("docs/adr")).unwrap();
         std::fs::write(src.join("README.md"), "---\ntitle: Read me\n---\n\nbody\n").unwrap();
@@ -1426,23 +1226,54 @@ mod tests {
             vec![entry("README.md", "Read me", &src), entry("docs/adr/0001.md", "ADR", &src)];
         let out = tmp("mirror-out");
 
-        let derived = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap().pages;
+        let derived = derive_tree(&out, &src, &entries, &stale()).unwrap().pages;
         assert_eq!(derived.len(), 2);
         assert!(out.join("README.md").is_file());
         assert!(out.join("docs/adr/0001.md").is_file());
 
         let readme = std::fs::read_to_string(out.join("README.md")).unwrap();
-        assert!(readme.starts_with("> **viewer-guarded**"), "{readme}");
-        assert!(readme.contains("25 behind `origin/main`"), "{readme}");
-        // Frontmatter gone, the title it carried restored as a heading.
+        assert!(!readme.contains("25 behind"), "the header is prose again: {readme}");
+        assert!(!readme.contains("origin/main"), "{readme}");
+        assert!(!readme.starts_with('>'), "{readme}");
+        // Frontmatter gone, the title it carried restored as a heading, and
+        // that heading is the first thing on the page.
+        assert!(readme.starts_with("# Read me"), "{readme}");
         assert!(!readme.contains("---\ntitle:"), "{readme}");
-        assert!(readme.contains("# Read me"), "{readme}");
+        // …and the facts are in `meta` instead, which is the other half of the
+        // same assertion: they did not simply disappear.
+        let meta = meta_json("viewer-guarded", &stale());
+        let v: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        assert_eq!(v["place"], "viewer-guarded");
+        assert_eq!(v["behind"], 25);
+        assert_eq!(v["base"], "origin/main");
+        assert_eq!(v["dirty"], 0);
+        assert_eq!(v["status_epoch"], 1_000_060);
+
         // Prose links are untouched — the mirror is what makes them resolve.
         let adr = std::fs::read_to_string(out.join("docs/adr/0001.md")).unwrap();
         assert!(adr.contains("[back](../../README.md)"), "{adr}");
 
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// `dirty` is a COUNT in the contract, and "clean" and "not computed" are
+    /// different answers — a place whose status could not be measured must not
+    /// render as a place with nothing to commit.
+    #[test]
+    fn an_unmeasured_dirty_count_is_not_a_clean_place() {
+        let mut s = stale();
+        s.dirty = None;
+        s.dirty_files = None;
+        let v: serde_json::Value = serde_json::from_str(&meta_json("p", &s)).unwrap();
+        assert!(v["dirty"].is_null(), "{v}");
+        s.dirty = Some(false);
+        let v: serde_json::Value = serde_json::from_str(&meta_json("p", &s)).unwrap();
+        assert_eq!(v["dirty"], 0);
+        s.dirty = Some(true);
+        s.dirty_files = Some(3);
+        let v: serde_json::Value = serde_json::from_str(&meta_json("p", &s)).unwrap();
+        assert_eq!(v["dirty"], 3);
     }
 
     /// A diagram node that names a page becomes a link to OUR url — the whole
@@ -1462,11 +1293,11 @@ mod tests {
             entry("docs/runbook.md", "Runbook", &src),
         ];
         let out = tmp("click-out");
-        let derived = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap().pages;
+        derive_tree(&out, &src, &entries, &stale()).unwrap();
 
         let text = std::fs::read_to_string(out.join("docs/overview.md")).unwrap();
         assert!(!text.contains("evil.example"), "an author's click survived: {text}");
-        let want = file_url(6275, "g", &derived[1].1);
+        let want = place_url(PORT, TOKEN, KEY, Some("docs/runbook.md"));
         assert!(text.contains(&format!("click runbook href \"{want}\"")), "{text}");
 
         let _ = std::fs::remove_dir_all(&src);
@@ -1482,18 +1313,18 @@ mod tests {
         std::fs::write(src.join("bad.md"), [0xffu8, 0xfe, 0xfd]).unwrap();
         let entries = vec![entry("bad.md", "bad", &src)];
         let out = tmp("stub-out");
-        write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        derive_tree(&out, &src, &entries, &stale()).unwrap();
         let text = std::fs::read_to_string(out.join("bad.md")).unwrap();
         assert!(text.contains("not valid UTF-8"), "{text}");
-        assert!(text.starts_with("> **viewer-guarded**"), "{text}");
+        assert!(text.starts_with("# bad"), "{text}");
 
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&out);
     }
 
-    /// A document removed from the place must leave the tree, or the viewer goes
-    /// on serving a page the index no longer lists — a stale document with a
-    /// staleness header on it, which is the joke this feature cannot afford.
+    /// A document removed from the place must leave the tree, or the server goes
+    /// on serving a page the index no longer lists — a stale document, which is
+    /// the joke this feature cannot afford.
     #[test]
     fn a_document_that_left_the_index_leaves_the_tree() {
         let src = tmp("prune");
@@ -1503,10 +1334,10 @@ mod tests {
         let out = tmp("prune-out");
 
         let both = vec![entry("a.md", "A", &src), entry("docs/b.md", "B", &src)];
-        write_tree(&out, &src, &both, &stale(), 6275, "g").unwrap();
+        derive_tree(&out, &src, &both, &stale()).unwrap();
         assert!(out.join("docs/b.md").is_file());
 
-        write_tree(&out, &src, &both[..1], &stale(), 6275, "g").unwrap();
+        derive_tree(&out, &src, &both[..1], &stale()).unwrap();
         assert!(out.join("a.md").is_file());
         assert!(!out.join("docs/b.md").exists(), "a dropped document stayed in the tree");
         assert!(!out.join("docs").exists(), "the directory it emptied stayed");
@@ -1518,6 +1349,10 @@ mod tests {
     /// A removed place's derived documents are the LAST readable copy of them —
     /// `cmd_rm` deleted the originals — and they would be on a port. Keyed by
     /// the canonical root, so the same slug in another project keeps its own.
+    ///
+    /// The REGISTRATION goes too, so the route answers `410 Gone` at once
+    /// rather than after the next tick: a page open on that place says the place
+    /// is gone instead of polling a hole.
     #[test]
     fn removing_a_place_takes_its_derived_documents_with_it() {
         let cfg = tmp("forget");
@@ -1531,36 +1366,46 @@ mod tests {
         }
         assert_eq!(std::fs::read_dir(&trees).unwrap().count(), 2);
 
-        forget_place(&cfg, "docs", &gone);
+        let v = Viewer::default();
+        for root in [&gone, &other] {
+            v.places.lock().unwrap().push(registry_entry("docs", root, &trees.join(tree_key("docs", root))));
+        }
+
+        forget_place(&v, &cfg, "docs", &gone);
         assert!(!trees.join(tree_key("docs", &gone)).exists(), "the removed place's documents stayed");
-        assert!(trees.join(tree_key("docs", &other)).is_file() || trees.join(tree_key("docs", &other)).is_dir(),
-            "the same slug in another project lost its tree");
+        assert!(trees.join(tree_key("docs", &other)).is_dir(), "the same slug in another project lost its tree");
+        let left: Vec<PathBuf> = v.places.lock().unwrap().iter().map(|g| g.root.clone()).collect();
+        assert_eq!(left, vec![other.clone()], "the route onto the removed place is still registered");
+
         // And a place that was never opened in the browser has no tree at all,
         // which is the common case and not an error.
-        forget_place(&cfg, "never-opened", &gone);
+        forget_place(&v, &cfg, "never-opened", &gone);
         let _ = std::fs::remove_dir_all(&cfg);
     }
 
-    /// `mo`'s session file is keyed by PORT and restores whatever that port
-    /// served last time, so a port the OS hands us twice would resurrect a place
-    /// the user has removed.
+    /// The derived trees are copies of documents §4.3 says carry a client's
+    /// signed agreement, in a directory Spotlight and Time Machine both index.
+    /// They do not get to outlive the process that needed them.
     #[test]
-    fn the_viewers_state_is_emptied_before_it_can_restore_anything() {
-        let d = tmp("state");
-        std::fs::create_dir_all(d.join("mo/backup")).unwrap();
-        std::fs::write(d.join("mo/backup/mo-6275.json"), "{\"groups\":{}}").unwrap();
-        std::fs::write(d.join("loose"), "x").unwrap();
-        empty_dir(&d);
-        assert!(d.is_dir(), "the directory itself must survive");
-        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
-        let _ = std::fs::remove_dir_all(&d);
+    fn nothing_the_derive_wrote_outlives_a_clean_exit() {
+        let cfg = tmp("cleanup");
+        let trees = viewer_dir(&cfg).join("tree");
+        std::fs::create_dir_all(trees.join("p-0000/sub")).unwrap();
+        std::fs::write(trees.join("p-0000/sub/x.md"), "a client's signed agreement").unwrap();
+        std::fs::write(trees.join("loose"), "x").unwrap();
+
+        cleanup(&cfg);
+
+        assert!(trees.is_dir(), "the directory itself must survive");
+        assert_eq!(std::fs::read_dir(&trees).unwrap().count(), 0, "derived documents survived");
+        let _ = std::fs::remove_dir_all(&cfg);
     }
 
     // ── images ──────────────────────────────────────────────────────────────
 
     /// A 1×1 PNG. Real bytes rather than a placeholder, because the end-to-end
-    /// test below hands them to a server that decides a content type.
-    const PNG: [u8; 67] = [
+    /// tests hand them to a server that states a content type.
+    pub(crate) const PNG: [u8; 67] = [
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
         0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
         0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
@@ -1605,7 +1450,7 @@ mod tests {
         let entries = vec![entry("docs/guides/p.md", "P", &src)];
         let out = tmp("img-out");
 
-        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        let d = derive_tree(&out, &src, &entries, &stale()).unwrap();
 
         for rel in ["docs/assets/y.png", "docs/guides/pics/z.png", "docs/guides/w.png"] {
             assert!(out.join(rel).is_file(), "{rel} was not copied into the derived tree");
@@ -1631,8 +1476,7 @@ mod tests {
     /// `symlink_metadata`, never `metadata` — the rule `docs.rs` keeps about
     /// documents, applied to images for the identical reason. A committed
     /// `docs/logo.png -> ~/.ssh/id_rsa` must copy NOTHING: the derived tree is
-    /// served on an unauthenticated loopback port, so a copy here is a
-    /// publication.
+    /// served on a loopback port, so a copy here is a publication.
     #[test]
     fn a_symlinked_image_copies_nothing() {
         let src = tmp("img-link");
@@ -1643,7 +1487,7 @@ mod tests {
         let entries = vec![entry("docs/p.md", "P", &src)];
         let out = tmp("img-link-out");
 
-        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        let d = derive_tree(&out, &src, &entries, &stale()).unwrap();
 
         assert!(!out.join("docs/logo.png").exists(), "a symlinked image was copied");
         assert!(
@@ -1656,7 +1500,7 @@ mod tests {
         assert_eq!(d.assets, vec!["docs/logo.png"]);
 
         let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&secret.parent().unwrap());
+        let _ = std::fs::remove_dir_all(secret.parent().unwrap());
         let _ = std::fs::remove_dir_all(&out);
     }
 
@@ -1681,7 +1525,7 @@ mod tests {
         let entries = vec![entry("docs/guides/p.md", "P", &src)];
         let out = tmp("img-escape-out");
 
-        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        let d = derive_tree(&out, &src, &entries, &stale()).unwrap();
 
         assert!(!out.join("docs/assets/x.png").exists(), "a file outside the place was copied in");
         assert!(
@@ -1725,7 +1569,7 @@ mod tests {
         let entries = vec![entry("p.md", "P", &src)];
         let out = tmp("img-cap-out");
 
-        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        let d = derive_tree(&out, &src, &entries, &stale()).unwrap();
 
         assert!(!out.join("huge.png").exists(), "an over-cap image was copied");
         assert!(out.join("fine.png").is_file(), "one refusal took the other image with it");
@@ -1739,28 +1583,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
-    /// SVG is not an image here, it is a document that can run script — and the
-    /// viewer hands assets back by URL, where an `<img>`'s inertness does not
-    /// apply. The allow-list carries the long version; this is the assertion
-    /// that stops someone "fixing" a broken logo by adding three letters.
+    /// **An SVG is copied again, and only because the response now says so.**
+    ///
+    /// It was excluded under `mo`, which handed any asset back by direct URL
+    /// with a content type we did not control — where an SVG is a top-level
+    /// document and its `<script>` runs. Owning the server replaces that
+    /// permanent amputation with two headers (findings §6.4), so the
+    /// allow-list entry and the headers are ONE decision and this test asserts
+    /// both halves: remove the CSP from the asset response and this goes red,
+    /// which is the only thing standing between a copied SVG and a live one.
     #[test]
-    fn an_svg_is_never_copied_however_ordinary_it_looks() {
+    fn an_svg_is_copied_only_because_the_response_makes_it_inert() {
         let src = tmp("img-svg");
         doc_at(&src, "p.md", "# P\n\n![logo](logo.svg)\n![shot](shot.png)\n");
-        std::fs::write(src.join("logo.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>fetch('/_/api/groups')</script></svg>").unwrap();
+        std::fs::write(
+            src.join("logo.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>fetch('/steal')</script></svg>",
+        )
+        .unwrap();
         png_at(&src, "shot.png");
         let entries = vec![entry("p.md", "P", &src)];
         let out = tmp("img-svg-out");
 
-        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        let d = derive_tree(&out, &src, &entries, &stale()).unwrap();
 
-        assert!(!out.join("logo.svg").exists(), "an SVG reached the derived tree");
+        assert!(out.join("logo.svg").is_file(), "the SVG was not copied");
         assert!(out.join("shot.png").is_file());
-        assert!(!d.assets.iter().any(|a| a.ends_with(".svg")), "{:?}", d.assets);
+        assert!(d.assets.iter().any(|a| a.ends_with(".svg")), "{:?}", d.assets);
+        // The half that makes it safe. `docserver` states the policy; this is
+        // the assertion that ties it to the allow-list, so that deleting the
+        // header cannot quietly re-arm every `logo.svg` in every place.
         assert!(
-            d.notes.iter().any(|n| n.contains("logo.svg") && n.contains("script")),
-            "a reader with a broken logo has no way to find out why: {:?}",
-            d.notes
+            crate::docserver::asset_csp().contains("default-src 'none'"),
+            "an SVG is served with no policy on it"
         );
 
         let _ = std::fs::remove_dir_all(&src);
@@ -1780,12 +1635,12 @@ mod tests {
         let entries = vec![entry("docs/p.md", "P", &src)];
         let out = tmp("img-prune-out");
 
-        write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        derive_tree(&out, &src, &entries, &stale()).unwrap();
         assert!(out.join("docs/shots/a.png").is_file(), "the first derive did not copy it");
 
         // The author drops the image from the document.
         doc_at(&src, "docs/p.md", "# P\n\nno picture any more\n");
-        let d = write_tree(&out, &src, &entries, &stale(), 6275, "g").unwrap();
+        let d = derive_tree(&out, &src, &entries, &stale()).unwrap();
 
         assert!(out.join("docs/p.md").is_file(), "the prune took the document too");
         assert!(!out.join("docs/shots/a.png").exists(), "a dropped image is still being served");
@@ -1798,38 +1653,69 @@ mod tests {
 
     // ── the tick ────────────────────────────────────────────────────────────
 
-    /// A viewer slot holding a child that is alive and is not a viewer.
+    /// One runtime for the whole test binary. `docserver::start` spawns onto
+    /// the ambient runtime, and a runtime dropped at the end of a test takes
+    /// its server with it — which would make every liveness assertion below
+    /// about the test harness rather than about the code.
+    pub(crate) fn rt() -> &'static tokio::runtime::Runtime {
+        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+        })
+    }
+
+    /// A registry row with nothing in it but an identity — enough for the tests
+    /// that only ask which places are registered.
+    fn registry_entry(slug: &str, root: &Path, tree: &Path) -> Group {
+        Group {
+            root: root.to_path_buf(),
+            slug: slug.to_string(),
+            key: slug.to_string(),
+            tree: tree.to_path_buf(),
+            docs: None,
+            stale: stale(),
+            fingerprint: 0,
+            assets: Vec::new(),
+            etag: "0".into(),
+            meta: Arc::from("{}"),
+            index: Arc::from("{}"),
+        }
+    }
+
+    /// A viewer with a REAL server running and one place registered.
     ///
-    /// `refresh` never talks to the process: it writes files into the tree and
-    /// lets `mo`'s own watcher (`-wR`) notice, which is the whole reason the
-    /// derived tree is written in place rather than recreated. So what the child
-    /// IS does not matter here — what matters is that `try_wait` reports it
-    /// alive, which is the liveness rule this shares with `Shells`. A real `mo`
-    /// is `the_whole_path_works_against_a_real_viewer`'s business.
-    fn registered(place: &Path, tree: &Path, fingerprint: u64, assets: Vec<String>, stale: Staleness) -> Viewer {
-        let child = std::process::Command::new("/bin/sleep")
-            .arg("120")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("a child to stand in for the viewer");
+    /// The server is real because the tick's second rule is about liveness, and
+    /// a stand-in that is merely alive cannot answer whether `Handle::alive`
+    /// means what `refresh` reads it as.
+    fn registered(
+        place: &Path,
+        tree: &Path,
+        fingerprint: u64,
+        assets: Vec<String>,
+        st: Staleness,
+    ) -> Viewer {
         let v = Viewer::default();
-        *v.0.lock().unwrap() = Some(Proc {
-            child,
-            port: 6275,
-            groups: vec![Group {
-                root: place.to_path_buf(),
-                slug: "tick-place".into(),
-                name: "tick-place".into(),
-                tree: tree.to_path_buf(),
-                docs: None,
-                stale,
-                fingerprint,
-                assets,
-            }],
+        let _g = rt().enter();
+        *v.srv.lock().unwrap() = Some(crate::docserver::start(v.places.clone(), None).unwrap());
+        v.places.lock().unwrap().push(Group {
+            root: place.to_path_buf(),
+            slug: KEY.into(),
+            key: KEY.into(),
+            tree: tree.to_path_buf(),
+            docs: None,
+            stale: st,
+            fingerprint,
+            assets,
+            etag: "0".into(),
+            meta: Arc::from("{}"),
+            index: Arc::from("{}"),
         });
         v
+    }
+
+    /// The fingerprint the tick is carrying for the one registered place.
+    fn recorded_fp(v: &Viewer) -> u64 {
+        v.places.lock().unwrap()[0].fingerprint
     }
 
     /// Derive a place the way `open` does, and hand back the state the tick
@@ -1838,15 +1724,29 @@ mod tests {
     fn first_derive(place: &Path, tree: &Path, st: &Staleness) -> (u64, Vec<String>) {
         let fp = worktrees_core::docs::fingerprint(place);
         let idx = worktrees_core::docs::index(place);
-        let d = write_tree(tree, place, &idx.entries, st, 6275, "tick-place").unwrap();
+        let d = derive_tree(tree, place, &idx.entries, st).unwrap();
         (worktrees_core::docs::fold_assets(fp, place, &d.assets), d.assets)
     }
 
-    /// **The bug, as one assertion.** `mo` watches the DERIVED tree, not the
-    /// repo, so before this the live-reload was perfect over a copy that could
-    /// only change when the button was pressed again: editing a document reached
-    /// nothing, adding one reached nothing, and refreshing the browser did not
-    /// help because the derived file genuinely had not changed.
+    /// Stops the server however the test ends.
+    ///
+    /// A `#[test]` that panics before reaching its own `kill` leaves a REAL
+    /// server holding a REAL port, on the machine of whoever ran it. That is not
+    /// hypothetical: proving an earlier tree-wipe assertion red left a viewer
+    /// listening on 53381 until it was found by hand — a test suite reproducing,
+    /// in miniature, the exact failure the lifecycle rules exist to prevent.
+    struct Reaper<'a>(&'a Viewer);
+    impl Drop for Reaper<'_> {
+        fn drop(&mut self) {
+            kill(self.0);
+        }
+    }
+
+    /// **The bug, as one assertion.** The server reads the DERIVED tree, not the
+    /// repo, so before the tick existed a live page was perfect over a copy that
+    /// could only change when the button was pressed again: editing a document
+    /// reached nothing, adding one reached nothing, and reloading did not help
+    /// because the derived file genuinely had not changed.
     #[test]
     fn an_edit_after_the_open_reaches_the_derived_copy() {
         let place = tmp("tick-edit");
@@ -1863,7 +1763,7 @@ mod tests {
             if worktrees_core::docs::fingerprint(&place) != fp {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
         std::fs::create_dir_all(place.join("docs")).unwrap();
         std::fs::write(place.join("docs/new.md"), "# Brand new\n").unwrap();
@@ -1877,8 +1777,11 @@ mod tests {
         assert!(!readme.contains("before"), "the old text is still being served: {readme}");
         assert!(tree.join("docs/new.md").is_file(), "a document added after the open was not derived");
         // …and the tick recorded the new state, so the next one is free.
-        let after = v.0.lock().unwrap().as_ref().unwrap().groups[0].fingerprint;
-        assert_ne!(after, fp, "the fingerprint was not carried forward; every tick would re-derive");
+        assert_ne!(recorded_fp(&v), fp, "the fingerprint was not carried forward; every tick would re-derive");
+        // …including the `ETag` stem, or a page polling with `If-None-Match`
+        // gets a `304` over text that just changed — the update arrives on
+        // disk and never reaches the reader.
+        assert_ne!(v.places.lock().unwrap()[0].etag, "0", "the ETag did not move with the document");
 
         let _ = std::fs::remove_dir_all(&place);
         let _ = std::fs::remove_dir_all(&tree);
@@ -1900,7 +1803,7 @@ mod tests {
         let v = registered(&place, &tree, fp, assets, st);
         let _reap = Reaper(&v);
         // Long enough that a rewrite would land in a later millisecond.
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(refresh(&v, 1_000_000 + 600).is_empty());
         assert!(refresh(&v, 1_000_000 + 900).is_empty());
 
@@ -1942,7 +1845,7 @@ mod tests {
             {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
 
         let v = registered(&place, &tree, fp, assets, st);
@@ -1954,8 +1857,7 @@ mod tests {
             newer,
             "the edited image never reached the derived copy"
         );
-        let after = v.0.lock().unwrap().as_ref().unwrap().groups[0].fingerprint;
-        assert_ne!(after, fp, "the fingerprint was not carried forward; every tick would re-derive");
+        assert_ne!(recorded_fp(&v), fp, "the fingerprint was not carried forward; every tick would re-derive");
 
         let _ = std::fs::remove_dir_all(&place);
         let _ = std::fs::remove_dir_all(&tree);
@@ -1993,9 +1895,7 @@ mod tests {
 
     /// …and the other half of the same rule: a place whose images are untouched
     /// re-copies none of them, even on a tick that DOES re-derive because a
-    /// document moved. Every write into this tree is an event for `mo`'s
-    /// watcher, so a re-copied screenshot is a reload in somebody's open tab
-    /// for no change at all.
+    /// document moved.
     ///
     /// **The witness is the copy's BYTES, not its mtime**, and that is a trap
     /// worth naming: on macOS `std::fs::copy` goes through
@@ -2019,7 +1919,7 @@ mod tests {
 
         let v = registered(&place, &tree, fp, assets, st);
         let _reap = Reaper(&v);
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(refresh(&v, 1_000_000 + 600).is_empty());
         assert!(refresh(&v, 1_000_000 + 900).is_empty());
         assert_eq!(
@@ -2046,10 +1946,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tree);
     }
 
-    /// The header has to date the COPY, and it may not claim the git facts were
+    /// `meta` has to date the COPY, and it may not claim the git facts were
     /// measured then. Every one of those costs a fan-out to recompute — §15.3
     /// refused that for a click, and a timer is worse — so after a background
-    /// re-derive the page carries two instants, and the older one belongs to the
+    /// re-derive the page carries two instants and the older one belongs to the
     /// status line.
     #[test]
     fn a_re_derived_page_is_stamped_now_and_keeps_the_facts_it_had() {
@@ -2060,45 +1960,44 @@ mod tests {
         st.now_epoch = 1_789_776_000;
         st.derived_epoch = 1_789_776_000;
         let (fp, assets) = first_derive(&place, &tree, &st);
-        let first = std::fs::read_to_string(tree.join("README.md")).unwrap();
-        assert!(first.contains("derived 2026-09-19 00:00:00 UTC"), "{first}");
-        assert!(!first.contains("status as of"), "one instant, one stamp: {first}");
 
         for _ in 0..200 {
             std::fs::write(place.join("README.md"), "# Read me\n\nAFTER\n").unwrap();
             if worktrees_core::docs::fingerprint(&place) != fp {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let v = registered(&place, &tree, fp, assets, st);
         let _reap = Reaper(&v);
         assert!(refresh(&v, 1_789_779_661).is_empty());
 
-        let out = std::fs::read_to_string(tree.join("README.md")).unwrap();
-        assert!(out.contains("derived 2026-09-19 01:01:01 UTC"), "the copy is not dated now: {out}");
-        assert!(out.contains("status as of 2026-09-19 00:00:00 UTC"), "the facts claim to be fresh: {out}");
+        let meta: serde_json::Value =
+            serde_json::from_str(&v.places.lock().unwrap()[0].meta).unwrap();
+        assert_eq!(meta["derived_epoch"], 1_789_779_661i64, "the copy is not dated now: {meta}");
+        assert_eq!(meta["status_epoch"], 1_789_776_000i64, "the facts claim to be fresh: {meta}");
         // The facts themselves are untouched — the tick re-reads documents, not
         // git.
-        assert!(out.contains("25 behind `origin/main`"), "{out}");
+        assert_eq!(meta["behind"], 25);
+        assert_eq!(meta["base"], "origin/main");
 
         let _ = std::fs::remove_dir_all(&place);
         let _ = std::fs::remove_dir_all(&tree);
     }
 
     /// Two refusals that are one rule: a timer may not decide the user wants a
-    /// viewer.
+    /// server.
     ///
-    /// Nothing registered must cost nothing at all, and a viewer that has died
-    /// must stay dead until somebody presses the button — respawning from a
-    /// timer would put an unauthenticated loopback port back up minutes after
-    /// the user stopped using it, with nothing on screen to say so. `Shells`
-    /// makes the same promise for the same reason.
+    /// Nothing registered must cost nothing at all, and a server that has died
+    /// must stay dead until somebody presses the button — restarting from a
+    /// timer would put a loopback port back up minutes after the user stopped
+    /// using it, with nothing on screen to say so. `Shells` makes the same
+    /// promise for the same reason.
     #[test]
-    fn the_tick_never_spawns_and_never_resurrects() {
+    fn the_tick_never_starts_and_never_resurrects() {
         let v = Viewer::default();
-        assert!(refresh(&v, 1_000_000).is_empty(), "an idle viewer reported something");
-        assert!(v.0.lock().unwrap().is_none(), "the tick put a viewer in an empty slot");
+        assert!(refresh(&v, 1_000_000).is_empty(), "an idle server reported something");
+        assert!(v.srv.lock().unwrap().is_none(), "the tick put a server in an empty slot");
 
         let place = tmp("tick-dead");
         let tree = tmp("tick-dead-tree");
@@ -2109,430 +2008,52 @@ mod tests {
         std::fs::write(place.join("README.md"), "# Read me\n\nAFTER\n").unwrap();
 
         let v = registered(&place, &tree, fp, assets, st);
-        {
-            let mut slot = v.0.lock().unwrap();
-            let p = slot.as_mut().unwrap();
-            p.child.kill().unwrap();
-            p.child.wait().unwrap();
+        let _reap = Reaper(&v);
+        v.srv.lock().unwrap().as_ref().unwrap().abort_for_test();
+        for _ in 0..200 {
+            if !v.srv.lock().unwrap().as_ref().unwrap().alive() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        std::thread::sleep(Duration::from_millis(20));
         assert!(refresh(&v, 1_000_000 + 600).is_empty());
-        assert!(v.0.lock().unwrap().is_none(), "a dead viewer stayed in the slot");
+        assert!(v.srv.lock().unwrap().is_none(), "a dead server stayed in the slot");
+        assert!(v.places.lock().unwrap().is_empty(), "the routes of a dead server stayed registered");
         assert_eq!(
             before,
             std::fs::metadata(tree.join("README.md")).unwrap().modified().unwrap(),
-            "the tick wrote documents for a viewer that is not running",
+            "the tick wrote documents for a server that is not running",
         );
 
         let _ = std::fs::remove_dir_all(&place);
         let _ = std::fs::remove_dir_all(&tree);
     }
 
-    // ── the gate's WIRING, against a viewer that fails it ───────────────────
-
-    /// A viewer binary that answers `200` to everything, including a forged
-    /// `Host`. Returns `None` when there is no `python3` to build it out of, in
-    /// which case the test skips rather than fails — the fake is a prop, and a
-    /// missing prop is not a defect in the thing being tested.
-    fn fake_viewer_that_answers_200(dir: &Path) -> Option<PathBuf> {
-        if !std::process::Command::new("python3")
-            .arg("-c")
-            .arg("pass")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|st| st.success())
-            .unwrap_or(false)
-        {
-            return None;
-        }
-        let path = dir.join("fake-viewer");
-        // Parses only `--port`, ignores the rest of our argv, then serves 200
-        // to any request on that port until it is killed.
-        let script = r#"#!/bin/sh
-while [ $# -gt 0 ]; do case "$1" in --port) p="$2"; shift 2 ;; *) shift ;; esac; done
-exec python3 -c '
-import socket, sys
-s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", int(sys.argv[1])))
-s.listen(8)
-while True:
-    c, _ = s.accept()
-    try:
-        c.recv(4096)
-        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-    except Exception:
-        pass
-    finally:
-        c.close()
-' "$p"
-"#;
-        std::fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        Some(path)
-    }
-
-    /// `spawn` must consult the gate, not merely contain a correct one.
-    ///
-    /// The end-to-end test below deliberately has no fake, on the grounds that
-    /// one would be "a second answer to the question this test exists to ask".
-    /// That is right about ITS question — does the gate pass against the binary
-    /// we ship — and wrong about this one, which is whether the gate is CALLED.
-    /// Delete the `probe_refuses_foreign_host` line from `spawn` and every
-    /// other test in this file still passes, the end-to-end one included,
-    /// because it reaches the probe directly rather than through `spawn`. Two
-    /// independent reviews found that hole before this test existed; it is the
-    /// only assertion here that goes red for it.
-    ///
-    /// It also pins the consequence, which is the part that matters: a viewer
-    /// that answers a forged `Host` must never reach the user's browser, so
-    /// `spawn` fails AND leaves nothing listening.
+    /// Detection is a STAT. Nothing about the browser bundle may be executed,
+    /// and nothing about it may run at launch.
     #[test]
-    fn spawn_refuses_a_viewer_that_serves_a_forged_host() {
-        let d = tmp("gatewire");
-        std::fs::create_dir_all(&d).unwrap();
-        let Some(fake) = fake_viewer_that_answers_200(&d) else {
-            eprintln!("skipped: no python3 to build the fake viewer out of");
-            let _ = std::fs::remove_dir_all(&d);
-            return;
-        };
-        let state = d.join("state");
-        std::fs::create_dir_all(&state).unwrap();
+    fn a_missing_bundle_is_absent_rather_than_an_error() {
+        let d = tmp("bundle");
+        assert!(resolve_bundle(None, Some(&d)).is_none(), "an empty resource dir is not an install");
+        assert!(resolve_bundle(None, None).is_none(), "no resource dir at all is not an install");
 
-        // `Proc` is not `Debug` (it holds a `Child`), so match rather than
-        // `expect_err` — and a spawn that SUCCEEDED must be cleaned up here or
-        // the fake outlives the test.
-        let err = match spawn(&fake, &state, &d.join("viewer.log")) {
-            Err(e) => e,
-            Ok(mut p) => {
-                let _ = p.child.kill();
-                let _ = p.child.wait();
-                panic!("a viewer that serves a forged Host was accepted and handed to the browser");
-            }
-        };
-        assert!(
-            err.contains("foreign Host header"),
-            "the refusal must name what was wrong, got: {err}"
-        );
-        // `spawn`'s failure path kills the child. If it did not, an
-        // unauthenticated server would outlive the open that refused it.
-        assert!(
-            std::process::Command::new("pgrep")
-                .args(["-f", "fake-viewer"])
-                .output()
-                .map(|o| o.stdout.is_empty())
-                .unwrap_or(true),
-            "the refused viewer is still running",
-        );
-        let _ = std::fs::remove_dir_all(&d);
-    }
+        // A DIRECTORY where the bundle should be is still "not installed".
+        std::fs::create_dir_all(d.join(BUNDLE_REL)).unwrap();
+        assert!(resolve_bundle(None, Some(&d)).is_none(), "a directory passed as the bundle");
+        let _ = std::fs::remove_dir_all(d.join(BUNDLE_REL));
 
-    // ── the whole thing, against a real viewer ──────────────────────────────
-
-    /// Spawn, gate, register, resolve — end to end, with the actual binary.
-    ///
-    /// **Runs only when `WORKTREES_VIEWER_BIN` names one.** CI has no viewer
-    /// (it is 26 MB of someone else's Go, built in `release.yml` and never
-    /// committed), and the alternative — a fake server that speaks just enough
-    /// HTTP — would be a second answer to the question this test exists to ask.
-    /// Everything above it is pure and always runs; this is the one that proves
-    /// the process, the port and the URL are real, and it is run by hand:
-    ///
-    /// ```sh
-    /// WORKTREES_VIEWER_BIN=~/workspace/mo/mo cargo test -p app --lib the_whole_path -- --nocapture
-    /// ```
-    ///
-    /// What it holds that nothing else can: that `--foreground` really keeps the
-    /// child ours (kill it, and the port goes), that the §11.3 gate passes
-    /// against the binary we ship rather than against a string, and that the URL
-    /// we hand `openUrl` addresses the DERIVED document — header and all — and
-    /// not the repo's own file.
-    #[test]
-    fn the_whole_path_works_against_a_real_viewer() {
-        if std::env::var(BIN_ENV).is_err() {
-            return;
-        }
-        let src = tmp("e2e");
-        std::fs::create_dir_all(src.join("docs")).unwrap();
-        std::fs::write(src.join("README.md"), "---\ntitle: Read me\n---\n\nhello\n").unwrap();
-        let entries = vec![entry("README.md", "Read me", &src)];
-        let cfg = tmp("e2e-cfg");
-        let v = Viewer::default();
-        let _reap = Reaper(&v);
-        let req = Request {
-            root: &src,
-            slug: "e2e-place",
-            path: Some(&entries[0].path),
-            stale: stale(),
-            docs: None,
-            fingerprint: worktrees_core::docs::fingerprint(&src),
-        };
-
-        // A tree left behind by a previous run — a crash, or a place the user
-        // has since removed. The first spawn of a run must take it with it.
-        let stale_tree = viewer_dir(&cfg).join("tree/gone-deadbeef");
-        std::fs::create_dir_all(&stale_tree).unwrap();
-        std::fs::write(stale_tree.join("secret.md"), "a client's signed agreement").unwrap();
-
-        let url = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up").url;
-        assert!(!stale_tree.exists(), "a previous run's derived documents survived a fresh spawn");
-        assert!(url.starts_with("http://127.0.0.1:"), "{url}");
-        assert!(derive::is_loopback_target(&url), "{url}");
-        let port = v.0.lock().unwrap().as_ref().unwrap().port;
-
-        // The gate, against the running process — not against `probe_verdict`.
-        probe_refuses_foreign_host(port).expect("the shipped viewer must refuse a foreign Host");
-
-        // And the URL addresses OUR document: fetch what the viewer would serve
-        // and find the header in it.
-        let id = url.rsplit("file=").next().unwrap().to_string();
-        let body = http_get(port, &format!("/_/api/groups/e2e-place/files/{id}/content"));
-        assert!(body.contains("25 behind"), "the derived header is not in what the viewer serves: {body}");
-        assert!(!body.contains("title: Read me"), "the frontmatter survived: {body}");
-
-        // `--foreground` means this child is ours. Without it the handle is a
-        // launcher that already exited and the port would outlive the app.
-        kill(&v);
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), PROBE_TIMEOUT).is_err(),
-            "the viewer survived being killed — it daemonised and we are holding the wrong process"
-        );
-        let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&cfg);
-    }
-
-    /// The tick, against the real thing — the one assertion no stub can make.
-    ///
-    /// `an_edit_after_the_open_reaches_the_derived_copy` proves the bytes on
-    /// disk change. What it cannot prove is the half this feature actually
-    /// depends on: that `mo`, watching the derived tree with `-wR`, SERVES the
-    /// rewritten file to a tab that is already open. That is a claim about
-    /// somebody else's watcher, and the only honest way to make it is to ask a
-    /// running one.
-    ///
-    /// **Runs only when `WORKTREES_VIEWER_BIN` names a viewer**, like the test
-    /// above and for the same reason — CI has no `mo`, and a fake that answered
-    /// this question would be answering it with our own assumption:
-    ///
-    /// ```sh
-    /// WORKTREES_VIEWER_BIN=~/workspace/mo/mo cargo test -p app --lib the_tick_reaches -- --nocapture
-    /// ```
-    #[test]
-    fn the_tick_reaches_a_real_viewers_open_tab() {
-        if std::env::var(BIN_ENV).is_err() {
-            return;
-        }
-        let src = tmp("e2e-tick");
-        let cfg = tmp("e2e-tick-cfg");
-        std::fs::write(src.join("README.md"), "# Read me\n\nBEFORE-THE-EDIT\n").unwrap();
-        // The REAL walk, so the entries and the fingerprint describe the same
-        // place — which is what `open`'s caller does.
-        let fp = worktrees_core::docs::fingerprint(&src);
-        let entries = worktrees_core::docs::index(&src).entries;
-        let v = Viewer::default();
-        let _reap = Reaper(&v);
-        let req = Request {
-            root: &src,
-            slug: "e2e-tick",
-            path: Some(&entries[0].path),
-            stale: stale(),
-            docs: None,
-            fingerprint: fp,
-        };
-        let url = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up").url;
-        let port = v.0.lock().unwrap().as_ref().unwrap().port;
-        let id = url.rsplit("file=").next().unwrap().to_string();
-        let content = format!("/_/api/groups/e2e-tick/files/{id}/content");
-        assert!(http_get(port, &content).contains("BEFORE-THE-EDIT"), "the first derive did not reach the viewer");
-
-        // The user edits the document. Nothing is clicked.
-        for _ in 0..200 {
-            std::fs::write(src.join("README.md"), "# Read me\n\nAFTER-THE-EDIT\n").unwrap();
-            if worktrees_core::docs::fingerprint(&src) != fp {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert!(refresh(&v, 1_789_779_661).is_empty(), "the tick reported an error");
-
-        // Polled, not slept: the watcher is another process and the only thing
-        // being asserted is that it gets there, not how fast. A bounded wait
-        // fails loudly; a fixed sleep either flakes or hides a regression.
-        let mut body = String::new();
-        for _ in 0..40 {
-            body = http_get(port, &content);
-            if body.contains("AFTER-THE-EDIT") {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(body.contains("AFTER-THE-EDIT"), "the viewer is still serving the copy made at click time: {body}");
-        assert!(!body.contains("BEFORE-THE-EDIT"), "the old text is still being served: {body}");
-        // …and it carries the new stamp, so a reader can tell the copy apart
-        // from the status above it.
-        assert!(body.contains("derived 2026-09-19 01:01:01 UTC"), "the re-derived page is not dated: {body}");
-        assert!(body.contains("status as of"), "the git facts are passed off as current: {body}");
-
-        let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&cfg);
-    }
-
-    /// **An image, loaded through the server.** The one assertion that a file on
-    /// disk cannot make: `mo` resolves a relative `src` against the directory of
-    /// the markdown file it is serving and hands the bytes back from
-    /// `/_/api/groups/{group}/files/{id}/raw/{path}`, so the copy is only
-    /// correct if the viewer can actually reach it at the path the author wrote.
-    ///
-    /// **Runs only when `WORKTREES_VIEWER_BIN` names a viewer:**
-    ///
-    /// ```sh
-    /// WORKTREES_VIEWER_BIN=~/workspace/mo/mo cargo test -p app --lib an_image_loads -- --nocapture
-    /// ```
-    ///
-    /// The `../` case is deliberately not asserted over HTTP, and that is a
-    /// finding rather than an omission: `resolveImageSrc` appends the author's
-    /// `src` to that raw prefix verbatim, so `../assets/y.png` builds a URL
-    /// carrying a dot segment — which both the browser and Go's own mux
-    /// normalise away, eating the `/raw/` segment and landing on a route that
-    /// does not exist (probed: 307 to `…/files/{id}/assets/y.png`, which serves
-    /// the SPA shell). The copy below is correct for that reference too — the
-    /// file lands exactly where the reference points — and it is asserted on
-    /// disk; making it *reachable* is a fix in the viewer, not here.
-    #[test]
-    fn an_image_loads_through_a_real_viewer() {
-        if std::env::var(BIN_ENV).is_err() {
-            return;
-        }
-        let src = tmp("e2e-img");
-        let cfg = tmp("e2e-img-cfg");
-        std::fs::write(
-            src.join("README.md"),
-            "# Read me\n\n![beside](shots/a.png)\n![above](../outside.png)\n",
-        )
-        .unwrap();
-        png_at(&src, "shots/a.png");
-        doc_at(&src, "docs/guides/p.md", "# P\n\n![up](../assets/y.png)\n");
-        png_at(&src, "docs/assets/y.png");
-        let entries = worktrees_core::docs::index(&src).entries;
-        let v = Viewer::default();
-        let _reap = Reaper(&v);
-        let req = Request {
-            root: &src,
-            slug: "e2e-image",
-            path: Some(&entries[0].path),
-            stale: stale(),
-            docs: None,
-            fingerprint: worktrees_core::docs::fingerprint(&src),
-        };
-
-        let opened = open(&v, &cfg, None, &entries, &req).expect("the viewer must come up");
-        let port = v.0.lock().unwrap().as_ref().unwrap().port;
-        let tree = v.0.lock().unwrap().as_ref().unwrap().groups[0].tree.clone();
-        let id = opened.url.rsplit("file=").next().unwrap().to_string();
-
-        // The bytes, through the server, at the path the document asked for.
-        let res = http_get(port, &format!("/_/api/groups/e2e-image/files/{id}/raw/shots/a.png"));
-        assert!(res.starts_with("HTTP/1.1 200"), "the image did not load: {}", res.lines().next().unwrap_or(""));
-        assert!(res.contains("Content-Type: image/png"), "{res:?}");
-        assert!(res.contains(&format!("Content-Length: {}", PNG.len())), "{res:?}");
-
-        // The parent-directory reference: copied to exactly where it points,
-        // which is all this side of the seam can do (see the note above).
-        assert!(tree.join("docs/assets/y.png").is_file(), "the parent-directory image was not copied");
-        assert_eq!(std::fs::read(tree.join("docs/assets/y.png")).unwrap(), PNG);
-        // …and a reference pointing OUT of the place copied nothing at all.
-        assert!(!tree.join("outside.png").exists());
-        assert!(!src.parent().unwrap().join("outside.png").exists());
-
-        kill(&v);
-        let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&cfg);
-    }
-
-    /// The derived tree is copies of the user's documents outside the repo's own
-    /// gitignore. A viewer that is dead has no business still having them.
-    #[test]
-    fn nothing_the_viewer_wrote_outlives_a_clean_exit() {
-        let cfg = tmp("cleanup");
-        let v = viewer_dir(&cfg);
-        std::fs::create_dir_all(v.join("tree/a-1234abcd/docs")).unwrap();
-        std::fs::write(v.join("tree/a-1234abcd/docs/x.md"), "a client's signed agreement").unwrap();
-        std::fs::create_dir_all(v.join("state/mo/backup")).unwrap();
-        std::fs::write(v.join("state/mo/backup/mo-6275.json"), "{}").unwrap();
-        // The log is kept on purpose: it is how a failed spawn is explained, and
-        // it holds no document content.
-        std::fs::write(v.join("viewer.log"), "serving\n").unwrap();
-
-        cleanup(&cfg);
-        assert_eq!(std::fs::read_dir(v.join("tree")).unwrap().count(), 0, "derived documents survived");
-        assert_eq!(std::fs::read_dir(v.join("state")).unwrap().count(), 0, "the session survived");
-        assert!(v.join("viewer.log").is_file(), "the log is not the viewer's state");
-        let _ = std::fs::remove_dir_all(&cfg);
-    }
-
-    /// Kills the viewer however the test ends.
-    ///
-    /// A `#[test]` that panics before reaching its own `kill` leaves a REAL
-    /// server holding a REAL port, on the machine of whoever ran it. That is not
-    /// hypothetical: proving the tree-wipe assertion red left `mo` listening on
-    /// 53381 until it was found by hand — a test suite reproducing, in miniature,
-    /// the exact failure rule 1 exists to prevent. `kill` takes the slot, so the
-    /// test's own explicit call still means what it says and this is a no-op
-    /// after it.
-    struct Reaper<'a>(&'a Viewer);
-    impl Drop for Reaper<'_> {
-        fn drop(&mut self) {
-            kill(self.0);
-        }
-    }
-
-    /// A loopback GET, for the test above. Not worth a dependency.
-    #[cfg(test)]
-    fn http_get(port: u16, path: &str) -> String {
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-        let mut s = TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).unwrap();
-        s.set_read_timeout(Some(PROBE_TIMEOUT)).unwrap();
-        s.write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes(),
-        )
-        .unwrap();
-        let mut out = Vec::new();
-        let _ = s.read_to_end(&mut out);
-        String::from_utf8_lossy(&out).into_owned()
-    }
-
-    /// Detection is a STAT. Executing a candidate to find out whether it is
-    /// there would put an exec of an unknown binary on the path rule 2 exists to
-    /// keep clear.
-    #[test]
-    fn a_missing_viewer_is_absent_rather_than_an_error() {
-        let d = tmp("bin");
-        assert!(resolve_binary(None, Some(&d)).is_none(), "an empty resource dir is not an install");
-        assert!(resolve_binary(None, None).is_none(), "no resource dir at all is not an install");
-
-        // A DIRECTORY where the binary should be is still "not installed".
-        std::fs::create_dir_all(d.join(RESOURCE_REL)).unwrap();
-        assert!(resolve_binary(None, Some(&d)).is_none(), "a directory passed as the binary");
-        let _ = std::fs::remove_dir_all(d.join(RESOURCE_REL));
-
-        let real = d.join("viewer/mo");
+        let real = d.join(BUNDLE_REL);
         std::fs::create_dir_all(real.parent().unwrap()).unwrap();
-        std::fs::write(&real, "#!/bin/sh\n").unwrap();
-        assert_eq!(resolve_binary(None, Some(&d)).as_deref(), Some(real.as_path()));
+        std::fs::write(&real, "export {}\n").unwrap();
+        assert_eq!(resolve_bundle(None, Some(&d)).as_deref(), Some(real.as_path()));
 
         // The override wins, and a BROKEN override does not fall through to the
-        // bundled one — running a different binary than the one you named is how
+        // bundled one — serving a different file than the one you named is how
         // an afternoon goes missing.
-        let other = d.join("other-mo");
-        std::fs::write(&other, "#!/bin/sh\n").unwrap();
-        assert_eq!(resolve_binary(Some(other.to_str().unwrap()), Some(&d)).as_deref(), Some(other.as_path()));
-        assert!(resolve_binary(Some("/does/not/exist/mo"), Some(&d)).is_none());
+        let other = d.join("other.js");
+        std::fs::write(&other, "export {}\n").unwrap();
+        assert_eq!(resolve_bundle(Some(other.to_str().unwrap()), Some(&d)).as_deref(), Some(other.as_path()));
+        assert!(resolve_bundle(Some("/does/not/exist/viewer.js"), Some(&d)).is_none());
 
         let _ = std::fs::remove_dir_all(&d);
     }
