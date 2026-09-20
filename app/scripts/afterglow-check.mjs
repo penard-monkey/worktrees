@@ -236,6 +236,24 @@ for (const re of [/workedAt\([^)]*\)\s*>\s*seen/, /worked\s*>\s*seen/, /last_wor
 if (!/isUnread\(/.test(app))
   fail("App.tsx no longer calls `isUnread` — the nav is deciding unread some other way");
 
+// The DISPLAY predicate and the FACT are two things, and only one of them may
+// reach the ack. `unreadOf` hides an unread place behind its live dot, which is
+// right for a single-glyph slot and fatal as a write guard: the visit to a
+// `waiting` place — the state it is in precisely because it wants you — would
+// spend nothing, `worked > seen` would stand in the store, and the ring would
+// come back the moment the session went quiet. Static, because the difference
+// only shows up against a live session and nothing else in the repo can see it.
+if (!/const unseenWork = \(p: Place\) => isUnread\(/.test(app))
+  fail("App.tsx: `unseenWork` is gone — the unread FACT and the unread DISPLAY have collapsed back into one predicate");
+if (!/const unreadOf = \(p: Place\) => !activityOf\(p\) && unseenWork\(p\)/.test(app))
+  fail("App.tsx: `unreadOf` no longer subtracts live activity — busy and waiting own the dot slot, and the ember may not paint over them");
+if (/\bunreadOf\([^)]*\)\)\s*ack\(/.test(app))
+  fail("App.tsx: an `ack` is guarded on `unreadOf` — a place whose session is busy or waiting can then never spend its unread signal, and its ring returns on the next restart");
+if (!/\bunseenWork\([^)]*\)\)\s*ack\(/.test(app))
+  fail("App.tsx: no `ack` is guarded on `unseenWork` — the enter path has stopped acking, or is acking unguarded (a store write per click)");
+if (!/const selPending = !!selected && unseenWork\(selected\)/.test(app))
+  fail("App.tsx: the dwell effect's predicate is not `unseenWork` — a selected place whose session is waiting would never ack");
+
 const settings = read("../src/settings.ts");
 for (const k of ["done_horizon_secs", "done_steps"]) {
   if (!new RegExp(`${k}:`).test(settings)) fail(`settings.ts: \`${k}\` is missing from the Settings type/defaults`);

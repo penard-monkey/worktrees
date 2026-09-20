@@ -3685,10 +3685,23 @@ function App() {
       seenPaths.get(p.path) ?? 0,
       seenEpoch(p.declared?.last_seen_epoch, p.declared?.last_opened_epoch),
     );
-  // "Claude finished here and nobody has looked since." Gated on `activityOf`
-  // like `doneOf` below — a place that is busy RIGHT NOW is not a thing you are
-  // behind on, it is a thing you are watching.
-  const unreadOf = (p: Place) => !activityOf(p) && isUnread(workedAt(p), seenAt(p));
+  // "Claude finished here and nobody has looked since." THE FACT — the one the
+  // ack spends, and the only one the store knows about.
+  //
+  // ⚠ Not gated on `activityOf`, and that separation is load-bearing. The dot
+  // slot is a single glyph, so live state has to out-rank the ember in what it
+  // SHOWS (`unreadOf`); but a visit is a visit whether or not the session has
+  // since gone busy again, and gating the ack on the display meant the visit to
+  // a place whose session sits at `waiting` — the state it is in precisely
+  // BECAUSE it wants you — could never spend anything. The ring was hidden
+  // behind the amber dot while you read, the store kept the finish unspent, and
+  // the ring came back the moment the session went quiet — which reads,
+  // correctly, as "I already looked at that one".
+  const unseenWork = (p: Place) => isUnread(workedAt(p), seenAt(p));
+  // What the DOT says: the same fact, minus the places whose slot a live state
+  // has taken. A place that is busy RIGHT NOW is not a thing you are behind on,
+  // it is a thing you are watching.
+  const unreadOf = (p: Place) => !activityOf(p) && unseenWork(p);
   /** Per place path, the seen epoch as it stood before this visit acked it.
    *  A ref, not state: nothing renders off it directly — `docsBaseline` reads it
    *  during render for a pane that is keyed by place and freezes its own copy —
@@ -3698,10 +3711,12 @@ function App() {
   /** Spend a place's unread signal: stamp NOW locally so the ring goes at once,
    *  and forward-only in the declared store so it survives a restart.
    *
-   *  Call this ONLY when `unreadOf(p)` — every guard at every call site exists
+   *  Call this ONLY when `unseenWork(p)` — every guard at every call site exists
    *  so that selecting a place you have already read is not a file write. The
    *  backend is forward-only too, but a no-op invoke per click is still a round
-   *  trip per click. */
+   *  trip per click. The guard is the FACT, never `unreadOf`: the display
+   *  predicate hides an unread place behind its live dot, and a visit that
+   *  cannot ack is a visit whose ring returns. */
   const ack = (repo: string, p: Place) => {
     const t = Math.floor(Date.now() / 1000);
     // What the seen epoch was BEFORE this ack — the Docs tab's recency baseline.
@@ -4270,17 +4285,21 @@ function App() {
   // dwell — never ack at all.
   //
   // A completion that lands while the place is already selected and visible
-  // re-runs this (`donePaths` changed, so `selUnread` flips true) and acks after
+  // re-runs this (`donePaths` changed, so `selPending` flips true) and acks after
   // the dwell. That is the "I watched it finish" case, and it is intended.
-  const selUnread = !!selected && unreadOf(selected);
+  //
+  // The FACT, not `unreadOf`: a session that went busy again — or that is
+  // waiting on you, which is the whole reason you came — must not make the
+  // visit unspendable. See `unseenWork`.
+  const selPending = !!selected && unseenWork(selected);
   useEffect(() => {
-    if (!sel || !selected || !pageVisible || !selUnread) return;
+    if (!sel || !selected || !pageVisible || !selPending) return;
     const { repo } = sel;
     const p = selected;
     const id = setTimeout(() => ack(repo, p), SEEN_DWELL_MS);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel?.repo, sel?.slug, pageVisible, selUnread]);
+  }, [sel?.repo, sel?.slug, pageVisible, selPending]);
 
   // Does the topbar's branch chip say anything the name and the alias do not?
   // On `(main)` it names the branch main is on, which is news; on a worktree it
@@ -4702,9 +4721,10 @@ function App() {
     (async () => {
       invoke("touch_place", { repo, slug: p.slug }).catch(() => {}); // fire-and-forget recency stamp
       // Entering is the strongest "I looked" there is, so it acks with no dwell.
-      // Guarded exactly like the dwell effect: an enter into a place with
-      // nothing unread must not write the store.
-      if (unreadOf(p)) ack(repo, p);
+      // Guarded exactly like the dwell effect — on the FACT, so that entering a
+      // place to answer the question its session is waiting on still spends the
+      // signal — and an enter into a place with nothing unseen writes nothing.
+      if (unseenWork(p)) ack(repo, p);
       await runCmd("open_place", { repo, slug: p.slug, fresh });
     })();
   };
