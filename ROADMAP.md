@@ -5,6 +5,28 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **`sessions:busy` has no mount-time pull.** The backend emits it only when
+  the busy/waiting set CHANGES, and the frontend only ever listens — so a
+  webview that mounts after the first poll tick holds empty sets until some
+  session changes state. No busy or waiting dots at all, and (since `unreadOf`
+  subtracts live activity) the unread ring unmasked on places that should be
+  showing live state instead. `list_drafts` gained a mount-time pull for
+  exactly this reason and says so in its comment; `sessions:busy` never did.
+  Not hit at app startup today — the first tick is 3s after setup and the
+  webview mounts well inside that — but a dev reload or a window recreation
+  lands squarely in the window. The fix is a `list_activity` command beside
+  `list_drafts`, pulling from the same `claude_activity()`.
+  _From: [2026-09-20 unread-ring restart](docs/sessions/2026-09-20-unread-ring-restart/summary.md)_
+
+- **Places carrying an inflated `last_worked_epoch` keep it.** Before #310 the
+  backfill stamped real places hours ahead of their last turn, and the
+  store is forward-only — nothing in the app writes that field backwards, so
+  those rows keep a false age and a false sort position until real work
+  overtakes them. A repair is a one-shot migration (re-derive each place's
+  stamp from its transcript, allow a backwards write, once, under a version
+  key) and was deliberately not bundled with the fix.
+  _From: [2026-09-20 unread-ring restart](docs/sessions/2026-09-20-unread-ring-restart/summary.md)_
+
 - **The docs viewer has never been opened in a real browser from a real app.**
   Everything about the server is proved by unit tests over real loopback
   sockets, and everything about the page is proved in its own worktree; none of
@@ -637,7 +659,15 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   after the subdir, and `/clear` must neither light a place nor inflate an
   existing ember. Re-run whenever the `claude` binary is upgraded — the probe
   schema and the history format are both undocumented.
-  _From: [2026-08-09 afterglow-dot session](docs/sessions/2026-08-09-afterglow-dot/summary.md)_
+  ⚠ **The busy → done → SEEN hand-off is part of this and has still never run
+  for real**, in either the 2026-09-16 session that built it or the 2026-09-20
+  one that fixed it twice. The check, end to end: let a place you are not
+  watching finish, confirm the ringed dot, select it for a second, confirm the
+  plain halo, restart the app with tmux left up, and confirm it stays plain.
+  That last step is the one both backfill bugs lived in — and note the mtime
+  read they hid behind survived a year of gates precisely because nothing
+  automated can see a restart.
+  _From: [2026-08-09 afterglow-dot session](docs/sessions/2026-08-09-afterglow-dot/summary.md), amended [2026-09-20 unread-ring restart](docs/sessions/2026-09-20-unread-ring-restart/summary.md)_
 
 - **The afterglow's decay is a setting now (v0.23.0); its ranges are a guess.**
   Settings → Navigation → Afterglow: horizon from `DONE_HORIZONS` (1h..7d) and

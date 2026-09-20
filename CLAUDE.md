@@ -114,6 +114,21 @@ RUNNING job as a failure. Both fired within a minute of each other on #304, one
 claiming green and one claiming nine failures, neither true. Watch the run, not
 the PR view: `gh run watch <run-id> --exit-status`, then read raw conclusions.
 
+**A CONFLICTED PR gets no CI at all, and it does not look like a conflict.**
+`on: pull_request` builds `refs/pull/N/merge`, which GitHub cannot create while
+the branch conflicts with main — so `gh run list --branch <b>` comes back EMPTY
+while every other branch runs normally, which reads as a broken workflow or a
+queue that never started. #310 sat like that until a rebase, then its run
+appeared within seconds. Check `gh pr view <n> --json mergeStateStatus` (DIRTY)
+before debugging the workflow. Note `mergeStateStatus` also reads `UNKNOWN` for
+a few seconds after any push while GitHub recomputes it.
+
+**Killing a bats run writes a `not ok` into its log.** A `pkill` (or a branch
+switch under a running suite) fails the in-flight test inside `common_setup`
+and prints `bats warning: Executed N instead of expected 340 tests`. A later
+grep of that log reads as a real regression. Check the plan line and the count
+before believing a single failure in a log you did not watch finish.
+
 **A throwaway git script needs a guard, because `git -C ""` means HERE.** A
 probe let a repo path come back empty and aimed `branch -M main` and
 `push origin main` at the live worktree; git refused both (the worktree guard on
@@ -666,6 +681,26 @@ is invisible to the bats suite — there is no fake claude. Re-run
   substitute — a genuinely busy session can go minutes without a write, which is
   why the dot has no expiry. Anything new read out of that file needs the same
   question asked: which write set this field?
+- **A live Claude transcript's MTIME is not its last turn.** Claude Code keeps
+  rewriting `~/.claude/projects/<mangled>/<sid>.jsonl` long after the session's
+  last entry: measured across every transcript touched in a day, 24 of 28 had an
+  mtime running from 12 minutes to **34 hours** ahead of the newest `timestamp`
+  INSIDE the file. `backfill_worked` read that mtime to date a completion, so
+  every launch re-dated every place whose session was still up in tmux to "just
+  finished" — and since the stamp is forward-only and the backfill runs on every
+  launch, the unread ring came back on each restart, on exactly the places the
+  user had just acked. `last_worked_epoch` is also the nav's row age and sort
+  key, so the same read reshuffled the tree. Date a session by `transcript_epoch`
+  (max `timestamp` over a tail of the file), never by `stat`. The general rule:
+  for any file claude owns, the metadata describes claude's bookkeeping and only
+  the CONTENT describes the work.
+- **A predicate that gates a DISPLAY must not also gate a WRITE.** The dot slot
+  shows one glyph, so `unreadOf` subtracts live activity — correct for painting,
+  and fatal as the ack's guard: a visit to a place whose session sits at
+  `waiting` (the state it is in *because* it wants you) spent nothing, and the
+  ring returned the moment that session went quiet. `unseenWork` is the FACT and
+  guards the write; `unreadOf` is the fact minus live state and only paints.
+  `afterglow-check.mjs` pins which one reaches `ack`.
 - **`document.visibilityState` works here** — WKWebView fires `visibilitychange`
   on minimize, ⌘H, Space switch and full occlusion (confirmed on a real build via
   logged transitions). The Tauri issues claiming otherwise are Windows/WebView2.
