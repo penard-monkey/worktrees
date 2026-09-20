@@ -29,11 +29,15 @@
 // and the measurement the brief asks for is explicitly "change a block
 // ELSEWHERE". The server's `id` is still carried, onto `data-block-id`, so the
 // two can be compared from a probe.
-import { memo, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
+import { memo, useLayoutEffect, useMemo, useRef } from "react";
 import { marked } from "marked";
 import { Markdown } from "../src/markdown";
 import { Mermaid } from "./Mermaid";
-import { assetUrl, resolveRel, type Block } from "./contract";
+import type { Block } from "./contract";
+import { onLink, renderImage, type DocCtx } from "./docctx";
+import { sanitizeHtml } from "./rawhtml";
+
+export type { DocCtx };
 
 /** FNV-1a. A key, not a digest — it only has to distinguish, cheaply. */
 function hash(s: string): string {
@@ -58,77 +62,6 @@ export function blockKeys(blocks: Block[]): string[] {
     seen.set(base, n + 1);
     return n === 0 ? base : `${base}#${n}`;
   });
-}
-
-export type DocCtx = {
-  /** API base — `http://127.0.0.1:<port>/<token>/p/<place>/`. */
-  base: URL;
-  /** Directory of the document being rendered; relative refs resolve here. */
-  dir: string;
-  /** A relative `.md` link was followed. */
-  onDoc: (path: string) => void;
-  /** An in-document `#anchor` was followed. */
-  onAnchor: (slug: string) => void;
-};
-
-/**
- * Images. `markdown.tsx` deliberately builds no `<img>` of its own — it
- * delegates here (`MarkdownProps.renderImage`, "the viewer loads them off
- * disk"). The dock's implementation reads bytes over a Tauri command; this one
- * points at the server's `asset/` route.
- *
- * Refusals are SHOWN, not swallowed. A reader who cannot see a diagram needs to
- * know whether it is missing or refused.
- */
-function renderImage(ctx: DocCtx, src: string, alt: string, title: string | null): ReactNode {
-  const s = src.trim();
-  if (s.startsWith("data:image/")) {
-    // Allowed by `img-src data:` and inert: an SVG inside <img> is in the
-    // spec's secure static mode — no script, no external references.
-    return <span className="md-img"><img src={s} alt={alt} title={title ?? undefined} /></span>;
-  }
-  if (/^[a-z][a-z0-9+.-]*:/i.test(s) || s.startsWith("//")) {
-    // Remote. The CSP (`img-src 'self' data:`) would refuse the load anyway;
-    // not emitting it means the page never even tries, which is the difference
-    // between "no outbound network by policy" and "no outbound network".
-    return <span className="md-img-note">[remote image not loaded: {s}]</span>;
-  }
-  const rel = resolveRel(ctx.dir, s);
-  if (!rel) return <span className="md-img-note">[image refused — path escapes the place root: {s}]</span>;
-  return (
-    <span className="md-img">
-      <img src={assetUrl(ctx.base, rel)} alt={alt} title={title ?? undefined} loading="lazy" />
-    </span>
-  );
-}
-
-const DOC_EXT = /\.(md|markdown)(#|$)/i;
-
-function onLink(ctx: DocCtx, href: string): void {
-  if (href.startsWith("#")) { ctx.onAnchor(href.slice(1)); return; }
-  if (/^https?:/i.test(href)) {
-    // The token lives in this page's URL, so an external navigation that
-    // carried a `Referer` would hand a stranger a capability to every document
-    // in this place. The shell's `<meta name="referrer" content="no-referrer">`
-    // is what prevents that; `noreferrer` here is the second lock, and
-    // `noopener` keeps the opened tab from reaching back through `window.opener`.
-    window.open(href, "_blank", "noopener,noreferrer");
-    return;
-  }
-  if (!DOC_EXT.test(href)) {
-    // A relative link to something that is not a document. Following it would
-    // be a TOP-LEVEL navigation to `asset/<rel>`, and a top-level SVG document
-    // executes script — which is a property of how the server labels the
-    // response, not something this page can settle. Until assets are known to
-    // carry `X-Content-Type-Options: nosniff` and a `default-src 'none'` CSP of
-    // their own, the link is inert and says so (see `.doc a.md-link` in
-    // viewer.css, which marks it visually).
-    return;
-  }
-  const [p, anchor] = href.split("#");
-  const rel = resolveRel(ctx.dir, p);
-  if (!rel) return;
-  ctx.onDoc(anchor ? `${rel}#${anchor}` : rel);
 }
 
 /** A block that is nothing but a ```mermaid fence, via the same lexer the
@@ -163,6 +96,25 @@ const BlockView = memo(function BlockView(
           className="mdb-md"
           renderImage={(s, alt, t) => renderImage(ctx, s, alt, t)}
           onLink={(h) => onLink(ctx, h)}
+          renderHtml={(raw) => {
+            // `null` hands the token back to `markdown.tsx`, which shows it as
+            // the literal text it has always shown. Every refusal in
+            // `rawhtml.tsx` — an `<svg>`, a `<script>`, an unbalanced opening
+            // tag — arrives here as `null`, so nothing a document wrote is ever
+            // silently deleted.
+            const r = sanitizeHtml(raw, ctx);
+            if (!r) return null;
+            return (
+              <span className="md-rawhtml-render">
+                {r.node}
+                {r.dropped > 0 && (
+                  <span className="md-rawhtml-dropped" title="an allow-list decides what raw HTML in a document may render as">
+                    {" "}[{r.dropped} not allowed]
+                  </span>
+                )}
+              </span>
+            );
+          }}
         />
       )}
     </div>
