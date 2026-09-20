@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The Docs tab is a tree.** Flat sections headed `DOCS/ADR` are gone; the
+  index nests the way the directories do, every folder collapses, and what you
+  collapsed is remembered per place across restarts. It remembers what you
+  CLOSED rather than what you opened, so a place you have never touched opens
+  fully expanded and a directory added tomorrow appears instead of hiding
+  inside a set recorded before it existed. The name filter reaches into closed
+  folders — a match three levels down opens its way out rather than staying
+  hidden behind a chevron, which is a filter that looks broken. Order is still
+  the walk's: a `[docs] paths = ["b", "a"]` lists `b` first, because that is
+  what the repo asked for and sorting it would quietly overrule them.
+
 - **Read a place's docs in the browser, diagrams and all.** The Docs tab grows
   an "Open this place in the browser" button and a per-row browser action. The
   app starts one small documentation server on first use — never at launch —
