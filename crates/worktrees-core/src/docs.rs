@@ -516,7 +516,7 @@ pub fn index_with(root: &Path, docs: Option<&Docs>) -> DocsIndex {
 /// earlier, so there is nobody to choose colliding inputs and nothing to forge.
 /// `worktrees-core` carries serde and `toml` and nothing else — a dependency
 /// here would be a new supply-chain entry to detect that a file changed.
-fn fnv1a(mut h: u64, bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(mut h: u64, bytes: &[u8]) -> u64 {
     for b in bytes {
         h ^= *b as u64;
         h = h.wrapping_mul(0x100_0000_01b3);

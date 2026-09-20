@@ -163,14 +163,36 @@ const KEYWORDS: [&str; 12] = [
 /// where one node id ends and the next begins.
 const LINK_CHARS: [char; 7] = ['-', '=', '.', '<', '>', '~', '&'];
 
-/// One document, transformed. `entry` is the row `docs::index_with` produced for
-/// it, `text` is the file's content, and nothing else is read.
+/// One document, transformed: the staleness header, then the body.
+///
+/// `entry` is the row `docs::index_with` produced for it, `text` is the file's
+/// content, and nothing else is read.
+///
+/// **The header is prose here and DATA in the server** (`doc`'s `meta`), which
+/// is why the split below exists rather than being tidiness: a surface that
+/// renders the facts itself must not also receive them as a blockquote, or the
+/// reader is told twice and the second copy cannot update. `body` is that
+/// surface's half; this composition is the one that writes a self-contained
+/// markdown file, and its output is unchanged.
 pub fn document(entry: &DocEntry, text: &str, stale: &Staleness, links: &Links) -> String {
+    let mut out = header(stale);
+    out.push_str(&body(entry, text, links));
+    out
+}
+
+/// `document` without the staleness header — frontmatter stripped, the title
+/// restored if stripping took it, diagram `click` directives rewritten.
+///
+/// This is what the browser page is served as blocks, because the page renders
+/// the same facts from `doc`'s `meta` and renders them LIVE: the header baked
+/// into the text would be a second, frozen copy of numbers the reader is
+/// looking at two inches away. §1.1's hazard with the axes swapped.
+pub fn body(entry: &DocEntry, text: &str, links: &Links) -> String {
     let (had_front, body) = match docs::split_frontmatter(text) {
         Some((_, rest)) => (true, rest),
         None => (false, text),
     };
-    let mut out = header(stale);
+    let mut out = String::new();
     // Only when stripping took the title away. A document with no heading and
     // no frontmatter never had one, and inventing an H1 for it (the walk's
     // fallback is the filename stem) is the tool writing content.
@@ -1085,6 +1107,397 @@ fn has_scheme(r: &str) -> bool {
         && cs.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
 }
 
+// ── blocks ───────────────────────────────────────────────────────────────────
+
+/// One top-level block of a document, as the browser page consumes it.
+///
+/// **Why a document is ever cut up at all.** The page polls, and when the text
+/// moves it replaces only the blocks whose source changed, leaving every other
+/// DOM node identical. That is not an optimisation: measured on a real page in
+/// both browsers, block-level replacement holds `scroll 400→400, sel 55→55`
+/// across an edit, and replacing the whole document measures `sel 70→0` — as
+/// destructive as a reload, which is the thing this transport exists to be
+/// better than (`docs-transport` findings §3.3, §1.2). A wrong split does not
+/// fail loudly; it quietly ruins reading.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Block {
+    /// Stable across re-derives: the same source text is always the same id,
+    /// wherever it has moved to in the document.
+    ///
+    /// **Derived from the content, deliberately not from the position.** A
+    /// positional `b0, b1, b2…` is stable only while nothing is inserted: add a
+    /// paragraph at the top and every id below it shifts, so every block reads
+    /// as changed and the page replaces the whole document — exactly the
+    /// `sel 70→0` failure the split exists to prevent, arriving on the most
+    /// ordinary edit there is. Keyed by content instead, an insert is one new
+    /// id among unchanged neighbours, a delete is one id gone, and a moved
+    /// block keeps its own.
+    ///
+    /// The cost is that an EDIT changes the id rather than the body under it.
+    /// That is the same single-node replacement either way: the block whose
+    /// text changed is the one block whose DOM cannot be preserved.
+    pub id: String,
+    /// The block's source, byte for byte, including the blank lines that
+    /// follow it. Concatenating every `md` in order reproduces the input
+    /// exactly — `blocks_partition_every_byte` is that assertion, and it is
+    /// what makes "the joined output is the document" a fact rather than a
+    /// hope.
+    pub md: String,
+}
+
+/// FNV-1a's offset basis, the seed `docs::fingerprint_with` uses. Same
+/// reasoning as there: this digest compares the tool's own output against the
+/// tool's own output a second later, so there is nobody to choose colliding
+/// inputs, and a cryptographic hash here would be a supply-chain entry to
+/// notice that a paragraph moved.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// Split a derived document into top-level blocks.
+///
+/// **The bias is to OVER-group, always.** Splitting one construct into two is a
+/// rendering change — a loose list cut at a blank line renders as two `<ul>`s,
+/// a fence cut at a blank line renders as prose and code and a stray ``` — and
+/// it is invisible to any test that only checks the join. Grouping two adjacent
+/// constructs into one block renders identically and costs one extra block
+/// redrawn on an edit. So every ambiguous case below continues the block.
+///
+/// What is recognised, because each of these legally contains a blank line and
+/// each would be destroyed by a naive blank-line split: fenced code, indented
+/// code, a loose list (and its nested lists and lazy continuations), an HTML
+/// comment or `<script>`/`<pre>`/`<style>`/`<textarea>` block. Blockquotes,
+/// tables, setext headings and paragraphs are blank-line-terminated runs.
+pub fn blocks(text: &str) -> Vec<Block> {
+    let sp = line_spans(text);
+    let n = sp.len();
+    let mut out: Vec<Block> = Vec::new();
+    let mut seen: BTreeMap<u64, u32> = BTreeMap::new();
+    if n == 0 {
+        return out;
+    }
+    let line = |k: usize| content(text, sp[k]);
+    // Leading blank lines belong to the first block: every byte has to land in
+    // exactly one block or the join is not the document.
+    let mut i = 0;
+    while i < n && line(i).trim().is_empty() {
+        i += 1;
+    }
+    if i == n {
+        // A document of nothing but blank lines is still bytes we were handed.
+        out.push(block(text, &mut seen));
+        return out;
+    }
+    let mut start = 0usize;
+    loop {
+        let mut k = block_end(text, &sp, i);
+        // Trailing blank lines join the block above them, which is what makes
+        // the partition contiguous without inventing a separator the join has
+        // to guess at.
+        while k < n && line(k).trim().is_empty() {
+            k += 1;
+        }
+        out.push(block(&text[start..sp[k - 1].1], &mut seen));
+        if k >= n {
+            break;
+        }
+        start = sp[k].0;
+        i = k;
+    }
+    out
+}
+
+/// One block, with its id. Two blocks with identical source get `-1`, `-2`…, so
+/// a document with three `---` rules still hands the page three distinct keys.
+fn block(md: &str, seen: &mut BTreeMap<u64, u32>) -> Block {
+    let h = crate::docs::fnv1a(FNV_OFFSET, md.as_bytes());
+    let dup = seen.entry(h).or_insert(0);
+    let id = if *dup == 0 { format!("b{h:016x}") } else { format!("b{h:016x}-{dup}") };
+    *dup += 1;
+    Block { id, md: md.to_string() }
+}
+
+/// Every line's byte range, the terminator included. `str::lines` cannot be
+/// used here: it drops `\r` and cannot tell `"a\n"` from `"a"`, and this
+/// partition has to be exact.
+fn line_spans(text: &str) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut s = 0;
+    for (i, c) in b.iter().enumerate() {
+        if *c == b'\n' {
+            out.push((s, i + 1));
+            s = i + 1;
+        }
+    }
+    if s < b.len() {
+        out.push((s, b.len()));
+    }
+    out
+}
+
+/// One line without its terminator.
+fn content(text: &str, sp: (usize, usize)) -> &str {
+    let mut s = &text[sp.0..sp.1];
+    if let Some(t) = s.strip_suffix('\n') {
+        s = t;
+    }
+    if let Some(t) = s.strip_suffix('\r') {
+        s = t;
+    }
+    s
+}
+
+/// Leading indentation in columns, a tab counting as four. Only ever compared
+/// against 3 (the most a leaf block may be indented by) and against a list
+/// marker's own column, so the approximation cannot be off by enough to matter.
+fn indent_of(s: &str) -> usize {
+    let mut n = 0;
+    for c in s.chars() {
+        match c {
+            ' ' => n += 1,
+            '\t' => n += 4,
+            _ => break,
+        }
+    }
+    n
+}
+
+/// An opening code fence at a block start: three or more backticks or tildes,
+/// indented by at most three.
+fn fence_at(s: &str) -> Option<(char, usize)> {
+    if indent_of(s) > 3 {
+        return None;
+    }
+    let t = s.trim_start();
+    let c = t.chars().next()?;
+    if c != '`' && c != '~' {
+        return None;
+    }
+    let n = t.chars().take_while(|x| *x == c).count();
+    if n < 3 {
+        return None;
+    }
+    Some((c, n))
+}
+
+/// The matching closing fence: the same character, at least as long, and
+/// nothing after it.
+fn fence_closes(s: &str, c: char, n: usize) -> bool {
+    if indent_of(s) > 3 {
+        return false;
+    }
+    let t = s.trim_start();
+    let run = t.chars().take_while(|x| *x == c).count();
+    run >= n && t[run..].trim().is_empty()
+}
+
+/// An ATX heading — the one construct that always interrupts a paragraph.
+fn is_atx(s: &str) -> bool {
+    if indent_of(s) > 3 {
+        return false;
+    }
+    let t = s.trim_start();
+    let h = t.chars().take_while(|c| *c == '#').count();
+    (1..=6).contains(&h) && t[h..].chars().next().map(|c| c == ' ' || c == '\t').unwrap_or(true)
+}
+
+/// A thematic break. Only asked at a BLOCK START, where it cannot be a setext
+/// underline — `---` under a paragraph is an H2 and asking there would cut a
+/// heading off its own text.
+fn is_thematic(s: &str) -> bool {
+    if indent_of(s) > 3 {
+        return false;
+    }
+    let t = s.trim_start();
+    let Some(c) = t.chars().next() else { return false };
+    if c != '-' && c != '*' && c != '_' {
+        return false;
+    }
+    t.chars().filter(|x| *x == c).count() >= 3 && t.chars().all(|x| x == c || x == ' ' || x == '\t')
+}
+
+/// A blockquote marker.
+fn is_quote(s: &str) -> bool {
+    indent_of(s) <= 3 && s.trim_start().starts_with('>')
+}
+
+/// A list item's marker column, or `None`. Bullet or ordered; the marker must
+/// be followed by whitespace or end the line, or `1.5` and `*emphasis*` become
+/// lists.
+fn list_at(s: &str) -> Option<usize> {
+    let ind = indent_of(s);
+    if ind > 3 {
+        return None;
+    }
+    let t = s.trim_start();
+    let rest = match t.chars().next()? {
+        '-' | '+' | '*' => &t[1..],
+        c if c.is_ascii_digit() => {
+            let d = t.chars().take_while(|x| x.is_ascii_digit()).count();
+            if d > 9 {
+                return None;
+            }
+            let after = &t[d..];
+            match after.chars().next()? {
+                '.' | ')' => &after[1..],
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    match rest.chars().next() {
+        None => Some(ind),
+        Some(' ') | Some('\t') => Some(ind),
+        _ => None,
+    }
+}
+
+/// An HTML block that may legally contain a blank line, and the string that
+/// ends it. These are the ones a blank-line split would cut in half.
+fn html_spanning(s: &str) -> Option<&'static str> {
+    if indent_of(s) > 3 {
+        return None;
+    }
+    let t = s.trim_start().to_ascii_lowercase();
+    for (open, close) in [
+        ("<!--", "-->"),
+        ("<script", "</script>"),
+        ("<pre", "</pre>"),
+        ("<style", "</style>"),
+        ("<textarea", "</textarea>"),
+    ] {
+        if t.starts_with(open) {
+            return Some(close);
+        }
+    }
+    None
+}
+
+/// Any other HTML block: ends at a blank line, like a paragraph.
+fn is_html(s: &str) -> bool {
+    indent_of(s) <= 3 && s.trim_start().starts_with('<')
+}
+
+/// Where the block beginning at line `i` ends — exclusive, and past its last
+/// CONTENT line, never past the blank lines after it (the caller absorbs
+/// those). Always greater than `i`, so the caller's loop always advances.
+fn block_end(text: &str, sp: &[(usize, usize)], i: usize) -> usize {
+    let n = sp.len();
+    let line = |k: usize| content(text, sp[k]);
+    let blank = |k: usize| line(k).trim().is_empty();
+    let cur = line(i);
+
+    // A fence owns everything up to its close, blank lines included. One that
+    // never closes owns the rest of the document — which is what a renderer
+    // does with it too, so the block and the rendering agree.
+    if let Some((c, len)) = fence_at(cur) {
+        let mut k = i + 1;
+        while k < n {
+            if fence_closes(line(k), c, len) {
+                return k + 1;
+            }
+            k += 1;
+        }
+        return n;
+    }
+
+    // Before every other test: a four-space-indented line is code, and code is
+    // allowed to look like anything below.
+    if indent_of(cur) >= 4 {
+        let mut last = i + 1;
+        let mut k = i + 1;
+        while k < n {
+            if blank(k) {
+                k += 1;
+                continue;
+            }
+            if indent_of(line(k)) >= 4 {
+                k += 1;
+                last = k;
+                continue;
+            }
+            break;
+        }
+        return last;
+    }
+
+    if let Some(close) = html_spanning(cur) {
+        // From the opening line itself: `<!-- x -->` is one line and one block.
+        let open_len = cur.trim_start().len().min(cur.len());
+        let from = cur.len() - open_len + 1;
+        if cur.len() > from && cur[from..].to_ascii_lowercase().contains(close) {
+            return i + 1;
+        }
+        let mut k = i + 1;
+        while k < n {
+            if line(k).to_ascii_lowercase().contains(close) {
+                return k + 1;
+            }
+            k += 1;
+        }
+        return n;
+    }
+
+    if is_atx(cur) || is_thematic(cur) {
+        return i + 1;
+    }
+
+    if let Some(marker) = list_at(cur) {
+        let mut last = i + 1;
+        let mut k = i + 1;
+        // A blank line inside a list does not end it — that is what makes the
+        // list LOOSE, and cutting there is the split that renders as two lists.
+        let mut after_blank = false;
+        while k < n {
+            if blank(k) {
+                after_blank = true;
+                k += 1;
+                continue;
+            }
+            let l = line(k);
+            // Indented past the marker: this item's own continuation, or a
+            // nested list. A sibling marker: the next item. Neither ends it.
+            if indent_of(l) > marker || list_at(l).is_some() {
+                k += 1;
+                last = k;
+                after_blank = false;
+                continue;
+            }
+            // Flush left after a blank line is a new block; flush left with no
+            // blank line is a lazy continuation of the item's paragraph.
+            if after_blank {
+                break;
+            }
+            k += 1;
+            last = k;
+        }
+        return last;
+    }
+
+    if is_quote(cur) || is_html(cur) {
+        let mut k = i + 1;
+        while k < n && !blank(k) {
+            k += 1;
+        }
+        return k;
+    }
+
+    // A paragraph, a table, or a setext heading: a run of non-blank lines.
+    // It stops early only for the constructs that genuinely interrupt one —
+    // NOT for a thematic break (under a paragraph `---` is a setext underline,
+    // and cutting there decapitates the heading) and not for a list (grouping
+    // a paragraph with the list under it renders identically; splitting a list
+    // that CommonMark would not have started here does not).
+    let mut k = i + 1;
+    while k < n {
+        let l = line(k);
+        if l.trim().is_empty() || fence_at(l).is_some() || is_atx(l) || is_quote(l) {
+            break;
+        }
+        k += 1;
+    }
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1701,4 +2114,195 @@ graph TD
         // them apart and a transform that adds one is editing the file.
         assert_eq!(diagrams("# Title\n\nno trailing newline", &Links::NONE), "# Title\n\nno trailing newline");
     }
+
+    // ── blocks ──────────────────────────────────────────────────────────────
+
+    /// The invariant that makes every other claim about the split checkable:
+    /// the blocks PARTITION the document. Nothing is dropped, nothing is
+    /// duplicated, no separator is invented that the page would have to guess
+    /// at — so "the joined output is the document" is a fact, not a hope.
+    ///
+    /// Run over this repository's own documents, not a fixture: the corpus that
+    /// matters is the one the feature serves, and it carries fences inside
+    /// lists, tables, HTML comments, CRLF and files with no trailing newline.
+    #[test]
+    fn blocks_partition_every_byte_of_every_document() {
+        let mut checked = 0;
+        let mut stack = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().to_string();
+                if crate::docs::SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                let Ok(md) = std::fs::symlink_metadata(&p) else { continue };
+                if md.is_dir() {
+                    stack.push(p);
+                } else if name.ends_with(".md") {
+                    let Ok(text) = std::fs::read_to_string(&p) else { continue };
+                    let joined: String = blocks(&text).iter().map(|b| b.md.as_str()).collect();
+                    assert_eq!(joined, text, "{} did not survive the split", p.display());
+                    checked += 1;
+                }
+            }
+        }
+        // A walk that found nothing would pass this test perfectly.
+        assert!(checked > 20, "only {checked} documents were checked; the walk found nothing");
+    }
+
+    /// Synthetic shapes the repository may not happen to contain, checked for
+    /// the same partition property. An empty file, a file of nothing but blank
+    /// lines, CRLF, and a document with no trailing newline are all inputs the
+    /// walk can hand us.
+    #[test]
+    fn the_partition_holds_for_the_shapes_a_repo_may_not_have() {
+        for src in [
+            "",
+            "\n",
+            "\n\n\n",
+            "   \n\t\n",
+            "a",
+            "a\r\nb\r\n\r\nc\r\n",
+            "# h\n\n\n\npara",
+            "```\nunclosed\n\nstill inside\n",
+        ] {
+            let joined: String = blocks(src).iter().map(|b| b.md.as_str()).collect();
+            assert_eq!(joined, src, "partition lost bytes of {src:?}");
+        }
+    }
+
+    /// A fence is one block however many blank lines are inside it. Cut at a
+    /// blank line it renders as prose, then code, then a stray ``` — a
+    /// document the tool BROKE, and nothing about the join would notice.
+    #[test]
+    fn a_fence_with_blank_lines_in_it_is_one_block() {
+        let src = "intro\n\n```rust\nfn a() {}\n\nfn b() {}\n```\n\nafter\n";
+        let bs = blocks(src);
+        assert_eq!(bs.len(), 3, "{:?}", bs.iter().map(|b| &b.md).collect::<Vec<_>>());
+        assert!(bs[1].md.starts_with("```rust"), "{:?}", bs[1].md);
+        assert!(bs[1].md.contains("fn a() {}\n\nfn b() {}"), "the fence was cut: {:?}", bs[1].md);
+    }
+
+    /// A LOOSE list — blank lines between its items — is one list to a
+    /// renderer and must be one block here. Split, it renders as two `<ul>`s
+    /// with a paragraph gap, which looks like a styling bug and is a split bug.
+    #[test]
+    fn a_loose_list_is_one_block() {
+        let src = "# h\n\n- one\n\n- two\n\n  a second paragraph in item two\n\n- three\n\nafter the list\n";
+        let bs = blocks(src);
+        let list: Vec<&str> = bs.iter().map(|b| b.md.as_str()).filter(|m| m.contains("- one")).collect();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].contains("- two"), "the list was cut at a blank line: {:?}", list[0]);
+        assert!(list[0].contains("- three"), "the list was cut at a blank line: {:?}", list[0]);
+        assert!(list[0].contains("a second paragraph"), "an item's own paragraph left the list");
+        assert!(!list[0].contains("after the list"), "the list swallowed the paragraph after it");
+    }
+
+    /// An indented code block keeps its blank lines for the same reason a
+    /// fenced one does, and it has no closing marker to find the end by.
+    #[test]
+    fn an_indented_code_block_survives_its_blank_line() {
+        let src = "text\n\n    line one\n\n    line two\n\nback to prose\n";
+        let bs = blocks(src);
+        let code: Vec<&str> = bs.iter().map(|b| b.md.as_str()).filter(|m| m.contains("line one")).collect();
+        assert_eq!(code.len(), 1);
+        assert!(code[0].contains("line two"), "the indented block was cut: {:?}", code[0]);
+        assert!(!code[0].contains("back to prose"));
+    }
+
+    /// An HTML comment may span blank lines, and this repo's own documents
+    /// contain them. Cut, the closing `-->` renders as text.
+    #[test]
+    fn an_html_comment_is_one_block_across_a_blank_line() {
+        let src = "a\n\n<!-- a note\n\nstill the note\n-->\n\nb\n";
+        let bs = blocks(src);
+        let c: Vec<&str> = bs.iter().map(|b| b.md.as_str()).filter(|m| m.contains("<!--")).collect();
+        assert_eq!(c.len(), 1);
+        assert!(c[0].contains("-->"), "the comment was cut: {:?}", c[0]);
+    }
+
+    /// `---` under a paragraph is a setext H2 underline, not a thematic break.
+    /// Cutting there puts the heading's text in one block and its underline in
+    /// the next, and each renders as a paragraph and a horizontal rule — a
+    /// heading silently demoted to prose.
+    #[test]
+    fn a_setext_heading_is_not_cut_from_its_underline() {
+        let src = "Heading text\n---\n\nbody\n";
+        let bs = blocks(src);
+        assert!(bs[0].md.starts_with("Heading text\n---"), "{:?}", bs[0].md);
+    }
+
+    /// The property the whole design rests on: a block the author did not touch
+    /// hands the page the SAME id, so the page leaves its DOM node — and the
+    /// reader's selection and scroll — alone.
+    ///
+    /// Insertion is the case a positional `b0, b1, b2…` gets wrong, and it is
+    /// the most ordinary edit there is: everything below the insert shifts, so
+    /// every block reads as changed and the page replaces the document.
+    #[test]
+    fn inserting_a_paragraph_changes_no_other_blocks_id() {
+        let before = "# Title\n\nfirst\n\nsecond\n\nthird\n";
+        let after = "# Title\n\nINSERTED\n\nfirst\n\nsecond\n\nthird\n";
+        // An id must still NAME THE SAME TEXT, not merely still exist: a
+        // positional scheme keeps every id alive and slides each one onto its
+        // neighbour's content, which is the whole failure and passes a
+        // membership check perfectly. (It did, while this test was being
+        // written.)
+        let a = blocks(before);
+        let b: std::collections::BTreeMap<String, String> =
+            blocks(after).into_iter().map(|x| (x.id, x.md)).collect();
+        for blk in &a {
+            assert_eq!(
+                b.get(&blk.id),
+                Some(&blk.md),
+                "{} no longer names {:?} after an insertion above it",
+                blk.id,
+                blk.md
+            );
+        }
+        assert_eq!(b.len(), a.len() + 1);
+    }
+
+    /// Editing one block changes one id. If an edit moved its neighbours' ids
+    /// the page would redraw them too, and the measurement this split exists
+    /// for (`sel 55→55`) would quietly become `sel 55→0`.
+    #[test]
+    fn editing_one_block_moves_one_id() {
+        let a: Vec<String> = blocks("one\n\ntwo\n\nthree\n").into_iter().map(|b| b.id).collect();
+        let b: Vec<String> = blocks("one\n\nTWO\n\nthree\n").into_iter().map(|b| b.id).collect();
+        assert_eq!(a.len(), b.len());
+        let moved = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+        assert_eq!(moved, 1, "{a:?} vs {b:?}");
+    }
+
+    /// Two blocks with identical source are two nodes on the page, so they need
+    /// two keys. A content-derived id collides by construction; the occurrence
+    /// counter is what stops the page treating them as one.
+    #[test]
+    fn identical_blocks_still_get_distinct_ids() {
+        let bs = blocks("---\n\n---\n\n---\n");
+        let ids: std::collections::BTreeSet<&str> = bs.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(bs.len(), 3);
+        assert_eq!(ids.len(), 3, "{:?}", bs.iter().map(|b| &b.id).collect::<Vec<_>>());
+    }
+
+    /// `document` is `header` + `body`, and the split is what lets the server
+    /// hand the page the facts as DATA (`doc`'s `meta`) without the reader
+    /// getting a second, frozen copy of them as prose.
+    #[test]
+    fn a_document_is_its_header_followed_by_its_body() {
+        let e = entry("docs/a.md", "A");
+        let st = stale();
+        let text = "---\ntitle: A\n---\n\nprose\n";
+        assert_eq!(document(&e, text, &st, &Links::NONE), format!("{}{}", header(&st), body(&e, text, &Links::NONE)));
+        // And the body carries none of the header's facts: the page renders
+        // those itself, live, from `meta`.
+        let b = body(&e, text, &Links::NONE);
+        assert!(!b.contains("origin/main"), "{b:?}");
+        assert!(!b.contains("behind"), "{b:?}");
+        assert!(b.contains("prose"));
+    }
+
 }
