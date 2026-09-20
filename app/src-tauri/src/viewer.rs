@@ -336,15 +336,30 @@ fn id8(bytes: &[u8]) -> String {
 ///
 /// `127.0.0.1` rather than `localhost`: it needs no resolver, it cannot be
 /// pointed anywhere by a hosts file, and it is the literal the server's own
-/// `Host` check will see. The document is a QUERY rather than a path segment
-/// because the shell is one page — the page fetches `doc?path=` for whatever it
-/// is showing, and a deep link is the same page told where to start.
+/// `Host` check will see.
+///
+/// **The document is a FRAGMENT, `#/<rel>`, and this was a query once.** The
+/// shell is a single page that routes on `location.hash`; a `?path=` deep link
+/// landed on the place's INDEX, so the Docs tab's per-row "open in the browser"
+/// action opened the right place at the wrong document and nothing anywhere
+/// said so. Measured in Chrome against the real page, which is the only way
+/// this was ever going to be found — both halves were green on their own.
+///
+/// Two things follow from it being a fragment, and both are worth having:
+/// the document's path is never sent to the server at all (it is not in the
+/// request line, so it cannot reach a log or a `Referer`), and there is exactly
+/// one place that knows which document is open — the page's own route — rather
+/// than a query string that would have to be kept in step with it on every
+/// in-page navigation, or else lie.
+///
+/// `route_escape` is per-segment `encodeURIComponent`, which is what the page's
+/// `decodeURIComponent` undoes.
 pub fn place_url(port: u16, token: &str, key: &str, rel: Option<&str>) -> String {
     match rel {
         None => format!("http://127.0.0.1:{port}/{token}/p/{key}/"),
         Some(r) => format!(
-            "http://127.0.0.1:{port}/{token}/p/{key}/?path={}",
-            crate::docserver::query_escape(r)
+            "http://127.0.0.1:{port}/{token}/p/{key}/#/{}",
+            crate::docserver::route_escape(r)
         ),
     }
 }
@@ -1122,25 +1137,34 @@ pub(crate) mod tests {
         assert!(derive::is_loopback_target(&place_url(65535, TOKEN, "a-b-c", Some("x.md"))));
     }
 
-    /// A deep link names the document in a QUERY, and the document's own name
-    /// may not end the value or start a second parameter — a file called
-    /// `a&path=../x.md` is legal on disk, and a URL is the one place in this
-    /// feature where a filename becomes syntax.
+    /// **A deep link names the document in the FRAGMENT**, because that is what
+    /// the page routes on. It was a `?path=` query first, and the page — which
+    /// reads `location.hash` and nothing else — answered it with the place's
+    /// INDEX: the Docs tab's per-row browser action opened the right place at
+    /// the wrong document, silently, and both halves were green apart.
+    ///
+    /// The document's own name may not end the fragment or start the page's
+    /// `?h=` anchor separator. A file called `q?x.md` or `h#h.md` is legal on
+    /// disk, and a URL is the one place in this feature where a filename
+    /// becomes syntax.
     #[test]
-    fn a_deep_link_cannot_be_escaped_by_the_name_it_carries() {
-        let u = place_url(PORT, TOKEN, "p", Some("docs/a&path=../../etc/passwd#x .md"));
+    fn a_deep_link_is_a_fragment_and_survives_the_name_it_carries() {
+        let u = place_url(PORT, TOKEN, "p", Some("docs/a?h=x#frag .md"));
         assert_eq!(
             u,
-            format!(
-                "http://127.0.0.1:{PORT}/{TOKEN}/p/p/?path=docs/a%26path%3D../../etc/passwd%23x%20.md"
-            )
+            format!("http://127.0.0.1:{PORT}/{TOKEN}/p/p/#/docs/a%3Fh%3Dx%23frag%20.md")
         );
+        // Exactly one `#`, or the browser cuts the fragment in the wrong place.
+        assert_eq!(u.matches('#').count(), 1, "{u}");
+        // No `?` at all, or the page reads the tail as an anchor.
+        assert!(!u.contains('?'), "{u}");
         assert!(derive::is_loopback_target(&u), "{u}");
-        // And it comes back as exactly the string that went in.
-        let q = u.split_once("?path=").unwrap().1;
+        // And it comes back as exactly the string that went in — the page's
+        // `decodeURIComponent` undoes this escaping.
+        let frag = u.split_once("/#/").unwrap().1;
         assert_eq!(
-            crate::docserver::pct_decode_once(q).as_deref(),
-            Some("docs/a&path=../../etc/passwd#x .md")
+            crate::docserver::pct_decode_once(frag).as_deref(),
+            Some("docs/a?h=x#frag .md")
         );
     }
 

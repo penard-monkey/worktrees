@@ -482,11 +482,17 @@ pub fn query_get(query: Option<&str>, key: &str) -> Option<String> {
     None
 }
 
-/// Percent-encode a value going INTO a query string — the deep link this
-/// module emits into a mermaid `click` directive and hands to `openUrl`.
-/// Conservative: everything but the unreserved set is escaped, so nothing in a
-/// document's own filename can end the value or start a second parameter.
-pub fn query_escape(s: &str) -> String {
+/// Percent-encode a path going into the shell's **fragment** — the deep link
+/// this module emits into a mermaid `click` directive and hands to `openUrl`.
+///
+/// Conservative on purpose: everything but the unreserved set and `/` is
+/// escaped, which is `encodeURIComponent` per segment and then joined, so the
+/// page's own `decodeURIComponent` gives the path back exactly. Escaping MORE
+/// than `encodeURIComponent` does is not caution here, it is correctness —
+/// `!'()*` round-trip either way, but a literal `#` in a filename would
+/// otherwise end the fragment at the wrong place and a literal `?` would be
+/// read as the page's `?h=` anchor separator. Both are legal filenames.
+pub fn route_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
