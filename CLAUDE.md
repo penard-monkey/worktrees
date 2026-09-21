@@ -205,6 +205,26 @@ Break the thing under test (drop the `skip_serializing_if`, restore the old
 line), watch it go red, then restore. Two tests this repo now relies on were
 confirmed this way.
 
+**A message's REMEDY is a claim, and it needs following, not proofreading.**
+B3 refused a declared symlink source with "link the real file, or point the
+config at it" — and BOTH are impossible in the only case that reaches the
+check, because `[[file]].path` is repo-relative (`init.rs` refuses absolute
+paths, `~` and `$`) and the target is outside the repo by definition or B3
+would not have fired. A test asserting the string would have passed forever.
+Check advice by DOING it end-to-end through the release binary in a scratch
+repo; here that turned up an escape hatch that is not in the config at all —
+`git worktree add` checks out a tracked `120000` blob with no Layer B check, so
+committing a symlink is free exactly where declaring it is refused (this repo's
+own `_tmp` has always worked that way). Two corollaries. **A feature hand-
+patched wherever it fails looks like a feature that works**: four of eight
+worktrees in the affected project had `_tmp` linked by hand, which disguised a
+declaration that had NEVER once succeeded in six days — mtimes scattered across
+three days is what gave it away. And **a tracked symlink is branch-dependent
+where a hand-made one is not**: checking out a branch that predates the
+tracking DELETES the link from that tree (git removes a tracked path absent
+from the target commit; ignore rules do not protect it), idle `-next` bases
+included.
+
 **Consolidating a git invocation? Diff `ls --json` against the SHIPPED binary.**
 Folding three git calls into one `status --porcelain=v2` silently changed
 `upstream` for one worktree — v2 reports the CONFIGURED upstream, `rev-parse
