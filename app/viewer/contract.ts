@@ -36,8 +36,10 @@ export type DocPayload = { meta: Meta; blocks: Block[] };
  * `path`'s directory part: `.planning/brief.md` is grouped with the ROOT files,
  * because a group of one under a gitignored directory name reads as an accident
  * (`DocEntry::group` in `docs.rs`). Deriving it from the path would file the
- * brief under a directory the walk does not show — so it is used verbatim when
- * the server sends it, and only FALLS BACK to the dirname when it does not.
+ * brief under `.planning/` — which is a REAL group now that the walk lists the
+ * rest of that directory, so the row would silently join the plan sets rather
+ * than fail visibly. It is used verbatim when the server sends it, and only
+ * FALLS BACK to the dirname when it does not.
  */
 export type IndexEntry = { path: string; title: string; group: string };
 

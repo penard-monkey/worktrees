@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **The Docs tab shows the plan, not just the brief.** A place's `.planning/`
+  directory is working memory — the brief the app writes itself, and, on any
+  place driven by the planning-with-files skill, the plan the session writes:
+  `task_plan.md`, `findings.md`, `progress.md`, one set per workstream under
+  `.planning/<slug>/`, plus whatever notes were filed beside them. Until now
+  the index listed exactly one file out of that directory and could not reach
+  the rest, because every tree walk refuses a dotted name — so the most current
+  documents a place had were the ones it could not show. They now sit between
+  the root files and the repo's own `docs/` tree, grouped by workstream, in the
+  Docs tab and in the browser page alike. The brief stays where it was, with
+  the root files: it is one document about the whole place, and a group of one
+  under a dotted directory name reads as an accident. A `[docs]` section cannot
+  turn this off and does not need to — `.planning/` is gitignored, so the repo
+  does not know it is there, and like the root files it is about the PLACE
+  rather than about the repo's documentation layout.
+
 ### Fixed
 - **The refusal for a declared file that is a symlink out of the repo now
   suggests something you can actually do.** It said "link the real file, or

@@ -340,10 +340,19 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
 
 // ── new / co ─────────────────────────────────────────────────────────────────
 
-/// Where a place's brief lives, relative to the worktree. `.planning/` is the
-/// planning-with-files working dir every repo of ours already gitignores, and
-/// the close-out ritual archives it — so the task an agent was given is kept
-/// with the rest of that session's working memory.
+/// The planning-with-files working directory, relative to the worktree — every
+/// repo of ours already gitignores it, and the close-out ritual archives it.
+///
+/// The brief is one file in it (`BRIEF_PATH`). The skill's parallel-plan mode
+/// fills the rest: `.planning/<slug>/{task_plan,findings,progress}.md`, one
+/// slug per workstream, plus whatever notes that session wrote beside them.
+/// `docs::walk` lists the whole directory for that reason — the brief is what
+/// this tool writes, and the plan is what the session writes, and a Docs tab
+/// that shows the first and hides the second is showing the staler half.
+pub const PLANNING_DIR: &str = ".planning";
+/// Where a place's brief lives, relative to the worktree. Inside `PLANNING_DIR`
+/// so the task an agent was given is kept with the rest of that session's
+/// working memory.
 pub const BRIEF_PATH: &str = ".planning/brief.md";
 /// The prompt claude is launched on when a brief was written. Fixed text: the
 /// brief itself never travels through argv, only this pointer to it does.

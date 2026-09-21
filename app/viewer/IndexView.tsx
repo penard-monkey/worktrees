@@ -50,7 +50,10 @@ export function IndexView({
       // `.planning` heading here while the nav — which uses `tree()`, which
       // uses `group` — correctly put it at the root. Two surfaces on the SAME
       // PAGE disagreeing about where a document lives, which is the mirror this
-      // whole extraction exists to avoid, one level smaller.
+      // whole extraction exists to avoid, one level smaller. That heading is no
+      // longer invented, either: the walk lists the whole of `.planning/`, so a
+      // path-derived group would drop the brief into the plan sets and look
+      // entirely plausible doing it.
       const d = e.group || ".";
       const list = by.get(d);
       if (list) list.push(e);

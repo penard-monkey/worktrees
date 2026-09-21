@@ -734,6 +734,12 @@ It is deliberately grouped with the root files rather than under `.planning`:
 a group of one, headed by a dotted directory name, reads as an accident.
 (`the_brief_is_grouped_with_the_root_files_not_under_planning`.)
 
+*Amended by §18:* the brief's placement is unchanged, but it stopped being the
+only row out of that directory. "A group of one" was the whole of the argument
+for hiding the rest, and it was never true of a place the planning skill drives.
+
+---
+
 ### 11.2 Does `(main)`'s index get a cross-place strip? — **No**
 
 The draft guessed the nav's job; that is right, and for a stronger reason than
@@ -1515,3 +1521,93 @@ a drift bug. And the `ETag` is per PLACE, not per document, so editing one
 document costs every open tab in that place one full response — the
 alternative is hashing each file's bytes on every conditional request, which is
 the disk read the `304` exists to avoid.
+
+---
+
+## 18. `.planning/` is a tree, not a file — found by using it, 2026-09-20
+
+**Reported against `valleos`:** the plan the session is working from does not
+appear in the Docs tab, and the reporter could not say why it worked in some
+places and not others. It was neither — it never worked. §11.1 listed
+`.planning/brief.md` by NAME (`ops::BRIEF_PATH`), and the tree pass that would
+have found its siblings refuses every dotted name on its way down, so a place
+whose planning directory held one file showed all of it and a place whose
+directory held nineteen showed one.
+
+**What is really in there,** measured across valleos's 17 worktrees that have
+one:
+
+```
+.planning/brief.md                     # ours (ops::BRIEF_PATH) — listed since phase 1
+.planning/<slug>/task_plan.md          # the planning-with-files skill, parallel-plan mode:
+.planning/<slug>/findings.md           #   one directory per workstream, and places carry
+.planning/<slug>/progress.md           #   several — ssdlc has ssdlc, w0-ssdlc, w0-secrets-aws
+.planning/.active_plan                 # a pointer, not a document (not markdown, never listed)
+.planning/review-pr7.md                # loose notes a session filed beside the plan
+.planning/docs/audit-{A..D}.md         # …and one session that filed eleven
+```
+
+The largest single place is ~19 markdown files. `MAX_ENTRIES` is 2000, so the
+cap is not a consideration; the reason this was ever a question is the dotted
+name and nothing else.
+
+### 18.1 The decision — a step of its own, between the root block and the tree
+
+`docs::walk` gains step 4, `.planning/**/*.md`, reusing the same subtree walker
+the documentation tree uses (extracted for the purpose — a second copy cut for
+this would be a mirror of a rule living six lines away, which is the drift the
+module's own note is about).
+
+Three things it deliberately does **not** do.
+
+It does not weaken the dotted-name refusal. That refusal is what keeps a `.git`
+two levels down out of the index; the one dotted directory we want is NAMED —
+`ops::PLANNING_DIR`, the constant `BRIEF_PATH` already lived under — rather than
+admitted by relaxing the rule.
+
+It does not become configurable. `[docs] paths` replaces step 5 and nothing
+else, for the same reason the root files and the brief survive it: this is about
+the PLACE, not about the repo's documentation layout. A repo could not declare
+it in any case — `.planning/` is gitignored, so the repo does not know it is
+there.
+
+It does not move the brief. `push` dedupes on `rel` for the whole walk, so the
+brief is already `seen` by the time the new step reaches it and stays ungrouped
+with the root files, exactly where §11.1 put it. The rest is grouped by
+directory (`.planning`, `.planning/<slug>`), because §11.1's reason for the
+exception — *a group of one under a dotted directory name reads as an accident*
+— does not describe a workstream's three files, and `<slug>` is the name of the
+workstream, which is the one thing the ungrouped block cannot say.
+
+**Placement** is between the root block and `docs/`: the brief says what this
+worktree is for, the plan says how it is going, and the repo's committed
+documentation follows both. It is the most current material a place has and the
+least committed, which is the same ordering argument §11.1 made one row smaller.
+
+### 18.2 What did not change, and why that is the evidence
+
+Nothing in either frontend. `doctree.ts::tree` and `IndexView.tsx` both nest on
+`group`, splitting on `/`, with no opinion about dots; `docserver::safe_under`
+and `viewer::safe_rel` refuse `.` and `..` COMPONENTS and have always allowed a
+leading-dot name (`.planning/brief.md` was already in both of their tests); and
+`fingerprint_with` shares `walk` with `index_with` precisely so a new step is
+picked up by both without being written twice. A change that reaches this many
+surfaces through one function is the seam §6 was cut for, working.
+
+One comment had to change on each of those surfaces, and it is worth recording
+why. Four of them justified grouping on `group` with *"deriving it from the path
+would file the brief under a `.planning/` the walk does not show"* — reasoning
+FROM the absence this section removes. The assertions stay correct and get
+sharper: a path-derived group no longer invents a node, it drops the brief into
+a real one, beside documents it plausibly belongs near. `docs-check.mjs`'s
+fixture now carries a real `.planning/<slug>` group for that reason, and it
+fails on a path-derived tree with both messages.
+
+### 18.3 A symlink the old code never had to think about
+
+`read_dir` follows a symlink. Every tree root the walk took before this was
+`symlink_metadata`'d by its caller (the declared-paths loop does it inline), so
+the walker never needed its own guard; `.planning` is the first root handed to
+it by a constant. A `.planning -> ~/notes` would have listed a directory outside
+the place. The guard lives in the walker now, where the next caller gets it for
+free (`a_symlinked_planning_directory_is_walked_as_nothing`).

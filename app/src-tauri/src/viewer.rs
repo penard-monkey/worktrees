@@ -1624,9 +1624,52 @@ pub(crate) mod tests {
         ] {
             assert!(safe_rel(bad).is_none(), "{bad:?} must not be written");
         }
-        for ok in ["README.md", "docs/adr/0001.md", ".planning/brief.md", "a-b_c.md"] {
+        // A dotted NAME is fine — only `.` and `..` as whole components are
+        // refused. The working-memory rows (`docs.rs` step 4) are two levels
+        // deep under one, which is the shape the brief alone never exercised.
+        for ok in [
+            "README.md",
+            "docs/adr/0001.md",
+            ".planning/brief.md",
+            ".planning/w5-aws-staging/task_plan.md",
+            "a-b_c.md",
+        ] {
             assert_eq!(safe_rel(ok), Some(ok));
         }
+    }
+
+    /// The other half of `docs.rs` step 4: a place's working memory has to
+    /// reach the BROWSER, not just the dock. Nothing in the derive is
+    /// dot-aware, which is the point — this pins that it stays that way, since
+    /// the one thing between an index row and a served page is a path the
+    /// walker now produces with a leading-dot component in it.
+    #[test]
+    fn a_plan_document_derives_into_the_tree_like_any_other() {
+        let src = tmp("planning");
+        std::fs::create_dir_all(src.join(".planning/w5-aws-staging")).unwrap();
+        std::fs::write(src.join("README.md"), "# Read me\n").unwrap();
+        std::fs::write(
+            src.join(".planning/w5-aws-staging/task_plan.md"),
+            "# Task plan\n\n[the readme](../../README.md)\n",
+        )
+        .unwrap();
+        let entries = vec![
+            entry("README.md", "Read me", &src),
+            entry(".planning/w5-aws-staging/task_plan.md", "Task plan", &src),
+        ];
+        let out = tmp("planning-out");
+
+        let derived = derive_tree(&out, &src, &entries, &stale()).unwrap().pages;
+        assert_eq!(derived.len(), 2, "the plan was dropped somewhere in the derive");
+        let page = out.join(".planning/w5-aws-staging/task_plan.md");
+        assert!(page.is_file(), "the derived tree has no {page:?}");
+        let text = std::fs::read_to_string(&page).unwrap();
+        // The mirror is what makes the plan's own relative links resolve, and a
+        // plan two levels down is the deepest `..` chain a place normally has.
+        assert!(text.contains("[the readme](../../README.md)"), "{text}");
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// The tree is what the server reads, so it has to MIRROR the place's

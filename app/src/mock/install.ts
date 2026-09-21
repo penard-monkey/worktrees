@@ -1373,6 +1373,18 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         // below the tree. Core's `every_group_is_one_contiguous_run` is the
         // contract; the harness has to hold it or it stops being parity.
         mk("NOTES.md", "notes"),
+        // The place's WORKING MEMORY, between the root block and the repo's own
+        // tree (`docs.rs` step 4). The brief above is the one row out of
+        // `.planning/` that is NOT grouped, and these are here so the harness
+        // shows that difference rather than only asserting it: a loose note at
+        // `.planning`, then one group per workstream. Two workstreams on
+        // purpose — one is the shape that made the brief's exception right, and
+        // it is not the shape a place driven by the planning skill has.
+        mk(".planning/review-pr7.md", "Review — PR #7", ".planning"),
+        mk(".planning/live-docs/task_plan.md", "Task plan — per-place docs", ".planning/live-docs"),
+        mk(".planning/live-docs/findings.md", "Findings", ".planning/live-docs"),
+        mk(".planning/live-docs/progress.md", "Progress", ".planning/live-docs"),
+        mk(".planning/w5-aws-staging/task_plan.md", "Task plan — staging on AWS", ".planning/w5-aws-staging"),
         mk("docs/index.md", "Documentation", "docs"),
         mk("docs/adr/0001-no-repo-supplied-argv.md", "ADR 0001 — a cloned repo never supplies argv", "docs/adr"),
         mk("docs/architecture/overview.md", "Platform overview", "docs/architecture"),
