@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.28.0] - 2026-09-21
 
 ### Added
 - **The Docs tab shows the plan, not just the brief.** A place's `.planning/`
