@@ -19,15 +19,25 @@
 //! 4. `.planning/**/*.md` — this place's working memory, grouped by directory;
 //! 5. `docs/**/*.md`, depth-first, files before subdirectories.
 //!
-//! `[docs]` (proposal §3.2) changes exactly one of those five. `paths`
+//! `[docs]` (proposal §3.2) touches exactly two of those five: `paths`
 //! replaces step 5 — the repo says which of its directories hold documentation
-//! — while 1-4 stay, because the root files, the brief and the plan are about
-//! the PLACE rather than about the repo's documentation layout. (A repo could
-//! not declare step 4 in any case: `.planning/` is gitignored, so the repo does
-//! not know it is there.) `index` prepends one entry ahead of everything,
-//! because "where reading starts" is a fact only the repo knows. Nothing else
-//! moves, and there is no key that can name a command: ADR 0001 is why `Docs`
-//! is two path fields (see `projcfg::Docs`).
+//! — and `index` prepends one entry ahead of everything, because "where reading
+//! starts" is a fact only the repo knows. Steps 1-4 stay, because the root
+//! files, the brief and the plan are about the PLACE rather than about the
+//! repo's documentation layout. Nothing else moves, and there is no key that
+//! can name a command: ADR 0001 is why `Docs` is two path fields (see
+//! `projcfg::Docs`).
+//!
+//! Step 4 is convention rather than configuration, and NOT because a repo is
+//! unable to name it — `.planning` is a perfectly legal `RelPath`, and `paths =
+//! [".planning"]` has always walked it. It is because `paths` REPLACES the
+//! documentation tree, so a repo that declared its working memory would be
+//! trading away `docs/` to get it; because the directory is the tool's own
+//! (`ops::PLANNING_DIR`, where `cmd_new` writes the brief) and filled by the
+//! skill, not by the repo; and because it is gitignored, so it is the one
+//! directory a committed config has no business having an opinion about. A
+//! declared `.planning` is therefore skipped in step 5 rather than refused:
+//! step 4 has already walked it.
 //!
 //! 4 sits between the root block and the tree because it is the most CURRENT
 //! thing a place has and the least committed — the brief says what this
@@ -56,10 +66,10 @@
 //! `SKIP_DIRS` is not a performance rule. On `(main)`, `.worktrees/` *contains
 //! every other place*, so walking it would file ten places' documentation under
 //! one — the exact confusion the tab exists to remove. Every tree walk also
-//! refuses a dotted NAME, which is why `.planning/` needs a step of its own
-//! rather than a line in `[docs] paths`: the refusal is what keeps a `.git`
-//! two levels down out of the index, and the one dotted directory we do want is
-//! named here instead of weakening it. And every entry is
+//! refuses a dotted NAME on the way DOWN — which is what keeps a `.git` two
+//! levels below `docs/` out of the index, and is why `.planning/` cannot be
+//! reached by descent even though a walk that STARTS there is fine. Step 4
+//! names it as a start rather than weakening the refusal. And every entry is
 //! `symlink_metadata`'d, never `metadata`'d: a committed
 //! `docs/secrets.md -> ~/.ssh/id_rsa` must list as nothing at all. The caller
 //! has already canonicalised `root` and proved it lies under a registered
@@ -116,12 +126,17 @@ pub struct DocEntry {
     /// root files and the brief. The frontend renders one header per distinct
     /// group in first-appearance order; `""` gets no header.
     ///
-    /// The brief is deliberately `""` rather than `.planning`: it is about this
-    /// PLACE, which is the one thing the root files are not, and a group of one
-    /// under a gitignored directory name reads as an accident. The REST of
-    /// `.planning/` is grouped normally (`.planning`, `.planning/<slug>`) —
-    /// a workstream's plan set is not a group of one, and the slug names the
-    /// workstream, which is the one thing the ungrouped block cannot say.
+    /// The brief is deliberately `""` rather than `.planning`, for §11.1's
+    /// first two reasons, which are the ones that survive step 4: it is the
+    /// most place-specific document that can exist — what this worktree is FOR,
+    /// which is the one thing the root files are not — and it is TOOL-OWNED, a
+    /// constant this module can name without guessing. §11.1's third reason,
+    /// "a group of one under a dotted directory name reads as an accident", is
+    /// no longer load-bearing and is no longer true of the directory either: a
+    /// loose `.planning/review-pr7.md` is exactly that, and it is grouped. The
+    /// REST of `.planning/` is grouped by directory (`.planning`,
+    /// `.planning/<slug>`) because the slug names a workstream, which is the
+    /// one thing the ungrouped block cannot say.
     pub group: String,
     /// Last modification, in milliseconds since the epoch; `0` when the stat
     /// failed. The recency mark in the Docs tab is this against the place's
@@ -606,8 +621,29 @@ fn walk<T>(root: &Path, docs: Option<&Docs>, mut visit: impl FnMut(&Path, &str, 
             }
         }
     }
+    // `.planning` itself, lstat'd ONCE and shared by steps 2 and 4.
+    //
+    // **`symlink_metadata` refuses to follow only the FINAL component.** So
+    // `is_regular_file(".planning/brief.md")` happily reads a brief through a
+    // `.planning -> ~/notes`, and did: the directory link is an intermediate
+    // component, resolved before the lstat ever happens. Step 4's walker
+    // refuses that link (it lstats its own start), so the *plan* rows were
+    // correctly absent while the brief beside them was listed from outside the
+    // place — a split that reads as "the link is handled" and is not.
+    //
+    // One stat, both steps, so the two cannot drift apart. It closes this
+    // module's own entry into the hole and not the hole: an intermediate
+    // symlink is still resolved for a `[docs] index` and for a declared path
+    // below a linked directory (`resolve_rel`, and `root.join(rel)` in the
+    // declared loop). Those are pre-existing and wider than this walk; ROADMAP
+    // carries them rather than this comment claiming they are shut.
+    let planning_is_dir = std::fs::symlink_metadata(root.join(crate::ops::PLANNING_DIR))
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+
     // 2. this place's brief — the one document the tool itself writes
-    if is_regular_file(&root.join(crate::ops::BRIEF_PATH))
+    if planning_is_dir
+        && is_regular_file(&root.join(crate::ops::BRIEF_PATH))
         && !push(&mut entries, &mut seen, root, &mut visit, crate::ops::BRIEF_PATH.to_string(), "")
     {
         truncated = true;
@@ -636,18 +672,17 @@ fn walk<T>(root: &Path, docs: Option<&Docs>, mut visit: impl FnMut(&Path, &str, 
     //    refuses every dotted name — so the most current documents a place has
     //    were the ones it could not show.
     //
-    //    These are GROUPED, unlike the brief, and the §11.1 reason for the
-    //    brief's exception is why: "a group of one under a dotted directory
-    //    name reads as an accident". A workstream's plan set is not a group of
-    //    one, and `<slug>` is the name of the workstream — information the
-    //    ungrouped root block has nowhere to put. The brief stays where it is:
-    //    `push` dedupes on `rel`, so it is already `seen` by the time this walk
-    //    reaches it and never comes out twice or moves.
+    //    These are GROUPED, unlike the brief, because `<slug>` is the name of
+    //    the workstream — information the ungrouped root block has nowhere to
+    //    put. The brief stays where it is for the reasons in `DocEntry::group`,
+    //    and it stays there mechanically: `push` dedupes on `rel`, so it is
+    //    already `seen` by the time this walk reaches it and never comes out
+    //    twice or moves.
     //
-    //    Walked always, and never `[docs] paths`'s business, for the reason
-    //    steps 1-3 survive a `[docs]` section: this is about the PLACE, not
-    //    about the repo's documentation layout. A repo cannot declare it,
-    //    because a repo does not know it is there — it is gitignored.
+    //    Walked always, for the reason steps 1-3 survive a `[docs]` section:
+    //    this is about the PLACE, not about the repo's documentation layout.
+    //    Not because a repo could not name it — see the module note, which also
+    //    says why a declared `.planning` is skipped below rather than refused.
     if !truncated
         && !subtree(
             &mut entries,
@@ -670,6 +705,18 @@ fn walk<T>(root: &Path, docs: Option<&Docs>, mut visit: impl FnMut(&Path, &str, 
     for rel in declared {
         if truncated {
             break;
+        }
+        // Step 4 walks `.planning` unconditionally, so a declared one is at
+        // best redundant — and at worst a DUPLICATE, because the dedupe is on
+        // `rel` as spelled: `paths = [".Planning"]` opens the same directory on
+        // APFS and emits every row a second time under a second group, which
+        // `write_tree` then collapses to one file. The list-level rule in
+        // `check_docs` cannot see this one; the collision is with a tree that is
+        // not in the list. Folded on the first component, for the reason
+        // `RelPath::parse` folds `.worktrees`: on APFS `.PLANNING/` opens
+        // `.planning/`.
+        if rel.split('/').next().is_some_and(|c| c.eq_ignore_ascii_case(crate::ops::PLANNING_DIR)) {
+            continue;
         }
         let target = root.join(&rel);
         let Ok(md) = std::fs::symlink_metadata(&target) else { continue }; // declared, absent: skip
@@ -1030,14 +1077,52 @@ mod tests {
     /// `.planning -> ~/notes` would otherwise list a directory outside the
     /// place — the same rule as `a_symlinked_document_is_listed_as_nothing_at_
     /// all`, applied to the directory rather than the file.
+    ///
+    /// **`brief.md` behind the link is the half that a walker-only guard leaves
+    /// open**, and the first version of this test could not see it because the
+    /// link target had no brief in it. `symlink_metadata` refuses to follow only
+    /// the FINAL component, so step 2's `is_regular_file(".planning/brief.md")`
+    /// resolves the directory link on its way past and reads a file outside the
+    /// place — while step 4's walker correctly refuses the same link, which
+    /// makes the result *look* guarded. Both steps gate on one lstat now, and
+    /// both halves are asserted here.
     #[test]
     fn a_symlinked_planning_directory_is_walked_as_nothing() {
         let t = tmp("planninglink");
         let r = &t.0;
         write(r, "elsewhere/secret.md", "# outside");
+        write(r, "elsewhere/brief.md", "# a brief that is not ours");
         write(r, "README.md", "# readme");
         std::os::unix::fs::symlink(r.join("elsewhere"), r.join(".planning")).unwrap();
-        assert_eq!(rels(&index(r)), vec!["README.md"], "nothing was walked through the link");
+        assert_eq!(
+            rels(&index(r)),
+            vec!["README.md"],
+            "something was listed through the link — the brief is read by NAME, so it needs its own guard",
+        );
+    }
+
+    /// A declared `.planning` is skipped in step 5 because step 4 already walked
+    /// it — and the case that costs something is the case-VARIANT, which opens
+    /// the same directory on APFS and would emit every row a second time under
+    /// a second group name. `check_docs` refuses case-only duplicates WITHIN
+    /// the list; it cannot see a collision with a tree that is not in the list.
+    ///
+    /// Both spellings are asserted, because only one of them was ever broken:
+    /// the exact spelling deduped on `rel` all along, so a fix that keyed on it
+    /// alone would pass this test's first half and leave the real shape open.
+    #[test]
+    fn a_declared_planning_path_is_not_walked_a_second_time() {
+        let t = tmp("planningdecl");
+        let r = &t.0;
+        write(r, "README.md", "# readme");
+        write(r, ".planning/portal/task_plan.md", "# plan");
+        for spelling in [".planning", ".Planning", ".PLANNING"] {
+            assert_eq!(
+                rels(&index_with(r, Some(&cfg(&[spelling], None)))),
+                vec!["README.md", ".planning/portal/task_plan.md"],
+                "`paths = [{spelling:?}]` listed the working memory twice",
+            );
+        }
     }
 
     /// The fingerprint and the index share `walk` so they cannot disagree about

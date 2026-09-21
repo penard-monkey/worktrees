@@ -16,13 +16,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   documents a place had were the ones it could not show. They now sit between
   the root files and the repo's own `docs/` tree, grouped by workstream, in the
   Docs tab and in the browser page alike. The brief stays where it was, with
-  the root files: it is one document about the whole place, and a group of one
-  under a dotted directory name reads as an accident. A `[docs]` section cannot
-  turn this off and does not need to — `.planning/` is gitignored, so the repo
-  does not know it is there, and like the root files it is about the PLACE
-  rather than about the repo's documentation layout.
+  the root files: it is the most place-specific document there is, and the one
+  the tool writes itself. This is convention rather than a `[docs]` key, for the
+  same reason the root files are — it is about the PLACE, not about the repo's
+  documentation layout — and because `[docs] paths` REPLACES the documentation
+  tree, so a repo declaring its own working memory would be trading `docs/` away
+  to get it.
 
 ### Fixed
+- **A `.planning` symlink no longer leaks a brief from outside the place.** The
+  brief is found by name, and `symlink_metadata` refuses to follow only the last
+  component of a path — so a `.planning` pointing somewhere else was read
+  through, while the directory walk beside it correctly refused the same link.
+  Both now gate on one check. Found in review of the change above.
+
 - **The refusal for a declared file that is a symlink out of the repo now
   suggests something you can actually do.** It said "link the real file, or
   point the config at it" — and `[[file]].path` is repo-relative, so both are

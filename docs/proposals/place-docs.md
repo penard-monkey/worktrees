@@ -734,9 +734,11 @@ It is deliberately grouped with the root files rather than under `.planning`:
 a group of one, headed by a dotted directory name, reads as an accident.
 (`the_brief_is_grouped_with_the_root_files_not_under_planning`.)
 
-*Amended by §18:* the brief's placement is unchanged, but it stopped being the
-only row out of that directory. "A group of one" was the whole of the argument
-for hiding the rest, and it was never true of a place the planning skill drives.
+*Amended by §18:* the brief's placement is unchanged and the first two reasons
+above still carry it. The third — "a group of one under a dotted directory name
+reads as an accident" — was an argument about the BRIEF's row that was never an
+argument for hiding the directory, and §18 lists a loose `.planning/review-pr7.md`
+that is a group of one under exactly that header. It is retired, not inherited.
 
 ---
 
@@ -1565,11 +1567,24 @@ two levels down out of the index; the one dotted directory we want is NAMED —
 `ops::PLANNING_DIR`, the constant `BRIEF_PATH` already lived under — rather than
 admitted by relaxing the rule.
 
-It does not become configurable. `[docs] paths` replaces step 5 and nothing
-else, for the same reason the root files and the brief survive it: this is about
-the PLACE, not about the repo's documentation layout. A repo could not declare
-it in any case — `.planning/` is gitignored, so the repo does not know it is
-there.
+It does not become configurable — and **not because a repo could not name it.**
+The draft of this section said so and it is false: `.planning` is a legal
+`RelPath` — of the COMPONENT rules `parse` applies (`.`, `..`, `.git`,
+`.worktrees`, and separately absolute paths, `~`, `$`, NUL and the config file's
+own names), none of them touches a leading dot — the declared-paths loop stats
+its start directly, and `paths = [".planning"]`
+listed the plan sets before this PR existed. The dotted-name refusal applies on
+the way DOWN, never to a start. The real reasons are three: `paths` REPLACES
+the documentation tree, so a repo declaring its working memory trades `docs/`
+away to get it; the directory is the tool's own, `ops::PLANNING_DIR`, filled by
+`cmd_new` and by the skill rather than by the repo; and it is gitignored, which
+makes it the one directory a committed config has no business having an opinion
+about. So a declared `.planning` is **skipped** in step 5 rather than refused —
+step 4 already walked it — folded on the first component, because on APFS
+`paths = [".Planning"]` opens the same directory and emitted every row twice
+under a second group (`a_declared_planning_path_is_not_walked_a_second_time`;
+`check_docs` refuses case-only duplicates within the list and cannot see a
+collision with a tree that is not in it).
 
 It does not move the brief. `push` dedupes on `rel` for the whole walk, so the
 brief is already `seen` by the time the new step reaches it and stays ungrouped
@@ -1603,11 +1618,30 @@ a real one, beside documents it plausibly belongs near. `docs-check.mjs`'s
 fixture now carries a real `.planning/<slug>` group for that reason, and it
 fails on a path-derived tree with both messages.
 
-### 18.3 A symlink the old code never had to think about
+### 18.3 A symlink the old code never had to think about — and half of one it did
 
 `read_dir` follows a symlink. Every tree root the walk took before this was
 `symlink_metadata`'d by its caller (the declared-paths loop does it inline), so
 the walker never needed its own guard; `.planning` is the first root handed to
 it by a constant. A `.planning -> ~/notes` would have listed a directory outside
 the place. The guard lives in the walker now, where the next caller gets it for
-free (`a_symlinked_planning_directory_is_walked_as_nothing`).
+free.
+
+**The walker's guard is not the whole of it, and review caught the half it
+misses.** `symlink_metadata` refuses to follow only the FINAL component, so step
+2's `is_regular_file(".planning/brief.md")` resolves that same directory link on
+its way past and reads a brief from outside the place. The first version of
+`a_symlinked_planning_directory_is_walked_as_nothing` passed only because the
+link target had no `brief.md` in it — put one there and it listed, while the
+plan rows beside it were correctly refused. That split is worse than either
+answer on its own: it reads as "the link is handled". Both steps now gate on one
+lstat of `.planning`, and the test asserts both halves.
+
+**What is still open, said out loud.** The same intermediate-component
+resolution applies to `[docs] index` (`resolve_rel` walks component by
+component, but `dir_names`'s `read_dir` follows a directory link) and to a
+declared path below a linked directory (`root.join(rel)`). Both pre-date this
+work and are wider than this walk — a `docs -> ../shared` is a thing a repo may
+legitimately do, so closing them is a behaviour decision about `[docs]`, not a
+patch. ROADMAP carries it. The module note says which entry is shut rather than
+claiming the class is.

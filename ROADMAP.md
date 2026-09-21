@@ -5,6 +5,31 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **An intermediate directory symlink is still resolved for `[docs]` paths.**
+  `symlink_metadata` refuses to follow only the FINAL component, so
+  `root.join(rel)` and `resolve_rel`'s per-component `read_dir` both walk
+  THROUGH a linked parent: a `[docs] index = "docs/index.md"` or a declared
+  `docs/api` resolves through a `docs -> ../shared-docs` and lists files from
+  outside the place. The walk's own module note claims it "never leaves `root`,
+  because it never follows the one thing that could", and for a tree root and
+  for every entry inside a tree that is true — this is the seam between them.
+  **The symptom today is a row that will not open, not a silent leak**, which is
+  worth knowing before this is ranked as a security item: `docserver::safe_under`
+  canonicalises and requires the result under the canonical root, so it already
+  403s exactly the rows an intermediate link lets the index list. The index and
+  the server disagree, and the index is the one that is wrong.
+  Pre-dates the docs index; the `.planning` instance of it was closed when the
+  working-memory step landed (that one is a constant, so gating it costs one
+  lstat and nothing else). The WRITE side is untouched and out of the index's
+  scope: `ops::write_brief` `create_dir_all`s and writes through a `.planning`
+  symlink at `cmd_new`, which is creation rather than listing. Closing the
+  general case is a behaviour DECISION, not a patch: a repo symlinking its docs directory into a monorepo sibling is a
+  reasonable thing to do, and refusing it silently drops that repo's whole tree.
+  Probably: resolve each component with lstat, and when a link is found, allow
+  it only if its target canonicalises back under the place root — which is the
+  rule `docserver::safe_under` already applies at read time, one layer later.
+  _From: fable's review of #318_
+
 - **`proc_cwd_follows_a_live_shell_into_a_new_directory` is order-dependent.**
   It failed once inside a full `cargo test -p app --lib` run (134 passed, 1
   failed) and then passed in isolation and in three consecutive full runs. It
