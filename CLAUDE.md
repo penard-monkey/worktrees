@@ -84,6 +84,14 @@ rebase exit code of 0 says the patch applied, not that it applied where you
 meant; after any rebase that crosses a release boundary, look at which section
 the entry actually landed in.
 
+Its twin, one level down: **resolving a CHANGELOG conflict by keeping both
+sides gives you two `### Fixed` blocks under one `## [Unreleased]`.** Both sides
+legitimately opened the same subsection, so "keep both" is right for the ITEMS
+and wrong for the HEADER. Nothing complains — the file renders, the rebase exits
+0, and the second header is below where the eye stops. `grep -c '^### Fixed'`
+between the `[Unreleased]` and the release under it, every time, the same way
+the duplicate `## [Unreleased]` hazard in ROADMAP has to be checked by counting.
+
 **A stale release binary does not only make bats FAIL — it can make it PASS.**
 The note above says "fail mysteriously", which is the friendlier half. Edit a
 crate *after* the release build and `make test` happily green-lights the OLD
@@ -198,6 +206,27 @@ the real emitter drifted from the strip rule, green throughout. Slice off `mod
 tests` (its `format!`s are fixtures) and fail when more than one line claims to
 be the emitter, rather than guessing. Same family as the mirror-drift rule
 below: a guard that cannot be wrong is a guard that cannot fail.
+
+**`symlink_metadata` refuses to follow only the LAST component.** Every
+intermediate directory in the path is resolved exactly as `metadata` would
+resolve it, so `symlink_metadata("a/b/c.md")` reads through an `a -> elsewhere`
+and reports a perfectly ordinary file outside the tree. A walk that lstats each
+entry as it descends is safe; a check that lstats a path built from a CONSTANT
+(`docs::walk`'s `.planning/brief.md`) is not, and the two sat four lines apart
+in `docs.rs` — the walker refused the link, the by-name read went through it,
+and the half that leaked was the half that always listed. The tell is that a
+partial guard looks like a working one: the rows the walker refused are missing,
+exactly as they would be if it all worked. `resolve_rel` and every
+`root.join(rel)` under `[docs]` still have this (ROADMAP); the fix shape is
+`docserver::safe_under`'s — canonicalise and require the result under the
+canonical root.
+
+**A test can pass because its FIXTURE omits the thing.** The regression test for
+that symlink wrote a directory behind the link and asserted the plan rows were
+absent — and passed, because nothing had put a `brief.md` in it. It was shown to
+fail first, against the right code, for the wrong reason. Sibling of the
+"recovery test that hand-clears the blocker" note below: when a test reaches its
+assertion, ask what is NOT in the fixture as well as what was poked into it.
 
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
