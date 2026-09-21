@@ -28,7 +28,7 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   Probably: resolve each component with lstat, and when a link is found, allow
   it only if its target canonicalises back under the place root — which is the
   rule `docserver::safe_under` already applies at read time, one layer later.
-  _From: fable's review of #318_
+  _From: [2026-09-21 planning-docs-index](docs/sessions/2026-09-21-planning-docs-index/summary.md)_
 
 - **`proc_cwd_follows_a_live_shell_into_a_new_directory` is order-dependent.**
   It failed once inside a full `cargo test -p app --lib` run (134 passed, 1
