@@ -5,6 +5,17 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **`proc_cwd_follows_a_live_shell_into_a_new_directory` is order-dependent.**
+  It failed once inside a full `cargo test -p app --lib` run (134 passed, 1
+  failed) and then passed in isolation and in three consecutive full runs. It
+  spawns a real `/bin/sh` on a pty and keys its scratch dirs on
+  `std::process::id()`, so it is the pty/parallel-runner analogue of the
+  `viewer::ISSUED` note in CLAUDE.md — a test that passes on an accident of
+  scheduling. Reproduce the way that note says: `cargo test -p app --lib --
+  --test-threads=1` and with filters that change the order. Left alone because
+  it is unrelated to the change that surfaced it.
+  _From: [2026-09-20 symlink-refusal-remedy](docs/sessions/2026-09-20-symlink-refusal-remedy/summary.md)_
+
 - **Terminal history has never been run in the real app.** Scrollback restore,
   the width reflow and per-tab history all shipped on gates, guard scripts and
   the browser harness — and CLAUDE.md is explicit that the mock answers in a
