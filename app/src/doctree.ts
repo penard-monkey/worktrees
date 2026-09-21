@@ -13,9 +13,10 @@
 
 /** `worktrees_core::docs::DocEntry`. `mtime_ms` is milliseconds, and it is
  *  mtime rather than git status because the documents the mark exists for —
- *  `task_plan.md`, the brief, everything under `.planning/` — are gitignored
- *  and can never carry one (the field's docstring in `docs.rs` has the long
- *  version). */
+ *  the brief, `task_plan.md`, everything else under `.planning/` — are
+ *  gitignored and can never carry one (the field's docstring in `docs.rs` has
+ *  the long version). Those are also the rows that move most often, which is
+ *  why the mark is worth having at all. */
 export type DocEntry = { path: string; rel: string; title: string; group: string; mtime_ms: number };
 /** A row in the tree: a document, or a directory holding more rows. */
 export type DocNode =
@@ -38,8 +39,11 @@ export type DocNode =
  *  differ on the one row where it matters: the brief lives at
  *  `.planning/brief.md` and is grouped with the ROOT files on purpose, because
  *  a group of one under a gitignored directory name reads as an accident
- *  (`DocEntry::group`). Deriving the parent from `rel` would file it under a
- *  `.planning/` directory the walk deliberately does not show. */
+ *  (`DocEntry::group`). Deriving the parent from `rel` would file it under
+ *  `.planning/` — and since the walk now lists the REST of that directory
+ *  (`docs.rs` step 4: the plan sets under `.planning/<slug>/`), the brief would
+ *  not land in an invented node, it would be swallowed by a real one. The bug
+ *  got quieter when the working memory was added, not louder. */
 export function tree(entries: DocEntry[]): DocNode[] {
   const roots: DocNode[] = [];
   const dirs = new Map<string, Extract<DocNode, { kind: "dir" }>>();

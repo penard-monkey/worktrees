@@ -137,16 +137,32 @@ const names = (nodes) => nodes.map((n) => (n.kind === "dir" ? n.name + "/" : n.e
 // ── 3. the nesting comes from `group`, never from `rel` ──────────────────────
 // The brief is the row where they differ: it lives at `.planning/brief.md` and
 // is grouped with the ROOT files on purpose (`DocEntry::group`), because a group
-// of one under a gitignored directory name reads as an accident. Deriving the
-// parent from the path would file it under a `.planning/` the walk does not
-// show, and every other `""`-grouped row with a slash in it goes the same way.
+// of one under a gitignored directory name reads as an accident. Every other
+// `""`-grouped row with a slash in it goes the same way.
+//
+// The fixture carries a REAL `.planning` group beside it, which is what the
+// walk now emits (`docs.rs` step 4 lists the plan sets under
+// `.planning/<slug>/`). That is the case a path-derived group fails silently
+// on: it does not invent a node any more, it drops the brief into one that
+// exists, beside documents it genuinely belongs near — a wrong answer that
+// looks entirely reasonable on screen. Both halves are asserted, so the check
+// still fails if the plan rows stop arriving and the old invented-node bug
+// comes back on its own.
 {
-  const t = tree([doc("README.md"), doc(".planning/brief.md"), doc("docs/a.md", "docs")]);
+  const t = tree([
+    doc("README.md"),
+    doc(".planning/brief.md"),
+    doc(".planning/portal/task_plan.md", ".planning/portal"),
+    doc("docs/a.md", "docs"),
+  ]);
   if (names(t)[1] !== ".planning/brief.md") {
     fail(`the brief was nested under a directory: ${JSON.stringify(names(t))}`);
   }
-  if (t.some((n) => n.kind === "dir" && n.name === ".planning")) {
-    fail("a `.planning` directory node was invented from the brief's path");
+  const planning = kidsOf(t, ".planning");
+  if (planning === null) {
+    fail("the `.planning` group the backend sent is missing from the tree");
+  } else if (planning.some((n) => n.kind === "doc" && n.entry.rel === ".planning/brief.md")) {
+    fail("the brief was filed under the real `.planning` node instead of staying with the root files");
   }
 }
 

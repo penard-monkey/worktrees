@@ -165,7 +165,7 @@ else {
   const code = nav.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
   if (/\.sort\s*\(/.test(code)) fail("DocsNav.tsx sorts — the backend's order is the repo's choice, and sorting overrules it silently");
   else ok("the viewer's nav never sorts");
-  if (!/e\.group/.test(code)) fail("DocsNav.tsx no longer passes `group` through — nesting would fall back to the path, and the brief would be filed under `.planning`");
+  if (!/e\.group/.test(code)) fail("DocsNav.tsx no longer passes `group` through — nesting would fall back to the path, and the brief would be filed under `.planning` beside the plan sets instead of with the root files");
   else ok("the viewer's nav nests on `group`, not on the path");
 }
 
