@@ -3,6 +3,23 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The refusal for a declared file that is a symlink out of the repo now
+  suggests something you can actually do.** It said "link the real file, or
+  point the config at it" — and `[[file]].path` is repo-relative, so both are
+  impossible in the only case that reaches the check: a target genuinely
+  outside the repo. A `_tmp -> iCloud` entry sat in a sibling project's
+  `.worktrees.toml` for six days failing on every place and every `doctor` run,
+  with no readable way forward. The message now names the remedy that works —
+  commit the link instead of declaring it, `git add -f <path>`, then drop the
+  `[[file]]` entry, because `git worktree add` recreates a tracked `120000`
+  blob in every new worktree for free — and says up front that the worktree is
+  otherwise complete, which the old wording left you to guess at while it sat
+  in red in the middle of a successful create. The rule itself is unchanged:
+  a symlink source is still refused, and it is still an error.
+
 ## [0.27.0] - 2026-09-20
 
 ### Added
