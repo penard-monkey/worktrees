@@ -471,6 +471,18 @@ fn plan_one(
     // credential path as a symlink to ~/.ssh/id_rsa and every Layer A rule
     // passes. Cost: a legitimate `main/.env -> ~/secrets/prod.env` stops working.
     // Accepted for v1; the safe-by-default direction is unambiguous here.
+    //
+    // ⚠ This rule guards the DECLARED path only, and a tracked symlink reaches a
+    // worktree without passing it: `git worktree add` checks out a `120000` blob
+    // with no checks at all, so the identical link is free if it is committed.
+    // That is not a hole to plug (the checkout is git's, and a hostile repo's
+    // tracked symlink is already in your main checkout before we run) — it is
+    // the REMEDY, and the message says so, because the honest advice for a
+    // legitimate link is "commit it, don't declare it". The remedy is load-
+    // bearing: `path` is repo-relative, so the two things the old message
+    // suggested — link the real file, point the config at it — are both
+    // impossible whenever the target is genuinely outside the repo, which is the
+    // only case that reaches here.
     if e.src_state.is_symlink {
         match (&e.src_state.real, main_real) {
             (Some(r), Some(m)) if inside(m, r) => {}
@@ -478,7 +490,12 @@ fn plan_one(
                 out.findings.push(finding(
                     Severity::Error,
                     Code::UnsafePath,
-                    format!("declared file `{rel}` is a symlink in main that resolves outside the repo — refusing (link the real file, or point the config at it)"),
+                    format!(
+                        "declared file `{rel}` is a symlink in main that resolves outside the repo — NOT linked; \
+the rest of the worktree is fine. A symlink source can never be materialized (it could point at a credential). \
+Commit the link instead of declaring it: `git add -f {rel}` in the main checkout, then remove its `[[file]]` \
+entry — git recreates a tracked symlink in every new worktree for free."
+                    ),
                 ));
                 return;
             }
@@ -1345,6 +1362,15 @@ mod tests {
         assert_eq!(rc, crate::diag::EXIT_FINDINGS);
         assert!(!t.wt().join(".env").exists());
         assert!(lines.iter().any(|l| l.contains("resolves outside the repo")), "{lines:?}");
+        // The remedy has to be one that EXISTS. `path` is repo-relative, so
+        // "point the config at it" — what this message used to say — can never
+        // be done for a target outside the repo, which is the only case that
+        // reaches here. Committing the link is the way out, and a message that
+        // drifts back to un-actionable advice fails this.
+        assert!(
+            lines.iter().any(|l| l.contains("git add -f .env")),
+            "the refusal must name the remedy that works: {lines:?}"
+        );
     }
 
     #[test]
