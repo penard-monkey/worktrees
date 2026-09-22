@@ -20,6 +20,7 @@ pub mod mcpsetup;
 pub mod mention;
 pub mod model;
 pub mod ops;
+pub mod plan;
 pub mod profile;
 pub mod projcfg;
 pub mod project;

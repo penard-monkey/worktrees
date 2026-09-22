@@ -3,6 +3,27 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **A Plan tab in the dock.** The fourth rail icon shows, for the selected
+  place, what it is for and how far along it is: the plan's title and goal, a
+  done-over-total bar from its checkboxes, the current phase, one row per
+  phase with a status glyph, the error count, and which of the skill's three
+  files exist — over the plan itself, rendered as markdown with the template's
+  guidance comments stripped. Above it, the place's live Claude state and any
+  unsent draft at its prompt. It reads the files the session already writes
+  under the planning-with-files skill (`.planning/.active_plan`, the newest
+  `.planning/<slug>/task_plan.md`, or a root `task_plan.md`, in that order —
+  the skill's own `resolve-plan-dir.sh`), falls back to the brief, and never
+  writes any of them. The extractor is deliberately lenient: of fifteen real
+  plans surveyed, two used the template's `### Phase` + `**Status:**` markers,
+  nine had checkboxes and most had a `## Goal`, so it mirrors the skill's own
+  Stop-hook greps rather than a schema, and a unit test cross-checks its phase
+  counts against that script when it is installed. MCP `place_status` and the
+  place resource carry the same summary (without the markdown) under `plan`,
+  so the orchestrator sees each worker's goal and progress with no new tool.
+
 ## [0.28.0] - 2026-09-21
 
 ### Added

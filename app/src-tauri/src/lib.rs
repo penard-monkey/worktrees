@@ -4251,6 +4251,19 @@ async fn list_docs(app: AppHandle, repo: String, root: String) -> Result<DocsInd
     Ok(DocsIndex { base, config_error, entries: idx.entries, truncated: idx.truncated })
 }
 
+/// The Plan dock tab: the place's planning-with-files summary (goal, phases,
+/// progress, errors) plus its brief. `worktrees_core::plan::summarize` never
+/// fails — an absent or unreadable plan is `source: "none"` — so the only
+/// error here is the guard. Read-only: the session owns these files.
+#[tauri::command]
+async fn place_plan(app: AppHandle, root: String) -> Result<worktrees_core::plan::PlanSummary, String> {
+    let dir = guard_under_projects(&app, &root)?;
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {root}"));
+    }
+    Ok(worktrees_core::plan::summarize(&dir))
+}
+
 /// The staleness facts, as the frontend already holds them in `Place`.
 ///
 /// Passed in rather than recomputed. Every field is in the `Place` the dock is
@@ -6762,6 +6775,7 @@ pub fn run() {
             read_file,
             file_readable,
             list_docs,
+            place_plan,
             open_docs_viewer,
             read_file_base64,
             write_file,

@@ -2808,6 +2808,118 @@ body.dragging .menu-catch { pointer-events: none; }
 .docs-warn-i { flex: none; color: var(--warn); }
 .docs-warn-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ── the dock's Plan tab (PlanPane.tsx) ────────────────────────────────────
+ * A summary header over the plan file itself. The header is `--bg-panel` for
+ * the same reason `.docs-head` is (it differs from the dock's `--bg-tree` in
+ * every theme); the body is `.scroll`, so it paints `--bg-abyss` like the
+ * Files tab's rendered markdown.
+ *
+ * The dock's floor is 240px, so every row is a flex row whose TEXT child has
+ * `min-width: 0` and ellipsises — nothing here may force horizontal scroll.
+ * The header does NOT scroll: a `max-height` + `overflow-y` on it (the first
+ * cut) made a five-phase plan on a short window into two nested scrollers, the
+ * phase list inside the header and the document below it. Every header row is
+ * bounded on its own instead — one line of title, three of goal, and the phase
+ * list capped at eight rows (its own scroller, but a bounded one that only a
+ * plan with nine or more phases ever sees) — so the header's height has a
+ * ceiling and the body keeps the rest.
+ *
+ * Hue lives in dots, glyphs and the bar's FILL only. Words are `--txt-hi` /
+ * `--txt-dim` / `--txt-mute` (CLAUDE.md: an accent token is a fill, not text). */
+.planpane {
+  flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  font-size: var(--fs-label);
+}
+.plan-head {
+  flex: none; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--s1);
+  padding: var(--s2);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line);
+}
+/* Wraps: at 240px the chip and the draft cannot share a line, and a draft
+ * squeezed beside the chip was a few characters and an ellipsis. With a basis
+ * the row cannot fit, the draft takes the next line whole and ellipsises THERE. */
+.plan-status {
+  display: flex; flex-wrap: wrap; min-width: 0; gap: 0 var(--s2); align-items: center;
+  font-size: var(--fs-meta); color: var(--txt-dim);
+}
+.plan-act { flex: none; display: inline-flex; align-items: center; gap: var(--s1); color: var(--txt-hi); }
+.plan-draft { flex: 1 1 16ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-title {
+  min-width: 0; color: var(--txt-hi); font-weight: var(--fw-bold); font-size: var(--fs-body);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* ~3 lines, then an ellipsis. The full text is the element's title. */
+.plan-goal {
+  min-width: 0; color: var(--txt-dim); line-height: var(--lh-prose);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.plan-progress { display: flex; min-width: 0; gap: var(--s2); align-items: center; margin-top: 2px; }
+/* The track is `--bg-abyss` — a recess in `--bg-panel` — chosen by measuring
+ * the FILL against it, since the fill is what carries the number. Against
+ * `--line-strong` (the first cut) the `--ok` fill fell to 1.55:1 in
+ * catppuccin-latte and 2.38:1 in tokyo-day; against `--bg-abyss` it is 2.53 and
+ * 3.16, and 6–12:1 in the dark themes. Latte's floor is its own `--ok` (2.96:1
+ * on bare `--bg-panel`), so no track can lift it further. The "done/total"
+ * beside the bar says the same thing in `--txt-dim`, so the hue is never the
+ * only channel. */
+.plan-bar {
+  flex: 1 1 auto; min-width: 0; height: 4px;
+  border-radius: var(--r-full); background: var(--bg-abyss); overflow: hidden;
+}
+.plan-bar-fill { display: block; height: 100%; border-radius: inherit; background: var(--ok); }
+.plan-count { flex: none; color: var(--txt-dim); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+.plan-current {
+  min-width: 0; color: var(--txt-hi); font-size: var(--fs-meta);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.plan-phases {
+  list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 1px;
+  max-height: calc(8 * (1em * var(--lh-prose, 1.5) + 1px)); overflow-y: auto;
+}
+.plan-phase { display: flex; min-width: 0; gap: var(--s2); align-items: baseline; color: var(--txt-dim); font-size: var(--fs-meta); }
+.plan-phase.in_progress { color: var(--txt-hi); }
+.plan-glyph { flex: none; width: 1.1em; text-align: center; color: var(--txt-mute); }
+.plan-phase.complete .plan-glyph { color: var(--ok); }
+.plan-phase.in_progress .plan-glyph { color: var(--accent); }
+.plan-phase.blocked .plan-glyph { color: var(--danger); }
+.plan-phase-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-phase-n { flex: none; color: var(--txt-mute); font-variant-numeric: tabular-nums; }
+/* The status as a word for a screen reader; the glyph is `aria-hidden`. */
+.plan-sr {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+.plan-meta {
+  display: flex; flex-wrap: wrap; min-width: 0; column-gap: var(--s2); row-gap: 0;
+  margin-top: 2px; color: var(--txt-mute); font-size: var(--fs-micro);
+}
+.plan-meta > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-meta > span + span::before { content: "· "; }
+/* The file path is the one long span, so it gets a line of its own; the short
+ * spans follow on the next line without a leading separator. Otherwise a path
+ * squeezed to nothing left a bare "· " with nothing after it. */
+.plan-meta > .plan-file { flex: 1 1 100%; }
+.plan-meta > .plan-file + span::before { content: none; }
+.plan-errs, .plan-missing { color: var(--txt-dim); }
+.plan-trunc { color: var(--txt-dim); font-size: var(--fs-micro); }
+.plan-body { min-width: 0; }
+.plan-note { padding: var(--s3) var(--s2); color: var(--txt-dim); font-size: var(--fs-meta); }
+/* Its own class rather than `.term-empty`: that one is shared by three hosts
+ * and restyling it for a fourth restyles the others (CLAUDE.md). */
+.plan-empty { flex: 1; min-height: 0; overflow-y: auto; display: flex; justify-content: center; align-items: flex-start; padding: var(--s5) var(--s3); }
+.plan-empty-card {
+  min-width: 0; max-width: 40ch;
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s4); background: var(--bg-panel); border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+.plan-empty-title { color: var(--txt-hi); font-size: var(--fs-body); }
+.plan-empty-sub { color: var(--txt-dim); font-size: var(--fs-meta); line-height: var(--lh-prose); overflow-wrap: anywhere; }
+
 /* ── the terminal as a drop target for a worktree reference ──────────────────
    Two levels, because a target nobody can see is a feature nobody finds: a
    quiet inset while any PLACE drag is live (projects cannot be referenced, so

@@ -403,10 +403,11 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 - **Agent workflow, next slices (parked by design).** One agent per place at a
   time is the stance; the door left open is **sub-places**
   (`communications/<task>` worktrees off `communications-next`). Also parked:
-  brief PROGRESS as status (the agent's `progress.md` + `notify_when_idle`'s
-  one-liner), a `worktrees agents` view, and a `worktrees adopt <path>
-  [--name]` verb wrapping `git worktree move` once the doctor remedy has been
-  typed by hand more than twice. The harness pass for the ⊟ flag + Project-
+  `notify_when_idle`'s one-liner as status (nothing captures it yet; the Plan
+  tab now shows the plan's own progress — `worktrees_core::plan` — and the
+  `progress.md` tail is the natural next field there), a `worktrees agents`
+  view, and a `worktrees adopt <path> [--name]` verb wrapping `git worktree
+  move` once the doctor remedy has been typed by hand more than twice. The harness pass for the ⊟ flag + Project-
   sheet stray section is still owed (tsc only).
   _From: [2026-09-02 agent-brief](docs/sessions/2026-09-02-agent-brief/summary.md)_
 

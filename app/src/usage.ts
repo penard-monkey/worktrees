@@ -28,6 +28,7 @@ export type Surface =
   | "dock.files"
   | "dock.terminal"
   | "dock.docs"
+  | "dock.plan"
   | "read"          // reading mode (a rendered file over the whole pane)
   | "home"          // the briefing
   | "nav"           // sidebar / rails
@@ -196,6 +197,7 @@ export function surfaceOf(t: Element): Surface | null {
   if (t.closest(".dock")) {
     if (t.closest(".termtabs, .term-host")) return "dock.terminal";
     if (t.closest(".docspane")) return "dock.docs";
+    if (t.closest(".planpane")) return "dock.plan";
     return "dock.files";
   }
   if (t.closest(".rail, .nav")) return "nav";
