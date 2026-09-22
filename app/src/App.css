@@ -2948,13 +2948,37 @@ body.dragging .menu-catch { pointer-events: none; }
  * and restyling it for a fourth restyles the others (CLAUDE.md). */
 .plan-empty { flex: 1; min-height: 0; overflow-y: auto; display: flex; justify-content: center; align-items: flex-start; padding: var(--s5) var(--s3); }
 .plan-empty-card {
-  min-width: 0; max-width: 40ch;
+  min-width: 0; width: 100%; max-width: 40ch;
   display: flex; flex-direction: column; gap: var(--s2);
   padding: var(--s4); background: var(--bg-panel); border: 1px solid var(--line);
   border-radius: var(--r-lg);
 }
 .plan-empty-title { color: var(--txt-hi); font-size: var(--fs-body); }
 .plan-empty-sub { color: var(--txt-dim); font-size: var(--fs-meta); line-height: var(--lh-prose); overflow-wrap: anywhere; }
+/* What the place already knows, on a place with no plan: branch + dirty, the
+ * base distance, the last commit, the live state and the note. Words stay on
+ * text tokens; the live state's hue is its `.status-dot`. Every text child
+ * carries `min-width: 0` so the 240px floor ellipsises instead of overflowing
+ * the card. */
+.plan-known { min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-meta); color: var(--txt-dim); }
+.plan-known-id { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
+.plan-known-branch {
+  flex: 0 1 auto; min-width: 0; color: var(--txt-hi); font-family: var(--font-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.plan-known-dirty { flex: none; min-width: 0; }
+.plan-known-line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-known-last { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
+.plan-known-subj { flex: 0 1 auto; min-width: 0; color: var(--txt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-known-last > .plan-age { flex: none; }
+.plan-known-note {
+  min-width: 0; color: var(--txt); font-style: italic;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.plan-gen { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); }
+.plan-gen-btn { max-width: 100%; }
+.plan-gen-note { min-width: 0; max-width: 100%; color: var(--txt-dim); font-size: var(--fs-meta); overflow-wrap: anywhere; }
 
 /* ── the terminal as a drop target for a worktree reference ──────────────────
    Two levels, because a target nobody can see is a feature nobody finds: a

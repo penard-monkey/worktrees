@@ -874,6 +874,18 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       });
       return token;
     }
+    // The Plan tab's "Generate plan". The real one pastes `ops::PLAN_PROMPT`
+    // into the session's Claude pane; here, record which session it was asked
+    // for (`__mock.planPrompts()`), and refuse a session that is not up the way
+    // `paste_to_ai` refuses a session with no Claude in it.
+    case "plan_prompt": {
+      const up = ws.projects.some((pv) =>
+        pv.snapshot?.places.some((p) => p.tmux_session.name === args.session && p.tmux_session.up));
+      if (!up) throw `no Claude running in session ${args.session} (panes: none)`;
+      mockPlanPrompts.push({ session: args.session });
+      console.info("[mock] plan_prompt", args.session);
+      return null;
+    }
     case "set_title":
       editPlace(args.repo, args.slug, (p) => {
         p.declared = { ...(p.declared ?? {}), title: args.title?.trim() || undefined };
@@ -2432,6 +2444,9 @@ setTimeout(() => emitEvent("sessions:drafts", { drafts }), 500);
  *  which the harness has no way to observe. */
 type MockDrop = { repo: string; slug: string; intoSlug: string; intoSession: string; token: string };
 const mockDrops: MockDrop[] = [];
+/** Every `plan_prompt` this session recorded — the session each "Generate
+ *  plan" press would have pasted into. */
+const mockPlanPrompts: { session: string }[] = [];
 
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
@@ -2440,6 +2455,8 @@ const healthyConfigs: Record<string, MockCfg> = {};
   uiEvents: () => mockUiEvents.slice(),
   /** What the nav drag dropped into a session, newest last. */
   drops: () => mockDrops.slice(),
+  /** What "Generate plan" pasted, and into which session, newest last. */
+  planPrompts: () => mockPlanPrompts.slice(),
   /** Replace the unsent-prompt set and push it, exactly as the poll thread
    *  does — including the transition to EMPTY (`__mock.setDrafts([])`), which
    *  is the case a sent prompt produces and the one that must clear the glyph,

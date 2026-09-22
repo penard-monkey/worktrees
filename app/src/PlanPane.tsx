@@ -46,6 +46,23 @@ export type PlanSummary = {
   truncated: boolean;
 };
 
+/** The slice of App's `Place` the empty state renders — structural, like
+ *  `DocsPlace`, so App passes its `Place` as is. Every fact here is already
+ *  on the `ls` snapshot; nothing is re-derived. */
+export type PlanPlace = {
+  branch: string | null;
+  /** Commits ahead of / behind the project's BASE ref (`project.rs`), not the
+   *  upstream. */
+  ahead: number | null;
+  behind: number | null;
+  dirty: boolean | null;
+  dirty_files?: number | null;
+  last_commit_subject?: string | null;
+  last_commit_epoch?: number | null;
+  tmux_session: { name: string; up: boolean };
+  declared: { note?: string; last_worked_epoch?: number } | null;
+};
+
 export type PlanPaneProps = {
   /** The place directory — what `place_plan` resolves the plan under. */
   root: string;
@@ -56,6 +73,13 @@ export type PlanPaneProps = {
   reloadToken: number;
   /** `useWindowAwake`. A `focus` re-read only happens while the window is visible. */
   pageVisible: boolean;
+  /** The place itself, for the empty state's "what this place already
+   *  knows" rows and for the session "Generate plan" pastes into. */
+  place: PlanPlace;
+  /** When Claude last finished work here, epoch SECONDS (`workedAt`: the
+   *  declared stamp merged with the live `sessions:done` overlay, which a
+   *  snapshot alone does not carry). */
+  workedEpoch?: number;
   /** The place's live claude state (`activityOf`). */
   activity: "busy" | "waiting" | "";
   /** The unsent prompt at claude's prompt, if any (`draftPaths`). */
@@ -218,9 +242,76 @@ function PhaseSummary({ phases }: { phases: PlanPhase[] }) {
   );
 }
 
-export function PlanPane({ root, slug, reloadToken, pageVisible, activity, draft, mdZoom, onOpen, onPlanPath, onError }: PlanPaneProps) {
+/** ahead/behind the base as words; null when git did not say (no base ref). */
+function againstBase(p: PlanPlace): string | null {
+  if (typeof p.ahead !== "number" || typeof p.behind !== "number") return null;
+  if (p.ahead === 0 && p.behind === 0) return "even with the base";
+  const parts = [p.ahead > 0 && `${p.ahead} ahead`, p.behind > 0 && `${p.behind} behind`].filter(Boolean);
+  return `${parts.join(", ")} of the base`;
+}
+
+/** "3 dirty files" / "clean"; null when the snapshot does not know. */
+function dirtyWords(p: PlanPlace): string | null {
+  if (p.dirty == null) return null;
+  if (!p.dirty) return "clean";
+  const n = p.dirty_files ?? 0;
+  return n === 1 ? "1 dirty file" : n > 0 ? `${n} dirty files` : "dirty";
+}
+
+/** What the place already knows, for a place with no plan and no brief — so
+ *  the tab is never a blank card. Every row is a fact off the `ls` snapshot or
+ *  the live session probe; nothing here is read from a file. Module scope
+ *  (CLAUDE.md: a component declared inside another remounts every render). */
+function KnownRows({ place, workedEpoch, actItem, draftRow }: {
+  place: PlanPlace;
+  workedEpoch: number;
+  actItem: { key: string; node: ReactNode }[];
+  draftRow: ReactNode;
+}) {
+  const dirty = dirtyWords(place);
+  const base = againstBase(place);
+  const subject = place.last_commit_subject ?? "";
+  const commitAge = shortAge((place.last_commit_epoch ?? 0) * 1000);
+  const worked = shortAge(workedEpoch * 1000);
+  const note = place.declared?.note?.trim() ?? "";
+  const live: { key: string; node: ReactNode }[] = [...actItem];
+  if (worked) live.push({
+    // Not `grow`: beside a live chip at the 240px floor it wraps whole to a
+    // line of its own rather than ellipsising to "Claude finished…".
+    key: "worked",
+    node: (
+      <span className="plan-age" title={`Claude finished ${new Date(workedEpoch * 1000).toLocaleString()}`}>
+        {worked === "now" ? "Claude finished just now" : `Claude finished ${worked} ago`}
+      </span>
+    ),
+  });
+  return (
+    <div className="plan-known">
+      <div className="plan-known-id">
+        <span className="plan-known-branch" title={place.branch ?? "detached HEAD"}>{place.branch || "detached"}</span>
+        {dirty && <span className="plan-known-dirty">{dirty}</span>}
+      </div>
+      {base && <div className="plan-known-line" title={base}>{base}</div>}
+      {(subject || commitAge) && (
+        <div className="plan-known-last" title={subject || undefined}>
+          {subject && <span className="plan-known-subj">{subject}</span>}
+          {commitAge && <span className="plan-age">{commitAge}</span>}
+        </div>
+      )}
+      <SepRow className="plan-band" items={live} />
+      {draftRow}
+      {note && <div className="plan-known-note" title={note}>{note}</div>}
+    </div>
+  );
+}
+
+export function PlanPane({ root, slug, place, workedEpoch, reloadToken, pageVisible, activity, draft, mdZoom, onOpen, onPlanPath, onError }: PlanPaneProps) {
   const [plan, setPlan] = useState<PlanSummary | null>(null);
   const [failed, setFailed] = useState(false);
+  // "Generate plan": `pasted` is the one-line confirmation, cleared by the next
+  // reload (a plan the session then writes arrives through that same reload).
+  const [pasted, setPasted] = useState(false);
+  const [pasting, setPasting] = useState(false);
   const [brief, setBrief] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
@@ -244,7 +335,7 @@ export function PlanPane({ root, slug, reloadToken, pageVisible, activity, draft
       });
   }, [root, onError]);
 
-  useEffect(() => { load(); }, [load, reloadToken]);
+  useEffect(() => { setPasted(false); load(); }, [load, reloadToken]);
   // No interval: `places:changed` already bumps `reloadToken`, and coming back
   // to the window is the other moment a plan is likely to have moved. Same
   // `pageVisible` gate as every other poll in the app.
@@ -297,6 +388,19 @@ export function PlanPane({ root, slug, reloadToken, pageVisible, activity, draft
   const raw = plan?.source === "plan" ? plan.markdown : plan?.source === "brief" ? brief : null;
   const body = useMemo(() => (raw == null ? null : withoutComments(raw)), [raw]);
 
+  // Mirrors the terminal's mention drop target (App.tsx `dropTargetAt`): a
+  // session that is UP is a target, and `paste_to_ai` answers honestly when no
+  // Claude is in it. No second, stricter predicate of our own.
+  const session = place.tmux_session.up ? place.tmux_session.name : null;
+  const generate = useCallback(() => {
+    if (!session || pasting) return;
+    setPasting(true);
+    invoke("plan_prompt", { session })
+      .then(() => setPasted(true))
+      .catch(onError)
+      .finally(() => setPasting(false));
+  }, [session, pasting, onError]);
+
   const draftLine = (draft ?? "").split("\n").find((l) => l.trim()) ?? "";
   const actItem = activity ? [{
     key: "act",
@@ -327,16 +431,31 @@ export function PlanPane({ root, slug, reloadToken, pageVisible, activity, draft
   }
 
   if (plan.source === "none") {
+    // No head band here: the live state and the draft are rows of the card,
+    // beside the rest of what the place knows, rather than a strip above it.
     return (
       <div className="planpane">
-        {status && <div className="plan-head">{status}</div>}
         <div className="plan-empty">
           <div className="plan-empty-card">
             <div className="plan-empty-title">No plan or brief here yet</div>
+            <KnownRows place={place} workedEpoch={workedEpoch ?? place.declared?.last_worked_epoch ?? 0} actItem={actItem} draftRow={draftRow} />
+            <div className="plan-gen">
+              <button
+                type="button"
+                className="ctrl sm plan-gen-btn"
+                data-track="dock.plan.generate"
+                disabled={!session || pasting}
+                title={session
+                  ? "Put a fixed prompt at this place's Claude prompt asking it to write its plan files. Nothing is sent until you press Enter there."
+                  : "start a Claude session in this place first"}
+                onClick={generate}
+              >
+                Generate plan
+              </button>
+              {pasted && <div className="plan-gen-note">prompt pasted into the session — press Enter there</div>}
+            </div>
             <div className="plan-empty-sub">
-              This tab reads <code>.planning/brief.md</code> and a{" "}
-              <code>task_plan.md</code> (under <code>.planning/</code> or at the
-              place root) when this place's session writes them.
+              Reads <code>.planning/brief.md</code> and a <code>task_plan.md</code> when this place's session writes them.
             </div>
           </div>
         </div>

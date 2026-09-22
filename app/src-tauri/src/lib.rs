@@ -4264,6 +4264,28 @@ async fn place_plan(app: AppHandle, root: String) -> Result<worktrees_core::plan
     Ok(worktrees_core::plan::summarize(&dir))
 }
 
+/// The Plan tab's "Generate plan": paste `ops::PLAN_PROMPT` into the place's
+/// Claude session and leave it there for the user to send.
+///
+/// The app still writes no plan — the SESSION does, when the user presses
+/// Enter on a prompt they can read first. That is why this is a paste and not
+/// a `send-keys … Enter`, and why `paste_to_ai` has no trailing newline. The
+/// text is the fixed constant; nothing from the frontend reaches the pane
+/// except which session to put it in.
+///
+/// `session` rather than a slug for the same reason as `drop_reference`: the
+/// place may be on an ADOPTED session whose name is not the canonical one, and
+/// the frontend already holds the real name from `ls`.
+#[tauri::command]
+async fn plan_prompt(session: String) -> Result<(), String> {
+    // Addressed by the AI's pane, not by an index (`tmux::ai_pane`), and an
+    // honest error when no Claude is there rather than a paste onto a shell.
+    let ai_word = profile::ai_word_of(&config::resolve_ai_cmd(None));
+    tmux::paste_to_ai(&session, &ai_word, ops::PLAN_PROMPT)?;
+    applog("info", &format!("plan_prompt: pasted into {session}"));
+    Ok(())
+}
+
 /// The staleness facts, as the frontend already holds them in `Place`.
 ///
 /// Passed in rather than recomputed. Every field is in the `Place` the dock is
@@ -6776,6 +6798,7 @@ pub fn run() {
             file_readable,
             list_docs,
             place_plan,
+            plan_prompt,
             open_docs_viewer,
             read_file_base64,
             write_file,

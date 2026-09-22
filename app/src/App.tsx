@@ -6981,6 +6981,8 @@ function App() {
                     root={selected.path}
                     repo={sel.repo}
                     slug={sel.slug}
+                    place={selected}
+                    workedEpoch={workedAt(selected)}
                     reloadToken={placesToken}
                     pageVisible={pageVisible}
                     activity={activityOf(selected)}

@@ -28,6 +28,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `place_status` and the place resource carry the same summary (without the
   markdown) under `plan`, so the orchestrator sees each worker's goal and
   progress with no new tool.
+- **A place with no plan still says what it knows, and can ask for one.** The
+  Plan tab's empty card now leads with the place's own facts — the branch and
+  its dirty count, how far it is ahead of or behind the base, the last commit
+  and its age, when Claude last finished work there, the place's note, and the
+  live Claude state — with the two-file hint as one dim line under them. A
+  **Generate plan** button pastes a request into the place's Claude session
+  asking it to write down the work already in flight as a planning-with-files
+  plan, and leaves it at the prompt for you to press Enter. The prompt is fixed
+  text, the same every time, and names no directory, since the skill decides
+  where its files go and the tab already reads both layouts. The session
+  writes the files; the app still never does. The button is disabled until the
+  place has a session running.
 
 ## [0.28.0] - 2026-09-21
 
