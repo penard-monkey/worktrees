@@ -3190,6 +3190,14 @@ body.dragging .menu-catch { pointer-events: none; }
 .auto-whenrow { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
 .auto-at { width: 7ch; flex: none; }
 .auto-inline-err { color: var(--txt-hi); font-size: var(--fs-meta); }
+/* Core's refusal, pinned between the scrolling body and the footer — it is a
+ * band of the MODAL, not a row of the form, so it cannot scroll out of sight
+ * at the moment it is most needed. `.sync-err` supplies the danger tint;
+ * `--txt-hi` supplies the words, because a hue token is a fill and not text. */
+.auto-dialog-err {
+  flex: none; margin: 0 var(--s4) var(--s3);
+  color: var(--txt-hi); font-size: var(--fs-meta); line-height: var(--lh-prose);
+}
 .auto-radio { display: flex; gap: var(--s2); align-items: flex-start; font-size: var(--fs-meta); }
 .auto-radio span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .auto-radio b { color: var(--txt-hi); font-weight: var(--fw-med); }

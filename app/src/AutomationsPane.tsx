@@ -720,8 +720,13 @@ export function AutomationDialog({ seed, projectName, profileName, busy, error, 
           <div className="auto-foot-note">
             Runs headless as this project's AI profile {profileName ? <b>{profileName}</b> : <i>(the default)</i>}. It can never remove a worktree.
           </div>
-          {error && <div className="sync-err auto-inline-err" data-testid="auto-dialog-error">{error}</div>}
         </div>
+        {/* ⚠ OUTSIDE `.sync-body`, which is the modal's only scrolling child.
+            Inside it the refusal rendered below the fold at 700px — you press
+            Save, nothing appears to happen, and the reason is a scroll away.
+            Same fix, and the same reason, as the offers band pinned outside
+            `.settings-body` (CLAUDE.md). */}
+        {error && <div className="sync-err auto-dialog-err" data-testid="auto-dialog-error">{error}</div>}
         <footer className="sync-foot">
           <button className="ctrl" onClick={onClose} disabled={busy}>Cancel</button>
           <button className="ctrl" data-testid="auto-save" disabled={!ready}

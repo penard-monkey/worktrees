@@ -580,6 +580,17 @@ the same trade the `when` field makes — stored and validated today, evaluated 
 phase 2, and saying so in a hint line rather than letting a saved schedule look
 live.
 
+**A modal's refusal cannot live inside its scrolling child.** Core's error
+string was rendered as the last row of the form, under the profile footnote —
+and at 1280x700 the body scrolls, so pressing Save on a duplicate name showed
+nothing at all: the reason was a scroll away, below the fold, while the footer
+stayed pinned above it. That is the silent failure the whole "never swallow an
+error" rule exists to prevent, arrived at by layout rather than by code. The
+band is now a child of the MODAL, between the scrolling body and the footer —
+the same fix, and the same reason, as the offers band pinned outside
+`.settings-body` (CLAUDE.md). Measured, not eyeballed: `elementFromPoint` at
+its centre returns the band itself at 700px, and it is not inside `.sync-body`.
+
 **Still owed, and not verifiable from the harness.** The mock answers instantly
 and is Chrome; the app is WKWebView with a real runner. Three things need a
 hand: one real run in `sandbox.sh --app` (does the in-process thread finish, does
