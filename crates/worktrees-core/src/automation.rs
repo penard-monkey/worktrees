@@ -11,12 +11,15 @@
 //! 1. **The brief is never argv.** ADR 0001 and `ops::BRIEF_OPENER`: a run
 //!    writes the brief to a file and hands claude a FIXED opener that points at
 //!    it. Nothing a repository (or a model) contains becomes a command line.
-//! 2. **A run's `cwd` is the MAIN ROOT, never a place.** `health::assess` folds
-//!    the newest claude transcript under a place's `~/.claude/projects/<mangled>`
-//!    into its activity max, so a headless claude run *in* a worktree makes that
-//!    worktree read `active` the next morning — a sweep over every place would
-//!    blind the very signal it exists to report on (proposal §4.3). The place
-//!    paths travel as DATA in `facts.json`.
+//! 2. **A run's `cwd` is the WORKTREE ROOT (`.worktrees/`), never a place —
+//!    and the main root IS a place.** `health::assess` folds the newest claude
+//!    transcript under a place's `~/.claude/projects/<mangled>` into its
+//!    activity max, and `claude -p` writes one under its cwd (measured; it
+//!    writes no session probe). A headless run *in* a worktree makes that
+//!    worktree read `active` the next morning, and one in the main root does
+//!    the same to `(main)` — a sweep over every place would blind the very
+//!    signal it exists to report on (proposal §4.3). `.worktrees/` is owned by
+//!    no place; the place paths travel as DATA in `facts.json`.
 //! 3. **A run reports; a person acts.** Phase 1 has exactly one tier
 //!    (`Tier::Report`). Findings carry *proposals* from a closed set
 //!    (`runs::PROPOSAL_TOOLS`), and applying one is a separate, human-pressed
@@ -577,7 +580,7 @@ fn run_inner(p: &Project, ui: &mut dyn Ui, slug: &str, opts: RunOpts) -> Result<
     let ai = crate::ops::ai_launch_for(
         p,
         &mut seam,
-        &p.main_root, // ⚠ the MAIN ROOT, deliberately — see the module note.
+        &p.main_root, // the profile seam keys on the project; the run CWD is set below.
         &crate::config::resolve_ai_cmd(None),
     );
     for w in seam.warnings() {
@@ -673,8 +676,18 @@ fn run_inner(p: &Project, ui: &mut dyn Ui, slug: &str, opts: RunOpts) -> Result<
         crate::tmux::sq(&opener),
         opts.max_turns
     );
+    // cwd = the WORKTREE ROOT (`<main root>/.worktrees/`), which is not a place.
+    // Measured 2026-09-22: `claude -p` writes no `sessions/<pid>.json` probe, but
+    // it DOES write a transcript under `~/.claude/projects/<mangled cwd>/`, and
+    // `(main)` is a place whose activity max reads that directory — so a run
+    // from the main root would make `(main)` read `active` after every sweep.
+    // From here the transcript lands in a directory no place owns, and both
+    // `Project::discover` (the in-run MCP server) and claude's CLAUDE.md lookup
+    // still resolve to the main root by walking up.
+    let run_cwd = Path::new(&p.wt_root);
+    fs::create_dir_all(run_cwd).map_err(|e| format!("{}: {e}", run_cwd.display()))?;
     let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.args(["-c", &line]).current_dir(&p.main_root);
+    cmd.args(["-c", &line]).current_dir(run_cwd);
     for (k, v) in &ai.env {
         cmd.env(k, v);
     }

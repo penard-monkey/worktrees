@@ -120,10 +120,13 @@ widen it: a profile whose server is read-only stays read-only.
 `~/.claude/projects/<mangled>/` — into its activity max. `ai_status_report`
 runs `claude -p` *in the place directory*, so a sweep that did the same over
 every place would make every place read `active` the next morning and blind
-itself. Rule: a run's claude executes with **cwd = the project's main root**
-and receives place paths as data in the prompt. Whether `-p` also writes a
-`sessions/<pid>.json` probe (the nav dot) is unverified; the same rule
-covers it either way, and the manual-checks doc gets an entry (§9).
+itself. Rule (revised in §11): a run's claude executes with **cwd = the
+worktree root, `<main root>/.worktrees/`**, a directory no place owns, and
+receives place paths as data in the prompt. Measured 2026-09-22: `claude -p`
+writes no `sessions/<pid>.json` probe (so no nav dot), but it does write a
+transcript under its cwd, and the main root is `(main)`'s place path — which
+is why the first draft's "cwd = main root" was not enough. The manual-checks
+doc's §12 re-checks it on every claude upgrade.
 
 **`last_worked_epoch` is not touched by a report.** `ai_status_report` says
 so in its own comment ("a report ABOUT a worktree is not work IN it"). Same
@@ -411,6 +414,18 @@ Phase 1 alone already replaces this repo's hand-run close-out sweep.
 
 Phase 1a is core + CLI + MCP (the app surface is 1b). What the design above got
 wrong or left open, and what was decided instead.
+
+**§4.3's cwd rule was one place short.** Open question 4 was measured during
+review: a nested `claude -p` (spawned from inside a Claude Code session, as an
+MCP-started run is) runs normally, writes **no** `sessions/<pid>.json` probe,
+and **does** write a transcript under `~/.claude/projects/<mangled cwd>/`. The
+draft's "cwd = main root" therefore poisoned exactly one place — `(main)`,
+whose path IS the main root — after every run. The runner now executes claude
+from `<main root>/.worktrees/` (`Project.wt_root`): no place owns that
+directory, `Project::discover` from inside it still finds the project (so the
+in-run MCP server serves it), and claude's CLAUDE.md lookup walks up to the
+same file. The bats case asserts the cwd is that directory and is neither the
+main root nor a place.
 
 **§5's example epochs are a year out.** `2026-09-22T08-02-11Z` is paired with
 `1758528131`, which is 2025-09-22; `created_epoch: 1758520800` is the same

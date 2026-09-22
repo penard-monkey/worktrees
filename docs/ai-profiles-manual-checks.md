@@ -294,13 +294,15 @@ worktrees automations show <run-id>
       — and the sweep would blind the signal it exists to report on. The cwd
       rule is what prevents it; this is how you find out it still holds.
       Cross-check directly: `ls -lt ~/.claude/projects/` — the directory that
-      gained a transcript must be the MAIN ROOT's, not any worktree's.
+      gained a transcript must be `<main root>/.worktrees`'s (mangled), and
+      NEITHER the main root's (that is `(main)`'s place) nor any worktree's.
 - [ ] **No nav dot lit.** With the app open on that project, no place's
       afterglow dot may appear during or after the run, and no agent dot either.
-      `~/.claude/sessions/` may gain a `<pid>.json` for the run — that is the
-      open question; what matters is whether `agents_at` attributes it to a
-      PLACE. If a dot does light, note which place and which file did it: the
-      answer is a `skipped`/attribution fix, not a change to the cwd rule.
+      Measured 2026-09-22 on claude 2.1.x: `claude -p` writes NO
+      `~/.claude/sessions/<pid>.json`, so no agent dot can come from a run.
+      Re-measure on a claude upgrade (`ls ~/.claude/sessions | wc -l` before
+      and after). If a dot does light, note which place and which file did it:
+      the answer is a `skipped`/attribution fix, not a change to the cwd rule.
 - [ ] **`last_worked_epoch` is untouched.** `.worktrees.places.json` before and
       after the run must be byte-identical. A report *about* a worktree is not
       work *in* it — the same rule `ai_status_report` follows.

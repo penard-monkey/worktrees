@@ -136,7 +136,7 @@ PY
   [[ "$output" == *'"automation":"close-out-sweep"'* ]]
 }
 
-@test "the run happens in the MAIN ROOT and the brief never reaches argv" {
+@test "the run happens in the WORKTREE ROOT, not a place, and the brief never reaches argv" {
   run_wt new feat-x
   add_sweep
   write_findings <<'JSON'
@@ -146,10 +146,12 @@ JSON
   run_wt automations run close-out-sweep
   [ "$status" -eq 0 ]   # no findings = clean
 
-  # §4.3: a headless claude with cwd = a place feeds that place's activity max,
-  # so every place would read `active` the next morning.
-  grep -q "^PWD=$REPO\$" "$BATS_TEST_TMPDIR/claude.log"
-  ! grep -q "PWD=$REPO/.worktrees" "$BATS_TEST_TMPDIR/claude.log"
+  # §4.3: a headless claude writes a transcript under its cwd, and a place's
+  # activity max reads that directory — so cwd may be neither a worktree NOR
+  # the main root (`(main)` is a place too). `.worktrees/` is owned by no place.
+  grep -q "^PWD=$REPO/.worktrees\$" "$BATS_TEST_TMPDIR/claude.log"
+  ! grep -q "^PWD=$REPO\$" "$BATS_TEST_TMPDIR/claude.log"
+  ! grep -q "^PWD=$REPO/.worktrees/feat-x" "$BATS_TEST_TMPDIR/claude.log"
 
   # ADR 0001 / BRIEF_OPENER: the prose travels as a FILE, never as an argument.
   ! grep -q 'ZEBRA-QUOKKA-7' "$BATS_TEST_TMPDIR/claude.log"
