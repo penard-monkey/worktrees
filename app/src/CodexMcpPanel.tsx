@@ -29,6 +29,7 @@ export function CodexMcpSection({ onReport }: { onReport: (text: string) => void
   };
   return <section className="setting">
     <label>Codex MCP server</label>
+    <div className="hint">Worktrees uses Codex's ChatGPT account sign-in. Run <code>codex login</code> in a terminal to complete the browser flow, then <code>codex login status</code> to check it. Worktrees does not ask for an API key.</div>
     <div className="hint">Connect Worktrees tools to Codex. Claude's MCP setup is separate.</div>
     <div className="hint">{status ? {
       installed: "Connected — Codex can create, inspect, and close worktrees.",

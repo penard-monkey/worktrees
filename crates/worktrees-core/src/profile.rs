@@ -468,9 +468,9 @@ pub struct AiLaunch {
     pub cmd: String,
     /// Basename of the real program, for adoption/session matching. `claude`.
     pub match_word: String,
-    /// An initial prompt handed to claude as its positional argument — how a
+    /// An initial prompt handed to Claude or Codex as its positional argument — how a
     /// brief reaches the agent (`ops::BRIEF_OPENER`). Appended by
-    /// `launch_cmd`, after `--name`, and only for claude: another AI tool
+    /// `launch_cmd`, after `--name` for Claude: another AI tool
     /// would read it as something else entirely.
     pub opener: Option<String>,
 }
@@ -644,7 +644,14 @@ impl AiLaunch {
         if self.cmd.is_empty() || (provider != "claude" && provider != "codex") {
             return self.cmd.clone();
         }
-        let mut cmd = self.cmd.clone();
+        // Worktrees-owned Codex panes use ChatGPT account sign-in. Put the
+        // config override immediately after the executable, before a possible
+        // `resume` subcommand, and leave Codex's own browser OAuth flow and
+        // credential store to the CLI. No Worktrees API key is created or read.
+        let mut cmd = if provider == "codex" {
+            let split = self.cmd.find(char::is_whitespace).unwrap_or(self.cmd.len());
+            format!("{} -c forced_login_method=chatgpt{}", &self.cmd[..split], &self.cmd[split..])
+        } else { self.cmd.clone() };
         if provider == "claude" && !session.is_empty() {
             cmd.push_str(" --name ");
             cmd.push_str(&shell_quote(session));
@@ -1636,10 +1643,11 @@ mod tests {
         let keep = "exec \"${SHELL:-/bin/sh}\"";
         // The name rides after everything the launch already carried…
         assert_eq!(AiLaunch::plain("claude").launch_cmd("proj-feat"), "claude --name 'proj-feat'");
-        assert_eq!(AiLaunch::plain("codex").launch_cmd("proj-feat"), "codex");
+        assert_eq!(AiLaunch::plain("codex").launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt");
+        assert_eq!(AiLaunch::plain("codex resume --last").launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt resume --last");
         let mut codex = AiLaunch::plain("codex");
         codex.opener = Some("Read .planning/brief.md and begin.".into());
-        assert_eq!(codex.launch_cmd("proj-feat"), "codex 'Read .planning/brief.md and begin.'");
+        assert_eq!(codex.launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt 'Read .planning/brief.md and begin.'");
         // …including the resume arg, which must NOT be followed by the opener:
         // `-r` takes an optional session id and would swallow it.
         let mut l = AiLaunch::plain("claude -r");

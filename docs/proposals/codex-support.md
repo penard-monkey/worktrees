@@ -116,6 +116,10 @@ container for two independent agent sessions.
 - The app's default first agent is configurable in Settings and starts as
   `claude` for existing installations. The CLI keeps `ai_cmd` and `--ai`;
   either provider can be added later.
+- Worktrees-launched Codex sessions require ChatGPT browser sign-in through
+  Codex's own OAuth flow. Worktrees neither requests nor stores OpenAI API keys.
+  Existing API key sign-ins must be replaced with `codex logout` followed by
+  `codex login` before using Codex in Worktrees.
 - The first implementation supports one Worktrees-managed session per provider
   per place. It does not restrict sessions a user launches manually.
 - Claude AI profiles are not converted into Codex profiles. Codex has its own

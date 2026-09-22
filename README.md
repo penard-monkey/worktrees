@@ -225,6 +225,13 @@ enters a place; changing it does not stop a running session. The CLI keeps its
 agent sessions. Codex resumes its most recent conversation in that place with
 `codex resume --last` when one exists.
 
+Worktrees-launched Codex sessions require ChatGPT account sign-in. Run
+`codex login` once and complete its browser flow; `codex login status` shows
+the active method. Worktrees uses Codex's saved credentials and does not ask
+for or store an OpenAI API key. If Codex is currently signed in with an API
+key, sign out with `codex logout` and sign back in with `codex login` before
+opening it from Worktrees.
+
 Connect Worktrees tools separately in Settings → Claude and Settings → Codex,
 or run `worktrees mcp --install --ai codex` for Codex. The unqualified MCP setup
 command still targets Claude.

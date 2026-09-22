@@ -92,6 +92,7 @@ session_count() {
   run_wt open --ai codex feat-x
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane0_cmd 'repo-feat-x~agent~codex')" == *codex* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-x~agent~codex')" == *"codex -c forced_login_method=chatgpt"* ]]
   [[ "$(tmux_pane0_cmd 'repo-feat-x~agent~codex')" != *fake-ai* ]]
 }
 

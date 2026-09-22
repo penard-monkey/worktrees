@@ -320,6 +320,7 @@ setup() {
   run_wt new feat-c
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane0_cmd 'repo-feat-c~agent~codex')" == *codex* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-c~agent~codex')" == *"codex -c forced_login_method=chatgpt"* ]]
 }
 
 @test "new: -r/--resume → pane 0 command contains 'fake-ai -r'" {
