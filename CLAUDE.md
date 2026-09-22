@@ -254,6 +254,16 @@ tracking DELETES the link from that tree (git removes a tracked path absent
 from the target commit; ignore rules do not protect it), idle `-next` bases
 included.
 
+**Before parsing a format a tool's TEMPLATE promises, count the real files.**
+The planning-with-files template ships `### Phase N` + `**Status:**` lines;
+of fifteen real `task_plan.md` files on this machine, two had them, nine had
+checkboxes, most had a `## Goal`, several were free prose. A parser written
+to the template would have rendered an empty Plan tab on thirteen places
+while every fixture-driven test passed. `worktrees_core::plan` mirrors the
+skill's own Stop-hook greps (`check-complete.sh`) instead and always shows
+the rendered file under the summary, so the summary being wrong hides
+nothing. The survey took ten minutes; do it before the parser, not after.
+
 **Consolidating a git invocation? Diff `ls --json` against the SHIPPED binary.**
 Folding three git calls into one `status --porcelain=v2` silently changed
 `upstream` for one worktree — v2 reports the CONFIGURED upstream, `rev-parse
@@ -539,6 +549,19 @@ is invisible to the bats suite — there is no fake claude. Re-run
   the PANEL as well as the trigger. The harness cannot find this by clicking:
   `.click()` dispatches no `pointerdown`, so reproducing it needs a real
   `PointerEvent` at the element.
+- **A `·` separator as `::before` on an ellipsising span dangles, and a
+  `max-height` on a summary header nests a scroller.** Both shipped in the
+  Plan tab's first cut. A span squeezed to nothing keeps its pseudo-element,
+  so the line read "· " with nothing after it; the fix that holds is a real
+  text-node separator beside each item with the row starting one
+  separator-width LEFT of an `overflow: hidden` box (`.plan-seprow`), so the
+  item that begins any line has its separator clipped. And a header capped
+  at 55% of the pane with its own `overflow-y` put the phase list in one
+  scroller and the document in another on a short window; bound each row
+  on its own (line clamps, a collapsed list) and let the header not scroll.
+  Where an item sits in a wrapping band decides what orphans at 240px —
+  the age last left it alone on line 2 while `current` shrank to 51px;
+  measure, then order.
 - **`sel` is a selection; `selected` is a LOOKUP that can be null while `sel`
   is set.** `selected` resolves `sel` against `ws`, so it is null for the
   seconds between a restored selection and the first `list_workspace`, and for

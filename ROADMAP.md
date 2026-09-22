@@ -400,6 +400,26 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   Write the orchestrator loop into valleos' CLAUDE.md once it has run.
   _From: [2026-09-02 agent-brief](docs/sessions/2026-09-02-agent-brief/summary.md)_
 
+- **Plan tab, next slices.** #323 shipped the dock's Plan tab (a lenient
+  reader over the planning-with-files files, `worktrees_core::plan`; brief-
+  first header over one status band; a "Generate plan" paste on the empty
+  state). Left on the table, roughly in order of value: (1) "what Claude last
+  said" as a band item, from the transcript tail dated by its own `timestamp`
+  (`transcript_epoch` already tails that file); (2) per-phase checkbox items
+  (text + done) in `PlanSummary`, one additive field, which unlocks the
+  stepper and checklist directions on the design canvas and a "next" card;
+  (3) "Generate plan" on a STALE plan, not only an empty place, and a re-read
+  of `ops::PLAN_PROMPT` after its first real use; (4) a mock fixture where
+  the brief is stale relative to the plan — the brief-first header's weakest
+  case, uncovered today; (5) `app/scripts/mock-static.sh` for the
+  `VITE_MOCK=1 vite build --base ./` bundle that was shared twice as a
+  private artifact, and a `sandbox.sh --seed-plans` that writes the four
+  plan shapes (template under `.planning/<id>/` + `.active_plan`, freeform
+  at the ROOT, brief-only, nothing) so the hand test is repeatable —
+  today's seed lives only in the session's `progress.md`. The `.plan-phases`
+  list past eight rows is a bounded nested scroller; noted, not owed.
+  _From: [2026-09-22 project-status-pane](docs/sessions/2026-09-22-project-status-pane/summary.md)_
+
 - **Agent workflow, next slices (parked by design).** One agent per place at a
   time is the stance; the door left open is **sub-places**
   (`communications/<task>` worktrees off `communications-next`). Also parked:
