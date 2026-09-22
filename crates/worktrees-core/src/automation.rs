@@ -544,6 +544,33 @@ fn check_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Can this project run an automation at all? The AI seam plus the "is it
+/// really claude" guard, with the seam's warnings passed to `ui`.
+///
+/// `pub` because the app asks this BEFORE it spawns the runner on a thread: a
+/// refusal here leaves no ledger entry (deliberately — see `run_inner`), so a
+/// caller that only learns of it from the thread's exit code has nothing to
+/// show the person. Asking first turns it into an ordinary error on the invoke.
+/// The runner asks again on its own thread; the seam is idempotent.
+///
+/// The guard's message is passed through unchanged: it already names the cause
+/// and the fix, and a prefix here once produced "automations need the claude
+/// CLI: this project's ai_cmd is `none`, and a headless run needs the claude CLI".
+pub fn preflight(p: &Project, ui: &mut dyn Ui) -> Result<crate::profile::AiLaunch, String> {
+    let mut seam = CaptureUi::default();
+    let ai = crate::ops::ai_launch_for(
+        p,
+        &mut seam,
+        &p.main_root, // the profile seam keys on the project; the run CWD is chosen by the runner.
+        &crate::config::resolve_ai_cmd(None),
+    );
+    for w in seam.warnings() {
+        ui.warn(&w);
+    }
+    crate::profile::claude_launch_check(&ai.cmd, &ai.match_word)?;
+    Ok(ai)
+}
+
 /// Run one automation, start to finish. Exit code: `0` clean, `2` findings
 /// (`doctor`'s convention), `1` failed.
 pub fn run(p: &Project, ui: &mut dyn Ui, slug: &str, opts: RunOpts) -> i32 {
@@ -576,20 +603,7 @@ fn run_inner(p: &Project, ui: &mut dyn Ui, slug: &str, opts: RunOpts) -> Result<
     // The AI seam BEFORE the entry is written: a project whose `ai_cmd` is not
     // claude cannot run an automation at all, and a ledger full of `failed`
     // entries for a machine that was never going to work is noise, not history.
-    let mut seam = CaptureUi::default();
-    let ai = crate::ops::ai_launch_for(
-        p,
-        &mut seam,
-        &p.main_root, // the profile seam keys on the project; the run CWD is set below.
-        &crate::config::resolve_ai_cmd(None),
-    );
-    for w in seam.warnings() {
-        ui.warn(&w);
-    }
-    // Passed through unchanged: the guard's messages already name the cause and
-    // the fix, and a prefix here produced "automations need the claude CLI:
-    // this project's ai_cmd is `none`, and a headless run needs the claude CLI".
-    crate::profile::claude_launch_check(&ai.cmd, &ai.match_word)?;
+    let ai = preflight(p, ui)?;
 
     let started = runs::run_now();
     let id = match opts.id {

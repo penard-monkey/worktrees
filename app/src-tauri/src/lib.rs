@@ -3062,6 +3062,17 @@ async fn run_automation(repo: String, slug: String) -> Result<RunStarted, String
     if worktrees_core::automation::is_running(&project.main_root, &slug) {
         return Ok(RunStarted { id: String::new(), already_running: true });
     }
+    // Ask the AI seam NOW, on the invoke: a project whose ai_cmd is not claude
+    // (or whose profile fails to materialize) is refused by the runner BEFORE
+    // it writes a ledger entry, so from the thread below the tab would only
+    // ever see an id that never appears. Here the refusal is the invoke's
+    // error and reaches the toast.
+    let mut pre = CaptureUi::default();
+    worktrees_core::automation::preflight(&project, &mut pre)
+        .inspect_err(|e| applog("error", &format!("run_automation repo={repo} slug={slug}: {e}")))?;
+    for w in pre.warnings() {
+        applog("warn", &format!("run_automation repo={repo} slug={slug}: {w}"));
+    }
     let dir = worktrees_core::runs::ensure_ledger_dir(&project.main_root)
         .inspect_err(|e| applog("error", &format!("run_automation repo={repo}: {e}")))?;
     let id = worktrees_core::runs::new_id(&dir, &slug, worktrees_core::runs::run_now());
