@@ -58,7 +58,7 @@ fn registered_entry(path: &Path) -> Option<Entry> {
 pub fn status() -> Status {
     let path = config_path();
     let entry = registered_entry(&path);
-    let codex_bin = crate::profile::bin_on_path("codex").map(|p| p.to_string_lossy().into_owned());
+    let codex_bin = crate::profile::codex_bin().map(|p| p.to_string_lossy().into_owned());
     let worktrees_bin = crate::profile::worktrees_bin().map(|p| p.to_string_lossy().into_owned());
     let state = match &entry {
         Some(e) if !e.ours => "foreign",
@@ -68,7 +68,10 @@ pub fn status() -> Status {
         None if worktrees_bin.is_none() => "cli-missing",
         None => "absent",
     };
-    let command = worktrees_bin.as_ref().map(|wt| format!("codex mcp add worktrees --env WORKTREES_MCP_PROVIDER=codex -- {} mcp --mutations", crate::profile::shell_quote(wt)));
+    let command = codex_bin.as_ref().zip(worktrees_bin.as_ref()).map(|(codex, wt)| format!(
+        "{} mcp add worktrees --env WORKTREES_MCP_PROVIDER=codex -- {} mcp --mutations",
+        crate::profile::shell_quote(codex), crate::profile::shell_quote(wt)
+    ));
     Status { state, codex_bin, worktrees_bin, entry, command, config_path: path.to_string_lossy().into_owned() }
 }
 

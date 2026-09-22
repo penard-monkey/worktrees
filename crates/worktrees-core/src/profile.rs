@@ -1122,6 +1122,12 @@ fn global_mcp_servers(user: &serde_json::Value) -> Map<String, serde_json::Value
 /// every materialization — an absolute path baked into a profile goes stale the
 /// moment the binary moves or the profile is carried to another machine.
 pub fn worktrees_bin() -> Option<PathBuf> {
+    // The sandbox app builds this branch's CLI before launch. MCP entries made
+    // while testing it must point at that binary, not an older installed CLI.
+    if let Some(bin) = std::env::var_os("WORKTREES_CLI_BIN").map(PathBuf::from)
+        .filter(|p| p.is_absolute() && is_exec(p)) {
+        return Some(bin);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if exe.file_name().and_then(|s| s.to_str()) == Some("worktrees") {
             return Some(exe);
@@ -1145,6 +1151,32 @@ pub fn bin_on_path(name: &str) -> Option<PathBuf> {
             .filter(|d| d.starts_with('/'))
             .map(|d| PathBuf::from(d).join(name))
             .find(|c| is_exec(c))
+    })
+}
+
+/// The Codex CLI may be bundled with its VS Code extension instead of linked
+/// into a login shell's PATH. Resolve that installed copy for the desktop app
+/// and MCP setup without requiring a second Codex installation.
+pub fn codex_bin() -> Option<PathBuf> {
+    bin_on_path("codex").or_else(|| {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        for editor in [".vscode", ".vscode-insiders", ".cursor"] {
+            let root = home.join(editor).join("extensions");
+            let Ok(entries) = fs::read_dir(root) else { continue };
+            let mut dirs: Vec<PathBuf> = entries.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("openai.chatgpt-")))
+                .collect();
+            dirs.sort_by(|a, b| b.cmp(a)); // newest extension first
+            for dir in dirs {
+                let Ok(platforms) = fs::read_dir(dir.join("bin")) else { continue };
+                for platform in platforms.flatten() {
+                    let candidate = platform.path().join("codex");
+                    if is_exec(&candidate) { return Some(candidate); }
+                }
+            }
+        }
+        None
     })
 }
 

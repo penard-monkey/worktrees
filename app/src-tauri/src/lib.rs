@@ -6670,6 +6670,15 @@ fn fixup_gui_path() {
         None => format!("{std_dirs}:{current}"),
     };
     std::env::set_var("PATH", path);
+    // The Codex VS Code extension bundles a usable CLI but does not always
+    // put it on the GUI app's PATH. Its parent directory also lets the tmux
+    // launch use the same `codex` command that MCP setup resolves below.
+    if worktrees_core::profile::bin_on_path("codex").is_none() {
+        if let Some(dir) = worktrees_core::profile::codex_bin().and_then(|p| p.parent().map(Path::to_path_buf)) {
+            let current = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var("PATH", format!("{}:{current}", dir.display()));
+        }
+    }
 }
 
 /// Is tmux reachable right now? `refresh = true` re-resolves the GUI PATH first,

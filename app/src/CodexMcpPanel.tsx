@@ -39,6 +39,8 @@ export function CodexMcpSection({ onReport }: { onReport: (text: string) => void
       absent: "Not connected to Codex.",
       "cli-missing": "Install the Worktrees CLI first.",
     }[status.state] : "Checking…"}</div>
+    {status && !status.codex_bin && <div className="hint">Codex CLI was not found. Install Codex or add its executable to your PATH, then reopen Settings.</div>}
+    {status && !status.worktrees_bin && <div className="hint">Worktrees CLI was not found. Install it under Updates, then reopen Settings.</div>}
     {status && status.state !== "foreign" && <>
       <label className="tier-toggle setting-check"><input type="checkbox" checked={mutations}
         onChange={(e) => setMutations(e.currentTarget.checked)} />Allow create and close tools</label>
