@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
+import { CodexMcpSection } from "./CodexMcpPanel";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -31,6 +32,7 @@ const CATS = [
   // hand-run command and an uninstall — and it is the surface a dismissed Home
   // card sends people to, so it has to be findable by name.
   { id: "claude", label: "Claude" },
+  { id: "codex", label: "Codex" },
   { id: "behavior", label: "Behavior" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
@@ -604,7 +606,21 @@ export function SettingsSheet({
             onSilenceOffer={onSilenceMcpOffer} onChanged={onMcpChanged} onReport={onReport} />
           </>}
 
+          {cat === "codex" && <CodexMcpSection onReport={onReport} />}
+
           {cat === "commands" && <>
+          <section className="setting">
+            <label>Default agent</label>
+            <div className="seg">
+              {(["claude", "codex"] as const).map((provider) => (
+                <button key={provider} className={settings.default_provider === provider ? "on" : ""}
+                  onClick={() => onChange({ default_provider: provider })}>
+                  {provider === "claude" ? "Claude" : "Codex"}
+                </button>
+              ))}
+            </div>
+            <div className="hint">Starts first when you enter a place. You can open the other agent beside it at any time. Running sessions keep their provider.</div>
+          </section>
           <section className="setting">
             <label>Commands</label>
             <label className="sub">Editor command</label>
@@ -625,9 +641,9 @@ export function SettingsSheet({
                 checked={settings.ai_auto_resume}
                 onChange={(e) => onChange({ ai_auto_resume: e.currentTarget.checked })}
               />
-              Resume Claude conversation on open
+              Resume agent conversation on open
             </label>
-            <div className="hint">Single-click Enter resumes the last conversation. Only applies when the AI command is claude.</div>
+            <div className="hint">Single-click Enter resumes the selected agent's last conversation when available.</div>
             <div className="ver-rows">
               <div className="ver-row">
                 AI command: <b>{aiConfig?.ai_cmd ?? "…"}</b>
@@ -637,7 +653,7 @@ export function SettingsSheet({
             <div className="ver-actions">
               <button className="ctrl sm" onClick={revealAiConfig} disabled={!aiConfig}>Reveal config file</button>
             </div>
-            <div className="hint">Shared with the CLI (~/.config/worktrees/config). Shell env vars (WORKTREES_AI_CMD) don't reach the GUI.</div>
+            <div className="hint">The CLI uses this command when you omit --ai. The app uses Default agent above. Shell env vars (WORKTREES_AI_CMD) don't reach the GUI.</div>
           </section>
           </>}
 

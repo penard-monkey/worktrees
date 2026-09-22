@@ -4,7 +4,7 @@ title: "Proposal — Codex support"
 
 # Codex support in Worktrees — implementation plan
 
-**Status:** proposed for review, 2026-09-22. No product implementation has started.
+**Status:** implemented on the feature branch 2026-09-22; awaiting review.
 **Branch:** `feat/codex-support`, based on `origin/main` at `e429ffe`.
 
 ## Goal and current behavior
@@ -12,8 +12,9 @@ title: "Proposal — Codex support"
 A user can run Claude and Codex simultaneously in the same worktree, see both
 terminals side by side, and open, resume, brief, or close either session without
 disturbing the other. Worktrees' MCP tools can be connected to each provider
-independently. `ai_cmd` selects only which agent starts first for a new place;
-it does not restrict which agents may run there.
+independently. The app's Settings default selects which agent starts first;
+the CLI's `ai_cmd` remains its default. Neither restricts which agents may run
+there.
 
 Today `--ai codex` starts a Codex process in pane 0, and tests cover that basic
 launch. Each place has only one canonical tmux session and one main terminal in
@@ -34,7 +35,11 @@ container for two independent agent sessions.
   canonical session. Match both worktree path and actual process/provider when
   adopting a session; never satisfy a Claude open with a Codex pane or vice
   versa. Preserve the current generic `--ai <cmd>` path for other tools.
-- Keep the configured `ai_cmd` as the initial agent for a new place. Add an
+- Add a Claude/Codex default provider selector in Settings. It determines the
+  initial agent when the app creates or enters a place; users can start the
+  other provider at any time. Keep explicit CLI `--ai` and the CLI's existing
+  config precedence. Changing the default never stops or replaces live sessions.
+  Add an
   explicit action in the app and CLI to start or reopen the other provider in
   that same place. Reopening either provider reuses its live session; a closed
   provider resumes its own conversation. A second provider does not create a
@@ -108,8 +113,9 @@ container for two independent agent sessions.
 
 ## Decisions and limits for this change
 
-- The default first agent remains `claude`. `--ai codex` or `ai_cmd = codex`
-  changes the initial launch only; either provider can be added later.
+- The app's default first agent is configurable in Settings and starts as
+  `claude` for existing installations. The CLI keeps `ai_cmd` and `--ai`;
+  either provider can be added later.
 - The first implementation supports one Worktrees-managed session per provider
   per place. It does not restrict sessions a user launches manually.
 - Claude AI profiles are not converted into Codex profiles. Codex has its own
@@ -137,6 +143,8 @@ container for two independent agent sessions.
    attached terminals after restart, and identifies Claude-only controls.
 6. Existing Claude launch, resume, profiles, MCP, and activity behavior passes
    its current tests and manual checks.
+7. Changing the default provider in Settings affects future app launches only;
+   live Claude and Codex sessions continue running unchanged.
 
 ## Official Codex references
 

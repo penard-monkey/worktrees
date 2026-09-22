@@ -74,6 +74,7 @@ type Place = {
   created_epoch?: number | null;
   last_commit_subject?: string | null;
   tmux_session: { name: string; up: boolean };
+  agent_sessions?: { claude: { name: string; up: boolean }; codex: { name: string; up: boolean } };
   last_commit_epoch?: number | null;
   claude_session_present: boolean;
   /// The AI profile the LIVE session was started with, and whether that profile
@@ -3130,6 +3131,7 @@ function App() {
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
+  const [activeProvider, setActiveProvider] = useState<"claude" | "codex">("claude");
   // Where Settings was asked to open. One state, never a boolean beside it:
   // `settingsOpen` is derived, so "the sheet is up" and "which section it went
   // to" cannot disagree. `{}`-with-no-cat is the ordinary ⌘, open.
@@ -4293,6 +4295,12 @@ function App() {
 
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
+  const selectedAgents = selected?.agent_sessions ?? (selected ? {
+    claude: selected.tmux_session,
+    codex: { name: `${selected.tmux_session.name}~agent~codex`, up: false },
+  } : null);
+  const planProvider = selectedAgents?.[activeProvider].up ? activeProvider
+    : selectedAgents?.claude.up ? "claude" : "codex";
   // The status chip's host, declared HERE and not up with `statusOnTile`,
   // because the footer renders under `selected && sel` — and `selected` is a
   // LOOKUP into the workspace, so it is null for the seconds between a restored
@@ -4754,6 +4762,7 @@ function App() {
   // home Resume rows. A plain nav click goes to `selectPlace` above.
   const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
     setSel({ repo, slug: p.slug });
+    setActiveProvider(settings.default_provider);
     setMenu(null);
     closeCtx();
     setTermFocus((v) => v + 1); // hand the keyboard back to the terminal
@@ -4765,8 +4774,14 @@ function App() {
       // place to answer the question its session is waiting on still spends the
       // signal — and an enter into a place with nothing unseen writes nothing.
       if (unseenWork(p)) ack(repo, p);
-      await runCmd("open_place", { repo, slug: p.slug, fresh });
+      await runCmd("open_place", { repo, slug: p.slug, fresh, provider: settings.default_provider });
     })();
+  };
+  const openAgent = (provider: "claude" | "codex") => {
+    if (!sel) return;
+    setActiveProvider(provider);
+    setTermFocus((v) => v + 1);
+    runCmd("open_place", { repo: sel.repo, slug: sel.slug, fresh: !settings.ai_auto_resume, provider });
   };
 
   // ── close ──
@@ -4782,9 +4797,9 @@ function App() {
   // named session can exit and another can adopt the place — then core answers
   // with a fresh needs_confirm naming the newcomer, which we re-arm and SAY, so
   // the click reads as "the session changed" rather than as a dud.
-  const doClose = async (repo: string, slug: string, key: string, armed: boolean) => {
+  const doClose = async (repo: string, slug: string, key: string, armed: boolean, provider?: "claude" | "codex") => {
     const expect = armed ? closeSess : "";
-    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null });
+    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null, provider: provider ?? null });
     if (r?.needs_confirm) {
       if (expect && r.needs_confirm !== expect)
         setNotice(`${expect} is gone — ${r.needs_confirm} is in this place now. Nothing was killed.`);
@@ -5186,7 +5201,7 @@ function App() {
     // The terminal, checked first: it is nowhere near the nav's tier zones, and
     // a drop there means something completely different from a reorder.
     if (el?.closest('[data-drop="mention"]')) {
-      if (!sel || !selected?.tmux_session.up) return null;
+      if (!sel || !selectedAgents?.claude.up) return null;
       if (item.repo !== sel.repo) {
         // Not a cosmetic guard. The MCP server is pinned to the repo it was
         // launched in and no tool takes a repo path, so a foreign project's
@@ -5197,7 +5212,7 @@ function App() {
       if (!p) return null;
       return {
         kind: "mention", repo: item.repo, slug: item.slug,
-        intoSlug: sel.slug, intoSession: selected.tmux_session.name, name: nameOf(p),
+        intoSlug: sel.slug, intoSession: selectedAgents.claude.name, name: nameOf(p),
       };
     }
 
@@ -5447,7 +5462,7 @@ function App() {
     setNewBase("");
     setNewDraft(null);
     try {
-      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null });
+      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null, provider: settings.default_provider });
       // Select core's ACTUAL final slug (origin/ stripped, holder-reuse applied);
       // fall back to the old derivation only if the backend didn't report one.
       if (r?.ok) setSel({ repo, slug: r.slug ?? label });
@@ -6720,9 +6735,34 @@ function App() {
           <main className="main">
             {selected && sel ? (
               <>
-                {selected.tmux_session.up ? (
-                  <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus}
-                    findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
+                <div className="agent-actions" aria-label="Agents in this place">
+                  {(["claude", "codex"] as const).map((provider) => (
+                    <button key={provider} className="ctrl sm" disabled={!!selectedAgents?.[provider].up}
+                      onClick={() => openAgent(provider)}>
+                      {provider === "claude" ? "Claude" : "Codex"} {selectedAgents?.[provider].up ? "running" : "open"}
+                    </button>
+                  ))}
+                </div>
+                {(selectedAgents?.claude.up || selectedAgents?.codex.up) ? (
+                  <div className="agent-grid">
+                    {(["claude", "codex"] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => (
+                      <div className="agent-cell" key={provider} onFocusCapture={() => setActiveProvider(provider)}>
+                        <div className="agent-label">
+                          {provider === "claude" ? "Claude" : "Codex"}
+                          <button className="ctrl sm" onClick={() => {
+                            if (!sel) return;
+                            const key = `agent|${sel.repo}|${sel.slug}|${provider}`;
+                            doClose(sel.repo, sel.slug, key, confirmRm === key, provider);
+                          }}>
+                            {confirmRm === `agent|${sel.repo}|${sel.slug}|${provider}` ? `Kill ${closeSess}?` : "Close"}
+                          </button>
+                        </div>
+                        <TerminalPane key={selectedAgents![provider].name} provider={provider} session={selectedAgents![provider].name}
+                          termVersion={termVersion} focusToken={termFocus} focusEnabled={provider === planProvider}
+                          findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
+                      </div>
+                    ))}
+                  </div>
                 ) : (
                   /* No session, so nothing is competing for this space — and the
                      one question a place with no session raises is whether it is
@@ -7006,6 +7046,8 @@ function App() {
                     repo={sel.repo}
                     slug={sel.slug}
                     place={selected}
+                    agentSession={selectedAgents?.[planProvider].up ? selectedAgents[planProvider].name : null}
+                    agentProvider={planProvider}
                     workedEpoch={workedAt(selected)}
                     reloadToken={placesToken}
                     pageVisible={pageVisible}

@@ -8,6 +8,8 @@
 pub mod agent;
 pub mod automation;
 pub mod config;
+pub mod codex;
+pub mod codexmcp;
 pub mod derive;
 pub mod diag;
 pub mod docs;

@@ -640,11 +640,12 @@ impl AiLaunch {
     /// neither: `ai_word_of(cmd)` is the program actually run, and `match_word`
     /// alone would say `claude` for the printf case too.
     pub fn launch_cmd(&self, session: &str) -> String {
-        if self.cmd.is_empty() || ai_word_of(&self.cmd) != "claude" {
+        let provider = ai_word_of(&self.cmd);
+        if self.cmd.is_empty() || (provider != "claude" && provider != "codex") {
             return self.cmd.clone();
         }
         let mut cmd = self.cmd.clone();
-        if !session.is_empty() {
+        if provider == "claude" && !session.is_empty() {
             cmd.push_str(" --name ");
             cmd.push_str(&shell_quote(session));
         }
@@ -1631,10 +1632,14 @@ mod tests {
     }
 
     #[test]
-    fn launch_cmd_names_the_session_and_appends_the_opener_for_claude_only() {
+    fn launch_cmd_names_claude_and_briefs_both_agents() {
         let keep = "exec \"${SHELL:-/bin/sh}\"";
         // The name rides after everything the launch already carried…
         assert_eq!(AiLaunch::plain("claude").launch_cmd("proj-feat"), "claude --name 'proj-feat'");
+        assert_eq!(AiLaunch::plain("codex").launch_cmd("proj-feat"), "codex");
+        let mut codex = AiLaunch::plain("codex");
+        codex.opener = Some("Read .planning/brief.md and begin.".into());
+        assert_eq!(codex.launch_cmd("proj-feat"), "codex 'Read .planning/brief.md and begin.'");
         // …including the resume arg, which must NOT be followed by the opener:
         // `-r` takes an optional session id and would swallow it.
         let mut l = AiLaunch::plain("claude -r");

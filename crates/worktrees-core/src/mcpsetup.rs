@@ -300,13 +300,6 @@ pub fn status(repo: Option<&str>) -> Status {
         ai_cmd: ai_cmd.clone(),
     };
 
-    // Not claude → this whole feature is about a program the user is not
-    // running. Answer before touching the filesystem.
-    if crate::profile::ai_word_of(&ai_cmd) != "claude" {
-        st.state = State::NotApplicable;
-        return st;
-    }
-
     let cj = read_claude_json();
     st.user = entry_in(Some(&cj));
     if st.user.is_some() {

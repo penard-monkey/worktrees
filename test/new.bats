@@ -319,7 +319,7 @@ setup() {
 
   run_wt new feat-c
   [ "$status" -eq 0 ]
-  [[ "$(tmux_pane0_cmd repo-feat-c)" == *codex* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-c~agent~codex')" == *codex* ]]
 }
 
 @test "new: -r/--resume → pane 0 command contains 'fake-ai -r'" {

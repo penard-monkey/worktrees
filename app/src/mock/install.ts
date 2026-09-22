@@ -46,6 +46,11 @@ let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
 // `verdict()` that is otherwise unreachable without editing someone's real
 // ~/.claude.json.
 const MOCK_WT_BIN = "/Users/demo/.local/bin/worktrees";
+let mockCodexMcp: Record<string, unknown> = {
+  state: "absent", codex_bin: "/usr/local/bin/codex", worktrees_bin: MOCK_WT_BIN,
+  entry: null, command: `codex mcp add worktrees --env WORKTREES_MCP_PROVIDER=codex -- ${MOCK_WT_BIN} mcp --mutations`,
+  config_path: "/Users/demo/.codex/config.toml",
+};
 let mockMcp: Record<string, unknown> = (() => {
   const want = new URLSearchParams(location.search).get("mcp") ?? "absent";
   const entry = (args: string[], ok = true) => ({
@@ -1077,8 +1082,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           slug, path: `${args.repo}/.worktrees/${slug}`, is_main: false, registered: true,
           branch: args.branch, detached: false, dirty: false, dirty_files: 0,
           ahead: 0, behind: 0, last_commit_subject: "wip", last_commit_epoch: now(),
-          tmux_session: { name: sessionName(pv.snapshot.prefix, slug), up: true },
-          claude_session_present: true,
+          tmux_session: { name: `${sessionName(pv.snapshot.prefix, slug)}${args.provider === "codex" ? "~agent~codex" : ""}`, up: true },
+          agent_sessions: {
+            claude: { name: sessionName(pv.snapshot.prefix, slug), up: args.provider !== "codex" },
+            codex: { name: `${sessionName(pv.snapshot.prefix, slug)}~agent~codex`, up: args.provider === "codex" },
+          },
+          claude_session_present: args.provider !== "codex",
           declared: { last_opened_epoch: now() }, lifecycle_effective: "active",
         });
       }
@@ -1089,8 +1098,16 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "open_place": {
       console.info("[mock] open_place", args); // includes args.fresh so headless tests can assert the flag
       editPlace(args.repo, args.slug, (p) => {
+        const provider = args.provider === "codex" ? "codex" : "claude";
+        const canonical = sessionName(findProject(args.repo)?.snapshot?.prefix ?? "repo", args.slug as string);
+        p.agent_sessions ??= {
+          claude: { name: canonical, up: p.tmux_session.up },
+          codex: { name: `${canonical}~agent~codex`, up: false },
+        };
+        p.agent_sessions[provider].up = true;
         p.tmux_session.up = true;
-        p.claude_session_present = true;
+        if (provider === "codex" && !p.agent_sessions.claude.up) p.tmux_session.name = p.agent_sessions.codex.name;
+        if (provider === "claude") { p.tmux_session.name = p.agent_sessions.claude.name; p.claude_session_present = true; }
         p.declared = { ...(p.declared ?? {}), last_opened_epoch: now() };
         reconcile(p);
       });
@@ -1107,6 +1124,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // user's word, collected by the frontend's two-click arm. A canonical
       // name is never a question.
       const canonical = sessionName(pv.snapshot.prefix, args.slug as string);
+      if (args.provider === "codex") {
+        editPlace(args.repo, args.slug, (p) => {
+          if (p.agent_sessions) p.agent_sessions.codex.up = false;
+          p.tmux_session = p.agent_sessions?.claude.up ? p.agent_sessions.claude : { name: canonical, up: false };
+          reconcile(p);
+        });
+        return { ok: true, code: 0, output: `closed Codex tmux ${canonical}~agent~codex` };
+      }
       const live = pl.tmux_session.name;
       // `session` is the name the frontend's arm displayed. Consent is bound to
       // it: if it is not what is live now, core kills nothing and asks again
@@ -1117,16 +1142,20 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           output: `${args.session} is no longer the session in ${pl.path} — ${live} is.`,
         };
       }
-      if (live !== canonical && !args.yes) {
+      if (live !== canonical && live !== `${canonical}~agent~codex` && !args.yes) {
         return {
           ok: false, code: 4, needs_confirm: live,
           output: `tmux ${live} was not opened under this repo's name (${canonical}) — adopted because a pane is cwd'd in ${pl.path}.`,
         };
       }
       editPlace(args.repo, args.slug, (p) => {
+        if (p.agent_sessions) {
+          p.agent_sessions.claude.up = false;
+          if (!args.provider) p.agent_sessions.codex.up = false;
+        }
         // The adopted session is gone, so the name falls back to canonical —
         // what core's snapshot reports for a place with nothing live.
-        p.tmux_session = { name: canonical, up: false };
+        p.tmux_session = p.agent_sessions?.codex.up ? p.agent_sessions.codex : { name: canonical, up: false };
         reconcile(p);
       });
       return { ok: true, code: 0, output: `closed tmux ${live} — worktree kept.` };
@@ -1992,6 +2021,17 @@ Phase 3: Frontend pane and mock harness
       mockMcp = { ...mockMcp, state: "absent", found_in: [], user: null };
       return { ok: true, output: "Removed MCP server worktrees from user config\n", status: clone(mockMcp) };
     }
+    case "codex_mcp_status":
+      return clone(mockCodexMcp);
+    case "codex_mcp_install": {
+      const mutations = args.mutations !== false;
+      mockCodexMcp = { ...mockCodexMcp, state: mutations ? "installed" : "read-only",
+        entry: { command: MOCK_WT_BIN, mutations } };
+      return { ok: true, output: "Added Worktrees to Codex MCP\n", status: clone(mockCodexMcp) };
+    }
+    case "codex_mcp_uninstall":
+      mockCodexMcp = { ...mockCodexMcp, state: "absent", entry: null };
+      return { ok: true, output: "Removed Worktrees from Codex MCP\n", status: clone(mockCodexMcp) };
 
     // AI command config (read-only, Phase 1). exists:false exercises the
     // reveal-parent fallback chain in SettingsSheet.

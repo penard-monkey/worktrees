@@ -18,6 +18,18 @@ use std::process::{Command, Output};
 /// to the sidecar of a place named "long", and closing one could kill the
 /// other's live Claude session.
 pub const SHELL_SIDECAR_MARKER: &str = "~term";
+pub const CODEX_SIDECAR_MARKER: &str = "~agent~codex";
+pub const CLAUDE_SIDECAR_MARKER: &str = "~agent~claude";
+
+/// Codex has its own durable tmux session in the same worktree. `~` cannot
+/// occur in a git ref, so this cannot collide with a place's canonical name.
+pub fn codex_session_name(canonical: &str) -> String {
+    format!("{canonical}{CODEX_SIDECAR_MARKER}")
+}
+
+pub fn claude_session_name(canonical: &str) -> String {
+    format!("{canonical}{CLAUDE_SIDECAR_MARKER}")
+}
 
 /// The sidecar session name for a place's (canonical) session + a 1-based tab
 /// index. Index ≤1 is the bare `~term`; 2+ append `~N`.
@@ -169,6 +181,13 @@ impl PaneList {
         self.panes.iter().any(|(s, _, _)| s == name)
     }
 
+    /// Recognize an older Codex pane launched under the canonical place name.
+    /// Keep this strict: `node` and version-like names identify Claude on some
+    /// installs, so they cannot distinguish the two providers here.
+    pub fn session_is_codex(&self, name: &str) -> bool {
+        self.panes.iter().any(|(s, _, cmd)| s == name && cmd.rsplit('/').next() == Some("codex"))
+    }
+
     /// Same selection as `worktree_session_excluding` but over the prefetched panes: a
     /// pane cwd'd in `wt` (exact or a subdir), preferring one whose command
     /// looks like the AI CLI (`ai_word`) or `node`, else the first match.
@@ -187,7 +206,7 @@ impl PaneList {
             // the worktree and runs a bare shell — never let it be adopted AS the
             // place's session (that would attach the AI view to a plain shell and
             // skip launching Claude). It's addressed by its exact name instead.
-            if is_shell_sidecar(sess) {
+            if is_shell_sidecar(sess) || sess.contains(CODEX_SIDECAR_MARKER) || sess.contains(CLAUDE_SIDECAR_MARKER) {
                 continue;
             }
             if let Some((eroot, eprefix)) = &excl {
@@ -204,6 +223,10 @@ impl PaneList {
         }
         best
     }
+}
+
+pub fn session_is_codex(name: &str) -> bool {
+    PaneList::fetch().is_some_and(|panes| panes.session_is_codex(name))
 }
 
 /// Multi-client sizing: by default tmux clamps a window to its SMALLEST

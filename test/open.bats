@@ -91,8 +91,43 @@ session_count() {
   make_worktree feat-x
   run_wt open --ai codex feat-x
   [ "$status" -eq 0 ]
-  [[ "$(tmux_pane0_cmd repo-feat-x)" == *codex* ]]
-  [[ "$(tmux_pane0_cmd repo-feat-x)" != *fake-ai* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-x~agent~codex')" == *codex* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-x~agent~codex')" != *fake-ai* ]]
+}
+
+@test "open keeps Claude and Codex sessions in the same worktree independently" {
+  install_fake_cmd claude
+  install_fake_cmd codex
+  make_worktree feat-both
+  run_wt open --no-attach --ai claude feat-both
+  [ "$status" -eq 0 ]
+  run_wt open --no-attach --ai codex feat-both
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-both
+  tmux_session_exists 'repo-feat-both~agent~codex'
+  [[ "$(tmux_pane0_cmd repo-feat-both)" == *claude* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-both~agent~codex')" == *codex* ]]
+  run_wt close --ai codex feat-both
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-both
+  ! tmux_session_exists 'repo-feat-both~agent~codex'
+}
+
+@test "a legacy canonical Codex session can coexist with a Claude sidecar" {
+  install_fake_cmd claude
+  install_fake_cmd codex
+  make_worktree feat-legacy
+  printf 'cwd=%s\ncmd0=x\n' "$REPO/.worktrees/feat-legacy" > "$TMUX_STATE/repo-feat-legacy"
+  echo codex > "$TMUX_STATE/repo-feat-legacy.cmd"
+  run_wt open --no-attach --ai claude feat-legacy
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-legacy
+  tmux_session_exists 'repo-feat-legacy~agent~claude'
+  [[ "$(tmux_pane0_cmd 'repo-feat-legacy~agent~claude')" == *claude* ]]
+  run_wt close --ai claude feat-legacy
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-legacy
+  ! tmux_session_exists 'repo-feat-legacy~agent~claude'
 }
 
 @test "open --ai without a value errors" {

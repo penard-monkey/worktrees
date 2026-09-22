@@ -197,7 +197,7 @@ lines, `#` comments. It is parsed as data, never executed.
 | What | Flag | Env | Config key | Default |
 |---|---|---|---|---|
 | AI pane command | `--ai <cmd>` | `WORKTREES_AI_CMD` | `ai_cmd` | `claude` |
-| AI resume flag (`-r` appends it) | — | `WORKTREES_AI_RESUME_ARG` | `ai_resume_arg` | `-r` |
+| AI resume argument (`-r` appends it) | — | `WORKTREES_AI_RESUME_ARG` | `ai_resume_arg` | Claude: `-r`; Codex: `resume --last` |
 | Session/name prefix | — | `WORKTREES_PREFIX` | `prefix` | repo dir name |
 
 ```ini
@@ -215,6 +215,19 @@ ai_resume_arg = resume
 
 Examples: `--ai claude`, `--ai "claude --model opus"`, `--ai codex`,
 `--ai opencode`, `--ai none`.
+
+Claude and Codex can run together in one worktree. The app shows their terminals
+side by side and lets you open or close either agent independently. Settings →
+Commands → Default agent chooses which starts first when the app creates or
+enters a place; changing it does not stop a running session. The CLI keeps its
+`ai_cmd` default and accepts `open <place> --ai claude|codex` and
+`close <place> --ai claude|codex`. An unqualified `close` closes both managed
+agent sessions. Codex resumes its most recent conversation in that place with
+`codex resume --last` when one exists.
+
+Connect Worktrees tools separately in Settings → Claude and Settings → Codex,
+or run `worktrees mcp --install --ai codex` for Codex. The unqualified MCP setup
+command still targets Claude.
 
 ## Compatibility notes
 

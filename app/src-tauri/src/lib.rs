@@ -19,7 +19,7 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{config, git, mcpsetup, mention, ops, profile, store, sync, sysclock, tmux, Project, Ui};
+use worktrees_core::{git, mcpsetup, mention, ops, store, sync, sysclock, tmux, Project, Ui};
 
 // The documentation viewer: one supervised child, N places, and a port. Its own
 // file because it is the only part of this backend that can hand a document to
@@ -269,10 +269,28 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     // Resolved against the set already loaded above — not a second read of the
     // same file in the same tick.
     let effective = worktrees_core::profile::resolve_profile_id_in(&profiles, repo);
+    let agent_panes = tmux::PaneList::fetch();
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
             let slug = place.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            let tmux_up = place.pointer("/tmux_session/up").and_then(|b| b.as_bool()).unwrap_or(false);
+            let canonical = project.session_name(&slug);
+            let legacy_codex = agent_panes.as_ref().is_some_and(|panes| panes.session_is_codex(&canonical));
+            let codex_name = if legacy_codex { canonical.clone() } else { tmux::codex_session_name(&canonical) };
+            let codex_up = agent_panes.as_ref().is_some_and(|panes| panes.has_session(&codex_name));
+            let primary_up = place.pointer("/tmux_session/up").and_then(|b| b.as_bool()).unwrap_or(false);
+            let primary_name = place.pointer("/tmux_session/name").and_then(|s| s.as_str()).unwrap_or(&canonical).to_string();
+            let claude_sidecar = tmux::claude_session_name(&canonical);
+            let sidecar_up = agent_panes.as_ref().is_some_and(|panes| panes.has_session(&claude_sidecar));
+            let claude_up = sidecar_up || (primary_up && !legacy_codex && primary_name != codex_name);
+            let claude_name = if sidecar_up { claude_sidecar } else if claude_up { primary_name } else { canonical.clone() };
+            place["agent_sessions"] = serde_json::json!({
+                "claude": { "name": claude_name, "up": claude_up },
+                "codex": { "name": codex_name, "up": codex_up }
+            });
+            let tmux_up = claude_up || codex_up;
+            if !claude_up && codex_up {
+                place["tmux_session"] = serde_json::json!({ "name": codex_name, "up": true });
+            }
             let decl = store.places.get(&slug);
             place["declared"] = decl
                 .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
@@ -297,7 +315,7 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
                     // Only meaningful while the session is up: a closed place
                     // picks up the current profile on its next launch, so calling
                     // it "stale" would be noise.
-                    if tmux_up {
+                    if claude_up {
                         let edited = profiles
                             .profiles
                             .get(pid)
@@ -309,7 +327,7 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
                         let rebound = effective.as_deref() != Some(pid);
                         stale = edited || rebound;
                     }
-                } else if tmux_up && effective.is_some() {
+                } else if claude_up && effective.is_some() {
                     // Launched unprofiled, but a profile is bound now.
                     pname = serde_json::Value::Null;
                     stale = true;
@@ -747,8 +765,7 @@ async fn drop_reference(
     //
     // Addressed by the AI's pane, not by an index — see `tmux::ai_pane` for the
     // three ordinary ways pane 0 turns out not to be Claude.
-    let ai_word = profile::ai_word_of(&config::resolve_ai_cmd(None));
-    tmux::paste_to_ai(&into_session, &ai_word, &format!(" {token} "))?;
+    tmux::paste_to_ai(&into_session, "claude", &format!(" {token} "))?;
     applog("info", &format!("drop_reference: {token} -> {into_session}"));
     Ok(token)
 }
@@ -881,7 +898,10 @@ async fn new_place(
     branch: String,
     base: Option<String>,
     name: Option<String>,
+    provider: Option<String>,
 ) -> Result<CmdResult, String> {
+    let provider = provider.unwrap_or_else(|| "claude".into());
+    if provider != "claude" && provider != "codex" { return Err("provider must be claude or codex".into()); }
     let branch_log = branch.clone();
     let name = name.filter(|s| !s.is_empty());
     // Resolve the FINAL slug BEFORE the op — wt_for_branch reflects the holder
@@ -899,6 +919,8 @@ async fn new_place(
         args.push("--name".into());
         args.push(n);
     }
+    args.push("--ai".into());
+    args.push(provider);
     args.push("--no-attach".into());
     // Single-pane like `open_place` below: Claude gets the full width and the
     // scratch shell lives in the dock's Terminal tab (which is also where deps
@@ -952,24 +974,29 @@ async fn list_branches(repo: String, slug: String) -> Result<BranchList, String>
 /// existing launch path); the main checkout is launched directly since `open` only
 /// targets worktrees under `.worktrees/`.
 #[tauri::command]
-async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<CmdResult, String> {
+async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: Option<String>) -> Result<CmdResult, String> {
+    let provider = provider.unwrap_or_else(|| "claude".into());
+    if provider != "claude" && provider != "codex" { return Err("provider must be claude or codex".into()); }
     run_op(&format!("open {slug} fresh={}", fresh.unwrap_or(false)), &repo, move |p, ui| {
         // Auto-resume: if this place already has a Claude Code conversation on
         // disk, launch the AI pane with the resume arg (-r) instead of cold.
         // `fresh` (right-click "Open fresh") skips it. Gated on the configured
         // AI actually being Claude — appending -r to an arbitrary ai_cmd breaks it.
-        let resume = !fresh.unwrap_or(false)
-            && ai_is_claude()
-            && p.claude_session_present(&p.place_dir(&slug));
+        let wt = p.place_dir(&slug);
+        let resume = !fresh.unwrap_or(false) && match provider.as_str() {
+            "claude" => p.claude_session_present(&wt),
+            "codex" => worktrees_core::codex::session_present(&wt),
+            _ => false,
+        };
         if slug == "(main)" {
             if !worktrees_core::tmux::have_tmux() {
                 ui.error("tmux not found");
                 return 1;
             }
-            let session = p.session_name("(main)");
-            let mut ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
+            let session = ops::agent_session_name(&p.session_name("(main)"), &provider);
+            let mut ai_cmd = provider.clone();
             if resume && !ai_cmd.is_empty() {
-                ai_cmd = format!("{ai_cmd} {}", worktrees_core::config::resolve_ai_resume_arg());
+                ai_cmd = ops::resume_command(&ai_cmd);
             }
             // Propagate launch's rc: a failed new-session must reach the UI
             // banner / app.log, not silently report success. Single-pane
@@ -979,20 +1006,14 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>) -> Result<C
             ops::launch(p, ui, &p.main_root, &session, "", &ai, false, false)
         } else {
             let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
+            args.push("--ai".into());
+            args.push(provider.clone());
             if resume {
                 args.push("-r".into());
             }
             ops::cmd_open(p, ui, &args)
         }
     })
-}
-
-/// Auto-resume only applies when the AI pane actually runs Claude Code (same
-/// first-word/basename derivation as ops::launch).
-fn ai_is_claude() -> bool {
-    // Same single derivation core uses for tmux adoption — see
-    // `profile::ai_word_of`. Re-deriving it here is how the three copies drifted.
-    worktrees_core::profile::ai_word_of(&worktrees_core::config::resolve_ai_cmd(None)) == "claude"
 }
 
 /// End a place's tmux session — the worktree stays (right-click "Close session").
@@ -1014,13 +1035,18 @@ async fn close_place(
     slug: String,
     yes: bool,
     session: Option<String>,
+    provider: Option<String>,
     shells: State<'_, Shells>,
 ) -> Result<CmdResult, String> {
+    if provider.as_deref().is_some_and(|p| p != "claude" && p != "codex") {
+        return Err("provider must be claude or codex".into());
+    }
     // core cmd_close sweeps this place's tmux-era sidecars; the owned dock
     // shells are app state, so they're swept here — same rule as before, the
     // dock's scratch shells die with the place.
     let slug_log = slug.clone();
     let mut args = vec![slug.clone()];
+    if let Some(p) = &provider { args.push("--ai".into()); args.push(p.clone()); }
     if yes {
         args.push("-y".into());
     }
@@ -1044,7 +1070,7 @@ async fn close_place(
         // name shown is the name core is held to, and `None` means there is
         // nothing left to ask about (the frontend treats it as "already gone").
         r.needs_confirm = Project::discover(Path::new(&repo)).ok().and_then(|p| ops::place_session(&p, &slug));
-    } else if r.ok {
+    } else if r.ok && provider.is_none() {
         kill_place_shells(&shells, &repo, &slug);
     }
     Ok(r)
@@ -2545,6 +2571,21 @@ async fn mcp_uninstall(repo: Option<String>) -> Result<worktrees_core::mcpsetup:
         applog("error", &format!("mcp_uninstall: {e}"));
     }
     r
+}
+
+#[tauri::command]
+async fn codex_mcp_status() -> Result<worktrees_core::codexmcp::Status, String> {
+    Ok(worktrees_core::codexmcp::status())
+}
+
+#[tauri::command]
+async fn codex_mcp_install(mutations: bool) -> Result<worktrees_core::codexmcp::Outcome, String> {
+    worktrees_core::codexmcp::install(mutations)
+}
+
+#[tauri::command]
+async fn codex_mcp_uninstall() -> Result<worktrees_core::codexmcp::Outcome, String> {
+    worktrees_core::codexmcp::uninstall()
 }
 
 // ── per-project config surface (the Project sheet, proposal §10) ─────────────
@@ -4566,10 +4607,11 @@ async fn place_plan(app: AppHandle, root: String) -> Result<worktrees_core::plan
 /// place may be on an ADOPTED session whose name is not the canonical one, and
 /// the frontend already holds the real name from `ls`.
 #[tauri::command]
-async fn plan_prompt(session: String) -> Result<(), String> {
+async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), String> {
     // Addressed by the AI's pane, not by an index (`tmux::ai_pane`), and an
     // honest error when no Claude is there rather than a paste onto a shell.
-    let ai_word = profile::ai_word_of(&config::resolve_ai_cmd(None));
+    let ai_word = provider.as_deref().unwrap_or("claude");
+    if ai_word != "claude" && ai_word != "codex" { return Err("unknown agent provider".into()); }
     tmux::paste_to_ai(&session, &ai_word, ops::PLAN_PROMPT)?;
     applog("info", &format!("plan_prompt: pasted into {session}"));
     Ok(())
@@ -7056,6 +7098,9 @@ pub fn run() {
             mcp_status,
             mcp_install,
             mcp_uninstall,
+            codex_mcp_status,
+            codex_mcp_install,
+            codex_mcp_uninstall,
             project_config_read,
             doctor,
             place_health,

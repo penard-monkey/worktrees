@@ -272,14 +272,11 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   [[ "$output" != *'Not inside a git repository'* ]]
 }
 
-# Two halves of the same rule, and the suite gets the first one for free: the
-# bats harness runs with WORKTREES_AI_CMD=fake-ai, so this machine is BY
-# DEFINITION not a claude machine, and the honest answer is "none of this
-# applies" rather than "not installed" — a nudge to set up an MCP server for a
-# program you do not run is pure noise.
-@test "mcp --status is not-applicable when the AI command is not claude" {
+# Claude MCP is independent of the configured default: both providers can run
+# in one place, and the setup state remains inspectable for each of them.
+@test "mcp --status reports Claude independently of the default AI command" {
   run bash -c "cd '$BATS_TEST_TMPDIR' && HOME='$BATS_TEST_TMPDIR' '$WT_BIN' mcp --status --json"
-  [[ "$output" == *'"state":"not-applicable"'* ]]
+  [[ "$output" == *'"state":"absent"'* ]]
   [[ "$output" == *'"ai_cmd":"fake-ai"'* ]]
 }
 
@@ -360,4 +357,14 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   [ -n "$entry" ]
   grep -q '"status": "findings"' "$entry"
   grep -q '"trigger": "mcp"' "$entry"
+}
+
+@test "mcp --status --ai codex reads Codex configuration independently" {
+  local codex_home="$BATS_TEST_TMPDIR/codex-home"
+  mkdir -p "$codex_home"
+  printf '[mcp_servers.worktrees]\ncommand = "%s"\nargs = ["mcp", "--mutations"]\n' "$WT_BIN" > "$codex_home/config.toml"
+  run env CODEX_HOME="$codex_home" "$WT_BIN" mcp --status --ai codex --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"state":"installed"'* ]]
+  [[ "$output" == *'"mutations":true'* ]]
 }
