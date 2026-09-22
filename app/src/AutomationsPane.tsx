@@ -864,8 +864,12 @@ export function AutomationsPane({
       const r = await invoke<Run>("get_run", { repo, id });
       setRun(r ?? null);
     } catch (e) {
+      // Back to the lists, not a permanent "reading…": `get_run` refuses an id
+      // the ledger does not hold, which is what an open report of a run whose
+      // automation was just deleted looks like. The banner says why.
       onError(e);
       setRun(null);
+      setOpenId(null);
     }
   }, [repo, onError]);
 
@@ -1000,6 +1004,26 @@ export function AutomationsPane({
       onClose={() => { setSeed(null); setDialogErr(null); }}
     />
   );
+
+  // `openId` set with no `run` yet is the tick between opening a row and
+  // `get_run` answering. Falling through to the lists for that tick would
+  // flash them — and a run started from a row opens its report immediately,
+  // so that tick happens on every Run now.
+  if (openId && !run) {
+    return (
+      <div className="autopane" data-testid="automations-pane">
+        <div className="auto-run-h">
+          <button type="button" className="ctrl sm icon-only" data-testid="auto-back"
+            aria-label="Back to the automations list" title="Back" onClick={() => setOpenId(null)}>
+            <Icons.ChevronLeft size={12} />
+          </button>
+          <span className="auto-run-name">{nameOfAutomation(runs.find((r) => r.id === openId)?.automation ?? "")}</span>
+        </div>
+        <div className="auto-note">reading…</div>
+        {dialog}
+      </div>
+    );
+  }
 
   if (openId && run) {
     return (
