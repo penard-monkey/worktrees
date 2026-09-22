@@ -591,6 +591,12 @@ the same fix, and the same reason, as the offers band pinned outside
 `.settings-body` (CLAUDE.md). Measured, not eyeballed: `elementFromPoint` at
 its centre returns the band itself at 700px, and it is not inside `.sync-body`.
 
+The same question then had a second answer: §7.4's footer line — the profile a
+run launches as, and "It can never remove a worktree" — was scrolling too. That
+line is a PERMISSIONS statement about the button directly under it, so it is
+pinned beside the refusal rather than left as the last row of the form. Both
+are measured the same way, and both are now in the viewport at 700px.
+
 **Still owed, and not verifiable from the harness.** The mock answers instantly
 and is Chrome; the app is WKWebView with a real runner. Three things need a
 hand: one real run in `sandbox.sh --app` (does the in-process thread finish, does

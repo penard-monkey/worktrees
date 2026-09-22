@@ -717,15 +717,20 @@ export function AutomationDialog({ seed, projectName, profileName, busy, error, 
             </label>
           </div>
 
-          <div className="auto-foot-note">
-            Runs headless as this project's AI profile {profileName ? <b>{profileName}</b> : <i>(the default)</i>}. It can never remove a worktree.
-          </div>
         </div>
-        {/* ⚠ OUTSIDE `.sync-body`, which is the modal's only scrolling child.
-            Inside it the refusal rendered below the fold at 700px — you press
-            Save, nothing appears to happen, and the reason is a scroll away.
-            Same fix, and the same reason, as the offers band pinned outside
+        {/* ⚠ BOTH of these are OUTSIDE `.sync-body`, the modal's only scrolling
+            child, and for the same reason: inside it they sat below the fold at
+            700px. A refusal you have to scroll to find reads as "Save did
+            nothing" — the silent failure the never-swallow-an-error rule exists
+            to prevent, arrived at through layout instead of through code — and
+            the line naming the profile a run launches as, and swearing it can
+            never remove a worktree, is a PERMISSIONS statement that has to be
+            readable at the moment you press the button, not after it. Same fix,
+            and the same reason, as the offers band pinned outside
             `.settings-body` (CLAUDE.md). */}
+        <div className="auto-foot-note auto-dialog-note">
+          Runs headless as this project's AI profile {profileName ? <b>{profileName}</b> : <i>(the default)</i>}. It can never remove a worktree.
+        </div>
         {error && <div className="sync-err auto-dialog-err" data-testid="auto-dialog-error">{error}</div>}
         <footer className="sync-foot">
           <button className="ctrl" onClick={onClose} disabled={busy}>Cancel</button>
