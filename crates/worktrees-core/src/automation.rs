@@ -583,8 +583,10 @@ fn run_inner(p: &Project, ui: &mut dyn Ui, slug: &str, opts: RunOpts) -> Result<
     for w in seam.warnings() {
         ui.warn(&w);
     }
-    crate::profile::claude_launch_check(&ai.cmd, &ai.match_word)
-        .map_err(|e| format!("automations need the claude CLI: {e}"))?;
+    // Passed through unchanged: the guard's messages already name the cause and
+    // the fix, and a prefix here produced "automations need the claude CLI:
+    // this project's ai_cmd is `none`, and a headless run needs the claude CLI".
+    crate::profile::claude_launch_check(&ai.cmd, &ai.match_word)?;
 
     let started = runs::run_now();
     let id = match opts.id {
