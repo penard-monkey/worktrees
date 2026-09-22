@@ -347,7 +347,14 @@ function FindingCard({ run, finding, index, place, busy, onSelectPlace, onApply 
             if (done) {
               return (
                 <span key={key} className="auto-prop-done">
-                  <button type="button" className="ctrl sm" disabled title={done.output}>
+                  {/* Disabled, so it records nothing — but `usage-check.mjs`
+                      keys a button on its `title` when nothing else names it,
+                      and this title is what the CALL said, i.e. model-adjacent
+                      free text. The key has to be a constant that lives in
+                      this repo's source, so it is a literal testid and not the
+                      interpolated one that would have been more convenient. */}
+                  <button type="button" className="ctrl sm" disabled
+                    data-testid="auto-applied" title={done.output}>
                     Applied ✓
                   </button>
                   {!done.ok && <span className="auto-prop-err">{done.output}</span>}
