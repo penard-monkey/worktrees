@@ -25,6 +25,8 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
   worktrees doctor [<name>]             report file drift, declared and un- (--json --strict --config-only)
   worktrees status <name>               health verdict for one worktree (--json)
+  worktrees automations [ls|add|rm]     briefs Claude runs across this project
+  worktrees automations run <slug>      run one now (0 clean, 2 findings, 1 failed)
   worktrees show <file>                 ask the worktrees app to open a document
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
@@ -165,6 +167,15 @@ fn run() -> i32 {
         // Read-only, so deliberately absent from MUTATING above — a health
         // verdict is part of finding out what a tree is, like `ls` and `doctor`.
         "status" => ops::cmd_status(&project, &mut ui, rest),
+        // Read-only as a VERB — `ls`, `runs` and `show` are the common case —
+        // so it is deliberately absent from MUTATING above. The subcommands
+        // that DO write (add/edit/rm/run/apply) carry the hub-copy guard
+        // themselves, inside `cmd_automations`, because a whole-verb entry here
+        // would refuse `automations ls` on a hub copy, which is one of the ways
+        // you find out what a tree is.
+        "automations" | "auto" => {
+            worktrees_core::automation::cmd_automations(&project, &mut ui, rest)
+        }
         // Read-only in the same sense as `status`: it writes a request into
         // `~/.cache/worktrees/inbox` and touches nothing in the repo, so it is
         // deliberately absent from MUTATING.

@@ -15,6 +15,15 @@ use crate::sysclock::now_epoch;
 pub const IDLE_WINDOW_SECS: i64 = 7 * 24 * 3600;
 const STORE_FILE: &str = ".worktrees.places.json";
 
+/// The declared lifecycle vocabulary — the closed set `set_lifecycle` accepts.
+///
+/// Here rather than in whichever surface needed it first: the MCP server
+/// validates a model's argument against it, and `runs::apply_proposal`
+/// validates a *run's* proposal against it, and two lists would be two answers
+/// to the same question. (The app keeps its own copy in `lib.rs` because
+/// `dnd-check.mjs` mirrors that one into the frontend.)
+pub const LIFECYCLE_LABELS: [&str; 4] = ["closed", "saved", "archived", "abandoned"];
+
 // Serialize all in-process writes (Tauri multi-window = same process).
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -110,11 +119,16 @@ fn store_path(repo: &str) -> PathBuf {
 
 /// The first time this repo gets a store, teach the repo to ignore it.
 ///
-/// `.worktrees.places.json`, `.worktrees/` and `.worktrees-sync/` (the backups a
-/// pull leaves behind) are per-MACHINE state — `sync` ferries them between
-/// machines out-of-band, and excludes its own directory from the transfer — so a
-/// repo that just acquired one should not answer `git status` with an untracked
-/// file the tool itself wrote.
+/// `.worktrees.places.json`, `.worktrees.automations.json`, `.worktrees/` and
+/// `.worktrees-sync/` (the backups a pull leaves behind) are per-MACHINE state
+/// — `sync` ferries them between machines out-of-band, and excludes its own
+/// directory from the transfer — so a repo that just acquired one should not
+/// answer `git status` with an untracked file the tool itself wrote.
+///
+/// ONE function and ONE list for every sidecar this tool writes, called by
+/// `store::edit` and by `automation::write` alike: two of these would mean two
+/// headers in the same file, and whichever sidecar was created second would
+/// append its own block below the first.
 /// `.git/info/exclude` rather than `.gitignore` because the choice is this
 /// checkout's, not the project's: it is never committed, and it never hides a
 /// TRACKED file, so a user who deliberately committed the store is unaffected.
@@ -123,7 +137,8 @@ fn store_path(repo: &str) -> PathBuf {
 /// whose `.git` is not a directory (a bats fake fixture, a plain dir) is skipped
 /// silently. Pure `std::fs`: this repo counts subprocesses, and a `git` call on
 /// the write path would show up in `spawn-count.sh`.
-fn exclude_app_state(base: &Path) {
+pub(crate) fn exclude_app_state(base: &Path) {
+    const HEADER: &str = "# worktrees — per-machine app state (moved by `worktrees sync`, not git)";
     let info = base.join(".git");
     if !info.is_dir() {
         return;
@@ -134,10 +149,15 @@ fn exclude_app_state(base: &Path) {
     }
     let path = info.join("exclude");
     let existing = fs::read_to_string(&path).unwrap_or_default();
-    let missing: Vec<&str> = ["/.worktrees.places.json", "/.worktrees/", "/.worktrees-sync/"]
-        .into_iter()
-        .filter(|want| !existing.lines().any(|l| l == *want))
-        .collect();
+    let missing: Vec<&str> = [
+        "/.worktrees.places.json",
+        "/.worktrees.automations.json",
+        "/.worktrees/",
+        "/.worktrees-sync/",
+    ]
+    .into_iter()
+    .filter(|want| !existing.lines().any(|l| l == *want))
+    .collect();
     if missing.is_empty() {
         return;
     }
@@ -145,7 +165,14 @@ fn exclude_app_state(base: &Path) {
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str("# worktrees — per-machine app state (moved by `worktrees sync`, not git)\n");
+    // The header is written ONCE per file. A repo whose exclude block predates a
+    // new entry gains the entry and not a second header — which is what a repo
+    // upgraded across this change actually meets, and what a second writer
+    // (`automation.rs`) would otherwise produce on its own first write.
+    if !out.lines().any(|l| l == HEADER) {
+        out.push_str(HEADER);
+        out.push('\n');
+    }
     for line in missing {
         out.push_str(line);
         out.push('\n');
@@ -403,6 +430,10 @@ mod tests {
             "the store itself must be excluded: {after_first}"
         );
         assert!(
+            after_first.lines().any(|l| l == "/.worktrees.automations.json"),
+            "the automations sidecar must be excluded too — same class of file,              written by the same tool, and `git status` names it the same way: {after_first}"
+        );
+        assert!(
             after_first.lines().any(|l| l == "/.worktrees/"),
             "the worktrees dir must be excluded: {after_first}"
         );
@@ -441,6 +472,7 @@ mod tests {
         assert!(body.starts_with("# git ls-files"), "existing content stays first: {body}");
         assert!(body.lines().any(|l| l == "*.swp"), "the user's own rule survives: {body}");
         assert!(body.lines().any(|l| l == "/.worktrees.places.json"), "{body}");
+        assert!(body.lines().any(|l| l == "/.worktrees.automations.json"), "{body}");
         assert!(body.lines().any(|l| l == "/.worktrees/"), "{body}");
         assert!(body.lines().any(|l| l == "/.worktrees-sync/"), "{body}");
     }
@@ -463,6 +495,38 @@ mod tests {
         assert_eq!(count("/.worktrees.places.json"), 1, "no duplicate: {body}");
         assert_eq!(count("/.worktrees/"), 1, "no duplicate: {body}");
         assert_eq!(count("/.worktrees-sync/"), 1, "the one it lacked, once: {body}");
+        assert_eq!(count("/.worktrees.automations.json"), 1, "the other one it lacked: {body}");
+    }
+
+    /// The shape a repo UPGRADED across a new sidecar meets: the block is
+    /// already there, under its header, and one line is missing. It gains the
+    /// line and NOT a second header — the header is a comment, so nothing
+    /// complains about a duplicate, and it is below where the eye stops.
+    #[test]
+    fn an_exclude_block_that_predates_an_entry_gains_no_second_header() {
+        let t = tmp("exclude-header");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::create_dir_all(t.0.join(".git/info")).unwrap();
+        let exclude = t.0.join(".git/info/exclude");
+        fs::write(
+            &exclude,
+            "# worktrees — per-machine app state (moved by `worktrees sync`, not git)\n             /.worktrees.places.json\n/.worktrees/\n/.worktrees-sync/\n",
+        )
+        .unwrap();
+
+        edit(&repo, "alpha", |d| d.pinned = Some(true)).unwrap();
+
+        let body = fs::read_to_string(&exclude).unwrap();
+        assert_eq!(
+            body.lines().filter(|l| l.starts_with("# worktrees —")).count(),
+            1,
+            "exactly one header: {body}"
+        );
+        assert_eq!(
+            body.lines().filter(|l| *l == "/.worktrees.automations.json").count(),
+            1,
+            "{body}"
+        );
     }
 
     /// The store is written for things that are not repos at all — bats' fake

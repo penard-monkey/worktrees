@@ -6,6 +6,7 @@
 //! declared store, and rendering. See MIGRATION.md.
 
 pub mod agent;
+pub mod automation;
 pub mod config;
 pub mod derive;
 pub mod diag;
@@ -21,11 +22,13 @@ pub mod mention;
 pub mod model;
 pub mod ops;
 pub mod plan;
+pub mod proc;
 pub mod profile;
 pub mod projcfg;
 pub mod project;
 pub mod provision;
 pub mod render;
+pub mod runs;
 pub mod skillstore;
 pub mod store;
 pub mod sync;
