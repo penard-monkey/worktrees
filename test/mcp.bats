@@ -294,3 +294,70 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   # The command is always spelled out, so the UI (and a human) can run it by hand.
   [[ "$output" == *'claude mcp add -s user worktrees --'* ]]
 }
+
+# ── automations ──────────────────────────────────────────────────────────────
+
+# The recursion guard (proposal §4.5), end to end over the real transport. A run
+# HOLDS this server, so `run_automation` reaching it would let a brief spawn
+# runs, and `upsert_automation` would let one rewrite the job it is executing.
+# `remove_worktree` is on the list for the other reason: an unattended caller
+# never reaches the one path that can destroy commits.
+#
+# Both halves are asserted. The tool list is advice — a model with the name from
+# a document walks straight past a missing entry — so the call has to refuse too.
+@test "inside a run the server hides the automation mutations and remove_worktree" {
+  export WORKTREES_RUN_ID=2026-09-22T08-02-11Z-sweep
+  mcp "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  [ "$status" -eq 0 ]
+  for gone in upsert_automation delete_automation run_automation apply_proposal remove_worktree; do
+    [[ "$output" != *"\"name\":\"$gone\""* ]] || { echo "$gone was advertised inside a run"; false; }
+  done
+  # Reads survive: a brief must still be able to say "compare with yesterday".
+  [[ "$output" == *'"name":"list_automations"'* ]]
+  [[ "$output" == *'"name":"list_runs"'* ]]
+  [[ "$output" == *'"name":"get_run"'* ]]
+  [[ "$output" == *'"name":"list_places"'* ]]
+
+  mcp "--mutations" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_automation","arguments":{"slug":"sweep"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [[ "$output" == *'inside an automation run'* ]]
+}
+
+# Outside a run the same server offers them — otherwise the test above would
+# pass on a server that simply never had the tools.
+@test "outside a run the mutating automation tools are advertised" {
+  mcp "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  for want in upsert_automation delete_automation run_automation apply_proposal; do
+    [[ "$output" == *"\"name\":\"$want\""* ]] || { echo "$want missing"; false; }
+  done
+}
+
+# `run_automation` is async BY CONSTRUCTION: it spawns `current_exe()` and does
+# not wait. A unit test cannot exercise that — under `cargo test`, `current_exe`
+# is the test harness — so this is the one place the real binary re-enters
+# itself, with the child inheriting the fake claude, the fake tmux and the
+# isolated state dir from this server's environment.
+@test "run_automation returns an id at once and the child finishes the run" {
+  export XDG_STATE_HOME="$BATS_TEST_TMPDIR/state"
+  install_fake_claude
+  export WORKTREES_AI_CMD=claude
+  export FAKE_CLAUDE_FINDINGS="$BATS_TEST_TMPDIR/findings.json"
+  echo '{"findings":[{"slug":"(main)","text":"Nothing pushed."}]}' > "$FAKE_CLAUDE_FINDINGS"
+  run_wt automations add --name Sweep --brief "look at everything"
+  [ "$status" -eq 0 ]
+
+  mcp "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_automation","arguments":{"slug":"sweep"}}}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'\"status\":\"running\"'* ]]
+  [[ "$output" == *'-sweep'* ]]
+
+  # The child is detached, so the ledger is polled rather than waited on.
+  for _ in $(seq 1 60); do
+    entry="$(find "$XDG_STATE_HOME/worktrees/runs" -name '*-sweep.json' 2>/dev/null | head -n1)"
+    [ -n "$entry" ] && grep -q '"status": "findings"' "$entry" && break
+    sleep 0.5
+  done
+  [ -n "$entry" ]
+  grep -q '"status": "findings"' "$entry"
+  grep -q '"trigger": "mcp"' "$entry"
+}

@@ -404,3 +404,82 @@ Phase 1 alone already replaces this repo's hand-run close-out sweep.
    subscription. Worth a per-automation `max_turns`? Default first, measure.
 4. **Is `-p` writing a session probe?** (§4.3) — measure once in the sandbox
    before phase 1 lands; the cwd rule holds regardless.
+
+---
+
+## 11. Answers — 2026-09-22, after building phase 1a
+
+Phase 1a is core + CLI + MCP (the app surface is 1b). What the design above got
+wrong or left open, and what was decided instead.
+
+**§5's example epochs are a year out.** `2026-09-22T08-02-11Z` is paired with
+`1758528131`, which is 2025-09-22; `created_epoch: 1758520800` is the same
+mistake. The *shape* of the id is the contract and it is unchanged — the numbers
+beside it were hand-written. The unit test pins both, so the document and the
+code can be compared without arithmetic.
+
+**§4.2's "the run may write its proposals" needed a closed tool set with a
+reason attached to every refusal.** A proposal whose `tool` is outside
+`set_lifecycle`/`set_note`/`set_pin`/`close_session` is dropped — but so is one
+whose `args.slug` does not match the finding it sits under, which §5 does not
+mention and which is the more likely mistake: a finding about one place
+carrying a button that changes another. Everything refused lands in `dropped`
+with the reason, which is a field §5's example shows as absent rather than as
+empty.
+
+**A missing `findings.json` is a FAILED run, not a clean one.** §6.1 step 6
+says "validates findings.json" without saying what an absent one means. It has
+to be a failure: a run that reported "all is well" because claude never wrote
+the file is the most expensive kind of wrong — a sweep you stop reading because
+it never says anything. Same for a non-zero exit, where the error carries the
+stderr tail.
+
+**`turns` cannot be filled in.** §5 shows `"turns": 12`. `claude -p` does not
+report how many turns it used, and `--max-turns` is a ceiling, not a
+measurement. The field stays `null` in phase 1 rather than carrying the ceiling
+as though it were the count; a ledger entry that looks measured and is not is
+worse than an honest gap. (`seconds` IS measured.)
+
+**The run id needs a collision rule, which §5 does not give it.** Two runs of
+one automation inside a second is what an MCP call plus a manual retry looks
+like, and under the test clock every run in a bats case shares one second.
+`-2`, `-3`… and the list's tiebreak is the id, descending.
+
+**Deleting an automation must delete its runs.** Not stated anywhere. Ledger
+entries are keyed on the slug, so leaving them would hand the next automation
+that happens to derive the same slug a stranger's history.
+
+**The in-run guard is a separate flag, not a third value of `mutations`.**
+§4.2 says "the tier can only narrow the profile, never widen it". Making that
+structural rather than a rule someone must remember: `Server.in_run` is read
+once from `WORKTREES_RUN_ID` and applied LAST, as a `retain` over whatever the
+tiers above granted. It can only subtract. Both halves are gated — `tools()`
+hides them and `call` refuses them with the reason — because a tool list is
+advice and a model with the name from a document walks past a missing entry.
+
+**`run_automation` needed an `already_running` answer of its own.** §6.3 says
+it returns the run id. It cannot always: when the lock is held there is no new
+run to name, and answering with an id the caller would then poll forever is
+worse than saying so. The lock is checked in the SERVER, before the spawn,
+because the answer has to arrive in milliseconds and the child would only reach
+it after materialising the profile.
+
+**`mark_run_seen` and the `worktrees:run://` resource are not in phase 1a.**
+§6.3 lists both; §8 puts unread in phase 2, which is where the ack belongs —
+`seen_epoch` is in the schema and nothing writes it yet.
+
+**Two things moved into core that §6.1 only mentions in passing.**
+`run_deadline` (named) and `claude_launch_check` (not named) both had to leave
+`lib.rs`: the second is the guard that reads the COMPOSED command rather than
+`match_word`, and a headless runner without it would execute the fail-closed
+`printf` sentinel and treat its message as claude's report. `store::edit`'s
+`.git/info/exclude` maintenance also grew a rule it did not have — the header
+is written once per file, or the second sidecar to be created appends its own
+block below the first.
+
+**Still open after building.** §10.2 (keep the full `health::Report` per place
+in `facts`): kept, with the 50-per-automation retention, and the working
+directory is deleted with the entry rather than left behind. §10.3 (cost) and
+§10.4 (does `-p` write a session probe) are both measurements, and both are now
+checklist items in `docs/ai-profiles-manual-checks.md` §12 rather than
+assertions in this document.
