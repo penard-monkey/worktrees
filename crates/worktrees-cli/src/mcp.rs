@@ -40,7 +40,7 @@
 use std::io::{BufRead, Read, Write};
 
 use worktrees_core::mention::uri_map;
-use worktrees_core::{ops, store, ui::CaptureUi, Project};
+use worktrees_core::{automation, ops, runs, store, ui::CaptureUi, Project};
 
 /// Pick the protocol version to answer `initialize` with: echo what the client
 /// asked for when we know it, else our newest. Free function so the test
@@ -87,10 +87,32 @@ struct Server {
     /// it costs a model nothing to read.
     project: Option<Project>,
     mutations: bool,
+    /// This server is being held BY an automation run (`WORKTREES_RUN_ID` is in
+    /// the process env). Recursion guard, proposal §4.5: if `run_automation`
+    /// were visible to a run, a brief could spawn runs — and a run that could
+    /// edit or delete automations could rewrite the job it is executing.
+    ///
+    /// It only ever NARROWS. `--mutations` and the profile's
+    /// `worktrees_mcp_mutations` decide what a session may do; this subtracts
+    /// from that and can never add, which is why it is a separate bool rather
+    /// than a third value of `mutations`.
+    in_run: bool,
     /// Set when `notifications/initialized` arrives. Shared with the watcher
     /// thread, which must not emit before it.
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// Tools that vanish inside a run, whatever `--mutations` says. `remove_worktree`
+/// is on the list for a different reason from the rest: it is not about
+/// recursion but about blast radius — an unattended caller never goes near the
+/// one path in this codebase that can destroy commits (proposal §4.2).
+const HIDDEN_IN_RUN: [&str; 5] = [
+    "upsert_automation",
+    "delete_automation",
+    "run_automation",
+    "apply_proposal",
+    "remove_worktree",
+];
 
 /// Longest free-text field (a branch or upstream name, a commit subject, an
 /// agent's name) copied into a resource body. These are written by other
@@ -213,7 +235,12 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     let watch = project
         .as_ref()
         .map(|p| (p.wt_root_dir().to_string(), format!("{}/.worktrees.places.json", p.main_root)));
-    let mut server = Server { project, mutations, ready: ready.clone() };
+    // Read ONCE at startup, from this process's own environment: the runner
+    // sets it on the claude it launches, and claude passes its environment to
+    // the MCP servers it starts. A per-call read would be the same answer with
+    // more places to forget it.
+    let in_run = std::env::var("WORKTREES_RUN_ID").is_ok_and(|v| !v.trim().is_empty());
+    let mut server = Server { project, mutations, in_run, ready: ready.clone() };
 
     if let Some((wt_root, places_file)) = watch {
         spawn_list_watcher(wt_root, places_file, ready);
@@ -478,6 +505,51 @@ impl Server {
                 false,
                 false,
             ),
+            tool(
+                "list_automations",
+                "List this project's automations: a brief Claude runs across every worktree,                  on a schedule or when asked. Each row carries its last run's result.",
+                serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                true,
+                false,
+            ),
+            tool(
+                "get_automation",
+                "One automation in full, including the brief it runs.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "slug": { "type": "string" } },
+                    "required": ["slug"],
+                    "additionalProperties": false
+                }),
+                true,
+                false,
+            ),
+            tool(
+                "list_runs",
+                "The run ledger for this project, newest first: id, status, how many findings.                  Summaries only — call get_run for the facts, the findings and the report.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "automation": { "type": "string", "description": "Slug to filter by. Optional." },
+                        "limit": { "type": "integer", "description": "How many rows. Default 20." }
+                    },
+                    "additionalProperties": false
+                }),
+                true,
+                false,
+            ),
+            tool(
+                "get_run",
+                "One run in full: the facts it gathered, its findings and their proposals,                  anything it dropped, and Claude's written report.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"],
+                    "additionalProperties": false
+                }),
+                true,
+                false,
+            ),
         ];
         if self.mutations {
             t.push(tool(
@@ -557,6 +629,75 @@ impl Server {
                 false,
                 true,
             ));
+            t.push(tool(
+                "upsert_automation",
+                "Create or edit an automation. Pass `slug` to edit an existing one; leave it out                  to create, and the slug is derived from `name` once, at creation. The brief is                  prose: say what Claude should look at and what to report.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "slug": { "type": "string", "description": "Edit this one. Omit to create." },
+                        "name": { "type": "string" },
+                        "brief": { "type": "string", "description": "What Claude should do, as prose." },
+                        "when": {
+                            "type": "object",
+                            "description": "{\"kind\":\"manual\"} | {\"kind\":\"daily\",\"at\":\"HH:MM\"} | {\"kind\":\"weekly\",\"day\":\"mon\",\"at\":\"HH:MM\"}"
+                        },
+                        "scope": { "type": "string", "enum": ["all", "brief"] },
+                        "tier": { "type": "string", "enum": ["report"], "description": "Report-only is the only tier there is." },
+                        "enabled": { "type": "boolean" }
+                    },
+                    "additionalProperties": false
+                }),
+                false,
+                false,
+            ));
+            t.push(tool(
+                "delete_automation",
+                "Delete an automation AND every run it recorded. Not reversible.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "slug": { "type": "string" } },
+                    "required": ["slug"],
+                    "additionalProperties": false
+                }),
+                false,
+                true,
+            ));
+            t.push(tool(
+                "run_automation",
+                "Start an automation now. Returns immediately with the run's id — the run itself                  takes minutes. Poll list_runs or get_run for the result. A run never removes a                  worktree; it reports, and proposes.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "slug": { "type": "string" } },
+                    "required": ["slug"],
+                    "additionalProperties": false
+                }),
+                false,
+                false,
+            ));
+            t.push(tool(
+                "apply_proposal",
+                "Make the one call a run proposed: run id, finding index, proposal index (both                  0-based, as get_run lists them). This is how a proposal is acted on without                  retyping its arguments.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "run_id": { "type": "string" },
+                        "finding": { "type": "integer" },
+                        "proposal": { "type": "integer" }
+                    },
+                    "required": ["run_id", "finding", "proposal"],
+                    "additionalProperties": false
+                }),
+                false,
+                false,
+            ));
+        }
+        // The recursion guard, applied LAST so it subtracts from whatever the
+        // tiers above granted and can never add to it (§4.5). Both halves — the
+        // list and `call` — are gated, because a list is advice and a call is
+        // the gate.
+        if self.in_run {
+            t.retain(|x| !HIDDEN_IN_RUN.contains(&x["name"].as_str().unwrap_or_default()));
         }
         t
     }
@@ -573,6 +714,18 @@ impl Server {
             Some(_) => return Err("params.arguments must be an object".into()),
         };
         let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        // The recursion guard, said out loud. `tools()` already hides these
+        // inside a run, so the branch below would refuse them as "unknown" —
+        // and that reads as a broken server to a model that has the name from
+        // a doc. Saying WHY is the difference between a wall and a rule.
+        if self.in_run && HIDDEN_IN_RUN.contains(&name) {
+            return Ok(text_err(&format!(
+                "{name} is not available inside an automation run: a run reports and proposes, \
+                 it does not change automations, start runs, apply proposals or remove worktrees. \
+                 Write the finding instead."
+            )));
+        }
 
         // A tool the server did not advertise must not be callable, or
         // `--mutations` would be advisory rather than a gate.
@@ -661,7 +814,10 @@ impl Server {
                     Err(e) => return Ok(text_err(&e)),
                 };
                 let life = s("lifecycle");
-                if !["closed", "saved", "archived", "abandoned"].contains(&life.as_str()) {
+                // core's list, not a copy: `runs::apply_proposal` validates a
+                // RUN's proposal against the same one, and two literals here
+                // would be two answers to "what is a lifecycle".
+                if !store::LIFECYCLE_LABELS.contains(&life.as_str()) {
                     return Ok(text_err(&format!("invalid lifecycle: {life}")));
                 }
                 self.meta(&slug, |d| d.lifecycle = Some(life.clone()))
@@ -769,6 +925,201 @@ impl Server {
                 };
                 let args = vec![slug, "-y".to_string()];
                 Ok(self.run_op(move |p, ui| ops::cmd_rm(p, ui, &args)))
+            }
+            "list_automations" => {
+                let project = self.proj()?;
+                let (store, warnings) = automation::read_reporting(&project.main_root);
+                let last = runs::last_by_automation(&project.main_root);
+                let rows: Vec<serde_json::Value> = store
+                    .automations
+                    .iter()
+                    .map(|(slug, a)| automation::row_json(slug, a, last.get(slug)))
+                    .collect();
+                // An entry this binary could not read is REPORTED, not silently
+                // missing: "you have three automations" when the file holds four
+                // is the kind of wrong a model repeats to the user as fact.
+                Ok(text_ok(
+                    &serde_json::to_string_pretty(&serde_json::json!({
+                        "automations": rows,
+                        "unreadable": warnings,
+                    }))
+                    .unwrap_or_default(),
+                ))
+            }
+            "get_automation" => {
+                let project = self.proj()?;
+                let slug = match safe_arg(&s("slug"), "slug") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                let store = automation::read_lenient(&project.main_root);
+                match store.automations.get(&slug) {
+                    Some(a) => {
+                        let last = runs::last_by_automation(&project.main_root);
+                        let mut v = automation::row_json(&slug, a, last.get(&slug));
+                        v["brief"] = serde_json::json!(a.brief);
+                        Ok(text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default()))
+                    }
+                    None => Ok(text_err(&format!("no such automation: {slug}"))),
+                }
+            }
+            "list_runs" => {
+                let project = self.proj()?;
+                let filter = s("automation");
+                let filter = if filter.trim().is_empty() { None } else { Some(filter) };
+                let limit = a.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).min(200) as usize;
+                let rows: Vec<serde_json::Value> = runs::list(&project.main_root, filter.as_deref())
+                    .iter()
+                    .take(limit)
+                    .map(|r| r.summary())
+                    .collect();
+                Ok(text_ok(&serde_json::to_string_pretty(&rows).unwrap_or_default()))
+            }
+            "get_run" => {
+                let project = self.proj()?;
+                match runs::read(&project.main_root, &s("id")) {
+                    Ok(r) => Ok(text_ok(&serde_json::to_string_pretty(&r).unwrap_or_default())),
+                    Err(e) => Ok(text_err(&e)),
+                }
+            }
+            "upsert_automation" => {
+                let project = self.proj()?;
+                let raw_slug = s("slug");
+                let slug = if raw_slug.trim().is_empty() {
+                    None
+                } else {
+                    match safe_arg(&raw_slug, "slug") {
+                        Ok(v) => Some(v),
+                        Err(e) => return Ok(text_err(&e)),
+                    }
+                };
+                let mut patch = automation::Patch::default();
+                if let Some(v) = a.get("name").and_then(|v| v.as_str()) {
+                    patch.name = Some(v.to_string());
+                }
+                if let Some(v) = a.get("brief").and_then(|v| v.as_str()) {
+                    patch.brief = Some(v.to_string());
+                }
+                if let Some(v) = a.get("enabled").and_then(|v| v.as_bool()) {
+                    patch.enabled = Some(v);
+                }
+                if let Some(v) = a.get("scope").and_then(|v| v.as_str()) {
+                    match automation::Scope::parse(v) {
+                        Some(x) => patch.scope = Some(x),
+                        None => return Ok(text_err(&format!("scope must be all or brief (got {v})"))),
+                    }
+                }
+                if let Some(v) = a.get("tier").and_then(|v| v.as_str()) {
+                    match automation::Tier::parse(v) {
+                        Some(x) => patch.tier = Some(x),
+                        None => return Ok(text_err(&format!(
+                            "tier must be report — it is the only one that exists (got {v})"
+                        ))),
+                    }
+                }
+                if let Some(v) = a.get("when") {
+                    match serde_json::from_value::<automation::When>(v.clone()) {
+                        Ok(w) => patch.when = Some(w),
+                        Err(e) => return Ok(text_err(&format!("when is malformed: {e}"))),
+                    }
+                }
+                let mut cap = CaptureUi::default();
+                match automation::upsert(&project.main_root, &mut cap, slug.as_deref(), patch) {
+                    Ok((slug, a)) => {
+                        let last = runs::last_by_automation(&project.main_root);
+                        let mut v = automation::row_json(&slug, &a, last.get(&slug));
+                        v["brief"] = serde_json::json!(a.brief);
+                        Ok(text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default()))
+                    }
+                    Err(e) => Ok(text_err(&e)),
+                }
+            }
+            "delete_automation" => {
+                let project = self.proj()?;
+                let slug = match safe_arg(&s("slug"), "slug") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                match automation::delete(&project.main_root, &slug) {
+                    Ok(()) => Ok(text_ok(&format!("deleted automation {slug} and its runs"))),
+                    Err(e) => Ok(text_err(&e)),
+                }
+            }
+            // ASYNC on purpose. A run is minutes of `claude -p`; an MCP call
+            // that blocked for it would hold the session's tool loop open the
+            // whole time and time out in most clients. So: mint the id here,
+            // spawn the runner detached, and answer with the id. `Command::spawn`
+            // and drop the child — on unix that is enough (no `setsid` needed:
+            // nothing waits, and the child's stdio is a file, not our pipe).
+            "run_automation" => {
+                let project = self.proj()?;
+                let slug = match safe_arg(&s("slug"), "slug") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                let store = automation::read_lenient(&project.main_root);
+                if !store.automations.contains_key(&slug) {
+                    return Ok(text_err(&format!("no such automation: {slug}")));
+                }
+                // Asked BEFORE spawning, because the answer has to arrive in
+                // milliseconds and the child would only discover this after the
+                // profile is materialised.
+                if automation::is_running(&project.main_root, &slug) {
+                    return Ok(text_ok(
+                        &serde_json::json!({ "already_running": true, "automation": slug })
+                            .to_string(),
+                    ));
+                }
+                let dir = match runs::ensure_ledger_dir(&project.main_root) {
+                    Ok(d) => d,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                let id = runs::new_id(&dir, &slug, runs::run_now());
+                let exe = match std::env::current_exe() {
+                    Ok(e) => e,
+                    Err(e) => return Ok(text_err(&format!("cannot find my own binary: {e}"))),
+                };
+                let log = dir.join(format!("{id}.spawn.log"));
+                let Ok(out) = std::fs::File::create(&log) else {
+                    return Ok(text_err(&format!("cannot write {}", log.display())));
+                };
+                let Ok(err) = out.try_clone() else {
+                    return Ok(text_err("cannot duplicate the spawn log handle"));
+                };
+                let mut cmd = std::process::Command::new(exe);
+                cmd.args(["automations", "run", &slug, "--id", &id, "--trigger", "mcp"])
+                    .current_dir(&project.main_root)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(out)
+                    .stderr(err);
+                match cmd.spawn() {
+                    Ok(child) => {
+                        drop(child); // deliberately not waited on — that IS the async
+                        Ok(text_ok(
+                            &serde_json::json!({ "id": id, "status": "running" }).to_string(),
+                        ))
+                    }
+                    Err(e) => Ok(text_err(&format!("could not start the runner: {e}"))),
+                }
+            }
+            "apply_proposal" => {
+                let run_id = s("run_id");
+                let (Some(f), Some(pr)) = (
+                    a.get("finding").and_then(|v| v.as_u64()),
+                    a.get("proposal").and_then(|v| v.as_u64()),
+                ) else {
+                    return Ok(text_err("finding and proposal must be 0-based integers"));
+                };
+                let project = self.proj()?;
+                let mut cap = CaptureUi::default();
+                match runs::apply_proposal(project, &mut cap, &run_id, f as usize, pr as usize) {
+                    Ok(act) => Ok(if act.ok {
+                        text_ok(&act.output)
+                    } else {
+                        text_err(&act.output)
+                    }),
+                    Err(e) => Ok(text_err(&e)),
+                }
             }
             other => Ok(text_err(&format!("unknown tool: {other}"))),
         }
@@ -1174,7 +1525,7 @@ mod tests {
     #[test]
     fn with_no_project_it_still_handshakes_and_advertises_no_tools() {
         use serde_json::json;
-        let mut server = Server { project: None, mutations: true, ready: Default::default() };
+        let mut server = Server { project: None, mutations: true, in_run: false, ready: Default::default() };
 
         let init = server
             .handle_line(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }).to_string())
@@ -1237,7 +1588,7 @@ mod tests {
         .unwrap();
 
         let project = Project::discover(&root).expect("a git repo");
-        let mut server = Server { project: Some(project), mutations: true, ready: Default::default() };
+        let mut server = Server { project: Some(project), mutations: true, in_run: false, ready: Default::default() };
 
         // Reading is how you find out WHAT this tree is — never refused.
         let r = server.call(&json!({ "name": "list_places", "arguments": {} })).unwrap();
@@ -1329,7 +1680,7 @@ mod tests {
 
         let names = |m: bool| -> Vec<String> {
             let p = Project::discover(&root).expect("a git repo");
-            Server { project: Some(p), mutations: m, ready: Default::default() }
+            Server { project: Some(p), mutations: m, in_run: false, ready: Default::default() }
                 .tools()
                 .iter()
                 .map(|t| t["name"].as_str().unwrap_or_default().to_string())
@@ -1339,7 +1690,7 @@ mod tests {
         assert!(names(true).contains(&"show_doc".to_string()), "--mutations server must offer it");
 
         let p = Project::discover(&root).expect("a git repo");
-        let mut server = Server { project: Some(p), mutations: true, ready: Default::default() };
+        let mut server = Server { project: Some(p), mutations: true, in_run: false, ready: Default::default() };
 
         // Relative resolves against the repo root, not the process cwd.
         let r = server.call(&json!({ "name": "show_doc", "arguments": { "path": "CLAUDE.md" } })).unwrap();
@@ -1380,7 +1731,7 @@ mod tests {
             .expect("git init")
             .success());
         let project = Project::discover(&base).expect("a git repo");
-        let server = Server { project: Some(project), mutations: false, ready: Default::default() };
+        let server = Server { project: Some(project), mutations: false, in_run: false, ready: Default::default() };
 
         let caps = server.initialize(&json!({ "protocolVersion": LATEST }))["capabilities"].clone();
         assert_eq!(caps["resources"]["listChanged"], json!(true));
@@ -1454,5 +1805,216 @@ mod tests {
         assert_eq!(v["jsonrpc"], serde_json::json!("2.0"));
         assert_eq!(v["error"]["code"], serde_json::json!(-32700));
         assert!(v["id"].is_null());
+    }
+
+    // ── automations ─────────────────────────────────────────────────────────
+
+    /// Serializes every test that writes `XDG_STATE_HOME`.
+    ///
+    /// The environment is PROCESS-global and `cargo test` runs these in
+    /// parallel, so without this each `set_var` would be visible to whichever
+    /// other test happened to resolve a ledger path at that instant — and the
+    /// suite would pass or fail on thread scheduling, which is the failure mode
+    /// CLAUDE.md records for `viewer::ISSUED`: green by accident, red on a
+    /// filtered run, with a message that blames the feature.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A throwaway git repo with an isolated `XDG_STATE_HOME`, so the ledger
+    /// these tests write is theirs and not the developer's. Holds `ENV_LOCK`
+    /// for the whole test.
+    struct Scratch {
+        base: std::path::PathBuf,
+        root: std::path::PathBuf,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+    fn scratch(tag: &str) -> Scratch {
+        // A panicking test poisons the mutex; taking the inner value anyway
+        // keeps one failure from cascading into "every other test hung".
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("wt-mcp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .expect("git init")
+            .success());
+        // The ledger is keyed on XDG_STATE_HOME; without this the test writes
+        // into ~/.local/state and reads back whatever a previous run left.
+        std::env::set_var("XDG_STATE_HOME", base.join("state"));
+        Scratch { base, root, _guard: guard }
+    }
+
+    fn server_at(root: &std::path::Path, mutations: bool, in_run: bool) -> Server {
+        Server {
+            project: Some(Project::discover(root).expect("a git repo")),
+            mutations,
+            in_run,
+            ready: Default::default(),
+        }
+    }
+
+    fn tool_names(s: &Server) -> Vec<String> {
+        s.tools().iter().map(|t| t["name"].as_str().unwrap_or_default().to_string()).collect()
+    }
+
+    /// The four combinations, in one place, because the rule is about how the
+    /// two gates COMPOSE: `--mutations` decides what a session may do, and the
+    /// in-run flag only ever subtracts from it. A third value of `mutations`
+    /// would have let a future edit make the run tier WIDER than the session's.
+    #[test]
+    fn the_in_run_guard_narrows_every_mutation_tier_and_never_widens_one() {
+        let sc = scratch("tiers");
+
+        let ro = tool_names(&server_at(&sc.root, false, false));
+        assert!(ro.contains(&"list_automations".into()), "reads are always there");
+        assert!(ro.contains(&"list_runs".into()));
+        assert!(!ro.contains(&"run_automation".into()), "a read-only server starts nothing");
+        assert!(!ro.contains(&"upsert_automation".into()));
+
+        let mu = tool_names(&server_at(&sc.root, true, false));
+        for want in ["upsert_automation", "delete_automation", "run_automation", "apply_proposal"] {
+            assert!(mu.contains(&want.to_string()), "--mutations must offer {want}: {mu:?}");
+        }
+
+        // Inside a run: the reads survive, every automation MUTATION and
+        // `remove_worktree` are gone — with --mutations and without.
+        for mutations in [true, false] {
+            let inr = tool_names(&server_at(&sc.root, mutations, true));
+            for gone in HIDDEN_IN_RUN {
+                assert!(!inr.contains(&gone.to_string()), "{gone} must vanish inside a run: {inr:?}");
+            }
+            assert!(inr.contains(&"list_automations".into()), "a run may still READ: {inr:?}");
+            assert!(inr.contains(&"get_run".into()), "so a brief can compare with yesterday");
+            assert!(inr.contains(&"list_places".into()));
+        }
+
+        // ...and the LIST is advice; `call` is the gate. Both halves, or a model
+        // with the name from a document walks straight past the missing entry.
+        let mut s = server_at(&sc.root, true, true);
+        for name in HIDDEN_IN_RUN {
+            let r = s.call(&serde_json::json!({ "name": name, "arguments": { "slug": "x", "confirm": true } })).unwrap();
+            assert_eq!(r["isError"], serde_json::json!(true), "{name} ran inside a run");
+            let text = r["content"][0]["text"].as_str().unwrap_or_default();
+            assert!(text.contains("inside an automation run"), "{name}: {text}");
+        }
+    }
+
+    /// Create → read → run → list, over the real server, with the one thing a
+    /// unit test can prove about `run_automation`: it ANSWERS rather than
+    /// blocking for the minutes a run takes. The child it spawns is
+    /// `current_exe()`, which under `cargo test` is the test harness rather than
+    /// the CLI — so what is asserted here is the async contract and the spawn
+    /// log, and `test/automations.bats` drives the real binary end to end.
+    #[test]
+    fn automations_round_trip_and_a_run_answers_immediately() {
+        let sc = scratch("crud");
+        let mut s = server_at(&sc.root, true, false);
+
+        let r = s
+            .call(&serde_json::json!({
+                "name": "upsert_automation",
+                "arguments": { "name": "Close-out candidates", "brief": "Look at every worktree." }
+            }))
+            .unwrap();
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", r["content"][0]["text"]);
+        let v: serde_json::Value =
+            serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(v["slug"], serde_json::json!("close-out-candidates"));
+        assert_eq!(v["when"]["kind"], serde_json::json!("manual"));
+        assert_eq!(v["tier"], serde_json::json!("report"));
+        assert!(v["last_run"].is_null(), "a fresh automation has never run");
+
+        // The BRIEF is on `get_automation` and not on the list — a list of five
+        // briefs is a list nobody reads.
+        let r = s.call(&serde_json::json!({ "name": "list_automations", "arguments": {} })).unwrap();
+        let body = r["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("close-out-candidates"), "{body}");
+        assert!(!body.contains("Look at every worktree"), "the list must not carry briefs: {body}");
+        let r = s
+            .call(&serde_json::json!({ "name": "get_automation", "arguments": { "slug": "close-out-candidates" } }))
+            .unwrap();
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("Look at every worktree"));
+
+        // A malformed `when` is refused rather than stored: a job with an
+        // unreachable slot is one that silently never runs.
+        let r = s
+            .call(&serde_json::json!({
+                "name": "upsert_automation",
+                "arguments": { "slug": "close-out-candidates", "when": { "kind": "daily", "at": "25:00" } }
+            }))
+            .unwrap();
+        assert_eq!(r["isError"], serde_json::json!(true));
+
+        let t0 = std::time::Instant::now();
+        let r = s
+            .call(&serde_json::json!({ "name": "run_automation", "arguments": { "slug": "close-out-candidates" } }))
+            .unwrap();
+        let elapsed = t0.elapsed();
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", r["content"][0]["text"]);
+        let v: serde_json::Value =
+            serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(v["status"], serde_json::json!("running"));
+        let id = v["id"].as_str().expect("an id").to_string();
+        assert!(id.ends_with("-close-out-candidates"), "{id}");
+        assert!(elapsed.as_secs() < 5, "run_automation must not block: {elapsed:?}");
+
+        // The spawn happened and its stdio went to a FILE, not to our stdout —
+        // which is the JSON-RPC transport, and a stray byte on it ends the
+        // session.
+        let dir = worktrees_core::runs::ledger_dir(
+            &Project::discover(&sc.root).unwrap().main_root,
+        )
+        .unwrap();
+        assert!(dir.join(format!("{id}.spawn.log")).exists(), "the child's stdio must be redirected");
+
+        let r = s
+            .call(&serde_json::json!({ "name": "delete_automation", "arguments": { "slug": "close-out-candidates" } }))
+            .unwrap();
+        assert_eq!(r["isError"], serde_json::json!(false));
+        let r = s.call(&serde_json::json!({ "name": "list_automations", "arguments": {} })).unwrap();
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("\"automations\": []"));
+    }
+
+    /// A lock held by a LIVE pid answers `already_running` instead of starting a
+    /// second run — and it is answered HERE, before the spawn, because the
+    /// caller needs the answer in milliseconds and the child would only reach it
+    /// after materialising the profile.
+    #[test]
+    fn a_held_lock_answers_already_running_without_spawning() {
+        let sc = scratch("lock");
+        let mut s = server_at(&sc.root, true, false);
+        s.call(&serde_json::json!({
+            "name": "upsert_automation",
+            "arguments": { "name": "Sweep", "brief": "look" }
+        }))
+        .unwrap();
+
+        let main_root = Project::discover(&sc.root).unwrap().main_root;
+        let dir = worktrees_core::runs::ensure_ledger_dir(&main_root).unwrap();
+        std::fs::write(dir.join("sweep.lock"), format!("{}", std::process::id())).unwrap();
+
+        let r = s
+            .call(&serde_json::json!({ "name": "run_automation", "arguments": { "slug": "sweep" } }))
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(v["already_running"], serde_json::json!(true));
+        assert!(v.get("id").is_none(), "no id is minted for a run that was not started");
+
+        // A run for an automation that does not exist is refused by NAME, not by
+        // spawning a child that fails minutes later.
+        let r = s
+            .call(&serde_json::json!({ "name": "run_automation", "arguments": { "slug": "ghost" } }))
+            .unwrap();
+        assert_eq!(r["isError"], serde_json::json!(true));
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("no such automation"));
     }
 }

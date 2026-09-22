@@ -1045,7 +1045,7 @@ pub fn write_config(main_root: &Path, text: &str) -> std::io::Result<PathBuf> {
 
 /// `$XDG_STATE_HOME/worktrees` (or `~/.local/state/worktrees`). State, not config:
 /// this is machine-generated and safely deletable, unlike `~/.config/worktrees`.
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     let base = std::env::var("XDG_STATE_HOME")
         .ok()
         .filter(|s| !s.is_empty())
@@ -1062,7 +1062,7 @@ fn marker_path_in(state: &Path, main_root: &Path) -> PathBuf {
 
 /// FNV-1a, the same hash `materialize.rs` uses. Not a security boundary — it
 /// names a file whose only job is "have I said this before".
-fn fnv1a(s: &str) -> u64 {
+pub(crate) fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.as_bytes() {
         h ^= u64::from(*b);

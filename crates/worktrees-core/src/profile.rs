@@ -541,6 +541,44 @@ fn basename(p: &str) -> String {
     p.rsplit('/').next().unwrap_or(p).to_string()
 }
 
+/// Is this launch really claude, and was it really prepared?
+///
+/// Moved here from the app (`lib.rs`) when the automation runner needed the
+/// identical guard: both are HEADLESS `claude -p` paths, neither has a pane a
+/// person can look at, and a second copy of this reasoning would be a second
+/// answer to "may we run this".
+///
+/// ⚠ NOT `ai.match_word`. `ops::ai_launch_for` fails CLOSED when a profile
+/// cannot be materialized: it replaces `cmd` with a `printf '…' >&2` sentinel
+/// that explains itself in the pane — while keeping `match_word` as `"claude"`
+/// (that branch is only reachable after the match_word == "claude" early
+/// return). So a match_word check passes for a broken profile, and we would run
+/// `printf`, get its message on stdout, and treat THAT as claude's read of the
+/// project. `ai_word_of` looks at the COMPOSED command's first word instead:
+/// `printf` for the sentinel, `claude` for both plain and profiled launches,
+/// and the real tool for a non-claude `ai_cmd` — one check, all three cases.
+///
+/// Returns the user-facing refusal, which has to distinguish the two causes:
+/// "your profile is broken" and "you don't run claude" need different fixes.
+pub fn claude_launch_check(cmd: &str, match_word: &str) -> Result<(), String> {
+    // `ai_cmd = none` — a plain shell. `ai_word_of("")` defaults to "claude",
+    // so this case must be caught BEFORE the word check or it would pass.
+    if cmd.trim().is_empty() {
+        return Err("this project's ai_cmd is `none`, and a headless run needs the claude CLI".into());
+    }
+    let word = ai_word_of(cmd);
+    if word == "claude" {
+        return Ok(());
+    }
+    if match_word == "claude" {
+        return Err(
+            "your AI profile could not be prepared, so claude was not launched — see the app log (Settings → Logs)"
+                .into(),
+        );
+    }
+    Err(format!("this project's ai_cmd runs `{word}`, not claude"))
+}
+
 impl AiLaunch {
     /// An unprofiled launch — exactly today's behaviour.
     pub fn plain(ai_cmd: &str) -> Self {

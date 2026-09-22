@@ -120,6 +120,58 @@ EOF
   chmod +x "$SHIMS/$1"
 }
 
+# A fake `claude` for the HEADLESS `-p` contract (automations).
+#
+# The AI-profiles note "there is no fake claude" is about INTERACTIVE launches,
+# where the whole point is a real binary in a real pane. A `-p` run is a
+# different animal: it is a command line in, two files out, and that contract is
+# exactly what the automation runner has to be held to. So this shim does the
+# three things the runner depends on and nothing else.
+#
+#   $BATS_TEST_TMPDIR/claude.log   PWD= and ARGV= for every invocation — the
+#                                  only way to assert "cwd is the main root"
+#                                  and "the brief never reached argv"
+#   $FAKE_CLAUDE_FINDINGS          a file the test writes; copied to whatever
+#                                  findings.json path the opener names
+#   $FAKE_CLAUDE_NO_REPORT=1       write no report.md
+#   $FAKE_CLAUDE_RC                exit code (default 0)
+#
+# It finds its output paths by splitting the opener on BACKTICKS, which is why
+# the runner quotes them that way: the shim parses the same contract the model
+# is given, rather than a second copy of it that could drift.
+install_fake_claude() {
+  cat > "$SHIMS/claude" <<EOF
+#!/usr/bin/env bash
+LOG="$BATS_TEST_TMPDIR/claude.log"
+EOF
+  cat >> "$SHIMS/claude" <<'EOF'
+{ printf 'PWD=%s\n' "$PWD"; printf 'ARGV=%s\n' "$*"; } >> "$LOG"
+
+opener=""; prev=""
+for a in "$@"; do
+  if [ "$prev" = "-p" ]; then opener="$a"; break; fi
+  prev="$a"
+done
+
+paths="$(printf '%s' "$opener" | tr '`' '\n')"
+findings="$(printf '%s\n' "$paths" | grep '/findings\.json$' | head -n1)"
+report="$(printf '%s\n' "$paths" | grep '/report\.md$' | head -n1)"
+
+if [ -n "$findings" ] && [ -n "${FAKE_CLAUDE_FINDINGS:-}" ] && [ -f "$FAKE_CLAUDE_FINDINGS" ]; then
+  cp "$FAKE_CLAUDE_FINDINGS" "$findings"
+fi
+if [ -n "$report" ] && [ "${FAKE_CLAUDE_NO_REPORT:-0}" != 1 ]; then
+  printf '# fake report\n\nLooked at everything.\n' > "$report"
+fi
+
+rc="${FAKE_CLAUDE_RC:-0}"
+if [ "$rc" != 0 ]; then printf 'fake claude refused: DISTINCTIVE-STDERR-TAIL\n' >&2; fi
+echo "fake claude done"
+exit "$rc"
+EOF
+  chmod +x "$SHIMS/claude"
+}
+
 # Fake tmux: appends argv to $TMUX_LOG; session registry = files in $TMUX_STATE.
 # Covers exactly the tmux surface bin/worktrees uses. list-panes emits one row
 # per session: name<TAB>cwd<TAB>cmd, where cmd comes from an optional

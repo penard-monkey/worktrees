@@ -1083,52 +1083,12 @@ fn latest_release_tag() -> Option<String> {
     url.rsplit("/tag/").next().map(String::from)
 }
 
-/// Run `cmd` with piped output and a hard deadline; kill past it. Every
-/// update-path subprocess goes through this so a hung login profile or a
-/// stalled network can never wedge an invoke forever. Reader threads drain the
-/// pipes (a >64KB burst would otherwise deadlock try_wait).
-fn run_deadline(mut cmd: std::process::Command, secs: u64) -> std::io::Result<std::process::Output> {
-    use std::io::Read;
-    use std::process::Stdio;
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
-    let mut child = cmd.spawn()?;
-    let so = child.stdout.take();
-    let se = child.stderr.take();
-    let drain = |s: Option<std::process::ChildStdout>| {
-        std::thread::spawn(move || {
-            let mut b = Vec::new();
-            if let Some(mut s) = s {
-                let _ = s.read_to_end(&mut b);
-            }
-            b
-        })
-    };
-    let ho = drain(so);
-    let he = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        if let Some(mut s) = se {
-            let _ = s.read_to_end(&mut b);
-        }
-        b
-    });
-    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
-    let status = loop {
-        if let Some(st) = child.try_wait()? {
-            break st;
-        }
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out after {secs}s")));
-        }
-        std::thread::sleep(Duration::from_millis(120));
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: ho.join().unwrap_or_default(),
-        stderr: he.join().unwrap_or_default(),
-    })
-}
+/// The hard-deadline subprocess runner, now core's (`proc.rs`).
+///
+/// It moved when the automation runner needed the identical thing: a headless
+/// `claude -p` with no pane to Ctrl-C and nobody watching. Imported rather than
+/// re-exported so every call site below reads exactly as it did.
+use worktrees_core::proc::run_deadline;
 
 // ── origin fetch: shared machinery for the watcher + the manual verb ─────────
 // The app's FIRST background network actor, so every call is hardened the same
@@ -2855,38 +2815,13 @@ struct AiStatusReport {
     verdict: String,
 }
 
-/// Is this launch really claude, and was it really prepared?
+/// The "is this really claude" guard, now core's (`profile.rs`).
 ///
-/// ⚠ NOT `ai.match_word`. `ops::ai_launch_for` fails CLOSED when a profile
-/// cannot be materialized: it replaces `cmd` with a `printf '…' >&2` sentinel
-/// that explains itself in the pane — while keeping `match_word` as `"claude"`
-/// (that branch is only reachable after the match_word == "claude" early
-/// return). So a match_word check passes for a broken profile, and we would run
-/// `printf`, get its message on stdout, and cache THAT as claude's read of the
-/// worktree. `ai_word_of` looks at the COMPOSED command's first word instead:
-/// `printf` for the sentinel, `claude` for both plain and profiled launches,
-/// and the real tool for a non-claude `ai_cmd` — one check, all three cases.
-///
-/// Returns the user-facing refusal, which has to distinguish the two causes:
-/// "your profile is broken" and "you don't run claude" need different fixes.
-fn claude_launch_check(cmd: &str, match_word: &str) -> Result<(), String> {
-    // `ai_cmd = none` — a plain shell. `ai_word_of("")` defaults to "claude",
-    // so this case must be caught BEFORE the word check or it would pass.
-    if cmd.trim().is_empty() {
-        return Err("the status report needs the claude CLI, and this project's ai_cmd is `none`".into());
-    }
-    let word = worktrees_core::profile::ai_word_of(cmd);
-    if word == "claude" {
-        return Ok(());
-    }
-    if match_word == "claude" {
-        return Err(
-            "your AI profile could not be prepared, so claude was not launched — see the app log (Settings → Logs)"
-                .into(),
-        );
-    }
-    Err(format!("the status report needs the claude CLI, and this project's ai_cmd runs `{word}`"))
-}
+/// Two headless callers need it — this command and `automation::run` — and the
+/// reasoning it encodes (read the COMPOSED command, never `match_word`, because
+/// `ai_launch_for` fails closed with a `printf` sentinel that keeps the word)
+/// is the kind that must have exactly one home. The test below still drives it.
+use worktrees_core::profile::claude_launch_check;
 
 /// The prompt, composed from the health report and the worktree's path.
 ///

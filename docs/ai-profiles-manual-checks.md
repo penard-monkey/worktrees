@@ -260,6 +260,74 @@ Open the sheet with right-click a worktree → **Status check…**, then the
 
 ---
 
+## 12. Automations (headless run)
+
+The SECOND headless path, and the one that runs over a whole project rather
+than one place. `test/automations.bats` covers the contract against a fake
+`claude`; what it cannot cover is a real profile, a real transcript, and the
+signals a real session leaves behind — which is the whole risk here
+(proposal §4.3, open question 4).
+
+Do this in a SCRATCH repo with two or three worktrees, never in a repo you
+care about, and with a real AI profile set on it.
+
+```sh
+worktrees automations add --name "Sweep" \
+  --brief "Look at every worktree in this project and say which ones hold no
+           unique work. Propose a lifecycle for each one you are sure about."
+worktrees automations run sweep          # 0 clean · 2 findings · 1 failed
+worktrees automations show <run-id>
+```
+
+- [ ] **It picked up the profile.** Add a distinctive rule to the profile
+      (§1's MARKER-7734 trick: "end every report with MARKER-7734") and check
+      the marker is in `report.md`. That is `CLAUDE_CONFIG_DIR` +
+      `--append-system-prompt-file` reaching a run, which is the whole reason
+      the runner goes through `ops::ai_launch_for` rather than spawning
+      `claude` itself.
+- [ ] **No place's verdict flipped to `active`.** ⚠ THE check this section
+      exists for. Run `worktrees status <slug>` for every place BEFORE the run
+      and again after; nothing may move from `cold`/`parked`/`at-risk` to
+      `active`. `health::assess` folds the newest transcript under a place's
+      `~/.claude/projects/<mangled path>` into its activity max, so a run whose
+      cwd were a worktree would make every place read `active` the next morning
+      — and the sweep would blind the signal it exists to report on. The cwd
+      rule is what prevents it; this is how you find out it still holds.
+      Cross-check directly: `ls -lt ~/.claude/projects/` — the directory that
+      gained a transcript must be `<main root>/.worktrees`'s (mangled), and
+      NEITHER the main root's (that is `(main)`'s place) nor any worktree's.
+- [ ] **No nav dot lit.** With the app open on that project, no place's
+      afterglow dot may appear during or after the run, and no agent dot either.
+      Measured 2026-09-22 on claude 2.1.x: `claude -p` writes NO
+      `~/.claude/sessions/<pid>.json`, so no agent dot can come from a run.
+      Re-measure on a claude upgrade (`ls ~/.claude/sessions | wc -l` before
+      and after). If a dot does light, note which place and which file did it:
+      the answer is a `skipped`/attribution fix, not a change to the cwd rule.
+- [ ] **`last_worked_epoch` is untouched.** `.worktrees.places.json` before and
+      after the run must be byte-identical. A report *about* a worktree is not
+      work *in* it — the same rule `ai_status_report` follows.
+- [ ] **The brief is not on the command line.** While it runs:
+      `ps -Ao args | grep 'claude -p'` shows the fixed opener and four paths,
+      and NOT the text of your brief. Put a nonsense word in the brief and grep
+      for that.
+- [ ] **A second run while one is going says so.** `worktrees automations run
+      sweep` in another terminal prints *"sweep is already running"* and exits
+      0 — and the first run's entry is still the only one in the ledger
+      (`worktrees automations runs`).
+- [ ] **In-run recursion is closed.** Ask the brief to call `run_automation`
+      (add "then start the sweep automation again" to it). It must come back
+      saying the tool is not available inside a run, not by spawning one.
+      `worktrees automations runs` must show exactly one run.
+- [ ] **Applying a proposal does what it says.** `worktrees automations apply
+      <run-id> 0 0` on a `set_lifecycle` proposal → `worktrees ls` shows the new
+      lifecycle, and `show <run-id>` lists one `actions` entry with `ok: true`.
+- [ ] **Cost.** Note the wall-clock seconds and your usage before/after
+      (proposal §10.3 asks for a measurement, not a guess). `--max-turns` is 12
+      and the deadline is 300s; if a real project's brief regularly hits either,
+      that is the evidence for a per-automation knob.
+
+---
+
 ## MCP resources in the `@` menu
 
 `make test-mcp` proves the SERVER side end to end (the list, the reads, the

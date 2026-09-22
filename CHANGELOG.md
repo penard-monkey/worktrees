@@ -40,6 +40,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   where its files go and the tab already reads both layouts. The session
   writes the files; the app still never does. The button is disabled until the
   place has a session running.
+- **Automations: a brief Claude runs across a whole project.** An automation is
+  a paragraph you write — *"look at every worktree and tell me which ones are
+  done with"* — that Claude carries out over the project's worktrees, headless,
+  and leaves a report you can come back to. It answers the question the app
+  could only answer one worktree at a time: *which of these still matters?*
+  There is no vocabulary to learn; the thing you edit is prose.
+  A run gathers every worktree's health verdict itself, hands Claude the facts
+  as a file, and asks for findings and *proposals*. It never changes anything
+  on its own: a proposal is a one-line suggestion (set a lifecycle, leave a
+  note, pin, close a session) that you apply with one command, and **a run can
+  never remove a worktree** — it can only say it thinks one has had its day.
+  This release is phase 1: runs you ask for, from the CLI or from a Claude
+  session. `worktrees automations add|ls|run|runs|show|apply`, and the same
+  through MCP, so a discussion in any worktree of the project can start a sweep
+  and act on what it finds. Schedules, the Automations tab and unread markers
+  come next.
 
 ## [0.28.0] - 2026-09-21
 
