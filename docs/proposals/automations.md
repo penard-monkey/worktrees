@@ -498,3 +498,108 @@ directory is deleted with the entry rather than left behind. §10.3 (cost) and
 §10.4 (does `-p` write a session probe) are both measurements, and both are now
 checklist items in `docs/ai-profiles-manual-checks.md` §12 rather than
 assertions in this document.
+
+---
+
+## 12. Answers — 2026-09-22, after building phase 1b
+
+Phase 1b is the app surface: the tab, the run view, the modal, the empty state.
+What §7 got wrong or left unsaid, and what was decided instead.
+
+**§7.2's "the proposal is a button" needs a way to tell an applied one, and the
+ledger does not have it.** The run view has to render `Applied ✓` on a proposal
+that was already pressed — otherwise a report re-opened tomorrow offers every
+button again, and pressing one a second time is a second write. §7.2 implies
+that is a lookup of the `(finding, proposal)` pair in `actions`, and it is not:
+`runs::Action` records `tool` + `args` and **no indices at all**, so the pair is
+unrecoverable from an entry. The identity used instead is THE CALL — same tool,
+same args — which is the better key anyway: two proposals that would make the
+identical call have the identical effect, so collapsing them is right rather
+than merely convenient. Both sides are serialised by the same Rust `Map`, so a
+`JSON.stringify` comparison is stable by construction. If phase 2 wants the
+literal pair, `Action` is where the indices have to go, not the frontend.
+
+**`run_automation` in the app cannot spawn the CLI, and the reason is not
+performance.** §6.1 says one runner, any clock, and `mcp.rs` reaches it by
+`Command::spawn`-ing `worktrees automations run`. The app must not: it LINKS
+core, and the CLI binary may be absent entirely — `update_cli` exists precisely
+because it can be, and `install.sh` is a separate act from installing the app.
+A spawn would make the tab work on the developer's machine and silently fail on
+a fresh install. So the app runs `automation::run` in-process on a
+`std::thread`, minting the id first through `RunOpts.id` (the seam part A added
+for MCP, which turns out to be the general answer to "answer before you finish")
+and checking `is_running` before the thread, so a double click answers
+`already_running` rather than naming a run it did not start.
+
+**A dock tab's content is per PLACE by default, and this one is not.** Files,
+Docs, Terminal and Plan are all keyed `repo|slug`, and a switch between places
+remounts them on purpose. Keying the Automations pane the same way would throw
+away an open run every time the selection moved — and the content is identical
+for every place of the project, so the remount buys nothing and costs the thing
+the user was reading. It is keyed on `sel.repo`. That also means the header has
+to name the project, which §7.1 already required for a different reason.
+
+**§7.1's header asks for a title the dock already renders.** The dock header
+reads its title out of `DOCK_RAIL` ("AUTOMATIONS"), so the pane's own header row
+carries only what that header cannot — the project chip and `+ New`. The rule in
+§7.1 is that a surface reached from many places must say whose it is, not that
+the word appears twice.
+
+**The empty state is not reachable from a place that has never opened the
+dock.** `dock_open` is a per-place panel that deliberately does NOT seed from
+the global (`settings.ts`, `panelsFor`), so selecting a place in a second
+project leaves no `.dock` in the DOM at all — the tab is fine, there is simply
+no dock. Worth knowing because it reads as a broken pane: the harness pass hit
+it, and the fix is a click on the rail icon, not a change to the pane.
+
+**The modal's BODY scrolls, not the modal.** CLAUDE.md's `.sync-*` rule says a
+dialog hosting a combobox has to move the scrolling to the modal, because a
+body with `overflow-y: auto` clips an absolutely-positioned popover into its own
+scrollbar. This dialog hosts no popover — a native `<select>` renders outside
+the flow — so the base `.sync-body` scroll is correct, and at 1280×700 it is
+what engages (content 582px in a 429px body) while the footer stays pinned.
+Measured with `elementFromPoint`, not with a rect: the tier radios, the footer
+note and all three buttons hit-test to themselves after the body is scrolled.
+
+**Three mirrors needed a guard, and one of them was already broken by this
+branch.** `dockrail-check.mjs` asserts that every `DOCK_RAIL` entry's `track` is
+`dock.<key>`, that BOTH `dock_tab` unions in `settings.ts` equal the rail's key
+set, and that `PROPOSAL_TOOLS` in `automations.ts` equals `runs.rs`'s; each
+assertion was shown to fail against a deliberately broken source before being
+kept. Separately, the EXISTING `usage-check.mjs` caught what this branch had got
+wrong: `usage.ts`'s `Surface` enum and `surfaceOf` both need a
+`dock.automations` branch, and without them every click in the new tab would
+have recorded as `dock.files` — a Files tab busier than it was, beside a tab
+that reads as never used. That check was written for exactly this and it worked.
+
+**Phase 1 renders the two tiers it does not ship.** §4.2 has three; §10.1 ships
+one. Hiding the other two would make phase 1 look like the whole design, and
+enabling them would run a job under permissions core cannot grant (`Tier` has
+one variant). They are rendered disabled with `title="next version"`, which is
+the same trade the `when` field makes — stored and validated today, evaluated in
+phase 2, and saying so in a hint line rather than letting a saved schedule look
+live.
+
+**A modal's refusal cannot live inside its scrolling child.** Core's error
+string was rendered as the last row of the form, under the profile footnote —
+and at 1280x700 the body scrolls, so pressing Save on a duplicate name showed
+nothing at all: the reason was a scroll away, below the fold, while the footer
+stayed pinned above it. That is the silent failure the whole "never swallow an
+error" rule exists to prevent, arrived at by layout rather than by code. The
+band is now a child of the MODAL, between the scrolling body and the footer —
+the same fix, and the same reason, as the offers band pinned outside
+`.settings-body` (CLAUDE.md). Measured, not eyeballed: `elementFromPoint` at
+its centre returns the band itself at 700px, and it is not inside `.sync-body`.
+
+The same question then had a second answer: §7.4's footer line — the profile a
+run launches as, and "It can never remove a worktree" — was scrolling too. That
+line is a PERMISSIONS statement about the button directly under it, so it is
+pinned beside the refusal rather than left as the last row of the form. Both
+are measured the same way, and both are now in the viewport at 700px.
+
+**Still owed, and not verifiable from the harness.** The mock answers instantly
+and is Chrome; the app is WKWebView with a real runner. Three things need a
+hand: one real run in `sandbox.sh --app` (does the in-process thread finish, does
+`app.log` carry its warnings); §4.3's check that no place's dot lights and no
+verdict flips to `active` after a sweep; and the modal at 700px in WKWebView,
+whose `<button>` intrinsic sizing differs from Chrome's.

@@ -51,11 +51,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   on its own: a proposal is a one-line suggestion (set a lifecycle, leave a
   note, pin, close a session) that you apply with one command, and **a run can
   never remove a worktree** — it can only say it thinks one has had its day.
-  This release is phase 1: runs you ask for, from the CLI or from a Claude
-  session. `worktrees automations add|ls|run|runs|show|apply`, and the same
-  through MCP, so a discussion in any worktree of the project can start a sweep
-  and act on what it finds. Schedules, the Automations tab and unread markers
-  come next.
+  This release is phase 1: runs you ask for, from the CLI, from a Claude
+  session, or from the app. `worktrees automations add|ls|run|runs|show|apply`,
+  the same through MCP — so a discussion in any worktree of the project can
+  start a sweep and act on what it finds — and a fourth dock tab, the bolt,
+  that does all of it by pointing.
+  The tab belongs to the PROJECT, not the place: open it from any worktree and
+  it shows the same two lists, headed by the project's name. Above, the
+  automations, each with what it does and when, and its last result; below, the
+  runs, grouped by day. Press ▸ on a row and the report opens while the run is
+  still going. A report is the findings as cards — the worktree's name is a
+  link that selects it in the sidebar, the text is Claude's sentence about it,
+  and each proposal is a button you press: *Mark abandoned*, *Add note*,
+  *Pin*. Pressing one applies immediately and the button becomes *Applied ✓*;
+  what the validator REFUSED is listed too, under **not shown**, with the
+  reason — a run that proposed removing a worktree says so rather than
+  quietly dropping it. Claude's prose read sits under the cards, and **Copy as
+  markdown** takes the whole thing to the clipboard.
+  Writing one is a modal: a name, the brief, when, which worktrees, and what it
+  may change — with **Save & run now**, so trying an idea is one click. The
+  first visit offers three starters (*Close-out candidates*, *Unpushed work*,
+  *What happened this week*) that open the modal prefilled, because a starter
+  is an example to edit, not a command to run. Schedules, unread markers and a
+  Home strip come next.
 
 ## [0.28.0] - 2026-09-21
 

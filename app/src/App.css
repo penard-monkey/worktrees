@@ -2980,6 +2980,240 @@ body.dragging .menu-catch { pointer-events: none; }
 .plan-gen-btn { max-width: 100%; }
 .plan-gen-note { min-width: 0; max-width: 100%; color: var(--txt-dim); font-size: var(--fs-meta); overflow-wrap: anywhere; }
 
+/* ── the Automations tab ──────────────────────────────────────────────────────
+ * Two lists, a run's report, and the modal that writes one. Every colour here
+ * is a token, and — the rule this pane is most exposed to — HUE LIVES IN THE
+ * DOT. A run's result is the one place in the app where four states share one
+ * row shape, and writing them as `--warn` / `--ok` / `--danger` TEXT would have
+ * measured 2.2:1 in catppuccin-latte and 3.1:1 in tokyo-day (CLAUDE.md: an
+ * accent token is a fill, not text). So `.auto-dot` carries the hue and the
+ * words stay on `--txt-hi` / `--txt-dim`.
+ *
+ * `.autopane` paints `--bg-tree` like the dock around it; the scrolling list
+ * inside it borrows `.scroll` (`--bg-abyss`), the same recess the Files and
+ * Docs bodies sit in. */
+.autopane {
+  flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  font-size: var(--fs-label);
+}
+.auto-head {
+  flex: none; display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2); background: var(--bg-panel); border-bottom: 1px solid var(--line);
+}
+/* The full-size `.chip` is a Home-screen pill (padding s2/s4, fs-label); in a
+ * 300px dock it would take the whole row. Same shape, one step down. */
+.auto-chip {
+  min-width: 0; padding: 2px var(--s2); font-size: var(--fs-meta); color: var(--txt-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.auto-lists { min-width: 0; padding-bottom: var(--s4); }
+
+/* Section rules: the same uppercase micro-heading the dock header uses, so a
+ * section inside the body cannot be mistaken for the panel's own title. */
+.auto-sec {
+  padding: var(--s3) var(--s3) var(--s1);
+  color: var(--txt-dim); font-size: var(--fs-micro);
+  letter-spacing: 0.08em; text-transform: uppercase; font-weight: var(--fw-bold);
+}
+.auto-rows { display: flex; flex-direction: column; }
+.auto-row {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s3); cursor: pointer; min-width: 0;
+}
+.auto-row:hover { background: var(--bg-elev); }
+.auto-row:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+.auto-row-id { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.auto-name {
+  color: var(--txt-hi); font-weight: var(--fw-med);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.auto-when {
+  color: var(--txt-mute); font-size: var(--fs-micro);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* `flex: 0 1 auto` + `min-width: 0`: the result gives way to the name rather
+ * than pushing the run button off a 240px dock. */
+.auto-last {
+  flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: var(--s2);
+  color: var(--txt-dim); font-size: var(--fs-meta);
+}
+.auto-last-words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.auto-never { color: var(--txt-mute); font-size: var(--fs-meta); }
+.auto-play { flex: none; }
+
+/* The one hue-bearing element on a row. 8px, like `.status-dot`, which is what
+ * the eye is already calibrated to in this app. */
+.auto-dot { width: 8px; height: 8px; border-radius: var(--r-full); flex: none; background: var(--txt-mute); }
+.auto-dot.warn { background: var(--warn); }
+.auto-dot.ok { background: var(--ok); }
+.auto-dot.danger { background: var(--danger); }
+.auto-dot.run { background: var(--accent); animation: breathe 2s ease-in-out infinite; }
+.auto-spin { color: var(--accent); }
+
+.auto-daygroup { display: flex; flex-direction: column; }
+.auto-day {
+  padding: var(--s2) var(--s3) 2px; color: var(--txt-mute); font-size: var(--fs-micro);
+}
+.auto-runrow {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 3px var(--s3); cursor: pointer; min-width: 0;
+}
+.auto-runrow:hover { background: var(--bg-elev); }
+.auto-runrow:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+.auto-time { flex: none; color: var(--txt-mute); font-family: var(--font-mono); font-size: var(--fs-micro); }
+.auto-runname {
+  flex: 0 1 auto; min-width: 0; color: var(--txt-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.auto-runres {
+  flex: 1 1 auto; min-width: 0; color: var(--txt-dim); font-size: var(--fs-meta);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.auto-more {
+  margin: var(--s2) var(--s3); padding: 2px var(--s2);
+  background: none; border: 0; color: var(--txt-dim); font-size: var(--fs-meta); cursor: pointer;
+}
+.auto-more:hover { color: var(--txt-hi); }
+.auto-note { padding: var(--s3); color: var(--txt-dim); font-size: var(--fs-meta); }
+.auto-said { color: var(--txt-hi); cursor: pointer; }
+
+/* The footer is a PERMISSIONS statement ("never removes a worktree"), so it is
+ * pinned rather than scrolled away with the lists. */
+.auto-foot {
+  flex: none; padding: var(--s2) var(--s3);
+  border-top: 1px solid var(--line); background: var(--bg-panel);
+  color: var(--txt-mute); font-size: var(--fs-micro); line-height: var(--lh-prose);
+}
+.auto-foot b { color: var(--txt-dim); font-weight: var(--fw-med); }
+
+/* ── the empty state ── `flex-start`, never `place-items: center`: an item
+ * taller than its track centres by overflowing BOTH edges and puts its own top
+ * above the scroll origin, unreachable (CLAUDE.md). */
+.auto-empty {
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: var(--s2); padding: var(--s5) var(--s3);
+}
+.auto-empty-bolt { align-self: center; color: var(--accent); }
+.auto-empty-lead {
+  margin: 0; color: var(--txt-dim); font-size: var(--fs-meta); line-height: var(--lh-prose);
+}
+.auto-starters { display: flex; flex-direction: column; gap: var(--s2); }
+.auto-starter {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  padding: var(--s2) var(--s3); cursor: pointer;
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-md);
+}
+.auto-starter:hover { border-color: var(--line-strong); }
+.auto-starter b { color: var(--txt-hi); font-size: var(--fs-label); font-weight: var(--fw-med); }
+.auto-starter i {
+  color: var(--txt-mute); font-style: normal; font-size: var(--fs-micro); line-height: var(--lh-prose);
+}
+.auto-own {
+  align-self: flex-start; margin-top: var(--s1); padding: 2px var(--s2);
+  background: none; border: 0; color: var(--accent); font-size: var(--fs-meta); cursor: pointer;
+}
+
+/* ── a run's report ── replaces the lists while open. */
+.auto-run { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.auto-run-h {
+  flex: none; display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2); background: var(--bg-panel); border-bottom: 1px solid var(--line);
+}
+.auto-run-name {
+  min-width: 0; color: var(--txt-hi); font-weight: var(--fw-med);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.auto-run-body { min-width: 0; }
+.auto-run-foot {
+  flex: none; display: flex; gap: var(--s2);
+  padding: var(--s2) var(--s3); border-top: 1px solid var(--line); background: var(--bg-panel);
+}
+.auto-meta {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s3) var(--s3) 0; color: var(--txt-dim); font-size: var(--fs-meta);
+}
+/* A finding is a CARD on `--bg-panel`, which differs from every host surface in
+ * all six themes — `--bg-abyss` (what `.scroll` paints) and `--bg-input` are
+ * both 0–7 RGB units from one another somewhere in the set (CLAUDE.md). */
+.auto-find {
+  margin: var(--s2) var(--s3); padding: var(--s2) var(--s3);
+  display: flex; flex-direction: column; gap: var(--s2);
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-md);
+}
+.auto-find-h { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.auto-placelink {
+  min-width: 0; padding: 0; background: none; border: 0; cursor: pointer;
+  color: var(--accent); font-size: var(--fs-label); font-family: var(--font-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.auto-placelink:hover { text-decoration: underline; }
+.auto-find-text { color: var(--txt); font-size: var(--fs-meta); line-height: var(--lh-prose); }
+.auto-props { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+.auto-prop-done { display: inline-flex; flex-direction: column; gap: 2px; }
+.auto-prop-err { color: var(--txt-dim); font-size: var(--fs-micro); }
+.auto-dropped {
+  margin: 0 var(--s3); padding: 0 0 0 var(--s4);
+  color: var(--txt-mute); font-size: var(--fs-micro); line-height: var(--lh-prose);
+}
+.auto-dropped b { color: var(--txt-dim); font-weight: var(--fw-med); }
+.auto-err {
+  margin: 0 var(--s3); padding: var(--s2) var(--s3);
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg-panel));
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--line));
+  border-radius: var(--r-sm);
+  color: var(--txt-hi); font-family: var(--font-mono); font-size: var(--fs-micro);
+  white-space: pre-wrap; overflow-x: auto;
+}
+.auto-md { min-width: 0; }
+
+/* ── the modal ── `.sync-modal.nw-modal` shell; only the fields are new. */
+.auto-body { min-width: 0; }
+.auto-brief {
+  resize: vertical; min-height: 9em; line-height: var(--lh-prose);
+  /* Prose, not a path: `.np-input` is monospace because every other field it
+     dresses holds a branch or a directory. */
+  font-family: var(--font-ui); font-size: var(--fs-body);
+}
+/* NOT `.seg` — that class already means the Settings segmented control (border,
+ * hidden overflow, fit-content) and reusing it makes bordered pills that shrink
+ * to nothing (CLAUDE.md). */
+.auto-seg { display: flex; flex-wrap: wrap; gap: var(--s1); }
+.auto-seg button {
+  padding: 3px var(--s3); cursor: pointer;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-sm);
+  color: var(--txt-dim); font-size: var(--fs-meta);
+}
+.auto-seg button:hover { color: var(--txt-hi); }
+.auto-seg button.on { color: var(--txt-hi); border-color: var(--line-strong); background: var(--bg-panel); }
+.auto-seg button:disabled { opacity: 0.5; cursor: default; }
+.auto-whenrow { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
+.auto-at { width: 7ch; flex: none; }
+.auto-inline-err { color: var(--txt-hi); font-size: var(--fs-meta); }
+/* Core's refusal, pinned between the scrolling body and the footer — it is a
+ * band of the MODAL, not a row of the form, so it cannot scroll out of sight
+ * at the moment it is most needed. `.sync-err` supplies the danger tint;
+ * `--txt-hi` supplies the words, because a hue token is a fill and not text. */
+/* The permissions line, pinned with the refusal band for the same reason —
+ * it has to be readable when the button is pressed, not after scrolling. */
+.auto-dialog-note {
+  flex: none; padding: var(--s2) var(--s4) 0;
+  border-top: 1px solid var(--line);
+}
+.auto-dialog-err {
+  flex: none; margin: var(--s2) var(--s4) 0;
+  color: var(--txt-hi); font-size: var(--fs-meta); line-height: var(--lh-prose);
+}
+.auto-radio { display: flex; gap: var(--s2); align-items: flex-start; font-size: var(--fs-meta); }
+.auto-radio span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.auto-radio b { color: var(--txt-hi); font-weight: var(--fw-med); }
+.auto-radio i { color: var(--txt-mute); font-style: normal; font-size: var(--fs-micro); line-height: var(--lh-prose); }
+/* The two tiers phase 1 does not ship: present, so the design is visible, and
+ * unmistakably inert. */
+.auto-radio.off { opacity: 0.45; cursor: default; }
+.auto-foot-note { color: var(--txt-mute); font-size: var(--fs-micro); line-height: var(--lh-prose); }
+.auto-foot-note b { color: var(--txt-dim); font-weight: var(--fw-med); }
+
 /* ── the terminal as a drop target for a worktree reference ──────────────────
    Two levels, because a target nobody can see is a feature nobody finds: a
    quiet inset while any PLACE drag is live (projects cannot be referenced, so
