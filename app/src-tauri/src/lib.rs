@@ -2796,6 +2796,349 @@ async fn place_health(repo: String, slug: String) -> Result<HealthReport, String
     }
 }
 
+// ── project automations: the dock's fourth tab ───────────────────────────────
+// Thin wrappers over `worktrees_core::automation` + `::runs`, which own the
+// sidecar, the ledger and the runner. Nothing here keeps a second copy of any
+// of that — the CLI reads the same files, and a tab that disagreed with
+// `worktrees automations ls` would be the bug this layering exists to prevent.
+//
+// The VIEWS are explicit structs rather than `serde_json::Value` for the reason
+// every other view struct here is: the frontend's types are read off these
+// fields, and an `Option` that vanished when it was `None` would make a run
+// that failed indistinguishable from one that has not finished.
+
+/// One run, as a LIST row: everything but the two bulky halves (`facts`,
+/// `report_md`). `findings` is a COUNT here — the rows say "3 findings", and
+/// shipping the findings themselves down the 2s poll would be the list paying
+/// for the run view's data.
+#[derive(Serialize)]
+struct RunSummaryView {
+    id: String,
+    automation: String,
+    trigger: String,
+    started_epoch: i64,
+    finished_epoch: Option<i64>,
+    status: String,
+    findings: usize,
+    dropped: usize,
+    actions: usize,
+    seconds: Option<u64>,
+    error: Option<String>,
+}
+
+impl RunSummaryView {
+    fn of(r: &worktrees_core::runs::Run) -> RunSummaryView {
+        RunSummaryView {
+            id: r.id.clone(),
+            automation: r.automation.clone(),
+            trigger: r.trigger.as_str().to_string(),
+            started_epoch: r.started_epoch,
+            finished_epoch: r.finished_epoch,
+            status: r.status.as_str().to_string(),
+            findings: r.findings.len(),
+            dropped: r.dropped.len(),
+            actions: r.actions.len(),
+            seconds: r.seconds,
+            error: r.error.clone(),
+        }
+    }
+}
+
+/// One definition plus the one fact the row on the right shows.
+#[derive(Serialize)]
+struct AutomationView {
+    slug: String,
+    name: String,
+    brief: String,
+    /// `automation::When`, verbatim: `{"kind":"manual"}` /
+    /// `{"kind":"daily","at":"08:00"}` / `{"kind":"weekly","day":"mon","at":"09:00"}`.
+    /// The frontend renders it as words and posts it back unchanged, so the
+    /// vocabulary has exactly one home.
+    when: serde_json::Value,
+    scope: String,
+    tier: String,
+    enabled: bool,
+    created_epoch: i64,
+    last_run: Option<RunSummaryView>,
+}
+
+/// A run in FULL, minus `facts`. `facts` is a `health::Report` per place — a few
+/// KB × places — and no surface renders it; a view that carried it would put
+/// that on every open of the run view for nothing. Add it when something needs
+/// it, rather than shipping it against a future that may not come.
+#[derive(Serialize)]
+struct RunView {
+    id: String,
+    automation: String,
+    trigger: String,
+    started_epoch: i64,
+    finished_epoch: Option<i64>,
+    status: String,
+    profile: Option<String>,
+    places: Vec<String>,
+    skipped: Vec<worktrees_core::runs::Skipped>,
+    findings: Vec<worktrees_core::runs::Finding>,
+    dropped: Vec<worktrees_core::runs::Dropped>,
+    actions: Vec<worktrees_core::runs::Action>,
+    report_md: Option<String>,
+    turns: Option<u32>,
+    seconds: Option<u64>,
+    error: Option<String>,
+    seen_epoch: Option<i64>,
+}
+
+impl RunView {
+    fn of(r: worktrees_core::runs::Run) -> RunView {
+        RunView {
+            id: r.id,
+            automation: r.automation,
+            trigger: r.trigger.as_str().to_string(),
+            started_epoch: r.started_epoch,
+            finished_epoch: r.finished_epoch,
+            status: r.status.as_str().to_string(),
+            profile: r.profile,
+            places: r.places,
+            skipped: r.skipped,
+            findings: r.findings,
+            dropped: r.dropped,
+            actions: r.actions,
+            report_md: r.report_md,
+            turns: r.turns,
+            seconds: r.seconds,
+            error: r.error,
+        seen_epoch: r.seen_epoch,
+        }
+    }
+}
+
+/// What the modal sends. Every field optional: an edit that names nothing
+/// changes nothing (core's `Patch`), and `when` arrives as the same JSON the
+/// view handed out.
+#[derive(Deserialize)]
+struct AutomationPatch {
+    name: Option<String>,
+    brief: Option<String>,
+    when: Option<serde_json::Value>,
+    scope: Option<String>,
+    tier: Option<String>,
+    enabled: Option<bool>,
+}
+
+fn automation_view(
+    slug: &str,
+    a: &worktrees_core::automation::Automation,
+    last: Option<&worktrees_core::runs::Run>,
+) -> AutomationView {
+    AutomationView {
+        slug: slug.to_string(),
+        name: a.name.clone(),
+        brief: a.brief.clone(),
+        // Infallible in practice (`When` is a closed enum of strings), and a
+        // serialisation failure must not take the whole list down — the row
+        // degrades to "when I ask" rather than the tab showing nothing.
+        when: serde_json::to_value(&a.when).unwrap_or_else(|_| serde_json::json!({ "kind": "manual" })),
+        scope: a.scope.as_str().to_string(),
+        tier: a.tier.as_str().to_string(),
+        enabled: a.enabled,
+        created_epoch: a.created_epoch,
+        last_run: last.map(RunSummaryView::of),
+    }
+}
+
+/// `Project::discover`, with the failure logged — the shape `place_health` uses.
+fn project_at(repo: &str, what: &str) -> Result<Project, String> {
+    Project::discover(Path::new(repo)).map_err(|e| {
+        applog("error", &format!("{what} repo={repo}: discover failed: {}", e.msg));
+        e.msg
+    })
+}
+
+#[tauri::command]
+async fn list_automations(repo: String) -> Result<Vec<AutomationView>, String> {
+    let project = project_at(&repo, "list_automations")?;
+    // `read_reporting`, not `read_lenient`: an entry this binary cannot read is
+    // dropped from the list, and a tab that showed one fewer row without saying
+    // why would be exactly the silent failure `diag.rs` forbids.
+    let (store, warnings) = worktrees_core::automation::read_reporting(&project.main_root);
+    for w in &warnings {
+        applog("warn", &format!("list_automations repo={repo}: {w}"));
+    }
+    let last = worktrees_core::runs::last_by_automation(&project.main_root);
+    Ok(store
+        .automations
+        .iter()
+        .map(|(slug, a)| automation_view(slug, a, last.get(slug)))
+        .collect())
+}
+
+#[tauri::command]
+async fn upsert_automation(
+    repo: String,
+    slug: Option<String>,
+    patch: AutomationPatch,
+) -> Result<AutomationView, String> {
+    let project = project_at(&repo, "upsert_automation")?;
+    let when = match patch.when {
+        // The vocabulary is core's. A `when` the enum does not know is refused
+        // HERE with the parse error rather than silently becoming `manual` —
+        // a schedule that quietly turned into "when I ask" is a job that never
+        // runs and never says so.
+        Some(v) => Some(
+            serde_json::from_value::<worktrees_core::automation::When>(v)
+                .map_err(|e| format!("when: {e}"))?,
+        ),
+        None => None,
+    };
+    let scope = match patch.scope.as_deref() {
+        Some(s) => Some(
+            worktrees_core::automation::Scope::parse(s)
+                .ok_or_else(|| format!("unknown scope: {s}"))?,
+        ),
+        None => None,
+    };
+    let tier = match patch.tier.as_deref() {
+        Some(t) => {
+            Some(worktrees_core::automation::Tier::parse(t).ok_or_else(|| format!("unknown tier: {t}"))?)
+        }
+        None => None,
+    };
+    let core_patch = worktrees_core::automation::Patch {
+        name: patch.name,
+        brief: patch.brief,
+        when,
+        scope,
+        tier,
+        enabled: patch.enabled,
+    };
+    let mut ui = CaptureUi::default();
+    let (slug, entry) =
+        worktrees_core::automation::upsert(&project.main_root, &mut ui, slug.as_deref(), core_patch)
+            .inspect_err(|e| applog("error", &format!("upsert_automation repo={repo}: {e}")))?;
+    // The rename warning ("the slug stays '…'") is core's, and it is the kind of
+    // thing a user discovers later as a command that does not resolve.
+    for w in ui.warnings() {
+        applog("warn", &format!("upsert_automation repo={repo} slug={slug}: {w}"));
+    }
+    let last = worktrees_core::runs::last_by_automation(&project.main_root);
+    Ok(automation_view(&slug, &entry, last.get(&slug)))
+}
+
+#[tauri::command]
+async fn delete_automation(repo: String, slug: String) -> Result<(), String> {
+    let project = project_at(&repo, "delete_automation")?;
+    worktrees_core::automation::delete(&project.main_root, &slug)
+        .inspect_err(|e| applog("error", &format!("delete_automation repo={repo} slug={slug}: {e}")))
+}
+
+/// What a click on "Run now" gets back — immediately, whatever the run then does.
+#[derive(Serialize)]
+struct RunStarted {
+    /// The id the caller polls `list_runs` for. Empty when `already_running`:
+    /// the run in flight is not this caller's, and handing back an id it did not
+    /// start would make a double click look like two runs.
+    id: String,
+    already_running: bool,
+}
+
+/// Start a run and answer with its id. The run itself is MINUTES of `claude -p`.
+///
+/// In-process on a `std::thread`, not `Command::spawn` of the CLI the way
+/// `mcp.rs` does it: the app LINKS core, and the CLI binary may be absent
+/// entirely — `update_cli` exists precisely because it can be. A spawn would
+/// make the tab silently stop working on a machine that never ran `install.sh`.
+///
+/// The id is minted HERE, before the thread, for the same reason the MCP tool
+/// mints it before spawning: the caller needs an answer in milliseconds, and
+/// `RunOpts.id` is the seam core already has for that. The lock is likewise
+/// checked here — core's own check happens inside the run, which is too late to
+/// answer with.
+#[tauri::command]
+async fn run_automation(repo: String, slug: String) -> Result<RunStarted, String> {
+    let project = project_at(&repo, "run_automation")?;
+    let store = worktrees_core::automation::read_lenient(&project.main_root);
+    if !store.automations.contains_key(&slug) {
+        return Err(format!("no such automation: {slug}"));
+    }
+    if worktrees_core::automation::is_running(&project.main_root, &slug) {
+        return Ok(RunStarted { id: String::new(), already_running: true });
+    }
+    let dir = worktrees_core::runs::ensure_ledger_dir(&project.main_root)
+        .inspect_err(|e| applog("error", &format!("run_automation repo={repo}: {e}")))?;
+    let id = worktrees_core::runs::new_id(&dir, &slug, worktrees_core::runs::run_now());
+    let thread_id = id.clone();
+    let (thread_repo, thread_slug) = (repo.clone(), slug.clone());
+    // A run writes `running` to its ledger entry before anything slow (see
+    // `run_inner` step 2), so the tab's poll sees the spinner without this
+    // thread reporting anything at all. What it reports is the END: a `failed`
+    // run's reason is in the entry, but the WARNINGS on the way there are only
+    // ever said out loud, and `app.log` is where the app says things.
+    thread::spawn(move || {
+        let mut ui = CaptureUi::default();
+        let code = worktrees_core::automation::run(
+            &project,
+            &mut ui,
+            &thread_slug,
+            worktrees_core::automation::RunOpts {
+                trigger: worktrees_core::runs::Trigger::Manual,
+                id: Some(thread_id.clone()),
+                ..Default::default()
+            },
+        );
+        // `warnings()` is Warn AND above, so the runner's `ui.error` lines —
+        // the reason a `failed` run failed — come through here too.
+        for w in ui.warnings() {
+            applog("warn", &format!("run_automation {thread_slug} ({thread_id}): {w}"));
+        }
+        applog(
+            // rc 2 is "findings" (`doctor`'s convention), not a failure.
+            if code == 1 { "warn" } else { "info" },
+            &format!("run_automation repo={thread_repo} {thread_slug} ({thread_id}) exited {code}"),
+        );
+    });
+    Ok(RunStarted { id, already_running: false })
+}
+
+#[tauri::command]
+async fn list_runs(repo: String, automation: Option<String>) -> Result<Vec<RunSummaryView>, String> {
+    let project = project_at(&repo, "list_runs")?;
+    Ok(worktrees_core::runs::list(&project.main_root, automation.as_deref())
+        .iter()
+        .map(RunSummaryView::of)
+        .collect())
+}
+
+#[tauri::command]
+async fn get_run(repo: String, id: String) -> Result<RunView, String> {
+    let project = project_at(&repo, "get_run")?;
+    worktrees_core::runs::read(&project.main_root, &id)
+        .map(RunView::of)
+        .inspect_err(|e| applog("warn", &format!("get_run repo={repo} id={id}: {e}")))
+}
+
+/// Press one of a run's proposals. The closed tool set, the slug check and the
+/// `Action` record are all core's (`runs::apply_proposal`) — this is the human
+/// press the whole report-only tier is built around.
+#[tauri::command]
+async fn apply_proposal(
+    repo: String,
+    run_id: String,
+    finding: usize,
+    proposal: usize,
+) -> Result<worktrees_core::runs::Action, String> {
+    let project = project_at(&repo, "apply_proposal")?;
+    let mut ui = CaptureUi::default();
+    let act = worktrees_core::runs::apply_proposal(&project, &mut ui, &run_id, finding, proposal)
+        .inspect_err(|e| {
+            applog("error", &format!("apply_proposal repo={repo} run={run_id}: {e}"))
+        })?;
+    // `ok: false` is a call that RAN and was refused — the button renders the
+    // reason under itself, and the log keeps it too.
+    if !act.ok {
+        applog("warn", &format!("apply_proposal repo={repo} run={run_id}: {}", act.output));
+    }
+    Ok(act)
+}
+
 // ── "Ask Claude": the headless one-shot status report ────────────────────────
 // The app's FIRST headless AI path. Every other launch in this codebase goes
 // through tmux (`ops::launch`), which means a pane, an interactive shell and a
@@ -6705,6 +7048,13 @@ pub fn run() {
             project_config_read,
             doctor,
             place_health,
+            list_automations,
+            upsert_automation,
+            delete_automation,
+            run_automation,
+            list_runs,
+            get_run,
+            apply_proposal,
             ai_status_report,
             relink,
             provision,

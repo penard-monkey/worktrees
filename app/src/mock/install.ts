@@ -223,6 +223,159 @@ type MockCfg = {
   warnings: string[];
 };
 
+// ── project automations (the dock's fourth tab) ─────────────────────────────
+// Stateful per PROJECT ROOT, like mockConfigs: a save is visible to the next
+// read, a run really flips from `running` to `findings`, and applying a
+// proposal really moves the declared state through `editPlace` — the same
+// function the real `set_lifecycle` case uses, so the optimistic patch and the
+// confirming refresh agree the way they do against the backend.
+//
+// Seeded for the `worktrees` project only, so the EMPTY STATE is reachable by
+// clicking (open a place of casa-del-valle and the starters are there) rather
+// than only by editing this file.
+//
+// `?slowrun=<ms>` is how long a run stays `running` — default 1500, the same
+// query-knob idiom as ?slowlist. The real one is minutes of `claude -p`; what
+// the frontend owns is the POLLING, and a run that finished in a microtask
+// would never exercise it.
+type MockWhen =
+  | { kind: "manual" }
+  | { kind: "daily"; at: string }
+  | { kind: "weekly"; day: string; at: string };
+type MockProposal = { tool: string; args: Record<string, unknown> };
+type MockRun = {
+  id: string; automation: string; trigger: string;
+  started_epoch: number; finished_epoch: number | null; status: string;
+  profile: string | null; places: string[];
+  skipped: { slug: string; why: string }[];
+  findings: { slug: string; text: string; proposals: MockProposal[] }[];
+  dropped: { what: string; why: string }[];
+  actions: { epoch: number; tool: string; args: Record<string, unknown>; ok: boolean; output: string }[];
+  report_md: string | null; turns: number | null; seconds: number | null;
+  error: string | null; seen_epoch: number | null;
+};
+type MockAutomation = {
+  slug: string; name: string; brief: string; when: MockWhen;
+  scope: string; tier: string; enabled: boolean; created_epoch: number;
+};
+
+const mockRunDelayMs = (() => {
+  const m = /[?&]slowrun(?:=(\d+))?/.exec(location.search);
+  return m ? Number(m[1] ?? 1500) : 1500;
+})();
+
+const mockAutomations: Record<string, MockAutomation[]> = {
+  [WT_ROOT]: [
+    {
+      slug: "close-out-candidates",
+      name: "Close-out candidates",
+      brief:
+        "Look at every worktree in this project and tell me which ones look finished. " +
+        "A worktree is a candidate when its branch is already merged into the base, or it has no commits of its own, " +
+        "and nobody has worked in it for a couple of weeks. " +
+        "Leave anything alone that still has unpushed commits.",
+      when: { kind: "daily", at: "08:00" },
+      scope: "all", tier: "report", enabled: true, created_epoch: now() - 9 * 86400,
+    },
+    {
+      slug: "unpushed-work",
+      name: "Unpushed work",
+      brief:
+        "Find the work in this project that exists only on this machine. " +
+        "Order the list by how much would be lost if this laptop died tonight.",
+      when: { kind: "manual" },
+      scope: "all", tier: "report", enabled: true, created_epoch: now() - 2 * 86400,
+    },
+  ],
+};
+
+// `id` shape is the real one (`runs::new_id`): a UTC stamp then the slug. The
+// tab groups by the LOCAL day of `started_epoch`, not by the id, so a fixture
+// stamped "yesterday" has to carry yesterday's epoch — which is why these are
+// computed rather than written out.
+const mockStamp = (epoch: number) =>
+  new Date(epoch * 1000).toISOString().replace(/\.\d+Z$/, "Z").replace(/:/g, "-");
+
+const mockRuns: Record<string, MockRun[]> = (() => {
+  const t0 = now() - 6 * 3600;
+  const t1 = now() - 30 * 3600;
+  const findings = {
+    id: `${mockStamp(t0)}-close-out-candidates`,
+    automation: "close-out-candidates", trigger: "schedule",
+    started_epoch: t0, finished_epoch: t0 + 72, status: "findings",
+    profile: "default",
+    places: ["(main)", "feat-redesign", "random-work", "fix-flaky-ci"],
+    skipped: [],
+    findings: [
+      {
+        slug: "fix-flaky-ci",
+        text: "Merged into main 19 days ago and nothing has happened in it since. The branch holds no commits that are not already on main.",
+        // TWO proposals, so the primary/ghost pair is reachable by clicking.
+        proposals: [
+          { tool: "set_lifecycle", args: { slug: "fix-flaky-ci", lifecycle: "abandoned" } },
+          { tool: "set_note", args: { slug: "fix-flaky-ci", note: "merged 19d ago — safe to remove" } },
+        ],
+      },
+      {
+        slug: "random-work",
+        text: "Three commits that are not on main and no upstream branch, last touched two hours ago. This is live work, not a close-out candidate — but it exists only here.",
+        proposals: [{ tool: "set_note", args: { slug: "random-work", note: "push before deciding" } }],
+      },
+    ],
+    // The refusal the tab must never hide. The real runner records exactly this
+    // shape when claude proposes a tool outside `runs::PROPOSAL_TOOLS`.
+    dropped: [
+      { what: "remove_worktree {\"slug\":\"fix-flaky-ci\"}", why: "remove_worktree is not an applicable proposal (allowed: set_lifecycle, set_note, set_pin, close_session)" },
+    ],
+    actions: [],
+    report_md:
+      "Four worktrees, and two of them are finished.\n\n" +
+      "`fix-flaky-ci` has been merged for nearly three weeks and holds nothing of its own — " +
+      "it is the clearest close-out candidate here. `random-work` looks busy but has never been pushed, " +
+      "so it is the one that would actually hurt to lose.\n\n" +
+      "- **(main)** — even with origin, nothing to do\n" +
+      "- **feat-redesign** — 7 commits ahead, pushed, a live session\n",
+    turns: null, seconds: 72, error: null, seen_epoch: null,
+  } satisfies MockRun;
+  const clean = {
+    id: `${mockStamp(t1)}-close-out-candidates`,
+    automation: "close-out-candidates", trigger: "schedule",
+    started_epoch: t1, finished_epoch: t1 + 41, status: "clean",
+    profile: "default", places: ["(main)", "feat-redesign", "random-work", "fix-flaky-ci"],
+    skipped: [], findings: [], dropped: [], actions: [],
+    report_md: "Nothing to report — every worktree is either live or already pushed.",
+    turns: null, seconds: 41, error: null, seen_epoch: null,
+  } satisfies MockRun;
+  return { [WT_ROOT]: [findings, clean] };
+})();
+
+const mockAutoSlug = (name: string) =>
+  name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+function mockAutosFor(repo: string): MockAutomation[] {
+  return (mockAutomations[repo] ??= []);
+}
+function mockRunsFor(repo: string): MockRun[] {
+  return (mockRuns[repo] ??= []);
+}
+/** Newest first, id as the tiebreak — `runs::list_in`'s order exactly. */
+function mockSortedRuns(repo: string): MockRun[] {
+  return [...mockRunsFor(repo)].sort((a, b) =>
+    b.started_epoch - a.started_epoch || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+}
+function mockRunSummary(r: MockRun) {
+  return {
+    id: r.id, automation: r.automation, trigger: r.trigger,
+    started_epoch: r.started_epoch, finished_epoch: r.finished_epoch, status: r.status,
+    findings: r.findings.length, dropped: r.dropped.length, actions: r.actions.length,
+    seconds: r.seconds, error: r.error,
+  };
+}
+function mockAutoView(repo: string, a: MockAutomation) {
+  const last = mockSortedRuns(repo).find((r) => r.automation === a.slug);
+  return { ...a, last_run: last ? mockRunSummary(last) : null };
+}
+
 // ── AI profiles + skill store ────────────────────────────────────────────────
 // Stateful, like mockConfigs: a write here is visible to the next read, so the
 // editor can be driven end-to-end headlessly (Playwright) without a backend.
@@ -2255,6 +2408,146 @@ Phase 3: Frontend pane and mock harness
     case "plugin:event|unlisten": {
       for (const s of Object.values(eventListeners)) s.delete(args.eventId);
       return null;
+    }
+
+    // ── automations (the dock's fourth tab) ─────────────────────────────────
+    case "list_automations":
+      return mockAutosFor(String(args.repo)).map((a) => mockAutoView(String(args.repo), a));
+
+    case "list_runs": {
+      const repo = String(args.repo);
+      const only = args.automation ? String(args.automation) : null;
+      return mockSortedRuns(repo).filter((r) => !only || r.automation === only).map(mockRunSummary);
+    }
+
+    case "get_run": {
+      const r = mockRunsFor(String(args.repo)).find((x) => x.id === String(args.id));
+      // Same refusal the backend gives: a run id that is not in the ledger is
+      // an error, not an empty report.
+      if (!r) throw new Error(`no such run: ${args.id}`);
+      // `facts` is NOT in the view (lib.rs `RunView`) — and it is not in the
+      // fixture either, so a component that reached for it would fail here
+      // rather than in the app.
+      return clone(r);
+    }
+
+    case "upsert_automation": {
+      const repo = String(args.repo);
+      const list = mockAutosFor(repo);
+      const patch = (args.patch ?? {}) as Partial<MockAutomation>;
+      const slug = args.slug ? String(args.slug) : null;
+      // Core's refusals, in core's words — the modal shows the string verbatim,
+      // so a mock that invented its own would be testing the wrong sentence.
+      if (!slug) {
+        const name = String(patch.name ?? "").trim();
+        if (!name) throw new Error("a new automation needs --name");
+        if (!String(patch.brief ?? "").trim()) throw new Error("the brief is empty — say what Claude should do");
+        const s = mockAutoSlug(name);
+        if (!s) throw new Error(`'${name}' has no letters or digits to make a slug from`);
+        if (list.some((a) => a.slug === s))
+          throw new Error(`an automation with the slug '${s}' already exists — rename it or pick another name`);
+        const made: MockAutomation = {
+          slug: s, name, brief: String(patch.brief), when: patch.when ?? { kind: "manual" },
+          scope: patch.scope ?? "all", tier: "report", enabled: true, created_epoch: now(),
+        };
+        list.push(made);
+        return mockAutoView(repo, made);
+      }
+      const cur = list.find((a) => a.slug === slug);
+      if (!cur) throw new Error(`no such automation: ${slug}`);
+      if (patch.name !== undefined) cur.name = String(patch.name).trim() || cur.name;
+      if (patch.brief !== undefined) cur.brief = String(patch.brief);
+      if (patch.when !== undefined) cur.when = patch.when;
+      if (patch.scope !== undefined) cur.scope = patch.scope;
+      return mockAutoView(repo, cur);
+    }
+
+    case "delete_automation": {
+      const repo = String(args.repo);
+      const slug = String(args.slug);
+      mockAutomations[repo] = mockAutosFor(repo).filter((a) => a.slug !== slug);
+      // Its runs go with it — core does that deliberately (a later automation
+      // that derived the same slug would inherit a stranger's history).
+      mockRuns[repo] = mockRunsFor(repo).filter((r) => r.automation !== slug);
+      return null;
+    }
+
+    case "run_automation": {
+      const repo = String(args.repo);
+      const slug = String(args.slug);
+      if (!mockAutosFor(repo).some((a) => a.slug === slug)) throw new Error(`no such automation: ${slug}`);
+      // The lock, answered before anything starts — a second click inside the
+      // window gets `already_running` and no new id, exactly like the backend.
+      if (mockRunsFor(repo).some((r) => r.automation === slug && r.status === "running"))
+        return { id: "", already_running: true };
+      const started = now();
+      const run: MockRun = {
+        id: `${mockStamp(started)}-${slug}`, automation: slug, trigger: "manual",
+        started_epoch: started, finished_epoch: null, status: "running",
+        profile: "default",
+        places: (findProject(repo)?.snapshot?.places ?? []).map((p) => p.slug),
+        skipped: [], findings: [], dropped: [], actions: [],
+        report_md: null, turns: null, seconds: null, error: null, seen_epoch: null,
+      };
+      mockRunsFor(repo).push(run);
+      // Finishes on a timer, so the tab's 2s poll is what turns the spinner
+      // into a report — the whole path the harness exists to exercise.
+      setTimeout(() => {
+        run.status = "findings";
+        run.finished_epoch = now();
+        run.seconds = Math.max(1, Math.round(mockRunDelayMs / 1000));
+        run.findings = [{
+          slug: "fix-flaky-ci",
+          text: "Still merged, still idle. Nothing in it that is not on main.",
+          proposals: [{ tool: "set_lifecycle", args: { slug: "fix-flaky-ci", lifecycle: "archived" } }],
+        }];
+        run.report_md = "One candidate, same as this morning.";
+        emitEvent("places:changed", {});
+      }, mockRunDelayMs);
+      return { id: run.id, already_running: false };
+    }
+
+    case "apply_proposal": {
+      const repo = String(args.repo);
+      const run = mockRunsFor(repo).find((r) => r.id === String(args.runId));
+      if (!run) throw new Error(`no such run: ${args.runId}`);
+      const f = run.findings[Number(args.finding)];
+      const p = f?.proposals[Number(args.proposal)];
+      if (!p) throw new Error(`run ${run.id} has no proposal ${args.finding}/${args.proposal}`);
+      const slug = String(p.args.slug ?? "");
+      let ok = true;
+      let output = "";
+      // Through `editPlace`, the SAME function the real set_lifecycle/set_pin/
+      // set_note cases use — so an applied proposal and a Lifecycle-menu click
+      // leave the harness in the identical state.
+      if (p.tool === "set_lifecycle") {
+        const life = String(p.args.lifecycle ?? "");
+        editPlace(repo, slug, (pl) => {
+          pl.declared = { ...(pl.declared ?? {}), lifecycle: life || undefined };
+          reconcile(pl);
+        });
+        output = `${slug}: lifecycle = ${life}`;
+      } else if (p.tool === "set_note") {
+        const note = String(p.args.note ?? "");
+        editPlace(repo, slug, (pl) => { pl.declared = { ...(pl.declared ?? {}), note: note || undefined }; });
+        output = `${slug}: note set`;
+      } else if (p.tool === "set_pin") {
+        editPlace(repo, slug, (pl) => { pl.declared = { ...(pl.declared ?? {}), pinned: p.args.pinned === true }; });
+        output = `${slug}: pinned = ${p.args.pinned === true}`;
+      } else if (p.tool === "close_session") {
+        editPlace(repo, slug, (pl) => { pl.tmux_session = { ...pl.tmux_session, up: false }; reconcile(pl); });
+        output = `closed ${slug}`;
+      } else {
+        // Unreachable through the UI (core drops anything else into `dropped`),
+        // and answered rather than thrown, because `ok: false` is a call that
+        // RAN and was refused — a different thing from an invoke that failed.
+        ok = false;
+        output = `${p.tool} is not an applicable proposal`;
+      }
+      const action = { epoch: now(), tool: p.tool, args: p.args, ok, output };
+      run.actions.push(action);
+      emitEvent("places:changed", {});
+      return action;
     }
 
     case "profiles_info": {

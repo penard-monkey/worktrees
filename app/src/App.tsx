@@ -10,6 +10,7 @@ import { useEscape } from "./useEscape";
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
+import { AutomationsPane } from "./AutomationsPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
 import { type McpStatus } from "./McpPanel";
@@ -124,6 +125,10 @@ const EXIT_NEEDS_CONFIRM = 4;
  *  `DocsPane` derives a `Set` from it with `useMemo`, and a new identity every
  *  render would rebuild that set on every keystroke in the filter box. */
 const EMPTY_PATHS: string[] = [];
+/** The same frozen-empty trick for a project whose snapshot has not arrived:
+ *  `AutomationsPane` memoises a slug→place Map off this array, and a fresh `[]`
+ *  per render would rebuild it on every poll tick. */
+const EMPTY_PLACES: Place[] = [];
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order. Two entries
 // now — Home and Places — so ⌘3/⌘4 are dead keys rather than shortcuts to the
@@ -6301,6 +6306,7 @@ function App() {
     { key: "terminal" as Settings["dock_tab"], track: "dock.terminal", icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
     { key: "docs" as Settings["dock_tab"], track: "dock.docs", icon: <Icons.BookText size={17} />, title: "Docs" },
     { key: "plan" as Settings["dock_tab"], track: "dock.plan", icon: <Icons.ListChecks size={17} />, title: "Plan" },
+    { key: "automations" as Settings["dock_tab"], track: "dock.automations", icon: <Icons.Zap size={17} />, title: "Automations" },
   ];
 
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
@@ -6973,7 +6979,25 @@ function App() {
                 )}
               </div>
               <div className="dock-body">
-                {eff.dock_tab === "plan" ? (
+                {eff.dock_tab === "automations" ? (
+                  // Keyed on the PROJECT, not the place: what this tab shows is
+                  // the project's — the same two lists from any of its places —
+                  // so a switch between places of one project must NOT remount
+                  // it and throw away an open run (proposal §7.1).
+                  <AutomationsPane
+                    key={sel.repo}
+                    repo={sel.repo}
+                    projectName={basename(sel.repo)}
+                    places={ws?.projects.find((pv) => pv.root === sel.repo)?.snapshot?.places ?? EMPTY_PLACES}
+                    pageVisible={pageVisible}
+                    reloadToken={placesToken}
+                    mdZoom={eff.files_md_zoom}
+                    onSelectPlace={(slug) => selectSlug(sel.repo, slug)}
+                    onPatchDeclared={(slug, patch, effective) => patchDeclared(sel.repo, slug, patch, effective)}
+                    onRefresh={refresh}
+                    onError={fail}
+                  />
+                ) : eff.dock_tab === "plan" ? (
                   // Keyed on the place like DocsPane: a switch remounts, so no
                   // previous place's plan can paint under the new place's name.
                   <PlanPane
