@@ -2906,7 +2906,7 @@ impl RunView {
             turns: r.turns,
             seconds: r.seconds,
             error: r.error,
-        seen_epoch: r.seen_epoch,
+            seen_epoch: r.seen_epoch,
         }
     }
 }
