@@ -358,6 +358,26 @@ pub const BRIEF_PATH: &str = ".planning/brief.md";
 /// brief itself never travels through argv, only this pointer to it does.
 pub const BRIEF_OPENER: &str = "Read .planning/brief.md and begin.";
 
+/// What the Plan tab's "Generate plan" button pastes into a place's Claude
+/// session: a request to write down the work already in flight there.
+///
+/// Fixed text, never generated — same rule as `BRIEF_OPENER`. It is pasted
+/// into a live session the user is looking at, so what arrives must be
+/// something they can read once and trust every time, not a string assembled
+/// from the place's own (session-written) files.
+///
+/// It names NO directory. The planning-with-files skill decides whether the
+/// files go at the repo root or under `.planning/<slug>/`, and
+/// `plan::summarize` already resolves both; a path here would be a second
+/// opinion that could only ever disagree with the skill. `.planning/brief.md`
+/// is mentioned as something to READ, because that is where the app writes a
+/// brief (`BRIEF_PATH`).
+///
+/// The SESSION writes the files; the app never does (the Plan tab is
+/// read-only). And no trailing newline: `tmux::paste_to_ai` pastes without
+/// one on purpose, so the prompt waits at claude's input for the user's Enter.
+pub const PLAN_PROMPT: &str = "Use the planning-with-files skill to capture the work already in flight in this place as a plan: task_plan.md, findings.md and progress.md, wherever that skill keeps them here. Record what is actually underway — the goal, what is done, what is next, what has been learned and any errors hit — starting from .planning/brief.md if there is one. If nothing is in flight, say so rather than inventing phases.";
+
 fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
     let path = Path::new(wt).join(BRIEF_PATH);
     if let Some(dir) = path.parent() {
@@ -2551,6 +2571,25 @@ fn hint_init(p: &Project, ui: &mut dyn Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The prompt names no directory: the planning-with-files skill decides
+    /// where its files live, and the reader resolves every layout it uses. The
+    /// one `.planning/` it may mention is the brief, which the app writes.
+    #[test]
+    fn plan_prompt_names_no_directory() {
+        let without_brief = PLAN_PROMPT.replace(".planning/brief.md", "");
+        assert!(!without_brief.contains(".planning"), "PLAN_PROMPT names a planning directory: {PLAN_PROMPT}");
+        assert!(!PLAN_PROMPT.contains("<slug>"), "PLAN_PROMPT names a plan slug: {PLAN_PROMPT}");
+        assert!(!without_brief.contains('/'), "PLAN_PROMPT carries a path: {PLAN_PROMPT}");
+    }
+
+    /// A trailing newline would SUBMIT the prompt the moment it is pasted —
+    /// `tmux::paste_to_ai` adds none precisely so the user presses Enter.
+    #[test]
+    fn plan_prompt_has_no_trailing_newline() {
+        assert!(!PLAN_PROMPT.ends_with('\n') && !PLAN_PROMPT.ends_with('\r'));
+        assert!(!PLAN_PROMPT.contains('\n'), "PLAN_PROMPT is one line of fixed text");
+    }
 
     #[test]
     fn worse_rc_is_order_independent_and_ranks_a_hard_failure_above_findings() {

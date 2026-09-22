@@ -9,6 +9,7 @@ import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
+import { PlanPane } from "./PlanPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
 import { type McpStatus } from "./McpPanel";
@@ -190,9 +191,14 @@ function findTarget(s: {
   //  Docs is unconditional where the other two are not: its find surface is its
   //  own name filter, which is always mounted. Files needs an open FILE (its
   //  viewer renders a hint otherwise) and Terminal needs a live session.
+  //  Plan is NEVER a target: it mounts no find bar, and a target that mounts
+  //  none is worse than no target (above) — ⌘F there goes to the terminal.
   const dockOk =
     s.dockShown &&
-    (s.dockTab === "terminal" ? s.mainTermUp : s.dockTab === "docs" ? true : !!s.dockFile);
+    (s.dockTab === "terminal" ? s.mainTermUp
+      : s.dockTab === "docs" ? true
+      : s.dockTab === "plan" ? false
+      : !!s.dockFile);
   if (s.last === "dock" && dockOk) return "dock";
   if (s.mainTermUp) return "main";
   return dockOk ? "dock" : null;
@@ -3301,6 +3307,10 @@ function App() {
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab.
   const filesDockShown = eff.dock_open && eff.dock_tab === "files";
+  // The file the Plan tab is showing, reported UP by `PlanPane` so the dock
+  // header's "open" button can hand it to the Files tab. Null while the tab is
+  // not mounted (the pane clears it on unmount) or the place has no plan.
+  const [planPath, setPlanPath] = useState<string | null>(null);
   useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
   // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
   const [newTermToken, setNewTermToken] = useState(0);
@@ -6290,6 +6300,7 @@ function App() {
     { key: "files" as Settings["dock_tab"], track: "dock.files", icon: <Icons.Folder size={17} />, title: "Files" },
     { key: "terminal" as Settings["dock_tab"], track: "dock.terminal", icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
     { key: "docs" as Settings["dock_tab"], track: "dock.docs", icon: <Icons.BookText size={17} />, title: "Docs" },
+    { key: "plan" as Settings["dock_tab"], track: "dock.plan", icon: <Icons.ListChecks size={17} />, title: "Plan" },
   ];
 
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
@@ -6935,9 +6946,53 @@ function App() {
                     ↻
                   </button>
                 )}
+                {eff.dock_tab === "plan" && (
+                  <>
+                    {planPath && (
+                      <button
+                        className="ctrl sm icon-only"
+                        aria-label="Open the plan in the Files tab"
+                        title="Open this file in the Files tab"
+                        data-track="dock.plan.open"
+                        onClick={() => { openDockFile(planPath); updatePanels({ dock_tab: "files", dock_open: true }); }}
+                      >
+                        {/* The Files tab's own rail icon: it says WHERE this goes. */}
+                        <Icons.Folder size={13} />
+                      </button>
+                    )}
+                    <button
+                      className="ctrl sm icon-only"
+                      aria-label="Refresh the plan"
+                      title="Re-read this place's plan"
+                      data-track="dock.plan.refresh"
+                      onClick={reloadFiles}
+                    >
+                      ↻
+                    </button>
+                  </>
+                )}
               </div>
               <div className="dock-body">
-                {eff.dock_tab === "docs" ? (
+                {eff.dock_tab === "plan" ? (
+                  // Keyed on the place like DocsPane: a switch remounts, so no
+                  // previous place's plan can paint under the new place's name.
+                  <PlanPane
+                    key={sel.repo + "|" + sel.slug}
+                    root={selected.path}
+                    repo={sel.repo}
+                    slug={sel.slug}
+                    place={selected}
+                    workedEpoch={workedAt(selected)}
+                    reloadToken={placesToken}
+                    pageVisible={pageVisible}
+                    activity={activityOf(selected)}
+                    draft={draftPaths.get(selected.path)?.text}
+                    mdZoom={eff.files_md_zoom}
+                    onOpen={(p) => { openDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
+                    onPlanPath={setPlanPath}
+                    onError={fail}
+                  />
+                ) : eff.dock_tab === "docs" ? (
                   // Keyed on the place: the index, the filter and the selection
                   // are all per place, and remounting is cheaper than five
                   // reset effects that each have to remember to exist.

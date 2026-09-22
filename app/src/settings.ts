@@ -58,10 +58,10 @@ export type PlacePanels = {
   /** WIDENING ONLY, and that direction matters. A record written by an older
    *  build holds `"files"` or `"terminal"`, both still legal — nothing to
    *  migrate. The reverse is the one to know about: a place left on `"docs"`
-   *  and then opened by an older build falls through that build's two-way
-   *  ternary and shows the Terminal. Survivable, and the price of not adding a
-   *  sanitiser that would have to know every future tab. */
-  dock_tab: "files" | "terminal" | "docs";
+   *  (or `"plan"`) and then opened by an older build falls through that
+   *  build's ternary and shows the Terminal. Survivable, and the price of not
+   *  adding a sanitiser that would have to know every future tab. */
+  dock_tab: "files" | "terminal" | "docs" | "plan";
   dock_width: number;
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
@@ -179,7 +179,7 @@ export type Settings = {
   usage_place: "strip" | "footer" | "rail" | "off";
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
-  dock_tab: "files" | "terminal" | "docs"; // last-used dock tab
+  dock_tab: "files" | "terminal" | "docs" | "plan"; // last-used dock tab
   // Files tab: how the tree and the viewer sit relative to each other.
   // "auto" flips to side-by-side once the dock is at least SPLIT_AT wide — a
   // narrow dock has no room for two columns, a wide one wastes half its width

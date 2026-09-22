@@ -874,6 +874,18 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       });
       return token;
     }
+    // The Plan tab's "Generate plan". The real one pastes `ops::PLAN_PROMPT`
+    // into the session's Claude pane; here, record which session it was asked
+    // for (`__mock.planPrompts()`), and refuse a session that is not up the way
+    // `paste_to_ai` refuses a session with no Claude in it.
+    case "plan_prompt": {
+      const up = ws.projects.some((pv) =>
+        pv.snapshot?.places.some((p) => p.tmux_session.name === args.session && p.tmux_session.up));
+      if (!up) throw `no Claude running in session ${args.session} (panes: none)`;
+      mockPlanPrompts.push({ session: args.session });
+      console.info("[mock] plan_prompt", args.session);
+      return null;
+    }
     case "set_title":
       editPlace(args.repo, args.slug, (p) => {
         p.declared = { ...(p.declared ?? {}), title: args.title?.trim() || undefined };
@@ -1414,6 +1426,187 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         return { base, entries, truncated: true };
       }
       return { base, entries, truncated: false };
+    }
+    case "place_plan": {
+      // `worktrees_core::plan::summarize`, in the shape the Plan tab reads —
+      // NOT a re-implementation of it. Resolution (`.active_plan`, newest dir,
+      // legacy root file), the symlink refusals, the 512 KiB cap and every
+      // extraction rule are tested in core; what the harness expresses is the
+      // SHAPES the pane renders differently:
+      //
+      // `?plan=` — `template` (default: the skill's template, 5 phases with
+      // `**Status:**` lines, 12/20 checks), `freeform` (valleos-shaped: a
+      // `## Goal (delivered)`, checkboxes, NO phases — the common case, 13 of the
+      // 15 plans surveyed), `brief` (no plan, only `.planning/brief.md`), `none`
+      // (neither), `truncated` (template past the cap).
+      //
+      // The plan/brief text is also seeded into `fsFiles`, so the header's
+      // "open" button and the brief's `read_file` land on the same text the
+      // summary describes instead of the fallback `// path` stub.
+      const root = args.root as string;
+      const mode = new URLSearchParams(location.search).get("plan") ?? "template";
+      const id = "2026-09-22-project-status-pane";
+      const planRel = `.planning/${id}/task_plan.md`;
+      const planPath = `${root}/${planRel}`;
+      const briefPath = `${root}/.planning/brief.md`;
+      const briefMd = `# Project status pane
+
+A fourth dock tab that says what a place is for, how far along it is, and
+whether a Claude session is working on it — read from the files the session
+already writes.
+
+## Constraints
+
+- The app never writes \`task_plan.md\` or the brief.
+- No second markdown renderer.
+`;
+      const briefFields = {
+        brief_path: briefPath,
+        brief_title: "Project status pane",
+        brief_lead: "A fourth dock tab that says what a place is for, how far along it is, and whether a Claude session is working on it — read from the files the session already writes.",
+      };
+      fsFiles.set(briefPath, { content: briefMd, binary: false, mtime: Date.now() });
+      const none = {
+        source: "none", how_resolved: null, plan_path: null, plan_rel: null, mtime_ms: 0,
+        title: null, goal: null, current: null, checks_done: 0, checks_total: 0, phases: [],
+        errors: 0, files: { task_plan: false, findings: false, progress: false },
+        brief_path: null, brief_title: null, brief_lead: null, markdown: null, truncated: false,
+      };
+      if (mode === "none") return none;
+      if (mode === "brief") return { ...none, source: "brief", ...briefFields };
+      const mtime = Date.now() - 7 * 60 * 1000;
+      if (mode === "freeform") {
+        const md = `# valleos — kitchen display cutover
+
+## Goal (delivered)
+
+Move every station off the legacy ticket printer onto the kitchen display,
+without a service where a ticket can be lost between the two.
+
+## NOW
+
+Waiting on the Saturday dinner service to confirm the bump-bar mapping.
+
+## Next steps (in order)
+
+- [x] Station map from the POS export
+- [x] Ticket routing behind a flag
+- [x] Bump-bar firmware on the grill line
+- [x] Shadow mode for one week
+- [ ] Flip the flag for the cold line
+- [ ] Flip the flag for the grill line
+- [ ] Remove the printer fallback
+- [ ] Delete \`legacy/printer.ts\`
+- [ ] Update the runbook
+
+## THE ONE OPEN ITEM
+
+Expo still wants paper for large parties. See [the findings](findings.md).
+
+## Errors Encountered
+
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| bump bar sends F13 | 1 | remapped in firmware |
+| duplicate tickets on reconnect | 2 | idempotency key |
+| <script>alert(1)</script> in a ticket note | 1 | rendered as text |
+`;
+        const path = `${root}/task_plan.md`;
+        fsFiles.set(path, { content: md, binary: false, mtime });
+        return {
+          ...none, source: "plan", how_resolved: "root", plan_path: path, plan_rel: "task_plan.md", mtime_ms: mtime,
+          title: "valleos — kitchen display cutover",
+          goal: "Move every station off the legacy ticket printer onto the kitchen display, without a service where a ticket can be lost between the two.",
+          current: null, checks_done: 4, checks_total: 9, phases: [], errors: 3,
+          files: { task_plan: true, findings: true, progress: false },
+          ...briefFields, markdown: md,
+        };
+      }
+      const md = `# Task Plan: Plan dock tab
+
+<!-- WHAT: the template's guidance comment — stripped by the extractor -->
+
+## Goal
+
+Show, per place, what the place is for and how far along its plan is, from the
+files the session already writes — without the app ever writing them.
+
+## Current Phase
+
+Phase 3: Frontend pane and mock harness
+
+## Phases
+
+### Phase 1: Requirements & Discovery
+- [x] Survey fifteen real plans
+- [x] Pin the contract
+- [x] Decide the resolution order
+- [x] Decide what the MCP surface sees
+**Status:** complete
+
+### Phase 2: Core extractor
+- [x] Resolve the plan directory
+- [x] Strip comments and fences
+- [x] Phases, checks, errors
+- [x] Tests against the survey
+**Status:** complete
+
+### Phase 3: Frontend pane and mock harness
+- [x] Types and invoke
+- [x] Header summary
+- [x] Phase list and progress bar
+- [x] Mock fixtures
+- [ ] Harness measurements
+- [ ] Light-theme contrast
+**Status:** in_progress
+
+### Phase 4: Review
+- [ ] Diff review
+- [ ] Gates
+- [ ] Hand test in the sandbox
+**Status:** pending
+
+### Phase 5: A phase whose name is long enough that a 240px dock has to ellipsise it rather than wrap or scroll sideways
+- [ ] Ship
+- [ ] Close out
+- [ ] Archive
+**Status:** blocked
+
+## Key Questions
+
+1. Does a freeform plan still say something useful? (yes — goal, checks)
+
+## Errors Encountered
+
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| symlinked .planning read through | 1 | lstat every component |
+| stale release binary passed bats | 1 | rebuild first |
+|       | 1       |            |
+
+\`\`\`md
+### Phase 9: inside a fence — not a phase
+- [ ] not a check
+\`\`\`
+`;
+      fsFiles.set(planPath, { content: md, binary: false, mtime });
+      return {
+        ...none, source: "plan", how_resolved: "active_plan", plan_path: planPath, plan_rel: planRel, mtime_ms: mtime,
+        title: "Task Plan: Plan dock tab",
+        goal: "Show, per place, what the place is for and how far along its plan is, from the files the session already writes — without the app ever writing them.",
+        current: "Phase 3: Frontend pane and mock harness",
+        checks_done: 12, checks_total: 20,
+        phases: [
+          { name: "Phase 1: Requirements & Discovery", status: "complete", done: 4, total: 4 },
+          { name: "Phase 2: Core extractor", status: "complete", done: 4, total: 4 },
+          { name: "Phase 3: Frontend pane and mock harness", status: "in_progress", done: 4, total: 6 },
+          { name: "Phase 4: Review", status: "pending", done: 0, total: 3 },
+          { name: "Phase 5: A phase whose name is long enough that a 240px dock has to ellipsise it rather than wrap or scroll sideways", status: "blocked", done: 0, total: 3 },
+        ],
+        errors: 2,
+        files: { task_plan: true, findings: true, progress: true },
+        ...briefFields, markdown: md, truncated: mode === "truncated",
+      };
     }
     case "open_docs_viewer": {
       // The browser viewer (lib.rs `open_docs_viewer`). The harness cannot bind
@@ -2251,6 +2444,9 @@ setTimeout(() => emitEvent("sessions:drafts", { drafts }), 500);
  *  which the harness has no way to observe. */
 type MockDrop = { repo: string; slug: string; intoSlug: string; intoSession: string; token: string };
 const mockDrops: MockDrop[] = [];
+/** Every `plan_prompt` this session recorded — the session each "Generate
+ *  plan" press would have pasted into. */
+const mockPlanPrompts: { session: string }[] = [];
 
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
@@ -2259,6 +2455,8 @@ const healthyConfigs: Record<string, MockCfg> = {};
   uiEvents: () => mockUiEvents.slice(),
   /** What the nav drag dropped into a session, newest last. */
   drops: () => mockDrops.slice(),
+  /** What "Generate plan" pasted, and into which session, newest last. */
+  planPrompts: () => mockPlanPrompts.slice(),
   /** Replace the unsent-prompt set and push it, exactly as the poll thread
    *  does — including the transition to EMPTY (`__mock.setDrafts([])`), which
    *  is the case a sent prompt produces and the one that must clear the glyph,

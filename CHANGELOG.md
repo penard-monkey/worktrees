@@ -3,6 +3,44 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **A Plan tab in the dock.** The fourth rail icon shows, for the selected
+  place, what it is for and how far along it is. The assignment comes first:
+  the brief's title and its lead sentence (a brief-only place shows the whole
+  lead, since that sentence is the document), with the plan's own title as a
+  dimmer line under it when the two differ. Under that sits one status band:
+  the place's live Claude state, a done-over-total bar from the plan's
+  checkboxes, the file's age and the current step, with any unsent draft at
+  the prompt on its own line below. A template plan's phases are collapsed to
+  one line naming the current phase and its status in words, and expand to
+  the full list. Then the plan itself, rendered as markdown with the
+  template's guidance comments stripped. It reads the files the session
+  already writes under the planning-with-files skill (`.planning/.active_plan`,
+  the newest `.planning/<slug>/task_plan.md`, or a root `task_plan.md`, in
+  that order — the skill's own `resolve-plan-dir.sh`), falls back to the
+  brief, and never writes any of them. The extractor is deliberately lenient:
+  of fifteen real plans surveyed, two used the template's `### Phase` +
+  `**Status:**` markers, nine had checkboxes and most had a `## Goal`, so it
+  mirrors the skill's own Stop-hook greps rather than a schema, and a unit test
+  cross-checks its phase counts against that script when it is installed. MCP
+  `place_status` and the place resource carry the same summary (without the
+  markdown) under `plan`, so the orchestrator sees each worker's goal and
+  progress with no new tool.
+- **A place with no plan still says what it knows, and can ask for one.** The
+  Plan tab's empty card now leads with the place's own facts — the branch and
+  its dirty count, how far it is ahead of or behind the base, the last commit
+  and its age, when Claude last finished work there, the place's note, and the
+  live Claude state — with the two-file hint as one dim line under them. A
+  **Generate plan** button pastes a request into the place's Claude session
+  asking it to write down the work already in flight as a planning-with-files
+  plan, and leaves it at the prompt for you to press Enter. The prompt is fixed
+  text, the same every time, and names no directory, since the skill decides
+  where its files go and the tab already reads both layouts. The session
+  writes the files; the app still never does. The button is disabled until the
+  place has a session running.
+
 ## [0.28.0] - 2026-09-21
 
 ### Added
