@@ -34,6 +34,28 @@ import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
 
+const CODEX_INSTALL_URL = "https://developers.openai.com/codex/cli/";
+
+function CodexInstallDialog({ onClose, onReport }: { onClose: () => void; onReport: (message: string) => void }) {
+  useEscape(onClose);
+  return <div className="scrim scrim-center" onClick={onClose}>
+    <div className="sync-modal rm-modal" role="dialog" aria-modal="true" aria-label="Install Codex CLI"
+      onClick={(e) => e.stopPropagation()}>
+      <header className="sync-h"><b>Install Codex CLI</b></header>
+      <div className="sync-body">
+        <div>Worktrees could not find the Codex CLI. Install it to open a Codex session here, or add an existing installation to your PATH.</div>
+        <div>Run this in a terminal:</div>
+        <code className="codex-install-command">curl -fsSL https://chatgpt.com/codex/install.sh | sh</code>
+        <div>Then run <code>codex login</code> and sign in with your ChatGPT account. Open Codex in Worktrees again after installation.</div>
+      </div>
+      <footer className="sync-foot">
+        <button className="ctrl" onClick={onClose}>Later</button>
+        <button className="enter-btn" autoFocus onClick={() => openUrl(CODEX_INSTALL_URL).catch((e) => onReport(String(e)))}>Open installation guide</button>
+      </footer>
+    </div>
+  </div>;
+}
+
 type Declared = {
   lifecycle?: string;
   pinned?: boolean;
@@ -3124,6 +3146,7 @@ function App() {
   // replaced). A red banner for a question is what this whole path exists to
   // stop, so it does not share the error register.
   const [notice, setNotice] = useState("");
+  const [codexInstallPrompt, setCodexInstallPrompt] = useState(false);
   // Which topbar popover is open. One member since the Lifecycle ▾ popover left
   // — kept as a union rather than a boolean because the state machine (one
   // popover at a time, every dismissal path through closeMenu) is the point.
@@ -4760,6 +4783,15 @@ function App() {
   // Only EXPLICIT gestures reach here: double-click or the ▸ button on a nav row,
   // the topbar/empty-state Enter, the ctx-menu entries, quick-switch, and the
   // home Resume rows. A plain nav click goes to `selectPlace` above.
+  const ensureCodexCli = async (provider: "claude" | "codex") => {
+    if (provider !== "codex") return true;
+    try {
+      const status = await invoke<{ codex_bin: string | null }>("codex_mcp_status");
+      if (status.codex_bin) return true;
+      setCodexInstallPrompt(true);
+    } catch (e) { setErr(String(e)); }
+    return false;
+  };
   const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
     setSel({ repo, slug: p.slug });
     setActiveProvider(settings.default_provider);
@@ -4768,6 +4800,7 @@ function App() {
     setTermFocus((v) => v + 1); // hand the keyboard back to the terminal
     const fresh = opts?.fresh ?? !settings.ai_auto_resume;
     (async () => {
+      if (!(await ensureCodexCli(settings.default_provider))) return;
       invoke("touch_place", { repo, slug: p.slug }).catch(() => {}); // fire-and-forget recency stamp
       // Entering is the strongest "I looked" there is, so it acks with no dwell.
       // Guarded exactly like the dwell effect — on the FACT, so that entering a
@@ -4781,7 +4814,10 @@ function App() {
     if (!sel) return;
     setActiveProvider(provider);
     setTermFocus((v) => v + 1);
-    runCmd("open_place", { repo: sel.repo, slug: sel.slug, fresh: !settings.ai_auto_resume, provider });
+    (async () => {
+      if (await ensureCodexCli(provider))
+        await runCmd("open_place", { repo: sel.repo, slug: sel.slug, fresh: !settings.ai_auto_resume, provider });
+    })();
   };
 
   // ── close ──
@@ -5450,6 +5486,7 @@ function App() {
 
   const createPlace = async (repo: string, branch: string, name: string, base: string) => {
     if (!branch) return;
+    if (!(await ensureCodexCli(settings.default_provider))) return;
     // Dismiss the form and put a ghost row in the nav IMMEDIATELY — the click is
     // acknowledged before any of the work starts. The label is the same
     // derivation the old success path used as its fallback; core may land on a
@@ -7299,12 +7336,17 @@ function App() {
         }}
       />
 
-      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onChange={updateSettings} onClose={() => setSettingsAt(null)}
+      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onChange={(patch) => {
+        updateSettings(patch);
+        if (patch.default_provider === "codex") void ensureCodexCli("codex");
+      }} onClose={() => setSettingsAt(null)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
         mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
         mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)} />
+
+      {codexInstallPrompt && <CodexInstallDialog onClose={() => setCodexInstallPrompt(false)} onReport={(m) => setNotice(m)} />}
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query

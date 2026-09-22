@@ -902,6 +902,9 @@ async fn new_place(
 ) -> Result<CmdResult, String> {
     let provider = provider.unwrap_or_else(|| "claude".into());
     if provider != "claude" && provider != "codex" { return Err("provider must be claude or codex".into()); }
+    if provider == "codex" && worktrees_core::profile::codex_bin().is_none() {
+        return Err("Codex CLI is not installed. Install it, then sign in with `codex login`.".into());
+    }
     let branch_log = branch.clone();
     let name = name.filter(|s| !s.is_empty());
     // Resolve the FINAL slug BEFORE the op — wt_for_branch reflects the holder
@@ -977,6 +980,9 @@ async fn list_branches(repo: String, slug: String) -> Result<BranchList, String>
 async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: Option<String>) -> Result<CmdResult, String> {
     let provider = provider.unwrap_or_else(|| "claude".into());
     if provider != "claude" && provider != "codex" { return Err("provider must be claude or codex".into()); }
+    if provider == "codex" && worktrees_core::profile::codex_bin().is_none() {
+        return Err("Codex CLI is not installed. Install it, then sign in with `codex login`.".into());
+    }
     run_op(&format!("open {slug} fresh={}", fresh.unwrap_or(false)), &repo, move |p, ui| {
         // Auto-resume: if this place already has a Claude Code conversation on
         // disk, launch the AI pane with the resume arg (-r) instead of cold.

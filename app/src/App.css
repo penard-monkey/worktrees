@@ -2274,6 +2274,7 @@ body.dragging .menu-catch { pointer-events: none; }
   padding: var(--s4); overflow-y: auto; display: flex; flex-direction: column; gap: var(--s3);
   font-size: var(--fs-body); color: var(--txt);
 }
+.codex-install-command { overflow-wrap: anywhere; }
 .sync-route {
   display: flex; flex-wrap: wrap; gap: var(--s2); align-items: baseline;
   font-size: var(--fs-meta); color: var(--txt-dim); word-break: break-all;

@@ -120,6 +120,9 @@ container for two independent agent sessions.
   Codex's own OAuth flow. Worktrees neither requests nor stores OpenAI API keys.
   Existing API key sign-ins must be replaced with `codex logout` followed by
   `codex login` before using Codex in Worktrees.
+- When Codex CLI is unavailable, selecting it or opening a Codex session shows
+  installation instructions and the official guide before creating a worktree
+  or starting a tmux session.
 - The first implementation supports one Worktrees-managed session per provider
   per place. It does not restrict sessions a user launches manually.
 - Claude AI profiles are not converted into Codex profiles. Codex has its own
