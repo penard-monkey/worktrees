@@ -515,6 +515,18 @@ fn acquire_lock(dir: &Path, slug: &str) -> Result<Option<LockGuard>, String> {
     Err(format!("could not take the run lock for {slug}"))
 }
 
+/// Is a run of this automation live right now?
+///
+/// Asked by a caller that must answer BEFORE spawning the runner — the MCP
+/// tool, which has to reply in milliseconds and cannot wait to find out that
+/// the child exited saying "already running". The same stale-pid rule as
+/// `acquire_lock`, and deliberately non-destructive: this only looks.
+pub fn is_running(main_root: &str, slug: &str) -> bool {
+    let Some(dir) = runs::ledger_dir(main_root) else { return false };
+    let Ok(body) = fs::read_to_string(dir.join(format!("{slug}.lock"))) else { return false };
+    body.trim().parse::<i32>().map(crate::agent::pid_alive).unwrap_or(false)
+}
+
 /// An id is a PATH COMPONENT (`<ledger>/<id>.json`, `<ledger>/<id>/`), and the
 /// MCP server lets a caller supply one.
 fn check_id(id: &str) -> Result<(), String> {
