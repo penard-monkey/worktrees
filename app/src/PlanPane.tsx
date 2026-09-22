@@ -16,7 +16,7 @@
 //
 // Every string in the payload is session-written free text. It is rendered as
 // text nodes only; `Markdown` already renders raw HTML as inert text.
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Markdown } from "./markdown";
@@ -70,14 +70,15 @@ export type PlanPaneProps = {
   onError: (e: unknown) => void;
 };
 
-/** Compact age from epoch MILLISECONDS, in words the meta line can carry. */
-function changedAgo(ms: number): string {
+/** Compact age from epoch MILLISECONDS, short enough for the status band
+ *  ("7m", "3h", "2d"); the band's `title` carries the full timestamp. */
+function shortAge(ms: number): string {
   if (!ms) return "";
   const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return "changed just now";
-  if (s < 3600) return `changed ${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `changed ${Math.floor(s / 3600)}h ago`;
-  return `changed ${Math.floor(s / 86400)}d ago`;
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
 }
 
 const GLYPH: Record<PlanPhaseStatus, string> = {
@@ -116,22 +117,104 @@ export function withoutComments(md: string): string {
   return parts.map((p, i) => (i % 2 ? p : strip(p))).join("");
 }
 
+/** A row of short facts separated by `·`, rendered as TEXT between siblings.
+ *
+ *  Not `::before` on the items: an item that ellipsises takes its own
+ *  pseudo-element with it, and a squeezed span left a bare "· " with nothing
+ *  after it (the first cut's meta line). Here each item owns its LEADING
+ *  separator as a real sibling of its text, and the row sits one separator
+ *  width to the left inside an `overflow: hidden` box, so whichever item
+ *  starts a line — the first, or one the row wrapped — has its separator
+ *  clipped. A wrap can therefore never leave a separator dangling at either
+ *  end of a line. `grow` marks the one item allowed to take (and give back)
+ *  the slack; its text ellipsises, its separator does not. */
+function SepRow({ className, items }: { className: string; items: { key: string; node: ReactNode; grow?: boolean }[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className={"plan-seprow " + className}>
+      <div className="plan-seprow-in">
+        {items.map((it) => (
+          <span key={it.key} className={"plan-bi" + (it.grow ? " grow" : "")}>
+            <span className="plan-sep" aria-hidden>·</span>
+            {it.node}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** The phase list. Module scope: a component declared inside `PlanPane` would
  *  be a new identity per render and remount (CLAUDE.md). */
-function PhaseRows({ phases }: { phases: PlanPhase[] }) {
+function PhaseRows({ phases, id }: { phases: PlanPhase[]; id?: string }) {
   return (
-    <ol className="plan-phases">
+    <ol className="plan-phases" id={id}>
       {phases.map((ph, i) => (
         <li key={i} className={"plan-phase " + ph.status} title={`${ph.name} — ${STATUS_WORD[ph.status]}`}>
           {/* Hue lives in the glyph only; the words take a text token
               (CLAUDE.md: an accent token is a fill, not text). */}
           <span className="plan-glyph" aria-hidden>{GLYPH[ph.status]}</span>
           <span className="plan-phase-name">{ph.name}</span>
+          {/* Blocked is the one state a reader must not miss, and its glyph's
+              hue is the weakest channel there is (2.5:1 in nord), so it also
+              says so in words. The other states stay a glyph + a screen-reader
+              word: a column of "complete" would be noise. */}
+          {ph.status === "blocked"
+            ? <span className="plan-phase-word">blocked</span>
+            : <span className="plan-sr">{STATUS_WORD[ph.status]}</span>}
           {ph.total > 0 && <span className="plan-phase-n">{ph.done}/{ph.total}</span>}
-          <span className="plan-sr">{STATUS_WORD[ph.status]}</span>
         </li>
       ))}
     </ol>
+  );
+}
+
+/** The phase the collapsed line names: the one in progress, else the first
+ *  that is not done (blocked or next up), else the last. */
+function currentPhase(phases: PlanPhase[]): number {
+  const ip = phases.findIndex((p) => p.status === "in_progress");
+  if (ip >= 0) return ip;
+  const open = phases.findIndex((p) => p.status !== "complete");
+  return open >= 0 ? open : phases.length - 1;
+}
+
+/** "Phase 3: Frontend pane" → "Frontend pane", since the line already says
+ *  "Phase 3 of 5". A name that does not follow the template is kept whole. */
+function bareName(name: string): string {
+  return name.replace(/^phase\s+\d+\s*[:.\u2014\u2013-]\s*/i, "") || name;
+}
+
+/** Phases, collapsed by default to ONE line naming the current phase, its
+ *  position and its status as a word; the disclosure expands the full list.
+ *  Local state and no persistence: `PlanPane` is keyed on the place, so a
+ *  switch collapses it again, which is the point — the list is a look-up, the
+ *  line is the answer. */
+function PhaseSummary({ phases }: { phases: PlanPhase[] }) {
+  const [open, setOpen] = useState(false);
+  const listId = useId();
+  const i = currentPhase(phases);
+  const ph = phases[i];
+  return (
+    <div className="plan-phase-box">
+      <button
+        type="button"
+        className={"plan-phase-toggle " + ph.status}
+        data-track="dock.plan.phases"
+        aria-expanded={open}
+        aria-controls={listId}
+        title={open ? "Hide the phase list" : "Show every phase"}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="plan-chev" aria-hidden>{open ? "▾" : "▸"}</span>
+        <span className="plan-glyph" aria-hidden>{GLYPH[ph.status]}</span>
+        <span className="plan-phase-pos">Phase {i + 1} of {phases.length}</span>
+        <span className="plan-sep" aria-hidden>·</span>
+        <span className="plan-phase-cur" title={ph.name}>{bareName(ph.name)}</span>
+        <span className="plan-sep" aria-hidden>·</span>
+        <span className="plan-phase-status">{STATUS_WORD[ph.status]}</span>
+      </button>
+      {open && <PhaseRows phases={phases} id={listId} />}
+    </div>
   );
 }
 
@@ -215,16 +298,23 @@ export function PlanPane({ root, slug, reloadToken, pageVisible, activity, draft
   const body = useMemo(() => (raw == null ? null : withoutComments(raw)), [raw]);
 
   const draftLine = (draft ?? "").split("\n").find((l) => l.trim()) ?? "";
-  const status = activity || draftLine ? (
-    <div className="plan-status">
-      {activity && (
-        <span className="plan-act">
-          <span className={"status-dot " + activity} aria-hidden />
-          <span>{activity === "busy" ? "Claude working" : "Claude needs input"}</span>
-        </span>
-      )}
-      {draftLine && <span className="plan-draft" title={draft}>✎ {draftLine}</span>}
-    </div>
+  const actItem = activity ? [{
+    key: "act",
+    node: (
+      <span className="plan-act" title={activity === "busy" ? "Claude is working" : "Claude needs input"}>
+        <span className={"status-dot " + activity} aria-hidden />
+        <span>{activity === "busy" ? "working" : "needs input"}</span>
+      </span>
+    ),
+  }] : [];
+  const draftRow = draftLine ? <div className="plan-draft" title={draft}>✎ {draftLine}</div> : null;
+  // Before a summary exists (and when there is nothing to summarise) the band
+  // carries only the live state, so a waiting session is visible either way.
+  const status = actItem.length > 0 || draftRow ? (
+    <>
+      <SepRow className="plan-band" items={actItem} />
+      {draftRow}
+    </>
   ) : null;
 
   if (!plan) {
@@ -254,47 +344,80 @@ export function PlanPane({ root, slug, reloadToken, pageVisible, activity, draft
     );
   }
 
-  const title = plan.title || plan.brief_title || slug;
-  const goal = plan.goal || plan.brief_lead;
+  // Brief first: the brief is the one document the TOOL wrote, so its title and
+  // lead sentence say what this place is FOR on every briefed place, whatever
+  // shape the session's plan took. Core clamps both to 280 chars.
+  const title = plan.brief_title || plan.title || slug;
+  const lead = plan.brief_lead || plan.goal;
+  // With both files, the plan's own title names the WORKSTREAM under the
+  // assignment — a second, dimmer line, never above the brief.
+  const sub = plan.source === "plan" && plan.brief_title && plan.title && plan.title !== plan.brief_title
+    ? plan.title : null;
   const pct = plan.checks_total > 0 ? Math.round((plan.checks_done / plan.checks_total) * 100) : 0;
   const missing = plan.source === "plan"
     ? [!plan.files.findings && "findings.md", !plan.files.progress && "progress.md"].filter(Boolean) as string[]
     : [];
-  const age = changedAgo(plan.mtime_ms);
+  const age = shortAge(plan.mtime_ms);
+  const hasPhases = plan.phases.length > 0;
+  // `current` usually IS the current phase's heading; when the phase line
+  // below already names it, the band does not say it twice.
+  const curPh = hasPhases ? plan.phases[currentPhase(plan.phases)] : null;
+  const showCurrent = !!plan.current && !(curPh && curPh.name.trim() === plan.current.trim());
 
+  const band: { key: string; node: ReactNode; grow?: boolean }[] = [...actItem];
+  if (plan.checks_total > 0) band.push({
+    key: "prog",
+    node: (
+      <span className="plan-prog">
+        <span
+          className="plan-bar"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={plan.checks_total}
+          aria-valuenow={plan.checks_done}
+          aria-label="Checklist progress"
+        >
+          <span className="plan-bar-fill" style={{ width: `${pct}%` } as CSSProperties} />
+        </span>
+        <span className="plan-count">{plan.checks_done}/{plan.checks_total}</span>
+      </span>
+    ),
+  });
+  if (age) band.push({
+    key: "age",
+    node: <span className="plan-age" title={`changed ${new Date(plan.mtime_ms).toLocaleString()}`}>{age}</span>,
+  });
+  // `current` LAST: it is the one long item, so when the band cannot hold it
+  // (the 240px floor with a live state) it wraps to a line of its own at full
+  // width, rather than the age orphaning onto line 2 while `current` shrinks
+  // to three letters on line 1.
+  if (showCurrent) band.push({ key: "cur", grow: true, node: <span className="plan-current" title={plan.current!}>{plan.current}</span> });
+
+  const shorts: { key: string; node: ReactNode }[] = [];
+  if (plan.source === "brief") shorts.push({ key: "nop", node: <span>no task_plan.md</span> });
+  if (plan.errors > 0) shorts.push({ key: "err", node: <span className="plan-errs">{plan.errors} {plan.errors === 1 ? "error" : "errors"} logged</span> });
+  if (missing.length > 0) shorts.push({ key: "miss", node: <span className="plan-missing">no {missing.join(" / ")}</span> });
 
   return (
     <div className="planpane">
       <div className="plan-head">
-        {status}
         <div className="plan-title" title={title}>{title}</div>
-        {goal && <div className="plan-goal" title={goal}>{goal}</div>}
-        {plan.checks_total > 0 && (
-          <div className="plan-progress">
-            <div
-              className="plan-bar"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={plan.checks_total}
-              aria-valuenow={plan.checks_done}
-              aria-label="Checklist progress"
-            >
-              <span className="plan-bar-fill" style={{ width: `${pct}%` } as CSSProperties} />
-            </div>
-            <span className="plan-count">{plan.checks_done}/{plan.checks_total}</span>
-          </div>
+        {lead && (
+          // A brief-only place shows the WHOLE lead: that sentence is the
+          // entire document. With a plan under it, 6 lines at most (see CSS).
+          <div className={"plan-lead" + (plan.source === "plan" ? " clamp" : "")} title={lead}>{lead}</div>
         )}
-        {plan.current && <div className="plan-current" title={plan.current}>{plan.current}</div>}
-        {plan.phases.length > 0 && <PhaseRows phases={plan.phases} />}
+        {sub && <div className="plan-sub" title={sub}>{sub}</div>}
+        <SepRow className="plan-band" items={band} />
+        {draftRow}
+        {hasPhases && <PhaseSummary phases={plan.phases} />}
         <div className="plan-meta">
           {plan.source === "plan" ? (
-            <span className="plan-file" title={plan.plan_path ?? undefined}>{plan.plan_rel}</span>
+            <div className="plan-file" title={plan.plan_path ?? undefined}>{plan.plan_rel}</div>
           ) : (
-            <span className="plan-file" title={plan.brief_path ?? undefined}>.planning/brief.md · no task_plan.md</span>
+            <div className="plan-file" title={plan.brief_path ?? undefined}>.planning/brief.md</div>
           )}
-          {age && <span className="plan-age">{age}</span>}
-          {plan.errors > 0 && <span className="plan-errs">{plan.errors} {plan.errors === 1 ? "error" : "errors"} logged</span>}
-          {missing.length > 0 && <span className="plan-missing">no {missing.join(" / ")}</span>}
+          <SepRow className="plan-meta-row" items={shorts} />
         </div>
         {plan.truncated && (
           <div className="plan-trunc">Only the first 512 KiB of this plan is shown.</div>
