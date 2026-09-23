@@ -5,6 +5,30 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Codex needs a manual check doc, like AI profiles have.** Bats has no fake
+  `codex`, so the live side is unguarded: a Claude → Codex → Claude switch
+  leaving one session each step, resume after a switch, the adopted-session
+  refusal, the legacy both-sessions reconcile, and the missing-CLI and sign-in
+  prompts. Write it in the shape of `docs/ai-profiles-manual-checks.md` and
+  re-run it on a `codex` upgrade.
+  _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md)_
+
+- **`codex::session_present` opens every rollout on each launch.** It walks all
+  of `$CODEX_HOME/sessions/Y/M/D/` and reads the first line of every `.jsonl` to
+  decide whether `resume --last` has anything for this cwd, so the cost grows
+  with the user's whole Codex history. Walk newest-first and stop at the first
+  match, or bound the walk by date.
+  _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md)_
+
+- **One-click provider handoff.** The manual path works today: the outgoing
+  agent writes `.planning/handoff.md`, then you switch, then the incoming agent
+  reads it. Automating it is blocked on a reliable "finished writing" signal
+  from the outgoing agent, plus timeout and error handling. The outgoing
+  session must close before the incoming one starts (proposal §Handoff
+  feasibility). CLAUDE.md's Architecture → Agents paragraph still describes
+  agents as Claude-only; update it alongside.
+  _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md)_
+
 - **An intermediate directory symlink is still resolved for `[docs]` paths.**
   `symlink_metadata` refuses to follow only the FINAL component, so
   `root.join(rel)` and `resolve_rel`'s per-component `read_dir` both walk
