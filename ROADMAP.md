@@ -243,37 +243,16 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   prefix is the only thing left holding it up.
   _From: [2026-09-18 claude-status-indicator](docs/sessions/2026-09-18-claude-status-indicator/summary.md)_
 
-- **The resource watcher notifies on sidecar WRITES, not on what the list
-  shows.** Measured from the temporary debug log before it was deleted at
-  v0.27.0 (2 days, 21 sessions, 5 repos): of 1,730 `list_changed`
-  notifications, 1,651 — 95% — were the sidecar's `mtime:len` moving, and 94%
-  of `resources/list` calls returned a URI set byte-identical to that session's
-  previous list. `membership()` (mcp.rs) hashes `read_dir` names PLUS the
-  sidecar's `mtime:len`, and the sidecar is rewritten constantly for fields
-  that can never reach the list: across 10 sidecars and 75 places,
-  `last_worked_epoch` moved 75 times, `last_opened_epoch` 50 and
-  `last_seen_epoch` 47, against `title` twice and `lifecycle` once. The
-  `worktrees` sidecar right now holds ONLY epoch stamps — not one field in it
-  can change the list, yet every stamp wakes every live session in the repo,
-  each paying a re-list at p50 17ms / p95 38ms / max 264ms. That is roughly 35
-  spurious notifications an hour per session.
-  The fix: digest `(slug, lifecycle, title)` from `store::read_lenient` instead
-  of `mtime:len` — cheap, since sidecars are 128 B to 4.9 KB and `resources()`
-  already calls `read_lenient` on every list.
-  **Two things the next person needs.** First,
-  `mcp::tests::the_watch_signal_moves_on_membership_and_not_on_work` currently
-  encodes this bug as correct: its last assertion writes a content-free change
-  (`{}` → `{"places":{}}`) and passes only because `len` moved, so it would
-  pass identically for an epoch stamp. Fixing the signal means changing that
-  assertion to a title/lifecycle edit and adding one that pins an epoch-only
-  write as NOT notifying — otherwise the suite stays green while the fix is
-  wrong. Second, do not read the log's "0 read errors" as the surface having
-  been validated: there were only 2 `resources/read` calls in 47 hours, so the
-  cache-divergence risk the watcher exists to cover was never exercised. The
-  log answers "is it chatty" (yes) and not "is it correct".
-  Usage was genuinely thin — 1,817 lists against 2 reads — but that ratio is
-  95% watcher noise over a barely-used surface, which are two separate facts
-  and should not be filed as "nobody uses resources".
+- **The MCP resource surface is barely used, and its correctness is
+  unproven.** The v0.27.0 debug log recorded 1,817 `resources/list` calls
+  against **2** `resources/read` in 47 hours, and zero read errors — but with
+  two reads, that zero is not evidence. The cache-divergence risk the list
+  watcher exists to cover (the client offering a uri it can no longer resolve,
+  `-32002`) was never exercised, so the log answered "is it chatty" and not
+  "is it correct". The chattiness is fixed (the watcher now digests the fields
+  the list renders — see `membership()`); what is still open is whether anyone
+  `@`-mentions places at all, and whether the surface is right when they do.
+  Worth deciding before more is built on it.
   _From: the v0.27.0 release bump; measurements by the bug-fixes session_
 
 - **The mock's TerminalPane throws on every place switch.** `Cannot read

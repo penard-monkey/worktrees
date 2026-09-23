@@ -148,6 +148,28 @@ try:
     time.sleep(WAIT / 2)
     check(not notifications(mark), "work INSIDE a worktree pushes nothing")
 
+    # The declared sidecar, both directions. The unit test pins `membership`
+    # itself; these pin the whole loop, which is what a wrong path handed to
+    # `spawn_list_watcher` would break while that test stayed green.
+    sidecar = os.path.join(guard(REPO), ".worktrees.places.json")
+    mark = len(lines)
+    with open(sidecar, "w") as fh:
+        fh.write('{"places":{"alpha":{"title":"Alpha"}}}')
+    end, fired = time.time() + WAIT, False
+    while time.time() < end and not fired:
+        fired = bool(notifications(mark))
+        time.sleep(0.1)
+    check(fired, "a title edit pushes list_changed (it is in the description)")
+
+    # The 95% case that made this worth fixing: same title, one clock field
+    # more. Under the old mtime+len signal every one of these woke every
+    # session in the repo.
+    mark = len(lines)
+    with open(sidecar, "w") as fh:
+        fh.write('{"places":{"alpha":{"title":"Alpha","last_worked_epoch":1790000000}}}')
+    time.sleep(WAIT / 2)
+    check(not notifications(mark), "a clock-only sidecar write pushes nothing")
+
     proc.stdin.close()
     proc.terminate()
     check(not bad, f"every stdout line parsed as JSON (torn lines: {bad[:2]})")
