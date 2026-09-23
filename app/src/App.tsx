@@ -56,6 +56,40 @@ function CodexInstallDialog({ onClose, onReport }: { onClose: () => void; onRepo
   </div>;
 }
 
+type ProviderSwitch = {
+  repo: string;
+  slug: string;
+  placeName: string;
+  from: "claude" | "codex";
+  to: "claude" | "codex";
+  session: string;
+};
+
+function ProviderSwitchDialog({ pending, onClose, onConfirm }: {
+  pending: ProviderSwitch;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  useEscape(onClose);
+  const from = pending.from === "claude" ? "Claude" : "Codex";
+  const to = pending.to === "claude" ? "Claude" : "Codex";
+  return <div className="scrim scrim-center" onClick={onClose}>
+    <div className="sync-modal rm-modal" role="dialog" aria-modal="true"
+      aria-label={`Switch from ${from} to ${to}`} data-testid="provider-switch-dialog"
+      onClick={(e) => e.stopPropagation()}>
+      <header className="sync-h"><b>Switch from {from} to {to}?</b></header>
+      <div className="sync-body">
+        <div>In {pending.placeName}, switching closes the current {from} session <code>{pending.session}</code>.</div>
+        <div className="sync-live">Any work still running in that session will stop. Your worktree and files stay in place.</div>
+      </div>
+      <footer className="sync-foot">
+        <button className="ctrl" autoFocus onClick={onClose}>Keep {from} open</button>
+        <button className="enter-btn" data-testid="provider-switch-confirm" onClick={onConfirm}>Close {from} and open {to}</button>
+      </footer>
+    </div>
+  </div>;
+}
+
 type Declared = {
   lifecycle?: string;
   pinned?: boolean;
@@ -3181,6 +3215,7 @@ function App() {
   // stop, so it does not share the error register.
   const [notice, setNotice] = useState("");
   const [codexInstallPrompt, setCodexInstallPrompt] = useState(false);
+  const [pendingProviderSwitch, setPendingProviderSwitch] = useState<ProviderSwitch | null>(null);
   // Which topbar popover is open. One member since the Lifecycle ▾ popover left
   // — kept as a union rather than a boolean because the state machine (one
   // popover at a time, every dismissal path through closeMenu) is the point.
@@ -4872,6 +4907,27 @@ function App() {
       if (await ensureCodexCli(provider))
         await runCmd("open_place", { repo: sel.repo, slug: sel.slug, fresh: !settings.ai_auto_resume, provider });
     })();
+  };
+  const requestOpenAgent = (provider: "claude" | "codex") => {
+    if (!sel || !selected) return;
+    const from = provider === "claude" ? "codex" : "claude";
+    const current = selectedAgents?.[from];
+    if (current?.up) {
+      setPendingProviderSwitch({ repo: sel.repo, slug: sel.slug, placeName: nameOf(selected), from, to: provider, session: current.name });
+      return;
+    }
+    openAgent(provider);
+  };
+  const confirmProviderSwitch = () => {
+    if (!pendingProviderSwitch) return;
+    const pending = pendingProviderSwitch;
+    setPendingProviderSwitch(null);
+    if (sel?.repo !== pending.repo || sel.slug !== pending.slug ||
+        !selectedAgents?.[pending.from].up || selectedAgents[pending.from].name !== pending.session) {
+      setNotice("The active session changed. Check the worktree and try switching again.");
+      return;
+    }
+    openAgent(pending.to);
   };
 
   // ── close ──
@@ -6830,7 +6886,7 @@ function App() {
                   {(["claude", "codex"] as const).map((provider) => (
                     <button key={provider} className="ctrl sm"
                       disabled={!!selectedAgents?.[provider].up && !selectedAgents?.[provider === "claude" ? "codex" : "claude"].up}
-                      onClick={() => openAgent(provider)}>
+                      onClick={() => requestOpenAgent(provider)}>
                       {selectedAgents?.[provider === "claude" ? "codex" : "claude"].up
                           ? `Switch to ${provider === "claude" ? "Claude" : "Codex"}`
                           : selectedAgents?.[provider].up
@@ -7406,6 +7462,8 @@ function App() {
         mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)} />
 
       {codexInstallPrompt && <CodexInstallDialog onClose={() => setCodexInstallPrompt(false)} onReport={(m) => setNotice(m)} />}
+      {pendingProviderSwitch && <ProviderSwitchDialog pending={pendingProviderSwitch}
+        onClose={() => setPendingProviderSwitch(null)} onConfirm={confirmProviderSwitch} />}
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query
