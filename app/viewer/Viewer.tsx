@@ -33,6 +33,7 @@ import {
   apiBase, basename, fetchDoc, fetchIndex,
   type DocPayload, type IndexPayload, type Meta,
 } from "./contract";
+import { useDocView, ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN, type DocViewApi } from "./zoom";
 
 const POLL_MS = 1000;
 
@@ -105,6 +106,64 @@ function useHashRoute(): [Route, (r: Route) => void] {
   return [route, go];
 }
 
+/**
+ * The reading-size stepper and the measure toggle, in the sticky header.
+ *
+ * MODULE SCOPE, not a closure inside `Viewer` — a component defined inside
+ * another re-mounts on every render of its parent (new identity), and this one
+ * lives in a header that re-renders once a second as the staleness ages count
+ * up (CLAUDE.md, Tauri app rules).
+ *
+ * The classes are App.css's own (`.seg` / `.seg-b` / `.zoomseg` / `.zoom-val`,
+ * `.ctrl.sm`), which this bundle already loads whole. That is reuse of the SAME
+ * control, not a borrowed name: the dock's Files pane paints A− | 100% | A+
+ * from these rules for exactly this job, and the two steppers should not look
+ * like different features.
+ */
+function ViewControls({ view, nudge, setWide }: DocViewApi) {
+  const { zoom, wide } = view;
+  return (
+    <span className="chrome-view">
+      <span className="seg zoomseg" role="group" aria-label="Reading size">
+        <button
+          className="seg-b"
+          disabled={zoom <= ZOOM_MIN}
+          title="Smaller text (⌘−)"
+          aria-label="Smaller text"
+          onClick={() => nudge(-1)}
+        >A−</button>
+        {/* The readout IS the reset. A percentage you cannot click back to 100%
+            leaves the only way home as counting steps — the same decision, and
+            the same control, as the Files pane's stepper. */}
+        <button
+          className="seg-b zoom-val"
+          disabled={zoom === ZOOM_DEFAULT}
+          title="Reset reading size (⌘0)"
+          aria-label={`Reading size ${zoom}%. Reset to 100%.`}
+          onClick={() => nudge(0)}
+        >{zoom}%</button>
+        <button
+          className="seg-b"
+          disabled={zoom >= ZOOM_MAX}
+          title="Larger text (⌘+)"
+          aria-label="Larger text"
+          onClick={() => nudge(1)}
+        >A+</button>
+      </span>
+      <button
+        className={"ctrl sm" + (wide ? " on" : "")}
+        aria-pressed={wide}
+        title={
+          wide
+            ? "Back to a 78-character reading measure"
+            : "Let the prose run the full width of the window"
+        }
+        onClick={() => setWide(!wide)}
+      >Wide</button>
+    </span>
+  );
+}
+
 export function Viewer() {
   const base = useMemo(() => apiBase(), []);
   const [route, go] = useHashRoute();
@@ -117,6 +176,11 @@ export function Viewer() {
   // means anything in drawer mode; above the breakpoint the column is always
   // there and this flag is ignored.
   const [drawer, setDrawer] = useState(false);
+  // The reading size and the measure. Bound to ⌘+ / ⌘− / ⌘0 only on the
+  // DOCUMENT route: the handler calls `preventDefault` to keep the browser from
+  // zooming the whole page underneath it, and swallowing the chord on a screen
+  // where it does nothing would be worse than not binding it.
+  const docView = useDocView(route.kind === "doc");
   const etags = useRef(new Map<string, string | null>());
   const docs = useRef(new Map<string, DocEntryCache>());
   const navFilter = useRef<HTMLInputElement | null>(null);
@@ -352,6 +416,7 @@ export function Viewer() {
         ☰ documents
       </button>
       <span className="nav-path">{route.kind === "doc" ? route.path : "documents in this place"}</span>
+      {route.kind === "doc" && <ViewControls {...docView} />}
     </>
   );
 
@@ -393,7 +458,7 @@ export function Viewer() {
             ))}
           {route.kind === "doc" &&
             (payload ? (
-              <DocBody blocks={payload.blocks} ctx={ctx} />
+              <DocBody blocks={payload.blocks} ctx={ctx} view={docView.view} />
             ) : (
               <div className="loading">loading {route.path}…</div>
             ))}

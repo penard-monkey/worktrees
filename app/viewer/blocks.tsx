@@ -29,13 +29,14 @@
 // and the measurement the brief asks for is explicitly "change a block
 // ELSEWHERE". The server's `id` is still carried, onto `data-block-id`, so the
 // two can be compared from a probe.
-import { Component, memo, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
+import { Component, memo, useLayoutEffect, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import { marked } from "marked";
 import { Markdown } from "../src/markdown";
 import { Mermaid } from "./Mermaid";
 import type { Block } from "./contract";
 import { onLink, renderImage, type DocCtx } from "./docctx";
 import { sanitizeHtml } from "./rawhtml";
+import type { DocView } from "./zoom";
 
 export type { DocCtx };
 
@@ -235,8 +236,45 @@ class BlockBoundary extends Component<{ children: ReactNode }, { err: string | n
  * a reader parked at the top of a document should SEE something inserted at the
  * top, not be scrolled past it.
  */
-function useBlockScrollAnchor(host: React.RefObject<HTMLElement | null>) {
-  const snap = useRef<{ key: string; top: number } | null>(null);
+export type Anchor = { key: string; top: number; height: number; sizing: boolean };
+
+/**
+ * How far to scroll so the anchored block lands where it was — the one piece of
+ * arithmetic in this file, pulled out because it is the piece that can be
+ * WRONG, and because nothing above can test it (the anchor needs real layout).
+ *
+ * The two cases are genuinely different, and conflating them is the bug this
+ * function exists to name:
+ *
+ *   A DOCUMENT UPDATE changes a block's CONTENT. Pinning the block's `top` is
+ *   exactly right: whatever grew, grew below the line being read, and the
+ *   reader must not move.
+ *
+ *   A SIZE CHANGE rescales the block ITSELF. Pinning its top then pushes the
+ *   line you were reading down by however far into the block you already were —
+ *   measured on a real document, a block 951px tall with 702px of it above the
+ *   viewport drifted 102px on a single 10% step, and would drift ~520px going
+ *   from 100% to 175%, which is most of a screen. What has to be held constant
+ *   is the FRACTION of the block above the fold, not the pixel count.
+ *
+ * So the scaling is applied only when the anchor straddles the viewport top
+ * (`top < 0`) and only on a size change. A block that starts below the fold has
+ * no fraction above it to preserve, and holding its `top` is already correct:
+ * everything above it grew too, and the gap should stay the size it looks.
+ */
+export function anchorDelta(s: Anchor, nextTop: number, nextHeight: number): number {
+  const want = s.sizing && s.top < 0 && s.height > 0 ? s.top * (nextHeight / s.height) : s.top;
+  return nextTop - want;
+}
+
+function useBlockScrollAnchor(host: React.RefObject<HTMLElement | null>, view: DocView) {
+  const snap = useRef<Anchor | null>(null);
+  // The view the DOM on screen was built with — NOT the one being rendered.
+  // Written in the layout effect below, i.e. once the DOM actually reflects it,
+  // so a render that bails out before committing cannot make a later size
+  // change look like an update.
+  const shown = useRef<DocView>(view);
+  const sizing = shown.current.zoom !== view.zoom || shown.current.wide !== view.wide;
 
   if (host.current && window.scrollY > 0) {
     snap.current = null;
@@ -244,13 +282,14 @@ function useBlockScrollAnchor(host: React.RefObject<HTMLElement | null>) {
       const r = child.getBoundingClientRect();
       if (r.bottom > 0) {
         const key = child.getAttribute("data-key");
-        if (key) snap.current = { key, top: r.top };
+        if (key) snap.current = { key, top: r.top, height: r.height, sizing };
         break;
       }
     }
   }
 
   useLayoutEffect(() => {
+    shown.current = view;
     const s = snap.current;
     snap.current = null;
     if (!s || !host.current) return;
@@ -258,12 +297,13 @@ function useBlockScrollAnchor(host: React.RefObject<HTMLElement | null>) {
     // nothing is adjusted — which is right: a new document starts at its top.
     const el = host.current.querySelector(`[data-key="${CSS.escape(s.key)}"]`);
     if (!el) return;
-    const delta = el.getBoundingClientRect().top - s.top;
+    const r = el.getBoundingClientRect();
+    const delta = anchorDelta(s, r.top, r.height);
     if (delta !== 0) window.scrollBy(0, delta);
   });
 }
 
-export function DocBody({ blocks, ctx }: { blocks: Block[]; ctx: DocCtx }) {
+export function DocBody({ blocks, ctx, view }: { blocks: Block[]; ctx: DocCtx; view: DocView }) {
   // KEYED ON THE ORIGINAL MARKDOWN, deliberately, even though what is rendered
   // is `md + defs`. Keys are how React decides what to keep; folding the defs
   // into them would re-key — and therefore replace the DOM subtree of — every
@@ -273,9 +313,29 @@ export function DocBody({ blocks, ctx }: { blocks: Block[]; ctx: DocCtx }) {
   const keys = useMemo(() => blockKeys(blocks), [blocks]);
   const defs = useMemo(() => collectDefs(blocks), [blocks]);
   const host = useRef<HTMLElement | null>(null);
-  useBlockScrollAnchor(host);
+  useBlockScrollAnchor(host, view);
+  // THE READING SIZE RIDES ON `.doc`, which also carries `.md` — App.css reads
+  // it through `var(--md-zoom, 1)`, so an element that never gets one simply
+  // renders at 100%. The unit is a bare ratio, as `FilesPane` writes it.
+  //
+  // Applying it HERE rather than on a wrapper is load-bearing in one more way:
+  // this is the element `useBlockScrollAnchor` watches. A zoom or measure
+  // change re-renders this component, so the snapshot above is taken against
+  // the OLD layout and the `useLayoutEffect` below runs against the new one —
+  // which means the block you were reading keeps its place on screen across a
+  // size change, for free, by the machinery that already holds it across a
+  // document update.
+  //
+  // `data-wide` is the measure: `.md`'s 78ch is a reading measure, and turning
+  // it off is the one thing zoom alone cannot do (78ch grows WITH the text, so
+  // a bigger size fills more of the window but never all of it).
   return (
-    <article className="doc md" ref={host}>
+    <article
+      className="doc md"
+      ref={host}
+      data-wide={view.wide ? "1" : "0"}
+      style={{ "--md-zoom": String(view.zoom / 100) } as CSSProperties}
+    >
       {blocks.map((b, i) => (
         <BlockBoundary key={keys[i]}>
           <BlockView dataKey={keys[i]} md={b.md} defs={defs} id={b.id} ctx={ctx} />
