@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.30.0] - 2026-09-23
 
 ### Added
 - **The agent label names the model.** The strip above the agent's terminal
