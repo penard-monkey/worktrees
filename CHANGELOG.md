@@ -33,6 +33,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   setting under that port.
 
 ### Fixed
+- **The MCP `@`-picker stops re-fetching for writes it cannot see.** The
+  resource watcher decided "the place list changed" from the declared
+  sidecar's modified-time and size, so any write to it woke every live Claude
+  session in the repo — and that file is rewritten constantly for fields the
+  picker never shows, `last_worked_epoch` (stamped as you work) above all.
+  Measured over two days: 95% of all notifications changed nothing in the
+  list, and 94% of the re-fetches they forced returned an identical set. The
+  watcher now digests the fields the list actually renders — each place's
+  slug, lifecycle and title — so a title or lifecycle edit still updates the
+  picker promptly and a clock stamp costs nothing. No behaviour you can see,
+  just work that was never needed.
 - **A tag-pinned `install.sh` installs its own release.** The documented
   `curl …/vX.Y.Z/install.sh | bash` form installed the LATEST release: the
   version came only from `WORKTREES_INSTALL_VERSION`, and a piped script

@@ -280,7 +280,7 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     // rather than started against a path that does not exist.
     let watch = project
         .as_ref()
-        .map(|p| (p.wt_root_dir().to_string(), format!("{}/.worktrees.places.json", p.main_root)));
+        .map(|p| (p.wt_root_dir().to_string(), p.main_root.clone()));
     // Read ONCE at startup, from this process's own environment: the runner
     // sets it on the claude it launches, and claude passes its environment to
     // the MCP servers it starts. A per-call read would be the same answer with
@@ -288,8 +288,8 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     let in_run = std::env::var("WORKTREES_RUN_ID").is_ok_and(|v| !v.trim().is_empty());
     let mut server = Server { project, mutations, in_run, ready: ready.clone() };
 
-    if let Some((wt_root, places_file)) = watch {
-        spawn_list_watcher(wt_root, places_file, ready);
+    if let Some((wt_root, repo)) = watch {
+        spawn_list_watcher(wt_root, repo, ready);
     }
 
     let stdin = std::io::stdin();
@@ -352,7 +352,7 @@ const WATCH_JITTER_MS: u64 = 800;
 /// exits, taking this with it. There is nothing to join and nothing to flush.
 fn spawn_list_watcher(
     wt_root: String,
-    places_file: String,
+    repo: String,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let jitter = (std::process::id() as u64) % WATCH_JITTER_MS;
@@ -361,13 +361,13 @@ fn spawn_list_watcher(
         // Seeded BEFORE the loop: the client has just fetched the list as part
         // of discovery, so firing on the first tick would be a guaranteed
         // redundant round trip for every session at startup.
-        let mut last = membership(&wt_root, &places_file);
+        let mut last = membership(&wt_root, &repo);
         loop {
             std::thread::sleep(period);
             if !ready.load(std::sync::atomic::Ordering::Relaxed) {
                 continue;
             }
-            let now = membership(&wt_root, &places_file);
+            let now = membership(&wt_root, &repo);
             if now == last {
                 continue;
             }
@@ -1443,9 +1443,21 @@ fn clip(s: &str, max: usize) -> String {
 /// Deliberately membership only. A resource's CONTENT is re-read on every
 /// mention, so live state does not need to be pushed — and if this noticed
 /// state, every `git add` in every worktree would notify every session in the
-/// repo. `read_dir` is non-recursive, so work inside a worktree cannot move it;
-/// the sidecar's mtime+len is here because `declared.title` reaches the list.
-fn membership(wt_root: &str, places_file: &str) -> String {
+/// repo. `read_dir` is non-recursive, so work inside a worktree cannot move it.
+///
+/// The sidecar half is the fields the list actually RENDERS (`lifecycle` and
+/// `title`, per `resources()`), not the file's `mtime:len`. Those bytes move on
+/// every write, and the sidecar is written constantly for fields the picker
+/// cannot show — `last_worked_epoch` above all, stamped as you work. The
+/// v0.27.0 debug log measured the cost: of 1,730 `list_changed` notifications,
+/// 1,651 (95%) were a sidecar write that changed nothing in the list, and 94%
+/// of the re-fetches they forced returned a byte-identical set. One write wakes
+/// every live session in the repo, so this is paid N times over.
+///
+/// Parsing the sidecar rather than stat-ing it is what makes that possible and
+/// costs nothing worth counting: these files are hundreds of bytes to a few KB,
+/// and `resources()` already does exactly this read on every list.
+fn membership(wt_root: &str, repo: &str) -> String {
     let mut names: Vec<String> = std::fs::read_dir(wt_root)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
@@ -1455,18 +1467,23 @@ fn membership(wt_root: &str, places_file: &str) -> String {
         })
         .unwrap_or_default();
     names.sort();
-    let stamp = std::fs::metadata(places_file)
-        .ok()
-        .map(|m| {
-            let mt = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            format!("{mt}:{}", m.len())
+    // `places` is a BTreeMap, so this is already slug-ordered and needs no sort
+    // of its own. A place declared but no longer on disk contributes nothing the
+    // list shows, but it is cheaper to include it than to cross-reference, and
+    // its removal from the sidecar is a change either way.
+    let declared = store::read_lenient(repo);
+    let stamp = declared
+        .places
+        .iter()
+        .map(|(slug, d)| {
+            format!(
+                "{slug}\u{1}{}\u{1}{}",
+                d.lifecycle.as_deref().unwrap_or_default(),
+                d.title.as_deref().unwrap_or_default()
+            )
         })
-        .unwrap_or_default();
+        .collect::<Vec<_>>()
+        .join("\u{2}");
     format!("{}|{stamp}", names.join("\n"))
 }
 
@@ -1671,9 +1688,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The signal behind `list_changed`. The third assertion is the point: if
-    /// this noticed work INSIDE a worktree, every `git add` in every place would
-    /// notify every session in the repo.
+    /// The signal behind `list_changed`, pinned from BOTH sides.
+    ///
+    /// Too narrow and a new place never reaches the `@` picker. Too broad and
+    /// every session in the repo re-lists for a write it cannot see — which is
+    /// what shipped: the old signal hashed the sidecar's `mtime:len`, so a
+    /// `last_worked_epoch` stamp moved it, and 95% of all notifications were
+    /// that. So the last three assertions are a PAIR of directions, not a list:
+    /// `title` and `lifecycle` reach the description and MUST notify, the clock
+    /// fields do not and must NOT. Drop the sidecar half and the title
+    /// assertion goes red; restore `mtime:len` and the clock one does.
     #[test]
     fn the_watch_signal_moves_on_membership_and_not_on_work() {
         let base = std::env::temp_dir().join(format!("wt-mcp-member-{}", std::process::id()));
@@ -1683,22 +1707,37 @@ mod tests {
         let places_file = base.join(".worktrees.places.json");
         std::fs::write(&places_file, "{}").unwrap();
         let wt = wt_root.to_string_lossy().to_string();
-        let pf = places_file.to_string_lossy().to_string();
+        let repo = base.to_string_lossy().to_string();
 
-        let first = membership(&wt, &pf);
+        let first = membership(&wt, &repo);
 
         std::fs::write(wt_root.join("alpha/file.rs"), "fn main() {}").unwrap();
-        assert_eq!(membership(&wt, &pf), first, "work inside a worktree must NOT notify");
+        assert_eq!(membership(&wt, &repo), first, "work inside a worktree must NOT notify");
 
         std::fs::create_dir_all(wt_root.join("beta")).unwrap();
-        let after_add = membership(&wt, &pf);
+        let after_add = membership(&wt, &repo);
         assert_ne!(after_add, first, "a new place must notify");
 
         std::fs::remove_dir_all(wt_root.join("beta")).unwrap();
-        assert_eq!(membership(&wt, &pf), first, "removing it returns to the old signal");
+        assert_eq!(membership(&wt, &repo), first, "removing it returns to the old signal");
 
-        std::fs::write(&places_file, "{\"places\":{}}").unwrap();
-        assert_ne!(membership(&wt, &pf), first, "the declared sidecar reaches the list too");
+        // Both fields the list renders, one at a time.
+        std::fs::write(&places_file, r#"{"places":{"alpha":{"title":"Alpha"}}}"#).unwrap();
+        let after_title = membership(&wt, &repo);
+        assert_ne!(after_title, first, "a title reaches the description and must notify");
+
+        std::fs::write(&places_file, r#"{"places":{"alpha":{"title":"Alpha","lifecycle":"saved"}}}"#).unwrap();
+        let quiet = membership(&wt, &repo);
+        assert_ne!(quiet, after_title, "a lifecycle reaches it too");
+
+        // The 95% case: same title, same lifecycle, one more clock field and a
+        // different byte length — which is all `mtime:len` ever saw.
+        std::fs::write(
+            &places_file,
+            r#"{"places":{"alpha":{"title":"Alpha","lifecycle":"saved","last_worked_epoch":1790000000}}}"#,
+        )
+        .unwrap();
+        assert_eq!(membership(&wt, &repo), quiet, "a clock-only write must NOT notify");
 
         let _ = std::fs::remove_dir_all(&base);
     }
