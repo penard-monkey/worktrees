@@ -32,6 +32,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   it starts on a fresh port each time the app does, and the browser files the
   setting under that port.
 
+- **The window reopens the way you left it.** Settings → Behavior → Startup has
+  a new "Restore window on launch" switch, on by default. Quit full screen and
+  the app comes back full screen; quit it small in a corner and it comes back
+  there, after a plain restart and after an in-app update alike. Leaving full
+  screen afterwards returns to the size you had before entering it, not to a
+  screen-sized window. A position on a display that is no longer attached is
+  dropped and macOS places the window instead. The frame is kept in its own
+  `window-state.json` beside `ui-state.json`, and a change to the switch
+  applies from the next launch.
+
 ### Fixed
 - **The MCP `@`-picker stops re-fetching for writes it cannot see.** The
   resource watcher decided "the place list changed" from the declared
