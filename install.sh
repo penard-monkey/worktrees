@@ -2,7 +2,10 @@
 # worktrees installer — usage:
 #   curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | bash
 # Recommended (reproducible) team form — pin the tag:
-#   curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/v0.1.0/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/vX.Y.Z/install.sh | bash
+# A tagged copy installs ITS OWN release (SCRIPT_VERSION below) for every tag
+# after v0.29.0. v0.29.0 and older predate that and install latest unless you
+# also set WORKTREES_INSTALL_VERSION on the `bash` side of the pipe.
 #
 # Installs the LATEST RELEASE (not main) to ~/.local/bin/worktrees. worktrees is
 # a compiled binary: this fetches the prebuilt binary for your platform, or (if
@@ -32,6 +35,13 @@ set -euo pipefail
 
 REPO="penard-monkey/worktrees"
 BIN_NAME="worktrees"
+# The release this copy of the script belongs to. A script piped into bash
+# cannot see the URL it came from, so a tagged copy knows its tag only by
+# carrying it. Kept equal to the workspace version in Cargo.toml — test/misc.bats,
+# `make release` and release.yml all refuse a mismatch — so main's copy names the
+# newest release too, except between a version bump and its tag, when that
+# release does not exist yet and resolution falls through to latest.
+SCRIPT_VERSION="v0.29.0"
 
 sha256_check() {   # reads "<hash>  <name>" on stdin, verifies <name> in cwd
   if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -
@@ -177,7 +187,12 @@ main() {
   fi
 
   # ── resolve version ────────────────────────────────────────────────────────
+  # WORKTREES_INSTALL_VERSION, else this script's own release, else latest.
   local version="${WORKTREES_INSTALL_VERSION:-}"
+  if [ -z "$version" ] \
+     && curl -fsSLI -o /dev/null "https://github.com/$REPO/releases/tag/$SCRIPT_VERSION" 2>/dev/null; then
+    version="$SCRIPT_VERSION"
+  fi
   if [ -z "$version" ]; then
     # releases/latest redirects to .../tag/vX.Y.Z — no API, no rate limit, no jq.
     version="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" | sed 's|.*/tag/||')"

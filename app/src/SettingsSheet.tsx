@@ -4,7 +4,7 @@ import { McpSection, type McpStatus } from "./McpPanel";
 import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
@@ -17,6 +17,54 @@ type CmdResult = { ok: boolean; code: number; output: string; slug?: string | nu
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
 /** `term_history_info` — what the saved-scrollback tree currently costs. */
 type TermHistoryInfo = { dir: string; bytes: number; tabs: number };
+type Release = { tag: string; published: string };
+
+const RELEASES_URL = "https://github.com/penard-monkey/worktrees/releases";
+
+/** The by-hand route for the same install — for when the buttons fail, or the
+ *  app is too broken to press them. The version MUST ride in
+ *  WORKTREES_INSTALL_VERSION on the `bash` side of the pipe: install.sh resolves
+ *  latest otherwise, whatever tag the script's own URL names. */
+function ManualInstall({ tag, cliDir }: { tag: string; cliDir: string | null }) {
+  const [copied, setCopied] = useState("");
+  const script = `curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/${tag}/install.sh`;
+  const dir = cliDir ? ` WORKTREES_INSTALL_DIR="${cliDir}"` : "";
+  const rows = [
+    { id: "cli", label: "CLI only", cmd: `${script} | WORKTREES_INSTALL_VERSION=${tag}${dir} WORKTREES_INSTALL_APP=0 bash` },
+    { id: "both", label: "App + CLI (quit worktrees first)", cmd: `${script} | WORKTREES_INSTALL_VERSION=${tag}${dir} WORKTREES_INSTALL_APP=1 bash` },
+  ];
+  const copy = (id: string, cmd: string) =>
+    navigator.clipboard.writeText(cmd).then(() => { setCopied(id); setTimeout(() => setCopied(""), 2000); }).catch(() => {});
+  return (
+    <details className="manual-install">
+      <summary>Install {tag} manually</summary>
+      {rows.map((r) => (
+        <div key={r.id} className="manual-row">
+          <div className="manual-head">
+            <span className="sub">{r.label}</span>
+            <button className="ctrl sm" onClick={() => copy(r.id, r.cmd)}>{copied === r.id ? "Copied" : "Copy"}</button>
+          </div>
+          <pre className="update-log">{r.cmd}</pre>
+        </div>
+      ))}
+      <div className="hint">
+        Run in any terminal. The app goes to /Applications (or ~/Applications) and is checksum-verified. Or download{" "}
+        <code>worktrees-app-&lt;arch&gt;.app.tar.gz</code> from the{" "}
+        <a href="#" onClick={(e) => { e.preventDefault(); openUrl(`${RELEASES_URL}/tag/${tag}`).catch(() => {}); }}>{tag} release page</a>, unpack it into
+        /Applications and run <code>xattr -cr /Applications/worktrees.app</code>.
+      </div>
+    </details>
+  );
+}
+
+/** Compare "vX.Y.Z" tags numerically; an unparseable side sorts as equal. */
+function cmpVer(a: string, b: string): number {
+  const p = (t: string) => t.replace(/^v/, "").split(/[.-]/).slice(0, 3).map(Number);
+  const [x, y] = [p(a), p(b)];
+  if (x.length < 3 || y.length < 3 || [...x, ...y].some(Number.isNaN)) return 0;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return 0;
+}
 
 function agentSetupLabel(state: string | null): string {
   if (!state) return "Checking…";
@@ -399,6 +447,58 @@ export function SettingsSheet({
       invoke("log_event", { level: "error", msg: m }).catch(() => {});
     } finally {
       setAppUpdating(false);
+    }
+  };
+
+  // Install a specific release — the escape hatch for a release that broke
+  // something but left this sheet usable. CLI first (they share
+  // ~/.config/worktrees, so they should move together), then the app, then
+  // relaunch. The backend re-checks the tag against the published list.
+  const [releases, setReleases] = useState<Release[] | null>(null);
+  const [releasesErr, setReleasesErr] = useState("");
+  const [pickTag, setPickTag] = useState("");
+  const [pickArmed, setPickArmed] = useState(false);
+  const [pinning, setPinning] = useState(false);
+  useEffect(() => { if (!open) setPickArmed(false); }, [open]);
+  const loadReleases = async () => {
+    setReleasesErr("");
+    try {
+      const rs = await invoke<Release[]>("list_releases");
+      setReleases(rs);
+      const cur = update?.app_version ? `v${update.app_version}` : "";
+      setPickTag(rs.find((r) => r.tag !== cur && cmpVer(r.tag, cur) < 0)?.tag ?? rs.find((r) => r.tag !== cur)?.tag ?? "");
+    } catch (e) {
+      setReleasesErr(String(e));
+    }
+  };
+  const doInstallVersion = async () => {
+    if (!pickTag || pinning || updating || appUpdating) return;
+    if (!pickArmed) { setPickArmed(true); return; } // arm; second click confirms
+    setPickArmed(false);
+    setPinning(true);
+    const tag = pickTag;
+    setUpdateLog(`installing ${tag}…\n`);
+    try {
+      if (update?.cli_version) {
+        setUpdateLog((l) => l + `$ install.sh @ ${tag}\n`);
+        const r = await invoke<CmdResult>("update_cli", { tag });
+        setUpdateLog((l) => l + r.output + "\n");
+        if (!r.ok) {
+          setUpdateLog((l) => l + `✗ CLI install failed (exit ${r.code}) — app left as is.`);
+          return;
+        }
+      }
+      setUpdateLog((l) => l + `downloading app ${tag}…\n`);
+      await invoke<string>("install_app_version", { tag });
+      setUpdateLog((l) => l + "installed — relaunching…");
+      await relaunch();
+    } catch (e) {
+      const m = `install ${tag} failed: ${String(e)}`;
+      setUpdateLog((l) => l + `\n✗ ${m}`);
+      invoke("log_event", { level: "error", msg: m }).catch(() => {});
+    } finally {
+      await onCheckUpdate();
+      setPinning(false);
     }
   };
 
@@ -872,6 +972,52 @@ export function SettingsSheet({
               </div>
             )}
             {updateLog && <pre className="update-log">{updateLog}</pre>}
+          </section>
+
+          <section className="setting">
+            <label>Install another version</label>
+            {releases === null ? (
+              <div className="ver-actions">
+                <button className="ctrl sm" onClick={loadReleases}>Choose a version…</button>
+              </div>
+            ) : (
+              <div className="ver-actions">
+                <select
+                  value={pickTag}
+                  disabled={pinning}
+                  onChange={(e) => { setPickTag(e.currentTarget.value); setPickArmed(false); }}
+                >
+                  {releases.map((r) => {
+                    const cur = r.tag === `v${update?.app_version}`;
+                    return (
+                      <option key={r.tag} value={r.tag} disabled={cur}>
+                        {r.tag} · {r.published}{cur ? " (current)" : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+                <button
+                  className="ctrl sm"
+                  disabled={!pickTag || pinning || updating || appUpdating}
+                  onClick={doInstallVersion}
+                >
+                  {pinning
+                    ? "Installing…"
+                    : pickArmed
+                      ? `Confirm: install ${pickTag}`
+                      : `${cmpVer(pickTag, `v${update?.app_version ?? ""}`) < 0 ? "Roll back" : "Install"} → ${pickTag}`}
+                </button>
+              </div>
+            )}
+            {releasesErr && <div className="hint">✗ {releasesErr}</div>}
+            <div className="hint">
+              For when a release breaks something. Installs the app{update?.cli_version ? " and the CLI" : ""} at
+              that version and relaunches; “Update app” brings you back to the latest. Your places and settings are kept.
+            </div>
+            <ManualInstall
+              tag={pickTag || update?.latest || "vX.Y.Z"}
+              cliDir={update?.cli_path ? update.cli_path.replace(/\/[^/]*$/, "") : null}
+            />
           </section>
           </>}
 

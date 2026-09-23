@@ -998,6 +998,14 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 /* the Logs tail is the thing you actually READ (200 lines) — the update-run log
    next to it is a progress trace and stays short. */
 .update-log.log-tail { max-height: 40vh; }
+/* Settings → Updates: the by-hand install commands, folded away by default. */
+.manual-install { margin-top: var(--s3); }
+.manual-install > summary { cursor: pointer; color: var(--txt-dim); font-size: var(--fs-label); }
+.manual-install > summary:hover { color: var(--txt); }
+.manual-row { margin-top: var(--s3); }
+.manual-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+.manual-head .sub { color: var(--txt-dim); font-size: var(--fs-label); }
+.manual-row .update-log { margin-top: var(--s1); user-select: text; }
 
 /* sort popover + manual-drag affordances + tier toggles + what's-new */
 .sortpop { min-width: 180px; }

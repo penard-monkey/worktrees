@@ -22,11 +22,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - name: version gate — tag matches Cargo.toml workspace version
+      - name: version gate — tag matches Cargo.toml and install.sh
         run: |
           tag="${GITHUB_REF_NAME#v}"
           grep -q "^version = \"$tag\"$" Cargo.toml \
             || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
+          grep -q "^SCRIPT_VERSION=\"v$tag\"$" install.sh \
+            || { echo "tag v$tag != install.sh SCRIPT_VERSION"; exit 1; }
       - name: aarch64-linux cross linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |

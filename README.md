@@ -61,11 +61,16 @@ Fresh machine (installs the latest release to `~/.local/bin`):
 curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | bash
 ```
 
-Teams should pin the tag for reproducibility:
+Teams should pin a release for reproducibility. Setting the version is the
+form that works for every tag:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/v0.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/v0.29.0/install.sh | WORKTREES_INSTALL_VERSION=v0.29.0 bash
 ```
+
+For tags after v0.29.0 the tagged script installs its own release on its own,
+so `…/vX.Y.Z/install.sh | bash` is enough. The app can also install any
+release, including an older one, from Settings → Updates.
 
 The installer fetches the prebuilt binary for your platform (macOS/Linux,
 x86_64/arm64); with no match, or `WORKTREES_INSTALL_FROM_SOURCE=1`, it builds

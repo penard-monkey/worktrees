@@ -910,7 +910,10 @@ is invisible to the bats suite — there is no fake claude. Re-run
 1. CHANGELOG: move `[Unreleased]` into `## [x.y.z] - date` (release.yml uses
    the section as notes; the app shows it as "What's new" — it ships in the
    binary via include_str!).
-2. Bump workspace `Cargo.toml` → PR → merge.
+2. Bump workspace `Cargo.toml` AND `install.sh`'s `SCRIPT_VERSION` → PR →
+   merge. (A piped installer cannot see its URL, so a tagged copy knows its
+   tag only by carrying it; `test/misc.bats`, `make release` and release.yml
+   all refuse a mismatch.)
 3. `make release VERSION=x.y.z` → `git push origin main vx.y.z`.
    ⚠ **The app-bundle job builds the docs viewer's browser bundle and gates
    the server that serves it**: the gate step runs the docs-server boundary
