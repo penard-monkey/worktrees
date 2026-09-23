@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.29.0] - 2026-09-22
 
 ### Added
 - **A Plan tab in the dock.** The fourth rail icon shows, for the selected
@@ -74,6 +74,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   *What happened this week*) that open the modal prefilled, because a starter
   is an example to edit, not a command to run. Schedules, unread markers and a
   Home strip come next.
+- **Codex runs in a place, alongside Claude.** A worktree's AI pane can be
+  either one: Settings → Agents carries the default for new places
+  (`default_provider`), the new-worktree dialog offers the choice per place,
+  and the place menu switches an existing one. A place runs **one active
+  provider at a time**, so switching is an act with a consequence and says so
+  before it happens — *Close Claude and open Codex*, and the other way round —
+  rather than leaving two agents in one worktree quietly competing for it.
+  Codex signs in with a **ChatGPT account**, not an API key: run `codex login`
+  once and `codex login status` to check it. Its MCP wiring is its own, in
+  Settings → Codex, because Claude's registration says nothing about Codex's —
+  and if the CLI is not on `PATH` the panel says so and gives you the install
+  line instead of failing at launch.
 
 ## [0.28.0] - 2026-09-21
 
