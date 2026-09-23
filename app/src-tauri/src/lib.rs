@@ -7316,7 +7316,7 @@ pub fn run() {
                 winstate::ready(handle);
             }
             if matches!(event, tauri::RunEvent::Exit) {
-                winstate::save(handle);
+                winstate::stop(handle);
                 let shells = handle.state::<Shells>();
                 // Where each tab ended up, recorded BEFORE the sweep — a killed
                 // shell has no cwd left to read.

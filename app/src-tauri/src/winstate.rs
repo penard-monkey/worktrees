@@ -18,13 +18,20 @@
 //!   backend-owned `window-state.json`, like `shell-cwds.json`.
 //! - It is ALWAYS recorded and only restored when the setting is on, so turning
 //!   the setting on picks up where the last session actually was.
-//! - Saved on `RunEvent::Exit`, which ⌘Q, closing the window and the updater's
-//!   `relaunch()` (plugin-process → `request_restart` → exit) all reach. A crash
-//!   does not, and then the frame from the last clean exit is used.
+//! - Saved WHILE the app runs, about a second after the window settles, and
+//!   never at exit. The first version saved on `RunEvent::Exit` and a real
+//!   fullscreen → ⌘Q → relaunch came back windowed, with the file saying
+//!   `fullscreen: false` over the pre-fullscreen frame: whatever the window
+//!   reports while AppKit tears it down is not the state the user left it in.
+//!   Freezing at exit and writing only settled states makes the quit path —
+//!   ⌘Q, closing the window, the updater's `relaunch()`, even a crash —
+//!   irrelevant. The price is a move made in the last second before quitting.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Runtime, WebviewWindow};
 
 pub const FILE: &str = "window-state.json";
@@ -39,6 +46,12 @@ const MIN_H: f64 = 560.0;
 /// that is no longer attached gets the OS's placement instead.
 const GRAB_W: f64 = 100.0;
 const GRAB_H: f64 = 30.0;
+/// A change is written once the window has been still this long — past the
+/// end of a drag, and past the ~0.7s fullscreen animation.
+const SETTLE: Duration = Duration::from_millis(1000);
+const TICK: Duration = Duration::from_millis(250);
+/// How long a fullscreen request gets before it is checked (and retried once).
+const FULLSCREEN_CHECK: Duration = Duration::from_millis(1500);
 
 /// A normal (not fullscreen, not maximized) window's frame, in logical points:
 /// outer top-left, inner size — the pair `set_position`/`set_size` take.
@@ -69,6 +82,23 @@ pub struct Tracker {
     /// to toggle fullscreen on a window the event loop has not shown yet is a
     /// request it is free to drop.
     pending_fullscreen: Mutex<bool>,
+    /// When the state last CHANGED and has not been written since.
+    dirty: Mutex<Option<Instant>>,
+    /// Set at exit: no more samples, no more writes.
+    stopped: AtomicBool,
+}
+
+/// Whether a pending change has been still long enough to write.
+pub fn settled(dirty: Option<Instant>, now: Instant) -> bool {
+    dirty.is_some_and(|t| now.saturating_duration_since(t) >= SETTLE)
+}
+
+fn describe(st: &WinState) -> String {
+    let frame = st
+        .frame
+        .map(|f| format!("{:.0}x{:.0} at {:.0},{:.0}", f.width, f.height, f.x, f.y))
+        .unwrap_or_else(|| "none".into());
+    format!("fullscreen={} maximized={} frame={frame}", st.fullscreen, st.maximized)
 }
 
 /// Missing key ⇒ ON, matching `DEFAULTS.restore_window` in settings.ts. A
@@ -130,10 +160,53 @@ fn current<R: Runtime>(w: &WebviewWindow<R>) -> Option<(Frame, bool, bool, bool)
 }
 
 fn sample<R: Runtime>(w: &WebviewWindow<R>) {
-    let Some((frame, fs, max, min)) = current(w) else { return };
     let tracker = w.state::<Tracker>();
+    if tracker.stopped.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some((frame, fs, max, min)) = current(w) else { return };
     let mut st = tracker.state.lock().unwrap();
-    *st = observe(*st, frame, fs, max, min);
+    let next = observe(*st, frame, fs, max, min);
+    if next != *st {
+        *st = next;
+        *tracker.dirty.lock().unwrap() = Some(Instant::now());
+    }
+}
+
+fn write(dir: &Path, st: &WinState) {
+    if st.frame.is_none() && !st.fullscreen && !st.maximized {
+        return; // nothing observed — leave whatever is on disk alone
+    }
+    let res = serde_json::to_vec_pretty(st)
+        .map_err(|e| e.to_string())
+        .and_then(|b| std::fs::write(dir.join(FILE), b).map_err(|e| e.to_string()));
+    match res {
+        Ok(()) => crate::applog("info", &format!("window state saved: {}", describe(st))),
+        Err(e) => crate::applog("warn", &format!("window state: could not save: {e}")),
+    }
+}
+
+/// Writes each settled change until `stop`.
+fn spawn_writer<R: Runtime>(app: AppHandle<R>, dir: PathBuf) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(TICK);
+        let tracker = app.state::<Tracker>();
+        if tracker.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        let due = {
+            let mut d = tracker.dirty.lock().unwrap();
+            let due = settled(*d, Instant::now());
+            if due {
+                *d = None;
+            }
+            due
+        };
+        if due {
+            let st = *tracker.state.lock().unwrap();
+            write(&dir, &st);
+        }
+    });
 }
 
 fn monitors<R: Runtime>(w: &WebviewWindow<R>) -> Vec<(f64, f64, f64, f64)> {
@@ -153,6 +226,14 @@ fn monitors<R: Runtime>(w: &WebviewWindow<R>) -> Vec<(f64, f64, f64, f64)> {
 pub fn attach<R: Runtime>(w: &WebviewWindow<R>, dir: &Path, restore: bool) {
     let saved = load(dir);
     let tracker = w.state::<Tracker>();
+    crate::applog(
+        "info",
+        &format!(
+            "window restore: {}, saved: {}",
+            if restore { "on" } else { "off" },
+            saved.as_ref().map(describe).unwrap_or_else(|| "nothing".into())
+        ),
+    );
     match saved {
         Some(st) if restore => {
             if let Some(f) = st.frame {
@@ -183,37 +264,42 @@ pub fn attach<R: Runtime>(w: &WebviewWindow<R>, dir: &Path, restore: bool) {
             sample(&win);
         }
     });
+    spawn_writer(w.app_handle().clone(), dir.to_path_buf());
 }
 
-/// `RunEvent::Ready`: the deferred half of a fullscreen restore.
+/// `RunEvent::Ready`: the deferred half of a fullscreen restore. Checked after
+/// a moment and retried once, because `set_fullscreen` only QUEUES the request
+/// — an `Ok` here says nothing about whether AppKit acted on it.
 pub fn ready<R: Runtime>(app: &AppHandle<R>) {
     let tracker = app.state::<Tracker>();
     let pending = std::mem::take(&mut *tracker.pending_fullscreen.lock().unwrap());
-    if pending {
-        if let Some(w) = app.get_webview_window("main") {
-            if let Err(e) = w.set_fullscreen(true) {
-                crate::applog("warn", &format!("window restore: fullscreen: {e}"));
+    if !pending {
+        return;
+    }
+    let Some(w) = app.get_webview_window("main") else { return };
+    crate::applog("info", "window restore: entering fullscreen");
+    if let Err(e) = w.set_fullscreen(true) {
+        crate::applog("warn", &format!("window restore: fullscreen: {e}"));
+    }
+    std::thread::spawn(move || {
+        for attempt in 1..=2 {
+            std::thread::sleep(FULLSCREEN_CHECK);
+            if w.is_fullscreen().unwrap_or(false) {
+                crate::applog("info", &format!("window restore: fullscreen confirmed (check {attempt})"));
+                return;
+            }
+            crate::applog("warn", &format!("window restore: not fullscreen after check {attempt}"));
+            if attempt == 1 {
+                let _ = w.set_fullscreen(true);
             }
         }
-    }
+    });
 }
 
-/// `RunEvent::Exit`: one last sample if the window still answers, then write.
-pub fn save<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(w) = app.get_webview_window("main") {
-        sample(&w);
-    }
-    let st = *app.state::<Tracker>().state.lock().unwrap();
-    if st.frame.is_none() && !st.fullscreen && !st.maximized {
-        return; // nothing observed — leave whatever is on disk alone
-    }
-    let Ok(dir) = app.path().app_config_dir() else { return };
-    let res = serde_json::to_vec_pretty(&st)
-        .map_err(|e| e.to_string())
-        .and_then(|b| std::fs::write(dir.join(FILE), b).map_err(|e| e.to_string()));
-    if let Err(e) = res {
-        crate::applog("warn", &format!("window state: could not save: {e}"));
-    }
+/// `RunEvent::Exit`: stop sampling and writing. Deliberately NOT a save — see
+/// the module doc for why the exit path is the one moment not to trust.
+pub fn stop<R: Runtime>(app: &AppHandle<R>) {
+    app.state::<Tracker>().stopped.store(true, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -244,6 +330,14 @@ mod tests {
         assert_eq!(st, WinState { frame: Some(F), maximized: true, fullscreen: false });
         let st = observe(st, F, false, false, false);
         assert_eq!(st, WinState { frame: Some(F), maximized: false, fullscreen: false });
+    }
+
+    #[test]
+    fn a_change_is_written_only_once_the_window_is_still() {
+        let t0 = Instant::now();
+        assert!(!settled(None, t0 + SETTLE * 5), "nothing changed, nothing to write");
+        assert!(!settled(Some(t0), t0 + SETTLE / 2), "mid-drag / mid-animation");
+        assert!(settled(Some(t0), t0 + SETTLE));
     }
 
     #[test]
