@@ -92,11 +92,14 @@ test-frontend:
 
 check: lint test test-mcp test-frontend
 
-# make release VERSION=x.y.z — bump the workspace version in Cargo.toml first.
+# make release VERSION=x.y.z — bump the workspace version in Cargo.toml AND
+# install.sh's SCRIPT_VERSION first.
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=x.y.z"; exit 1; }
 	@grep -q '^version = "$(VERSION)"$$' Cargo.toml || { \
 	  echo "workspace version in Cargo.toml != $(VERSION) — bump it first"; exit 1; }
+	@grep -q '^SCRIPT_VERSION="v$(VERSION)"$$' install.sh || { \
+	  echo "install.sh SCRIPT_VERSION != v$(VERSION) — bump it with Cargo.toml"; exit 1; }
 	@git diff --quiet || { echo "working tree dirty"; exit 1; }
 	git tag -a "v$(VERSION)" -m "worktrees v$(VERSION)"
 	@echo "tagged v$(VERSION) — push with: git push origin main v$(VERSION)"

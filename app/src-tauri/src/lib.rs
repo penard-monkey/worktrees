@@ -2398,23 +2398,28 @@ async fn check_update() -> Result<UpdateInfo, String> {
 
 /// Update the installed CLI via the PINNED-TAG installer — install.sh stays the
 /// single source of truth for download/checksum/replace. Hardening (review):
-/// the webview PROPOSES a tag but this side re-resolves latest and requires an
-/// exact match (no webview-driven downgrade / stale pin); the script downloads
+/// the webview PROPOSES a tag but this side re-resolves it — latest, or (for a
+/// user-chosen rollback) a tag in the published stable list, never an arbitrary
+/// string; the script downloads
 /// to a temp file with a CHECKED curl (a piped `curl | bash` masks download
 /// failure as success — pipeline status is the last command's); and success is
 /// declared only when the re-probed CLI actually reports the new version.
 #[tauri::command]
 async fn update_cli(tag: String) -> Result<CmdResult, String> {
-    let ok_tag = tag.starts_with('v')
-        && tag.len() > 1
-        && tag[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
-    if !ok_tag {
+    if !valid_tag(&tag) {
         return Err(format!("suspicious tag '{tag}'"));
     }
+    // Latest via the cheap redirect; anything else (a rollback) must be a
+    // published stable release — the webview still cannot name an arbitrary tag.
     match latest_release_tag() {
         Some(latest) if latest == tag => {}
-        Some(latest) => return Err(format!("{tag} is not the latest release ({latest}) — re-check for updates")),
-        None => return Err("could not re-verify the latest release (offline?)".into()),
+        Some(_) => {
+            let known = list_published_releases()?;
+            if !known.iter().any(|r| r.tag == tag) {
+                return Err(format!("{tag} is not a published release — re-check the version list"));
+            }
+        }
+        None => return Err("could not re-verify the release list (offline?)".into()),
     }
 
     let url = format!("https://raw.githubusercontent.com/{REPO_SLUG}/{tag}/install.sh");
@@ -2473,6 +2478,104 @@ async fn update_cli(tag: String) -> Result<CmdResult, String> {
         needs_confirm: None,
         warnings: Vec::new(),
     })
+}
+
+// ── install a specific release (rollback) ────────────────────────────────────
+// A bad release that still leaves the UI usable must be escapable from the UI.
+// Every stable release since v0.4.0 carries its own latest.json + signed app
+// tarballs, so "install vX" is the ordinary updater pointed at vX's manifest.
+// Going back UP needs nothing new: an older build's "Update app" still reads
+// releases/latest. State survives the round trip because both persisted
+// stores keep keys they do not know (store.rs `extra`, settings' spread).
+
+fn valid_tag(tag: &str) -> bool {
+    tag.starts_with('v')
+        && tag.len() > 1
+        && tag[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct ReleaseRow {
+    tag: String,
+    published: String, // YYYY-MM-DD
+}
+
+/// GitHub's releases list → installable rows, newest first. Drafts and
+/// prereleases are out, and so is anything without a `latest.json` — the app
+/// half of the install cannot run without it.
+fn parse_releases(body: &str) -> Result<Vec<ReleaseRow>, String> {
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| format!("release list: {e}"))?;
+    let arr = v.as_array().ok_or("release list: not an array (rate-limited?)")?;
+    Ok(arr
+        .iter()
+        .filter(|r| !r["draft"].as_bool().unwrap_or(true) && !r["prerelease"].as_bool().unwrap_or(true))
+        .filter(|r| {
+            r["assets"].as_array().is_some_and(|a| a.iter().any(|x| x["name"] == "latest.json"))
+        })
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            valid_tag(tag).then(|| ReleaseRow {
+                tag: tag.to_string(),
+                published: r["published_at"].as_str().unwrap_or("").chars().take(10).collect(),
+            })
+        })
+        .collect())
+}
+
+fn list_published_releases() -> Result<Vec<ReleaseRow>, String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-fsSL", "--max-time", "10", "-H", "Accept: application/vnd.github+json"])
+        .arg(format!("https://api.github.com/repos/{REPO_SLUG}/releases?per_page=30"));
+    let out = run_deadline(cmd, 15).map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("couldn't fetch the release list (curl exited {})", out.status.code().unwrap_or(-1)));
+    }
+    parse_releases(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[tauri::command]
+async fn list_releases() -> Result<Vec<ReleaseRow>, String> {
+    list_published_releases()
+}
+
+/// Install the signed app bundle of exactly `tag` — up or down. The updater is
+/// pointed at that release's own manifest and its comparator accepts only that
+/// version, so the signature check is the stock one and nothing else can land.
+/// The caller relaunches.
+#[tauri::command]
+async fn install_app_version(app: AppHandle, tag: String) -> Result<String, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    if !valid_tag(&tag) {
+        return Err(format!("suspicious tag '{tag}'"));
+    }
+    let want = tag[1..].to_string();
+    if want == env!("CARGO_PKG_VERSION") {
+        return Err(format!("already running {tag}"));
+    }
+    if !list_published_releases()?.iter().any(|r| r.tag == tag) {
+        return Err(format!("{tag} is not a published release"));
+    }
+    let url = tauri::Url::parse(&format!("https://github.com/{REPO_SLUG}/releases/download/{tag}/latest.json"))
+        .map_err(|e| e.to_string())?;
+    let cmp = want.clone();
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .version_comparator(move |_current, remote| remote.version.to_string() == cmp)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let up = updater
+        .check()
+        .await
+        .map_err(|e| format!("{tag}: {e}"))?
+        .ok_or_else(|| format!("{tag}'s manifest does not describe version {want}"))?;
+    applog("info", &format!("install_app_version: {} → {tag}", env!("CARGO_PKG_VERSION")));
+    up.download_and_install(|_, _| {}, || {}).await.map_err(|e| {
+        applog("error", &format!("install_app_version {tag}: {e}"));
+        format!("{tag}: {e}")
+    })?;
+    Ok(up.version)
 }
 
 // ── AI command config (Settings → Commands) ──────────────────────────────────
@@ -7109,6 +7212,8 @@ pub fn run() {
             set_fetch_interval,
             check_update,
             update_cli,
+            list_releases,
+            install_app_version,
             get_ai_config,
             mcp_status,
             mcp_install,
@@ -7227,6 +7332,29 @@ mod tests {
 
     fn v(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── rollback: which releases are offered ────────────────────────────────
+    #[test]
+    fn release_list_keeps_only_installable_stable_tags() {
+        let body = r#"[
+          {"tag_name":"v0.29.0-rc1","draft":false,"prerelease":true,"published_at":"2026-09-22T00:00:00Z","assets":[{"name":"latest.json"}]},
+          {"tag_name":"v0.28.0","draft":false,"prerelease":false,"published_at":"2026-09-21T22:24:30Z","assets":[{"name":"latest.json"},{"name":"checksums.txt"}]},
+          {"tag_name":"v0.27.9","draft":true,"prerelease":false,"published_at":null,"assets":[{"name":"latest.json"}]},
+          {"tag_name":"v0.27.0","draft":false,"prerelease":false,"published_at":"2026-09-20T19:02:45Z","assets":[{"name":"checksums.txt"}]},
+          {"tag_name":"v0.26.0; rm -rf","draft":false,"prerelease":false,"published_at":"x","assets":[{"name":"latest.json"}]},
+          {"tag_name":"v0.3.0","draft":false,"prerelease":false,"published_at":"2026-07-27T16:24:43Z","assets":[{"name":"latest.json"}]}
+        ]"#;
+        let rows = parse_releases(body).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ReleaseRow { tag: "v0.28.0".into(), published: "2026-09-21".into() },
+                ReleaseRow { tag: "v0.3.0".into(), published: "2026-07-27".into() },
+            ]
+        );
+        // a rate-limit answer is an object, not a list — an error, not "no releases"
+        assert!(parse_releases(r#"{"message":"API rate limit exceeded"}"#).is_err());
     }
 
     // ── Claude plan usage: what a failed fetch answers ──────────────────────

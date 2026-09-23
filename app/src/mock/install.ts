@@ -1987,6 +1987,15 @@ Phase 3: Frontend pane and mock harness
         cli_path: mockCliVersion ? "/Users/demo/.local/bin/worktrees" : null,
         latest: "v0.2.1",
       };
+    case "list_releases":
+      return [
+        { tag: "v0.2.1", published: "2026-07-26" },
+        { tag: "v0.2.0", published: "2026-07-25" },
+        { tag: "v0.1.0", published: "2026-07-20" },
+      ];
+    case "install_app_version":
+      console.info("[mock] install_app_version", args.tag);
+      return (args.tag as string).replace(/^v/, "");
     case "update_cli": {
       mockCliVersion = (args.tag as string).replace(/^v/, "");
       return {

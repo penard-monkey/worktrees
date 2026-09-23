@@ -25,6 +25,16 @@ write_config() {
   [ "$output" = "worktrees $ver" ]
 }
 
+@test "install.sh's SCRIPT_VERSION is the workspace version" {
+  # A tagged install.sh installs its own release only by carrying the tag — a
+  # piped script cannot see its URL. Bumping Cargo.toml without this line would
+  # ship a tag whose "pinned" installer installs the release before it.
+  ver="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$BATS_TEST_DIRNAME/../Cargo.toml" | head -n1)"
+  pinned="$(sed -n 's/^SCRIPT_VERSION="\(.*\)"$/\1/p' "$BATS_TEST_DIRNAME/../install.sh")"
+  [ -n "$ver" ]
+  [ "$pinned" = "v$ver" ]
+}
+
 @test "help / -h / --help print usage (contains 'worktrees new') and exit 0 outside any git repo" {
   local v
   for v in help -h --help; do

@@ -3,6 +3,29 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Roll back to an earlier release from Settings → Updates.** "Install
+  another version" lists every published stable release and installs the
+  one you pick — the CLI first, then the signed app bundle — and relaunches.
+  It is there for a release that breaks something while leaving the app
+  usable; "Update app" brings you back to the latest. Places and settings
+  survive the round trip, because both stores keep keys an older version does
+  not know.
+  A folded "Install manually" block gives the same install as copyable
+  terminal commands (CLI only, or app + CLI), for when the buttons fail.
+
+### Fixed
+- **A tag-pinned `install.sh` installs its own release.** The documented
+  `curl …/vX.Y.Z/install.sh | bash` form installed the LATEST release: the
+  version came only from `WORKTREES_INSTALL_VERSION`, and a piped script
+  cannot see the URL it was fetched from. The script now carries its release
+  (`SCRIPT_VERSION`, kept equal to `Cargo.toml` by a test, `make release` and
+  the release workflow) and falls back to latest only when that release does
+  not exist yet. Applies to tags after v0.29.0; for older ones set
+  `WORKTREES_INSTALL_VERSION`, as the README now shows.
+
 ## [0.29.0] - 2026-09-22
 
 ### Added
