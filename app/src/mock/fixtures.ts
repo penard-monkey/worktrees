@@ -34,7 +34,7 @@ export type Place = {
   last_commit_subject?: string | null;
   last_commit_epoch?: number | null;
   tmux_session: { name: string; up: boolean };
-  agent_sessions?: { claude: { name: string; up: boolean }; codex: { name: string; up: boolean } };
+  agent_sessions?: { claude: { name: string; up: boolean; model?: string | null }; codex: { name: string; up: boolean; model?: string | null } };
   claude_session_present: boolean;
   profile_name?: string | null;
   profile_stale?: boolean;

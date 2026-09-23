@@ -56,6 +56,12 @@ pub struct ClaudeProbe {
     /// Time of the last write that CHANGED `status`.
     #[serde(default, rename = "statusUpdatedAt")]
     pub status_updated_at: Option<i64>,
+    /// The claude config dir this probe was READ from (`~/.claude` or a
+    /// profile's dir) — not in the file; `live_probes` fills it. The session's
+    /// transcript lives under the same root, and a profiled session's does not
+    /// live under `~/.claude`.
+    #[serde(skip)]
+    pub root: std::path::PathBuf,
 }
 
 /// True when this probe's `busy` is residue from PARKING rather than live work.
@@ -130,10 +136,11 @@ pub fn live_probes() -> Vec<ClaudeProbe> {
                 Ok(b) => b,
                 Err(_) => continue,
             };
-            let probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
+            let mut probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
                 Ok(p) => p, // missing pid/cwd/status → parse fails → skip
                 Err(_) => continue,
             };
+            probe.root = root.clone();
             if probe.cwd.is_empty() || !pid_alive(probe.pid) {
                 continue; // dead pid (or crashed-session stale file) → skip
             }
@@ -236,6 +243,73 @@ pub fn pane_id(tmux: &str) -> Option<&str> {
 pub fn session_name(tmux: &str) -> Option<&str> {
     let (s, _) = tmux.split_once(':')?;
     if s.is_empty() { None } else { Some(s) }
+}
+
+// ── the model a session is running ───────────────────────────────────────────
+// The probe file does not say; the transcript does, in two places: every
+// assistant reply carries `message.model`, and a `/model` switch writes its
+// confirmation (`Set model to `Fable 5.1``) the moment it is made — so a switch
+// shows before the next reply, not after it. The newest of the two wins. A
+// session that has done neither has no answer rather than a guessed default.
+
+/// The model named by the newest reply or `/model` switch among transcript
+/// `lines` (oldest first): an id (`claude-opus-5-5`) from a reply, a display
+/// name (`Fable 5.1`) from a switch — `model_display` passes the latter through.
+/// Claude writes `<synthetic>` for replies it made up locally (an interrupted
+/// turn, an API error) — those name no model.
+pub fn transcript_model(lines: &[String]) -> Option<String> {
+    lines.iter().rev().find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        match v.get("type")?.as_str()? {
+            "assistant" => {
+                let m = v.pointer("/message/model")?.as_str()?;
+                (!m.is_empty() && !m.starts_with('<')).then(|| m.to_string())
+            }
+            "user" => model_switch(v.pointer("/message/content")?),
+            _ => None,
+        }
+    })
+}
+
+/// The model a `/model` confirmation names, from a user entry's content (a
+/// string, or a list of text blocks). `Default (Opus 5.5)` reads as `Opus 5.5`
+/// and a trailing `(1M context)` is dropped, matching what a reply's id shows.
+fn model_switch(content: &serde_json::Value) -> Option<String> {
+    let text = match content {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Array(a) => a.iter().find_map(|b| b.get("text")?.as_str())?,
+        _ => return None,
+    };
+    let rest = text.strip_prefix("<local-command-stdout>")?.strip_prefix("Set model to `")?;
+    let mut name = rest.split('`').next()?.trim();
+    if let Some(inner) = name.strip_prefix("Default (").and_then(|n| n.strip_suffix(')')) {
+        name = inner;
+    }
+    if let Some(i) = name.find(" (") {
+        name = &name[..i];
+    }
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// A Claude model id as people say it: `claude-opus-5-5` → `Opus 5.5`,
+/// `claude-haiku-4-5-20251001` → `Haiku 4.5`, a `[1m]` context suffix dropped.
+/// Anything not shaped `claude-<family>-<digits>…` is returned as given — an
+/// unfamiliar id shown verbatim beats a confidently wrong name.
+pub fn model_display(id: &str) -> String {
+    let base = id.split('[').next().unwrap_or(id);
+    let Some(rest) = base.strip_prefix("claude-") else { return id.to_string() };
+    let mut parts: Vec<&str> = rest.split('-').collect();
+    // A trailing snapshot date (8 digits) is not part of the version.
+    if parts.len() > 2 && parts.last().is_some_and(|p| p.len() == 8 && p.bytes().all(|b| b.is_ascii_digit())) {
+        parts.pop();
+    }
+    let (family, version) = match parts.split_first() {
+        Some((f, v)) if !f.is_empty() && !v.is_empty() && v.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) => (*f, v),
+        _ => return id.to_string(),
+    };
+    let mut name = family[..1].to_ascii_uppercase();
+    name.push_str(&family[1..]);
+    format!("{name} {}", version.join("."))
 }
 
 /// Longest draft we keep. Long enough to recognise the thought, short enough
@@ -454,6 +528,58 @@ mod tests {
 
     fn probe(s: &str) -> ClaudeProbe {
         serde_json::from_str(s).expect("probe must parse")
+    }
+
+    #[test]
+    fn model_display_names_a_model_the_way_people_do() {
+        assert_eq!(model_display("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_display("claude-opus-5-5[1m]"), "Opus 5.5");
+        assert_eq!(model_display("claude-sonnet-5"), "Sonnet 5");
+        assert_eq!(model_display("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(model_display("claude-fable-5-1"), "Fable 5.1");
+        // Not the shape we know → verbatim, never a mangled guess.
+        assert_eq!(model_display("gpt-6-astra"), "gpt-6-astra");
+        assert_eq!(model_display("claude-3-opus-20240229"), "claude-3-opus-20240229");
+        assert_eq!(model_display("claude-"), "claude-");
+    }
+
+    #[test]
+    fn transcript_model_is_the_last_real_reply() {
+        let lines: Vec<String> = [
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-5"}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5"}}"#,
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
+            "not json",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(transcript_model(&lines).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(transcript_model(&lines[2..]), None);
+    }
+
+    /// Verbatim shape from a real `/model` switch: the confirmation lands in the
+    /// transcript immediately, and must outrank the reply before it.
+    #[test]
+    fn a_model_switch_shows_before_the_next_reply() {
+        let switched = |name: &str| {
+            serde_json::json!({"type":"user","message":{"role":"user","content":
+                format!("<local-command-stdout>Set model to `{name}` and saved as your default for new sessions</local-command-stdout>")}})
+            .to_string()
+        };
+        let reply = r#"{"type":"assistant","message":{"model":"claude-opus-5-5"}}"#.to_string();
+        let lines = vec![reply.clone(), switched("Fable 5.1")];
+        assert_eq!(transcript_model(&lines).as_deref(), Some("Fable 5.1"));
+        assert_eq!(model_display(&transcript_model(&lines).unwrap()), "Fable 5.1");
+        // …and a later reply outranks the switch.
+        let back = vec![switched("Fable 5.1"), reply];
+        assert_eq!(transcript_model(&back).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(transcript_model(&[switched("Default (Opus 5.5)")]).as_deref(), Some("Opus 5.5"));
+        assert_eq!(transcript_model(&[switched("Opus 5.5 (1M context)")]).as_deref(), Some("Opus 5.5"));
+        // A user's own prose mentioning the phrase is not a switch.
+        let prose = serde_json::json!({"type":"user","message":{"content":"Set model to `x` please"}}).to_string();
+        assert_eq!(transcript_model(&[prose]), None);
     }
 
     /// The stuck-green bug, verbatim: the two probes that sat `busy` for 22h and

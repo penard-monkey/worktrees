@@ -271,6 +271,7 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     // same file in the same tick.
     let effective = worktrees_core::profile::resolve_profile_id_in(&profiles, repo);
     let agent_panes = tmux::PaneList::fetch();
+    let probes = worktrees_core::agent::live_probes();
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
             let slug = place.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
@@ -284,9 +285,15 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             let sidecar_up = agent_panes.as_ref().is_some_and(|panes| panes.has_session(&claude_sidecar));
             let claude_up = sidecar_up || (primary_up && !legacy_codex && primary_name != codex_name);
             let claude_name = if sidecar_up { claude_sidecar } else if claude_up { primary_name } else { canonical.clone() };
+            // The model each live agent last answered with — `null` until its
+            // first reply, and never looked up for a session that is down.
+            let place_path = place.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let claude_model = if claude_up { claude_model(&probes, &claude_name) } else { None };
+            let codex_model = if codex_up { codex_model(&place_path) } else { None };
+            codex_watch_set(&place_path, codex_up, &codex_model);
             place["agent_sessions"] = serde_json::json!({
-                "claude": { "name": claude_name, "up": claude_up },
-                "codex": { "name": codex_name, "up": codex_up }
+                "claude": { "name": claude_name, "up": claude_up, "model": claude_model },
+                "codex": { "name": codex_name, "up": codex_up, "model": codex_model }
             });
             let tmux_up = claude_up || codex_up;
             if !claude_up && codex_up {
@@ -1191,17 +1198,28 @@ async fn fetch_origin(root: String) -> Result<(), String> {
 /// (busy_cwds, waiting_cwds). Paths are pushed as-is (the probe cwd and a
 /// place's `path` both derive from the same worktree dir, so the frontend
 /// matches raw). Any I/O or parse failure degrades to empty.
-fn claude_activity() -> (Vec<String>, Vec<String>) {
+/// Busy and waiting cwds, plus the model each tmux-hosted session currently
+/// names (by pid). The snapshot carries that model, and nothing else the poll
+/// watches moves when it changes: a `/model` switch touches neither tmux nor
+/// the probe's status, and a 2s first reply never spans the two ticks the busy
+/// set needs to see it. Costs a `stat` per session per tick, plus a tail read
+/// only for a transcript that grew.
+fn claude_activity() -> (Vec<String>, Vec<String>, Vec<(i32, Option<String>)>) {
     let mut busy = Vec::new();
     let mut waiting = Vec::new();
+    let mut models = Vec::new();
     for probe in worktrees_core::agent::live_probes() {
+        if probe.tmux.is_some() {
+            models.push((probe.pid, probe_model(&probe)));
+        }
         match worktrees_core::agent::effective_state(&probe).as_str() {
             "busy" => busy.push(probe.cwd),
             "waiting" => waiting.push(probe.cwd),
             _ => {} // idle / shell / parked-away busy (`delegated`) → no dot
         }
     }
-    (busy, waiting)
+    models.sort_unstable();
+    (busy, waiting, models)
 }
 
 /// Payload for `sessions:busy` — PATHS (worktree dirs), keyed to a place's `path`.
@@ -1605,6 +1623,86 @@ fn transcript_epoch(path: &Path) -> Option<i64> {
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter_map(|v| v.get("timestamp").and_then(entry_epoch))
         .max()
+}
+
+/// Last answer per transcript/rollout: its length when read, and the model it
+/// named. Read on the 3s snapshot poll, so a file is re-read only once it has
+/// GROWN — an idle session costs one `stat`.
+static MODEL_CACHE: Mutex<Option<HashMap<PathBuf, (u64, Option<String>)>>> = Mutex::new(None);
+/// Worktrees with a live codex session, and the model the last snapshot showed
+/// for each. Codex writes no status file, so nothing else tells the poll a
+/// codex turn landed; the tick re-reads these and re-lists when one CHANGES —
+/// exactly when the label would, and never while a turn merely streams.
+static CODEX_WATCH: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+
+/// The model named in `path`'s tail by `parse`, cached by file length. A tail
+/// that now names nothing (one enormous tool result filling it) KEEPS the last
+/// answer: the model did not change because a big line landed.
+fn cached_model(path: &Path, parse: fn(&[String]) -> Option<String>) -> Option<String> {
+    let len = std::fs::metadata(path).ok()?.len();
+    let mut guard = MODEL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if let Some((l, m)) = cache.get(path) {
+        if *l == len {
+            return m.clone();
+        }
+    }
+    let prev = cache.get(path).and_then(|(_, m)| m.clone());
+    let m = parse(&tail_lines(path, TRANSCRIPT_TAIL_BYTES)).or(prev);
+    cache.insert(path.to_path_buf(), (len, m.clone()));
+    m
+}
+
+/// The model the pane-0 claude in tmux session `session` currently names,
+/// display-named (`Opus 5.5`). Found by the probe whose `tmux` names that
+/// session — the same session the label sits over, not merely a claude with
+/// the same cwd (a dock shell may be running another).
+fn claude_model(probes: &[worktrees_core::agent::ClaudeProbe], session: &str) -> Option<String> {
+    probe_model(probes.iter().find(|p| {
+        p.tmux.as_deref().and_then(worktrees_core::agent::session_name) == Some(session)
+    })?)
+}
+
+fn probe_model(p: &worktrees_core::agent::ClaudeProbe) -> Option<String> {
+    let sid = p.session_id.as_deref()?;
+    let jsonl = Path::new(&worktrees_core::project::claude_dir_in(&p.root, &p.cwd)).join(format!("{sid}.jsonl"));
+    cached_model(&jsonl, worktrees_core::agent::transcript_model)
+        .map(|id| worktrees_core::agent::model_display(&id))
+}
+
+/// The model the newest codex session in worktree `cwd` last ran a turn on.
+fn codex_model(cwd: &str) -> Option<String> {
+    cached_model(&worktrees_core::codex::latest_rollout(cwd)?, worktrees_core::codex::rollout_model)
+}
+
+/// Record what a snapshot showed for `cwd`'s codex session (`None` = no live
+/// session, which stops the tick watching it).
+fn codex_watch_set(cwd: &str, live: bool, model: &Option<String>) {
+    let mut guard = CODEX_WATCH.lock().unwrap_or_else(|e| e.into_inner());
+    let w = guard.get_or_insert_with(HashMap::new);
+    if live {
+        w.insert(cwd.to_string(), model.clone());
+    } else {
+        w.remove(cwd);
+    }
+}
+
+/// True when any watched codex session's model differs from what was last
+/// shown. Updates the record itself, so one change is one re-list.
+fn codex_models_moved() -> bool {
+    let watched: Vec<(String, Option<String>)> = {
+        let guard = CODEX_WATCH.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|w| w.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
+    };
+    let mut moved = false;
+    for (cwd, shown) in watched {
+        let now = codex_model(&cwd);
+        if now != shown {
+            codex_watch_set(&cwd, true, &now);
+            moved = true;
+        }
+    }
+    moved
 }
 
 fn is_work_prompt(display: &str) -> bool {
@@ -7010,6 +7108,7 @@ pub fn run() {
                 let mut last = worktrees_core::tmux::session_fingerprint();
                 let mut last_busy: Vec<String> = Vec::new();
                 let mut last_waiting: Vec<String> = Vec::new();
+                let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
                 let mut ticks: u32 = 0;
                 // Auto-fetch scheduling. The pass runs INLINE on this thread (no
                 // extra thread → passes can never stack; the AtomicU64 interval is
@@ -7159,7 +7258,16 @@ pub fn run() {
                             }
                         }
                     }
-                    let (mut busy, mut waiting) = claude_activity();
+                    let (mut busy, mut waiting, models) = claude_activity();
+                    // A live agent now names a different model (a first reply,
+                    // a `/model` switch, codex's next turn) → re-list, so the
+                    // agent label follows within a tick rather than on the 30s
+                    // safety tick. `None` first: the launch already listed.
+                    let codex_moved = codex_models_moved();
+                    if codex_moved || last_models.as_ref().is_some_and(|m| *m != models) {
+                        let _ = handle.emit("places:changed", ());
+                    }
+                    last_models = Some(models);
                     busy.sort_unstable();
                     waiting.sort_unstable();
                     // Two sessions in the SAME dir each push their cwd. The
