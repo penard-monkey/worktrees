@@ -904,6 +904,18 @@ export function SettingsSheet({
               Restore last place on launch
             </label>
             <div className="hint">Reopens the most recently used place, ready but not started — press Enter to attach.</div>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.restore_window}
+                onChange={(e) => onChange({ restore_window: e.currentTarget.checked })}
+              />
+              Restore window on launch
+            </label>
+            <div className="hint">
+              Reopens the window the way you left it — size, position, and full screen — after a
+              quit or an update. Takes effect the next time the app starts.
+            </div>
           </section>
 
           <section className="setting">

@@ -313,6 +313,11 @@ export type Settings = {
   // shims that source the user's own); zsh and bash only.
   term_per_tab_history: boolean;
   restore_last: boolean; // on launch, SELECT the most recently opened place (selection-only, never enters)
+  // Reopen the window as it was left: size, position, maximized, fullscreen.
+  // Read by the BACKEND at launch (winstate.rs), before this file ever runs, so
+  // a change takes effect on the next launch. A missing key means ON there too —
+  // keep the two defaults in step.
+  restore_window: boolean;
   // Sync modal: ferry the Claude transcripts along with the tree. GLOBAL and
   // flat, deliberately not part of `place_panels` — it is a property of how YOU
   // move between two Macs, not of one worktree, and the seed trap `place_panels`
@@ -402,6 +407,7 @@ export const DEFAULTS: Settings = {
   term_persist_scrollback: true,
   term_per_tab_history: true,
   restore_last: false,
+  restore_window: true,
   sync_with_sessions: false,
   collapsed: {},
   hidden_tiers: [],

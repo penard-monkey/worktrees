@@ -27,6 +27,7 @@ use worktrees_core::{git, mcpsetup, mention, ops, store, sync, sysclock, tmux, P
 // surface is worth reading in one piece.
 mod docserver;
 mod viewer;
+mod winstate;
 
 // ── app log ──────────────────────────────────────────────────────────────────
 // Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
@@ -6887,6 +6888,7 @@ pub fn run() {
         .manage(Terminals::default())
         .manage(Shells::default())
         .manage(viewer::Viewer::default())
+        .manage(winstate::Tracker::default())
         .setup(|app| {
             // A crash is the one exit `RunEvent::Exit` never sees, and it
             // leaves the derived trees on disk: COPIES of the user's documents
@@ -6903,6 +6905,15 @@ pub fn run() {
             // starts it.
             if let Ok(dir) = app.path().app_config_dir() {
                 viewer::cleanup(&dir);
+                // Settings → Behavior → Restore window. Read straight from
+                // ui-state.json because this runs before the frontend exists;
+                // see winstate.rs for why that file is only ever READ here.
+                if let Some(w) = app.get_webview_window("main") {
+                    let ui = std::fs::read(dir.join("ui-state.json"))
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+                    winstate::attach(&w, &dir, winstate::enabled(ui.as_ref()));
+                }
             }
             // macOS 26 floats a Writing Tools affordance (AppKit's Campo
             // lightweight UI) over any selection, and hovering the one it puts
@@ -7301,7 +7312,11 @@ pub fn run() {
         // them up, so without this the PTY children outlive the window as
         // orphaned logins.
         .run(|handle, event| {
+            if matches!(event, tauri::RunEvent::Ready) {
+                winstate::ready(handle);
+            }
             if matches!(event, tauri::RunEvent::Exit) {
+                winstate::save(handle);
                 let shells = handle.state::<Shells>();
                 // Where each tab ended up, recorded BEFORE the sweep — a killed
                 // shell has no cwd left to read.
