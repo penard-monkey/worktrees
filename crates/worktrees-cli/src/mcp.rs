@@ -42,6 +42,18 @@ use std::io::{BufRead, Read, Write};
 use worktrees_core::mention::uri_map;
 use worktrees_core::{automation, ops, runs, store, ui::CaptureUi, Project};
 
+fn add_agent_status(v: &mut serde_json::Value, project: &Project, slug: &str, path: &str) {
+    let claude = worktrees_core::agent::agents_at(&worktrees_core::agent::live_probes(), path);
+    let mut agents: Vec<serde_json::Value> = claude.iter().filter_map(|a| serde_json::to_value(a).ok()).collect();
+    let codex = ops::agent_session_name(&project.session_name(slug), "codex");
+    let codex_up = worktrees_core::tmux::session_exists(&codex);
+    if codex_up {
+        agents.push(serde_json::json!({ "provider": "codex", "state": "running", "tmux": codex }));
+    }
+    v["agent_state"] = serde_json::json!(claude.first().map(|a| a.state.as_str()).unwrap_or(if codex_up { "running" } else { "none" }));
+    v["agents"] = serde_json::json!(agents);
+}
+
 /// Pick the protocol version to answer `initialize` with: echo what the client
 /// asked for when we know it, else our newest. Free function so the test
 /// exercises THIS, rather than a copy of the rule.
@@ -142,6 +154,9 @@ pub fn setup_verb(args: &[String]) -> Option<&'static str> {
 /// it is what makes the local/project scopes checkable, and `None` is a normal
 /// answer here (the whole point of hoisting these above the git guard).
 pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
+    if args.windows(2).any(|w| w[0] == "--ai" && w[1] == "codex") || args.iter().any(|a| a == "--ai=codex") {
+        return cmd_codex_mcp_setup(verb, args);
+    }
     use worktrees_core::mcpsetup::{self, State};
     let json = args.iter().any(|a| a == "--json");
     // The server's own flag, reused: `--install` alone installs the mutating
@@ -205,12 +220,43 @@ pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
     }
 }
 
+fn cmd_codex_mcp_setup(verb: &str, args: &[String]) -> i32 {
+    use worktrees_core::codexmcp;
+    let json = args.iter().any(|a| a == "--json");
+    let report = |s: &codexmcp::Status| {
+        if json { println!("{}", serde_json::to_string(s).unwrap_or_default()); }
+        else {
+            println!("Codex MCP: {}", s.state);
+            if let Some(cmd) = &s.command { println!("  install with: {cmd}"); }
+            println!("  config: {}", s.config_path);
+        }
+    };
+    match verb {
+        "status" => { report(&codexmcp::status()); 0 }
+        "install" | "uninstall" => {
+            let result = if verb == "install" {
+                codexmcp::install(!args.iter().any(|a| a == "--read-only"))
+            } else { codexmcp::uninstall() };
+            match result {
+                Ok(out) => {
+                    if !out.output.is_empty() && !json { eprint!("{}", out.output); }
+                    report(&out.status);
+                    if out.ok { 0 } else { 1 }
+                }
+                Err(e) => { eprintln!("{e}"); 1 }
+            }
+        }
+        _ => 1,
+    }
+}
+
 pub fn cmd_mcp(args: &[String]) -> i32 {
     let mutations = args.iter().any(|a| a == "--mutations");
     // Pin the project once, here. `CLAUDE_PROJECT_DIR` is what claude exports for
     // the session's root; fall back to the process cwd.
-    let root = std::env::var("CLAUDE_PROJECT_DIR")
-        .ok()
+    let root = (std::env::var("WORKTREES_MCP_PROVIDER").ok().as_deref() != Some("codex"))
+        .then(|| std::env::var("CLAUDE_PROJECT_DIR").ok())
+        .flatten()
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
@@ -555,16 +601,16 @@ impl Server {
             t.push(tool(
                 "create_worktree",
                 "Create a worktree for a branch (creating the branch off base if needed) and \
-                 open its tmux session: a single pane running the AI, named after the \
-                 session so other sessions can message it. Pass `brief` to hand the agent \
-                 its task: it is written to .planning/brief.md in the worktree and claude \
-                 opens on it.",
+                 start the chosen agent in its own tmux session. Pass `brief` to hand the agent \
+                 its task: it is written to .planning/brief.md in the worktree and the chosen \
+                 agent opens on it. `provider` defaults to the project's AI command.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "branch": { "type": "string" },
                         "base": { "type": "string", "description": "Base ref for a new branch. Optional." },
-                        "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; claude is launched on it. Optional." },
+                        "provider": { "type": "string", "enum": ["claude", "codex"], "description": "Agent to start. Omit to use the project's AI command." },
+                        "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; the chosen agent opens on it. Optional." },
                         "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." }
                     },
                     "required": ["branch"],
@@ -776,9 +822,7 @@ impl Server {
                         // it by. `agent_state` is the one-word answer to "is
                         // anyone on this?" — `none` when the pane has no claude.
                         let mut v = serde_json::to_value(p).unwrap_or_default();
-                        let agents = worktrees_core::agent::agents_at(&worktrees_core::agent::live_probes(), &p.path);
-                        v["agent_state"] = serde_json::json!(agents.first().map(|a| a.state.as_str()).unwrap_or("none"));
-                        v["agents"] = serde_json::json!(agents);
+                        add_agent_status(&mut v, self.proj()?, &p.slug, &p.path);
                         v["plan"] = plan_json(&p.path);
                         Ok(text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default()))
                     }
@@ -870,6 +914,14 @@ impl Server {
                 };
                 let raw_base = s("base");
                 let mut args = vec![branch, "--no-attach".to_string()];
+                match a.get("provider") {
+                    None | Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::String(p)) if p == "claude" || p == "codex" => {
+                        args.push("--ai".to_string());
+                        args.push(p.clone());
+                    }
+                    Some(_) => return Ok(text_err("provider must be claude or codex")),
+                }
                 if !raw_base.trim().is_empty() {
                     match safe_arg(&raw_base, "base") {
                         Ok(b) => args.insert(1, b),
@@ -1261,9 +1313,7 @@ impl Server {
         // a prompt concurrently, so a fan-out here would be paid per mention.
         let place = project.place_one(&found);
         let mut v = serde_json::to_value(&place).unwrap_or_default();
-        let agents = worktrees_core::agent::agents_at(&worktrees_core::agent::live_probes(), &place.path);
-        v["agent_state"] = serde_json::json!(agents.first().map(|a| a.state.as_str()).unwrap_or("none"));
-        v["agents"] = serde_json::json!(agents);
+        add_agent_status(&mut v, project, &place.slug, &place.path);
         v["plan"] = plan_json(&place.path);
         for f in ["branch", "upstream", "last_commit_subject"] {
             if let Some(t) = v.get(f).and_then(|x| x.as_str()) {

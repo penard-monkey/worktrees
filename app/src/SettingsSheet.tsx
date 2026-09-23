@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
+import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -17,6 +18,20 @@ type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: b
 /** `term_history_info` — what the saved-scrollback tree currently costs. */
 type TermHistoryInfo = { dir: string; bytes: number; tabs: number };
 
+function agentSetupLabel(state: string | null): string {
+  if (!state) return "Checking…";
+  return ({
+    installed: "Connected",
+    "read-only": "Connected (read only)",
+    elsewhere: "Connected in this project",
+    absent: "Not connected",
+    stale: "Needs repair",
+    foreign: "Name in use",
+    "cli-missing": "Worktrees CLI missing",
+    "not-applicable": "Unavailable",
+  } as Record<string, string>)[state] ?? state;
+}
+
 // Sheet categories. One is shown at a time (see .settings-split) — the flat
 // 12-section pile made every setting equally hard to find. Purely presentational:
 // no section's markup or onChange contract changed when they were bucketed.
@@ -31,6 +46,7 @@ const CATS = [
   // hand-run command and an uninstall — and it is the surface a dismissed Home
   // card sends people to, so it has to be findable by name.
   { id: "claude", label: "Claude" },
+  { id: "codex", label: "Codex" },
   { id: "behavior", label: "Behavior" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
@@ -298,6 +314,16 @@ export function SettingsSheet({
   // you hunt for the thing it just offered.
   const [cat, setCat] = useState<CatId>("appearance");
   useEffect(() => { if (open) setCat(at?.cat ?? "appearance"); }, [open, at]);
+  const [codexMcpStatus, setCodexMcpStatus] = useState<CodexMcpStatus | null>(null);
+  useEffect(() => {
+    if (!open || cat !== "commands") return;
+    let alive = true;
+    invoke<CodexMcpStatus>("codex_mcp_status")
+      .then((status) => { if (alive) setCodexMcpStatus(status); })
+      .catch((e) => { if (alive) onReport(String(e)); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- probe on entry, not every App render
+  }, [open, cat]);
 
   // …and then say which section it meant. A transient class rather than focus:
   // the sheet body scrolls, and `autoFocus` inside a scrolling box is what
@@ -604,7 +630,30 @@ export function SettingsSheet({
             onSilenceOffer={onSilenceMcpOffer} onChanged={onMcpChanged} onReport={onReport} />
           </>}
 
+          {cat === "codex" && <CodexMcpSection onReport={onReport} />}
+
           {cat === "commands" && <>
+          <section className="setting">
+            <label>Default agent</label>
+            <div className="seg">
+              {(["claude", "codex"] as const).map((provider) => (
+                <button key={provider} className={settings.default_provider === provider ? "on" : ""}
+                  onClick={() => onChange({ default_provider: provider })}>
+                  {provider === "claude" ? "Claude" : "Codex"}
+                </button>
+              ))}
+            </div>
+            <div className="hint">Preselected for new worktrees when both agents are installed. Entering a place keeps its running agent; this default applies when none is running. Switching agents closes the current session first.</div>
+          </section>
+          <section className="setting">
+            <label>Worktrees tools for agents</label>
+            <div className="hint">Both providers can be connected at the same time. Their MCP setup is independent of the default agent.</div>
+            <div className="hint">Claude: {agentSetupLabel(mcpStatus?.state ?? null)} · Codex: {agentSetupLabel(codexMcpStatus?.state ?? null)}</div>
+            <div className="ver-actions">
+              <button className="ctrl sm" onClick={() => setCat("claude")}>Configure Claude</button>
+              <button className="ctrl sm" onClick={() => setCat("codex")}>Configure Codex</button>
+            </div>
+          </section>
           <section className="setting">
             <label>Commands</label>
             <label className="sub">Editor command</label>
@@ -625,9 +674,9 @@ export function SettingsSheet({
                 checked={settings.ai_auto_resume}
                 onChange={(e) => onChange({ ai_auto_resume: e.currentTarget.checked })}
               />
-              Resume Claude conversation on open
+              Resume agent conversation on open
             </label>
-            <div className="hint">Single-click Enter resumes the last conversation. Only applies when the AI command is claude.</div>
+            <div className="hint">Single-click Enter resumes the selected agent's last conversation when available.</div>
             <div className="ver-rows">
               <div className="ver-row">
                 AI command: <b>{aiConfig?.ai_cmd ?? "…"}</b>
@@ -637,7 +686,7 @@ export function SettingsSheet({
             <div className="ver-actions">
               <button className="ctrl sm" onClick={revealAiConfig} disabled={!aiConfig}>Reveal config file</button>
             </div>
-            <div className="hint">Shared with the CLI (~/.config/worktrees/config). Shell env vars (WORKTREES_AI_CMD) don't reach the GUI.</div>
+            <div className="hint">The CLI uses this command when you omit --ai. The app uses Default agent above. Shell env vars (WORKTREES_AI_CMD) don't reach the GUI.</div>
           </section>
           </>}
 

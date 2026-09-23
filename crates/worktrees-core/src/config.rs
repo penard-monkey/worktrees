@@ -256,6 +256,17 @@ pub fn resolve_ai_resume_arg() -> String {
     resolve_ai_resume_arg_from(env.as_deref(), cfg.as_deref())
 }
 
+/// Codex resumes by subcommand. An explicitly configured resume argument still
+/// wins, preserving the existing user override for every AI command.
+pub fn resolve_ai_resume_arg_for(ai_cmd: &str) -> String {
+    let env = std::env::var("WORKTREES_AI_RESUME_ARG").ok();
+    let cfg = user_cfg("ai_resume_arg");
+    if let Some(arg) = env.as_deref().filter(|s| !s.is_empty()).or(cfg.as_deref().filter(|s| !s.is_empty())) {
+        return arg.to_string();
+    }
+    if crate::profile::ai_word_of(ai_cmd) == "codex" { "resume --last".into() } else { "-r".into() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -148,6 +148,7 @@ pub fn live_probes() -> Vec<ClaudeProbe> {
 /// decide whether to brief it (`state`), and to find its pane (`tmux`).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Agent {
+    pub provider: &'static str,
     /// `busy` · `waiting` (on the user) · `idle` · `delegated` (parked-away
     /// busy) · `shell` · anything else claude writes, verbatim.
     pub state: String,
@@ -189,6 +190,7 @@ pub fn agents_at(probes: &[ClaudeProbe], path: &str) -> Vec<Agent> {
         .iter()
         .filter(|p| p.cwd == path)
         .map(|p| Agent {
+            provider: "claude",
             state: effective_state(p),
             pid: p.pid,
             name: p.name.clone(),
@@ -546,7 +548,7 @@ mod tests {
         assert_eq!(states, vec!["waiting", "delegated", "idle"]);
         // `agent` JSON leaves absent fields out rather than writing nulls.
         let j = serde_json::to_value(&agents_at(&probes, "/w/b")[0]).unwrap();
-        assert_eq!(j, serde_json::json!({"state":"busy","pid":9}));
+        assert_eq!(j, serde_json::json!({"provider":"claude","state":"busy","pid":9}));
     }
 
     // ── the unsent prompt ───────────────────────────────────────────────────

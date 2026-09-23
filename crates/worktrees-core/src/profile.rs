@@ -468,9 +468,9 @@ pub struct AiLaunch {
     pub cmd: String,
     /// Basename of the real program, for adoption/session matching. `claude`.
     pub match_word: String,
-    /// An initial prompt handed to claude as its positional argument — how a
+    /// An initial prompt handed to Claude or Codex as its positional argument — how a
     /// brief reaches the agent (`ops::BRIEF_OPENER`). Appended by
-    /// `launch_cmd`, after `--name`, and only for claude: another AI tool
+    /// `launch_cmd`, after `--name` for Claude: another AI tool
     /// would read it as something else entirely.
     pub opener: Option<String>,
 }
@@ -640,11 +640,19 @@ impl AiLaunch {
     /// neither: `ai_word_of(cmd)` is the program actually run, and `match_word`
     /// alone would say `claude` for the printf case too.
     pub fn launch_cmd(&self, session: &str) -> String {
-        if self.cmd.is_empty() || ai_word_of(&self.cmd) != "claude" {
+        let provider = ai_word_of(&self.cmd);
+        if self.cmd.is_empty() || (provider != "claude" && provider != "codex") {
             return self.cmd.clone();
         }
-        let mut cmd = self.cmd.clone();
-        if !session.is_empty() {
+        // Worktrees-owned Codex panes use ChatGPT account sign-in. Put the
+        // config override immediately after the executable, before a possible
+        // `resume` subcommand, and leave Codex's own browser OAuth flow and
+        // credential store to the CLI. No Worktrees API key is created or read.
+        let mut cmd = if provider == "codex" {
+            let split = self.cmd.find(char::is_whitespace).unwrap_or(self.cmd.len());
+            format!("{} -c forced_login_method=chatgpt{}", &self.cmd[..split], &self.cmd[split..])
+        } else { self.cmd.clone() };
+        if provider == "claude" && !session.is_empty() {
             cmd.push_str(" --name ");
             cmd.push_str(&shell_quote(session));
         }
@@ -1114,6 +1122,12 @@ fn global_mcp_servers(user: &serde_json::Value) -> Map<String, serde_json::Value
 /// every materialization — an absolute path baked into a profile goes stale the
 /// moment the binary moves or the profile is carried to another machine.
 pub fn worktrees_bin() -> Option<PathBuf> {
+    // The sandbox app builds this branch's CLI before launch. MCP entries made
+    // while testing it must point at that binary, not an older installed CLI.
+    if let Some(bin) = std::env::var_os("WORKTREES_CLI_BIN").map(PathBuf::from)
+        .filter(|p| p.is_absolute() && is_exec(p)) {
+        return Some(bin);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if exe.file_name().and_then(|s| s.to_str()) == Some("worktrees") {
             return Some(exe);
@@ -1137,6 +1151,32 @@ pub fn bin_on_path(name: &str) -> Option<PathBuf> {
             .filter(|d| d.starts_with('/'))
             .map(|d| PathBuf::from(d).join(name))
             .find(|c| is_exec(c))
+    })
+}
+
+/// The Codex CLI may be bundled with its VS Code extension instead of linked
+/// into a login shell's PATH. Resolve that installed copy for the desktop app
+/// and MCP setup without requiring a second Codex installation.
+pub fn codex_bin() -> Option<PathBuf> {
+    bin_on_path("codex").or_else(|| {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        for editor in [".vscode", ".vscode-insiders", ".cursor"] {
+            let root = home.join(editor).join("extensions");
+            let Ok(entries) = fs::read_dir(root) else { continue };
+            let mut dirs: Vec<PathBuf> = entries.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("openai.chatgpt-")))
+                .collect();
+            dirs.sort_by(|a, b| b.cmp(a)); // newest extension first
+            for dir in dirs {
+                let Ok(platforms) = fs::read_dir(dir.join("bin")) else { continue };
+                for platform in platforms.flatten() {
+                    let candidate = platform.path().join("codex");
+                    if is_exec(&candidate) { return Some(candidate); }
+                }
+            }
+        }
+        None
     })
 }
 
@@ -1631,10 +1671,15 @@ mod tests {
     }
 
     #[test]
-    fn launch_cmd_names_the_session_and_appends_the_opener_for_claude_only() {
+    fn launch_cmd_names_claude_and_briefs_both_agents() {
         let keep = "exec \"${SHELL:-/bin/sh}\"";
         // The name rides after everything the launch already carried…
         assert_eq!(AiLaunch::plain("claude").launch_cmd("proj-feat"), "claude --name 'proj-feat'");
+        assert_eq!(AiLaunch::plain("codex").launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt");
+        assert_eq!(AiLaunch::plain("codex resume --last").launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt resume --last");
+        let mut codex = AiLaunch::plain("codex");
+        codex.opener = Some("Read .planning/brief.md and begin.".into());
+        assert_eq!(codex.launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt 'Read .planning/brief.md and begin.'");
         // …including the resume arg, which must NOT be followed by the opener:
         // `-r` takes an optional session id and would swallow it.
         let mut l = AiLaunch::plain("claude -r");

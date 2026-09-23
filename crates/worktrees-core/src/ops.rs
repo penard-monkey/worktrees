@@ -3,7 +3,10 @@
 //! an exit code (guards → 1). git/tmux are shelled out. The bats suite gates
 //! this against the bash CLI byte-for-byte.
 
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::process::Command;
 
 use crate::config::sanitize_prefix;
 use crate::diag::{Code, Finding, Report, Severity};
@@ -147,6 +150,27 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
     }
 }
 
+/// Serialize provider changes across CLI, MCP and app processes. Without this,
+/// two simultaneous opens can both see an empty place and create one session
+/// each. The lock lives in Git's private directory, never in tracked files.
+fn lock_agent_switch(main_root: &str) -> Result<File, String> {
+    let output = Command::new("git").args(["-C", main_root, "rev-parse", "--absolute-git-dir"])
+        .output().map_err(|e| format!("could not locate Git directory for agent switch: {e}"))?;
+    if !output.status.success() {
+        return Err("could not locate Git directory for agent switch".into());
+    }
+    let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let path = Path::new(&git_dir).join("worktrees-agent-switch.lock");
+    let file = OpenOptions::new().create(true).read(true).write(true).open(&path)
+        .map_err(|e| format!("could not open agent switch lock {}: {e}", path.display()))?;
+    // SAFETY: flock receives a live file descriptor. The returned File keeps
+    // the exclusive lock until the whole launch/reuse operation finishes.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!("could not lock agent switch: {}", std::io::Error::last_os_error()));
+    }
+    Ok(file)
+}
+
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
 // Returns 0 on success (session live / adopted / attached), 1 when tmux refuses
 // to create the session (the reason is surfaced via ui.error — the app shows it
@@ -162,8 +186,55 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
     // the app's auto-resume off.
     let ai_word = ai.match_word.clone();
     let ai_cmd = ai.cmd.as_str();
+    let _switch_lock = if ai_word == "claude" || ai_word == "codex" {
+        match lock_agent_switch(&p.main_root) {
+            Ok(file) => Some(file),
+            Err(e) => { ui.error(&e); return 1; }
+        }
+    } else { None };
+    // Provider changes are explicit opens. End the other Worktrees-managed AI
+    // session before this one starts, so a place never has two active agents.
+    // The canonical name predates provider sidecars; it may contain either AI.
+    if ai_word == "claude" || ai_word == "codex" {
+        let slug = if wt == p.main_root { "(main)" } else { wt.rsplit('/').next().unwrap_or("") };
+        let canonical = p.session_name(slug);
+        let codex_sidecar = tmux::codex_session_name(&canonical);
+        let claude_sidecar = tmux::claude_session_name(&canonical);
+        let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
+        if let Some(panes) = tmux::PaneList::fetch() {
+            for (name, provider) in panes.agents_in(wt, exclude) {
+                if provider != ai_word && name != canonical && name != codex_sidecar && name != claude_sidecar {
+                    ui.error(&format!(
+                        "{provider} is running in adopted tmux session '{name}'; close that session explicitly before switching to {ai_word}"
+                    ));
+                    return 1;
+                }
+            }
+        }
+        let mut other = Vec::new();
+        if ai_word == "claude" {
+            other.push(codex_sidecar);
+            if session_in != canonical && tmux::session_is_codex(&canonical) {
+                other.push(canonical);
+            }
+        } else {
+            other.push(claude_sidecar);
+            if session_in != canonical && tmux::session_exists(&canonical) && !tmux::session_is_codex(&canonical) {
+                other.push(canonical);
+            }
+        }
+        for name in other {
+            if name == session_in || !tmux::session_exists(&name) { continue; }
+            tmux::kill_session(&name);
+            if tmux::session_exists(&name) {
+                ui.error(&format!("could not close the other agent session '{name}'; provider switch cancelled"));
+                return 1;
+            }
+            ui.info(&format!("closed the other agent session '{name}' before starting {ai_word}"));
+        }
+    }
     let mut session = session_in.to_string();
-    if !tmux::session_exists(&session) {
+    if !tmux::session_exists(&session) && !session.contains(tmux::CODEX_SIDECAR_MARKER) && !session.contains(tmux::CLAUDE_SIDECAR_MARKER) {
         // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
         // inside the main root, so without the exclusion opening main could
         // adopt (and attach to) a worktree's session instead of creating main's.
@@ -268,6 +339,9 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
             }
         }
     }
+    // The critical section ends once the target exists. A CLI attach may stay
+    // open for hours and must not hold the lock against a later switch.
+    drop(_switch_lock);
     if !do_attach {
         ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
         return 0;
@@ -357,6 +431,19 @@ pub const BRIEF_PATH: &str = ".planning/brief.md";
 /// The prompt claude is launched on when a brief was written. Fixed text: the
 /// brief itself never travels through argv, only this pointer to it does.
 pub const BRIEF_OPENER: &str = "Read .planning/brief.md and begin.";
+
+pub fn agent_session_name(canonical: &str, ai_word: &str) -> String {
+    if ai_word == "codex" {
+        if tmux::session_is_codex(canonical) { canonical.to_string() }
+        else { tmux::codex_session_name(canonical) }
+    } else if ai_word == "claude" && (tmux::session_is_codex(canonical) || tmux::session_exists(&tmux::claude_session_name(canonical))) {
+        tmux::claude_session_name(canonical)
+    } else { canonical.to_string() }
+}
+
+pub fn resume_command(ai_cmd: &str) -> String {
+    format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg_for(ai_cmd))
+}
 
 /// What the Plan tab's "Generate plan" button pastes into a place's Claude
 /// session: a request to write down the work already in flight there.
@@ -635,8 +722,9 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 
     let install_cmd = if do_install && !already { detect_install_cmd(&wt) } else { String::new() };
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
-    if resume && !ai_cmd.is_empty() {
-        ai_cmd = format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg());
+    if resume && !ai_cmd.is_empty() &&
+        (crate::profile::ai_word_of(&ai_cmd) != "codex" || crate::codex::session_present(&wt)) {
+        ai_cmd = resume_command(&ai_cmd);
     }
 
     if !do_tmux {
@@ -663,6 +751,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if brief.is_some() && !ai.cmd.is_empty() {
         ai.opener = Some(BRIEF_OPENER.to_string());
     }
+    let session = agent_session_name(&session, &ai.match_word);
     let rc = launch(p, ui, &wt, &session, pane1_install, &ai, do_attach, spare_shell);
     if rc != 0 {
         rc
@@ -832,10 +921,12 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let session = p.session_name(&slug);
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
-    if resume && !ai_cmd.is_empty() {
-        ai_cmd = format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg());
+    if resume && !ai_cmd.is_empty() &&
+        (crate::profile::ai_word_of(&ai_cmd) != "codex" || crate::codex::session_present(&wt)) {
+        ai_cmd = resume_command(&ai_cmd);
     }
     let ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    let session = agent_session_name(&session, &ai.match_word);
     launch(p, ui, &wt, &session, "", &ai, do_attach, spare_shell)
 }
 
@@ -845,9 +936,17 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut names: Vec<String> = Vec::new();
     let mut yes = false;
+    let mut provider: Option<String> = None;
+    let mut want_provider = false;
     let mut expect: Option<String> = None;
     let mut want_val = false;
     for a in args {
+        if want_provider {
+            if a != "claude" && a != "codex" { ui.error("--ai must be claude or codex"); return 1; }
+            provider = Some(a.clone());
+            want_provider = false;
+            continue;
+        }
         if want_val {
             if a.starts_with('-') {
                 ui.error(&format!("--session needs a value (got '{a}')"));
@@ -866,6 +965,8 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             // See close_one: consent is bound to this name, not to whatever is
             // live by the time the answer comes back.
             "--session" => want_val = true,
+            "--ai" => want_provider = true,
+            s if s.starts_with("--ai=") => provider = Some(s["--ai=".len()..].to_string()),
             s if s.starts_with("--session=") => expect = Some(s["--session=".len()..].to_string()),
             s if s.starts_with('-') => {
                 ui.error(&format!("Unknown flag: {s}"));
@@ -873,6 +974,14 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             }
             s => names.push(s.to_string()),
         }
+    }
+    if want_provider {
+        ui.error("--ai needs a value");
+        return 1;
+    }
+    if provider.as_deref().is_some_and(|v| v != "claude" && v != "codex") {
+        ui.error("--ai must be claude or codex");
+        return 1;
     }
     if want_val {
         ui.error("--session needs a value");
@@ -895,12 +1004,53 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let mut rc = 0;
     for n in &names {
+        if provider.as_deref() == Some("claude") {
+            let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
+            let canonical = p.session_name(&slug);
+            let session = tmux::claude_session_name(&canonical);
+            if tmux::session_is_codex(&canonical) || tmux::session_exists(&session) {
+                if tmux::session_exists(&session) {
+                    if expect.as_deref().is_some_and(|e| e != session) {
+                        ui.error("Claude session changed since confirmation; nothing was closed.");
+                        rc = worse_rc(rc, 1);
+                    } else {
+                        tmux::kill_session(&session);
+                        ui.info(&format!("closed Claude tmux {session}"));
+                    }
+                } else { ui.info(&format!("no live Claude session for '{slug}'")); }
+                continue;
+            }
+        }
+        if provider.as_deref() == Some("codex") {
+            let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
+            let session = agent_session_name(&p.session_name(&slug), "codex");
+            if tmux::session_exists(&session) {
+                if expect.as_deref().is_some_and(|e| e != session) {
+                    ui.error("Codex session changed since confirmation; nothing was closed.");
+                    rc = worse_rc(rc, 1);
+                } else {
+                    tmux::kill_session(&session);
+                    ui.info(&format!("closed Codex tmux {session}"));
+                }
+            } else {
+                ui.info(&format!("no live Codex session for '{slug}'"));
+            }
+            continue;
+        }
         // A hard failure OUTRANKS a needs-confirmation stop: across several
         // names the caller must see "something broke" (1) rather than "ask the
         // user" (EXIT_NEEDS_CONFIRM), which is the code every existing caller
         // already understands. `worse_rc` is that ranking, written down once.
-        if let Err(code) = close_one(p, ui, n, yes, expect.as_deref()) {
-            rc = worse_rc(rc, code);
+        match close_one(p, ui, n, yes, expect.as_deref()) {
+            Err(code) => rc = worse_rc(rc, code),
+            Ok(()) if provider.is_none() => {
+                let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
+                let codex = tmux::codex_session_name(&p.session_name(&slug));
+                if tmux::session_exists(&codex) { tmux::kill_session(&codex); ui.info(&format!("closed Codex tmux {codex}")); }
+                let claude = tmux::claude_session_name(&p.session_name(&slug));
+                if tmux::session_exists(&claude) { tmux::kill_session(&claude); ui.info(&format!("closed Claude tmux {claude}")); }
+            }
+            Ok(()) => {}
         }
     }
     rc
@@ -1127,6 +1277,10 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
         tmux::kill_session(session);
         ui.info(&format!("killed tmux {session}"));
     }
+    let codex = tmux::codex_session_name(&p.session_name(&slug));
+    if tmux::session_exists(&codex) { tmux::kill_session(&codex); ui.info(&format!("killed tmux {codex}")); }
+    let claude = tmux::claude_session_name(&p.session_name(&slug));
+    if tmux::session_exists(&claude) { tmux::kill_session(&claude); ui.info(&format!("killed tmux {claude}")); }
     tmux::kill_shell_sidecars(&session); // dock shells die with the worktree (past the refusal guards)
     if reg {
         if git::git_status(&p.main_root, &["worktree", "remove", "--force", &path]) {

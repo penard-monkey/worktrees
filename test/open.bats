@@ -91,8 +91,74 @@ session_count() {
   make_worktree feat-x
   run_wt open --ai codex feat-x
   [ "$status" -eq 0 ]
-  [[ "$(tmux_pane0_cmd repo-feat-x)" == *codex* ]]
-  [[ "$(tmux_pane0_cmd repo-feat-x)" != *fake-ai* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-x~agent~codex')" == *codex* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-x~agent~codex')" == *"codex -c forced_login_method=chatgpt"* ]]
+  [[ "$(tmux_pane0_cmd 'repo-feat-x~agent~codex')" != *fake-ai* ]]
+}
+
+@test "open switches providers and leaves only one live agent in the worktree" {
+  install_fake_cmd claude
+  install_fake_cmd codex
+  make_worktree feat-both
+  run_wt open --no-attach --ai claude feat-both
+  [ "$status" -eq 0 ]
+  run_wt open --no-attach --ai codex feat-both
+  [ "$status" -eq 0 ]
+  ! tmux_session_exists repo-feat-both
+  tmux_session_exists 'repo-feat-both~agent~codex'
+  [[ "$(tmux_pane0_cmd 'repo-feat-both~agent~codex')" == *codex* ]]
+  run_wt open --no-attach --ai claude feat-both
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-both
+  ! tmux_session_exists 'repo-feat-both~agent~codex'
+  [[ "$(tmux_pane0_cmd repo-feat-both)" == *claude* ]]
+}
+
+@test "a legacy canonical Codex session is closed before Claude starts" {
+  install_fake_cmd claude
+  install_fake_cmd codex
+  make_worktree feat-legacy
+  printf 'cwd=%s\ncmd0=x\n' "$REPO/.worktrees/feat-legacy" > "$TMUX_STATE/repo-feat-legacy"
+  echo codex > "$TMUX_STATE/repo-feat-legacy.cmd"
+  run_wt open --no-attach --ai claude feat-legacy
+  [ "$status" -eq 0 ]
+  ! tmux_session_exists repo-feat-legacy
+  tmux_session_exists 'repo-feat-legacy~agent~claude'
+  [[ "$(tmux_pane0_cmd 'repo-feat-legacy~agent~claude')" == *claude* ]]
+  run_wt close --ai claude feat-legacy
+  [ "$status" -eq 0 ]
+  ! tmux_session_exists repo-feat-legacy
+  ! tmux_session_exists 'repo-feat-legacy~agent~claude'
+}
+
+@test "provider switch refuses to kill an adopted agent session" {
+  install_fake_cmd claude
+  make_worktree feat-adopted
+  printf 'cwd=%s\ncmd0=x\n' "$REPO/.worktrees/feat-adopted" > "$TMUX_STATE/personal"
+  echo codex > "$TMUX_STATE/personal.cmd"
+  run_wt open --no-attach --ai claude feat-adopted
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"adopted tmux session 'personal'"* ]]
+  tmux_session_exists personal
+  ! tmux_session_exists repo-feat-adopted
+  ! tmux_session_exists 'repo-feat-adopted~agent~claude'
+}
+
+@test "concurrent provider opens leave only one live agent" {
+  install_fake_cmd claude
+  install_fake_cmd codex
+  make_worktree feat-race
+  ( cd "$REPO" && "$WT_BIN" open --no-attach --ai claude feat-race > "$BATS_TEST_TMPDIR/claude.log" 2>&1 ) &
+  local claude_pid=$!
+  ( cd "$REPO" && "$WT_BIN" open --no-attach --ai codex feat-race > "$BATS_TEST_TMPDIR/codex.log" 2>&1 ) &
+  local codex_pid=$!
+  wait "$claude_pid"
+  wait "$codex_pid"
+  if tmux_session_exists repo-feat-race; then
+    ! tmux_session_exists 'repo-feat-race~agent~codex'
+  else
+    tmux_session_exists 'repo-feat-race~agent~codex'
+  fi
 }
 
 @test "open --ai without a value errors" {

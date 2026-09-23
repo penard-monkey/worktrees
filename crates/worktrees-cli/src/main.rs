@@ -11,12 +11,12 @@ use worktrees_core::{CliUi, Project};
 mod mcp;
 
 const USAGE: &str = "\
-worktrees — one git worktree per branch, one tmux session per worktree.
+worktrees — one git worktree per branch, one active agent per worktree.
 
   worktrees new <branch> [base]         create a worktree + tmux (AI | shell)
   worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
   worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
-  worktrees open <name>                 reopen a worktree's tmux session
+  worktrees open <name> [--ai claude|codex]  open or switch the active agent
   worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
                                         (-y to kill an adopted session; --session <s> binds that answer)
   worktrees ls [--json]                 list worktrees + state (--json = machine-readable)
@@ -34,8 +34,8 @@ worktrees — one git worktree per branch, one tmux session per worktree.
   worktrees sync push|pull [name]       courier-sync this project to/from an SSD hub (rsync)
   worktrees sync status                 hub + project sync state (--json; no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
-  worktrees mcp --status [--json]       is the server wired into claude? (no repo needed)
-  worktrees mcp --install [--read-only] wire it into claude, user scope (--uninstall removes it)
+  worktrees mcp --status [--json] [--ai codex]       check Claude or Codex MCP setup (no repo needed)
+  worktrees mcp --install [--read-only] [--ai codex] connect tools to Claude or Codex (--uninstall removes)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";
 

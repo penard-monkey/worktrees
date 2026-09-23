@@ -76,6 +76,8 @@ export type PlanPaneProps = {
   /** The place itself, for the empty state's "what this place already
    *  knows" rows and for the session "Generate plan" pastes into. */
   place: PlanPlace;
+  agentSession: string | null;
+  agentProvider: "claude" | "codex";
   /** When Claude last finished work here, epoch SECONDS (`workedAt`: the
    *  declared stamp merged with the live `sessions:done` overlay, which a
    *  snapshot alone does not carry). */
@@ -305,7 +307,7 @@ function KnownRows({ place, workedEpoch, actItem, draftRow }: {
   );
 }
 
-export function PlanPane({ root, slug, place, workedEpoch, reloadToken, pageVisible, activity, draft, mdZoom, onOpen, onPlanPath, onError }: PlanPaneProps) {
+export function PlanPane({ root, slug, place, agentSession, agentProvider, workedEpoch, reloadToken, pageVisible, activity, draft, mdZoom, onOpen, onPlanPath, onError }: PlanPaneProps) {
   const [plan, setPlan] = useState<PlanSummary | null>(null);
   const [failed, setFailed] = useState(false);
   // "Generate plan": `pasted` is the one-line confirmation, cleared by the next
@@ -391,15 +393,15 @@ export function PlanPane({ root, slug, place, workedEpoch, reloadToken, pageVisi
   // Mirrors the terminal's mention drop target (App.tsx `dropTargetAt`): a
   // session that is UP is a target, and `paste_to_ai` answers honestly when no
   // Claude is in it. No second, stricter predicate of our own.
-  const session = place.tmux_session.up ? place.tmux_session.name : null;
+  const session = agentSession;
   const generate = useCallback(() => {
     if (!session || pasting) return;
     setPasting(true);
-    invoke("plan_prompt", { session })
+    invoke("plan_prompt", { session, provider: agentProvider })
       .then(() => setPasted(true))
       .catch(onError)
       .finally(() => setPasting(false));
-  }, [session, pasting, onError]);
+  }, [session, agentProvider, pasting, onError]);
 
   const draftLine = (draft ?? "").split("\n").find((l) => l.trim()) ?? "";
   const actItem = activity ? [{
@@ -446,8 +448,8 @@ export function PlanPane({ root, slug, place, workedEpoch, reloadToken, pageVisi
                 data-track="dock.plan.generate"
                 disabled={!session || pasting}
                 title={session
-                  ? "Put a fixed prompt at this place's Claude prompt asking it to write its plan files. Nothing is sent until you press Enter there."
-                  : "start a Claude session in this place first"}
+                  ? `Put a fixed prompt at this place's ${agentProvider === "claude" ? "Claude" : "Codex"} prompt asking it to write its plan files. Nothing is sent until you press Enter there.`
+                  : "start an agent session in this place first"}
                 onClick={generate}
               >
                 Generate plan

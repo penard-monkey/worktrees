@@ -48,7 +48,7 @@ const body = (name) => {
 for (const name of ["TerminalPane", "ShellPane"]) {
   check(body(name) !== "", `${name} is still an exported component this can read`);
 }
-check(/drop="mention"/.test(body("TerminalPane")), "TerminalPane marks itself a drop target");
+check(/drop=\{provider === "claude" \? "mention" : undefined\}/.test(body("TerminalPane")), "only Claude's terminal marks itself a mention drop target");
 check(!/drop=/.test(body("ShellPane")), "ShellPane does NOT — a dock scratch shell is not a place");
 
 // ── 2. branch order in resolveDrop ─────────────────────────────────────────
@@ -69,8 +69,8 @@ check(
   "a cross-project drop is REJECTED rather than silently inserted",
 );
 check(
-  /tmux_session\.up/.test(mentionBranch),
-  "a place whose session is down is not a target (there is no pane to paste into)",
+  /selectedAgents\?\.claude\.up/.test(mentionBranch),
+  "a place without a live Claude session is not a mention target",
 );
 
 // ── 3. the affordance's selector matches the attribute ─────────────────────

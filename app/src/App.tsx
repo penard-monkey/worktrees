@@ -34,6 +34,62 @@ import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
 
+const CODEX_INSTALL_URL = "https://developers.openai.com/codex/cli/";
+
+function CodexInstallDialog({ onClose, onReport }: { onClose: () => void; onReport: (message: string) => void }) {
+  useEscape(onClose);
+  return <div className="scrim scrim-center" onClick={onClose}>
+    <div className="sync-modal rm-modal" role="dialog" aria-modal="true" aria-label="Install Codex CLI"
+      onClick={(e) => e.stopPropagation()}>
+      <header className="sync-h"><b>Install Codex CLI</b></header>
+      <div className="sync-body">
+        <div>Worktrees could not find the Codex CLI. Install it to open a Codex session here, or add an existing installation to your PATH.</div>
+        <div>Run this in a terminal:</div>
+        <code className="codex-install-command">curl -fsSL https://chatgpt.com/codex/install.sh | sh</code>
+        <div>Then run <code>codex login</code> and sign in with your ChatGPT account. Open Codex in Worktrees again after installation.</div>
+      </div>
+      <footer className="sync-foot">
+        <button className="ctrl" onClick={onClose}>Later</button>
+        <button className="enter-btn" autoFocus onClick={() => openUrl(CODEX_INSTALL_URL).catch((e) => onReport(String(e)))}>Open installation guide</button>
+      </footer>
+    </div>
+  </div>;
+}
+
+type ProviderSwitch = {
+  repo: string;
+  slug: string;
+  placeName: string;
+  from: "claude" | "codex";
+  to: "claude" | "codex";
+  session: string;
+};
+
+function ProviderSwitchDialog({ pending, onClose, onConfirm }: {
+  pending: ProviderSwitch;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  useEscape(onClose);
+  const from = pending.from === "claude" ? "Claude" : "Codex";
+  const to = pending.to === "claude" ? "Claude" : "Codex";
+  return <div className="scrim scrim-center" onClick={onClose}>
+    <div className="sync-modal rm-modal" role="dialog" aria-modal="true"
+      aria-label={`Switch from ${from} to ${to}`} data-testid="provider-switch-dialog"
+      onClick={(e) => e.stopPropagation()}>
+      <header className="sync-h"><b>Switch from {from} to {to}?</b></header>
+      <div className="sync-body">
+        <div>In {pending.placeName}, switching closes the current {from} session <code>{pending.session}</code>.</div>
+        <div className="sync-live">Any work still running in that session will stop. Your worktree and files stay in place.</div>
+      </div>
+      <footer className="sync-foot">
+        <button className="ctrl" autoFocus onClick={onClose}>Keep {from} open</button>
+        <button className="enter-btn" data-testid="provider-switch-confirm" onClick={onConfirm}>Close {from} and open {to}</button>
+      </footer>
+    </div>
+  </div>;
+}
+
 type Declared = {
   lifecycle?: string;
   pinned?: boolean;
@@ -74,6 +130,7 @@ type Place = {
   created_epoch?: number | null;
   last_commit_subject?: string | null;
   tmux_session: { name: string; up: boolean };
+  agent_sessions?: { claude: { name: string; up: boolean }; codex: { name: string; up: boolean } };
   last_commit_epoch?: number | null;
   claude_session_present: boolean;
   /// The AI profile the LIVE session was started with, and whether that profile
@@ -1541,10 +1598,10 @@ type Verdict = {
  *  was visible in three bare inputs whose base placeholder said "default: main"
  *  on a repo whose default base is `master`.
  *
- *  Module scope (CLAUDE.md): it owns three fields, and App re-renders on the 3s
+ *  Module scope (CLAUDE.md): it owns its fields, and App re-renders on the 3s
  *  poll — defined inside App() it would remount and drop focus per keystroke. */
 function NewPlaceDialog({
-  project, prefix, places, unborn, initial, initialBase,
+  project, prefix, places, unborn, initial, initialBase, defaultProvider,
   onCreate, onClose, onOpenPlace, onInitialCommit, onError,
 }: {
   project: string;
@@ -1555,10 +1612,11 @@ function NewPlaceDialog({
   places: Place[];
   unborn: boolean;
   /** A REJECTED create, handed back so a typo costs one edit and not a retype. */
-  initial: { branch: string; name: string; base: string } | null;
+  initial: { branch: string; name: string; base: string; provider: "claude" | "codex" } | null;
   /** ctx-menu "New worktree from this branch…" — a base, nothing else. */
   initialBase: string;
-  onCreate: (branch: string, name: string, base: string) => void;
+  defaultProvider: "claude" | "codex";
+  onCreate: (branch: string, name: string, base: string, provider: "claude" | "codex") => void;
   onClose: () => void;
   onOpenPlace: (slug: string) => void;
   onInitialCommit: (repo: string) => Promise<void>;
@@ -1567,11 +1625,30 @@ function NewPlaceDialog({
   const [branch, setBranch] = useState(initial?.branch ?? "");
   const [base, setBase] = useState(initial?.base || initialBase);
   const [name, setName] = useState(initial?.name ?? "");
+  const [provider, setProvider] = useState<"claude" | "codex">(initial?.provider ?? defaultProvider);
+  const [available, setAvailable] = useState<{ claude: boolean; codex: boolean } | null>(null);
   // Until this flips, the folder name MIRRORS the branch. Emptying the field
   // hands it back — which is what the hint under it says.
   const [touched, setTouched] = useState(!!initial?.name);
   const [data, setData] = useState<BranchList | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      invoke<McpStatus>("mcp_status", { repo: project }),
+      invoke<{ codex_bin: string | null }>("codex_mcp_status"),
+    ]).then(([claude, codex]) => {
+      if (!alive) return;
+      const next = { claude: !!claude.claude_bin, codex: !!codex.codex_bin };
+      setAvailable(next);
+      // A rejected create reopens with the user's exact choice, even if CLI
+      // availability changed while the operation was running.
+      if (!initial && next.claude !== next.codex) setProvider(next.claude ? "claude" : "codex");
+    }).catch((e) => { if (alive) onError(e); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per open
+  }, [project]);
 
   useEffect(() => {
     let alive = true;
@@ -1680,7 +1757,7 @@ function NewPlaceDialog({
   // anything reads as broken, not as inert.
   const baseUsed = !b || !verdict || !!verdict.usesBase || verdict.outcome === "unknown";
   const ready = !!b && !verdict?.blocking && !busy;
-  const submit = () => { if (ready) onCreate(b, sendName, base.trim()); };
+  const submit = () => { if (ready) onCreate(b, sendName, base.trim(), provider); };
 
   return (
     <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
@@ -1786,6 +1863,20 @@ function NewPlaceDialog({
                   {touched ? "clear this field to follow the branch again" : "follows the branch — edit to pin it"}
                 </span>
               </label>
+
+              {available?.claude && available.codex && (
+                <div className="np-field">
+                  <span className="np-label">Start with</span>
+                  <div className="seg" role="group" aria-label="Agent provider">
+                    {(["claude", "codex"] as const).map((choice) => (
+                      <button key={choice} type="button" data-testid={`nw-provider-${choice}`}
+                        className={provider === choice ? "on" : ""} aria-pressed={provider === choice}
+                        onClick={() => setProvider(choice)}>{choice === "claude" ? "Claude" : "Codex"}</button>
+                    ))}
+                  </div>
+                  <span className="np-hint">You can switch agents later; the current session closes first.</span>
+                </div>
+              )}
 
               {/* The preview follows the VERDICT, not the fields. Saying "will
                   create <derived slug>" under a verdict that says an existing
@@ -3099,7 +3190,7 @@ function App() {
   const [newBase, setNewBase] = useState("");
   // What a REJECTED create had typed in it, so reopening the form restores the
   // fields instead of handing back three empty boxes. Null for a fresh form.
-  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string } | null>(null);
+  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string; provider: "claude" | "codex" } | null>(null);
   // Places whose `new` is still running. Creating one takes seconds of network
   // and disk (git fetch, worktree add, materialize, tmux) and the nav had NO
   // representation of it, so the app read as hung — the whole complaint. Each
@@ -3123,6 +3214,8 @@ function App() {
   // replaced). A red banner for a question is what this whole path exists to
   // stop, so it does not share the error register.
   const [notice, setNotice] = useState("");
+  const [codexInstallPrompt, setCodexInstallPrompt] = useState(false);
+  const [pendingProviderSwitch, setPendingProviderSwitch] = useState<ProviderSwitch | null>(null);
   // Which topbar popover is open. One member since the Lifecycle ▾ popover left
   // — kept as a union rather than a boolean because the state machine (one
   // popover at a time, every dismissal path through closeMenu) is the point.
@@ -3130,6 +3223,7 @@ function App() {
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
+  const [activeProvider, setActiveProvider] = useState<"claude" | "codex">("claude");
   // Where Settings was asked to open. One state, never a boolean beside it:
   // `settingsOpen` is derived, so "the sheet is up" and "which section it went
   // to" cannot disagree. `{}`-with-no-cat is the ordinary ⌘, open.
@@ -4293,6 +4387,29 @@ function App() {
 
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
+  const selectedAgents = selected?.agent_sessions ?? (selected ? {
+    claude: selected.tmux_session,
+    codex: { name: `${selected.tmux_session.name}~agent~codex`, up: false },
+  } : null);
+  const reconciledLegacyAgents = useRef(new Set<string>());
+  useEffect(() => {
+    if (!sel || !selectedAgents?.claude.up || !selectedAgents.codex.up) return;
+    const key = `${sel.repo}|${sel.slug}|${settings.default_provider}`;
+    if (reconciledLegacyAgents.current.has(key)) return;
+    reconciledLegacyAgents.current.add(key);
+    // Earlier builds allowed both providers to run. Re-enter the preferred
+    // provider through the same locked launch path; it closes the other one.
+    // A failed reconciliation stays visible as an error, not a retry loop on
+    // every workspace poll.
+    invoke<CmdResult>("open_place", { repo: sel.repo, slug: sel.slug, fresh: false, provider: settings.default_provider })
+      .then((result) => {
+        if (!result.ok) setErr(result.output || "Could not close the other agent session.");
+        else { setActiveProvider(settings.default_provider); void refresh(); }
+      })
+      .catch((e) => setErr(String(e)));
+  }, [sel?.repo, sel?.slug, selectedAgents?.claude.up, selectedAgents?.codex.up, settings.default_provider, refresh]);
+  const planProvider = selectedAgents?.[activeProvider].up ? activeProvider
+    : selectedAgents?.claude.up ? "claude" : "codex";
   // The status chip's host, declared HERE and not up with `statusOnTile`,
   // because the footer renders under `selected && sel` — and `selected` is a
   // LOOKUP into the workspace, so it is null for the seconds between a restored
@@ -4752,21 +4869,65 @@ function App() {
   // Only EXPLICIT gestures reach here: double-click or the ▸ button on a nav row,
   // the topbar/empty-state Enter, the ctx-menu entries, quick-switch, and the
   // home Resume rows. A plain nav click goes to `selectPlace` above.
+  const ensureCodexCli = async (provider: "claude" | "codex") => {
+    if (provider !== "codex") return true;
+    try {
+      const status = await invoke<{ codex_bin: string | null }>("codex_mcp_status");
+      if (status.codex_bin) return true;
+      setCodexInstallPrompt(true);
+    } catch (e) { setErr(String(e)); }
+    return false;
+  };
   const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
+    const agents = p.agent_sessions;
+    const provider = agents?.claude.up && !agents.codex.up ? "claude"
+      : agents?.codex.up && !agents.claude.up ? "codex" : settings.default_provider;
     setSel({ repo, slug: p.slug });
+    setActiveProvider(provider);
     setMenu(null);
     closeCtx();
     setTermFocus((v) => v + 1); // hand the keyboard back to the terminal
     const fresh = opts?.fresh ?? !settings.ai_auto_resume;
     (async () => {
+      if (!(await ensureCodexCli(provider))) return;
       invoke("touch_place", { repo, slug: p.slug }).catch(() => {}); // fire-and-forget recency stamp
       // Entering is the strongest "I looked" there is, so it acks with no dwell.
       // Guarded exactly like the dwell effect — on the FACT, so that entering a
       // place to answer the question its session is waiting on still spends the
       // signal — and an enter into a place with nothing unseen writes nothing.
       if (unseenWork(p)) ack(repo, p);
-      await runCmd("open_place", { repo, slug: p.slug, fresh });
+      await runCmd("open_place", { repo, slug: p.slug, fresh, provider });
     })();
+  };
+  const openAgent = (provider: "claude" | "codex") => {
+    if (!sel) return;
+    setActiveProvider(provider);
+    setTermFocus((v) => v + 1);
+    (async () => {
+      if (await ensureCodexCli(provider))
+        await runCmd("open_place", { repo: sel.repo, slug: sel.slug, fresh: !settings.ai_auto_resume, provider });
+    })();
+  };
+  const requestOpenAgent = (provider: "claude" | "codex") => {
+    if (!sel || !selected) return;
+    const from = provider === "claude" ? "codex" : "claude";
+    const current = selectedAgents?.[from];
+    if (current?.up) {
+      setPendingProviderSwitch({ repo: sel.repo, slug: sel.slug, placeName: nameOf(selected), from, to: provider, session: current.name });
+      return;
+    }
+    openAgent(provider);
+  };
+  const confirmProviderSwitch = () => {
+    if (!pendingProviderSwitch) return;
+    const pending = pendingProviderSwitch;
+    setPendingProviderSwitch(null);
+    if (sel?.repo !== pending.repo || sel.slug !== pending.slug ||
+        !selectedAgents?.[pending.from].up || selectedAgents[pending.from].name !== pending.session) {
+      setNotice("The active session changed. Check the worktree and try switching again.");
+      return;
+    }
+    openAgent(pending.to);
   };
 
   // ── close ──
@@ -4782,9 +4943,9 @@ function App() {
   // named session can exit and another can adopt the place — then core answers
   // with a fresh needs_confirm naming the newcomer, which we re-arm and SAY, so
   // the click reads as "the session changed" rather than as a dud.
-  const doClose = async (repo: string, slug: string, key: string, armed: boolean) => {
+  const doClose = async (repo: string, slug: string, key: string, armed: boolean, provider?: "claude" | "codex") => {
     const expect = armed ? closeSess : "";
-    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null });
+    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null, provider: provider ?? null });
     if (r?.needs_confirm) {
       if (expect && r.needs_confirm !== expect)
         setNotice(`${expect} is gone — ${r.needs_confirm} is in this place now. Nothing was killed.`);
@@ -5186,7 +5347,7 @@ function App() {
     // The terminal, checked first: it is nowhere near the nav's tier zones, and
     // a drop there means something completely different from a reorder.
     if (el?.closest('[data-drop="mention"]')) {
-      if (!sel || !selected?.tmux_session.up) return null;
+      if (!sel || !selectedAgents?.claude.up) return null;
       if (item.repo !== sel.repo) {
         // Not a cosmetic guard. The MCP server is pinned to the repo it was
         // launched in and no tool takes a repo path, so a foreign project's
@@ -5197,7 +5358,7 @@ function App() {
       if (!p) return null;
       return {
         kind: "mention", repo: item.repo, slug: item.slug,
-        intoSlug: sel.slug, intoSession: selected.tmux_session.name, name: nameOf(p),
+        intoSlug: sel.slug, intoSession: selectedAgents.claude.name, name: nameOf(p),
       };
     }
 
@@ -5433,8 +5594,9 @@ function App() {
     return () => clearTimeout(t);
   }, [undo]);
 
-  const createPlace = async (repo: string, branch: string, name: string, base: string) => {
+  const createPlace = async (repo: string, branch: string, name: string, base: string, provider: "claude" | "codex") => {
     if (!branch) return;
+    if (!(await ensureCodexCli(provider))) return;
     // Dismiss the form and put a ghost row in the nav IMMEDIATELY — the click is
     // acknowledged before any of the work starts. The label is the same
     // derivation the old success path used as its fallback; core may land on a
@@ -5447,15 +5609,15 @@ function App() {
     setNewBase("");
     setNewDraft(null);
     try {
-      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null });
+      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null, provider });
       // Select core's ACTUAL final slug (origin/ stripped, holder-reuse applied);
       // fall back to the old derivation only if the backend didn't report one.
-      if (r?.ok) setSel({ repo, slug: r.slug ?? label });
+      if (r?.ok) { setActiveProvider(provider); setSel({ repo, slug: r.slug ?? label }); }
       // A rejected create is usually a fixable typo (a base that does not exist,
       // a branch checked out in another worktree). Put the form back with what
       // was typed still in it — dismissing on submit must not also mean losing
       // the input. `runCmd` owns the banner, so this only restores the fields.
-      else if (r) { setNewDraft({ branch, name, base }); setNewBase(base); setNewFor(repo); }
+      else if (r) { setNewDraft({ branch, name, base, provider }); setNewBase(base); setNewFor(repo); }
     } finally {
       // `runCmd` awaits its own refresh() before returning, so the real row is
       // already in `ws` by now — the ghost hands over with no empty frame
@@ -6682,6 +6844,14 @@ function App() {
                             onClick={() => closeFromMenu(sel.repo, sel.slug, false)}>Close session</button>
                         )
                       )}
+                      {selectedAgents?.claude.up !== selectedAgents?.codex.up && (
+                        <button className="pop-item" data-testid="topbar-switch-provider" onClick={() => {
+                          closeMenu();
+                          requestOpenAgent(selectedAgents?.claude.up ? "codex" : "claude");
+                        }}>
+                          Switch to {selectedAgents?.claude.up ? "Codex" : "Claude"}
+                        </button>
+                      )}
                       {/* Live sessions only. A session-less place shows the same
                           check inline in the main window (it is all that is
                           there), so the item would open a sheet over a copy of
@@ -6720,9 +6890,35 @@ function App() {
           <main className="main">
             {selected && sel ? (
               <>
-                {selected.tmux_session.up ? (
-                  <TerminalPane key={selected.tmux_session.name} session={selected.tmux_session.name} termVersion={termVersion} focusToken={termFocus}
-                    findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
+                {!selectedAgents?.claude.up && !selectedAgents?.codex.up && (
+                  <div className="agent-actions" aria-label="Agents in this place">
+                    {(["claude", "codex"] as const).map((provider) => (
+                      <button key={provider} className="ctrl sm" onClick={() => requestOpenAgent(provider)}>
+                        Open {provider === "claude" ? "Claude" : "Codex"}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {(selectedAgents?.claude.up || selectedAgents?.codex.up) ? (
+                  <div className="agent-grid">
+                    {([planProvider] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => (
+                      <div className="agent-cell" key={provider} onFocusCapture={() => setActiveProvider(provider)}>
+                        <div className="agent-label">
+                          {provider === "claude" ? "Claude" : "Codex"}
+                          <button className="ctrl sm" onClick={() => {
+                            if (!sel) return;
+                            const key = `agent|${sel.repo}|${sel.slug}|${provider}`;
+                            doClose(sel.repo, sel.slug, key, confirmRm === key, provider);
+                          }}>
+                            {confirmRm === `agent|${sel.repo}|${sel.slug}|${provider}` ? `Kill ${closeSess}?` : "Close"}
+                          </button>
+                        </div>
+                        <TerminalPane key={selectedAgents![provider].name} provider={provider} session={selectedAgents![provider].name}
+                          termVersion={termVersion} focusToken={termFocus} focusEnabled={provider === planProvider}
+                          findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
+                      </div>
+                    ))}
+                  </div>
                 ) : (
                   /* No session, so nothing is competing for this space — and the
                      one question a place with no session raises is whether it is
@@ -7006,6 +7202,8 @@ function App() {
                     repo={sel.repo}
                     slug={sel.slug}
                     place={selected}
+                    agentSession={selectedAgents?.[planProvider].up ? selectedAgents[planProvider].name : null}
+                    agentProvider={planProvider}
                     workedEpoch={workedAt(selected)}
                     reloadToken={placesToken}
                     pageVisible={pageVisible}
@@ -7257,12 +7455,19 @@ function App() {
         }}
       />
 
-      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onChange={updateSettings} onClose={() => setSettingsAt(null)}
+      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onChange={(patch) => {
+        updateSettings(patch);
+        if (patch.default_provider === "codex") void ensureCodexCli("codex");
+      }} onClose={() => setSettingsAt(null)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
         onShowNotes={showReleaseNotes} onReset={onReset}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
         mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
         mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)} />
+
+      {codexInstallPrompt && <CodexInstallDialog onClose={() => setCodexInstallPrompt(false)} onReport={(m) => setNotice(m)} />}
+      {pendingProviderSwitch && <ProviderSwitchDialog pending={pendingProviderSwitch}
+        onClose={() => setPendingProviderSwitch(null)} onConfirm={confirmProviderSwitch} />}
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query
@@ -7301,7 +7506,8 @@ function App() {
           unborn={unbornProjects.has(newFor)}
           initial={newDraft}
           initialBase={newBase}
-          onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
+          defaultProvider={settings.default_provider}
+          onCreate={(b, n, ba, provider) => createPlace(newFor, b, n, ba, provider)}
           onClose={() => { setNewFor(null); setNewBase(""); setNewDraft(null); }}
           onOpenPlace={(slug) => {
             setNewFor(null); setNewBase(""); setNewDraft(null);

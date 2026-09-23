@@ -83,6 +83,9 @@ fi
 export XDG_CONFIG_HOME="$SBX/config" XDG_DATA_HOME="$SBX/data" WORKTREES_PREFIX="$PREFIX"
 
 if [ "$MODE" = app ]; then
+  # MCP setup from this app must register the branch under test, not a possibly
+  # older `worktrees` installed in ~/.local/bin.
+  export WORKTREES_CLI_BIN="$BIN"
   echo "→ launching the app against the sandbox" >&2
   echo "   window title / dock name: 'worktrees (sbx $SLUG)'" >&2
   echo "   tmux sessions:            $PREFIX-<slug>" >&2

@@ -185,6 +185,26 @@ print("ok")
   [ ! -d "$REPO/.worktrees/agent-g" ]
 }
 
+@test "create_worktree can choose Codex without changing the project's Claude default" {
+  install_fake_cmd codex
+  export WORKTREES_AI_CMD=claude
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-codex","provider":"codex","brief":"Review this branch"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  tmux_session_exists 'repo-agent-codex~agent~codex'
+  [[ "$(tmux_pane0_cmd 'repo-agent-codex~agent~codex')" == *"codex -c forced_login_method=chatgpt"*"Read .planning/brief.md and begin."* ]]
+  [ "$(cat "$REPO/.worktrees/agent-codex/.planning/brief.md")" = "Review this branch" ]
+  mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-default"}}}'
+  tmux_session_exists repo-agent-default
+  [[ "$(tmux_pane0_cmd repo-agent-default)" == *"claude --name"* ]]
+  mcp --mutations '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-default","provider":"codex"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  ! tmux_session_exists repo-agent-default
+  tmux_session_exists 'repo-agent-default~agent~codex'
+  mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-invalid","provider":"other"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [ ! -d "$REPO/.worktrees/agent-invalid" ]
+}
+
 @test "place_status reports the claude session(s) working in the place" {
   run_wt new feat-ag --no-tmux
   local q='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"feat-ag"}}}'
@@ -272,14 +292,11 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   [[ "$output" != *'Not inside a git repository'* ]]
 }
 
-# Two halves of the same rule, and the suite gets the first one for free: the
-# bats harness runs with WORKTREES_AI_CMD=fake-ai, so this machine is BY
-# DEFINITION not a claude machine, and the honest answer is "none of this
-# applies" rather than "not installed" — a nudge to set up an MCP server for a
-# program you do not run is pure noise.
-@test "mcp --status is not-applicable when the AI command is not claude" {
+# Claude MCP is independent of the configured default: both providers can run
+# in one place, and the setup state remains inspectable for each of them.
+@test "mcp --status reports Claude independently of the default AI command" {
   run bash -c "cd '$BATS_TEST_TMPDIR' && HOME='$BATS_TEST_TMPDIR' '$WT_BIN' mcp --status --json"
-  [[ "$output" == *'"state":"not-applicable"'* ]]
+  [[ "$output" == *'"state":"absent"'* ]]
   [[ "$output" == *'"ai_cmd":"fake-ai"'* ]]
 }
 
@@ -360,4 +377,14 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   [ -n "$entry" ]
   grep -q '"status": "findings"' "$entry"
   grep -q '"trigger": "mcp"' "$entry"
+}
+
+@test "mcp --status --ai codex reads Codex configuration independently" {
+  local codex_home="$BATS_TEST_TMPDIR/codex-home"
+  mkdir -p "$codex_home"
+  printf '[mcp_servers.worktrees]\ncommand = "%s"\nargs = ["mcp", "--mutations"]\n' "$WT_BIN" > "$codex_home/config.toml"
+  run env CODEX_HOME="$codex_home" "$WT_BIN" mcp --status --ai codex --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"state":"installed"'* ]]
+  [[ "$output" == *'"mutations":true'* ]]
 }

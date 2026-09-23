@@ -170,7 +170,7 @@ const RESIZE_SETTLE_MS = 80;
 const TERM_SCROLLBACK = 5000;
 
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
-function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number) {
+function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number, focusEnabled: boolean) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -410,8 +410,8 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
   // chrome — rows, pin, popovers — moves focus there and nothing else returns
   // it; xterm only self-focuses on a click inside its own canvas).
   useEffect(() => {
-    termRef.current?.focus();
-  }, [focusToken]);
+    if (focusEnabled) termRef.current?.focus();
+  }, [focusToken, focusEnabled]);
 
   // live re-fit when Settings change the terminal font or theme
   useEffect(() => {
@@ -472,15 +472,15 @@ export type TermFindProps = {
 
 /** The rendered pane: xterm plus its find bar. Both kinds of terminal share it,
  *  so find behaves identically in the main pane and in a dock shell tab. */
-function TermSurface({ makeTransport, tkey, termVersion, focusToken, drop, findOpen = false, findToken = 0, onFindClose }: {
-  makeTransport: () => Transport; tkey: string; termVersion: number; focusToken: number;
+function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnabled = true, drop, findOpen = false, findToken = 0, onFindClose }: {
+  makeTransport: () => Transport; tkey: string; termVersion: number; focusToken: number; focusEnabled?: boolean;
   /** `data-drop` for the nav drag's hit-test, or absent. Passed IN rather than
    *  set here because this component is shared: every dock shell tab renders it
    *  too, and only the place's own tmux pane is somewhere a worktree reference
    *  can be dropped. */
   drop?: string;
 } & TermFindProps) {
-  const { hostRef, termRef, searchRef, epoch } = useTerm(makeTransport, tkey, termVersion, focusToken);
+  const { hostRef, termRef, searchRef, epoch } = useTerm(makeTransport, tkey, termVersion, focusToken, focusEnabled);
   const [query, setQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [res, setRes] = useState({ index: 0, count: 0 });
@@ -577,12 +577,12 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, drop, findO
   );
 }
 
-export function TerminalPane({ session, termVersion = 0, focusToken = 0, ...find }: {
-  session: string; termVersion?: number; focusToken?: number;
+export function TerminalPane({ session, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, ...find }: {
+  session: string; provider?: "claude" | "codex"; termVersion?: number; focusToken?: number; focusEnabled?: boolean;
 } & TermFindProps) {
   return (
     <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}
-      termVersion={termVersion} focusToken={focusToken} drop="mention" {...find} />
+      termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider === "claude" ? "mention" : undefined} {...find} />
   );
 }
 

@@ -153,7 +153,7 @@ Flags:
 | Command | Flags |
 |---|---|
 | `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--no-spare` (single pane — no spare shell, and for `new` no auto-install) |
-| `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` · `--brief <text>` (write the agent's task to `.planning/brief.md` and launch claude on it) |
+| `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` · `--brief <text>` (write the agent's task to `.planning/brief.md` and launch the selected agent on it) |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |
 
@@ -197,7 +197,7 @@ lines, `#` comments. It is parsed as data, never executed.
 | What | Flag | Env | Config key | Default |
 |---|---|---|---|---|
 | AI pane command | `--ai <cmd>` | `WORKTREES_AI_CMD` | `ai_cmd` | `claude` |
-| AI resume flag (`-r` appends it) | — | `WORKTREES_AI_RESUME_ARG` | `ai_resume_arg` | `-r` |
+| AI resume argument (`-r` appends it) | — | `WORKTREES_AI_RESUME_ARG` | `ai_resume_arg` | Claude: `-r`; Codex: `resume --last` |
 | Session/name prefix | — | `WORKTREES_PREFIX` | `prefix` | repo dir name |
 
 ```ini
@@ -215,6 +215,31 @@ ai_resume_arg = resume
 
 Examples: `--ai claude`, `--ai "claude --model opus"`, `--ai codex`,
 `--ai opencode`, `--ai none`.
+
+Claude and Codex can both be configured, but each worktree runs one provider
+session at a time. Switching providers closes the current managed tmux session
+before opening the other; each provider keeps its own saved conversation. Settings →
+Claude and Settings → Codex can both be configured. When both CLIs are available,
+the New worktree dialog asks which agent to start; it preselects Settings →
+Commands → Default agent. Entering an existing place keeps its running provider;
+the default is used when no agent is running. Changing the default does not
+stop a running session. The CLI keeps its
+`ai_cmd` default and accepts `open <place> --ai claude|codex` and
+`close <place> --ai claude|codex`. An unqualified `close` closes both managed
+agent sessions. Codex resumes its most recent conversation in that place with
+`codex resume --last` when one exists.
+
+Worktrees-launched Codex sessions require ChatGPT account sign-in. Run
+`codex login` once and complete its browser flow; `codex login status` shows
+the active method. Worktrees uses Codex's saved credentials and does not ask
+for or store an OpenAI API key. If Codex is currently signed in with an API
+key, sign out with `codex logout` and sign back in with `codex login` before
+opening it from Worktrees.
+
+Connect Worktrees tools separately in Settings → Claude and Settings → Codex,
+or run `worktrees mcp --install --ai codex` for Codex. The unqualified MCP setup
+command still targets Claude. The MCP `create_worktree` tool accepts an optional
+`provider: "claude" | "codex"`; without one it uses the project's AI command.
 
 ## Compatibility notes
 

@@ -18,6 +18,19 @@ use std::process::{Command, Output};
 /// to the sidecar of a place named "long", and closing one could kill the
 /// other's live Claude session.
 pub const SHELL_SIDECAR_MARKER: &str = "~term";
+pub const CODEX_SIDECAR_MARKER: &str = "~agent~codex";
+pub const CLAUDE_SIDECAR_MARKER: &str = "~agent~claude";
+
+/// Codex's managed session name. A provider switch ends the other agent's
+/// session first; `~` cannot occur in a git ref, so this cannot collide with
+/// a place's canonical name.
+pub fn codex_session_name(canonical: &str) -> String {
+    format!("{canonical}{CODEX_SIDECAR_MARKER}")
+}
+
+pub fn claude_session_name(canonical: &str) -> String {
+    format!("{canonical}{CLAUDE_SIDECAR_MARKER}")
+}
 
 /// The sidecar session name for a place's (canonical) session + a 1-based tab
 /// index. Index ≤1 is the bare `~term`; 2+ append `~N`.
@@ -169,6 +182,31 @@ impl PaneList {
         self.panes.iter().any(|(s, _, _)| s == name)
     }
 
+    /// Recognize an older Codex pane launched under the canonical place name.
+    /// Keep this strict: `node` and version-like names identify Claude on some
+    /// installs, so they cannot distinguish the two providers here.
+    pub fn session_is_codex(&self, name: &str) -> bool {
+        self.panes.iter().any(|(s, _, cmd)| s == name && cmd.rsplit('/').next() == Some("codex"))
+    }
+
+    /// Running provider panes in one place, including sessions left under an
+    /// older prefix. Callers may close only names they own; an adopted session
+    /// must be surfaced for explicit handling instead of silently killed.
+    pub fn agents_in(&self, wt: &str, exclude_under: Option<&str>) -> Vec<(String, &'static str)> {
+        let prefix = format!("{wt}/");
+        let mut found = Vec::new();
+        for (session, path, cmd) in &self.panes {
+            if is_shell_sidecar(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
+            if exclude_under.is_some_and(|dir| path == dir || path.starts_with(&format!("{dir}/"))) { continue; }
+            let provider = if cmd.rsplit('/').next() == Some("codex") { "codex" }
+                else if is_ai_command(cmd, "claude") { "claude" } else { continue };
+            if !found.iter().any(|(name, _)| name == session) {
+                found.push((session.clone(), provider));
+            }
+        }
+        found
+    }
+
     /// Same selection as `worktree_session_excluding` but over the prefetched panes: a
     /// pane cwd'd in `wt` (exact or a subdir), preferring one whose command
     /// looks like the AI CLI (`ai_word`) or `node`, else the first match.
@@ -187,7 +225,7 @@ impl PaneList {
             // the worktree and runs a bare shell — never let it be adopted AS the
             // place's session (that would attach the AI view to a plain shell and
             // skip launching Claude). It's addressed by its exact name instead.
-            if is_shell_sidecar(sess) {
+            if is_shell_sidecar(sess) || sess.contains(CODEX_SIDECAR_MARKER) || sess.contains(CLAUDE_SIDECAR_MARKER) {
                 continue;
             }
             if let Some((eroot, eprefix)) = &excl {
@@ -204,6 +242,10 @@ impl PaneList {
         }
         best
     }
+}
+
+pub fn session_is_codex(name: &str) -> bool {
+    PaneList::fetch().is_some_and(|panes| panes.session_is_codex(name))
 }
 
 /// Multi-client sizing: by default tmux clamps a window to its SMALLEST
@@ -686,6 +728,21 @@ mod tests {
             ("repo-foo", "/wt/foo", "claude"),
         ]);
         assert_eq!(list.session_in("/wt/foo", "claude", None).as_deref(), Some("repo-foo"));
+    }
+
+    #[test]
+    fn agents_in_finds_adopted_providers_without_neighboring_places_or_shells() {
+        let list = pl(&[
+            ("old-prefix", "/repo/src", "claude"),
+            ("codex-sidecar", "/repo", "codex"),
+            ("repo~term", "/repo", "zsh"),
+            ("worktree-agent", "/repo/.worktrees/feat", "codex"),
+            ("neighbor", "/repository", "claude"),
+        ]);
+        assert_eq!(list.agents_in("/repo", Some("/repo/.worktrees")), vec![
+            ("old-prefix".into(), "claude"),
+            ("codex-sidecar".into(), "codex"),
+        ]);
     }
 
     #[test]
