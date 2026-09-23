@@ -4,8 +4,7 @@ title: "Proposal — Codex support"
 
 # Codex support in Worktrees — implementation plan
 
-**Status:** implemented on `feat/codex-support`; verification in progress.
-**Base:** `origin/main` at `e429ffe`.
+**Status:** implemented on `feat/codex-support`.
 
 ## Goal
 
@@ -66,11 +65,11 @@ live session by itself.
 
 ## App behavior
 
-- The main area shows one provider terminal. Its actions say **Open** when no
-  agent runs, **Running** for the active provider, and **Switch to** for the
-  other provider. A switch closes the old managed session before opening the
-  selected one. Terminal focus, scrollback, and Plan prompts follow the
-  selected provider.
+- The main area shows one provider terminal. When no agent runs, **Open**
+  buttons offer both providers. With an active session, **Switch to** the other
+  provider appears in the place's three-dot menu and warns that the current
+  session will close before proceeding. Terminal focus, scrollback, and Plan
+  prompts follow the selected provider.
 - Claude activity and usage remain Claude-specific. Codex presence comes
   from its tmux session; no busy or usage value is invented for Codex.
   Claude-only messaging and `@worktrees:` mentions stay out of Codex panes.
