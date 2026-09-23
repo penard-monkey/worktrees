@@ -16,6 +16,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   A folded "Install manually" block gives the same install as copyable
   terminal commands (CLI only, or app + CLI), for when the buttons fail.
 
+
+- **The document in the browser has its own reading size, and can drop the
+  measure.** The docs page now carries `A− 100% A+` and a `Wide` toggle in its
+  header, on ⌘+ / ⌘− / ⌘0 as well (⌘⌥ works too, matching the dock's viewer).
+  It is the page's own zoom, not the browser's: it scales the prose, the
+  headings, the tables, the code fences and their spacing and leaves the
+  navigation column and the staleness header the size they should be — and
+  because the 78-character measure is font-relative, a bigger size makes the
+  column WIDER rather than just taller. On a 1672px window the prose was 645px
+  of a 1393px page; at 175% it is 1100px, and `Wide` drops the measure
+  entirely and gives it all 1393. Your place in the document is kept across a
+  size change, the way it already is across an edit landing underneath you.
+  The setting is remembered for as long as the documentation server is up —
+  it starts on a fresh port each time the app does, and the browser files the
+  setting under that port.
+
 ### Fixed
 - **A tag-pinned `install.sh` installs its own release.** The documented
   `curl …/vX.Y.Z/install.sh | bash` form installed the LATEST release: the

@@ -155,7 +155,22 @@ body { background: var(--bg-abyss); }
 .chrome-nav { gap: var(--s3); padding-top: 2px; }
 .nav-link { font-size: var(--fs-meta); color: var(--accent); text-decoration: none; }
 .nav-link:hover { text-decoration: underline; }
-.nav-path { font-size: var(--fs-meta); color: var(--txt-mute); font-family: var(--font-mono); }
+/* Shrinkable, so the reading controls keep the right-hand end of the row. The
+ * row is `flex-wrap: wrap`, and a flex item that cannot shrink WRAPS rather
+ * than shortens — a deep `.planning/app-review/findings.md` would otherwise
+ * push the stepper onto a line of its own on a perfectly wide window. */
+.nav-path {
+  font-size: var(--fs-meta); color: var(--txt-mute); font-family: var(--font-mono);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── the reading controls ──────────────────────────────────────────────────
+ * A− | 100% | A+ and the measure toggle, pinned to the right of the nav row.
+ * `flex: none` because `.seg` is `overflow: hidden` and `width: fit-content`:
+ * as a shrinkable flex item it is a box that can be squeezed to nothing with
+ * its own content clipped away, which is the failure the compact usage
+ * segments hit when they borrowed `.seg` (CLAUDE.md). */
+.chrome-view { margin-left: auto; flex: none; display: flex; align-items: center; gap: var(--s2); }
 
 /* ── the document ─────────────────────────────────────────────────────────
  * `.doc` also carries `.md`, which is where the padding, the 78ch measure, the
@@ -165,6 +180,14 @@ body { background: var(--bg-abyss); }
  * of a DOCUMENT and would otherwise be applied once per block. */
 .body { min-height: 60vh; }
 .doc { margin: 0 auto; }
+/* The measure, off. `.md`'s `max-width: 78ch` is a READING measure and it is
+ * the right default — but it is expressed in `ch`, so it grows with the text
+ * and the column can therefore never reach the edge of a wide window however
+ * far you zoom. This is the one thing the size stepper cannot do, which is why
+ * it is a separate control rather than the last zoom step. The attribute is
+ * always written (`"0"` or `"1"`), so a probe can read the state rather than
+ * infer it from an absence. */
+.doc[data-wide="1"] { max-width: none; }
 /* `.mdb` and `.mdb-md` must stay bare — no padding, no border, no overflow, no
  * display change. Each would open a block formatting context and stop the
  * adjacent blocks' margins collapsing through the wrappers, turning every gap

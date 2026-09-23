@@ -33,6 +33,7 @@ const CHROME = process.argv[5] || here("../viewer/Chrome.tsx");
 const INDEXVIEW = process.argv[6] || here("../viewer/IndexView.tsx");
 const DOCSNAV = process.argv[7] || here("../viewer/DocsNav.tsx");
 const CSS = process.argv[8] || here("../viewer/viewer.css");
+const ZOOM = process.argv[10] || here("../viewer/zoom.ts");
 // The OTHER half of the click contract, in Rust. Read, never written.
 const DERIVE = process.argv[9] || here("../../crates/worktrees-core/src/derive.rs");
 
@@ -183,8 +184,23 @@ const buildViewer = await load(
   VIEWER,
   ["useCallback", "useEffect", "useMemo", "useRef", "useState",
    "Chrome", "DocBody", "DocsNav", "IndexView",
-   "apiBase", "basename", "fetchDoc", "fetchIndex", "h", "F"],
+   "apiBase", "basename", "fetchDoc", "fetchIndex",
+   // …and what `zoom.ts` exports into it. `load` destructures a FIXED list, so
+   // a name missing from here is an undefined free variable at render time,
+   // not a missing import anyone would recognise.
+   "useDocView", "ZOOM_DEFAULT", "ZOOM_MAX", "ZOOM_MIN",
+   "h", "F"],
   ["Viewer", "parseRoute", "routeHash"],
+);
+
+// The reading size, built from the REAL module and handed to the Viewer the
+// way an import would — so the chord table, the step table and the persistence
+// under test are the ones that ship, not a paraphrase of them.
+const buildZoom = await load(
+  ZOOM,
+  ["useCallback", "useEffect", "useState"],
+  ["ZOOM_STEPS", "ZOOM_MIN", "ZOOM_MAX", "ZOOM_DEFAULT",
+   "clampZoom", "stepZoom", "zoomDir", "readView", "writeView", "useDocView"],
 );
 
 const meta = {
@@ -193,11 +209,17 @@ const meta = {
 };
 const payload = (path, text) => ({ meta, blocks: [{ id: "b0", md: `# ${path}\n\n${text}` }] });
 
+/** Survives a `restore()`, so a second mount can read back what the first one
+ *  wrote — which is the only way to test that the setting is remembered at
+ *  all. Cleared explicitly by the one section that wants a virgin store. */
+const store = new Map();
+
 function mountViewer(startHash) {
   const realSetTimeout = globalThis.setTimeout;
   const prev = {
     window: globalThis.window, document: globalThis.document, location: globalThis.location,
     setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
+    localStorage: globalThis.localStorage,
   };
   const listeners = {};
   let hash = startHash;
@@ -216,6 +238,11 @@ function mountViewer(startHash) {
       hash = v;
       for (const fn of listeners.hashchange ?? []) fn();
     },
+  };
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)); },
+    removeItem: (k) => { store.delete(k); },
   };
   globalThis.window = {
     addEventListener: (t, fn) => { (listeners[t] ||= []).push(fn); },
@@ -259,17 +286,51 @@ function mountViewer(startHash) {
 
   const rt = runtime(() => api.Viewer());
   Object.assign(env, rt.hooks);
+  // AFTER the hooks, BEFORE the Viewer: `useDocView` is called during the
+  // Viewer's render, so it has to close over the same hook slots. Building it
+  // with a different runtime would give the page two independent React states
+  // and the chord would move a number nothing on screen reads.
+  const zoom = buildZoom(env);
+  Object.assign(env, zoom);
   const api = buildViewer(env);
   rt.flush();
 
   return {
     api,
+    zoom,
     tree: rt.tree,
     /** The document currently painted, or null when the page says "loading". */
     shown: () => find(rt.tree(), "DocBody")?.props?.blocks?.[0]?.md ?? null,
     loading: () => textOf(findClass(rt.tree(), "loading")) || null,
     banner: () => textOf(findClass(rt.tree(), "err")) || null,
     gone: () => Boolean(findClass(rt.tree(), "gone")),
+    /** The reading size and measure the document is painted with. */
+    view: () => find(rt.tree(), "DocBody")?.props?.view ?? null,
+    /**
+     * Every reading control's label, in order — or null when the header is not
+     * showing them at all (the index route).
+     *
+     * Found as a MOUNTED node first (which is what proves the route gate), then
+     * invoked: the recorder's `h` stores a function component without calling
+     * it, so `ViewControls` has no children in the tree until something runs
+     * it. It takes no hooks, so calling it here is safe.
+     */
+    controls: () => {
+      const n = [...walk(rt.tree())].find(
+        (x) => x && typeof x === "object" && typeof x.tag === "function" && x.props && "view" in x.props,
+      );
+      return n ? [...walk(n.tag(n.props))].filter((x) => typeof x === "string" || typeof x === "number").map(String) : null;
+    },
+    /** Dispatch a keydown at the window, capture listeners and all, and report
+     *  whether anything called `preventDefault` — which is the half that keeps
+     *  the BROWSER from zooming the page underneath us. */
+    key: (init) => {
+      let prevented = false;
+      const e = { key: "", code: "", metaKey: false, ctrlKey: false, altKey: false,
+                  target: null, ...init, preventDefault: () => { prevented = true; } };
+      for (const fn of [...(listeners.keydown ?? [])]) fn(e);
+      return prevented;
+    },
     go: (h2) => { globalThis.location.hash = h2; },
     /** Answer the LATEST unanswered `doc` request — the one the route that is
      *  on screen is waiting for. Requests abandoned by a navigation stay
@@ -515,12 +576,15 @@ console.log("── the mermaid click rule ──");
 console.log("── the block list: cross-block link definitions ──");
 
 // ── blocks.tsx ───────────────────────────────────────────────────────────────
+// Hoisted out of the block below so the reading-size section can reach
+// `anchorDelta` — the read position across a zoom belongs with the zoom.
+let blocksApi = null;
 {
   const build = await load(
     BLOCKS,
     ["Component", "memo", "useLayoutEffect", "useMemo", "useRef", "marked",
      "Markdown", "Mermaid", "onLink", "renderImage", "sanitizeHtml", "h", "F"],
-    ["DocBody", "collectDefs", "blockKeys", "mermaidSource"],
+    ["DocBody", "collectDefs", "blockKeys", "mermaidSource", "anchorDelta"],
   );
   const rt = runtime(() => null);
   const api = safeBuild("blocks.tsx", build, {
@@ -532,6 +596,7 @@ console.log("── the block list: cross-block link definitions ──");
     h, F,
     ...rt.hooks,
   });
+  blocksApi = api;
   if (!api) {
     fail("blocks.tsx has no `collectDefs` — nothing collects a document's link definitions across blocks,\n"
       + "     so `[ci][badge]` in one block cannot see `[badge]: …` in another and renders as literal brackets");
@@ -568,7 +633,8 @@ console.log("── the block list: cross-block link definitions ──");
     }
     return out;
   };
-  const shown = srcOf(api.DocBody({ blocks, ctx: { base: new URL("http://x/"), dir: "" } }));
+  const view = { zoom: 100, wide: false };
+  const shown = srcOf(api.DocBody({ blocks, ctx: { base: new URL("http://x/"), dir: "" }, view }));
   is(shown.length, 5, "every block is rendered");
   is(
     shown[1].includes("[badge]: https://img.example/ci.svg"), true,
@@ -595,7 +661,7 @@ console.log("── the block list: cross-block link definitions ──");
     before.filter((k, j) => k !== after[j]).length, 1,
     "editing one definition block changes exactly ONE key — blockKeys stays on the ORIGINAL md",
   );
-  const shownAfter = srcOf(api.DocBody({ blocks: edited, ctx: { base: new URL("http://x/"), dir: "" } }));
+  const shownAfter = srcOf(api.DocBody({ blocks: edited, ctx: { base: new URL("http://x/"), dir: "" }, view }));
   is(shownAfter[1] !== shown[1], true, "…while what the referencing block RENDERS does follow the new definition");
   }
 }
@@ -692,6 +758,142 @@ console.log("── one filter shortcut, and the index's order ──");
       + "      route — showed the same documents in different orders, and nothing failed)",
     );
   }
+}
+
+console.log("\n── the reading size and the measure ──");
+
+// The two tables, straight. A stop list is a preference (see the comment on
+// `ZOOM_STEPS`), but the SNAP is a guard: this reads a string anything with the
+// origin's localStorage may have written, and a value that cannot be stepped
+// off again is a document nobody can zoom back out of.
+{
+  const v = mountViewer("#/docs/a.md");
+  const z = v.zoom;
+  is(z.clampZoom(undefined), 100, "a missing size is 100%");
+  is(z.clampZoom("nonsense"), 100, "a non-numeric size is 100%");
+  is(z.clampZoom(1e9), z.ZOOM_MAX, "an absurd size is pulled down to the top stop");
+  is(z.clampZoom(-4), z.ZOOM_MIN, "a negative size is pulled up to the bottom stop");
+  is(z.clampZoom(118), 125, "an off-table size snaps to the NEAREST stop, not the floor");
+  is(z.stepZoom(100, 1), 110, "one step up from 100%");
+  is(z.stepZoom(z.ZOOM_MAX, 1), z.ZOOM_MAX, "the top stop does not wrap");
+  is(z.stepZoom(z.ZOOM_MIN, -1), z.ZOOM_MIN, "the bottom stop does not wrap");
+
+  // Both faces of each key, and the reset that `||` would swallow.
+  const dir = (init) => z.zoomDir({ key: "", code: "", metaKey: false, ctrlKey: false, altKey: false, ...init });
+  is(dir({ key: "=", code: "Equal", metaKey: true }), 1, "⌘= is bigger");
+  is(dir({ key: "+", code: "Equal", metaKey: true, shiftKey: true }), 1, "⌘⇧+ is bigger");
+  is(dir({ key: "-", code: "Minus", ctrlKey: true }), -1, "⌃− is smaller");
+  is(dir({ key: "0", code: "Digit0", metaKey: true }), 0, "⌘0 is RESET");
+  is(dir({ key: "0", code: "", metaKey: true }), 0,
+     "…even with no e.code to fall back on — `??` and not `||`\n"
+     + "     (0 is a legal direction and falls straight through `||` to the code table.\n"
+     + "      With both tables answering it the mistake is invisible; this is the case\n"
+     + "      where they disagree, which is the only one that can fail on it)");
+  is(dir({ key: "–", code: "Minus", metaKey: true, altKey: true }), -1,
+     "⌘⌥− survives macOS composing Option into an en dash — matched on e.code\n"
+     + "     (keyed on e.key alone this chord is silently dead on every US Mac)");
+  is(dir({ key: "=", code: "Equal" }), undefined, "a bare = is not a chord");
+  is(dir({ key: "a", code: "KeyA", metaKey: true }), undefined, "⌘a is not a chord");
+  v.restore();
+}
+
+// The chord, through the whole page: the document is painted at the size the
+// key asked for, and the browser is stopped from zooming as well.
+{
+  store.clear();
+  const v = mountViewer("#/docs/a.md");
+  await v.answer({ kind: "data", etag: '"1"', data: payload("docs/a.md", "body") });
+  is(v.view(), { zoom: 100, wide: false }, "a fresh store reads as 100% and a measured column");
+
+  is(v.key({ key: "=", code: "Equal", metaKey: true }), true,
+     "⌘= is swallowed — without preventDefault the browser zooms the whole page too");
+  is(v.view()?.zoom, 110, "…and the document is painted one stop larger");
+  v.key({ key: "=", code: "Equal", metaKey: true });
+  v.key({ key: "=", code: "Equal", metaKey: true });
+  is(v.view()?.zoom, 150, "three steps up from 100% is 150%");
+  is(v.controls()?.join(""), "A−150%A+Wide", "the stepper reads back the size it applied");
+
+  v.key({ key: "0", code: "Digit0", metaKey: true });
+  is(v.view()?.zoom, 100, "⌘0 goes straight home rather than stepping back down");
+
+  v.key({ key: "-", code: "Minus", metaKey: true });
+  is(v.view()?.zoom, 90, "⌘− is smaller");
+  is(JSON.parse(store.get("worktrees.docs.view") ?? "null"), { zoom: 90, wide: false },
+     "the size is written to the store as one blob, not as two keys that can disagree");
+  v.restore();
+}
+
+// Remembered across a reload — which is all `localStorage` can promise here:
+// the docs server binds an ephemeral port, so the origin (and with it this
+// store) is new on every app launch. Documented in zoom.ts, asserted here.
+{
+  const v = mountViewer("#/docs/a.md");
+  await v.answer({ kind: "data", etag: '"1"', data: payload("docs/a.md", "body") });
+  is(v.view(), { zoom: 90, wide: false }, "a new page picks the remembered size back up");
+  v.restore();
+}
+
+// A value the page did not write. The store is the origin's, and this key can
+// be hand-edited or left behind by another build — so what comes back out of it
+// is input, not state, and it goes through the same clamp as a keypress.
+{
+  store.set("worktrees.docs.view", '{"zoom":9999,"wide":"yes"}');
+  const v = mountViewer("#/docs/a.md");
+  await v.answer({ kind: "data", etag: '"1"', data: payload("docs/a.md", "body") });
+  is(v.view(), { zoom: 300, wide: false },
+     "a garbage stored size is clamped on the way IN, and `wide` is read strictly\n"
+     + "     (unclamped, a hand-edited 9999 paints a document nobody can zoom back out of:\n"
+     + "      A+ is disabled at the top stop and A− steps down from a value not on the table)");
+  v.restore();
+}
+
+// The read position across a size change. `useBlockScrollAnchor` itself needs
+// real layout, which nothing here has — so the one piece of it that can be
+// wrong is a pure function, and this is it.
+{
+  const { anchorDelta } = blocksApi ?? {};
+  if (typeof anchorDelta !== "function") {
+    fail("blocks.tsx exports no `anchorDelta` — the read position across a zoom is unguarded");
+  } else {
+  // An UPDATE: the anchored block's top is held to the pixel, whatever its
+  // height did. This is the behaviour docs-transport §3.3 measured.
+  is(anchorDelta({ key: "k", top: -702, height: 951, sizing: false }, -702, 1049), 0,
+     "a document update holds the anchored block's TOP, however much it grew");
+  is(anchorDelta({ key: "k", top: 169, height: 400, sizing: false }, 214, 400), 45,
+     "…and scrolls by exactly what moved it");
+  // A SIZE change: the fraction above the fold is what is held, because the
+  // block rescaled rather than gained content.
+  // The real numbers from the browser: a 951px block with 702px above the fold,
+  // grown to 1049px by one 10% step. 702/951 of 1049 is 774px above the fold,
+  // so the page must scroll DOWN 72px for the same line to stay at the top.
+  is(Math.round(anchorDelta({ key: "k", top: -702, height: 951, sizing: true }, -702, 1049)), 72,
+     "a zoom step scrolls by the block's OWN growth above the fold\n"
+     + "     (pinning the top instead left the line being read 102px down the screen,\n"
+     + "      measured on a real document at a single 10% step)");
+  is(anchorDelta({ key: "k", top: 0, height: 951, sizing: true }, 0, 1650), 0,
+     "a block that starts exactly at the fold has no fraction above it to preserve");
+  is(anchorDelta({ key: "k", top: 169, height: 951, sizing: true }, 169, 1650), 0,
+     "…nor does one that starts BELOW it — everything above grew too, so the gap holds");
+  is(anchorDelta({ key: "k", top: -100, height: 0, sizing: true }, -100, 200), 0,
+     "a zero-height anchor does not divide by zero");
+  }
+}
+
+// The measure, and the route gate.
+{
+  store.clear();
+  const v = mountViewer("#/docs/a.md");
+  await v.answer({ kind: "data", etag: '"1"', data: payload("docs/a.md", "body") });
+  const doc = find(v.tree(), "DocBody");
+  is(doc?.props?.view?.wide, false, "the 78ch reading measure is the default");
+
+  v.go("#");
+  is(v.controls(), null, "the index route shows no reading controls — there is no document to size");
+  is(v.key({ key: "=", code: "Equal", metaKey: true }), false,
+     "…and it does not swallow ⌘= either\n"
+     + "     (a chord that is prevented and then does nothing is worse than an unbound one:\n"
+     + "      it takes the browser's own zoom away and gives back nothing)");
+  v.restore();
 }
 
 console.log(failed === 0 ? "\nall good" : `\n${failed} failing`);
