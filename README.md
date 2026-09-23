@@ -218,8 +218,10 @@ Examples: `--ai claude`, `--ai "claude --model opus"`, `--ai codex`,
 
 Claude and Codex can run together in one worktree. The app shows their terminals
 side by side and lets you open or close either agent independently. Settings →
-Commands → Default agent chooses which starts first when the app creates or
-enters a place; changing it does not stop a running session. The CLI keeps its
+Claude and Settings → Codex can both be configured. When both CLIs are available,
+the New worktree dialog asks which agent to start; it preselects Settings →
+Commands → Default agent. That default also chooses which agent starts when you
+enter an existing place. Changing it does not stop a running session. The CLI keeps its
 `ai_cmd` default and accepts `open <place> --ai claude|codex` and
 `close <place> --ai claude|codex`. An unqualified `close` closes both managed
 agent sessions. Codex resumes its most recent conversation in that place with
@@ -234,7 +236,8 @@ opening it from Worktrees.
 
 Connect Worktrees tools separately in Settings → Claude and Settings → Codex,
 or run `worktrees mcp --install --ai codex` for Codex. The unqualified MCP setup
-command still targets Claude.
+command still targets Claude. The MCP `create_worktree` tool accepts an optional
+`provider: "claude" | "codex"`; without one it uses the project's AI command.
 
 ## Compatibility notes
 

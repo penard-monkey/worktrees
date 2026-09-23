@@ -4,7 +4,7 @@ title: "Proposal — Codex support"
 
 # Codex support in Worktrees — implementation plan
 
-**Status:** implemented on the feature branch 2026-09-22; awaiting review.
+**Status:** implemented on the feature branch 2026-09-22; awaiting review and live session verification.
 **Branch:** `feat/codex-support`, based on `origin/main` at `e429ffe`.
 
 ## Goal and current behavior
@@ -16,7 +16,7 @@ independently. The app's Settings default selects which agent starts first;
 the CLI's `ai_cmd` remains its default. Neither restricts which agents may run
 there.
 
-Today `--ai codex` starts a Codex process in pane 0, and tests cover that basic
+Before this branch, `--ai codex` started a Codex process in pane 0, and tests covered that basic
 launch. Each place has only one canonical tmux session and one main terminal in
 the app. Session adoption chooses one pane by worktree path, so a second agent
 could be mistaken for the first. The default resume argument is Claude's `-r`;
@@ -25,7 +25,7 @@ Settings panel are Claude-specific. AI profiles are Claude config bundles.
 Activity and usage read Claude-owned data. The worktree must become the shared
 container for two independent agent sessions.
 
-## Proposed implementation
+## Implementation
 
 ### 1. Represent two agent sessions per place
 
@@ -152,6 +152,46 @@ container for two independent agent sessions.
    its current tests and manual checks.
 7. Changing the default provider in Settings affects future app launches only;
    live Claude and Codex sessions continue running unchanged.
+8. When both CLIs are available, New worktree offers both providers and starts
+   the selected one; a failed create restores that selection.
+9. Settings shows both MCP setup states together while keeping their setup
+   controls independent.
+
+## Follow-up: provider choice at creation
+
+Claude and Codex MCP connections remain separate in Settings and can both be
+installed. Settings → Commands shows both setup states together and links to
+each provider's setup controls. An MCP connection is optional for running that
+provider; the New worktree dialog checks whether each CLI is available. When both are available,
+it offers Claude and Codex, preselecting the Settings default. When only one is
+available, it starts that one. The chosen provider reaches `new_place`, becomes
+the active terminal, and survives a failed creation attempt. The MCP
+`create_worktree` tool also accepts an optional `provider` argument; omitting it
+keeps the CLI's configured AI command.
+
+## Handoff feasibility
+
+**Feasible while both sessions stay open.** Claude and Codex can already run
+side by side in the same worktree, as independent sessions over the same files.
+A handoff is an optional way to pass task context from one to the other. It
+does not switch the worktree's provider, close either tab, or prevent both
+agents from working at once. The user can keep using both before and after a
+handoff.
+
+A simple manual handoff needs no new runtime: ask one agent to write
+`.planning/handoff.md`, then ask the other to read it. The document should
+capture the goal, completed work, current git state and uncommitted edits,
+decisions, blockers, and next actions. The receiving agent should also inspect
+the files and git diff. A future app action could prompt the source session to
+write this document, wait for an explicit ready signal, then paste a fixed
+read prompt into the selected destination session, opening it if needed.
+
+The document is a snapshot, not shared conversation memory. Claude and Codex
+keep separate transcripts and tool state. A reliable automated handoff needs
+timeout/error handling and a way to avoid reading a partially written file.
+If both agents may edit concurrently, the handoff should identify which files
+each owns or ask the receiving agent to review before editing. This is a
+follow-up design, not part of the provider picker.
 
 ## Official Codex references
 

@@ -185,6 +185,22 @@ print("ok")
   [ ! -d "$REPO/.worktrees/agent-g" ]
 }
 
+@test "create_worktree can choose Codex without changing the project's Claude default" {
+  install_fake_cmd codex
+  export WORKTREES_AI_CMD=claude
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-codex","provider":"codex","brief":"Review this branch"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  tmux_session_exists 'repo-agent-codex~agent~codex'
+  [[ "$(tmux_pane0_cmd 'repo-agent-codex~agent~codex')" == *"codex -c forced_login_method=chatgpt"*"Read .planning/brief.md and begin."* ]]
+  [ "$(cat "$REPO/.worktrees/agent-codex/.planning/brief.md")" = "Review this branch" ]
+  mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-default"}}}'
+  tmux_session_exists repo-agent-default
+  [[ "$(tmux_pane0_cmd repo-agent-default)" == *"claude --name"* ]]
+  mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-invalid","provider":"other"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [ ! -d "$REPO/.worktrees/agent-invalid" ]
+}
+
 @test "place_status reports the claude session(s) working in the place" {
   run_wt new feat-ag --no-tmux
   local q='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"feat-ag"}}}'

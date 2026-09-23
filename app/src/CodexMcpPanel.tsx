@@ -4,7 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 const INSTALL_URL = "https://developers.openai.com/codex/cli/";
 
-type Status = {
+export type CodexMcpStatus = {
   state: "installed" | "read-only" | "stale" | "foreign" | "absent" | "cli-missing";
   codex_bin: string | null;
   worktrees_bin: string | null;
@@ -12,14 +12,14 @@ type Status = {
   command: string | null;
   config_path: string;
 };
-type Outcome = { ok: boolean; output: string; status: Status };
+type Outcome = { ok: boolean; output: string; status: CodexMcpStatus };
 
 export function CodexMcpSection({ onReport }: { onReport: (text: string) => void }) {
-  const [status, setStatus] = useState<Status | null>(null);
+  const [status, setStatus] = useState<CodexMcpStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [mutations, setMutations] = useState(true);
   const [output, setOutput] = useState("");
-  useEffect(() => { invoke<Status>("codex_mcp_status").then(setStatus).catch((e) => onReport(String(e))); }, []);
+  useEffect(() => { invoke<CodexMcpStatus>("codex_mcp_status").then(setStatus).catch((e) => onReport(String(e))); }, []);
   const act = async (remove: boolean) => {
     setBusy(true);
     try {

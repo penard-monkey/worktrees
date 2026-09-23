@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
-import { CodexMcpSection } from "./CodexMcpPanel";
+import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -17,6 +17,20 @@ type CmdResult = { ok: boolean; code: number; output: string; slug?: string | nu
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
 /** `term_history_info` — what the saved-scrollback tree currently costs. */
 type TermHistoryInfo = { dir: string; bytes: number; tabs: number };
+
+function agentSetupLabel(state: string | null): string {
+  if (!state) return "Checking…";
+  return ({
+    installed: "Connected",
+    "read-only": "Connected (read only)",
+    elsewhere: "Connected in this project",
+    absent: "Not connected",
+    stale: "Needs repair",
+    foreign: "Name in use",
+    "cli-missing": "Worktrees CLI missing",
+    "not-applicable": "Unavailable",
+  } as Record<string, string>)[state] ?? state;
+}
 
 // Sheet categories. One is shown at a time (see .settings-split) — the flat
 // 12-section pile made every setting equally hard to find. Purely presentational:
@@ -300,6 +314,16 @@ export function SettingsSheet({
   // you hunt for the thing it just offered.
   const [cat, setCat] = useState<CatId>("appearance");
   useEffect(() => { if (open) setCat(at?.cat ?? "appearance"); }, [open, at]);
+  const [codexMcpStatus, setCodexMcpStatus] = useState<CodexMcpStatus | null>(null);
+  useEffect(() => {
+    if (!open || cat !== "commands") return;
+    let alive = true;
+    invoke<CodexMcpStatus>("codex_mcp_status")
+      .then((status) => { if (alive) setCodexMcpStatus(status); })
+      .catch((e) => { if (alive) onReport(String(e)); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- probe on entry, not every App render
+  }, [open, cat]);
 
   // …and then say which section it meant. A transient class rather than focus:
   // the sheet body scrolls, and `autoFocus` inside a scrolling box is what
@@ -619,7 +643,16 @@ export function SettingsSheet({
                 </button>
               ))}
             </div>
-            <div className="hint">Starts first when you enter a place. You can open the other agent beside it at any time. Running sessions keep their provider.</div>
+            <div className="hint">Preselected for new worktrees when both agents are installed, and starts first when you enter a place. You can open the other agent beside it at any time. Running sessions keep their provider.</div>
+          </section>
+          <section className="setting">
+            <label>Worktrees tools for agents</label>
+            <div className="hint">Both providers can be connected at the same time. Their MCP setup is independent of the default agent.</div>
+            <div className="hint">Claude: {agentSetupLabel(mcpStatus?.state ?? null)} · Codex: {agentSetupLabel(codexMcpStatus?.state ?? null)}</div>
+            <div className="ver-actions">
+              <button className="ctrl sm" onClick={() => setCat("claude")}>Configure Claude</button>
+              <button className="ctrl sm" onClick={() => setCat("codex")}>Configure Codex</button>
+            </div>
           </section>
           <section className="setting">
             <label>Commands</label>

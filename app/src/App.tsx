@@ -1564,10 +1564,10 @@ type Verdict = {
  *  was visible in three bare inputs whose base placeholder said "default: main"
  *  on a repo whose default base is `master`.
  *
- *  Module scope (CLAUDE.md): it owns three fields, and App re-renders on the 3s
+ *  Module scope (CLAUDE.md): it owns its fields, and App re-renders on the 3s
  *  poll — defined inside App() it would remount and drop focus per keystroke. */
 function NewPlaceDialog({
-  project, prefix, places, unborn, initial, initialBase,
+  project, prefix, places, unborn, initial, initialBase, defaultProvider,
   onCreate, onClose, onOpenPlace, onInitialCommit, onError,
 }: {
   project: string;
@@ -1578,10 +1578,11 @@ function NewPlaceDialog({
   places: Place[];
   unborn: boolean;
   /** A REJECTED create, handed back so a typo costs one edit and not a retype. */
-  initial: { branch: string; name: string; base: string } | null;
+  initial: { branch: string; name: string; base: string; provider: "claude" | "codex" } | null;
   /** ctx-menu "New worktree from this branch…" — a base, nothing else. */
   initialBase: string;
-  onCreate: (branch: string, name: string, base: string) => void;
+  defaultProvider: "claude" | "codex";
+  onCreate: (branch: string, name: string, base: string, provider: "claude" | "codex") => void;
   onClose: () => void;
   onOpenPlace: (slug: string) => void;
   onInitialCommit: (repo: string) => Promise<void>;
@@ -1590,11 +1591,30 @@ function NewPlaceDialog({
   const [branch, setBranch] = useState(initial?.branch ?? "");
   const [base, setBase] = useState(initial?.base || initialBase);
   const [name, setName] = useState(initial?.name ?? "");
+  const [provider, setProvider] = useState<"claude" | "codex">(initial?.provider ?? defaultProvider);
+  const [available, setAvailable] = useState<{ claude: boolean; codex: boolean } | null>(null);
   // Until this flips, the folder name MIRRORS the branch. Emptying the field
   // hands it back — which is what the hint under it says.
   const [touched, setTouched] = useState(!!initial?.name);
   const [data, setData] = useState<BranchList | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      invoke<McpStatus>("mcp_status", { repo: project }),
+      invoke<{ codex_bin: string | null }>("codex_mcp_status"),
+    ]).then(([claude, codex]) => {
+      if (!alive) return;
+      const next = { claude: !!claude.claude_bin, codex: !!codex.codex_bin };
+      setAvailable(next);
+      // A rejected create reopens with the user's exact choice, even if CLI
+      // availability changed while the operation was running.
+      if (!initial && next.claude !== next.codex) setProvider(next.claude ? "claude" : "codex");
+    }).catch((e) => { if (alive) onError(e); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per open
+  }, [project]);
 
   useEffect(() => {
     let alive = true;
@@ -1703,7 +1723,7 @@ function NewPlaceDialog({
   // anything reads as broken, not as inert.
   const baseUsed = !b || !verdict || !!verdict.usesBase || verdict.outcome === "unknown";
   const ready = !!b && !verdict?.blocking && !busy;
-  const submit = () => { if (ready) onCreate(b, sendName, base.trim()); };
+  const submit = () => { if (ready) onCreate(b, sendName, base.trim(), provider); };
 
   return (
     <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
@@ -1809,6 +1829,20 @@ function NewPlaceDialog({
                   {touched ? "clear this field to follow the branch again" : "follows the branch — edit to pin it"}
                 </span>
               </label>
+
+              {available?.claude && available.codex && (
+                <div className="np-field">
+                  <span className="np-label">Start with</span>
+                  <div className="seg" role="group" aria-label="Agent provider">
+                    {(["claude", "codex"] as const).map((choice) => (
+                      <button key={choice} type="button" data-testid={`nw-provider-${choice}`}
+                        className={provider === choice ? "on" : ""} aria-pressed={provider === choice}
+                        onClick={() => setProvider(choice)}>{choice === "claude" ? "Claude" : "Codex"}</button>
+                    ))}
+                  </div>
+                  <span className="np-hint">You can open the other agent in this worktree later.</span>
+                </div>
+              )}
 
               {/* The preview follows the VERDICT, not the fields. Saying "will
                   create <derived slug>" under a verdict that says an existing
@@ -3122,7 +3156,7 @@ function App() {
   const [newBase, setNewBase] = useState("");
   // What a REJECTED create had typed in it, so reopening the form restores the
   // fields instead of handing back three empty boxes. Null for a fresh form.
-  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string } | null>(null);
+  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string; provider: "claude" | "codex" } | null>(null);
   // Places whose `new` is still running. Creating one takes seconds of network
   // and disk (git fetch, worktree add, materialize, tmux) and the nav had NO
   // representation of it, so the app read as hung — the whole complaint. Each
@@ -5484,9 +5518,9 @@ function App() {
     return () => clearTimeout(t);
   }, [undo]);
 
-  const createPlace = async (repo: string, branch: string, name: string, base: string) => {
+  const createPlace = async (repo: string, branch: string, name: string, base: string, provider: "claude" | "codex") => {
     if (!branch) return;
-    if (!(await ensureCodexCli(settings.default_provider))) return;
+    if (!(await ensureCodexCli(provider))) return;
     // Dismiss the form and put a ghost row in the nav IMMEDIATELY — the click is
     // acknowledged before any of the work starts. The label is the same
     // derivation the old success path used as its fallback; core may land on a
@@ -5499,15 +5533,15 @@ function App() {
     setNewBase("");
     setNewDraft(null);
     try {
-      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null, provider: settings.default_provider });
+      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null, provider });
       // Select core's ACTUAL final slug (origin/ stripped, holder-reuse applied);
       // fall back to the old derivation only if the backend didn't report one.
-      if (r?.ok) setSel({ repo, slug: r.slug ?? label });
+      if (r?.ok) { setActiveProvider(provider); setSel({ repo, slug: r.slug ?? label }); }
       // A rejected create is usually a fixable typo (a base that does not exist,
       // a branch checked out in another worktree). Put the form back with what
       // was typed still in it — dismissing on submit must not also mean losing
       // the input. `runCmd` owns the banner, so this only restores the fields.
-      else if (r) { setNewDraft({ branch, name, base }); setNewBase(base); setNewFor(repo); }
+      else if (r) { setNewDraft({ branch, name, base, provider }); setNewBase(base); setNewFor(repo); }
     } finally {
       // `runCmd` awaits its own refresh() before returning, so the real row is
       // already in `ws` by now — the ghost hands over with no empty frame
@@ -7385,7 +7419,8 @@ function App() {
           unborn={unbornProjects.has(newFor)}
           initial={newDraft}
           initialBase={newBase}
-          onCreate={(b, n, ba) => createPlace(newFor, b, n, ba)}
+          defaultProvider={settings.default_provider}
+          onCreate={(b, n, ba, provider) => createPlace(newFor, b, n, ba, provider)}
           onClose={() => { setNewFor(null); setNewBase(""); setNewDraft(null); }}
           onOpenPlace={(slug) => {
             setNewFor(null); setNewBase(""); setNewDraft(null);

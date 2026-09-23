@@ -601,16 +601,16 @@ impl Server {
             t.push(tool(
                 "create_worktree",
                 "Create a worktree for a branch (creating the branch off base if needed) and \
-                 open its tmux session: a single pane running the AI, named after the \
-                 session so other sessions can message it. Pass `brief` to hand the agent \
-                 its task: it is written to .planning/brief.md in the worktree and claude \
-                 opens on it.",
+                 start the chosen agent in its own tmux session. Pass `brief` to hand the agent \
+                 its task: it is written to .planning/brief.md in the worktree and the chosen \
+                 agent opens on it. `provider` defaults to the project's AI command.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "branch": { "type": "string" },
                         "base": { "type": "string", "description": "Base ref for a new branch. Optional." },
-                        "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; claude is launched on it. Optional." },
+                        "provider": { "type": "string", "enum": ["claude", "codex"], "description": "Agent to start. Omit to use the project's AI command." },
+                        "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; the chosen agent opens on it. Optional." },
                         "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." }
                     },
                     "required": ["branch"],
@@ -914,6 +914,14 @@ impl Server {
                 };
                 let raw_base = s("base");
                 let mut args = vec![branch, "--no-attach".to_string()];
+                match a.get("provider") {
+                    None | Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::String(p)) if p == "claude" || p == "codex" => {
+                        args.push("--ai".to_string());
+                        args.push(p.clone());
+                    }
+                    Some(_) => return Ok(text_err("provider must be claude or codex")),
+                }
                 if !raw_base.trim().is_empty() {
                     match safe_arg(&raw_base, "base") {
                         Ok(b) => args.insert(1, b),
