@@ -3242,3 +3242,21 @@ body.dragging-place .term-wrap[data-drop="mention"] {
 body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
   outline: 2px solid var(--accent);
 }
+
+/* Top-level crash pane (AppErrorBoundary) */
+.app-crash {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100vh;
+  padding: 24px;
+  text-align: center;
+}
+
+.app-crash pre {
+  max-width: 70ch;
+  white-space: pre-wrap;
+  opacity: 0.8;
+}
