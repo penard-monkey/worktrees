@@ -8,7 +8,7 @@ title: "2026-09-23 — Codex support"
 - **Worktree:** `.worktrees/feat-codex-support`
 - **Branch:** `feat/codex-support` (11 commits, squash-merged)
 - **PR:** [#328](https://github.com/penard-monkey/worktrees/pull/328), merge `1ca9884`
-- **Release tag:** none. The change is unreleased, and `CHANGELOG.md` has no entry for it yet (see Follow-ups)
+- **Release tag:** [v0.29.0](https://github.com/penard-monkey/worktrees/releases/tag/v0.29.0) (#327), whose CHANGELOG section documents Codex
 - **Planning files:** none. The session kept no `task_plan.md`/`findings.md`/`progress.md`. The design record is
   [`docs/proposals/codex-support.md`](../../proposals/codex-support.md)
 
@@ -120,8 +120,6 @@ gates were not re-run.
 
 ## Follow-ups
 
-- **CHANGELOG entry.** `[Unreleased]` has no Codex entry, so the next release's
-  "What's new" would omit the feature.
 - **Manual check for Codex.** Add a `docs/`-level checklist in the shape of
   `ai-profiles-manual-checks.md`: switch round-trip, resume after a switch,
   adopted-session refusal, legacy both-sessions reconcile, and sign-in or

@@ -5,11 +5,6 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
-- **Codex support has no CHANGELOG entry.** #328 merged without one, so the
-  next release's "What's new" (shipped in the binary via `include_str!`) would
-  leave out the feature. Add it under `[Unreleased]` before cutting the release.
-  _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md)_
-
 - **Codex needs a manual check doc, like AI profiles have.** Bats has no fake
   `codex`, so the live side is unguarded: a Claude → Codex → Claude switch
   leaving one session each step, resume after a switch, the adopted-session
