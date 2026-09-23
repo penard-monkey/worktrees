@@ -6844,6 +6844,14 @@ function App() {
                             onClick={() => closeFromMenu(sel.repo, sel.slug, false)}>Close session</button>
                         )
                       )}
+                      {selectedAgents?.claude.up !== selectedAgents?.codex.up && (
+                        <button className="pop-item" data-testid="topbar-switch-provider" onClick={() => {
+                          closeMenu();
+                          requestOpenAgent(selectedAgents?.claude.up ? "codex" : "claude");
+                        }}>
+                          Switch to {selectedAgents?.claude.up ? "Codex" : "Claude"}
+                        </button>
+                      )}
                       {/* Live sessions only. A session-less place shows the same
                           check inline in the main window (it is all that is
                           there), so the item would open a sheet over a copy of
@@ -6882,19 +6890,15 @@ function App() {
           <main className="main">
             {selected && sel ? (
               <>
-                <div className="agent-actions" aria-label="Agents in this place">
-                  {(["claude", "codex"] as const).map((provider) => (
-                    <button key={provider} className="ctrl sm"
-                      disabled={!!selectedAgents?.[provider].up && !selectedAgents?.[provider === "claude" ? "codex" : "claude"].up}
-                      onClick={() => requestOpenAgent(provider)}>
-                      {selectedAgents?.[provider === "claude" ? "codex" : "claude"].up
-                          ? `Switch to ${provider === "claude" ? "Claude" : "Codex"}`
-                          : selectedAgents?.[provider].up
-                            ? `${provider === "claude" ? "Claude" : "Codex"} running`
-                            : `Open ${provider === "claude" ? "Claude" : "Codex"}`}
-                    </button>
-                  ))}
-                </div>
+                {!selectedAgents?.claude.up && !selectedAgents?.codex.up && (
+                  <div className="agent-actions" aria-label="Agents in this place">
+                    {(["claude", "codex"] as const).map((provider) => (
+                      <button key={provider} className="ctrl sm" onClick={() => requestOpenAgent(provider)}>
+                        Open {provider === "claude" ? "Claude" : "Codex"}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {(selectedAgents?.claude.up || selectedAgents?.codex.up) ? (
                   <div className="agent-grid">
                     {([planProvider] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => (
