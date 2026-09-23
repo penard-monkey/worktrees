@@ -3,7 +3,10 @@
 //! an exit code (guards → 1). git/tmux are shelled out. The bats suite gates
 //! this against the bash CLI byte-for-byte.
 
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::process::Command;
 
 use crate::config::sanitize_prefix;
 use crate::diag::{Code, Finding, Report, Severity};
@@ -147,6 +150,27 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
     }
 }
 
+/// Serialize provider changes across CLI, MCP and app processes. Without this,
+/// two simultaneous opens can both see an empty place and create one session
+/// each. The lock lives in Git's private directory, never in tracked files.
+fn lock_agent_switch(main_root: &str) -> Result<File, String> {
+    let output = Command::new("git").args(["-C", main_root, "rev-parse", "--absolute-git-dir"])
+        .output().map_err(|e| format!("could not locate Git directory for agent switch: {e}"))?;
+    if !output.status.success() {
+        return Err("could not locate Git directory for agent switch".into());
+    }
+    let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let path = Path::new(&git_dir).join("worktrees-agent-switch.lock");
+    let file = OpenOptions::new().create(true).read(true).write(true).open(&path)
+        .map_err(|e| format!("could not open agent switch lock {}: {e}", path.display()))?;
+    // SAFETY: flock receives a live file descriptor. The returned File keeps
+    // the exclusive lock until the whole launch/reuse operation finishes.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!("could not lock agent switch: {}", std::io::Error::last_os_error()));
+    }
+    Ok(file)
+}
+
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
 // Returns 0 on success (session live / adopted / attached), 1 when tmux refuses
 // to create the session (the reason is surfaced via ui.error — the app shows it
@@ -162,6 +186,53 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
     // the app's auto-resume off.
     let ai_word = ai.match_word.clone();
     let ai_cmd = ai.cmd.as_str();
+    let _switch_lock = if ai_word == "claude" || ai_word == "codex" {
+        match lock_agent_switch(&p.main_root) {
+            Ok(file) => Some(file),
+            Err(e) => { ui.error(&e); return 1; }
+        }
+    } else { None };
+    // Provider changes are explicit opens. End the other Worktrees-managed AI
+    // session before this one starts, so a place never has two active agents.
+    // The canonical name predates provider sidecars; it may contain either AI.
+    if ai_word == "claude" || ai_word == "codex" {
+        let slug = if wt == p.main_root { "(main)" } else { wt.rsplit('/').next().unwrap_or("") };
+        let canonical = p.session_name(slug);
+        let codex_sidecar = tmux::codex_session_name(&canonical);
+        let claude_sidecar = tmux::claude_session_name(&canonical);
+        let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
+        if let Some(panes) = tmux::PaneList::fetch() {
+            for (name, provider) in panes.agents_in(wt, exclude) {
+                if provider != ai_word && name != canonical && name != codex_sidecar && name != claude_sidecar {
+                    ui.error(&format!(
+                        "{provider} is running in adopted tmux session '{name}'; close that session explicitly before switching to {ai_word}"
+                    ));
+                    return 1;
+                }
+            }
+        }
+        let mut other = Vec::new();
+        if ai_word == "claude" {
+            other.push(codex_sidecar);
+            if session_in != canonical && tmux::session_is_codex(&canonical) {
+                other.push(canonical);
+            }
+        } else {
+            other.push(claude_sidecar);
+            if session_in != canonical && tmux::session_exists(&canonical) && !tmux::session_is_codex(&canonical) {
+                other.push(canonical);
+            }
+        }
+        for name in other {
+            if name == session_in || !tmux::session_exists(&name) { continue; }
+            tmux::kill_session(&name);
+            if tmux::session_exists(&name) {
+                ui.error(&format!("could not close the other agent session '{name}'; provider switch cancelled"));
+                return 1;
+            }
+            ui.info(&format!("closed the other agent session '{name}' before starting {ai_word}"));
+        }
+    }
     let mut session = session_in.to_string();
     if !tmux::session_exists(&session) && !session.contains(tmux::CODEX_SIDECAR_MARKER) && !session.contains(tmux::CLAUDE_SIDECAR_MARKER) {
         // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
@@ -268,6 +339,9 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
             }
         }
     }
+    // The critical section ends once the target exists. A CLI attach may stay
+    // open for hours and must not hold the lock against a later switch.
+    drop(_switch_lock);
     if !do_attach {
         ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
         return 0;

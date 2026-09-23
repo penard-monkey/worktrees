@@ -153,7 +153,7 @@ Flags:
 | Command | Flags |
 |---|---|
 | `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--no-spare` (single pane — no spare shell, and for `new` no auto-install) |
-| `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` · `--brief <text>` (write the agent's task to `.planning/brief.md` and launch claude on it) |
+| `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` · `--brief <text>` (write the agent's task to `.planning/brief.md` and launch the selected agent on it) |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |
 
@@ -216,12 +216,14 @@ ai_resume_arg = resume
 Examples: `--ai claude`, `--ai "claude --model opus"`, `--ai codex`,
 `--ai opencode`, `--ai none`.
 
-Claude and Codex can run together in one worktree. The app shows their terminals
-side by side and lets you open or close either agent independently. Settings →
+Claude and Codex can both be configured, but each worktree runs one provider
+session at a time. Switching providers closes the current managed tmux session
+before opening the other; each provider keeps its own saved conversation. Settings →
 Claude and Settings → Codex can both be configured. When both CLIs are available,
 the New worktree dialog asks which agent to start; it preselects Settings →
-Commands → Default agent. That default also chooses which agent starts when you
-enter an existing place. Changing it does not stop a running session. The CLI keeps its
+Commands → Default agent. Entering an existing place keeps its running provider;
+the default is used when no agent is running. Changing the default does not
+stop a running session. The CLI keeps its
 `ai_cmd` default and accepts `open <place> --ai claude|codex` and
 `close <place> --ai claude|codex`. An unqualified `close` closes both managed
 agent sessions. Codex resumes its most recent conversation in that place with

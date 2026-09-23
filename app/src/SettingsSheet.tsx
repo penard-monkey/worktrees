@@ -643,7 +643,7 @@ export function SettingsSheet({
                 </button>
               ))}
             </div>
-            <div className="hint">Preselected for new worktrees when both agents are installed, and starts first when you enter a place. You can open the other agent beside it at any time. Running sessions keep their provider.</div>
+            <div className="hint">Preselected for new worktrees when both agents are installed. Entering a place keeps its running agent; this default applies when none is running. Switching agents closes the current session first.</div>
           </section>
           <section className="setting">
             <label>Worktrees tools for agents</label>

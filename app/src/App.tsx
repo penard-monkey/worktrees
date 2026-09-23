@@ -1840,7 +1840,7 @@ function NewPlaceDialog({
                         onClick={() => setProvider(choice)}>{choice === "claude" ? "Claude" : "Codex"}</button>
                     ))}
                   </div>
-                  <span className="np-hint">You can open the other agent in this worktree later.</span>
+                  <span className="np-hint">You can switch agents later; the current session closes first.</span>
                 </div>
               )}
 
@@ -4356,6 +4356,23 @@ function App() {
     claude: selected.tmux_session,
     codex: { name: `${selected.tmux_session.name}~agent~codex`, up: false },
   } : null);
+  const reconciledLegacyAgents = useRef(new Set<string>());
+  useEffect(() => {
+    if (!sel || !selectedAgents?.claude.up || !selectedAgents.codex.up) return;
+    const key = `${sel.repo}|${sel.slug}|${settings.default_provider}`;
+    if (reconciledLegacyAgents.current.has(key)) return;
+    reconciledLegacyAgents.current.add(key);
+    // Earlier builds allowed both providers to run. Re-enter the preferred
+    // provider through the same locked launch path; it closes the other one.
+    // A failed reconciliation stays visible as an error, not a retry loop on
+    // every workspace poll.
+    invoke<CmdResult>("open_place", { repo: sel.repo, slug: sel.slug, fresh: false, provider: settings.default_provider })
+      .then((result) => {
+        if (!result.ok) setErr(result.output || "Could not close the other agent session.");
+        else { setActiveProvider(settings.default_provider); void refresh(); }
+      })
+      .catch((e) => setErr(String(e)));
+  }, [sel?.repo, sel?.slug, selectedAgents?.claude.up, selectedAgents?.codex.up, settings.default_provider, refresh]);
   const planProvider = selectedAgents?.[activeProvider].up ? activeProvider
     : selectedAgents?.claude.up ? "claude" : "codex";
   // The status chip's host, declared HERE and not up with `statusOnTile`,
@@ -4827,21 +4844,24 @@ function App() {
     return false;
   };
   const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
+    const agents = p.agent_sessions;
+    const provider = agents?.claude.up && !agents.codex.up ? "claude"
+      : agents?.codex.up && !agents.claude.up ? "codex" : settings.default_provider;
     setSel({ repo, slug: p.slug });
-    setActiveProvider(settings.default_provider);
+    setActiveProvider(provider);
     setMenu(null);
     closeCtx();
     setTermFocus((v) => v + 1); // hand the keyboard back to the terminal
     const fresh = opts?.fresh ?? !settings.ai_auto_resume;
     (async () => {
-      if (!(await ensureCodexCli(settings.default_provider))) return;
+      if (!(await ensureCodexCli(provider))) return;
       invoke("touch_place", { repo, slug: p.slug }).catch(() => {}); // fire-and-forget recency stamp
       // Entering is the strongest "I looked" there is, so it acks with no dwell.
       // Guarded exactly like the dwell effect — on the FACT, so that entering a
       // place to answer the question its session is waiting on still spends the
       // signal — and an enter into a place with nothing unseen writes nothing.
       if (unseenWork(p)) ack(repo, p);
-      await runCmd("open_place", { repo, slug: p.slug, fresh, provider: settings.default_provider });
+      await runCmd("open_place", { repo, slug: p.slug, fresh, provider });
     })();
   };
   const openAgent = (provider: "claude" | "codex") => {
@@ -6808,15 +6828,20 @@ function App() {
               <>
                 <div className="agent-actions" aria-label="Agents in this place">
                   {(["claude", "codex"] as const).map((provider) => (
-                    <button key={provider} className="ctrl sm" disabled={!!selectedAgents?.[provider].up}
+                    <button key={provider} className="ctrl sm"
+                      disabled={!!selectedAgents?.[provider].up && !selectedAgents?.[provider === "claude" ? "codex" : "claude"].up}
                       onClick={() => openAgent(provider)}>
-                      {provider === "claude" ? "Claude" : "Codex"} {selectedAgents?.[provider].up ? "running" : "open"}
+                      {selectedAgents?.[provider === "claude" ? "codex" : "claude"].up
+                          ? `Switch to ${provider === "claude" ? "Claude" : "Codex"}`
+                          : selectedAgents?.[provider].up
+                            ? `${provider === "claude" ? "Claude" : "Codex"} running`
+                            : `Open ${provider === "claude" ? "Claude" : "Codex"}`}
                     </button>
                   ))}
                 </div>
                 {(selectedAgents?.claude.up || selectedAgents?.codex.up) ? (
                   <div className="agent-grid">
-                    {(["claude", "codex"] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => (
+                    {([planProvider] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => (
                       <div className="agent-cell" key={provider} onFocusCapture={() => setActiveProvider(provider)}>
                         <div className="agent-label">
                           {provider === "claude" ? "Claude" : "Codex"}

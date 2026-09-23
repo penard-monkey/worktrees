@@ -4,200 +4,118 @@ title: "Proposal — Codex support"
 
 # Codex support in Worktrees — implementation plan
 
-**Status:** implemented on the feature branch 2026-09-22; awaiting review and live session verification.
-**Branch:** `feat/codex-support`, based on `origin/main` at `e429ffe`.
+**Status:** implemented on `feat/codex-support`; verification in progress.
+**Base:** `origin/main` at `e429ffe`.
 
-## Goal and current behavior
+## Goal
 
-A user can run Claude and Codex simultaneously in the same worktree, see both
-terminals side by side, and open, resume, brief, or close either session without
-disturbing the other. Worktrees' MCP tools can be connected to each provider
-independently. The app's Settings default selects which agent starts first;
-the CLI's `ai_cmd` remains its default. Neither restricts which agents may run
-there.
+A worktree can use Claude or Codex, with both providers configured on the same
+machine. It has **one active provider session at a time**. The New worktree
+dialog offers a provider choice when both CLIs are available. An explicit
+provider change closes the current Worktrees-managed tmux session before
+opening the other provider. Claude and Codex retain separate saved
+conversations, so each can resume when selected again.
 
-Before this branch, `--ai codex` started a Codex process in pane 0, and tests covered that basic
-launch. Each place has only one canonical tmux session and one main terminal in
-the app. Session adoption chooses one pane by worktree path, so a second agent
-could be mistaken for the first. The default resume argument is Claude's `-r`;
-`--brief` supplies an initial prompt only to Claude; the MCP setup command and
-Settings panel are Claude-specific. AI profiles are Claude config bundles.
-Activity and usage read Claude-owned data. The worktree must become the shared
-container for two independent agent sessions.
+The Settings default preselects the provider for a new worktree and applies
+when entering a place with no running agent. Entering a place that already has
+one running provider keeps that provider. Changing the default never closes a
+live session by itself.
 
-## Implementation
+## Session lifecycle
 
-### 1. Represent two agent sessions per place
+- Resolve each provider's session by worktree path and actual process. Keep
+  collision-safe provider names and recognize older sessions under the
+  canonical name. A Codex process must never be treated as a Claude session,
+  or vice versa.
+- `new --ai` and `open --ai` start the selected provider. Before launch, close
+  any other Worktrees-managed provider session in that place. If closing it
+  fails, stop without starting another agent. Reopening the same provider
+  reuses its live session. A Git-directory lock serializes concurrent opens
+  from the app, CLI, and MCP so two processes cannot start different agents
+  after each observes an empty place.
+- Do not silently kill a provider session adopted from a personal tmux name
+  or an older prefix. Refuse the switch and name the session for explicit
+  closure. A launch must not adopt a running session of the other provider.
+- A legacy place that already has both sessions is rendered as one terminal.
+  When selected in the app, it is reconciled through the locked launch path,
+  keeping the Settings default and closing the other managed session. An
+  explicit provider selection can also reconcile it. Closing or removing the
+  place still accounts for every live session, including legacy sidecars.
+- Claude resumes with its configured resume argument. Codex uses `codex
+  resume --last` in the place directory when a saved conversation exists.
+  A fresh action bypasses resume. A newly written `.planning/brief.md` is
+  opened through a fixed prompt without putting its text in process arguments.
+- Generic CLI `--ai <cmd>` behavior remains available for other tools.
 
-- Add an explicit provider identity (`claude` or `codex`) to session lookup,
-  launch, close, and place status. Use distinct, collision-safe tmux session
-  names for each provider, with a migration path that recognizes an existing
-  canonical session. Match both worktree path and actual process/provider when
-  adopting a session; never satisfy a Claude open with a Codex pane or vice
-  versa. Preserve the current generic `--ai <cmd>` path for other tools.
-- Add a Claude/Codex default provider selector in Settings. It determines the
-  initial agent when the app creates or enters a place; users can start the
-  other provider at any time. Keep explicit CLI `--ai` and the CLI's existing
-  config precedence. Changing the default never stops or replaces live sessions.
-  Add an
-  explicit action in the app and CLI to start or reopen the other provider in
-  that same place. Reopening either provider reuses its live session; a closed
-  provider resumes its own conversation. A second provider does not create a
-  second git worktree or replace the first session.
-- Resolve resume per provider: Claude keeps `-r`; Codex uses `codex resume
-  --last` scoped to the place directory. Preserve explicit resume overrides
-  where they apply, and start a fresh Codex session if no saved session exists.
-  Verify the CLI argument form before implementation.
-- Deliver the fixed `.planning/brief.md` opener to a newly launched Claude or
-  Codex session. The brief file is shared by the place; launching the second
-  agent reads its current contents. Do not silently resend a changed brief to
-  an already running session or put user-authored brief text in argv.
-- Make `open --ai <provider>` and `close --ai <provider>` target one provider.
-  Define the existing unqualified `close <place>` as closing all Worktrees-owned
-  agent sessions for that place, listing them before confirmation. Removing a
-  place must account for both live sessions and preserve the existing adopted
-  session safety checks.
+## Configuration and authentication
 
-### 2. Connect Worktrees MCP to Codex
+- Settings keeps independent Claude and Codex MCP setup controls and shows
+  both states together. Connecting Worktrees tools to either provider is
+  optional for launching its CLI. The CLI offers provider-targeted MCP setup:
+  `worktrees mcp --status|--install|--uninstall --ai codex`; the unqualified
+  command retains Claude behavior.
+- Codex MCP registration uses `codex mcp add` and `codex mcp remove`. Never
+  edit Codex's config directly or replace an entry owned by another tool.
+  Project-local configuration is reported separately from user-wide setup.
+- Worktrees-launched Codex requires ChatGPT browser sign-in through Codex's
+  OAuth flow. Worktrees neither requests nor stores OpenAI API keys. If the
+  Codex CLI is missing, show installation instructions before launch.
+- The MCP `create_worktree` tool accepts an optional `provider: "claude" |
+  "codex"`. Without one, it uses the project's configured AI command. Its
+  brief and provider values are validated as data before reaching the CLI.
 
-- Extend MCP status and setup with an explicit provider parameter, independent
-  of `ai_cmd`. For Codex, detect the
-  `worktrees` entry in Codex's user config and report absent, installed,
-  read-only, stale, and foreign states with the same safety rules as Claude.
-- Register through Codex's own `codex mcp add worktrees -- <worktrees-bin> mcp
-  --mutations` command; use `codex mcp remove` for a Worktrees-owned entry when
-  repairing it. Never write `~/.codex/config.toml` directly or overwrite a
-  foreign entry. Keep a read-only install option.
-- Make `worktrees mcp --status|--install|--uninstall --ai codex` and separate
-  Settings sections operate on Codex, while the current unqualified CLI command
-  retains its Claude behavior for compatibility. Show setup state for both
-  providers at once in Settings. Keep project-local config
-  detection separate from user-wide setup, since Codex loads project config
-  only for trusted projects.
-- Audit MCP server project discovery: it currently checks
-  `CLAUDE_PROJECT_DIR` before cwd. For Codex, rely on the process cwd and
-  confirm that a user-wide server serves the intended worktree in a real
-  session. Review provider-specific wording in tool descriptions and errors.
+## App behavior
 
-### 3. Show both sessions in the app
-
-- Change the main terminal area to show Claude and Codex side by side when both
-  are open, with independent attach, focus, sizing, scrollback, and lifecycle.
-  When only one is open, it gets the available width. Provide a clear start or
-  resume action for the absent provider. Reattaching the app must restore both
-  terminals without restarting either process.
-- Report presence and activity per provider instead of collapsing both into
-  one `tmux_session` or one agent dot. Keep Claude's existing busy/waiting
-  probe and usage meter associated only with Claude. For Codex, derive running
-  presence from its tmux pane; add richer activity only if a reliable Codex
-  signal is established. Never infer busy from log modification times.
-- Show provider-specific MCP setup alongside Claude-only AI profiles, usage,
-  and status controls. Label those controls accurately when both providers are
-  active. Route Plan prompts and terminal paste to the user's selected pane;
-  keep Claude-specific cross-session messaging and `@worktrees:` mentions out
-  of Codex panes.
-
-### 4. Documentation and verification
-
-- Update README configuration and examples, CLI help, Settings copy, and manual
-  checks for simultaneous sessions, provider-targeted actions, resume, and both
-  MCP connections.
-- Add Rust and bats coverage for distinct session names, adoption, close and
-  remove safety, resume, brief delivery, independent MCP setup, and existing
-  Claude behavior. Add app checks for side-by-side rendering, provider-specific
-  controls, and restoring both attached terminals.
-- Run the repository's normal CLI and app gates, then manually run Claude and
-  Codex together in one real worktree. Close and resume each independently,
-  verify neither steals the other's pane, and connect MCP to both. Check a
-  Claude-only place for compatibility.
-
-## Decisions and limits for this change
-
-- The app's default first agent is configurable in Settings and starts as
-  `claude` for existing installations. The CLI keeps `ai_cmd` and `--ai`;
-  either provider can be added later.
-- Worktrees-launched Codex sessions require ChatGPT browser sign-in through
-  Codex's own OAuth flow. Worktrees neither requests nor stores OpenAI API keys.
-  Existing API key sign-ins must be replaced with `codex logout` followed by
-  `codex login` before using Codex in Worktrees.
-- When Codex CLI is unavailable, selecting it or opening a Codex session shows
-  installation instructions and the official guide before creating a worktree
-  or starting a tmux session.
-- The first implementation supports one Worktrees-managed session per provider
-  per place. It does not restrict sessions a user launches manually.
-- Claude AI profiles are not converted into Codex profiles. Codex has its own
-  `config.toml`, `AGENTS.md`, and skills model; a separate profile design would
-  need its own requirements and migration rules.
-- A Codex usage meter and Claude-style busy/waiting indicators are outside this
-  change unless a reliable supported data source is found during implementation.
-  The UI should show no fabricated value for either.
-- No repository-provided file may name a command to execute. All MCP setup and
-  AI command choices remain user-controlled.
-
-## Acceptance criteria
-
-1. In one worktree, the user can start Claude and Codex and interact with both
-   terminals side by side. Neither session changes the other's process, cwd,
-   transcript, or tmux target.
-2. The user can close and reopen either provider independently. Codex resumes
-   the most recent conversation for that place, or starts fresh when none exists.
-   An unqualified close accounts for both sessions before acting.
-3. Either provider started with `--brief` receives the same
-   `.planning/brief.md` task without placing its text in argv.
-4. CLI and app can detect and install Worktrees MCP for each provider without
-   changing the other's configuration or an existing foreign server.
-5. The app reports each provider's session state accurately, restores both
-   attached terminals after restart, and identifies Claude-only controls.
-6. Existing Claude launch, resume, profiles, MCP, and activity behavior passes
-   its current tests and manual checks.
-7. Changing the default provider in Settings affects future app launches only;
-   live Claude and Codex sessions continue running unchanged.
-8. When both CLIs are available, New worktree offers both providers and starts
-   the selected one; a failed create restores that selection.
-9. Settings shows both MCP setup states together while keeping their setup
-   controls independent.
-
-## Follow-up: provider choice at creation
-
-Claude and Codex MCP connections remain separate in Settings and can both be
-installed. Settings → Commands shows both setup states together and links to
-each provider's setup controls. An MCP connection is optional for running that
-provider; the New worktree dialog checks whether each CLI is available. When both are available,
-it offers Claude and Codex, preselecting the Settings default. When only one is
-available, it starts that one. The chosen provider reaches `new_place`, becomes
-the active terminal, and survives a failed creation attempt. The MCP
-`create_worktree` tool also accepts an optional `provider` argument; omitting it
-keeps the CLI's configured AI command.
+- The main area shows one provider terminal. Its actions say **Open** when no
+  agent runs, **Running** for the active provider, and **Switch to** for the
+  other provider. A switch closes the old managed session before opening the
+  selected one. Terminal focus, scrollback, and Plan prompts follow the
+  selected provider.
+- Claude activity and usage remain Claude-specific. Codex presence comes
+  from its tmux session; no busy or usage value is invented for Codex.
+  Claude-only messaging and `@worktrees:` mentions stay out of Codex panes.
+- The worktree, branch, brief, files, notes, and plan are shared. The agents'
+  transcripts and tmux sessions remain separate, although only one provider
+  session runs at a time.
 
 ## Handoff feasibility
 
-**Feasible while both sessions stay open.** Claude and Codex can already run
-side by side in the same worktree, as independent sessions over the same files.
-A handoff is an optional way to pass task context from one to the other. It
-does not switch the worktree's provider, close either tab, or prevent both
-agents from working at once. The user can keep using both before and after a
-handoff.
+A manual handoff works now: ask the current agent to write
+`.planning/handoff.md`, switch providers, and ask the receiving agent to read
+it and inspect the current files and git diff. The document should record the
+goal, completed work, decisions, uncommitted changes, blockers, and next
+steps. It is a snapshot, not a transcript conversion.
 
-A simple manual handoff needs no new runtime: ask one agent to write
-`.planning/handoff.md`, then ask the other to read it. The document should
-capture the goal, completed work, current git state and uncommitted edits,
-decisions, blockers, and next actions. The receiving agent should also inspect
-the files and git diff. A future app action could prompt the source session to
-write this document, wait for an explicit ready signal, then paste a fixed
-read prompt into the selected destination session, opening it if needed.
+A future one-click handoff needs a reliable acknowledgement that the outgoing
+agent finished writing the document, timeout and error handling, then a fixed
+read prompt for the incoming agent. It must close the outgoing session before
+starting the incoming one. This automation is outside the current provider
+switch implementation.
 
-The document is a snapshot, not shared conversation memory. Claude and Codex
-keep separate transcripts and tool state. A reliable automated handoff needs
-timeout/error handling and a way to avoid reading a partially written file.
-If both agents may edit concurrently, the handoff should identify which files
-each owns or ask the receiving agent to review before editing. This is a
-follow-up design, not part of the provider picker.
+## Acceptance criteria
+
+1. A worktree never gains a second Worktrees-managed provider session from
+   `new`, `open`, the app, or MCP. Switching Claude → Codex → Claude leaves one
+   live session after each step and preserves both saved conversations.
+2. Entering a place with one live provider keeps it, regardless of the
+   Settings default. A failed provider switch does not open a second session.
+3. An adopted session is not killed without explicit closure. A legacy place
+   with both managed sessions displays one terminal and is reconciled on
+   selection in the app.
+4. When both CLIs are available, New worktree offers both providers. The
+   choice reaches the launch command and survives a failed create.
+5. Both MCP connections can coexist. Setup for one provider does not alter
+   the other or a foreign entry. Codex uses ChatGPT sign-in.
+6. Brief delivery, resume, close/remove safety, Claude profiles and activity,
+   and existing generic AI command behavior pass their tests.
+7. The app build, Rust tests, bats suite, and shell lint pass. Live sessions
+   are checked manually without replacing either provider's saved transcript.
 
 ## Official Codex references
 
 - [CLI command reference](https://developers.openai.com/codex/cli/reference/) —
   `codex resume --last` and `codex mcp add|get|list|remove`.
-- [MCP guide](https://developers.openai.com/codex/mcp/) — Codex's MCP config and
-  supported local stdio registration.
+- [MCP guide](https://developers.openai.com/codex/mcp/) — Codex's MCP config
+  and local stdio registration.
 - [AGENTS.md guide](https://developers.openai.com/codex/guides/agents-md/) —
-  Codex's project instruction discovery.
+  project instruction discovery.

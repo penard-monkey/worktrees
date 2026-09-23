@@ -196,6 +196,10 @@ print("ok")
   mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-default"}}}'
   tmux_session_exists repo-agent-default
   [[ "$(tmux_pane0_cmd repo-agent-default)" == *"claude --name"* ]]
+  mcp --mutations '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-default","provider":"codex"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  ! tmux_session_exists repo-agent-default
+  tmux_session_exists 'repo-agent-default~agent~codex'
   mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-invalid","provider":"other"}}}'
   [[ "$output" == *'"isError":true'* ]]
   [ ! -d "$REPO/.worktrees/agent-invalid" ]
