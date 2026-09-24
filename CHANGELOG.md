@@ -11,6 +11,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   provider, and follows a mid-session `/model` switch within a few seconds,
   for both, without waiting for the next message. A Claude session that has
   not replied yet shows the provider alone.
+  The label's own Close button is gone; close the session from the ⋯ menu.
 - **Roll back to an earlier release from Settings → Updates.** "Install
   another version" lists every published stable release and installs the
   one you pick — the CLI first, then the signed app bundle — and relaunches.

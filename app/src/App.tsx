@@ -4946,9 +4946,9 @@ function App() {
   // named session can exit and another can adopt the place — then core answers
   // with a fresh needs_confirm naming the newcomer, which we re-arm and SAY, so
   // the click reads as "the session changed" rather than as a dud.
-  const doClose = async (repo: string, slug: string, key: string, armed: boolean, provider?: "claude" | "codex") => {
+  const doClose = async (repo: string, slug: string, key: string, armed: boolean) => {
     const expect = armed ? closeSess : "";
-    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null, provider: provider ?? null });
+    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null });
     if (r?.needs_confirm) {
       if (expect && r.needs_confirm !== expect)
         setNotice(`${expect} is gone — ${r.needs_confirm} is in this place now. Nothing was killed.`);
@@ -6915,13 +6915,6 @@ function App() {
                               </span>
                             )}
                           </span>
-                          <button className="ctrl sm" onClick={() => {
-                            if (!sel) return;
-                            const key = `agent|${sel.repo}|${sel.slug}|${provider}`;
-                            doClose(sel.repo, sel.slug, key, confirmRm === key, provider);
-                          }}>
-                            {confirmRm === `agent|${sel.repo}|${sel.slug}|${provider}` ? `Kill ${closeSess}?` : "Close"}
-                          </button>
                         </div>
                         <TerminalPane key={selectedAgents![provider].name} provider={provider} session={selectedAgents![provider].name}
                           termVersion={termVersion} focusToken={termFocus} focusEnabled={provider === planProvider}
