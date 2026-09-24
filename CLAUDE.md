@@ -886,6 +886,23 @@ is invisible to the bats suite — there is no fake claude. Re-run
   (max `timestamp` over a tail of the file), never by `stat`. The general rule:
   for any file claude owns, the metadata describes claude's bookkeeping and only
   the CONTENT describes the work.
+- **An agent's MODEL is in its transcript, never its probe — and a switch is
+  written at once, for both CLIs.** Claude: the newest of an assistant reply's
+  `message.model` or the ``<local-command-stdout>Set model to `X` `` entry
+  `/model` writes immediately. Codex: the newest `turn_context.model` or
+  `thread_settings_applied` in the rollout. The CLI writes that event AT the
+  switch; one VS Code rollout, where it happened to land in the same second as
+  a turn, once passed for proof it waited for the next message. Sample the
+  client you are building for. Two more Codex rollout traps. Its own
+  sub-agents (the auto-review "guardian": `source.subagent`,
+  `parent_thread_id`) write rollouts with the SAME cwd that start LATER, so
+  "newest rollout for this cwd" is routinely not the user's session. And the
+  file exists seconds before its 20KB `session_meta` first line does, so never
+  cache a miss on a line with no trailing newline. Anything the snapshot
+  derives from agent state also needs its own re-list trigger. The poll
+  re-lists on a tmux fingerprint change or every 30s, and neither a finished
+  turn nor a `/model` moves tmux; `claude_activity` + `codex_models_moved`
+  exist for that.
 - **A predicate that gates a DISPLAY must not also gate a WRITE.** The dot slot
   shows one glyph, so `unreadOf` subtracts live activity — correct for painting,
   and fatal as the ack's guard: a visit to a place whose session sits at

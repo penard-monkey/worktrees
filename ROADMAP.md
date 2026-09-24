@@ -10,8 +10,20 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   leaving one session each step, resume after a switch, the adopted-session
   refusal, the legacy both-sessions reconcile, and the missing-CLI and sign-in
   prompts. Write it in the shape of `docs/ai-profiles-manual-checks.md` and
-  re-run it on a `codex` upgrade.
-  _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md)_
+  re-run it on a `codex` upgrade. Include the agent label: a mid-session
+  `/model` in the Codex TUI should change it within a few seconds with no
+  message sent. That case was verified only at the snapshot level, because the
+  rollout event it relies on (`thread_settings_applied`) is Codex's to rename.
+  _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md),
+  [2026-09-23 model-label](docs/sessions/2026-09-23-model-label/summary.md)_
+
+- **`CODEX_WATCH` keeps a removed project's worktrees.** The poll re-checks
+  the model of every worktree a snapshot last saw with live Codex. A worktree
+  is dropped only when a later snapshot of ITS repo sees Codex down, so
+  removing the project while Codex runs leaves the entry until the app
+  restarts. That costs a few `read_dir` calls per tick. Prune against
+  `read_projects` in `codex_models_moved`.
+  _From: [2026-09-23 model-label](docs/sessions/2026-09-23-model-label/summary.md)_
 
 - **`codex::session_present` opens every rollout on each launch.** It walks all
   of `$CODEX_HOME/sessions/Y/M/D/` and reads the first line of every `.jsonl` to
