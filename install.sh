@@ -41,7 +41,7 @@ BIN_NAME="worktrees"
 # `make release` and release.yml all refuse a mismatch — so main's copy names the
 # newest release too, except between a version bump and its tag, when that
 # release does not exist yet and resolution falls through to latest.
-SCRIPT_VERSION="v0.29.0"
+SCRIPT_VERSION="v0.30.0"
 
 sha256_check() {   # reads "<hash>  <name>" on stdin, verifies <name> in cwd
   if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -
