@@ -1084,8 +1084,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           ahead: 0, behind: 0, last_commit_subject: "wip", last_commit_epoch: now(),
           tmux_session: { name: `${sessionName(pv.snapshot.prefix, slug)}${args.provider === "codex" ? "~agent~codex" : ""}`, up: true },
           agent_sessions: {
-            claude: { name: sessionName(pv.snapshot.prefix, slug), up: args.provider !== "codex" },
-            codex: { name: `${sessionName(pv.snapshot.prefix, slug)}~agent~codex`, up: args.provider === "codex" },
+            claude: { name: sessionName(pv.snapshot.prefix, slug), up: args.provider !== "codex", model: null },
+            codex: { name: `${sessionName(pv.snapshot.prefix, slug)}~agent~codex`, up: args.provider === "codex", model: null },
           },
           claude_session_present: args.provider !== "codex",
           declared: { last_opened_epoch: now() }, lifecycle_effective: "active",
@@ -1105,6 +1105,9 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           codex: { name: `${canonical}~agent~codex`, up: false },
         };
         p.agent_sessions[provider].up = true;
+        // What the real backend reads out of the transcript once the agent has
+        // replied; the mock has no transcript, so it just names one.
+        p.agent_sessions[provider].model = provider === "claude" ? "Opus 5.5" : "gpt-6-astra";
         p.tmux_session.up = true;
         if (provider === "codex" && !p.agent_sessions.claude.up) p.tmux_session.name = p.agent_sessions.codex.name;
         if (provider === "claude") { p.tmux_session.name = p.agent_sessions.claude.name; p.claude_session_present = true; }

@@ -112,6 +112,7 @@ type Declared = {
   status_report?: StatusReport | null;
 } | null;
 
+type AgentSession = { name: string; up: boolean; model?: string | null };
 type Place = {
   slug: string;
   path: string;
@@ -130,7 +131,9 @@ type Place = {
   created_epoch?: number | null;
   last_commit_subject?: string | null;
   tmux_session: { name: string; up: boolean };
-  agent_sessions?: { claude: { name: string; up: boolean }; codex: { name: string; up: boolean } };
+  /** `model`: what the live agent last replied with, display-named (`Opus 5.5`,
+   *  or codex's id verbatim); null before its first reply. */
+  agent_sessions?: { claude: AgentSession; codex: AgentSession };
   last_commit_epoch?: number | null;
   claude_session_present: boolean;
   /// The AI profile the LIVE session was started with, and whether that profile
@@ -4387,7 +4390,7 @@ function App() {
 
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
-  const selectedAgents = selected?.agent_sessions ?? (selected ? {
+  const selectedAgents: Place["agent_sessions"] | null = selected?.agent_sessions ?? (selected ? {
     claude: selected.tmux_session,
     codex: { name: `${selected.tmux_session.name}~agent~codex`, up: false },
   } : null);
@@ -4943,9 +4946,9 @@ function App() {
   // named session can exit and another can adopt the place — then core answers
   // with a fresh needs_confirm naming the newcomer, which we re-arm and SAY, so
   // the click reads as "the session changed" rather than as a dud.
-  const doClose = async (repo: string, slug: string, key: string, armed: boolean, provider?: "claude" | "codex") => {
+  const doClose = async (repo: string, slug: string, key: string, armed: boolean) => {
     const expect = armed ? closeSess : "";
-    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null, provider: provider ?? null });
+    const r = await runCmd("close_place", { repo, slug, yes: armed, session: expect || null });
     if (r?.needs_confirm) {
       if (expect && r.needs_confirm !== expect)
         setNotice(`${expect} is gone — ${r.needs_confirm} is in this place now. Nothing was killed.`);
@@ -6904,14 +6907,14 @@ function App() {
                     {([planProvider] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => (
                       <div className="agent-cell" key={provider} onFocusCapture={() => setActiveProvider(provider)}>
                         <div className="agent-label">
-                          {provider === "claude" ? "Claude" : "Codex"}
-                          <button className="ctrl sm" onClick={() => {
-                            if (!sel) return;
-                            const key = `agent|${sel.repo}|${sel.slug}|${provider}`;
-                            doClose(sel.repo, sel.slug, key, confirmRm === key, provider);
-                          }}>
-                            {confirmRm === `agent|${sel.repo}|${sel.slug}|${provider}` ? `Kill ${closeSess}?` : "Close"}
-                          </button>
+                          <span className="agent-name">
+                            {provider === "claude" ? "Claude" : "Codex"}
+                            {selectedAgents?.[provider].model && (
+                              <span className="agent-model" title="the model this session last replied with">
+                                {selectedAgents[provider].model}
+                              </span>
+                            )}
+                          </span>
                         </div>
                         <TerminalPane key={selectedAgents![provider].name} provider={provider} session={selectedAgents![provider].name}
                           termVersion={termVersion} focusToken={termFocus} focusEnabled={provider === planProvider}
