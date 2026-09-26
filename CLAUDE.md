@@ -1013,6 +1013,10 @@ dies with *fatal: 'main' is already used by worktree at …* — that is `gh`'s
 local checkout step, AFTER the merge landed on GitHub. Check
 `gh pr view <n> --json state,mergeCommit` before retrying, or you will re-merge
 a merged PR. Same shared-branch rule as below, from a new direction.
+**And it takes `--delete-branch` down with it**: that runs after the step that
+died, so a successful merge leaves the remote branch behind. `git push origin
+--delete <branch>` it by hand, and do not read the surviving branch as evidence
+that the merge did not happen — it is the same one failure, twice.
 
 **Tag the release from the worktree that already owns `main`** (the repo root).
 `git checkout -B main` inside a side worktree moves the SHARED branch ref out
