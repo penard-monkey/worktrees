@@ -507,6 +507,47 @@ export function ProjectSheet({
 // that later gains a credential file re-suggests (§9). It persists in
 // ui-state.json's `init_dismissed`, alongside `collapsed` / `manual_order` —
 // which are also per-project-root maps.
+/** Worktrees git registers for this repo that live outside `.worktrees/` —
+ *  made by hand, or by another tool (Claude Code's own worktree feature puts
+ *  them in `.claude/worktrees/`). Every command here is keyed on the place dir,
+ *  so a stray is invisible to `ls`, to the nav and to this app, while holding a
+ *  branch and often uncommitted work.
+ *
+ *  The data has always been in the snapshot (`ls --json`'s `strays`) and the
+ *  adopt commands have always been in the project sheet. What was missing was a
+ *  signal anyone could read: a bare `⊟` in the header strip, explained only in
+ *  a `title`. Eight of them sat unnoticed in a real project, four with
+ *  uncommitted changes and one twelve commits ahead.
+ *
+ *  NOT an offer, and deliberately not built on `offers.ts`. That registry is
+ *  for after-update suggestions, its context may "ask about the MACHINE, never
+ *  about which screen you are on" (a stray is per-PROJECT), and every offer is
+ *  dismissible — which its own doc rules out for this class: a problem "belongs
+ *  in Settings where it cannot be silenced". Hence no dismiss button here. The
+ *  banner leaves when the strays do, which is the only thing that should
+ *  silence it.
+ *
+ *  Borrows `.init-banner`'s box, amber edge included: unlike the MCP card this
+ *  IS something being wrong. */
+export function StrayBanner({ count, onOpen }: { count: number; onOpen: () => void }) {
+  return (
+    <div className="init-banner">
+      <div className="init-banner-h">
+        <span className="init-banner-i">⊟</span>
+        {count} outside <code>.worktrees/</code>
+      </div>
+      <p>
+        Git registers {count === 1 ? "this worktree" : `these ${count} worktrees`} for this project, but
+        {count === 1 ? " it lives" : " they live"} outside <code>.worktrees/</code> — so nothing here can
+        see {count === 1 ? "it" : "them"}, and {count === 1 ? "it is" : "they are"} not listed above.
+      </p>
+      <div className="ver-actions">
+        <button className="ctrl sm" data-track="nav.project.strays.adopt" onClick={onOpen}>Adopt…</button>
+      </div>
+    </div>
+  );
+}
+
 export function InitBanner({ suggestion, onOpen, onDismiss }: {
   suggestion: InitSuggestion;
   onOpen: () => void;

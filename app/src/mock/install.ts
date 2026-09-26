@@ -561,6 +561,31 @@ const tabKey = (repo: string, slug: string, index: number) => `${repo}|${slug}|$
  *  materialized when a directory is listed, so a file referenced before its
  *  folder was ever expanded (a relative image in a markdown doc) would
  *  otherwise 404 — an artifact of the harness that looks like an app bug. */
+/** `?strays=N` — N stray worktrees on the first project, shaped exactly as
+ *  `model::Stray` serialises them (path, branch, slug). The slug is what the
+ *  sheet's `git worktree move` line targets, so it has to be the slugified
+ *  branch the real `strays_from` derives, not the directory name.
+ *
+ *  `fixtures.ts` already ships ONE stray on that project, which is what makes
+ *  the badge and banner drivable at all; this exists for the plural case —
+ *  the wording, and a count wide enough to clip a fixed-width badge. It takes
+ *  the CLONE, not `ws`: mutating the fixture would leave strays on it for
+ *  every later call in the page. */
+function withStrays(w: Workspace): Workspace {
+  const m = /[?&]strays=(\d+)/.exec(location.search);
+  const n = m ? Math.min(20, parseInt(m[1], 10)) : 0;
+  if (!n || !w.projects.length) return w;
+  const p = w.projects[0];
+  if (!p.ok || !p.snapshot) return w;
+  const names = ["discogs-oauth", "living-panorama", "tidal-integration", "record-gatefold",
+    "visual-richness", "palm-removal", "shelf-refresh", "touch-buttons"];
+  p.snapshot.strays = Array.from({ length: n }, (_, i) => {
+    const name = names[i % names.length] + (i >= names.length ? `-${i}` : "");
+    return { path: `${p.root}/.claude/worktrees/${name}`, branch: `worktree-${name}`, slug: `worktree-${name}` };
+  });
+  return w;
+}
+
 function fsFile(path: string) {
   const hit = fsFiles.get(path);
   if (hit) return hit;
@@ -917,7 +942,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
   switch (cmd) {
     case "list_workspace":
       await sleep(mockListDelayMs);
-      return clone(ws);
+      // `?strays=N` puts N worktrees "registered outside .worktrees/" on the
+      // FIRST project. Backend parity: the real snapshot carries these on every
+      // `ls --json` (see `Project::stray_worktrees`), and the app reads them
+      // straight off it — but no fixture had any, so the `⊟` badge, the nav
+      // banner and the project sheet's adopt block were all undrivable here.
+      // Off by default: a stray is an abnormal condition and every other test
+      // asserts against a project without one.
+      return withStrays(clone(ws));
     case "list_places":
       return clone(findProject(args.repo)?.snapshot ?? null);
 

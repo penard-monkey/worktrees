@@ -537,7 +537,11 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
    (.g-drift), and exists in all six theme blocks — no new token. */
 .mini.pbroken { opacity: 1; color: var(--warn); }
 /* a stray worktree: same attention colour, always visible for the same reason */
-.mini.pstray { opacity: 1; color: var(--warn); }
+/* Carries its COUNT, not a bare glyph: this is the only stray signal a
+   COLLAPSED project shows (the banner lives inside `.kids`), and "⊟" alone
+   said nothing — eight hidden worktrees went unnoticed behind one. `ch` units
+   so a two-digit count does not clip; the number is the whole message. */
+.mini.pstray { opacity: 1; color: var(--warn); min-width: 3ch; font-variant-numeric: tabular-nums; }
 .mini.pstray:hover { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
 .mini.pbroken:hover { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
 /* armed: stays visible past hover, reads as destructive (two-click remove) */
