@@ -204,6 +204,7 @@ lines, `#` comments. It is parsed as data, never executed.
 | AI pane command | `--ai <cmd>` | `WORKTREES_AI_CMD` | `ai_cmd` | `claude` |
 | AI resume argument (`-r` appends it) | — | `WORKTREES_AI_RESUME_ARG` | `ai_resume_arg` | Claude: `-r`; Codex: `resume --last` |
 | Session/name prefix | — | `WORKTREES_PREFIX` | `prefix` | repo dir name |
+| Codex permissions (`ask`, `auto-review`, `full`) | — | `WORKTREES_CODEX_PERMISSIONS` | `codex_permissions` | `auto-review` |
 
 ```ini
 # ~/.config/worktrees/config
@@ -217,6 +218,17 @@ ai_resume_arg = resume
   the env var wins over it.
 - Pane 0 hands the command to your `$SHELL -ic` — aliases work; assumes a
   POSIX-ish (bash/zsh/sh) login shell.
+
+- The app's Settings → Codex → Permissions overrides env and config for
+  launches the app makes; the CLI (and MCP `create_worktree`) use env/config.
+  `auto-review` is `--approve-for-me` plus a sandbox that can also write the
+  repo's git common dir (so `git commit` works in a worktree — that includes
+  `.git/hooks` and `.git/config`) and reach the network.
+- Every Codex launch also passes `-c project_doc_fallback_filenames=["CLAUDE.md"]`,
+  so a CLAUDE.md-only project briefs Codex without a repo change.
+  `worktrees agent-setup` checks the default branch and can make AGENTS.md the
+  one instruction file (CLAUDE.md becomes an `@AGENTS.md` stub) via a PR, and
+  link your `~/.claude/skills` into `~/.agents/skills` where Codex looks.
 
 Examples: `--ai claude`, `--ai "claude --model opus"`, `--ai codex`,
 `--ai opencode`, `--ai none`.

@@ -473,6 +473,11 @@ pub struct AiLaunch {
     /// `launch_cmd`, after `--name` for Claude: another AI tool
     /// would read it as something else entirely.
     pub opener: Option<String>,
+    /// Extra Codex arguments, each ALREADY shell-quoted, inserted by
+    /// `launch_cmd` right after the executable (before a `resume` subcommand).
+    /// Filled by `ops::ai_launch_for` because it depends on the worktree (the
+    /// auto-review sandbox needs the repo's git common dir). Empty for claude.
+    pub codex_flags: Vec<String>,
 }
 
 /// Compose the profiled launch for claude: the config-dir swap plus the flags
@@ -523,6 +528,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         // the app's auto-resume gate match the PROGRAM, never this string.
         match_word: base.match_word.clone(),
         opener: base.opener.clone(),
+        codex_flags: Vec::new(),
     }
 }
 
@@ -588,6 +594,7 @@ impl AiLaunch {
             cmd: ai_cmd.to_string(),
             match_word: ai_word_of(ai_cmd),
             opener: None,
+            codex_flags: Vec::new(),
         }
     }
 
@@ -648,9 +655,20 @@ impl AiLaunch {
         // config override immediately after the executable, before a possible
         // `resume` subcommand, and leave Codex's own browser OAuth flow and
         // credential store to the CLI. No Worktrees API key is created or read.
+        //
+        // `project_doc_fallback_filenames` makes Codex read a directory's
+        // CLAUDE.md when it has no AGENTS.md (measured with `codex debug
+        // prompt-input`, 0.157.1: nested directories too, and AGENTS.md still
+        // wins where both exist) — so a CLAUDE.md-only project briefs Codex
+        // with no repo change. Per-launch `-c`, never a write to Codex's config.
         let mut cmd = if provider == "codex" {
             let split = self.cmd.find(char::is_whitespace).unwrap_or(self.cmd.len());
-            format!("{} -c forced_login_method=chatgpt{}", &self.cmd[..split], &self.cmd[split..])
+            let mut head = format!("{} -c forced_login_method=chatgpt -c {}", &self.cmd[..split], shell_quote(CODEX_DOC_FALLBACK));
+            for f in &self.codex_flags {
+                head.push(' ');
+                head.push_str(f);
+            }
+            format!("{head}{}", &self.cmd[split..])
         } else { self.cmd.clone() };
         if provider == "claude" && !session.is_empty() {
             cmd.push_str(" --name ");
@@ -668,6 +686,9 @@ impl AiLaunch {
         format!("{}{}; {}", self.shell_prefix(), self.launch_cmd(session), keep)
     }
 }
+
+/// The `-c` value that lets Codex fall back to CLAUDE.md (see `launch_cmd`).
+pub const CODEX_DOC_FALLBACK: &str = r#"project_doc_fallback_filenames=["CLAUDE.md"]"#;
 
 /// A shell-safe environment variable NAME.
 fn is_env_name(k: &str) -> bool {
@@ -1634,6 +1655,7 @@ mod tests {
             cmd: "claude --append-system-prompt-file /data/profiles/work/rules.md".into(),
             match_word: ai_word_of("claude"),
             opener: None,
+            codex_flags: Vec::new(),
         };
         assert_eq!(l.match_word, "claude", "adoption matches the program, not the env prefix");
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/data/profiles/work' ");
@@ -1663,6 +1685,7 @@ mod tests {
             cmd: "claude -r".into(),
             match_word: "claude".into(),
             opener: None,
+            codex_flags: Vec::new(),
         };
         assert_eq!(
             l.pane0_body(keep),
@@ -1675,11 +1698,16 @@ mod tests {
         let keep = "exec \"${SHELL:-/bin/sh}\"";
         // The name rides after everything the launch already carried…
         assert_eq!(AiLaunch::plain("claude").launch_cmd("proj-feat"), "claude --name 'proj-feat'");
-        assert_eq!(AiLaunch::plain("codex").launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt");
-        assert_eq!(AiLaunch::plain("codex resume --last").launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt resume --last");
+        // Codex: sign-in, the CLAUDE.md fallback, then the permission flags —
+        // all before a `resume` subcommand, which would otherwise own them.
+        let fb = r#"-c 'project_doc_fallback_filenames=["CLAUDE.md"]'"#;
+        assert_eq!(AiLaunch::plain("codex").launch_cmd("proj-feat"), format!("codex -c forced_login_method=chatgpt {fb}"));
+        let mut resumed = AiLaunch::plain("codex resume --last");
+        resumed.codex_flags = vec!["--approve-for-me".into()];
+        assert_eq!(resumed.launch_cmd("proj-feat"), format!("codex -c forced_login_method=chatgpt {fb} --approve-for-me resume --last"));
         let mut codex = AiLaunch::plain("codex");
         codex.opener = Some("Read .planning/brief.md and begin.".into());
-        assert_eq!(codex.launch_cmd("proj-feat"), "codex -c forced_login_method=chatgpt 'Read .planning/brief.md and begin.'");
+        assert_eq!(codex.launch_cmd("proj-feat"), format!("codex -c forced_login_method=chatgpt {fb} 'Read .planning/brief.md and begin.'"));
         // …including the resume arg, which must NOT be followed by the opener:
         // `-r` takes an optional session id and would swallow it.
         let mut l = AiLaunch::plain("claude -r");
@@ -1695,6 +1723,7 @@ mod tests {
             cmd: "claude --model 'opus'".into(),
             match_word: "claude".into(),
             opener: None,
+            codex_flags: Vec::new(),
         };
         assert_eq!(
             prof.pane0_body_for(keep, "proj-x"),
@@ -1736,6 +1765,7 @@ mod tests {
             cmd: "claude".into(),
             match_word: "claude".into(),
             opener: None,
+            codex_flags: Vec::new(),
         };
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");
     }

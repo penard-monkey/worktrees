@@ -130,6 +130,123 @@ pub fn rollout_model(lines: &[String]) -> Option<String> {
     })
 }
 
+// ── permissions ─────────────────────────────────────────────────────────────
+
+/// How much a Worktrees-launched Codex may do without asking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permissions {
+    /// Codex's own default: it asks.
+    Ask,
+    /// `--approve-for-me`: a reviewer decides each request, inside the
+    /// workspace-write sandbox. The default — the analogue of Claude's auto mode.
+    AutoReview,
+    /// `--dangerously-bypass-approvals-and-sandbox`.
+    Full,
+}
+
+impl Permissions {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "ask" => Some(Self::Ask),
+            "auto-review" => Some(Self::AutoReview),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AutoReview => "auto-review",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// The app's setting, pushed in-process (the app links this crate). Wins over
+/// env and config so a Settings change applies to the very next launch.
+static PERMISSIONS_OVERRIDE: Mutex<Option<Permissions>> = Mutex::new(None);
+
+pub fn set_permissions_override(p: Option<Permissions>) {
+    *PERMISSIONS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = p;
+}
+
+/// app setting > `$WORKTREES_CODEX_PERMISSIONS` > `codex_permissions` user
+/// config > auto-review. An unknown value falls through rather than failing a
+/// launch.
+pub fn permissions() -> Permissions {
+    if let Some(p) = *PERMISSIONS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) {
+        return p;
+    }
+    let env = std::env::var("WORKTREES_CODEX_PERMISSIONS").ok();
+    let cfg = crate::config::user_cfg("codex_permissions");
+    permissions_from(env.as_deref(), cfg.as_deref())
+}
+
+pub fn permissions_from(env: Option<&str>, cfg: Option<&str>) -> Permissions {
+    env.and_then(Permissions::parse)
+        .or_else(|| cfg.and_then(Permissions::parse))
+        .unwrap_or(Permissions::AutoReview)
+}
+
+/// Codex arguments (already shell-quoted) for `mode` in a worktree whose git
+/// common dir is `git_common`.
+///
+/// Auto-review needs two holes in the workspace-write sandbox, both measured
+/// live (codex exec, 0.157.1) in a linked worktree:
+/// - the git COMMON dir must be writable, or `git add`/`commit` die on
+///   `<main>/.git/worktrees/<name>/index.lock` ("Operation not permitted") —
+///   a linked worktree's index and every object live outside it;
+/// - network, or `git push`/`gh` cannot resolve github.com.
+/// Without a common dir (not a repo?) the flag is omitted rather than guessed.
+pub fn permission_flags(mode: Permissions, git_common: Option<&str>) -> Vec<String> {
+    let q = crate::profile::shell_quote;
+    match mode {
+        Permissions::Ask => Vec::new(),
+        Permissions::Full => vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+        Permissions::AutoReview => {
+            let mut v = vec!["--approve-for-me".to_string()];
+            if let Some(dir) = git_common.filter(|d| !d.is_empty()) {
+                let toml = format!("sandbox_workspace_write.writable_roots=[{}]", toml_str(dir));
+                v.push("-c".into());
+                v.push(q(&toml));
+            }
+            v.push("-c".into());
+            v.push("sandbox_workspace_write.network_access=true".into());
+            v
+        }
+    }
+}
+
+/// A TOML basic string.
+fn toml_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04X}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// The repo's git common dir as a real path (the sandbox compares real paths:
+/// on macOS `/tmp` is `/private/tmp`).
+pub fn git_common_dir(wt: &str) -> Option<String> {
+    let raw = crate::git::git_out(wt, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let p = std::fs::canonicalize(raw.trim()).ok()?;
+    Some(p.to_string_lossy().into_owned())
+}
+
+/// Everything `ops::ai_launch_for` adds to a Codex launch in `wt`.
+pub fn launch_flags(wt: &str) -> Vec<String> {
+    let mode = permissions();
+    let common = if mode == Permissions::AutoReview { git_common_dir(wt) } else { None };
+    permission_flags(mode, common.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +306,35 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         assert_eq!(rollout_model(&lines).as_deref(), Some("gpt-6-sol"));
+    }
+
+    #[test]
+    fn permissions_resolve_env_then_config_then_auto_review() {
+        assert_eq!(permissions_from(None, None), Permissions::AutoReview);
+        assert_eq!(permissions_from(None, Some("ask")), Permissions::Ask);
+        assert_eq!(permissions_from(Some("full"), Some("ask")), Permissions::Full);
+        // garbage falls through, it never fails a launch
+        assert_eq!(permissions_from(Some("yolo"), Some("ask")), Permissions::Ask);
+        assert_eq!(permissions_from(Some(""), None), Permissions::AutoReview);
+    }
+
+    #[test]
+    fn auto_review_opens_the_git_common_dir_and_network() {
+        assert_eq!(permission_flags(Permissions::Ask, Some("/r/.git")), Vec::<String>::new());
+        assert_eq!(permission_flags(Permissions::Full, None), vec!["--dangerously-bypass-approvals-and-sandbox"]);
+        assert_eq!(
+            permission_flags(Permissions::AutoReview, Some("/r/.git")).join(" "),
+            r#"--approve-for-me -c 'sandbox_workspace_write.writable_roots=["/r/.git"]' -c sandbox_workspace_write.network_access=true"#
+        );
+        // no common dir → no guessed root, still network
+        assert_eq!(
+            permission_flags(Permissions::AutoReview, None).join(" "),
+            "--approve-for-me -c sandbox_workspace_write.network_access=true"
+        );
+        // a quote in the path survives both TOML and the shell
+        assert_eq!(
+            permission_flags(Permissions::AutoReview, Some("/a'b\"c/.git"))[2],
+            r#"'sandbox_workspace_write.writable_roots=["/a'\''b\"c/.git"]'"#
+        );
     }
 }

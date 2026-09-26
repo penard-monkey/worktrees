@@ -161,7 +161,8 @@ pub fn user_cfg_from(toml_val: Option<&str>, kv_val: Option<&str>) -> Option<Str
         .map(|s| s.to_string())
 }
 
-/// Live user-config lookup for one key (`ai_cmd`, `ai_resume_arg`, `prefix`).
+/// Live user-config lookup for one key (`ai_cmd`, `ai_resume_arg`, `prefix`,
+/// `codex_permissions`).
 pub fn user_cfg(key: &str) -> Option<String> {
     user_cfg_from(
         cfg_toml_get(&config_toml_path(), key).as_deref(),

@@ -28,6 +28,7 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees automations [ls|add|rm]     briefs Claude runs across this project
   worktrees automations run <slug>      run one now (0 clean, 2 findings, 1 failed)
   worktrees show <file>                 ask the worktrees app to open a document
+  worktrees agent-setup [status|fix|link-skills]  CLAUDE.md/AGENTS.md + skills for every agent (--json)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
@@ -181,6 +182,10 @@ fn run() -> i32 {
         // deliberately absent from MUTATING.
         "show" => worktrees_core::inbox::cmd_show(&project, &mut ui, rest),
         "init" => ops::cmd_init(&project, &mut ui, rest),
+        // Not in MUTATING: `status` is read-only and must work on a hub copy.
+        // `fix` pushes, and `agentfiles::fix` refuses a hub copy itself — the
+        // app calls it in-process, past this dispatch.
+        "agent-setup" => worktrees_core::agentfiles::cmd_agent_setup(&project, &mut ui, rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));
             println!();

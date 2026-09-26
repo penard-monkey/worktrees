@@ -217,6 +217,37 @@ function dirKind(dir: string): "repo" | "empty" | "unborn" {
 const CDV_ROOT = "/Users/demo/workspace/casadelvalle/casa-del-valle-monorepo";
 const WT_ROOT = "/Users/demo/workspace/worktrees";
 
+// ── agent setup (AGENTS.md for every agent) ─────────────────────────────────
+// STATEFUL like mockConfigs: casa-del-valle starts CLAUDE.md-only with one repo
+// skill Codex cannot see, so the nav offer, the sheet section and the armed Fix
+// are all reachable by clicking. A Fix marks it `pending` and changes nothing
+// else, as in the real backend: the default branch only moves when the PR
+// merges. A link empties the user's missing list. Every other project is
+// already set up.
+type MockAgentReport = {
+  reference: string;
+  dirs: { dir: string; kind: string }[];
+  skills: { name: string; kind: string }[];
+  fixable: boolean;
+  conflicts: boolean;
+  pending: string | null;
+};
+const mockAgentRepos: Record<string, MockAgentReport> = {
+  [CDV_ROOT]: {
+    reference: "origin/main",
+    dirs: [{ dir: "", kind: "claude-only" }, { dir: "apps/web", kind: "stub" }],
+    skills: [{ name: "deploy", kind: "missing" }, { name: "review", kind: "present" }],
+    fixable: true,
+    conflicts: false,
+    pending: null,
+  },
+};
+const mockUserSkills: { name: string; status: string }[] = [
+  { name: "close-out", status: "linked" },
+  { name: "find-skills", status: "missing" },
+  { name: "planning-with-files", status: "conflict" },
+];
+
 type MockCfg = {
   path: string;
   exists: boolean;
@@ -2353,6 +2384,53 @@ Phase 3: Frontend pane and mock harness
         emitEvent("places:changed", {});
       }
       return { ok: true, code: 0, warnings: [], output: lines.join("\n") };
+    }
+
+    case "agent_setup_status": {
+      const root = args.repo as string;
+      const repo = mockAgentRepos[root] ?? {
+        reference: "origin/main",
+        dirs: [{ dir: "", kind: "stub" }],
+        skills: [],
+        fixable: false,
+        conflicts: false,
+        pending: null,
+      };
+      return clone({ repo, user_skills: mockUserSkills });
+    }
+    case "agent_setup_fix": {
+      const root = args.repo as string;
+      const r = mockAgentRepos[root];
+      emitEvent("places:changed", {});
+      if (r?.pending) throw new Error("a branch named 'agent-instructions' already exists — merge its PR first");
+      if (!r?.fixable) {
+        return { branch: "agent-instructions", base: "origin/main", commit: null, pushed: false, pr_url: null, left_alone: [],
+          notes: ["origin/main already has its agent instructions set up."] };
+      }
+      // Like the real backend: the default branch does not change until the PR
+      // merges, so the report stays `fixable` and only `pending` retires the offer.
+      mockAgentRepos[root] = { ...r, pending: "agent-instructions" };
+      const url = "https://github.com/demo/casa-del-valle-monorepo/pull/412";
+      return {
+        branch: "agent-instructions", base: "origin/main", commit: "3f9a1c2d4e5b6a7f8091a2b3c4d5e6f708192a3b",
+        pushed: true, pr_url: url, left_alone: [],
+        notes: ["Committed 3f9a1c2 on branch 'agent-instructions' (off origin/main).", `Opened ${url} — merge it to finish.`],
+      };
+    }
+    case "agent_link_skills": {
+      const done = mockUserSkills.filter((u) => u.status === "missing").map((u) => u.name);
+      for (const u of mockUserSkills) if (u.status === "missing") u.status = "linked";
+      return done;
+    }
+    case "set_codex_permissions": {
+      const mode = String(args.mode);
+      if (!["ask", "auto-review", "full"].includes(mode)) {
+        throw `unknown Codex permission mode '${mode}' (expected ask, auto-review or full)`;
+      }
+      // Readable from the harness (there is no getter command in lib.rs, and
+      // the mock must not invent one): proves the push reached the backend.
+      (window as unknown as { __mockCodexPermissions?: string }).__mockCodexPermissions = mode;
+      return null;
     }
 
     case "init_suggest":
