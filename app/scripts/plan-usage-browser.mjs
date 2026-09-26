@@ -76,6 +76,12 @@ for (const [engine, type] of Object.entries({chromium, webkit})) {
  assert.equal(await page.locator('[data-provider="codex"]').innerText(),'Codex CLI was not found.');
  results.push({engine,missingCliOnly:'generic trigger and one-line note'});
  await page.goto(baseURL+'/?codexUsage=ready');
+ // `goto` resolves at `load`, which does NOT wait for main.tsx's `import("./App")`.
+ // Reloading before App renders cancels that import mid-fetch, and WebKit reports
+ // the abandoned import as an unhandled rejection (Chromium drops it silently) — an
+ // intermittent failure in the gate, not the app. Every other navigation here
+ // already waits for boot; this one did not.
+ await page.waitForFunction(()=>document.getElementById('root')?.childElementCount>0);
  // Apply persisted settings before reload: independent switches and migration.
  for(const [claude,codex,place] of [[true,false,'strip'],[false,true,'strip'],[false,false,'strip'],[true,true,'off'],[true,true,'rail']]) {
   await page.evaluate(s=>sessionStorage.setItem('wt-mock-ui-state',JSON.stringify(s)),{usage_claude:claude,usage_codex:codex,usage_place:place});
