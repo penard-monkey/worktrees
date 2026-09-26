@@ -855,6 +855,10 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         sh(&t, &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
         sh(&repo, &["init", "-q", "-b", "main"]);
+        // In the REPO, not only in `sh`'s env: `fix` runs its own commit-tree,
+        // and a CI runner has no global identity (it failed there, not here).
+        sh(&repo, &["config", "user.name", "t"]);
+        sh(&repo, &["config", "user.email", "t@t"]);
         std::fs::write(repo.join("CLAUDE.md"), "# rules\nbe kind\n").unwrap();
         std::fs::create_dir_all(repo.join(".claude/skills/deploy")).unwrap();
         std::fs::write(repo.join(".claude/skills/deploy/SKILL.md"), "---\nname: deploy\n---\n").unwrap();
