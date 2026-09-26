@@ -26,10 +26,20 @@
 // NOT from `mcp_nudge_dismissed`, which got away with a boolean only because its
 // one suggestion can never change. A dismissal silences the suggestion you were
 // shown; a different suggestion under the same id is a new question.
+//
+// # Machine-wide only
+//
+// Every offer here is about the MACHINE — the same answer whichever project you
+// are in. Per-project things to do (doctor drift, a repo's agent setup) are
+// NOT offers: they live in `projectTodos.ts`, behind the project's header badge
+// and its "Repair / upgrade…" entry, because an offer about one repo would
+// otherwise stand in a list with no repo named.
 import type { McpStatus } from "./McpPanel";
+import type { CodexMcpStatus } from "./CodexMcpPanel";
+import type { UserSkill } from "./AgentSetup";
 import type { CatId } from "./SettingsSheet";
 
-export type OfferId = "mcp-server";
+export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills";
 
 export type Offer = {
   id: OfferId;
@@ -50,7 +60,17 @@ export type Offer = {
 
 /** Everything an offer is allowed to consult. Deliberately narrow: an offer may
  *  ask about the MACHINE, never about which screen you are on. */
-export type OfferCtx = { mcp: McpStatus | null };
+export type OfferCtx = {
+  mcp: McpStatus | null;
+  /** App's startup `codex_mcp_status`. Optional so a caller that knows only
+   *  about Claude still type-checks — absent reads as "unknown", which offers
+   *  nothing. */
+  codexMcp?: CodexMcpStatus | null;
+  /** `agent_user_skills` — a machine-level command, deliberately NOT taken from
+   *  some project's `agent_setup_status`: that would make the offer need a
+   *  project, which is the v0.25.0 precondition bug again. */
+  userSkills?: UserSkill[] | null;
+};
 
 /** The pending offers, in the order they should be listed.
  *
@@ -80,6 +100,35 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
       // The state IS the suggestion here: any other state is either done or a
       // problem, and both retire this offer rather than changing it.
       fingerprint: "absent",
+    });
+  }
+  // The Codex twin of `mcp-server`, and the same rule: `absent` only. Codex's
+  // broken states (stale / read-only / foreign) are problems for its panel;
+  // `cli-missing` (no worktrees CLI) is Updates' sentence. And it also needs
+  // the Codex CLI itself — a user without Codex has nothing to connect, and
+  // suggesting a server for an agent they never installed is noise.
+  if (ctx.codexMcp?.state === "absent" && ctx.codexMcp.codex_bin) {
+    out.push({
+      id: "codex-mcp",
+      title: "Let Codex drive your worktrees",
+      body: "Codex can create, inspect and close worktrees as tools, the same server Claude uses — one setup, every project.",
+      cta: "Set up…",
+      to: { cat: "codex", focus: "codex-mcp" },
+      fingerprint: "absent",
+    });
+  }
+  const missing = (ctx.userSkills ?? []).filter((u) => u.status === "missing").map((u) => u.name).sort();
+  if (missing.length > 0) {
+    out.push({
+      id: "codex-skills",
+      title: "Let Codex use your Claude skills",
+      body: `${missing.length} skill${missing.length === 1 ? "" : "s"} in ~/.claude/skills ${missing.length === 1 ? "isn't" : "aren't"} visible to Codex. Linking adds symlinks and changes nothing else.`,
+      cta: "Review…",
+      to: { cat: "codex", focus: "codex-skills" },
+      // The SET of unlinked skills: a new skill later is a new question, while
+      // the same unlinked set stays quiet once dismissed. `conflict` skills are
+      // not in it — linking cannot help them, so they are not an offer.
+      fingerprint: missing.join(","),
     });
   }
   return out.filter((o) => dismissed[o.id] !== o.fingerprint);

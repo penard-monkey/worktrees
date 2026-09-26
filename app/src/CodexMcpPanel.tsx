@@ -14,8 +14,18 @@ export type CodexMcpStatus = {
 };
 type Outcome = { ok: boolean; output: string; status: CodexMcpStatus };
 
-export function CodexMcpSection({ onReport }: { onReport: (text: string) => void }) {
-  const [status, setStatus] = useState<CodexMcpStatus | null>(null);
+export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer }: {
+  onReport: (text: string) => void;
+  /** Every status this panel reads or is handed back — App keeps the
+   *  `codex-mcp` offer in step with it, so installing here retires the offer. */
+  onStatus?: (s: CodexMcpStatus) => void;
+  /** Is `codex-mcp` still an open suggestion? Like the Claude panel, this is
+   *  the on-demand way to end it (the band appears once per version). */
+  offerPending?: boolean;
+  onSilenceOffer?: () => void;
+}) {
+  const [status, setStatusRaw] = useState<CodexMcpStatus | null>(null);
+  const setStatus = (s: CodexMcpStatus) => { setStatusRaw(s); onStatus?.(s); };
   const [busy, setBusy] = useState(false);
   const [mutations, setMutations] = useState(true);
   const [output, setOutput] = useState("");
@@ -30,7 +40,7 @@ export function CodexMcpSection({ onReport }: { onReport: (text: string) => void
     } catch (e) { onReport(String(e)); }
     finally { setBusy(false); }
   };
-  return <><section className="setting">
+  return <><section className="setting" data-focus="codex-mcp">
     <label>Codex MCP server</label>
     <div className="hint">Worktrees uses Codex's ChatGPT account sign-in. Run <code>codex login</code> in a terminal to complete the browser flow, then <code>codex login status</code> to check it. Worktrees does not ask for an API key.</div>
     <div className="hint">Connect Worktrees tools to Codex. Claude's MCP setup is separate.</div>
@@ -52,6 +62,7 @@ export function CodexMcpSection({ onReport }: { onReport: (text: string) => void
           : <button className="ctrl sm" disabled={busy || !status.worktrees_bin}
             onClick={() => act(false)}>{busy ? "Working…" : status.entry ? "Repair or update" : "Set up Codex"}</button>}
         {status.entry && <button className="ctrl sm danger" disabled={busy} onClick={() => act(true)}>Remove from Codex</button>}
+        {offerPending && onSilenceOffer && <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>}
       </div>
       {status.command && <div className="hint"><code>{status.command}</code></div>}
     </>}

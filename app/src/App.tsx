@@ -21,7 +21,9 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed, StrayBanner,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
-import { AgentSetupBanner, agentSetupKey, agentSetupOffers, type AgentSetupStatus } from "./AgentSetup";
+import type { AgentSetupStatus, UserSkill } from "./AgentSetup";
+import type { CodexMcpStatus } from "./CodexMcpPanel";
+import { needsRepair, projectTodos, todoCount } from "./projectTodos";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
@@ -3133,8 +3135,9 @@ function App() {
   >(null);
   const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
   const [projSheet, setProjSheet] = useState<string | null>(null);
-  // Opened from the agent-setup offer: the sheet scrolls to that section.
-  const [projSheetAgent, setProjSheetAgent] = useState(false);
+  // Opened from "Repair / upgrade…" or the header's to-do badge: the sheet
+  // brings its To do list into view.
+  const [projSheetTodo, setProjSheetTodo] = useState(false);
   /** The per-place status check (right-click → Status check…, or the topbar ⋯).
    *  Holds `{repo, slug}` rather than a Place: the 3s refresh swaps every Place
    *  object, and the sheet re-fetches its own report anyway. */
@@ -3213,9 +3216,10 @@ function App() {
   // What `worktrees init` would suggest per project (§9's nudge). Probed ONCE per
   // project — it walks the checkout, so it is not poll-path work either.
   const [suggest, setSuggest] = useState<Record<string, InitSuggestion>>({});
-  // `worktrees agent-setup status` per project — the offer behind the nav's
-  // "Agent setup" banner. Rides the same 5-minute sweep as `suggest`: it reads
-  // the default-branch ref, which a merge or a pull moves from OUTSIDE the app.
+  // `worktrees agent-setup status` per project — half of each project's
+  // to-do count (`projectTodos`, with `health`). Rides the same 5-minute sweep
+  // as `suggest`: it reads the default-branch ref, which a merge or a pull
+  // moves from OUTSIDE the app.
   const [agentSetup, setAgentSetup] = useState<Record<string, AgentSetupStatus>>({});
   // Badge = actionable updates. CLI via the pinned-tag installer; the app via
   // tauri-plugin-updater (signed bundles) — both one click in Settings now.
@@ -3534,14 +3538,23 @@ function App() {
   useEffect(() => {
     invoke<McpStatus>("mcp_status", { repo: null }).then(setMcpStatus).catch(() => setMcpStatus(null));
   }, []);
+  // The two Codex offers' inputs, probed the same way and for the same reason
+  // (once, at startup, failures swallowed). Both are MACHINE facts: neither is
+  // read from a project, so neither offer can grow a project precondition.
+  const [codexMcp, setCodexMcp] = useState<CodexMcpStatus | null>(null);
+  const [userSkills, setUserSkills] = useState<UserSkill[] | null>(null);
+  useEffect(() => {
+    invoke<CodexMcpStatus>("codex_mcp_status").then(setCodexMcp).catch(() => setCodexMcp(null));
+    invoke<UserSkill[]>("agent_user_skills").then(setUserSkills).catch(() => setUserSkills(null));
+  }, []);
 
   // Offers: things set up nowhere, listed in the release notes and badged on
   // the gear until taken or silenced. Derived — no surface computes its own
   // answer, which is how the Home card and the Settings panel came to disagree
   // about whether there was anything to say.
   const offers = useMemo(
-    () => pendingOffers({ mcp: mcpStatus }, settings.offers_dismissed ?? {}),
-    [mcpStatus, settings.offers_dismissed],
+    () => pendingOffers({ mcp: mcpStatus, codexMcp, userSkills }, settings.offers_dismissed ?? {}),
+    [mcpStatus, codexMcp, userSkills, settings.offers_dismissed],
   );
   const takeOffer = useCallback((o: Offer) => {
     setSettingsAt(o.to);
@@ -3557,6 +3570,8 @@ function App() {
   }, []);
   // The MCP offer specifically, for Settings → Claude's "stop suggesting this".
   const mcpOffer = offers.find((o) => o.id === "mcp-server") ?? null;
+  const codexMcpOffer = offers.find((o) => o.id === "codex-mcp") ?? null;
+  const skillsOffer = offers.find((o) => o.id === "codex-skills") ?? null;
 
   // The rail dot already means "something in Settings needs you" (an update).
   // An unacted offer is the same claim, so it lights the same dot rather than
@@ -4940,9 +4955,12 @@ function App() {
   const dismissInit = (root: string, hash: string) => {
     updateSettings({ init_dismissed: { ...(settings.init_dismissed ?? {}), [root]: hash } });
   };
-  // The agent-setup offer, same rule: dismissed until its dirs/skills change.
-  const dismissAgentSetup = (root: string, key: string) => {
-    updateSettings((prev) => ({ agent_setup_dismissed: { ...(prev.agent_setup_dismissed ?? {}), [root]: key } }));
+  // Project sheet opened AT its To do list (the header badge, and the
+  // project menu's "Repair / upgrade…").
+  const openRepair = (root: string) => {
+    closeCtx();
+    setProjSheetTodo(true);
+    setProjSheet(root);
   };
   // Settings → Data → "Reset to defaults". Preserve last_seen_version so the
   // What's-new sheet doesn't re-fire, push through the same apply/persist/refit
@@ -6271,6 +6289,26 @@ function App() {
               onClick={() => setProjSheet(pv.root)}
             >⚑</button>
           ) : null}
+          {/* The project's things to do — doctor findings plus what the agent
+              setup Fix PR would carry (`projectTodos`, the same model as the
+              menu's "Repair / upgrade…" and the sheet's To do list). Always
+              visible, like ⚑ and ⊟: it is the only sign a COLLAPSED project
+              gives, and it replaced the per-project "Agent setup" banner,
+              which lived inside `.kids` and so vanished on collapse. Hue in
+              the dot, the number in a text token (accent-as-text fails
+              contrast in the light themes). */}
+          {pv.ok && (() => {
+            const n = todoCount(projectTodos(health[pv.root], agentSetup[pv.root]));
+            return n > 0 ? (
+              <button
+                className="mini ptodo"
+                data-testid={`todo-mini|${pv.root}`}
+                data-track="nav.project.todo"
+                title={`${n} thing${n === 1 ? "" : "s"} to repair or upgrade — open the list`}
+                onClick={() => openRepair(pv.root)}
+              ><span className="todo-dot warn" />{n}</button>
+            ) : null;
+          })()}
           {/* Also project-level: worktrees git registers OUTSIDE .worktrees/
               (made by hand, or by another tool). No row can carry one — the
               whole point is that it has no row. Comes with every snapshot
@@ -6317,23 +6355,6 @@ function App() {
                   suggestion={sug}
                   onOpen={() => setProjSheet(pv.root)}
                   onDismiss={() => dismissInit(pv.root, sug.hash)}
-                />
-              );
-            })()}
-            {(() => {
-              // Rendered per PROJECT, beside the init nudge — deliberately not
-              // gated on `sel`/`selected`: an offer about a project's default
-              // branch must not also require that some place of it is open
-              // (CLAUDE.md: a suggestion's surface may not add preconditions).
-              const st = agentSetup[pv.root];
-              if (!st || !agentSetupOffers(st)) return null;
-              const key = agentSetupKey(st);
-              if (settings.agent_setup_dismissed?.[pv.root] === key) return null;
-              return (
-                <AgentSetupBanner
-                  status={st}
-                  onOpen={() => { setProjSheetAgent(true); setProjSheet(pv.root); }}
-                  onDismiss={() => dismissAgentSetup(pv.root, key)}
                 />
               );
             })()}
@@ -7354,12 +7375,14 @@ function App() {
         editorCmd={settings.editor_cmd}
         suggestion={projSheet ? suggest[projSheet] ?? null : null}
         strays={projSheet ? ws?.projects.find((p) => p.root === projSheet)?.snapshot?.strays ?? [] : []}
-        onClose={() => { setProjSheet(null); setProjSheetAgent(false); }}
+        onClose={() => { setProjSheet(null); setProjSheetTodo(false); }}
         onReport={takeReport}
         onConfigWritten={(root) => { probeSuggest(root); refresh(); }}
-        agentFocus={projSheetAgent}
-        // This root only: the nav offer is about the repo, and the user-skill
-        // links it could also have changed are shown only in this sheet.
+        todoFocus={projSheetTodo}
+        health={projSheet ? health[projSheet] ?? null : null}
+        agentStatus={projSheet ? agentSetup[projSheet] ?? null : null}
+        // This root only: the Fix changes one repo's report, and so one
+        // header count. (User skills are machine-wide and live in Settings.)
         onAgentChanged={(root) => probeAgentSetup(root)}
       />
 
@@ -7419,7 +7442,11 @@ function App() {
         onShowNotes={showReleaseNotes} onReset={onReset}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
         mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
-        mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)} />
+        mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)}
+        onCodexMcpChanged={setCodexMcp}
+        codexMcpOfferPending={!!codexMcpOffer} onSilenceCodexMcpOffer={() => codexMcpOffer && silenceOffer(codexMcpOffer)}
+        userSkills={userSkills} onUserSkillsChanged={setUserSkills}
+        skillsOfferPending={!!skillsOffer} onSilenceSkillsOffer={() => skillsOffer && silenceOffer(skillsOffer)} />
 
       {codexInstallPrompt && <CodexInstallDialog onClose={() => setCodexInstallPrompt(false)} onReport={(m) => setNotice(m)} />}
       {pendingProviderSwitch && <ProviderSwitchDialog pending={pendingProviderSwitch}
@@ -7655,6 +7682,25 @@ function App() {
             )}
             {pv?.ok && <SyncMenuItems status={syncStatus[ctx.root]} root={ctx.root} onOpen={openSync} />}
             {pv?.ok && (() => {
+              // "Repair / upgrade…": everything a button can change here —
+              // doctor findings PLUS the agent-setup items the Fix PR carries
+              // (`projectTodos`). Offered only when there is something, or when
+              // doctor could not run (that row is uncounted but needs you).
+              const todos = projectTodos(health[ctx.root], agentSetup[ctx.root]);
+              if (!needsRepair(todos)) return null;
+              const n = todoCount(todos);
+              return (
+                <button className="pop-item" data-testid="proj-repair" onClick={() => openRepair(ctx.root)}>
+                  Repair / upgrade…
+                  {n > 0 && <span className="todo-count"><span className="todo-dot warn" />{n}</span>}
+                </button>
+              );
+            })()}
+            {pv?.ok && (() => {
+              // "Project settings…" keeps the DOCTOR count only. It is a
+              // subset of Repair's number above, which adds the agent-setup
+              // items the Fix PR would carry; both read the same `health`, so
+              // they differ by exactly those items and never contradict.
               // The badge is the SHEET's count (issueCount), not the row-glyph set:
               // those two answer different questions, and a placeless finding used
               // to make them disagree with no way to tell which was lying. When the
@@ -7662,7 +7708,7 @@ function App() {
               // — say so instead of showing a number.
               const h = health[ctx.root];
               return (
-                <button className="pop-item" onClick={() => { closeCtx(); setProjSheet(ctx.root); }}>
+                <button className="pop-item" onClick={() => { closeCtx(); setProjSheetTodo(false); setProjSheet(ctx.root); }}>
                   Project settings…
                   {h?.error
                     ? <span className="upd-tag warn" title={h.error}>unchecked</span>

@@ -21,8 +21,8 @@ export type AgentReport = {
   fixable: boolean;
   conflicts: boolean;
   /** The fix branch exists: a previous fix awaits its merge. The base ref does
-   *  not move until then, so `fixable` stays true — this is what retires the
-   *  offer instead. */
+   *  not move until then, so `fixable` stays true — this is what zeroes the
+   *  project's to-do count instead (`projectTodos.ts`). */
   pending: string | null;
 };
 export type UserSkill = { name: string; status: "linked" | "missing" | "conflict" };
@@ -37,42 +37,7 @@ export type AgentFixOutcome = {
   notes: string[];
 };
 
-const missingUser = (s: AgentSetupStatus) => s.user_skills.filter((u) => u.status === "missing");
-
-/** Is there anything to OFFER in the nav? Only the REPO fix. Diverged dirs
- *  alone are not an offer — only a person can merge them, and a banner whose one
- *  button cannot help is a nag. Nor are the user's own skills: they are
- *  machine-wide, so an offer about them would stand under EVERY project at
- *  once. The sheet lists both. */
-export function agentSetupOffers(s: AgentSetupStatus | null | undefined): boolean {
-  return !!s && s.repo.fixable && !s.repo.pending;
-}
-
-/** The dismissal key: a hash of what the offer is ABOUT — the dirs and the
- *  repo skills — so a tree that changes (a new CLAUDE.md in a subdir, a new
- *  skill) re-offers. Same rule as `init_dismissed`.
- *  32-bit FNV-1a: not a security boundary, only "is this the offer I declined?". */
-export function agentSetupKey(s: AgentSetupStatus): string {
-  const lines = [
-    ...s.repo.dirs.map((d) => `dir\t${d.kind}\t${d.dir}`),
-    ...s.repo.skills.map((k) => `skill\t${k.kind}\t${k.name}`),
-  ].sort();
-  let h = 0x811c9dc5;
-  for (const ch of lines.join("\n")) {
-    h ^= ch.codePointAt(0)!;
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h.toString(16).padStart(8, "0");
-}
-
-/** The banner's one line: the most important thing first. */
-export function agentSetupLine(s: AgentSetupStatus): string {
-  const kinds = new Set(s.repo.dirs.map((d) => d.kind));
-  if (kinds.has("agents-only")) return "Agent instructions are only in AGENTS.md, so Claude sees nothing.";
-  if (kinds.has("claude-only")) return "Agent instructions are only in CLAUDE.md. Codex reads them, but AGENTS.md-first tools don't.";
-  const repoSkills = s.repo.skills.filter((k) => k.kind === "missing").length;
-  return `${repoSkills} repo skill${repoSkills === 1 ? " is" : "s are"} in .claude/skills only, where Codex doesn't look.`;
-}
+const missingUser = (skills: UserSkill[]) => skills.filter((u) => u.status === "missing");
 
 const dirLabel = (d: string) => (d === "" ? "(root)" : d);
 
@@ -86,30 +51,35 @@ function dirLine(k: AgentDirKind): { sev: "info" | "warn" | "error"; glyph: stri
   }
 }
 
+
 // How long the Fix button stays armed. Short on purpose: an arm that outlives
 // the reader's attention is a one-click push.
 const ARM_MS = 4000;
 
-/** The ProjectSheet's "Agent setup" section. Module scope with props
- *  (CLAUDE.md): defined inside a parent it would remount every render. */
-export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
-  root: string;
-  open: boolean;
-  /** Scroll this section into view once it has content (the banner's Fix…). */
-  focus: boolean;
-  /** The status was re-read — App re-probes so the nav banner tracks it. */
-  onChanged: (root: string) => void;
-  onError: (msg: string) => void;
-}) {
+/** Everything the Fix needs, owned ONCE per open ProjectSheet. Two surfaces
+ *  press it — the To do row at the top of the sheet and the Agent setup
+ *  section — and they must share one status, one arm and one in-flight flag:
+ *  two copies would let the section re-offer a push the To do row just made,
+ *  in the window before its re-read lands. */
+export type AgentSetupCtl = {
+  status: AgentSetupStatus | null;
+  loadErr: string | null;
+  running: boolean;
+  armed: boolean;
+  outcome: AgentFixOutcome | null;
+  log: string;
+  load: () => Promise<void>;
+  /** First call arms, second call (within ARM_MS) pushes. */
+  fix: () => Promise<void>;
+};
+
+export function useAgentSetup(root: string, open: boolean, onChanged: (root: string) => void, onError: (msg: string) => void): AgentSetupCtl {
   const [status, setStatus] = useState<AgentSetupStatus | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  const [running, setRunning] = useState<"" | "fix" | "link">("");
+  const [running, setRunning] = useState(false);
   const [armed, setArmed] = useState(false);
   const [outcome, setOutcome] = useState<AgentFixOutcome | null>(null);
-  const [linked, setLinked] = useState<string[] | null>(null);
   const [log, setLog] = useState("");
-  const ref = useRef<HTMLElement | null>(null);
-  const scrolled = useRef(false);
 
   const load = useCallback(async () => {
     setArmed(false);
@@ -128,9 +98,7 @@ export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
   useEffect(() => {
     if (!open) return;
     setOutcome(null);
-    setLinked(null);
     setLog("");
-    scrolled.current = false;
     load();
   }, [open, load]);
 
@@ -141,17 +109,11 @@ export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
     return () => clearTimeout(t);
   }, [armed]);
 
-  useEffect(() => {
-    if (!focus || scrolled.current || !status || !ref.current) return;
-    scrolled.current = true;
-    ref.current.scrollIntoView({ block: "start" });
-  }, [focus, status]);
-
   const fix = async () => {
     if (running) return;
     if (!armed) { setArmed(true); return; }
     setArmed(false);
-    setRunning("fix");
+    setRunning(true);
     setOutcome(null);
     setLog("");
     try {
@@ -165,37 +127,44 @@ export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
       // stale `fixable` in the gap would offer the same push twice.
       await load();
       onChanged(root);
-      setRunning("");
+      setRunning(false);
     }
   };
 
-  const link = async () => {
-    if (running) return;
-    setRunning("link");
-    setLinked(null);
-    try {
-      const names = await invoke<string[] | null>("agent_link_skills");
-      setLinked(names ?? []);
-    } catch (e) {
-      setLog(`✗ ${String(e)}`);
-      onError(`agent_link_skills: ${String(e)}`);
-    } finally {
-      await load();
-      onChanged(root);
-      setRunning("");
-    }
-  };
+  return { status, loadErr, running, armed, outcome, log, load, fix };
+}
 
-  const busy = running !== "";
+/** The Fix button, shared by the To do row and the section so the two can
+ *  never drift in what they say the second click does. */
+export function AgentFixButton({ ctl, disabled = false, onPress }: { ctl: AgentSetupCtl; disabled?: boolean; onPress?: () => void }) {
+  const repo = ctl.status?.repo;
+  return (
+    <button
+      className={"ctrl sm" + (ctl.armed ? " danger armed" : "")}
+      data-testid="agent-setup-fix"
+      disabled={disabled || ctl.running || !repo?.fixable || !!repo?.pending}
+      title={ctl.armed ? "click again to push the branch and open a PR" : `commit the fix on 'agent-instructions' off ${repo?.reference ?? "the default branch"}, push it and open a PR`}
+      onClick={() => { onPress?.(); ctl.fix(); }}
+    >
+      {ctl.running ? "Pushing…" : ctl.armed ? "Push branch + open PR" : "Fix…"}
+    </button>
+  );
+}
+
+export function openPr(url: string, onError: (msg: string) => void) {
+  openUrl(url).catch((e) => onError(`open ${url}: ${String(e)}`));
+}
+
+/** The ProjectSheet's "Agent setup" section. Module scope with props
+ *  (CLAUDE.md): defined inside a parent it would remount every render. */
+export function AgentSetupSection({ ctl, onError }: { ctl: AgentSetupCtl; onError: (msg: string) => void }) {
+  const { status, loadErr, outcome, log } = ctl;
   const repo = status?.repo;
   const missingSkills = repo?.skills.filter((k) => k.kind === "missing") ?? [];
-  const userMissing = status ? missingUser(status) : [];
-  const userConflict = status?.user_skills.filter((u) => u.status === "conflict") ?? [];
-  const userLinked = status?.user_skills.filter((u) => u.status === "linked") ?? [];
   const todo = (repo?.dirs.filter((d) => d.kind === "claude-only" || d.kind === "agents-only").length ?? 0) + missingSkills.length;
 
   return (
-    <section className="setting" ref={ref} data-testid="agent-setup">
+    <section className="setting" data-testid="agent-setup">
       <label>
         Agent setup
         {repo?.pending ? <span className="upd-tag">PR waiting</span> : repo?.fixable ? <span className="upd-tag warn">{todo} to fix</span> : null}
@@ -229,16 +198,8 @@ export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
         </div>
       )}
       <div className="ver-actions">
-        <button
-          className={"ctrl sm" + (armed ? " danger armed" : "")}
-          data-testid="agent-setup-fix"
-          disabled={busy || !repo?.fixable || !!repo?.pending}
-          title={armed ? "click again to push the branch and open a PR" : `commit the fix on 'agent-instructions' off ${repo?.reference ?? "the default branch"}, push it and open a PR`}
-          onClick={fix}
-        >
-          {running === "fix" ? "Pushing…" : armed ? "Push branch + open PR" : "Fix…"}
-        </button>
-        <button className="ctrl sm" disabled={busy} onClick={load}>Re-check</button>
+        <AgentFixButton ctl={ctl} />
+        <button className="ctrl sm" disabled={ctl.running} onClick={ctl.load}>Re-check</button>
       </div>
       {repo?.pending && !outcome && (
         <div className="hint">
@@ -257,65 +218,101 @@ export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
           {outcome.notes.length > 0 && <pre className="update-log">{outcome.notes.join("\n")}</pre>}
           {outcome.pr_url && (
             <div className="ver-actions">
-              <button className="ctrl sm" onClick={() => openUrl(outcome.pr_url!).catch((e) => onError(`open ${outcome.pr_url}: ${String(e)}`))}>
+              <button className="ctrl sm" onClick={() => openPr(outcome.pr_url!, onError)}>
                 Open PR <Icons.ExternalLink size={12} />
               </button>
             </div>
           )}
         </>
       )}
-
-      <label className="sub">Your skills</label>
-      {!status ? null : status.user_skills.length === 0 ? (
-        <div className="hint">No skills in ~/.claude/skills.</div>
-      ) : (
-        <>
-          <div className="hint">
-            {userMissing.length > 0
-              ? `${userMissing.length} of ${status.user_skills.length} skills in ~/.claude/skills ${userMissing.length === 1 ? "is" : "are"} not visible to Codex.`
-              : `Codex can see ${userLinked.length} of the ${status.user_skills.length} skills in ~/.claude/skills; nothing is left to link.`}
-            {" "}Linking adds symlinks in ~/.agents/skills and changes nothing else.
-          </div>
-          {userConflict.length > 0 && (
-            <div className="hint">
-              Left alone — a different skill of the same name is already in ~/.agents/skills:{" "}
-              {userConflict.map((u) => u.name).join(", ")}
-            </div>
-          )}
-          {userMissing.length > 0 && (
-            <div className="ver-actions">
-              <button className="ctrl sm" data-testid="agent-link-skills" disabled={busy} onClick={link}>
-                {running === "link" ? "Linking…" : `Link ${userMissing.length} skill${userMissing.length === 1 ? "" : "s"} for Codex`}
-              </button>
-            </div>
-          )}
-        </>
-      )}
-      {linked && <div className="hint">{linked.length > 0 ? `Linked ${linked.join(", ")}.` : "Nothing needed linking."}</div>}
+      {/* The user's OWN skills used to be linked from here. They are
+          machine-wide — the same answer under every project — so they live in
+          Settings → Codex, which is also where the after-update offer about
+          them points (offers.ts, `codex-skills`). */}
+      <div className="hint">Your own skills in ~/.claude/skills are linked for Codex in Settings → Codex.</div>
       {log && <pre className="update-log">{log}</pre>}
     </section>
   );
 }
 
-/** The nav offer, under a project whose default branch could use the fix (or
- *  whose user skills Codex cannot see). Box borrowed from `InitBanner`; dismissal
- *  is keyed by `agentSetupKey`, persisted in `agent_setup_dismissed`. */
-export function AgentSetupBanner({ status, onOpen, onDismiss }: {
-  status: AgentSetupStatus;
-  onOpen: () => void;
-  onDismiss: () => void;
+/** Settings → Codex → "Your skills": link ~/.claude/skills into ~/.agents/skills.
+ *  Machine-level, so it needs no project — it reads `agent_user_skills`, which
+ *  is why the `codex-skills` offer can land here on a fresh install with no
+ *  project at all (a suggestion's surface may not add preconditions). */
+export function UserSkillsSection({ skills, onChanged, offerPending, onSilenceOffer, onReport }: {
+  /** App's probe (`agent_user_skills`); null = not read yet or failed. */
+  skills: UserSkill[] | null;
+  /** The re-read after a link — App keeps the offer in step with it. */
+  onChanged: (skills: UserSkill[]) => void;
+  offerPending: boolean;
+  onSilenceOffer: () => void;
+  onReport: (msg: string) => void;
 }) {
+  const [busy, setBusy] = useState(false);
+  const [linked, setLinked] = useState<string[] | null>(null);
+  // Callbacks through a ref: App passes fresh closures every render, and an
+  // effect keyed on them would re-probe on every render it causes — a loop.
+  const cb = useRef({ onChanged, onReport });
+  cb.current = { onChanged, onReport };
+  const reread = useCallback(async () => {
+    try {
+      cb.current.onChanged((await invoke<UserSkill[] | null>("agent_user_skills")) ?? []);
+    } catch (e) { cb.current.onReport(`agent_user_skills: ${String(e)}`); }
+  }, []);
+  // Re-read on entry: a skill added from a terminal since launch should show.
+  useEffect(() => { reread(); }, [reread]);
+  const link = async () => {
+    if (busy) return;
+    setBusy(true);
+    setLinked(null);
+    try {
+      setLinked((await invoke<string[] | null>("agent_link_skills")) ?? []);
+    } catch (e) {
+      onReport(`agent_link_skills: ${String(e)}`);
+    } finally {
+      await reread();
+      setBusy(false);
+    }
+  };
+  const missing = skills ? missingUser(skills) : [];
+  const conflict = skills?.filter((u) => u.status === "conflict") ?? [];
+  const linkedNow = skills?.filter((u) => u.status === "linked") ?? [];
   return (
-    <div className="init-banner" data-testid="agent-setup-banner">
-      <div className="init-banner-h">
-        <span className="init-banner-i">⚑</span>
-        Agent setup
-      </div>
-      <p>{agentSetupLine(status)}</p>
+    <section className="setting" data-focus="codex-skills">
+      <label>
+        Your skills
+        {missing.length > 0 && <span className="upd-tag">{missing.length} not linked</span>}
+      </label>
+      {!skills ? (
+        <div className="hint">Checking…</div>
+      ) : skills.length === 0 ? (
+        <div className="hint">No skills in ~/.claude/skills.</div>
+      ) : (
+        <div className="hint">
+          {missing.length > 0
+            ? `${missing.length} of ${skills.length} skills in ~/.claude/skills ${missing.length === 1 ? "is" : "are"} not visible to Codex: ${missing.map((u) => u.name).join(", ")}.`
+            : `Codex can see ${linkedNow.length} of the ${skills.length} skills in ~/.claude/skills; nothing is left to link.`}
+          {" "}Linking adds symlinks in ~/.agents/skills and changes nothing else.
+        </div>
+      )}
+      {conflict.length > 0 && (
+        <div className="hint">
+          Left alone — a different skill of the same name is already in ~/.agents/skills:{" "}
+          {conflict.map((u) => u.name).join(", ")}
+        </div>
+      )}
       <div className="ver-actions">
-        <button className="ctrl sm" onClick={onOpen}>Fix…</button>
-        <button className="ctrl sm" title="hide until this project's agent files change" onClick={onDismiss}>Not now</button>
+        {missing.length > 0 && (
+          <button className="ctrl sm" data-testid="agent-link-skills" disabled={busy} onClick={link}>
+            {busy ? "Linking…" : `Link ${missing.length} skill${missing.length === 1 ? "" : "s"} for Codex`}
+          </button>
+        )}
+        {/* Ends the SUGGESTION, not the feature — same contract as the Claude
+            panel's: the band and the gear dot are the only surfaces that
+            appear once, so the section needs its own off switch. */}
+        {offerPending && <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>}
       </div>
-    </div>
+      {linked && <div className="hint">{linked.length > 0 ? `Linked ${linked.join(", ")}.` : "Nothing needed linking."}</div>}
+    </section>
   );
 }

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProfilesInfo } from "./ProfilesPanel";
-import { AgentSetupSection } from "./AgentSetup";
+import { AgentFixButton, AgentSetupSection, openPr, useAgentSetup, type AgentSetupStatus } from "./AgentSetup";
+import { projectTodos, type Todo, type TodoHealth } from "./projectTodos";
 
 // Right-side slide-over for ONE project (proposal §10). It stays a sheet:
 // unlike Settings, it is about the thing selected in the tree behind it.
@@ -115,14 +116,23 @@ export function ProjectSheet({
   onClose,
   onReport,
   onConfigWritten,
-  agentFocus = false,
+  todoFocus = false,
+  health = null,
+  agentStatus = null,
   onAgentChanged,
 }: {
   open: boolean;
-  /** Opened from the nav's agent-setup offer: scroll to that section. */
-  agentFocus?: boolean;
-  /** The agent setup was re-read (after a Fix or a link) — App re-probes so
-   *  the nav offer retires. */
+  /** Opened from "Repair / upgrade…" or the header's to-do badge: bring the
+   *  To do list into view (it is the first section, so this is belt-and-braces
+   *  for a sheet that was already scrolled). */
+  todoFocus?: boolean;
+  /** App's last sweep for this root — what the To do list shows until the
+   *  sheet's own doctor run and agent probe land, so it is never empty for the
+   *  second those take. */
+  health?: TodoHealth | null;
+  agentStatus?: AgentSetupStatus | null;
+  /** The agent setup was re-read (after a Fix) — App re-probes so the
+   *  header's count tracks it. */
   onAgentChanged: (root: string) => void;
   /** Worktrees registered outside `.worktrees/` (from the snapshot's `strays`). */
   strays?: Stray[];
@@ -163,6 +173,15 @@ export function ProjectSheet({
     invoke("log_event", { level: "error", msg: m }).catch(() => {});
   }, []);
 
+  // The agent-setup state, owned here so the To do row and the Agent setup
+  // section press ONE Fix with one arm (see `useAgentSetup`).
+  const agent = useAgentSetup(root, open, onAgentChanged, logError);
+  // Set when a To do row ran something, so that row's output shows beside it
+  // instead of only in the section further down.
+  const [todoRan, setTodoRan] = useState(false);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const todoRef = useRef<HTMLElement | null>(null);
+
   // One re-read of everything this sheet shows. Also the `finally` step of every
   // action below — see the hazard note on `run`.
   const refresh = useCallback(async () => {
@@ -194,6 +213,7 @@ export function ProjectSheet({
     setErr(null);
     setShowToml(false);
     setArmed(false);
+    setTodoRan(false);
     refresh();
     // On sheet-open only: profiles_info does a filesystem probe per profile, so
     // it must never ride the 3s poll.
@@ -206,6 +226,10 @@ export function ProjectSheet({
   }, [open, refresh, root]);
 
   useEscape(onClose, open);
+
+  useEffect(() => {
+    if (open && todoFocus) todoRef.current?.scrollIntoView({ block: "nearest" });
+  }, [open, todoFocus]);
 
   // Every action shares this shape, copied from the CLI-update block in
   // SettingsSheet INCLUDING the hazard it already solved: state is re-read in
@@ -262,6 +286,16 @@ export function ProjectSheet({
   // not what it was triggered by.
   const forceable = broken ? [] : forcible(report);
   const offerForce = forceable.some((f) => f.severity !== "info");
+  // The sheet's own reads win once they exist; App's sweep fills the gap.
+  const todoHealth: TodoHealth | null = report
+    ? { issues, error: broken ? (report.error ?? "doctor could not run") : null }
+    : health;
+  const todos = projectTodos(todoHealth, agent.status ?? agentStatus);
+  const canRelink = !!cfg?.exists && !cfg?.error;
+  const show = (section: Todo["section"]) => {
+    const sel = section === "health" ? '[data-section="health"]' : '[data-testid="agent-setup"]';
+    bodyRef.current?.querySelector<HTMLElement>(sel)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
 
   return (
     <div className="scrim" onClick={onClose}>
@@ -271,7 +305,49 @@ export function ProjectSheet({
           <button className="icon-btn" title="close (Esc)" onClick={onClose}><Icons.X /></button>
         </header>
 
-        <div className="settings-body">
+        <div className="settings-body" ref={bodyRef}>
+          {(todos.length > 0 || todoFocus) && (
+            <section className="setting" ref={todoRef} data-testid="project-todos">
+              <label>To do</label>
+              {todos.length === 0 ? (
+                <div className="hint">✓ Nothing to repair or upgrade here.</div>
+              ) : (
+                <div className="todo-list">
+                  {todos.map((t, i) => {
+                    // The Fix PR carries the dirs AND the skills: its button
+                    // shows once, on the first row that uses it, and the other
+                    // row's label already says "same PR".
+                    const firstFix = t.action === "agent-fix" && todos.findIndex((x) => x.action === "agent-fix") === i;
+                    return (
+                      <div className="todo-row" key={t.id} data-todo={t.id}>
+                        <span className={"todo-dot " + t.sev} />
+                        <span className="todo-label">{t.label}</span>
+                        <span className="todo-acts">
+                          {t.action === "relink" && (
+                            <button className="ctrl sm" data-testid="todo-relink" disabled={busy || !canRelink}
+                              title={canRelink ? "worktrees relink --all" : "no readable .worktrees.toml — see Health"}
+                              onClick={() => { setTodoRan(true); run("relink", "relink --all", "relink", { repo: root, slug: null, force: false }); }}>
+                              {running === "relink" ? "Relinking…" : "Relink"}
+                            </button>
+                          )}
+                          {firstFix && <AgentFixButton ctl={agent} onPress={() => setTodoRan(true)} />}
+                          {t.id === "agent-pending" && agent.outcome?.pr_url && (
+                            <button className="ctrl sm" onClick={() => openPr(agent.outcome!.pr_url!, logError)}>
+                              Open PR <Icons.ExternalLink size={12} />
+                            </button>
+                          )}
+                          <button className="ctrl sm" data-testid={`todo-show|${t.id}`} onClick={() => show(t.section)}>Details</button>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {todoRan && log && <pre className="update-log">{log}</pre>}
+              {todoRan && agent.log && <pre className="update-log">{agent.log}</pre>}
+            </section>
+          )}
+
           <section className="setting">
             <label>
               Config
@@ -385,7 +461,7 @@ export function ProjectSheet({
             ) : null}
           </section>
 
-          <section className="setting">
+          <section className="setting" data-section="health">
             <label>
               Health
               {broken ? <span className="upd-tag warn">unchecked</span> : null}
@@ -474,7 +550,7 @@ export function ProjectSheet({
             {err && <pre className="update-log">{err}</pre>}
           </section>
 
-          <AgentSetupSection root={root} open={open} focus={agentFocus} onChanged={onAgentChanged} onError={logError} />
+          <AgentSetupSection ctl={agent} onError={logError} />
 
           {canSuggest && suggestion && (
             <section className="setting">

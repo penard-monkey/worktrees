@@ -230,11 +230,13 @@ const WT_ROOT = "/Users/demo/workspace/worktrees";
 
 // ── agent setup (AGENTS.md for every agent) ─────────────────────────────────
 // STATEFUL like mockConfigs: casa-del-valle starts CLAUDE.md-only with one repo
-// skill Codex cannot see, so the nav offer, the sheet section and the armed Fix
-// are all reachable by clicking. A Fix marks it `pending` and changes nothing
-// else, as in the real backend: the default branch only moves when the PR
-// merges. A link empties the user's missing list. Every other project is
-// already set up.
+// skill Codex cannot see (and it has doctor drift too), so its header to-do
+// badge, "Repair / upgrade…", the sheet's To do list and the armed Fix are all
+// reachable by clicking. A Fix marks it `pending` and changes nothing else, as
+// in the real backend: the default branch only moves when the PR merges.
+// `worktrees` starts with a fix ALREADY pending plus one diverged dir — the
+// project whose report still says `fixable` and whose count must be 0. A link
+// empties the user's missing list. Every other project is already set up.
 type MockAgentReport = {
   reference: string;
   dirs: { dir: string; kind: string }[];
@@ -251,6 +253,14 @@ const mockAgentRepos: Record<string, MockAgentReport> = {
     fixable: true,
     conflicts: false,
     pending: null,
+  },
+  [WT_ROOT]: {
+    reference: "origin/main",
+    dirs: [{ dir: "", kind: "claude-only" }, { dir: "app", kind: "diverged" }],
+    skills: [{ name: "close-out", kind: "missing" }],
+    fixable: true,
+    conflicts: true,
+    pending: "agent-instructions",
   },
 };
 const mockUserSkills: { name: string; status: string }[] = [
@@ -2476,6 +2486,8 @@ Phase 3: Frontend pane and mock harness
         notes: ["Committed 3f9a1c2 on branch 'agent-instructions' (off origin/main).", `Opened ${url} — merge it to finish.`],
       };
     }
+    case "agent_user_skills":
+      return clone(mockUserSkills);
     case "agent_link_skills": {
       const done = mockUserSkills.filter((u) => u.status === "missing").map((u) => u.name);
       for (const u of mockUserSkills) if (u.status === "missing") u.status = "linked";

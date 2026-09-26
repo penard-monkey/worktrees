@@ -4219,6 +4219,16 @@ async fn agent_setup_fix(app: AppHandle, repo: String) -> Result<worktrees_core:
     }
 }
 
+/// The user's own skills alone — machine-level, no repo. What Settings → Codex
+/// and the `codex-skills` after-update offer read: taking it from some
+/// project's `agent_setup_status` would make a machine-wide suggestion need a
+/// project to exist. A directory scan of ~/.claude/skills, cheap enough to
+/// probe at startup.
+#[tauri::command]
+async fn agent_user_skills() -> Result<Vec<worktrees_core::agentfiles::UserSkill>, String> {
+    Ok(worktrees_core::agentfiles::user_skills())
+}
+
 #[tauri::command]
 async fn agent_link_skills() -> Result<Vec<String>, String> {
     worktrees_core::agentfiles::link_user_skills().map_err(|e| {
@@ -7636,6 +7646,7 @@ pub fn run() {
             agent_setup_status,
             agent_setup_fix,
             agent_link_skills,
+            agent_user_skills,
             set_codex_permissions,
             diagnostics,
             tmux_check,

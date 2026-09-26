@@ -19,11 +19,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   fix is committed on its own `agent-instructions` branch, pushed, and opened
   as a pull request, so nothing lands until you merge it and your checkouts
   are never touched. A directory whose CLAUDE.md and AGENTS.md say different
-  things is left alone and named, for you to merge by hand. A banner under the
-  project offers this once; "Not now" hides it until the files change. The
-  same section links your own `~/.claude/skills` into `~/.agents/skills`, one
+  things is left alone and named, for you to merge by hand. Settings → Codex
+  → Your skills links your own `~/.claude/skills` into `~/.agents/skills`, one
   symlink each, and leaves alone any name that already belongs to a different
   skill.
+- **Projects say when they have things to do, and right-click repairs them.**
+  A project header now carries a small count of what needs doing: file-sync
+  problems doctor found, plus the agent-setup changes above. Right-click the
+  project → "Repair / upgrade…" opens its sheet at a To do list with one
+  button per item: Relink for the file syncs, Fix… for the agent setup (the
+  second click pushes the branch and opens the PR). Once that PR is open the
+  project stops counting it and shows "Fix PR waiting to merge" instead, and
+  folders whose CLAUDE.md and AGENTS.md disagree are listed to merge by hand
+  without adding to the count.
+- **After an update, What's new suggests the Codex setup you have not done
+  yet:** connecting Worktrees to Codex (only when the Codex CLI is installed
+  and the server is not), and linking your Claude skills for Codex (only when
+  some are not linked). Each goes to its place in Settings → Codex, lights the
+  gear's dot until taken, and can be silenced with "Don't show again" there or
+  "Stop suggesting this" in Settings; a newly unlinked skill asks again.
 - **Codex starts in auto-review.** Settings → Codex → Permissions picks how
   much a Codex launched from here may do: Ask (Codex's own default), Auto-review
   (the new default: a reviewer approves or refuses each request, inside a

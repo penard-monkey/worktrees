@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
 import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
+import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -324,6 +325,13 @@ export function SettingsSheet({
   onMcpChanged,
   mcpOfferPending,
   onSilenceMcpOffer,
+  onCodexMcpChanged,
+  codexMcpOfferPending,
+  onSilenceCodexMcpOffer,
+  userSkills,
+  onUserSkillsChanged,
+  skillsOfferPending,
+  onSilenceSkillsOffer,
 }: {
   open: boolean;
   /// Where the sheet was asked to open, when the caller had somewhere in mind —
@@ -351,6 +359,16 @@ export function SettingsSheet({
   /// only on-demand way to end it — see `McpSection`.
   mcpOfferPending: boolean;
   onSilenceMcpOffer: () => void;
+  /// Codex's twins of the two above (offers.ts `codex-mcp` / `codex-skills`).
+  /// The Codex MCP panel still probes for itself; it reports what it reads so
+  /// App's offer tracks it.
+  onCodexMcpChanged: (s: CodexMcpStatus) => void;
+  codexMcpOfferPending: boolean;
+  onSilenceCodexMcpOffer: () => void;
+  userSkills: UserSkill[] | null;
+  onUserSkillsChanged: (s: UserSkill[]) => void;
+  skillsOfferPending: boolean;
+  onSilenceSkillsOffer: () => void;
 }) {
   // Selected category — local, deliberately NOT persisted: the sheet opens on
   // Appearance so "where was I" never depends on last session.
@@ -758,7 +776,16 @@ export function SettingsSheet({
             ))}
             <div className="hint">Applies to the next Codex launch; a session already running keeps what it started with.</div>
           </section>
-          <CodexMcpSection onReport={onReport} />
+          {/* ORDER IS LOAD-BEARING: both sections below are deep-link targets
+              (offers.ts), and the focus effect scrolls once, on the next frame.
+              The MCP panel and its migration table fill in ASYNCHRONOUSLY, so
+              anything under them is pushed off screen after the scroll landed
+              — measured: "Your skills" ended at y=1258 in an 897px window.
+              Skills renders from App's state at once, so it goes above. */}
+          <UserSkillsSection skills={userSkills} onChanged={onUserSkillsChanged}
+            offerPending={skillsOfferPending} onSilenceOffer={onSilenceSkillsOffer} onReport={onReport} />
+          <CodexMcpSection onReport={onReport} onStatus={onCodexMcpChanged}
+            offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />
           </>}
 
           {cat === "commands" && <>
