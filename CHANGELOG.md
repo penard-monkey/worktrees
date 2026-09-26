@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.31.0] - 2026-09-26
 
 ### Added
 - **One set of instructions for every agent, and Codex sees your skills.**
@@ -69,7 +69,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   stale, unavailable and sign-in states. Codex reads limits through its existing
   CLI login without reading conversations or changing configuration. Appearance
   settings can turn either provider's usage checks off independently.
-- Copy user-scope MCP servers from Claude into Codex from Settings → Codex or
+- **Your Claude MCP servers can come with you to Codex.** Copy user-scope MCP
+  servers from Claude into Codex from Settings → Codex or
   `worktrees mcp --migrate --ai codex`. Preview supported servers and apply a
   selection; existing Codex entries are never replaced. OAuth servers include
   a sign-in hint, and unsupported transports or headers explain why they cannot
@@ -77,6 +78,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   disclosure; execution arguments stay out of plan JSON and the webview.
   Configuration writes go through `codex mcp add`, with a shared file lock
   serializing Worktrees migrations across the CLI and app.
+
+### Fixed
+- **A project says how many of its worktrees are hiding outside `.worktrees/`.**
+  Worktrees git registers somewhere else — made by hand, or by another tool
+  (Claude Code's own worktree feature puts them in `.claude/worktrees/`) — have
+  always been found, listed in `ls --json`, and shown in the project sheet with
+  a ready `git worktree move`. What was wrong was the signal: one `⊟` in the
+  header with the explanation in a tooltip, a glyph with no number, which reads
+  as decoration. Eight sat unnoticed that way in a real project, four with
+  uncommitted changes and one twelve commits ahead of main. The badge now
+  carries its count (`⊟8`), since it is the only sign a collapsed project
+  shows, and an open project gets a banner in its list — the only honest place,
+  because a stray has no row of its own by definition. It has no dismiss
+  button: it leaves when the strays do.
 
 ## [0.30.0] - 2026-09-23
 
