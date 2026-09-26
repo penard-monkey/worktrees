@@ -63,12 +63,12 @@ export function CodexMcpSection({ onReport }: { onReport: (text: string) => void
 export type MigrationRow = {
   name: string;
   transport: string;
-  status: "copy" | "copy_needs_login" | "exists" | "differs" | "unsupported";
+  status: "copy" | "copy_needs_login" | "copy_literal_env" | "exists" | "differs" | "unsupported";
   reason: string;
-  argv: string[];
 };
 export type MigrationOutcome = { name: string; ok: boolean; output: string; needs_login: boolean };
 const migrationLabels: Record<MigrationRow["status"], string> = {
+  copy_literal_env: "Literal env values",
   copy: "Ready to copy", copy_needs_login: "Sign-in needed", exists: "Already in Codex",
   differs: "Differs", unsupported: "Can't copy",
 };
@@ -84,6 +84,7 @@ function CodexMcpMigration({ onReport, codexAvailable }: { onReport: (text: stri
     try {
       const plan = await invoke<MigrationRow[]>("codex_mcp_migration_plan");
       setRows(plan);
+      // A refreshed literal-value warning requires an explicit selection again.
       setSelected((current) => current.filter((name) => plan.some((r) => r.name === name && (r.status === "copy" || r.status === "copy_needs_login"))));
     } catch (e) { setError(String(e)); onReport(String(e)); }
   };
@@ -102,12 +103,12 @@ function CodexMcpMigration({ onReport, codexAvailable }: { onReport: (text: stri
   };
   return <section className="setting mcp-migration" data-focus="mcp-migration">
     <label>Copy servers from Claude</label>
-    <div className="hint">Choose servers from Claude's user configuration to add to Codex. Existing names are skipped. Worktrees' own server is managed above.</div>
+    <div className="hint">Choose servers from Claude's user configuration to add to Codex. Existing names are skipped. Worktrees' own server is managed above. Worktrees serializes its own migrations, but cannot guard against another tool writing Codex configuration at the same moment.</div>
     {error && <div className="hint" role="alert">{error}</div>}
     {!rows && !error && <div className="hint">Checking Claude servers…</div>}
     {rows?.length === 0 && <div className="hint">No Claude user-scope servers to copy.</div>}
     {rows?.map((row) => {
-      const copyable = row.status === "copy" || row.status === "copy_needs_login";
+      const copyable = row.status === "copy" || row.status === "copy_needs_login" || row.status === "copy_literal_env";
       const result = outcomes.find((o) => o.name === row.name);
       return <div className="mcp-migration-row" key={row.name}>
         <div className="mcp-migration-heading">

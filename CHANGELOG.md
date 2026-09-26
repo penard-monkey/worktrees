@@ -54,7 +54,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `worktrees mcp --migrate --ai codex`. Preview supported servers and apply a
   selection; existing Codex entries are never replaced. OAuth servers include
   a sign-in hint, and unsupported transports or headers explain why they cannot
-  be copied. Configuration writes go through `codex mcp add`.
+  be copied. Literal environment values require explicit selection with a
+  disclosure; execution arguments stay out of plan JSON and the webview.
+  Configuration writes go through `codex mcp add`, with a shared file lock
+  serializing Worktrees migrations across the CLI and app.
 
 ## [0.30.0] - 2026-09-23
 

@@ -7,13 +7,17 @@ use serde_json::{json, Value};
 pub enum Status {
     Copy,
     CopyNeedsLogin,
+    CopyLiteralEnv,
     Exists,
     Differs,
     Unsupported,
 }
 impl Status {
     pub fn copyable(&self) -> bool {
-        matches!(self, Self::Copy | Self::CopyNeedsLogin)
+        matches!(
+            self,
+            Self::Copy | Self::CopyNeedsLogin | Self::CopyLiteralEnv
+        )
     }
 }
 #[derive(Clone, Debug, Serialize)]
@@ -23,6 +27,7 @@ pub struct Row {
     pub status: Status,
     pub reason: String,
     /// Arguments after the executable. Passed directly to Command, never a shell.
+    #[serde(skip)]
     pub argv: Vec<String>,
 }
 
@@ -52,34 +57,33 @@ pub fn plan(claude: &Value, codex: &toml::Value) -> Vec<Row> {
                 reason: String::new(),
                 argv: vec![],
             };
-            let mapped = translate(&row, entry);
-            if let Some(existing) = target.get("mcp_servers").and_then(|m| m.get(name)) {
-                let same = mapped
-                    .as_ref()
-                    .is_ok_and(|(_, expected, _, _)| equivalent(existing, expected));
-                row.status = if same {
-                    Status::Exists
-                } else {
-                    Status::Differs
-                };
-                row.reason = if same {
-                    "Already in Codex."
-                } else {
-                    "A different entry already exists in Codex; it will not be overwritten."
-                }
-                .into();
-            } else {
-                match mapped {
-                    Ok((argv, _, login, note)) => {
+            match translate(&row, entry) {
+                Err(reason) => row.reason = reason,
+                Ok((argv, expected, login, note)) => {
+                    if let Some(existing) = target.get("mcp_servers").and_then(|m| m.get(name)) {
+                        let same = equivalent(existing, &expected);
+                        row.status = if same {
+                            Status::Exists
+                        } else {
+                            Status::Differs
+                        };
+                        row.reason = if same {
+                            "Already in Codex."
+                        } else {
+                            "A different entry already exists in Codex; it will not be overwritten."
+                        }
+                        .into();
+                    } else {
                         row.status = if login {
                             Status::CopyNeedsLogin
+                        } else if !literal_env_keys(entry).is_empty() {
+                            Status::CopyLiteralEnv
                         } else {
                             Status::Copy
                         };
                         row.argv = argv;
                         row.reason = note;
                     }
-                    Err(reason) => row.reason = reason,
                 }
             }
             row
@@ -106,6 +110,25 @@ fn env_name(s: &str) -> bool {
             .enumerate()
             .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
 }
+/// Only an entire ${VAR} reference avoids the literal-value warning. Mixed
+/// strings and empty values still get explicit disclosure without their contents.
+fn literal_env_keys(entry: &Value) -> Vec<&str> {
+    entry
+        .get("env")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| {
+            let reference = value
+                .as_str()
+                .and_then(|s| s.strip_prefix("${"))
+                .and_then(|s| s.strip_suffix('}'))
+                .is_some_and(env_name);
+            (!reference).then_some(key.as_str())
+        })
+        .collect()
+}
+
 fn translate(row: &Row, entry: &Value) -> Result<(Vec<String>, Value, bool, String), String> {
     if row.name.is_empty()
         || !row
@@ -229,6 +252,9 @@ fn translate(row: &Row, entry: &Value) -> Result<(Vec<String>, Value, bool, Stri
         }
         _ => return Err("Unsupported transport.".into()),
     }
+    for key in literal_env_keys(entry) {
+        note.push_str(&format!(" {key} is a literal value; it will be written into Codex config and briefly visible in the process list while copying. Select this server explicitly to copy it."));
+    }
     if argv.iter().any(|s| s.contains("${")) {
         note.push_str(" ${VAR} references are passed literally, never expanded; check the server's environment in Codex.");
     }
@@ -301,13 +327,47 @@ pub struct Outcome {
     pub needs_login: bool,
 }
 
+/// Keep a stable sibling inode: Codex replaces config.toml when it writes.
+/// File owns the advisory lock until drop; never unlink the lock file.
+fn lock_migration() -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    let config = crate::codexmcp::config_path();
+    let parent = config
+        .parent()
+        .ok_or("Codex configuration has no parent directory.")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("Cannot create Codex configuration directory: {e}"))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(config.with_file_name("config.toml.worktrees-migrate.lock"))
+        .map_err(|e| format!("Cannot open Codex migration lock: {e}"))?;
+    loop {
+        // SAFETY: file owns a live descriptor and stays alive through recheck,
+        // add, and verification in both the CLI and app's shared apply path.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("Cannot acquire Codex migration lock: {error}"));
+        }
+    }
+}
+
 /// Re-plan before EACH command, skip existing names, and verify the persisted
 /// definition afterwards. This cannot serialize independent external Codex writers.
 pub fn apply(names: &[String]) -> Result<Vec<Outcome>, String> {
     let codex = crate::profile::codex_bin().ok_or("Codex CLI was not found on PATH.")?;
-    // Serialize app calls in this process. Other writers remain outside our control.
+    // Serialize threads as well as cooperating CLI/app processes. External
+    // tools that do not acquire our flock remain outside our control.
     static APPLY: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = APPLY.lock().map_err(|_| "Migration lock unavailable.")?;
+    let _guard = APPLY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _file_guard = lock_migration()?;
     let mut outcomes = vec![];
     for name in names {
         let mut result = Outcome {
@@ -364,10 +424,46 @@ mod tests {
         rows(json!({"mcpServers":{"demo":entry}}), "").remove(0)
     }
     #[test]
+    fn serialized_plan_never_exposes_execution_arguments() {
+        let r = row(
+            json!({"command":"echo","args":["private-argument"],"env":{"OPENAI_API_KEY":"sk-example-secret"}}),
+        );
+        let serialized = serde_json::to_string(&r).unwrap();
+        assert!(!serialized.contains("argv"));
+        assert!(!serialized.contains("sk-example-secret"));
+        assert!(!serialized.contains("private-argument"));
+        assert!(r
+            .argv
+            .iter()
+            .any(|a| a == "OPENAI_API_KEY=sk-example-secret"));
+    }
+    #[test]
+    fn literal_env_values_are_copyable_with_explicit_warning() {
+        for value in ["sk-example-secret", "", "prefix-${TOKEN}"] {
+            let r = row(json!({"command":"echo","env":{"KEY":value,"REFERENCE":"${TOKEN}"}}));
+            assert_eq!(serde_json::to_value(&r.status).unwrap(), "copy_literal_env");
+            assert!(r.status.copyable());
+            assert!(r.reason.contains("KEY is a literal value"));
+            assert!(r.reason.contains("written into Codex config"));
+            assert!(r.reason.contains("process list"));
+            assert!(!r.reason.contains("REFERENCE is a literal value"));
+        }
+    }
+    #[test]
+    fn untranslatable_existing_entry_keeps_unsupported_reason() {
+        let r = rows(
+            json!({"mcpServers":{"demo":{"type":"sse","url":"https://example.com"}}}),
+            "[mcp_servers.demo]\nurl='https://example.com'\n",
+        );
+        assert_eq!(r[0].status, Status::Unsupported);
+        assert!(r[0].reason.contains("SSE cannot be copied"));
+        assert!(r[0].argv.is_empty());
+    }
+    #[test]
     fn stdio() {
         let r =
             row(json!({"command":"node","args":["server.js","two words"],"env":{"KEY":"value"}}));
-        assert_eq!(r.status, Status::Copy);
+        assert_eq!(r.status, Status::CopyLiteralEnv);
         assert_eq!(
             r.argv,
             [

@@ -14,13 +14,43 @@ JSON
 printf '%s\n' "$@" >> "$MIGRATION_LOG"
 [ "$3" = fail ] && exit 1
 [ "${MIGRATION_NOOP:-}" = yes ] && exit 0
-cat >> "$CODEX_HOME/config.toml" <<'TOML'
-[mcp_servers.demo]
-command = "echo"
-args = ["${TOKEN}", "two words"]
-[mcp_servers.demo.env]
-KEY = "${SECRET}"
-TOML
+python3 - "$@" <<'PYSHIM'
+import json, os, pathlib, sys
+args = sys.argv[1:]
+assert args[:2] == ['mcp', 'add'], args
+name, fields, env, oauth = args[2], {}, {}, {}
+i = 3
+while i < len(args):
+    flag = args[i]
+    if flag == '--':
+        fields['command'], fields['args'] = args[i + 1], args[i + 2:]
+        break
+    value = args[i + 1]
+    if flag == '--env':
+        key, value = value.split('=', 1)
+        env[key] = value
+    elif flag == '--url':
+        fields['url'] = value
+    elif flag == '--bearer-token-env-var':
+        fields['bearer_token_env_var'] = value
+    elif flag == '--oauth-client-id':
+        oauth['client_id'] = value
+    elif flag == '--oauth-resource':
+        fields['oauth_resource'] = value
+    else:
+        assert flag == '--oauth-client-registration', flag
+    i += 2
+quote = lambda value: json.dumps(value, ensure_ascii=False)
+with pathlib.Path(os.environ['CODEX_HOME'], 'config.toml').open('a') as output:
+    output.write('\n[mcp_servers.' + quote(name) + ']\n')
+    for key, value in fields.items():
+        output.write(quote(key) + ' = ' + quote(value) + '\n')
+    for section, values in [('env', env), ('oauth', oauth)]:
+        if values:
+            output.write('[mcp_servers.' + quote(name) + '.' + section + ']\n')
+            for key, value in values.items():
+                output.write(quote(key) + ' = ' + quote(value) + '\n')
+PYSHIM
 SH
   chmod +x "$SHIMS/codex"
 }
@@ -106,4 +136,46 @@ SH
   [ "$status" -eq 1 ]
   [[ "$output" == *'Claude configuration must be an object'* ]]
   [ ! -e "$MIGRATION_LOG" ]
+}
+
+@test "migration verifies arbitrary stdio and HTTP argv instead of a canned server" {
+  cat > "$HOME/.claude.json" <<'JSON'
+{"mcpServers":{"custom":{"command":"node","args":["server.js","two words","quote\"here"],"env":{"API_KEY":"sk-example","REF":"${KEEP}"}},"http":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer ${TOKEN}"}}}}
+JSON
+  run "$WT_BIN" mcp --migrate --ai codex --apply custom http --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"name":"custom","ok":true'* ]]
+  [[ "$output" == *'"name":"http","ok":true'* ]]
+  run "$WT_BIN" mcp --migrate --ai codex --json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(sum(r["status"] == "exists" for r in json.load(sys.stdin)))')" -eq 2 ]
+}
+
+@test "migration locks before rechecking and adding across processes" {
+  python3 - "$WT_BIN" <<'PY'
+import fcntl, os, pathlib, subprocess, sys
+config = pathlib.Path(os.environ['CODEX_HOME'], 'config.toml')
+lock = config.with_name('config.toml.worktrees-migrate.lock')
+with lock.open('a') as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    child = subprocess.Popen([sys.argv[1], 'mcp', '--migrate', '--ai', 'codex', '--apply', 'demo', '--json'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        try:
+            child.communicate(timeout=0.5)
+            raise AssertionError('migration bypassed the held file lock')
+        except subprocess.TimeoutExpired:
+            pass
+        assert not pathlib.Path(os.environ['MIGRATION_LOG']).exists(), 'codex add ran before the lock was released'
+        config.write_text('[mcp_servers.demo]\ncommand="other"\n')
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 1, (stdout, stderr)
+        assert 'will not be overwritten' in stdout, stdout
+        assert not pathlib.Path(os.environ['MIGRATION_LOG']).exists(), 'did not recheck after acquiring lock'
+        assert config.read_text() == '[mcp_servers.demo]\ncommand="other"\n'
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+PY
 }

@@ -15,12 +15,13 @@ type MockDoc = { path: string; rel: string; title: string; group: string; mtime_
 let ws: Workspace = initialWorkspace();
 
 const mockMigration: MigrationRow[] = [
-  { name: "filesystem", transport: "stdio", status: "copy", reason: "Ready to copy. ${VAR} references are passed literally, never expanded.", argv: ["mcp", "add", "filesystem", "--", "example-server", "${ROOT}"] },
-  { name: "remote-oauth", transport: "http", status: "copy_needs_login", reason: "OAuth sign-in is needed after copying.", argv: ["mcp", "add", "remote-oauth", "--url", "https://example.com/mcp"] },
-  { name: "already-configured", transport: "stdio", status: "exists", reason: "Already in Codex.", argv: [] },
-  { name: "different-command", transport: "stdio", status: "differs", reason: "A different entry already exists in Codex; it will not be overwritten.", argv: [] },
-  { name: "legacy-sse", transport: "sse", status: "unsupported", reason: "Codex supports streamable HTTP, not SSE.", argv: [] },
-  { name: "custom-headers", transport: "http", status: "unsupported", reason: "Custom HTTP headers cannot be copied by codex mcp add.", argv: [] },
+  { name: "literal-env", transport: "stdio", status: "copy_literal_env", reason: "API_KEY is a literal value; it will be written into Codex config and briefly visible in the process list while copying. Select this server explicitly to copy it." },
+  { name: "filesystem", transport: "stdio", status: "copy", reason: "Ready to copy. ${VAR} references are passed literally, never expanded." },
+  { name: "remote-oauth", transport: "http", status: "copy_needs_login", reason: "OAuth sign-in is needed after copying." },
+  { name: "already-configured", transport: "stdio", status: "exists", reason: "Already in Codex." },
+  { name: "different-command", transport: "stdio", status: "differs", reason: "A different entry already exists in Codex; it will not be overwritten." },
+  { name: "legacy-sse", transport: "sse", status: "unsupported", reason: "Codex supports streamable HTTP, not SSE." },
+  { name: "custom-headers", transport: "http", status: "unsupported", reason: "Custom HTTP headers cannot be copied by codex mcp add." },
 ];
 
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x));
@@ -2142,7 +2143,7 @@ Phase 3: Frontend pane and mock harness
       const names = args.names as string[];
       return names.map((name): MigrationOutcome => {
         const row = mockMigration.find((r) => r.name === name);
-        if (!row || (row.status !== "copy" && row.status !== "copy_needs_login")) {
+        if (!row || (row.status !== "copy" && row.status !== "copy_needs_login" && row.status !== "copy_literal_env")) {
           return { name, ok: false, output: "Server is no longer copyable.", needs_login: false };
         }
         const needs_login = row.status === "copy_needs_login";
@@ -2151,7 +2152,6 @@ Phase 3: Frontend pane and mock harness
         }
         row.status = "exists";
         row.reason = "Already in Codex.";
-        row.argv = [];
         return { name, ok: true, output: "Copied to Codex.", needs_login };
       });
     }
