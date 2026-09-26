@@ -245,10 +245,16 @@ pub fn claude_json_path() -> PathBuf {
 /// offer the install and let `claude mcp add` — which CAN parse it — be the one
 /// that refuses.
 fn read_claude_json() -> serde_json::Value {
-    std::fs::read_to_string(claude_json_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::Value::Null)
+    read_claude_json_checked().unwrap_or(serde_json::Value::Null)
+}
+
+/// Migration must distinguish an empty config from an unreadable one.
+pub(crate) fn read_claude_json_checked() -> Result<serde_json::Value, String> {
+    match std::fs::read_to_string(claude_json_path()) {
+        Ok(s) => serde_json::from_str(&s).map_err(|_| "Cannot parse Claude configuration; migration was not attempted.".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::Value::Null),
+        Err(_) => Err("Cannot read Claude configuration; migration was not attempted.".into()),
+    }
 }
 
 /// Judge one `mcpServers` map for our key.

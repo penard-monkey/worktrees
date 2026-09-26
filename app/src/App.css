@@ -3275,3 +3275,13 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
 }
 
 .usage-minimal.only { display: inline; }
+
+/* MCP migration: words use text tokens; only the dot carries status hue. */
+.mcp-migration-row { padding: var(--s3) 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.mcp-migration-heading { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); }
+.mcp-migration-heading .setting-check { margin: 0; min-width: 0; }
+.mcp-migration-name { color: var(--txt-hi); overflow-wrap: anywhere; min-width: 0; }
+.mcp-migration-chip { display: inline-flex; align-items: center; gap: var(--s1); padding: 2px var(--s2); border-radius: var(--r-full); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-micro); }
+.mcp-migration-chip i { width: 6px; height: 6px; flex: none; border-radius: var(--r-full); background: var(--warn); }
+.mcp-migration-chip.copy i, .mcp-migration-chip.exists i { background: var(--ok); }
+.mcp-migration .hint { overflow-wrap: anywhere; }
