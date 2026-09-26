@@ -2157,7 +2157,11 @@ body.dragging .menu-catch { pointer-events: none; }
 /* Home (empty state): logo + open button, then the resume list */
 .briefing { margin: auto; width: min(560px, 82%); padding: var(--s6) 0; }
 .home-hero { display: flex; align-items: center; gap: var(--s4); margin-bottom: var(--s5); }
-.home-logo { width: 72px; height: 72px; border-radius: 16px; flex: none; }
+/* `object-fit: contain` and NO radius of our own: the brand master already
+   carries its rounded #11121A tile, and a second border-radius over it clips
+   the corners twice (the handoff calls this out as double-masking). The 72px
+   box and the hero's 16px gap are unchanged. */
+.home-logo { width: 72px; height: 72px; object-fit: contain; flex: none; }
 .home-id h1 { font-size: 1.6rem; font-weight: var(--fw-bold); color: var(--txt-hi); margin: 0 0 2px; }
 .home-tag { color: var(--txt-dim); font-size: var(--fs-body); }
 /* Two ways in, weighted: opening a project is the primary act, importing from

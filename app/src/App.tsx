@@ -30,8 +30,14 @@ import {
 } from "./dnd";
 import { useNavDrag, type DragItem } from "./navdrag";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
-import logoUrl from "./assets/logo.png";
+// The Guardian mark, traced from the Blue + Mint handoff's refined board into
+// vector and re-rendered (app/brand/). The app-tile version, per the handoff:
+// the dark #11121A tile is part of the artwork, so `.home-logo` must not
+// re-round it — `object-fit: contain` inside the existing 72px box.
+import logoUrl from "./assets/hecaton-logo.png";
 import "./tokens.css";
+// after tokens.css: the brand layer is namespaced and only ever adds
+import "./brand-tokens.css";
 import "./App.css";
 
 const CODEX_INSTALL_URL = "https://developers.openai.com/codex/cli/";
@@ -7015,10 +7021,13 @@ function App() {
             ) : (
               <div className="briefing">
                 <div className="home-hero">
-                  <img className="home-logo" src={logoUrl} alt="worktrees logo" />
+                  {/* Empty alt: the <h1> beside it already supplies the
+                      accessible name, so alt="Hecaton" would have a screen
+                      reader say it twice. */}
+                  <img className="home-logo" src={logoUrl} alt="" />
                   <div className="home-id">
-                    <h1>worktrees</h1>
-                    <div className="home-tag">a place for every work stream</div>
+                    <h1>Hecaton</h1>
+                    <div className="home-tag">A place for every work stream.</div>
                   </div>
                 </div>
                 {/* The two moments a workspace starts from: a new user makes a

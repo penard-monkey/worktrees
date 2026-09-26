@@ -1,0 +1,30 @@
+/* Hecaton Guardian / Blue + Mint - v1.0
+ * Import after tokens.css. Set data-brand on the same root as data-theme.
+ * Logo palette is independent from terminal and status palettes.
+ */
+:root[data-brand="guardian-blue-mint"] {
+  --hecaton-logo-primary: #7AA2F7;
+  --hecaton-logo-secondary: #5BD6BA;
+  --hecaton-canvas: #11121A;
+  --hecaton-wordmark-on-dark: #F3F5FA;
+  --hecaton-supporting-text: #BBC3D0;
+  --hecaton-light-surface: #F6F4EE;
+  --hecaton-ink: #11121A;
+}
+
+/* The handoff's OPTIONAL default-theme interaction mapping is deliberately NOT
+   adopted, and the reason is measurement rather than caution. Against
+   tokens.css as it stands the block is very nearly a no-op: `--accent` is
+   ALREADY #7aa2f7 (tokens.css:27, the same colour as the brand's logo primary)
+   and `--guide-sel` is already the identical rgba(122,162,247,0.5)
+   (tokens.css:125). Its only real effect is `--accent-ink` #0f0f16 -> #11121A,
+   a sub-perceptual shift between two near-blacks.
+
+   What it WOULD add is a second, higher-specificity owner of tokens the themes
+   define — so a later change to tokyo-night's accent would be silently
+   overridden here, and CLAUDE.md's per-theme contrast rules would be measured
+   against the wrong value. The logo palette below stays namespaced and
+   always-on; the interaction palette stays the themes'.
+
+   If it is ever wanted, the block is in the untouched original at
+   docs/design/hecaton-blue-mint-handoff.zip. */

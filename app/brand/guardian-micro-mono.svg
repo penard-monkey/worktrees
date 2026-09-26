@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="mt">
+  <title id="mt">Hecaton</title>
+  <!-- Micro mark, for 16px and below, where the full emblem's inner channels
+       close and it reads as a smudge (verified on real exports, not the board).
+       Hand-authored rather than traced: a reduction, not a shrink. Four arms
+       instead of six — the middle pair is what closes first — and every stroke
+       is >= 4 viewBox units so it survives at 2px on a 16px raster. Monochrome
+       by design, per the handoff; `currentColor` so a menu-bar template or a
+       disabled state inherits correctly. -->
+  <g fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 13.4 16 27.2"/>
+    <path d="M16 15.6 8.6 9.2"/>
+    <path d="M16 15.6 23.4 9.2"/>
+    <path d="M16 22.2 9.4 27.4"/>
+    <path d="M16 22.2 22.6 27.4"/>
+  </g>
+  <circle cx="16" cy="7.2" r="4.3" fill="currentColor"/>
+</svg>
