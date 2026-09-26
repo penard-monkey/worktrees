@@ -6,6 +6,7 @@
 //! declared store, and rendering. See MIGRATION.md.
 
 pub mod agent;
+pub mod agentfiles;
 pub mod automation;
 pub mod config;
 pub mod codex;
