@@ -5,6 +5,13 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Finish hand-checking window restore, then quiet its log.** A real
+  full-screen restore is confirmed in `app.log`. Still unobserved: leaving full
+  screen after a restore lands on the pre-full-screen frame, the switch off
+  gives the default window, and a frame on a detached display falls back to
+  macOS placement. After that, drop the per-change `window state saved` line
+  and keep the restore lines. See
+  [the session](docs/sessions/2026-09-23-restore-window/summary.md).
 - **Codex needs a manual check doc, like AI profiles have.** Bats has no fake
   `codex`, so the live side is unguarded: a Claude → Codex → Claude switch
   leaving one session each step, resume after a switch, the adopted-session
