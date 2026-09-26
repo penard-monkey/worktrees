@@ -2977,6 +2977,26 @@ async fn codex_mcp_uninstall() -> Result<worktrees_core::codexmcp::Outcome, Stri
     worktrees_core::codexmcp::uninstall()
 }
 
+#[tauri::command]
+async fn codex_mcp_migration_plan() -> Result<Vec<worktrees_core::mcpmigrate::Row>, String> {
+    let result = worktrees_core::mcpmigrate::migration_plan();
+    if let Err(e) = &result { applog("error", &format!("codex_mcp_migration_plan: {e}")); }
+    result
+}
+
+#[tauri::command]
+async fn codex_mcp_migrate(names: Vec<String>) -> Result<Vec<worktrees_core::mcpmigrate::Outcome>, String> {
+    let result = worktrees_core::mcpmigrate::apply(&names);
+    match &result {
+        Err(e) => applog("error", &format!("codex_mcp_migrate: {e}")),
+        Ok(rows) => {
+            let failed = rows.iter().filter(|r| !r.ok).count();
+            applog(if failed > 0 { "warn" } else { "info" }, &format!("codex_mcp_migrate: {} attempted, {failed} not copied", rows.len()));
+        }
+    }
+    result
+}
+
 // ── per-project config surface (the Project sheet, proposal §10) ─────────────
 // Read-only config view + the four verbs (doctor / relink / provision / init).
 //
@@ -7592,6 +7612,8 @@ pub fn run() {
             codex_mcp_status,
             codex_mcp_install,
             codex_mcp_uninstall,
+            codex_mcp_migration_plan,
+            codex_mcp_migrate,
             project_config_read,
             doctor,
             place_health,

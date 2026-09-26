@@ -21,6 +21,7 @@ pub mod inbox;
 pub mod init;
 pub mod materialize;
 pub mod mcpsetup;
+pub mod mcpmigrate;
 pub mod mention;
 pub mod model;
 pub mod ops;

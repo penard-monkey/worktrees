@@ -50,6 +50,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   stale, unavailable and sign-in states. Codex reads limits through its existing
   CLI login without reading conversations or changing configuration. Appearance
   settings can turn either provider's usage checks off independently.
+- Copy user-scope MCP servers from Claude into Codex from Settings → Codex or
+  `worktrees mcp --migrate --ai codex`. Preview supported servers and apply a
+  selection; existing Codex entries are never replaced. OAuth servers include
+  a sign-in hint, and unsupported transports or headers explain why they cannot
+  be copied. Configuration writes go through `codex mcp add`.
 
 ## [0.30.0] - 2026-09-23
 

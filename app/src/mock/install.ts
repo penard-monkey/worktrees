@@ -6,12 +6,22 @@
 // commands resolve to null + a console.warn, so new commands never hard-crash the
 // harness during a redesign.
 
+import type { MigrationRow, MigrationOutcome } from "../CodexMcpPanel";
 import { initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 
 /** `worktrees_core::docs::DocEntry` — see the `list_docs` case. */
 type MockDoc = { path: string; rel: string; title: string; group: string; mtime_ms: number };
 
 let ws: Workspace = initialWorkspace();
+
+const mockMigration: MigrationRow[] = [
+  { name: "filesystem", transport: "stdio", status: "copy", reason: "Ready to copy. ${VAR} references are passed literally, never expanded.", argv: ["mcp", "add", "filesystem", "--", "example-server", "${ROOT}"] },
+  { name: "remote-oauth", transport: "http", status: "copy_needs_login", reason: "OAuth sign-in is needed after copying.", argv: ["mcp", "add", "remote-oauth", "--url", "https://example.com/mcp"] },
+  { name: "already-configured", transport: "stdio", status: "exists", reason: "Already in Codex.", argv: [] },
+  { name: "different-command", transport: "stdio", status: "differs", reason: "A different entry already exists in Codex; it will not be overwritten.", argv: [] },
+  { name: "legacy-sse", transport: "sse", status: "unsupported", reason: "Codex supports streamable HTTP, not SSE.", argv: [] },
+  { name: "custom-headers", transport: "http", status: "unsupported", reason: "Custom HTTP headers cannot be copied by codex mcp add.", argv: [] },
+];
 
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x));
 const now = () => Math.floor(Date.now() / 1000);
@@ -2125,6 +2135,25 @@ Phase 3: Frontend pane and mock harness
     case "mcp_uninstall": {
       mockMcp = { ...mockMcp, state: "absent", found_in: [], user: null };
       return { ok: true, output: "Removed MCP server worktrees from user config\n", status: clone(mockMcp) };
+    }
+    case "codex_mcp_migration_plan":
+      return clone(mockMigration);
+    case "codex_mcp_migrate": {
+      const names = args.names as string[];
+      return names.map((name): MigrationOutcome => {
+        const row = mockMigration.find((r) => r.name === name);
+        if (!row || (row.status !== "copy" && row.status !== "copy_needs_login")) {
+          return { name, ok: false, output: "Server is no longer copyable.", needs_login: false };
+        }
+        const needs_login = row.status === "copy_needs_login";
+        if (new URLSearchParams(location.search).get("migratefail") === name) {
+          return { name, ok: false, output: "Codex did not save the expected configuration.", needs_login: false };
+        }
+        row.status = "exists";
+        row.reason = "Already in Codex.";
+        row.argv = [];
+        return { name, ok: true, output: "Copied to Codex.", needs_login };
+      });
     }
     case "codex_mcp_status":
       return clone(mockCodexMcp);

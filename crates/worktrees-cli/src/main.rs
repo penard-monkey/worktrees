@@ -36,6 +36,7 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees sync status                 hub + project sync state (--json; no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
   worktrees mcp --status [--json] [--ai codex]       check Claude or Codex MCP setup (no repo needed)
+  worktrees mcp --migrate --ai codex [--json] [--apply <name>…] copy Claude user servers
   worktrees mcp --install [--read-only] [--ai codex] connect tools to Claude or Codex (--uninstall removes)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";

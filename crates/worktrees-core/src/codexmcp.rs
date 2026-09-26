@@ -75,12 +75,12 @@ pub fn status() -> Status {
     Status { state, codex_bin, worktrees_bin, entry, command, config_path: path.to_string_lossy().into_owned() }
 }
 
-fn run(codex: &str, args: &[&str]) -> Result<(bool, String), String> {
+pub(crate) fn run(codex: &str, args: &[&str]) -> Result<(bool, String), String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let mut child = Command::new(codex).args(args).stdin(Stdio::null())
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
-        .map_err(|e| format!("codex mcp {}: {e}", args.join(" ")))?;
+        .map_err(|e| format!("could not run codex mcp: {e}"))?;
     let drain = |mut stream: Option<Box<dyn Read + Send>>| std::thread::spawn(move || {
         let mut bytes = Vec::new();
         if let Some(s) = stream.as_mut() { let _ = s.read_to_end(&mut bytes); }

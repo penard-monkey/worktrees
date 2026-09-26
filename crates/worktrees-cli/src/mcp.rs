@@ -139,6 +139,7 @@ const FREE_TEXT_MAX: usize = 400;
 /// rather than branching in `cmd_mcp` keeps the dispatch in main.rs, which has
 /// to make the same decision one step earlier (the git guard).
 pub fn setup_verb(args: &[String]) -> Option<&'static str> {
+    if args.iter().any(|a| a == "--migrate" || a == "--apply") { return Some("migrate"); }
     for a in args {
         match a.as_str() {
             "--status" => return Some("status"),
@@ -156,6 +157,10 @@ pub fn setup_verb(args: &[String]) -> Option<&'static str> {
 pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
     if args.windows(2).any(|w| w[0] == "--ai" && w[1] == "codex") || args.iter().any(|a| a == "--ai=codex") {
         return cmd_codex_mcp_setup(verb, args);
+    }
+    if verb == "migrate" {
+        eprintln!("MCP migration requires --migrate --ai codex.");
+        return 1;
     }
     use worktrees_core::mcpsetup::{self, State};
     let json = args.iter().any(|a| a == "--json");
@@ -221,6 +226,7 @@ pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
 }
 
 fn cmd_codex_mcp_setup(verb: &str, args: &[String]) -> i32 {
+    if verb == "migrate" { return cmd_mcp_migrate(args); }
     use worktrees_core::codexmcp;
     let json = args.iter().any(|a| a == "--json");
     let report = |s: &codexmcp::Status| {
@@ -248,6 +254,62 @@ fn cmd_codex_mcp_setup(verb: &str, args: &[String]) -> i32 {
         }
         _ => 1,
     }
+}
+
+fn cmd_mcp_migrate(args: &[String]) -> i32 {
+    use worktrees_core::mcpmigrate;
+    let execute = || -> Result<i32, String> {
+        let mut json = false;
+        let mut migrate = false;
+        let mut apply = false;
+        let mut names = vec![];
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--migrate" => migrate = true,
+                "--json" => json = true,
+                "--ai=codex" => {},
+                "--ai" if args.get(i + 1).map(String::as_str) == Some("codex") => i += 1,
+                "--apply" => {
+                    apply = true;
+                    i += 1;
+                    let start = names.len();
+                    while i < args.len() && !args[i].starts_with("--") {
+                        names.push(args[i].clone());
+                        i += 1;
+                    }
+                    if names.len() == start { return Err("--apply requires at least one server name.".into()); }
+                    continue;
+                }
+                _ => return Err("Usage: worktrees mcp --migrate --ai codex [--json] [--apply <name>…]".into()),
+            }
+            i += 1;
+        }
+        if !migrate { return Err("--apply requires --migrate --ai codex.".into()); }
+        if apply {
+            let outcomes = mcpmigrate::apply(&names)?;
+            if json { println!("{}", serde_json::to_string(&outcomes).map_err(|e| e.to_string())?); }
+            else {
+                for o in &outcomes {
+                    println!("{}: {} — {}", o.name, if o.ok { "copied" } else { "not copied" }, o.output);
+                    if o.needs_login { println!("  codex mcp login {}", o.name); }
+                }
+            }
+            Ok(i32::from(outcomes.iter().any(|o| !o.ok)))
+        } else {
+            let rows = mcpmigrate::migration_plan()?;
+            if json { println!("{}", serde_json::to_string(&rows).map_err(|e| e.to_string())?); }
+            else if rows.is_empty() { println!("No Claude user-scope servers to copy."); }
+            else {
+                for row in rows {
+                    let status = serde_json::to_value(&row.status).map_err(|e| e.to_string())?;
+                    println!("{} ({}) — {}: {}", row.name, row.transport, status.as_str().unwrap_or("unsupported"), row.reason);
+                }
+            }
+            Ok(0)
+        }
+    };
+    match execute() { Ok(code) => code, Err(e) => { eprintln!("{e}"); 1 } }
 }
 
 pub fn cmd_mcp(args: &[String]) -> i32 {
