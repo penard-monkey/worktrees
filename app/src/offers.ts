@@ -118,16 +118,21 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
     });
   }
   const missing = (ctx.userSkills ?? []).filter((u) => u.status === "missing").map((u) => u.name).sort();
-  if (missing.length > 0) {
+  // Dismissed = the SET the user was shown. Re-ask only when something NEW is
+  // unlinked: linking one of five (or deleting a skill) shrinks the set, which
+  // is a different fingerprint but no new question — a plain `!==` re-asked
+  // exactly then, nagging about skills the user had already declined.
+  const declined = new Set((dismissed["codex-skills"] ?? "").split(",").filter(Boolean));
+  if (missing.some((n) => !declined.has(n))) {
     out.push({
       id: "codex-skills",
       title: "Let Codex use your Claude skills",
       body: `${missing.length} skill${missing.length === 1 ? "" : "s"} in ~/.claude/skills ${missing.length === 1 ? "isn't" : "aren't"} visible to Codex. Linking adds symlinks and changes nothing else.`,
       cta: "Review…",
       to: { cat: "codex", focus: "codex-skills" },
-      // The SET of unlinked skills: a new skill later is a new question, while
-      // the same unlinked set stays quiet once dismissed. `conflict` skills are
-      // not in it — linking cannot help them, so they are not an offer.
+      // The SET of unlinked skills: a skill outside the declined set is a new
+      // question; the same set, or any subset of it, stays quiet (see above).
+      // `conflict` skills are not in it — linking cannot help them.
       fingerprint: missing.join(","),
     });
   }

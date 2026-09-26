@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
+import { projectTodos, todoCount } from "./projectTodos";
 
 // Agent instructions for every agent: AGENTS.md is the real file, CLAUDE.md a
 // one-line `@AGENTS.md` stub, and repo skills linked into `.agents/skills`
@@ -24,6 +25,10 @@ export type AgentReport = {
    *  not move until then, so `fixable` stays true — this is what zeroes the
    *  project's to-do count instead (`projectTodos.ts`). */
   pending: string | null;
+  /** The pending branch is on origin — so a PR can exist. False with `pending`
+   *  set means it was committed locally and never pushed (no origin, a failed
+   *  push): there is nothing to wait for. */
+  pending_on_origin: boolean;
 };
 export type UserSkill = { name: string; status: "linked" | "missing" | "conflict" };
 export type AgentSetupStatus = { repo: AgentReport; user_skills: UserSkill[] };
@@ -73,13 +78,21 @@ export type AgentSetupCtl = {
   fix: () => Promise<void>;
 };
 
-export function useAgentSetup(root: string, open: boolean, onChanged: (root: string) => void, onError: (msg: string) => void): AgentSetupCtl {
+/** `onLoaded` gets EVERY successful read, not only the one after a Fix: the
+ *  sheet's read is fresher than App's 5-minute sweep, and the header badge,
+ *  the menu and the sheet's own To do list must agree the moment it lands —
+ *  the doctor side already hands its report up the same way (`onReport`). */
+export function useAgentSetup(root: string, open: boolean, onLoaded: (root: string, s: AgentSetupStatus) => void, onError: (msg: string) => void): AgentSetupCtl {
   const [status, setStatus] = useState<AgentSetupStatus | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [armed, setArmed] = useState(false);
   const [outcome, setOutcome] = useState<AgentFixOutcome | null>(null);
   const [log, setLog] = useState("");
+  // Through a ref: App passes a fresh closure every render, and `load` keyed on
+  // it would re-run the open effect (and re-probe) on every render it causes.
+  const cb = useRef(onLoaded);
+  cb.current = onLoaded;
 
   const load = useCallback(async () => {
     setArmed(false);
@@ -87,6 +100,7 @@ export function useAgentSetup(root: string, open: boolean, onChanged: (root: str
       const s = await invoke<AgentSetupStatus | null>("agent_setup_status", { repo: root });
       setStatus(s ?? null);
       setLoadErr(null);
+      if (s) cb.current(root, s);
     } catch (e) {
       // Shown in the section AND logged — a section that silently rendered
       // nothing would read as "nothing to set up".
@@ -124,9 +138,9 @@ export function useAgentSetup(root: string, open: boolean, onChanged: (root: str
       onError(`agent_setup_fix ${root}: ${String(e)}`);
     } finally {
       // Re-read BEFORE the button comes back (ProjectSheet's `run` hazard): a
-      // stale `fixable` in the gap would offer the same push twice.
+      // stale `fixable` in the gap would offer the same push twice. The re-read
+      // hands itself up through `onLoaded`, like every other read.
       await load();
-      onChanged(root);
       setRunning(false);
     }
   };
@@ -161,13 +175,17 @@ export function AgentSetupSection({ ctl, onError }: { ctl: AgentSetupCtl; onErro
   const { status, loadErr, outcome, log } = ctl;
   const repo = status?.repo;
   const missingSkills = repo?.skills.filter((k) => k.kind === "missing") ?? [];
-  const todo = (repo?.dirs.filter((d) => d.kind === "claude-only" || d.kind === "agents-only").length ?? 0) + missingSkills.length;
+  // The same number the To do list and the header show — derived, never
+  // recounted here, so the three cannot drift.
+  const todo = todoCount(projectTodos(null, status));
 
   return (
     <section className="setting" data-testid="agent-setup">
       <label>
         Agent setup
-        {repo?.pending ? <span className="upd-tag">PR waiting</span> : repo?.fixable ? <span className="upd-tag warn">{todo} to fix</span> : null}
+        {repo?.pending
+          ? <span className="upd-tag">{repo.pending_on_origin ? "PR waiting" : "not pushed"}</span>
+          : todo > 0 ? <span className="upd-tag warn">{todo} to fix</span> : null}
         {repo?.conflicts ? <span className="upd-tag warn">merge by hand</span> : null}
       </label>
       {loadErr ? (
@@ -201,12 +219,17 @@ export function AgentSetupSection({ ctl, onError }: { ctl: AgentSetupCtl; onErro
         <AgentFixButton ctl={ctl} />
         <button className="ctrl sm" disabled={ctl.running} onClick={ctl.load}>Re-check</button>
       </div>
-      {repo?.pending && !outcome && (
+      {repo?.pending && !outcome && (repo.pending_on_origin ? (
         <div className="hint">
           A fix is waiting on branch <code>{repo.pending}</code>: merge its PR to finish. If that PR was
           closed, delete the branch (locally and on origin) to fix again.
         </div>
-      )}
+      ) : (
+        <div className="hint">
+          Branch <code>{repo.pending}</code> was committed but never pushed, so there is no PR to merge.
+          Push it and open one yourself, or delete it (<code>git branch -D {repo.pending}</code>) to fix again.
+        </div>
+      ))}
       <div className="hint">
         AGENTS.md becomes the one instruction file — Codex and other agents read it directly — and
         CLAUDE.md a one-line <code>@AGENTS.md</code> import, so Claude reads the same words. Judged
@@ -239,7 +262,10 @@ export function AgentSetupSection({ ctl, onError }: { ctl: AgentSetupCtl; onErro
  *  Machine-level, so it needs no project — it reads `agent_user_skills`, which
  *  is why the `codex-skills` offer can land here on a fresh install with no
  *  project at all (a suggestion's surface may not add preconditions). */
-export function UserSkillsSection({ skills, onChanged, offerPending, onSilenceOffer, onReport }: {
+export function UserSkillsSection({ skills, onChanged, offerPending, onSilenceOffer, onReport, "data-focus": focusId }: {
+  /** The deep-link target, named at the CALL site (SettingsSheet's Codex
+   *  category), where offers-check can see it beside the category it opens. */
+  "data-focus": string;
   /** App's probe (`agent_user_skills`); null = not read yet or failed. */
   skills: UserSkill[] | null;
   /** The re-read after a link — App keeps the offer in step with it. */
@@ -278,7 +304,7 @@ export function UserSkillsSection({ skills, onChanged, offerPending, onSilenceOf
   const conflict = skills?.filter((u) => u.status === "conflict") ?? [];
   const linkedNow = skills?.filter((u) => u.status === "linked") ?? [];
   return (
-    <section className="setting" data-focus="codex-skills">
+    <section className="setting" data-focus={focusId}>
       <label>
         Your skills
         {missing.length > 0 && <span className="upd-tag">{missing.length} not linked</span>}

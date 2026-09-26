@@ -4,7 +4,7 @@ import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProfilesInfo } from "./ProfilesPanel";
 import { AgentFixButton, AgentSetupSection, openPr, useAgentSetup, type AgentSetupStatus } from "./AgentSetup";
-import { projectTodos, type Todo, type TodoHealth } from "./projectTodos";
+import { projectTodos, type Remedies, type Todo, type TodoHealth } from "./projectTodos";
 
 // Right-side slide-over for ONE project (proposal §10). It stays a sheet:
 // unlike Settings, it is about the thing selected in the tree behind it.
@@ -90,6 +90,39 @@ export function issueCount(r: DoctorReport | null | undefined): number {
   return (r?.findings ?? []).filter((f) => f.severity !== "info").length;
 }
 
+/** What each actionable finding needs, by the ONE command (or the lack of
+ * one) that clears it. The To do list turns this into a row per remedy, and it
+ * has to be right, because a row's button is a promise: `issueCount` under a
+ * Relink button claimed a plain relink would clear a `copy-stale` it
+ * deliberately leaves alone (materialize::plan_one), a `no-slot` that only
+ * provision allocates, and an `unknown-key` nothing but an edit removes.
+ *
+ * Same population as `issueCount` (non-info), so the four always sum to it.
+ * The codes are `diag::Code`, kebab-cased. `dangling-link` is NOT relink's:
+ * it travels with `missing-source` (the file is gone from main), which no
+ * command here can conjure. Anything unknown — a code added to core after this
+ * list — lands in `manual`, the one bucket that promises no button. */
+export function remedies(r: DoctorReport | null | undefined): Remedies {
+  const out: Remedies = { relink: 0, force: 0, provision: 0, manual: 0 };
+  for (const f of r?.findings ?? []) {
+    if (f.severity === "info") continue;
+    switch (f.code) {
+      case "not-linked":
+      case "wrong-mode":
+        out.relink++; break;
+      case "shadowed":
+      case "copy-stale":
+        out.force++; break;
+      case "no-slot":
+      case "missing-port":
+        out.provision++; break;
+      default:
+        out.manual++;
+    }
+  }
+  return out;
+}
+
 /** A report that did not RUN — `cmd_doctor` exited on a guard (an unreadable
  * `.worktrees.toml`, a bad worktree name) before it could emit any JSON, so
  * `findings: []` here means "nothing was measured", never "nothing is wrong".
@@ -119,7 +152,7 @@ export function ProjectSheet({
   todoFocus = false,
   health = null,
   agentStatus = null,
-  onAgentChanged,
+  onAgentLoaded,
 }: {
   open: boolean;
   /** Opened from "Repair / upgrade…" or the header's to-do badge: bring the
@@ -131,9 +164,10 @@ export function ProjectSheet({
    *  second those take. */
   health?: TodoHealth | null;
   agentStatus?: AgentSetupStatus | null;
-  /** The agent setup was re-read (after a Fix) — App re-probes so the
-   *  header's count tracks it. */
-  onAgentChanged: (root: string) => void;
+  /** Every agent-setup read this sheet makes (on open, Re-check, after a
+   *  Fix) — App stores it, so the header badge and the menu agree with the
+   *  sheet at once instead of at the next 5-minute sweep. */
+  onAgentLoaded: (root: string, s: AgentSetupStatus) => void;
   /** Worktrees registered outside `.worktrees/` (from the snapshot's `strays`). */
   strays?: Stray[];
   root: string;
@@ -175,7 +209,7 @@ export function ProjectSheet({
 
   // The agent-setup state, owned here so the To do row and the Agent setup
   // section press ONE Fix with one arm (see `useAgentSetup`).
-  const agent = useAgentSetup(root, open, onAgentChanged, logError);
+  const agent = useAgentSetup(root, open, onAgentLoaded, logError);
   // Set when a To do row ran something, so that row's output shows beside it
   // instead of only in the section further down.
   const [todoRan, setTodoRan] = useState(false);
@@ -288,8 +322,15 @@ export function ProjectSheet({
   const offerForce = forceable.some((f) => f.severity !== "info");
   // The sheet's own reads win once they exist; App's sweep fills the gap.
   const todoHealth: TodoHealth | null = report
-    ? { issues, error: broken ? (report.error ?? "doctor could not run") : null }
+    ? { issues, error: broken ? (report.error ?? "doctor could not run") : null, remedies: remedies(broken ? null : report) }
     : health;
+  const canProvision = !!cfg?.ports && !cfg?.error;
+  // The Health section's --force arm, shared: one armed state, whichever of
+  // the two buttons armed it.
+  const reseed = () => {
+    if (!armed) { setArmed(true); return; }
+    run("force", "relink --all --force", "relink", { repo: root, slug: null, force: true });
+  };
   const todos = projectTodos(todoHealth, agent.status ?? agentStatus);
   const canRelink = !!cfg?.exists && !cfg?.error;
   const show = (section: Todo["section"]) => {
@@ -328,6 +369,21 @@ export function ProjectSheet({
                               title={canRelink ? "worktrees relink --all" : "no readable .worktrees.toml — see Health"}
                               onClick={() => { setTodoRan(true); run("relink", "relink --all", "relink", { repo: root, slug: null, force: false }); }}>
                               {running === "relink" ? "Relinking…" : "Relink"}
+                            </button>
+                          )}
+                          {t.action === "force" && (
+                            <button className={"ctrl sm danger" + (armed ? " armed" : "")} data-testid="todo-force"
+                              disabled={busy || !canRelink}
+                              title="re-seed declared copies from main and move a shadowing file aside as .bak"
+                              onClick={() => { setTodoRan(true); reseed(); }}>
+                              {running === "force" ? "Re-seeding…" : armed ? `Overwrite ${forceable.length} file${forceable.length === 1 ? "" : "s"}?` : "Re-seed…"}
+                            </button>
+                          )}
+                          {t.action === "provision" && (
+                            <button className="ctrl sm" data-testid="todo-provision" disabled={busy || !canProvision}
+                              title={canProvision ? "worktrees provision --all" : "no [ports] in a readable .worktrees.toml — see Health"}
+                              onClick={() => { setTodoRan(true); run("provision", "provision --all", "provision", { repo: root, slug: null }); }}>
+                              {running === "provision" ? "Provisioning…" : "Provision"}
                             </button>
                           )}
                           {firstFix && <AgentFixButton ctl={agent} onPress={() => setTodoRan(true)} />}
@@ -517,10 +573,7 @@ export function ProjectSheet({
                   className={"ctrl sm danger" + (armed ? " armed" : "")}
                   disabled={busy}
                   title="re-seed declared copies from main and move a shadowing file aside as .bak"
-                  onClick={() => {
-                    if (!armed) { setArmed(true); return; }
-                    run("force", "relink --all --force", "relink", { repo: root, slug: null, force: true });
-                  }}
+                  onClick={reseed}
                 >
                   {running === "force"
                     ? "Re-seeding…"

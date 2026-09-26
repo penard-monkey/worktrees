@@ -9,11 +9,16 @@
 //
 // # What counts
 //
-// The COUNT is the number of things one button here can change: doctor findings
-// (relink) plus the agent-setup items the Fix PR would carry (instruction dirs
-// and repo skills). Everything else is a ROW with n = 0:
+// The COUNT is the number of things one button here can change: the doctor
+// findings a relink, a re-seed or a provision clears (split by remedy — see
+// `remedies` in ProjectSheet.tsx) plus the agent-setup items the Fix PR would
+// carry (instruction dirs and repo skills). Everything else is a ROW with n = 0:
 //
-// - a Fix PR already open. The default branch does not move until it merges, so
+// - doctor findings only an edit clears (`.worktrees.toml`, or by hand). A
+//   count under no button is a nag, and a count under the WRONG button is a
+//   lie: `shadowed` under Relink promised a repair relink refuses by design.
+// - a fix branch already made (on origin: a PR to merge; local only: a push
+//   that never happened, which is a different sentence). The default branch does not move until it merges, so
 //   the report keeps saying `fixable` — counting it would badge a project whose
 //   only remaining step is someone else's review, forever.
 // - diverged dirs. Only a person can merge two instruction files; a count that
@@ -28,14 +33,17 @@ import type { AgentSetupStatus } from "./AgentSetup";
 
 export type TodoId =
   | "doctor-error"
-  | "doctor"
+  | "doctor-relink"
+  | "doctor-force"
+  | "doctor-provision"
+  | "doctor-manual"
   | "agent-dirs"
   | "agent-skills"
   | "agent-pending"
   | "agent-diverged";
 
 /** What the row's own button does. `null`: the row only points at its section. */
-export type TodoAction = "relink" | "agent-fix" | null;
+export type TodoAction = "relink" | "force" | "provision" | "agent-fix" | null;
 
 export type Todo = {
   id: TodoId;
@@ -48,9 +56,13 @@ export type Todo = {
   sev: "error" | "warn" | "info";
 };
 
+/** Doctor's actionable findings by the command that clears them. Built by
+ *  `remedies()` in ProjectSheet.tsx; sums to `issueCount`. */
+export type Remedies = { relink: number; force: number; provision: number; manual: number };
+
 /** The slice of App's `ProjectHealth` this needs — the sheet builds the same
  *  shape from its own fresher report. */
-export type TodoHealth = { issues: number; error: string | null };
+export type TodoHealth = { issues: number; error: string | null; remedies: Remedies };
 
 const s = (n: number) => (n === 1 ? "" : "s");
 
@@ -65,19 +77,48 @@ export function projectTodos(
       id: "doctor-error", label: "Config unreadable — doctor could not check this project",
       action: null, section: "health", n: 0, sev: "error",
     });
-  } else if (health && health.issues > 0) {
-    out.push({
-      id: "doctor", label: `${health.issues} file-sync issue${s(health.issues)} found by doctor`,
-      action: "relink", section: "health", n: health.issues, sev: "warn",
-    });
+  } else if (health) {
+    const { relink, force, provision, manual } = health.remedies;
+    if (relink > 0) {
+      out.push({
+        id: "doctor-relink", label: `${relink} declared file${s(relink)} not linked into ${relink === 1 ? "a worktree" : "worktrees"}`,
+        action: "relink", section: "health", n: relink, sev: "warn",
+      });
+    }
+    if (force > 0) {
+      // Its own row and its own ARMED button: it moves the local file aside as
+      // .bak and rewrites it from main, and that content may be the only copy.
+      out.push({
+        id: "doctor-force", label: `Re-seed ${force} file${s(force)} from main (the local copy is kept as .bak)`,
+        action: "force", section: "health", n: force, sev: "warn",
+      });
+    }
+    if (provision > 0) {
+      out.push({
+        id: "doctor-provision", label: `${provision} port setup${s(provision)} missing — provision allocates a slot`,
+        action: "provision", section: "health", n: provision, sev: "warn",
+      });
+    }
+    if (manual > 0) {
+      out.push({
+        id: "doctor-manual", label: `${manual} finding${s(manual)} to fix by editing .worktrees.toml or by hand`,
+        action: null, section: "health", n: 0, sev: "info",
+      });
+    }
   }
 
   const repo = agent?.repo;
   if (repo) {
     if (repo.pending) {
+      // `pending` only says the branch EXISTS. Whether there is anything to
+      // wait for depends on where: a push that failed (or no origin, no gh)
+      // leaves a local branch and no PR at all.
       out.push({
-        id: "agent-pending", label: `Fix PR waiting to merge (branch ${repo.pending})`,
-        action: null, section: "agent", n: 0, sev: "info",
+        id: "agent-pending",
+        label: repo.pending_on_origin
+          ? `Fix PR waiting to merge (branch ${repo.pending})`
+          : `Fix branch '${repo.pending}' was committed but never pushed — push it, or delete it to redo`,
+        action: null, section: "agent", n: 0, sev: repo.pending_on_origin ? "info" : "warn",
       });
     } else if (repo.fixable) {
       const claudeOnly = repo.dirs.filter((d) => d.kind === "claude-only").length;

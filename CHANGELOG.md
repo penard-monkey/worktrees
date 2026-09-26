@@ -24,20 +24,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   symlink each, and leaves alone any name that already belongs to a different
   skill.
 - **Projects say when they have things to do, and right-click repairs them.**
-  A project header now carries a small count of what needs doing: file-sync
-  problems doctor found, plus the agent-setup changes above. Right-click the
-  project → "Repair / upgrade…" opens its sheet at a To do list with one
-  button per item: Relink for the file syncs, Fix… for the agent setup (the
-  second click pushes the branch and opens the PR). Once that PR is open the
-  project stops counting it and shows "Fix PR waiting to merge" instead, and
-  folders whose CLAUDE.md and AGENTS.md disagree are listed to merge by hand
-  without adding to the count.
+  A project header now carries a small count of what a button can fix: the
+  doctor findings a relink, a re-seed from main or a port provision clears,
+  plus the agent-setup changes above. Right-click the project → "Repair /
+  upgrade…" opens its sheet at a To do list with one row per remedy and its
+  own button: Relink, Re-seed… (armed: it moves the local copy aside as .bak),
+  Provision, and Fix… for the agent setup (the second click pushes the branch
+  and opens the PR). Findings only an edit to `.worktrees.toml` can clear are
+  listed without a count. Once the fix branch exists the project stops
+  counting it: "Fix PR waiting to merge" when the branch reached origin, or
+  "committed but never pushed" when it did not (no origin, or the push
+  failed), with what to do about it. Folders whose CLAUDE.md and AGENTS.md
+  disagree are listed to merge by hand, also without a count.
 - **After an update, What's new suggests the Codex setup you have not done
   yet:** connecting Worktrees to Codex (only when the Codex CLI is installed
   and the server is not), and linking your Claude skills for Codex (only when
-  some are not linked). Each goes to its place in Settings → Codex, lights the
-  gear's dot until taken, and can be silenced with "Don't show again" there or
-  "Stop suggesting this" in Settings; a newly unlinked skill asks again.
+  some are not linked). Each goes to its place in Settings → Codex, and lights
+  the gear's dot until it is done or silenced ("Don't show again" in What's
+  new, "Stop suggesting this" in Settings). A newly unlinked skill asks again;
+  linking some of the ones you declined does not.
 - **Codex starts in auto-review.** Settings → Codex → Permissions picks how
   much a Codex launched from here may do: Ask (Codex's own default), Auto-review
   (the new default: a reviewer approves or refuses each request, inside a

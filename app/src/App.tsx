@@ -18,12 +18,12 @@ import { type McpStatus } from "./McpPanel";
 import { dismissPatch, pendingOffers, type Offer } from "./offers";
 import type { CatId } from "./SettingsSheet";
 import {
-  driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed, StrayBanner,
+  driftedSlugs, InitBanner, issueCount, ProjectSheet, remedies, reportFailed, StrayBanner,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
 import type { AgentSetupStatus, UserSkill } from "./AgentSetup";
 import type { CodexMcpStatus } from "./CodexMcpPanel";
-import { needsRepair, projectTodos, todoCount } from "./projectTodos";
+import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTodos";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
@@ -165,7 +165,7 @@ type CmdResult = { ok: boolean; code: number; output: string; slug?: string | nu
  * `issues` is the project-level count (placeless findings included, so it equals
  * the sheet's Health badge), `error` means the last run did not produce a report
  * at all — in which case the other two are the last measurement, not this one. */
-type ProjectHealth = { slugs: Set<string>; issues: number; error: string | null };
+type ProjectHealth = { slugs: Set<string>; issues: number; error: string | null; remedies: Remedies };
 
 // Arm keys for the topbar Close (bare control) and the ctx-menu "Close session"
 // (popover). Namespaced so they never collide with the PROJECT remove arms
@@ -3858,11 +3858,12 @@ function App() {
           [root]: {
             slugs: prev?.slugs ?? new Set<string>(),
             issues: prev?.issues ?? 0,
+            remedies: prev?.remedies ?? { relink: 0, force: 0, provision: 0, manual: 0 },
             error: r?.error ?? "doctor produced no report",
           },
         };
       }
-      return { ...h, [root]: { slugs: driftedSlugs(r), issues: issueCount(r), error: null } };
+      return { ...h, [root]: { slugs: driftedSlugs(r), issues: issueCount(r), remedies: remedies(r), error: null } };
     });
   }, []);
   // A BACKGROUND doctor failure is logged, never banner'd — the user didn't ask
@@ -7381,9 +7382,10 @@ function App() {
         todoFocus={projSheetTodo}
         health={projSheet ? health[projSheet] ?? null : null}
         agentStatus={projSheet ? agentSetup[projSheet] ?? null : null}
-        // This root only: the Fix changes one repo's report, and so one
-        // header count. (User skills are machine-wide and live in Settings.)
-        onAgentChanged={(root) => probeAgentSetup(root)}
+        // Every read the sheet makes lands here, so the header count and the
+        // menu agree with the sheet at once. (User skills are machine-wide and
+        // live in Settings.)
+        onAgentLoaded={(root, st) => setAgentSetup((m) => ({ ...m, [root]: st }))}
       />
 
       {/* Per-place status check (right-click a worktree → Status check…, or the
@@ -7697,10 +7699,13 @@ function App() {
               );
             })()}
             {pv?.ok && (() => {
-              // "Project settings…" keeps the DOCTOR count only. It is a
-              // subset of Repair's number above, which adds the agent-setup
-              // items the Fix PR would carry; both read the same `health`, so
-              // they differ by exactly those items and never contradict.
+              // "Project settings…" keeps doctor's WHOLE count (`issueCount`),
+              // what the sheet's Health tag says. Repair's number above is a
+              // different question — what a button can clear: the relink /
+              // re-seed / provision share of those findings (`remedies`), plus
+              // the agent-setup items. So the two differ both ways, by the
+              // findings only an edit clears and by the agent setup; both read
+              // the same `health`, so neither can be stale against the other.
               // The badge is the SHEET's count (issueCount), not the row-glyph set:
               // those two answer different questions, and a placeless finding used
               // to make them disagree with no way to tell which was lying. When the

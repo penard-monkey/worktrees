@@ -90,14 +90,26 @@ else ok("no skills data offers nothing");
 // nowhere is the same bug as the old one.
 const every = pendingOffers(
   { mcp: status("absent"), codexMcp: codex("absent"), userSkills: skills("missing") }, {});
-const allSrc = fs.readdirSync(fileURLToPath(new URL("../src/", import.meta.url)))
-  .filter((f) => /\.tsx?$/.test(f)).map((f) => read(`../src/${f}`)).join("\n");
 const sheetSrc = read("../src/SettingsSheet.tsx");
+// The render of ONE category: from its `{cat === "x" && <>` to the next
+// category's. A data-focus found anywhere in src/ proves nothing about where
+// the deep link lands — it could sit in a section another category renders,
+// or in a component nothing mounts.
+const catSlice = (cat) => {
+  const at = sheetSrc.indexOf(`{cat === "${cat}" && <>`);
+  if (at < 0) return "";
+  const next = sheetSrc.indexOf("{cat === \"", at + 1);
+  return sheetSrc.slice(at, next < 0 ? undefined : next);
+};
 for (const o of every) {
   if (typeof o.to?.cat !== "string" || typeof o.to?.focus !== "string") fail(`${o.id}: offer.to must name a category AND a section`);
   else if (!new RegExp(`id:\\s*"${o.to.cat}"`).test(sheetSrc)) fail(`${o.id}: SettingsSheet has no category "${o.to.cat}"`);
-  else if (!allSrc.includes(`data-focus="${o.to.focus}"`)) fail(`${o.id}: nothing carries data-focus="${o.to.focus}" — the deep link highlights nothing`);
-  else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, and the section exists`);
+  else if (!catSlice(o.to.cat).includes(`data-focus="${o.to.focus}"`)
+    // mcp-server's section predates the call-site convention; section 2 below
+    // pins it in McpPanel, which only the claude category mounts.
+    && !(o.id === "mcp-server" && read("../src/McpPanel.tsx").includes(`data-focus="${o.to.focus}"`))) {
+    fail(`${o.id}: the "${o.to.cat}" category's render carries no data-focus="${o.to.focus}" — the deep link opens the category and highlights nothing`);
+  } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
   // dismissal, per offer
   if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), userSkills: skills("missing") },
@@ -114,6 +126,13 @@ if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,codex-skills") {
     dismissPatch(a, {}));
   if (later.length !== 1) fail("codex-skills: a NEW unlinked skill stayed silenced by an old dismissal");
   else ok("codex-skills: a new unlinked skill re-offers");
+  // …and a SHRINK is not a question: declining {a, b} and then linking b must
+  // stay quiet, though the fingerprint ("a") differs from the one dismissed.
+  const [ab] = pendingOffers({ mcp: null, userSkills: [{ name: "a", status: "missing" }, { name: "b", status: "missing" }] }, {});
+  const shrunk = pendingOffers({ mcp: null, userSkills: [{ name: "a", status: "missing" }, { name: "b", status: "linked" }] },
+    dismissPatch(ab, {}));
+  if (shrunk.length !== 0) fail("codex-skills: linking one of the declined skills re-asked about the rest");
+  else ok("codex-skills: a shrinking unlinked set stays silenced");
 }
 
 const [offer] = pendingOffers({ mcp: status("absent") }, {});

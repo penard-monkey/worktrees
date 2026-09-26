@@ -14,8 +14,10 @@ export type CodexMcpStatus = {
 };
 type Outcome = { ok: boolean; output: string; status: CodexMcpStatus };
 
-export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer }: {
+export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, "data-focus": focusId }: {
   onReport: (text: string) => void;
+  /** The deep-link target, named at the call site (see UserSkillsSection). */
+  "data-focus"?: string;
   /** Every status this panel reads or is handed back — App keeps the
    *  `codex-mcp` offer in step with it, so installing here retires the offer. */
   onStatus?: (s: CodexMcpStatus) => void;
@@ -40,7 +42,7 @@ export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSi
     } catch (e) { onReport(String(e)); }
     finally { setBusy(false); }
   };
-  return <><section className="setting" data-focus="codex-mcp">
+  return <><section className="setting" data-focus={focusId}>
     <label>Codex MCP server</label>
     <div className="hint">Worktrees uses Codex's ChatGPT account sign-in. Run <code>codex login</code> in a terminal to complete the browser flow, then <code>codex login status</code> to check it. Worktrees does not ask for an API key.</div>
     <div className="hint">Connect Worktrees tools to Codex. Claude's MCP setup is separate.</div>

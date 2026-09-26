@@ -782,9 +782,9 @@ export function SettingsSheet({
               anything under them is pushed off screen after the scroll landed
               — measured: "Your skills" ended at y=1258 in an 897px window.
               Skills renders from App's state at once, so it goes above. */}
-          <UserSkillsSection skills={userSkills} onChanged={onUserSkillsChanged}
+          <UserSkillsSection data-focus="codex-skills" skills={userSkills} onChanged={onUserSkillsChanged}
             offerPending={skillsOfferPending} onSilenceOffer={onSilenceSkillsOffer} onReport={onReport} />
-          <CodexMcpSection onReport={onReport} onStatus={onCodexMcpChanged}
+          <CodexMcpSection data-focus="codex-mcp" onReport={onReport} onStatus={onCodexMcpChanged}
             offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />
           </>}
 
