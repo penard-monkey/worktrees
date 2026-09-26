@@ -53,6 +53,18 @@ tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time"] }
 # 16 bytes for the per-launch path token. The OS's CSPRNG, not a clock and a
 # pid: a token anyone can reconstruct is not a token.
 getrandom = "0.3"
+# Filesystem watching for the dock's Files tab. The viewer had no way to learn
+# that a file changed: `places:changed` is only ever emitted for WORKTREE-level
+# events (sync, project add, pull), never for an ordinary write, so a file that
+# Claude rewrote in the pane next door stayed stale on screen until you clicked
+# refresh or left the window and came back.
+#
+# Unlike `sha2` and the docserver's stack, this one is NOT already in the lock
+# tree — it adds fsevent-sys (macOS) and inotify/kqueue (the Linux CI leg),
+# target-gated so only one is ever built. That is the cost; the alternative was
+# polling `list_dir` on a timer for every open viewer, which spends the same
+# work whether or not anything changed.
+notify = "8"
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
