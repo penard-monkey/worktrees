@@ -93,7 +93,12 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
 /// that `env` and `match_word` travel BESIDE the command instead of being parsed
 /// back out of it.
 pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
-    let plain = crate::profile::AiLaunch::plain(ai_cmd);
+    let mut plain = crate::profile::AiLaunch::plain(ai_cmd);
+    // Codex's permission mode rides on EVERY Codex launch, profiled or not —
+    // profiles are claude-only, and this is not a profile setting.
+    if plain.match_word == "codex" {
+        plain.codex_flags = crate::codex::launch_flags(wt);
+    }
     // Reads the same flag the PROBE side reads, so the two cannot get out of
     // step — `claude_config_dir_for_repo` returns `~/.claude` while this is off.
     if !crate::profile::launch_honors_profiles() {
@@ -145,6 +150,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
                 cmd: format!("printf '%s\\n' {} >&2", crate::profile::shell_quote(&msg)),
                 match_word: plain.match_word,
                 opener: None,
+                codex_flags: Vec::new(),
             }
         }
     }
