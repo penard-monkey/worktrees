@@ -12,6 +12,30 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   macOS placement. After that, drop the per-change `window state saved` line
   and keep the restore lines. See
   [the session](docs/sessions/2026-09-23-restore-window/summary.md).
+- **The docs page's `⌘+` has never been tried in Safari, which is where the
+  complaint came from.** The page now binds `⌘+`/`⌘−`/`⌘0` and calls
+  `preventDefault` so the browser does not zoom underneath it. Chrome honours
+  that; Safari has historically let a menu-item shortcut win, and nobody has
+  checked. The Chrome extension refuses to send those chords at all, so the
+  session could only dispatch a synthetic `KeyboardEvent` — which proves our
+  handler runs, not that the browser's own zoom is suppressed. The original
+  symptom (Safari zooms, then resets) was never explained either; nothing in
+  the bundle can cause or fix browser page zoom, which is the argument for the
+  page owning its own. If ⌘+ still page-zooms there, the buttons work
+  regardless and the binding moves to a chord Safari does not own.
+  _From: [2026-09-23 docs-viewer-zoom](docs/sessions/2026-09-23-docs-viewer-zoom/summary.md)_
+
+- **A mermaid diagram does not scale with the docs page's reading size.**
+  `Mermaid.tsx` sets no `fontSize`, so mermaid lays its SVG out at its own
+  default in px and injects its own `<style>`; `.mermaid-host svg` carries
+  `max-width: 100%; height: auto`, which only ever scales it DOWN to fit. At
+  175% the prose is 23px and a diagram's labels are still 16px. Reasoned from
+  the config and the sheet, NOT measured — the docs server was down by
+  close-out. The likely fix is a `fontSize` derived from the zoom at render
+  time, which means re-rendering the diagram on a zoom step rather than
+  restyling it.
+  _From: [2026-09-23 docs-viewer-zoom](docs/sessions/2026-09-23-docs-viewer-zoom/summary.md)_
+
 - **Codex needs a manual check doc, like AI profiles have.** Bats has no fake
   `codex`, so the live side is unguarded: a Claude → Codex → Claude switch
   leaving one session each step, resume after a switch, the adopted-session
