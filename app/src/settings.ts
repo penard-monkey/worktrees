@@ -121,6 +121,11 @@ export function panelsFor(s: Settings, key: string | null): Settings {
   return s.dock_open ? { ...s, dock_open: false } : s;
 }
 
+// Settings → Codex: how much a Worktrees-launched Codex may do without asking.
+// The same three strings `worktrees_core::codex::Permissions::parse` accepts.
+export const CODEX_PERMISSIONS = ["ask", "auto-review", "full"] as const;
+export type CodexPermissions = (typeof CODEX_PERMISSIONS)[number];
+
 export type Settings = {
   ui_rem: number; // 13–22 — the BASE chrome size (see `app_zoom` for the overall knob)
   // Overall app zoom — WKWebView page zoom, ⌘+ / ⌘− / ⌘0 (see ZOOM_STEPS).
@@ -290,6 +295,10 @@ export type Settings = {
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
   default_provider: "claude" | "codex"; // app's initial agent; both may run in one place
+  // How much a Worktrees-launched Codex may do without asking. Pushed to the
+  // backend (`set_codex_permissions`) at load and on every change; it applies to
+  // the NEXT launch. Mirrors `worktrees_core::codex::Permissions`.
+  codex_permissions: CodexPermissions;
   ai_auto_resume: boolean; // single-click Enter resumes the selected provider when possible
   update_auto_check: boolean; // check for updates ~3s after launch (manual check always works)
   fetch_interval_min: number; // background `git fetch origin` cadence (0 = off, else 5 | 15 | 60)
@@ -344,6 +353,10 @@ export type Settings = {
   // the same re-suggest rule, and unifying them would mean the CLI reading an
   // app-owned file — a worse dependency than a duplicated boolean-shaped fact.
   init_dismissed: Record<string, string>;
+  // The agent-setup offer ("instructions only in CLAUDE.md"), dismissed per
+  // project root. Same shape and rule as `init_dismissed`: the VALUE is a hash
+  // of the report's dirs + skills, so a tree that changes re-offers.
+  agent_setup_dismissed: Record<string, string>;
   // Offers silenced by the user, id -> the FINGERPRINT that was dismissed
   // (`offers.ts`). Deliberately the same shape as `init_dismissed` above and not
   // the boolean this replaced: `mcp_nudge_dismissed` was safe only because its
@@ -401,6 +414,7 @@ export const DEFAULTS: Settings = {
   editor_cmd: "code",
   terminal_cmd: "",
   default_provider: "claude",
+  codex_permissions: "auto-review",
   ai_auto_resume: true,
   update_auto_check: true,
   fetch_interval_min: 0,
@@ -416,6 +430,7 @@ export const DEFAULTS: Settings = {
   manual_order: {},
   last_seen_version: "",
   init_dismissed: {},
+  agent_setup_dismissed: {},
   offers_dismissed: {},
   settings_rev: SETTINGS_REV,
 };
@@ -638,6 +653,7 @@ export async function loadSettings(): Promise<Settings> {
     s.done_horizon_secs = snapHorizon(s.done_horizon_secs);
     s.done_steps = clampSteps(s.done_steps);
     if (s.default_provider !== "claude" && s.default_provider !== "codex") s.default_provider = "claude";
+    if (!CODEX_PERMISSIONS.includes(s.codex_permissions)) s.codex_permissions = "auto-review";
     if (migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0)) saveSettings(s);
     return s;
   } catch {

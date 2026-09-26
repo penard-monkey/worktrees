@@ -730,7 +730,36 @@ export function SettingsSheet({
             onSilenceOffer={onSilenceMcpOffer} onChanged={onMcpChanged} onReport={onReport} />
           </>}
 
-          {cat === "codex" && <CodexMcpSection onReport={onReport} />}
+          {cat === "codex" && <>
+          <section className="setting">
+            <label>Permissions</label>
+            <div className="seg seg-plain" data-testid="codex-permissions">
+              {([
+                ["ask", "Ask"],
+                ["auto-review", "Auto-review"],
+                ["full", "Full access"],
+              ] as const).map(([mode, label]) => (
+                <button key={mode} className={settings.codex_permissions === mode ? "on" : ""}
+                  onClick={() => onChange({ codex_permissions: mode })}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {/* All three lines, always: the choice is only honest if you can read
+                what you are NOT picking. The current one is bold. */}
+            {([
+              ["ask", "Ask", "Codex asks before running commands."],
+              ["auto-review", "Auto-review", "a reviewer approves or refuses each request; commands run sandboxed to this worktree and its git data, with network."],
+              ["full", "Full access", "no prompts and no sandbox."],
+            ] as const).map(([mode, label, line]) => (
+              <div className="hint" key={mode}>
+                {settings.codex_permissions === mode ? <b>{label}:</b> : `${label}:`} {line}
+              </div>
+            ))}
+            <div className="hint">Applies to the next Codex launch; a session already running keeps what it started with.</div>
+          </section>
+          <CodexMcpSection onReport={onReport} />
+          </>}
 
           {cat === "commands" && <>
           <section className="setting">

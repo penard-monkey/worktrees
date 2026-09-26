@@ -3,6 +3,7 @@ import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProfilesInfo } from "./ProfilesPanel";
+import { AgentSetupSection } from "./AgentSetup";
 
 // Right-side slide-over for ONE project (proposal §10). It stays a sheet:
 // unlike Settings, it is about the thing selected in the tree behind it.
@@ -114,8 +115,15 @@ export function ProjectSheet({
   onClose,
   onReport,
   onConfigWritten,
+  agentFocus = false,
+  onAgentChanged,
 }: {
   open: boolean;
+  /** Opened from the nav's agent-setup offer: scroll to that section. */
+  agentFocus?: boolean;
+  /** The agent setup was re-read (after a Fix or a link) — App re-probes so
+   *  the nav offer retires. */
+  onAgentChanged: (root: string) => void;
   /** Worktrees registered outside `.worktrees/` (from the snapshot's `strays`). */
   strays?: Stray[];
   root: string;
@@ -146,6 +154,12 @@ export function ProjectSheet({
   // land in app.log (ProjectSheet has no fail() — same shape as SettingsSheet).
   const note = useCallback((m: string) => {
     setErr(m);
+    invoke("log_event", { level: "error", msg: m }).catch(() => {});
+  }, []);
+
+  // For a section that shows its OWN error inline (Agent setup): log it, but do
+  // not also paint it into the Health section's error area.
+  const logError = useCallback((m: string) => {
     invoke("log_event", { level: "error", msg: m }).catch(() => {});
   }, []);
 
@@ -459,6 +473,8 @@ export function ProjectSheet({
             {log && <pre className="update-log">{log}</pre>}
             {err && <pre className="update-log">{err}</pre>}
           </section>
+
+          <AgentSetupSection root={root} open={open} focus={agentFocus} onChanged={onAgentChanged} onError={logError} />
 
           {canSuggest && suggestion && (
             <section className="setting">

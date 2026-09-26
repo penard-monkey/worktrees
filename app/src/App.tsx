@@ -20,6 +20,7 @@ import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed, StrayBanner,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
+import { AgentSetupBanner, agentSetupKey, agentSetupOffers, type AgentSetupStatus } from "./AgentSetup";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
@@ -3254,6 +3255,8 @@ function App() {
   >(null);
   const [whatsNew, setWhatsNew] = useState<{ version: string; notes: string; manual?: boolean } | null>(null);
   const [projSheet, setProjSheet] = useState<string | null>(null);
+  // Opened from the agent-setup offer: the sheet scrolls to that section.
+  const [projSheetAgent, setProjSheetAgent] = useState(false);
   /** The per-place status check (right-click → Status check…, or the topbar ⋯).
    *  Holds `{repo, slug}` rather than a Place: the 3s refresh swaps every Place
    *  object, and the sheet re-fetches its own report anyway. */
@@ -3332,6 +3335,10 @@ function App() {
   // What `worktrees init` would suggest per project (§9's nudge). Probed ONCE per
   // project — it walks the checkout, so it is not poll-path work either.
   const [suggest, setSuggest] = useState<Record<string, InitSuggestion>>({});
+  // `worktrees agent-setup status` per project — the offer behind the nav's
+  // "Agent setup" banner. Rides the same 5-minute sweep as `suggest`: it reads
+  // the default-branch ref, which a merge or a pull moves from OUTSIDE the app.
+  const [agentSetup, setAgentSetup] = useState<Record<string, AgentSetupStatus>>({});
   // Badge = actionable updates. CLI via the pinned-tag installer; the app via
   // tauri-plugin-updater (signed bundles) — both one click in Settings now.
   const cliStale = !!(upd?.latest && upd.cli_version && vnewer(upd.latest, upd.cli_version));
@@ -3998,6 +4005,16 @@ function App() {
       invoke("log_event", { level: "warn", msg: `init_suggest ${root}: ${String(e)}` }).catch(() => {});
     }
   }, []);
+  const probeAgentSetup = useCallback(async (root: string) => {
+    try {
+      const s = await invoke<AgentSetupStatus | null>("agent_setup_status", { repo: root });
+      if (s) setAgentSetup((m) => ({ ...m, [root]: s }));
+    } catch (e) {
+      // A repo with no commits yet refuses here; that is not worth a toast on
+      // every sweep, but it is never silent either.
+      invoke("log_event", { level: "warn", msg: `agent_setup_status ${root}: ${String(e)}` }).catch(() => {});
+    }
+  }, []);
   useEffect(() => {
     const roots = rootsKey ? rootsKey.split("\n") : [];
     // A removed project must not keep its drift decoration or its suggestion
@@ -4009,6 +4026,7 @@ function App() {
         : Object.fromEntries(Object.entries(m).filter(([k]) => live.has(k)));
     setHealth((m) => prune(m));
     setSuggest((m) => prune(m));
+    setAgentSetup((m) => prune(m));
     if (roots.length === 0) return;
     // The init probe rides the doctor sweep rather than running once per root:
     // `.worktrees.toml` can appear from OUTSIDE the app (a merge, a pull, the
@@ -4019,6 +4037,7 @@ function App() {
       roots.filter((r) => okRoots.current.has(r)).forEach((r) => {
         sweepDoctor(r);
         probeSuggest(r);
+        probeAgentSetup(r);
       });
     // Slow timer, not the poll — but it still shells out per root, so it stops
     // while the window is off screen. The guard sits BEFORE the immediate sweep
@@ -4031,7 +4050,7 @@ function App() {
     sweep();
     const t = setInterval(sweep, 5 * 60_000);
     return () => clearInterval(t);
-  }, [rootsKey, sweepDoctor, probeSuggest, pageVisible]);
+  }, [rootsKey, sweepDoctor, probeSuggest, probeAgentSetup, pageVisible]);
 
   // uncaught frontend errors → app log (the "it just didn't respond" killers)
   useEffect(() => {
@@ -4123,6 +4142,16 @@ function App() {
       } catch { /* harness / older backend */ }
     })();
   }, []);
+
+  // Settings → Codex → Permissions lives in the backend's process (the app
+  // links core; `codex::set_permissions_override`), so it is pushed after the
+  // load and on every change. Gated on hydration: pushing the DEFAULT first
+  // would be harmless only until someone launches Codex in that gap. A refusal
+  // is surfaced, never swallowed — it would mean the launch uses another mode.
+  useEffect(() => {
+    if (!hydratedTick) return;
+    invoke("set_codex_permissions", { mode: settings.codex_permissions }).catch((e) => fail(`Codex permissions: ${String(e)}`));
+  }, [hydratedTick, settings.codex_permissions, fail]);
 
   /** The functional form exists for patches that must be built from OTHER
    *  keys' current value — undo restoring one repo's `manual_order` entry.
@@ -5023,6 +5052,10 @@ function App() {
   // value is the suggestion's content hash, never a boolean — see settings.ts).
   const dismissInit = (root: string, hash: string) => {
     updateSettings({ init_dismissed: { ...(settings.init_dismissed ?? {}), [root]: hash } });
+  };
+  // The agent-setup offer, same rule: dismissed until its dirs/skills change.
+  const dismissAgentSetup = (root: string, key: string) => {
+    updateSettings((prev) => ({ agent_setup_dismissed: { ...(prev.agent_setup_dismissed ?? {}), [root]: key } }));
   };
   // Settings → Data → "Reset to defaults". Preserve last_seen_version so the
   // What's-new sheet doesn't re-fire, push through the same apply/persist/refit
@@ -6395,6 +6428,23 @@ function App() {
                 />
               );
             })()}
+            {(() => {
+              // Rendered per PROJECT, beside the init nudge — deliberately not
+              // gated on `sel`/`selected`: an offer about a project's default
+              // branch must not also require that some place of it is open
+              // (CLAUDE.md: a suggestion's surface may not add preconditions).
+              const st = agentSetup[pv.root];
+              if (!st || !agentSetupOffers(st)) return null;
+              const key = agentSetupKey(st);
+              if (settings.agent_setup_dismissed?.[pv.root] === key) return null;
+              return (
+                <AgentSetupBanner
+                  status={st}
+                  onOpen={() => { setProjSheetAgent(true); setProjSheet(pv.root); }}
+                  onDismiss={() => dismissAgentSetup(pv.root, key)}
+                />
+              );
+            })()}
             {/* Above the places, like the init nudge: a stray has no row by
                 construction — that IS the condition — so the only honest place
                 for it is beside the list it is missing from. Not dismissible
@@ -7412,9 +7462,13 @@ function App() {
         editorCmd={settings.editor_cmd}
         suggestion={projSheet ? suggest[projSheet] ?? null : null}
         strays={projSheet ? ws?.projects.find((p) => p.root === projSheet)?.snapshot?.strays ?? [] : []}
-        onClose={() => setProjSheet(null)}
+        onClose={() => { setProjSheet(null); setProjSheetAgent(false); }}
         onReport={takeReport}
         onConfigWritten={(root) => { probeSuggest(root); refresh(); }}
+        agentFocus={projSheetAgent}
+        // This root only: the nav offer is about the repo, and the user-skill
+        // links it could also have changed are shown only in this sheet.
+        onAgentChanged={(root) => probeAgentSetup(root)}
       />
 
       {/* Per-place status check (right-click a worktree → Status check…, or the

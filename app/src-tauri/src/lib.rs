@@ -3977,6 +3977,69 @@ async fn init_write(repo: String) -> Result<CmdResult, String> {
     run_op("init", &repo, |p, ui| ops::cmd_init(p, ui, &args))
 }
 
+// ── agent setup (AGENTS.md for every agent, skills Codex can see) ────────────
+// The app half of `worktrees agent-setup`. `status` reads the project's
+// DEFAULT-BRANCH ref (never a checkout) plus the user's ~/.claude/skills;
+// `fix` is outward-facing — it pushes a branch and opens a PR — so the sheet
+// arms it. The frontend probes `status` on the same slow sweep as
+// `init_suggest`, never on the 3s poll.
+
+#[derive(Serialize)]
+struct AgentSetupStatus {
+    repo: worktrees_core::agentfiles::Report,
+    user_skills: Vec<worktrees_core::agentfiles::UserSkill>,
+}
+
+#[tauri::command]
+async fn agent_setup_status(repo: String) -> Result<AgentSetupStatus, String> {
+    let p = project_at(&repo, "agent_setup_status")?;
+    let report = worktrees_core::agentfiles::inspect(&p).map_err(|e| {
+        applog("error", &format!("agent_setup_status repo={repo}: {e}"));
+        e
+    })?;
+    Ok(AgentSetupStatus { repo: report, user_skills: worktrees_core::agentfiles::user_skills() })
+}
+
+#[tauri::command]
+async fn agent_setup_fix(app: AppHandle, repo: String) -> Result<worktrees_core::agentfiles::FixOutcome, String> {
+    let p = project_at(&repo, "agent_setup_fix")?;
+    let out = worktrees_core::agentfiles::fix(&p);
+    // A new local branch (and maybe a fetch) either way — re-pull the snapshot.
+    let _ = app.emit("places:changed", ());
+    match out {
+        Ok(o) => {
+            applog("info", &format!("agent_setup_fix repo={repo}: commit={:?} pushed={} pr={:?}", o.commit, o.pushed, o.pr_url));
+            Ok(o)
+        }
+        Err(e) => {
+            applog("error", &format!("agent_setup_fix repo={repo}: {e}"));
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+async fn agent_link_skills() -> Result<Vec<String>, String> {
+    worktrees_core::agentfiles::link_user_skills().map_err(|e| {
+        applog("error", &format!("agent_link_skills: {e}"));
+        e
+    })
+}
+
+/// The Settings → Codex permission mode, pushed in-process so the NEXT Codex
+/// launch uses it. An unknown value is refused, never defaulted: a typo must not
+/// quietly widen (or narrow) what Codex may do.
+#[tauri::command]
+async fn set_codex_permissions(mode: String) -> Result<(), String> {
+    let Some(p) = worktrees_core::codex::Permissions::parse(&mode) else {
+        let e = format!("unknown Codex permission mode '{mode}' (expected ask, auto-review or full)");
+        applog("error", &format!("set_codex_permissions: {e}"));
+        return Err(e);
+    };
+    worktrees_core::codex::set_permissions_override(Some(p));
+    Ok(())
+}
+
 // ── diagnostics (Settings → Logs → Copy diagnostics) ─────────────────────────
 // A single clipboard-ready plaintext block for bug reports. Entirely OFFLINE:
 // no check_update / no network — versions come from the compiled-in constant +
@@ -7359,6 +7422,10 @@ pub fn run() {
             sync_apply,
             init_suggest,
             init_write,
+            agent_setup_status,
+            agent_setup_fix,
+            agent_link_skills,
+            set_codex_permissions,
             diagnostics,
             tmux_check,
             set_zoom,

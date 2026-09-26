@@ -3,6 +3,36 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **One set of instructions for every agent, and Codex sees your skills.**
+  A Codex launched from here now reads a project's CLAUDE.md when there is no
+  AGENTS.md, so a project written for Claude briefs Codex too with no change
+  to the repo (subdirectories included; an AGENTS.md still wins). Other tools
+  that read only AGENTS.md still see nothing. To make it permanent,
+  `worktrees agent-setup` (and a new "Agent setup" section in the project
+  sheet) checks the default branch and offers a fix: AGENTS.md becomes the
+  real file, which Codex and other agents read, and CLAUDE.md a one-line
+  `@AGENTS.md` import, so Claude reads the same words. Skills in
+  `.claude/skills` are linked into `.agents/skills`, where Codex looks. The
+  fix is committed on its own `agent-instructions` branch, pushed, and opened
+  as a pull request, so nothing lands until you merge it and your checkouts
+  are never touched. A directory whose CLAUDE.md and AGENTS.md say different
+  things is left alone and named, for you to merge by hand. A banner under the
+  project offers this once; "Not now" hides it until the files change. The
+  same section links your own `~/.claude/skills` into `~/.agents/skills`, one
+  symlink each, and leaves alone any name that already belongs to a different
+  skill.
+- **Codex starts in auto-review.** Settings → Codex → Permissions picks how
+  much a Codex launched from here may do: Ask (Codex's own default), Auto-review
+  (the new default: a reviewer approves or refuses each request, inside a
+  sandbox) or Full access (no prompts, no sandbox). Auto-review's sandbox
+  covers the worktree plus two things it would otherwise refuse, both found by
+  trying: the repository's shared git data, without which `git commit` fails
+  in any worktree but the main one, and the network, without which `git push`
+  and `gh` cannot reach GitHub. A change applies to the next Codex launch.
+
 ## [0.30.0] - 2026-09-23
 
 ### Added
