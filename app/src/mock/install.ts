@@ -230,11 +230,14 @@ const WT_ROOT = "/Users/demo/workspace/worktrees";
 
 // ── agent setup (AGENTS.md for every agent) ─────────────────────────────────
 // STATEFUL like mockConfigs: casa-del-valle starts CLAUDE.md-only with one repo
-// skill Codex cannot see, so the nav offer, the sheet section and the armed Fix
-// are all reachable by clicking. A Fix marks it `pending` and changes nothing
-// else, as in the real backend: the default branch only moves when the PR
-// merges. A link empties the user's missing list. Every other project is
-// already set up.
+// skill Codex cannot see (and it has doctor drift too), so its header to-do
+// badge, "Repair / upgrade…", the sheet's To do list and the armed Fix are all
+// reachable by clicking. A Fix marks it `pending` and changes nothing else, as
+// in the real backend: the default branch only moves when the PR merges.
+// `worktrees` starts with a fix branch ALREADY committed (locally — never
+// pushed) plus one diverged dir: the project whose report still says `fixable`
+// and whose count must be 0. A link
+// empties the user's missing list. Every other project is already set up.
 type MockAgentReport = {
   reference: string;
   dirs: { dir: string; kind: string }[];
@@ -242,6 +245,7 @@ type MockAgentReport = {
   fixable: boolean;
   conflicts: boolean;
   pending: string | null;
+  pending_on_origin: boolean;
 };
 const mockAgentRepos: Record<string, MockAgentReport> = {
   [CDV_ROOT]: {
@@ -251,6 +255,18 @@ const mockAgentRepos: Record<string, MockAgentReport> = {
     fixable: true,
     conflicts: false,
     pending: null,
+    pending_on_origin: false,
+  },
+  [WT_ROOT]: {
+    reference: "origin/main",
+    dirs: [{ dir: "", kind: "claude-only" }, { dir: "app", kind: "diverged" }],
+    skills: [{ name: "close-out", kind: "missing" }],
+    fixable: true,
+    conflicts: true,
+    pending: "agent-instructions",
+    // Committed but never pushed — the "no PR to wait for" wording. The
+    // pushed wording is reached by pressing Fix on casa-del-valle.
+    pending_on_origin: false,
   },
 };
 const mockUserSkills: { name: string; status: string }[] = [
@@ -537,6 +553,13 @@ let mockPortFindings: Record<string, MockFinding[]> = {
     {
       severity: "info", code: "port-busy", place: "messaging", path: null,
       message: "API=3101 is already bound — expected while this place's stack is up",
+    },
+    // Placeless and EDIT-only (the config's `future_thing` warning, as doctor
+    // reports it): neither relink nor provision clears it, so the To do list
+    // must show it as a row with no button and no count.
+    {
+      severity: "warn", code: "unknown-key", place: null, path: ".worktrees.toml",
+      message: "unknown key `future_thing` in .worktrees.toml — ignored",
     },
   ],
 };
@@ -2454,6 +2477,7 @@ Phase 3: Frontend pane and mock harness
         fixable: false,
         conflicts: false,
         pending: null,
+        pending_on_origin: false,
       };
       return clone({ repo, user_skills: mockUserSkills });
     }
@@ -2468,7 +2492,7 @@ Phase 3: Frontend pane and mock harness
       }
       // Like the real backend: the default branch does not change until the PR
       // merges, so the report stays `fixable` and only `pending` retires the offer.
-      mockAgentRepos[root] = { ...r, pending: "agent-instructions" };
+      mockAgentRepos[root] = { ...r, pending: "agent-instructions", pending_on_origin: true };
       const url = "https://github.com/demo/casa-del-valle-monorepo/pull/412";
       return {
         branch: "agent-instructions", base: "origin/main", commit: "3f9a1c2d4e5b6a7f8091a2b3c4d5e6f708192a3b",
@@ -2476,6 +2500,8 @@ Phase 3: Frontend pane and mock harness
         notes: ["Committed 3f9a1c2 on branch 'agent-instructions' (off origin/main).", `Opened ${url} — merge it to finish.`],
       };
     }
+    case "agent_user_skills":
+      return clone(mockUserSkills);
     case "agent_link_skills": {
       const done = mockUserSkills.filter((u) => u.status === "missing").map((u) => u.name);
       for (const u of mockUserSkills) if (u.status === "missing") u.status = "linked";

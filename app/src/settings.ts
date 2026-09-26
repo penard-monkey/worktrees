@@ -355,10 +355,6 @@ export type Settings = {
   // the same re-suggest rule, and unifying them would mean the CLI reading an
   // app-owned file — a worse dependency than a duplicated boolean-shaped fact.
   init_dismissed: Record<string, string>;
-  // The agent-setup offer ("instructions only in CLAUDE.md"), dismissed per
-  // project root. Same shape and rule as `init_dismissed`: the VALUE is a hash
-  // of the report's dirs + skills, so a tree that changes re-offers.
-  agent_setup_dismissed: Record<string, string>;
   // Offers silenced by the user, id -> the FINGERPRINT that was dismissed
   // (`offers.ts`). Deliberately the same shape as `init_dismissed` above and not
   // the boolean this replaced: `mcp_nudge_dismissed` was safe only because its
@@ -434,7 +430,6 @@ export const DEFAULTS: Settings = {
   manual_order: {},
   last_seen_version: "",
   init_dismissed: {},
-  agent_setup_dismissed: {},
   offers_dismissed: {},
   settings_rev: SETTINGS_REV,
 };
@@ -648,6 +643,12 @@ export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await invoke<Partial<Settings> | null>("get_settings");
     const s = { ...DEFAULTS, ...(raw ?? {}) };
+    // Retired key: the per-project "Agent setup" nav banner's dismissals. The
+    // banner became the project's to-do badge (`projectTodos.ts`), which is
+    // not dismissible — it leaves when the work is done. An old ui-state.json
+    // still carries the key; drop it here so the next whole-blob save stops
+    // copying it forward (the merge above would keep it forever otherwise).
+    delete (s as Partial<Settings> & { agent_setup_dismissed?: unknown }).agent_setup_dismissed;
     s.usage_claude = typeof s.usage_claude === "boolean" ? s.usage_claude : true;
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
     s.theme = normalizeTheme(s.theme);

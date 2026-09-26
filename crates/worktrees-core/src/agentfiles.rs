@@ -91,6 +91,12 @@ pub struct Report {
     /// not move until that PR merges, so without this `fixable` stays true after
     /// a successful fix and the offer would invite a push that can only refuse.
     pub pending: Option<String>,
+    /// Whether the pending branch is on ORIGIN. `pending` alone cannot tell a
+    /// fix that reached review from one committed locally whose push failed
+    /// (no origin, no network, no gh) — and the second has no PR to wait for,
+    /// so a surface that says "waiting to merge" about it is lying. Kept beside
+    /// `pending` rather than replacing it so older readers keep working.
+    pub pending_on_origin: bool,
 }
 
 /// One tracked entry from `git ls-tree -r`.
@@ -205,7 +211,7 @@ pub fn report_from(reference: &str, dirs: Vec<DirState>, skills: Vec<SkillState>
     let fixable = dirs.iter().any(|d| matches!(d.kind, DirKind::ClaudeOnly | DirKind::AgentsOnly))
         || skills.iter().any(|s| s.kind == SkillKind::Missing);
     let conflicts = dirs.iter().any(|d| d.kind == DirKind::Diverged);
-    Report { reference: reference.to_string(), dirs, skills, fixable, conflicts, pending: None }
+    Report { reference: reference.to_string(), dirs, skills, fixable, conflicts, pending: None, pending_on_origin: false }
 }
 
 // ── git plumbing ─────────────────────────────────────────────────────────────
@@ -301,9 +307,17 @@ static CLASSIFIED: std::sync::Mutex<Vec<(String, String, Vec<DirState>, Vec<Skil
 
 /// The fix branch, if it exists locally or on origin.
 pub fn pending_branch(root: &str) -> Option<String> {
+    pending_state(root).map(|(b, _)| b)
+}
+
+/// The fix branch and whether ORIGIN has it (`Report::pending_on_origin`).
+/// "Origin" is our remote-tracking ref, i.e. as of the last fetch or push —
+/// `fix` pushes with `-u`, so a successful push always updates it.
+pub fn pending_state(root: &str) -> Option<(String, bool)> {
     let exists = |r: String| crate::git::git_ok(root, &["show-ref", "--verify", "-q", &r]);
-    (exists(format!("refs/heads/{FIX_BRANCH}")) || exists(format!("refs/remotes/origin/{FIX_BRANCH}")))
-        .then(|| FIX_BRANCH.to_string())
+    let local = exists(format!("refs/heads/{FIX_BRANCH}"));
+    let origin = exists(format!("refs/remotes/origin/{FIX_BRANCH}"));
+    (local || origin).then(|| (FIX_BRANCH.to_string(), origin))
 }
 
 pub fn inspect(p: &crate::project::Project) -> Result<Report, String> {
@@ -329,7 +343,10 @@ pub fn inspect(p: &crate::project::Project) -> Result<Report, String> {
         }
     };
     let mut r = report_from(&reference, dirs, skills);
-    r.pending = pending_branch(&p.main_root);
+    if let Some((b, on_origin)) = pending_state(&p.main_root) {
+        r.pending = Some(b);
+        r.pending_on_origin = on_origin;
+    }
     Ok(r)
 }
 
@@ -654,7 +671,11 @@ pub fn cmd_agent_setup(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, 
             }
             ui.header(&format!("Agent instructions on {}", r.reference));
             if let Some(b) = &r.pending {
-                ui.plain(&format!("  a fix is waiting on branch '{b}' — merge its PR"));
+                if r.pending_on_origin {
+                    ui.plain(&format!("  a fix is waiting on branch '{b}' — merge its PR"));
+                } else {
+                    ui.plain(&format!("  branch '{b}' was committed but never pushed — push it, or delete it to fix again"));
+                }
             }
             if r.dirs.is_empty() {
                 ui.plain("  no CLAUDE.md or AGENTS.md — nothing to fix");
@@ -899,8 +920,37 @@ mod tests {
         let after = inspect(&p).unwrap();
         assert!(after.fixable, "main still needs it until the PR merges");
         assert_eq!(after.pending.as_deref(), Some(FIX_BRANCH));
+        assert!(after.pending_on_origin, "the push reached origin");
         // A second run refuses rather than racing the open PR.
         assert!(fix_with(&p, fake_gh.to_str().unwrap()).unwrap_err().contains("already exists"));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// A fix that never left the machine (no origin here; a failed push is the
+    /// same state) leaves the branch pending LOCALLY — and there is no PR, so
+    /// the app must not say one is waiting to merge.
+    #[test]
+    fn a_fix_that_never_reached_origin_is_pending_locally_only() {
+        let t = std::fs::canonicalize(std::env::temp_dir()).unwrap()
+            .join(format!("wt-agentfix-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let repo = t.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        sh(&repo, &["config", "user.name", "t"]);
+        sh(&repo, &["config", "user.email", "t@t"]);
+        std::fs::write(repo.join("CLAUDE.md"), "# rules\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        let p = crate::project::Project::discover(&repo).unwrap();
+        let before = inspect(&p).unwrap();
+        assert!(before.pending.is_none() && !before.pending_on_origin);
+        // gh is never reached without an origin; a path that cannot run proves it.
+        let out = fix_with(&p, "/nonexistent/gh").unwrap();
+        assert!(out.commit.is_some() && !out.pushed && out.pr_url.is_none(), "{:?}", out.notes);
+        let after = inspect(&p).unwrap();
+        assert_eq!(after.pending.as_deref(), Some(FIX_BRANCH));
+        assert!(!after.pending_on_origin, "nothing was pushed");
         let _ = std::fs::remove_dir_all(&t);
     }
 }

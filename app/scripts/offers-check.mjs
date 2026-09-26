@@ -60,7 +60,81 @@ if (offering.join(",") !== "absent") {
 if (pendingOffers({ mcp: null }, {}).length !== 0) fail("a null status (probe failed) must offer nothing");
 else ok("an unknown status offers nothing");
 
+// ── 1b. the Codex offers: same rule, plus "Codex is actually here" ─────────
+const codex = (state, bin = "/usr/local/bin/codex") => ({ state, codex_bin: bin, worktrees_bin: "/w",
+  entry: null, command: null, config_path: "/x/.codex/config.toml" });
+const CODEX = ["installed", "read-only", "stale", "foreign", "absent", "cli-missing"];
+const ids = (ctx) => pendingOffers({ mcp: null, ...ctx }, {}).map((o) => o.id);
+const codexOffering = CODEX.filter((st) => ids({ codexMcp: codex(st) }).includes("codex-mcp"));
+if (codexOffering.join(",") !== "absent") {
+  fail(`Codex states that offer: [${codexOffering}] — expected exactly [absent]. Broken states are the `
+     + "panel's problem to state, never a dismissible suggestion.");
+} else ok("codex-mcp: only `absent` offers");
+if (ids({ codexMcp: codex("absent", null) }).includes("codex-mcp")) {
+  fail("codex-mcp offered with no Codex CLI — a server for an agent the user never installed");
+} else ok("codex-mcp needs the Codex CLI present");
+if (ids({ codexMcp: null }).length !== 0) fail("an unknown Codex status must offer nothing");
+else ok("an unknown Codex status offers nothing");
+
+const skills = (...st) => st.map((status, i) => ({ name: `s${i}`, status }));
+if (!ids({ userSkills: skills("missing", "linked") }).includes("codex-skills")) fail("a missing user skill did not offer codex-skills");
+else ok("codex-skills offers when a user skill is missing");
+if (ids({ userSkills: skills("linked", "conflict") }).includes("codex-skills")) {
+  fail("codex-skills offered with nothing MISSING — a conflict is not something linking can fix");
+} else ok("linked/conflict skills alone offer nothing");
+if (ids({ userSkills: null }).length !== 0 || ids({ userSkills: [] }).length !== 0) fail("no skills data must offer nothing");
+else ok("no skills data offers nothing");
+
 // ── 2. an offer's action is a DESTINATION, not a deed ──────────────────────
+// Every offer id, not just the first: a new offer whose deep link lands
+// nowhere is the same bug as the old one.
+const every = pendingOffers(
+  { mcp: status("absent"), codexMcp: codex("absent"), userSkills: skills("missing") }, {});
+const sheetSrc = read("../src/SettingsSheet.tsx");
+// The render of ONE category: from its `{cat === "x" && <>` to the next
+// category's. A data-focus found anywhere in src/ proves nothing about where
+// the deep link lands — it could sit in a section another category renders,
+// or in a component nothing mounts.
+const catSlice = (cat) => {
+  const at = sheetSrc.indexOf(`{cat === "${cat}" && <>`);
+  if (at < 0) return "";
+  const next = sheetSrc.indexOf("{cat === \"", at + 1);
+  return sheetSrc.slice(at, next < 0 ? undefined : next);
+};
+for (const o of every) {
+  if (typeof o.to?.cat !== "string" || typeof o.to?.focus !== "string") fail(`${o.id}: offer.to must name a category AND a section`);
+  else if (!new RegExp(`id:\\s*"${o.to.cat}"`).test(sheetSrc)) fail(`${o.id}: SettingsSheet has no category "${o.to.cat}"`);
+  else if (!catSlice(o.to.cat).includes(`data-focus="${o.to.focus}"`)
+    // mcp-server's section predates the call-site convention; section 2 below
+    // pins it in McpPanel, which only the claude category mounts.
+    && !(o.id === "mcp-server" && read("../src/McpPanel.tsx").includes(`data-focus="${o.to.focus}"`))) {
+    fail(`${o.id}: the "${o.to.cat}" category's render carries no data-focus="${o.to.focus}" — the deep link opens the category and highlights nothing`);
+  } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
+  if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
+  // dismissal, per offer
+  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), userSkills: skills("missing") },
+    dismissPatch(o, {})).some((x) => x.id === o.id)) fail(`${o.id}: dismissing it did not silence it`);
+  else ok(`${o.id}: dismissal silences its own fingerprint (${JSON.stringify(o.fingerprint)})`);
+}
+if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,codex-skills") {
+  fail(`expected all three offers, got [${every.map((o) => o.id)}]`);
+}
+// The skills fingerprint is the SET of unlinked skills: a new one is a new question.
+{
+  const [a] = pendingOffers({ mcp: null, userSkills: [{ name: "a", status: "missing" }] }, {});
+  const later = pendingOffers({ mcp: null, userSkills: [{ name: "a", status: "missing" }, { name: "b", status: "missing" }] },
+    dismissPatch(a, {}));
+  if (later.length !== 1) fail("codex-skills: a NEW unlinked skill stayed silenced by an old dismissal");
+  else ok("codex-skills: a new unlinked skill re-offers");
+  // …and a SHRINK is not a question: declining {a, b} and then linking b must
+  // stay quiet, though the fingerprint ("a") differs from the one dismissed.
+  const [ab] = pendingOffers({ mcp: null, userSkills: [{ name: "a", status: "missing" }, { name: "b", status: "missing" }] }, {});
+  const shrunk = pendingOffers({ mcp: null, userSkills: [{ name: "a", status: "missing" }, { name: "b", status: "linked" }] },
+    dismissPatch(ab, {}));
+  if (shrunk.length !== 0) fail("codex-skills: linking one of the declined skills re-asked about the rest");
+  else ok("codex-skills: a shrinking unlinked set stays silenced");
+}
+
 const [offer] = pendingOffers({ mcp: status("absent") }, {});
 if (!offer) {
   fail("no offer for `absent` — nothing else below can run");
@@ -130,6 +204,17 @@ if (!feed) {
      + "moved one line up.");
 } else ok("the modal is fed every pending offer (bar the manual view)");
 
+// …and the CONTEXT: an offer whose input is never fed can never render. The two
+// Codex inputs must be the machine-level probes, not some project's status.
+const ctxCall = app.match(/pendingOffers\(\{([^}]*)\}/);
+if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1])) {
+  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp and userSkills must both reach it`);
+} else ok("pendingOffers is fed mcp + codexMcp + userSkills");
+if (!/invoke<CodexMcpStatus>\("codex_mcp_status"\)\.then\(setCodexMcp\)/.test(app)
+  || !/invoke<UserSkill\[\]>\("agent_user_skills"\)\.then\(setUserSkills\)/.test(app)) {
+  fail("App.tsx no longer probes codex_mcp_status / agent_user_skills straight into the offer inputs");
+} else ok("the Codex offer inputs come from machine-level probes");
+
 // The band is once-per-version and absent on a fresh install, so the panel must
 // carry a dismissal of its own or the gear dot has no off switch.
 const panel = read("../src/McpPanel.tsx");
@@ -137,6 +222,16 @@ if (!/offerPending/.test(panel) || !/onSilenceOffer/.test(panel)) {
   fail("McpPanel has no offerPending/onSilenceOffer — Settings → Claude is the only "
      + "on-demand surface, and without it a fresh install gets a permanent dot it cannot clear");
 } else ok("Settings → Claude can end the suggestion on demand");
+// Same for both Codex offers: each destination section carries its own off switch.
+const codexPanel = read("../src/CodexMcpPanel.tsx");
+const agentSrc = read("../src/AgentSetup.tsx");
+if (!/offerPending/.test(codexPanel) || !/onSilenceOffer/.test(codexPanel)) fail("CodexMcpSection has no offerPending/onSilenceOffer");
+else ok("Settings → Codex (MCP) can end its suggestion on demand");
+if (!/function UserSkillsSection[\s\S]*offerPending[\s\S]*onSilenceOffer/.test(agentSrc)) fail("UserSkillsSection has no offerPending/onSilenceOffer");
+else ok("Settings → Codex (skills) can end its suggestion on demand");
+if (!/codexMcpOfferPending=\{!!codexMcpOffer\}/.test(app) || !/skillsOfferPending=\{!!skillsOffer\}/.test(app)) {
+  fail("App.tsx does not tell Settings which Codex offers are pending");
+} else ok("Settings is told which Codex offers are pending");
 
 if (/canNudge|McpNudge|mcp_nudge_dismissed/.test(app)) {
   fail("App.tsx still references the retired Home card (canNudge/McpNudge/mcp_nudge_dismissed)");

@@ -526,6 +526,36 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
 .mini.pstray { opacity: 1; color: var(--warn); min-width: 3ch; font-variant-numeric: tabular-nums; }
 .mini.pstray:hover { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
 .mini.pbroken:hover { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
+/* A project's things to do (projectTodos.ts): a standing signal like ⚑/⊟, so it
+   survives .mini's hover-only opacity. The HUE is the dot; the number is text,
+   in --txt-hi — --warn as small text fails contrast in tokyo-day and
+   catppuccin-latte (CLAUDE.md: an accent token is a fill, not text). */
+.mini.ptodo {
+  opacity: 1; color: var(--txt-hi); display: inline-flex; align-items: center; gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.mini.ptodo:hover { color: var(--txt-hi); background: color-mix(in srgb, var(--warn) 18%, var(--bg-elev)); }
+.todo-dot {
+  flex: none; width: 6px; height: 6px; border-radius: var(--r-full); background: var(--txt-mute);
+}
+.todo-dot.warn { background: var(--warn); }
+.todo-dot.error { background: var(--danger); }
+.todo-dot.info { background: var(--txt-mute); }
+/* The menu's count tag: the tint and dot carry the hue, the digits do not. */
+.todo-count {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px var(--s2); border-radius: var(--r-sm);
+  font-size: var(--fs-micro); font-weight: var(--fw-bold); color: var(--txt-hi);
+  background: color-mix(in srgb, var(--warn) 16%, transparent); font-variant-numeric: tabular-nums;
+}
+/* The ProjectSheet's To do list: one row per item, its own buttons at the end. */
+.todo-list { display: flex; flex-direction: column; gap: var(--s2); }
+.todo-row {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--fs-label); color: var(--txt);
+}
+.todo-label { flex: 1; min-width: 0; line-height: var(--lh-prose); }
+.todo-acts { flex: none; display: flex; gap: var(--s1); }
 /* armed: stays visible past hover, reads as destructive (two-click remove) */
 .mini.armed {
   opacity: 1; color: var(--danger); font-weight: var(--fw-bold);
