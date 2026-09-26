@@ -57,8 +57,13 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   answer"/"to submit all"). A reworded footer degrades quietly to busy (green)
   rather than a false amber, so nothing will complain. Add it to the Codex
   manual check: park a turn on an approval and on a plan-mode question, and
-  watch the dot go amber and back. MCP elicitation's footer was never
-  captured. Re-probe `notify` for an `approval-requested` event on each Codex
+  watch the dot go amber and back; then open `/model` and `/permissions` mid-turn
+  and check it stays green (on 0.157.1 their footers are "enter select · esc
+  back", and `/experimental`'s is "space toggle · enter save · esc save/close",
+  so neither matches). MCP elicitation's footer was never captured. Also kill a
+  codex mid-turn (`kill <pid>`): the dot must clear within a tick, since
+  nothing writes `turn_aborted` and only the pane going back to its shell says
+  so. Re-probe `notify` for an `approval-requested` event on each Codex
   upgrade too — if it ever fires, it is the better source.
   _From: codex-activity-nav (2026-09-26)_
 

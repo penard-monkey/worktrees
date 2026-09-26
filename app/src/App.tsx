@@ -784,13 +784,18 @@ function liveAgent(p: Place): "claude" | "codex" | null {
   return null;
 }
 
-/** The nav row's provider mark: ✻ Claude, >_ Codex (each CLI's own banner
- *  glyph), nothing when no agent is live. */
+/** The nav row's provider mark: the Claude spark or the OpenAI blossom (Codex),
+ *  nothing when no agent is live. The SVG is aria-hidden, so the span carries
+ *  the label; `title` is the hover. Sized in `em` by `.g-agent svg`, so it
+ *  follows the glyph cluster's font (and `--ui-rem`), not a fixed px. */
 function AgentMark({ agent }: { agent: "claude" | "codex" | null }) {
   if (!agent) return null;
-  return agent === "claude"
-    ? <span className="g g-agent" title="Claude session live">✻</span>
-    : <span className="g g-agent g-agent-codex" title="Codex session live">&gt;_</span>;
+  const label = agent === "claude" ? "Claude session live" : "Codex session live";
+  return (
+    <span className={"g g-agent g-agent-" + agent} title={label} aria-label={label} role="img">
+      {agent === "claude" ? <Icons.ClaudeMark /> : <Icons.OpenAIMark />}
+    </span>
+  );
 }
 
 function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, onPick, onClose }: {

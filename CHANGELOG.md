@@ -42,9 +42,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   interrupted turn clears the dot without a ring. When Codex stops to ask —
   approve a command, an edit or a permission, or answer a plan-mode question
   — the dot turns amber ("Codex needs input") until you answer.
-- **Each nav row shows which agent is live:** ✻ for Claude, >_ for Codex,
-  nothing when no agent is running. The dot's tooltip names the agent too
-  ("Codex working").
+- **Each nav row shows which agent is live:** the Claude logo or the OpenAI
+  logo (for Codex), nothing when no agent is running. The dot's tooltip names
+  the agent too ("Codex working").
 
 ## [0.30.0] - 2026-09-23
 

@@ -147,7 +147,7 @@ function cdv(): ProjectView {
     place(P, root, {
       slug: "billing-refactor", branch: "feat/billing-v2",
       ahead: 5, behind: 1, tmux_session: { name: `${P}-billing-refactor~agent~codex`, up: true },
-      // The Codex place: its nav row carries >_ and its busy turns (the
+      // The Codex place: its nav row carries the OpenAI mark and its busy turns (the
       // activity cycle in install.ts) light the same dots Claude's do.
       agent_sessions: {
         claude: { name: `${P}-billing-refactor`, up: false, model: null },

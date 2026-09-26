@@ -290,7 +290,13 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             let place_path = place.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string();
             let claude_model = if claude_up { claude_model(&probes, &claude_name) } else { None };
             let codex_model = if codex_up { codex_model(&place_path) } else { None };
-            codex_watch_set(&place_path, codex_up.then_some(&codex_name), &codex_model);
+            // Watched only while codex itself runs in the session: the pane is
+            // `codex …; exec "$SHELL"`, so a codex that exited or was killed
+            // leaves the session up with a shell in it, and its rollout ending
+            // on `task_started` (nothing writes `turn_aborted` on a kill)
+            // would otherwise hold the place green indefinitely.
+            let codex_running = codex_up && agent_panes.as_ref().is_some_and(|panes| panes.session_runs_program(&codex_name));
+            codex_watch_set(&place_path, codex_running.then_some(&codex_name), &codex_model);
             place["agent_sessions"] = serde_json::json!({
                 "claude": { "name": claude_name, "up": claude_up, "model": claude_model },
                 "codex": { "name": codex_name, "up": codex_up, "model": codex_model }
@@ -1597,7 +1603,7 @@ fn hist_epoch(v: &serde_json::Value) -> Option<i64> {
 /// (`2026-09-20T01:49:52.243Z`); `history.jsonl`'s epoch-millis shape is
 /// accepted too, tried second so a date string is never mistaken for a number.
 fn entry_epoch(v: &serde_json::Value) -> Option<i64> {
-    v.as_str().and_then(parse_iso8601).or_else(|| hist_epoch(v))
+    v.as_str().and_then(sysclock::parse_iso8601).or_else(|| hist_epoch(v))
 }
 
 /// When a session transcript's newest entry was written, per the timestamps the
@@ -1773,30 +1779,44 @@ fn codex_tick(sessions: &str) -> CodexTick {
             _ => {}
         }
     }
-    let parked = codex_waiting_panes(sessions, &mid_turn);
+    let panes = codex_panes(sessions, &mid_turn);
     for (cwd, _) in mid_turn {
-        if parked.contains(&cwd) {
-            out.waiting.push(cwd);
-        } else {
-            out.busy.push(cwd);
+        match panes.iter().find(|(c, _)| *c == cwd).map(|(_, p)| p) {
+            Some(CodexPane::Waiting) => out.waiting.push(cwd),
+            // The snapshot's liveness check can be up to 30s old; this one is
+            // this tick's. A dead codex is not busy, whatever its rollout says.
+            Some(CodexPane::Gone) => {}
+            // Running, or no answer at all (a tmux failure, a chain cut short):
+            // the rollout says busy, and busy is the quiet failure.
+            _ => out.busy.push(cwd),
         }
     }
     out
 }
 
+/// What a mid-turn codex pane shows, per one capture.
+#[derive(Debug, PartialEq)]
+enum CodexPane {
+    /// The pane is back at a bare shell: codex exited or was killed.
+    Gone,
+    /// Codex is running and not asking anything.
+    Running,
+    /// Codex is sitting on an approval or a question (`waiting_on_screen`).
+    Waiting,
+}
+
 /// Capture the codex panes in `targets` (cwd, tmux session) in ONE `tmux`
-/// call and return the cwds whose screen is sitting on a modal. Costs nothing
-/// while no codex turn is running, which is nearly always; during one it is a
-/// single spawn per 3s tick, however many sessions are mid-turn.
+/// call: each pane's current command, then its screen. Costs nothing while no
+/// codex turn is running, which is nearly always; during one it is a single
+/// spawn per 3s tick, however many sessions are mid-turn.
 ///
 /// Same chaining as `scan_drafts`: sessions missing from the fingerprint are
 /// dropped first (a dead target aborts the rest of the chain), and a marker
-/// precedes each capture so a chain that dies part-way still attributes what
-/// it did print. `=name:` is the session's current window and active pane,
+/// precedes each pane so a chain that dies part-way still attributes what it
+/// did print. `=name:` is the session's current window and active pane,
 /// which is codex unless the user split it — then the screen shows no codex
-/// footer and the place simply reads busy. A tmux failure reads the same way:
-/// the quiet failure, never a false amber.
-fn codex_waiting_panes(sessions: &str, targets: &[(String, String)]) -> Vec<String> {
+/// footer and the place simply reads busy.
+fn codex_panes(sessions: &str, targets: &[(String, String)]) -> Vec<(String, CodexPane)> {
     let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
     let targets: Vec<(&String, String)> = targets
         .iter()
@@ -1807,29 +1827,75 @@ fn codex_waiting_panes(sessions: &str, targets: &[(String, String)]) -> Vec<Stri
         return Vec::new();
     }
     let marks: Vec<String> = (0..targets.len()).map(|i| format!("@@ {i} @@")).collect();
-    let mut args: Vec<&str> = Vec::with_capacity(targets.len() * 9);
+    let mut args: Vec<&str> = Vec::with_capacity(targets.len() * 15);
     for (i, (_, target)) in targets.iter().enumerate() {
         if i > 0 {
             args.push(";");
         }
-        args.extend(["display-message", "-p", &marks[i], ";", "capture-pane", "-p", "-t", target]);
+        args.extend(["display-message", "-p", &marks[i], ";"]);
+        args.extend(["display-message", "-p", "-t", target, "#{pane_current_command}", ";"]);
+        args.extend(["capture-pane", "-p", "-t", target]);
     }
     let Ok(out) = worktrees_core::tmux::tmux(&args) else {
         return Vec::new();
     };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut parked = Vec::new();
-    for (i, (cwd, _)) in targets.iter().enumerate() {
+    let cwds: Vec<&str> = targets.iter().map(|(c, _)| c.as_str()).collect();
+    codex_panes_in(&String::from_utf8_lossy(&out.stdout), &cwds)
+}
+
+/// Parse `codex_panes`'s chained output: per target `i`, the line `@@ i @@`,
+/// then the pane's current command, then its screen up to the next marker.
+/// Pure, so the marker split and the bound are testable without tmux. A
+/// target with no marker in the output (the chain died before it) is left
+/// out — no answer, which the caller reads as the rollout's busy.
+fn codex_panes_in(text: &str, cwds: &[&str]) -> Vec<(String, CodexPane)> {
+    let marks: Vec<String> = (0..cwds.len()).map(|i| format!("@@ {i} @@")).collect();
+    let mut panes = Vec::new();
+    for (i, cwd) in cwds.iter().enumerate() {
         let Some(rest) = text.split(&format!("{}\n", marks[i])).nth(1) else { continue };
-        let screen = match marks.get(i + 1).and_then(|m| rest.find(m.as_str())) {
+        // The next marker ends this pane's block (the last one runs to EOF).
+        let block = match marks.get(i + 1).and_then(|m| rest.find(m.as_str())) {
             Some(end) => &rest[..end],
             None => rest,
         };
-        if worktrees_core::codex::waiting_on_screen(screen) {
-            parked.push((*cwd).clone());
-        }
+        let (cmd, screen) = block.split_once('\n').unwrap_or((block, ""));
+        let state = if worktrees_core::tmux::is_shell_command(cmd.trim()) {
+            CodexPane::Gone
+        } else if worktrees_core::codex::waiting_on_screen(screen) {
+            CodexPane::Waiting
+        } else {
+            CodexPane::Running
+        };
+        panes.push((cwd.to_string(), state));
     }
-    parked
+    panes
+}
+
+/// One tick's dot sets: what `sessions:busy` carries, and what the dwell
+/// counter sees. Codex is merged into the first two only — a codex turn is
+/// dated by its own `task_complete` (`codex_new_dones`), and an interrupted
+/// one (`turn_aborted`) is not work to announce; feeding it to
+/// `completion_edges` too would stamp every codex turn twice, and the second
+/// stamp would say an Esc was finished work.
+struct Activity {
+    busy: Vec<String>,
+    waiting: Vec<String>,
+    edges: Vec<String>,
+}
+
+/// Merge claude's and codex's sets for one tick, sorted and de-duplicated (two
+/// sessions in one dir push its cwd twice; the dwell counter would count it
+/// twice and let a blip through).
+fn merge_activity(claude_busy: Vec<String>, claude_waiting: Vec<String>, codex: &CodexTick) -> Activity {
+    let norm = |mut v: Vec<String>| {
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let edges = norm(claude_busy.clone());
+    let busy = norm(claude_busy.into_iter().chain(codex.busy.iter().cloned()).collect());
+    let waiting = norm(claude_waiting.into_iter().chain(codex.waiting.iter().cloned()).collect());
+    Activity { busy, waiting, edges }
 }
 
 /// The codex completions not yet stamped: those whose epoch differs from the
@@ -2034,39 +2100,6 @@ static USAGE_CACHE: Mutex<Option<UsageInfo>> = Mutex::new(None);
 /// Epoch of the last FAILED real attempt — the negative half of the TTL below.
 static USAGE_FAIL_AT: Mutex<Option<i64>> = Mutex::new(None);
 
-/// ISO-8601 (`2026-08-04T00:00:00Z`, `…+00:00`, optional fraction) → unix
-/// seconds. days_from_civil, the inverse of fmt_utc's civil_from_days — same
-/// reason: no chrono dep for two date conversions.
-fn parse_iso8601(s: &str) -> Option<i64> {
-    if s.len() < 19 {
-        return None;
-    }
-    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse::<i64>().ok() };
-    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (h, mi, se) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
-        return None;
-    }
-    let y = if mo <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = if mo > 2 { mo - 3 } else { mo + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let mut epoch = days * 86_400 + h * 3600 + mi * 60 + se;
-    // trailing zone: `Z`, nothing, or ±HH:MM (after an optional .fraction)
-    let rest = s[19..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
-    let sign = rest.chars().next().unwrap_or('Z');
-    if sign == '+' || sign == '-' {
-        let oh: i64 = rest.get(1..3)?.parse().ok()?;
-        let om: i64 = rest.get(4..6).and_then(|m| m.parse::<i64>().ok()).unwrap_or(0);
-        let off = oh * 3600 + om * 60;
-        epoch += if sign == '-' { off } else { -off };
-    }
-    Some(epoch)
-}
-
 /// The Claude Code OAuth access token, straight out of the login Keychain item.
 /// None on any failure (not macOS, item absent, locked keychain, shape changed).
 fn claude_oauth_token() -> Option<String> {
@@ -2134,7 +2167,7 @@ fn parse_usage_limits(body: &str) -> Option<Vec<UsageLimit>> {
             label,
             percent,
             severity: e.get("severity").and_then(|s| s.as_str()).unwrap_or("normal").to_string(),
-            resets_at: e.get("resets_at").and_then(|r| r.as_str()).and_then(parse_iso8601),
+            resets_at: e.get("resets_at").and_then(|r| r.as_str()).and_then(sysclock::parse_iso8601),
         });
     }
     Some(out)
@@ -2477,11 +2510,11 @@ fn status_parse(body: &str, now: i64) -> Result<ClaudeStatus, String> {
                 updated_at: latest
                     .and_then(|u| u.get("updated_at").or_else(|| u.get("created_at")))
                     .and_then(|x| x.as_str())
-                    .and_then(parse_iso8601)
+                    .and_then(sysclock::parse_iso8601)
                     .or_else(|| {
                         inc.get("updated_at")
                             .and_then(|x| x.as_str())
-                            .and_then(parse_iso8601)
+                            .and_then(sysclock::parse_iso8601)
                     }),
                 url: inc
                     .get("shortlink")
@@ -7464,7 +7497,7 @@ pub fn run() {
                             }
                         }
                     }
-                    let (mut busy, mut waiting, models) = claude_activity();
+                    let (busy, waiting, models) = claude_activity();
                     // A live agent now names a different model (a first reply,
                     // a `/model` switch, codex's next turn) → re-list, so the
                     // agent label follows within a tick rather than on the 30s
@@ -7474,25 +7507,7 @@ pub fn run() {
                         let _ = handle.emit("places:changed", ());
                     }
                     last_models = Some(models);
-                    // Claude's busy set alone feeds the dwell counter below:
-                    // a codex turn is dated by its own `task_complete`, and an
-                    // interrupted one (`turn_aborted`) is not work to announce.
-                    let claude_busy = {
-                        let mut b = busy.clone();
-                        b.sort_unstable();
-                        b.dedup();
-                        b
-                    };
-                    busy.extend(codex.busy);
-                    waiting.extend(codex.waiting);
-                    busy.sort_unstable();
-                    waiting.sort_unstable();
-                    // Two sessions in the SAME dir each push their cwd. The
-                    // frontend already de-dupes into a Set, but the dwell
-                    // counter would not: a doubled path would qualify in one
-                    // tick instead of two and let a blip through.
-                    busy.dedup();
-                    waiting.dedup();
+                    let Activity { busy, waiting, edges } = merge_activity(busy, waiting, &codex);
                     // Change-gated: emit only when EITHER set shifts, so an idle
                     // machine stays silent (the frontend just re-applies the last set).
                     if busy != last_busy || waiting != last_waiting {
@@ -7505,7 +7520,7 @@ pub fn run() {
                     }
                     // Completion edges, computed AFTER the busy emit so the dot's
                     // hand-off (green out, ember in) arrives in that order.
-                    let exits = completion_edges(&mut busy_ticks, &claude_busy);
+                    let exits = completion_edges(&mut busy_ticks, &edges);
                     if !exits.is_empty() {
                         // read_projects only on a real edge — not every 3s tick
                         let roots = read_projects(&handle);
@@ -8251,6 +8266,46 @@ mod tests {
         let mut t = HashMap::new();
         completion_edges(&mut t, &v(&["/a", "/a"]));
         assert_eq!(t["/a"], 2, "documents WHY the caller must dedup before this");
+    }
+
+    /// A codex turn is merged into the DOTS but must never reach the dwell
+    /// counter: it is stamped from its own `task_complete`, and feeding it to
+    /// `completion_edges` as well would stamp it twice — once more at the
+    /// busy-exit, which an Esc also triggers.
+    #[test]
+    fn a_codex_turn_is_a_dot_but_never_a_completion_edge() {
+        let codex = CodexTick { busy: v(&["/codex"]), waiting: v(&["/asking"]), ..Default::default() };
+        let act = merge_activity(v(&["/claude", "/claude"]), vec![], &codex);
+        assert_eq!(act.busy, v(&["/claude", "/codex"]));
+        assert_eq!(act.waiting, v(&["/asking"]));
+        let mut t = HashMap::new();
+        completion_edges(&mut t, &act.edges);
+        completion_edges(&mut t, &act.edges);
+        assert!(!t.contains_key("/codex"), "codex reached the dwell counter: {t:?}");
+        assert_eq!(t["/claude"], 2, "claude is counted once per tick, de-duplicated");
+    }
+
+    /// The chained capture, two panes: each block runs from its marker to the
+    /// NEXT marker (not to EOF — the first pane must not see the second's
+    /// footer), its first line is the pane's command, and a bare shell there
+    /// means codex is gone whatever the screen shows.
+    #[test]
+    fn codex_panes_split_the_chain_per_pane() {
+        let modal = "  3. No, and tell Codex what to do differently (esc)\n  Press enter to confirm or esc to cancel\n";
+        let idle = "› Ask Codex to do anything\n  ? for shortcuts\n";
+        let text = format!("@@ 0 @@\ncodex\n{idle}@@ 1 @@\ncodex\n{modal}");
+        assert_eq!(
+            codex_panes_in(&text, &["/a", "/b"]),
+            vec![("/a".into(), CodexPane::Running), ("/b".into(), CodexPane::Waiting)]
+        );
+        // codex exited: the pane is back at its shell. Not busy, not waiting.
+        let text = format!("@@ 0 @@\nzsh\n{modal}@@ 1 @@\nnode\n{idle}");
+        assert_eq!(
+            codex_panes_in(&text, &["/a", "/b"]),
+            vec![("/a".into(), CodexPane::Gone), ("/b".into(), CodexPane::Running)]
+        );
+        // The chain died after the first pane: the second has no answer.
+        assert_eq!(codex_panes_in(&format!("@@ 0 @@\ncodex\n{idle}"), &["/a", "/b"]).len(), 1);
     }
 
     /// A finished codex turn stays the rollout's newest boundary until the next

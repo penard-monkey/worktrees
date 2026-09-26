@@ -50,10 +50,22 @@ const ROLLOUT_DAYS: usize = 14;
 /// the same cwd, and those start AFTER the session that spawned them — so
 /// without this the newest rollout is routinely the reviewer, and the label
 /// names `codex-auto-review` instead of the model the user chose.
+///
+/// `codex exec` runs are excluded for the same reason: `source: "exec"`, no
+/// parent, same cwd. A script or an agent running `codex exec` in the worktree
+/// would otherwise become "the newest session" and hijack the dot, the
+/// worked stamp and the label — and stay newest long after it exited.
+///
+/// Still ambiguous: two INTERACTIVE sessions in one cwd (a second `codex`
+/// opened by hand beside the managed one). The newer one wins, whichever the
+/// user is looking at; one provider session per place is the app's rule, and
+/// this does not try to enforce it.
 fn is_user_thread(meta: &serde_json::Value, cwd: &str) -> bool {
+    let source = meta.get("source");
     meta.get("cwd").and_then(|c| c.as_str()) == Some(cwd)
         && meta.get("parent_thread_id").is_none_or(|p| p.is_null())
-        && meta.get("source").and_then(|s| s.get("subagent")).is_none()
+        && source.and_then(|s| s.get("subagent")).is_none()
+        && source.and_then(|s| s.as_str()) != Some("exec")
 }
 
 /// The newest rollout file for a user thread in `cwd` (see `is_user_thread`),
@@ -260,8 +272,9 @@ pub enum Turn {
     /// nothing codex writes tells apart from a command that is simply running.
     Busy,
     /// The last turn finished at `at` (epoch seconds, codex's own
-    /// `completed_at` — CONTENT, never the file's mtime, which a live session
-    /// keeps moving). `None` when the record carries no time.
+    /// `completed_at`, else the record's own RFC3339 `timestamp` — CONTENT
+    /// either way, never the file's mtime, which a live session keeps moving).
+    /// `None` only when the record carries neither.
     Done { at: Option<i64>, turn_id: Option<String> },
     /// The last turn was interrupted. Not work to be told about: the user was
     /// at the prompt when it stopped.
@@ -287,7 +300,9 @@ pub fn rollout_turn(lines: &[String]) -> Option<Turn> {
         match p.get("type")?.as_str()? {
             "task_started" => Some(Turn::Busy),
             "task_complete" => Some(Turn::Done {
-                at: p.get("completed_at").and_then(|c| c.as_i64()),
+                at: p.get("completed_at").and_then(|c| c.as_i64()).or_else(|| {
+                    v.get("timestamp").and_then(|t| t.as_str()).and_then(crate::sysclock::parse_iso8601)
+                }),
                 turn_id: p.get("turn_id").and_then(|t| t.as_str()).map(str::to_string),
             }),
             "turn_aborted" => Some(Turn::Aborted),
@@ -338,6 +353,9 @@ mod tests {
         assert!(is_user_thread(&user, "/w"));
         assert!(is_user_thread(&vscode, "/w"));
         assert!(!is_user_thread(&guardian, "/w"));
+        // `codex exec` in the same worktree: no parent, but not a user thread.
+        let exec = serde_json::json!({"cwd":"/w","source":"exec","parent_thread_id":null});
+        assert!(!is_user_thread(&exec, "/w"));
         assert!(!is_user_thread(&user, "/elsewhere"));
     }
 
@@ -429,6 +447,18 @@ mod tests {
         assert_eq!(rollout_turn(&lines(&[COMPLETE, STARTED, TOOL])), Some(Turn::Busy));
         assert_eq!(
             rollout_turn(&lines(&[STARTED, TOOL, COMPLETE])),
+            Some(Turn::Done { at: Some(1790454674), turn_id: Some("t1".into()) })
+        );
+    }
+
+    /// A `task_complete` with no `completed_at` is dated by the record's own
+    /// timestamp — still content — rather than dropped, which would leave the
+    /// ring dark for a turn that did finish.
+    #[test]
+    fn a_completion_without_completed_at_uses_its_timestamp() {
+        let bare = r#"{"timestamp":"2026-09-26T20:31:14.445Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}"#;
+        assert_eq!(
+            rollout_turn(&lines(&[STARTED, bare])),
             Some(Turn::Done { at: Some(1790454674), turn_id: Some("t1".into()) })
         );
     }

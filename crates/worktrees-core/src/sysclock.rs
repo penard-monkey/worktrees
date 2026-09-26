@@ -160,6 +160,40 @@ pub fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+/// ISO-8601 (`2026-08-04T00:00:00Z`, `…+00:00`, optional fraction) → unix
+/// seconds. days_from_civil, the inverse of fmt_utc's civil_from_days — same
+/// reason: no chrono dep for a few date conversions. Lives here so the app
+/// (usage resets, transcripts) and codex's rollout records share one parser.
+pub fn parse_iso8601(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse::<i64>().ok() };
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, se) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if mo > 2 { mo - 3 } else { mo + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let mut epoch = days * 86_400 + h * 3600 + mi * 60 + se;
+    // trailing zone: `Z`, nothing, or ±HH:MM (after an optional .fraction)
+    let rest = s[19..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let sign = rest.chars().next().unwrap_or('Z');
+    if sign == '+' || sign == '-' {
+        let oh: i64 = rest.get(1..3)?.parse().ok()?;
+        let om: i64 = rest.get(4..6).and_then(|m| m.parse::<i64>().ok()).unwrap_or(0);
+        let off = oh * 3600 + om * 60;
+        epoch += if sign == '-' { off } else { -off };
+    }
+    Some(epoch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
