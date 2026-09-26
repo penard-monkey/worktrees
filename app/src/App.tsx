@@ -1,4 +1,4 @@
-import { adaptClaude, adaptCodex, checking, detailMessage, expired, providerName, stateLabel, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage, type Provider } from "./planUsage";
+import { adaptClaude, adaptCodex, checking, compactUsage, detailMessage, expired, providerName, stateLabel, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage, type Provider } from "./planUsage";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -2157,7 +2157,7 @@ function UsageRows({ info, nowSec }: { info: PlanUsage; nowSec: number }) {
           {past ? <span className="usage-awaiting">Awaiting update</span> : <>
             <span className="usage-bar"><i style={{ width: `${Math.max(0, Math.min(100, l.percent))}%` }} /></span>
             <span className="usage-pct">{pct}%</span>
-            <span className="usage-eta">{eta ? `in ${eta}` : "Reset unknown"}</span>
+            <span className="usage-eta">{l.resets_at === null ? "Reset unknown" : eta ? `in ${eta}` : ""}</span>
           </>}
         </div>
       </Fragment>;
@@ -2186,12 +2186,13 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
     window.addEventListener("pointerdown", onDown, true);
     return () => window.removeEventListener("pointerdown", onDown, true);
   }, [pinned]);
-  const names = info.map(i => providerName(i.provider)).join(" and ");
-  const label = info.map(i => {
+  const compact = compactUsage(info);
+  const names = compact.map(i => providerName(i.provider)).join(" and ") || "Account";
+  const label = compact.map(i => {
     const l = summaryLimit(i, nowSec);
     const bucket = l && l.bucketLabel !== providerName(i.provider) ? `${l.bucketLabel} ` : "";
     return `${providerName(i.provider)} ${l ? `${bucket}${l.label} ${Math.round(l.percent)}% used${i.state === "stale" ? ", stale" : ""}` : stateLabel(i)}`;
-  }).join("; ");
+  }).join("; ") || "Usage details";
   return <>
     <button ref={trigRef} type="button" data-testid="usage-meter" data-track="plan_usage"
       className={"usage-trig " + shape + (pinned ? " pinned" : "")} aria-label={`${names} plan usage: ${label}`}
@@ -2201,8 +2202,8 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
       onFocus={() => setHovering(true)} onBlur={() => setHovering(false)} onClick={() => setPinned(v => !v)}>
       <span className={"usage-shape " + shape}>
         {shape === "tile" ? <span aria-hidden="true">▥</span> : <>
-          <span className="usage-minimal" aria-hidden="true">Usage ▾</span>
-          {info.map(i => {
+          <span className={"usage-minimal" + (!compact.length ? " only" : "")} aria-hidden="true">Usage ▾</span>
+          {compact.map(i => {
             const l = summaryLimit(i, nowSec);
             return <span key={i.provider} className={"usage-provider-summary" + (i.state === "stale" ? " stale" : "")}>
               <span className="usage-provider-name">{providerName(i.provider)}</span>
@@ -2225,7 +2226,9 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
         <StatusDetail info={status} onError={onError ?? (() => {})} />
       </div>}
       <div className="usage-pop-head"><span>Plan usage</span><span>Account limits · used %</span></div>
-      {info.map(i => <section className={"usage-provider-detail" + (i.state === "stale" ? " stale" : "")} key={i.provider} data-provider={i.provider}>
+      {info.map(i => i.provider === "codex" && i.state === "missing_cli"
+        ? <p key={i.provider} className="usage-message" data-provider="codex">Codex CLI was not found.</p>
+        : <section className={"usage-provider-detail" + (i.state === "stale" ? " stale" : "")} key={i.provider} data-provider={i.provider}>
         <div className="usage-provider-head"><strong>{providerName(i.provider)}</strong>
           <span>{i.state === "stale" ? "Stale" : i.state === "ready" ? "Updated" : stateLabel(i)}
             {i.fetched_at !== null && <time title={new Date(i.fetched_at * 1000).toLocaleString()}> · {Math.max(0, Math.floor((nowSec - i.fetched_at) / 60))} min ago</time>}

@@ -56,11 +56,26 @@ for (const [engine, type] of Object.entries({chromium, webkit})) {
   const detail=await page.locator('[data-provider="codex"]').innerText();
   if(mode==='expired')assert(detail.includes('Awaiting update'));
   if(mode==='old'){assert(detail.includes('Could not read usage'));assert(!detail.includes('48%'));}
+  if(mode==='missing'){
+   assert(!await meter.innerText().then(t=>t.includes('Codex')));
+   assert.equal(detail,'Codex CLI was not found.');
+   assert.equal(await page.locator('.usage-provider-detail[data-provider="codex"]').count(),0);
+  }
   if(mode==='signedout')assert(detail.includes('Not signed in'));
   if(mode==='weekly'){assert(detail.includes('7d'));assert(!detail.includes('5h'));}
   if(mode==='edge')assert(detail.includes('105%'));
   results.push({engine,mode,detail});
  }
+ // With only Codex enabled, keep a generic details trigger for the missing-CLI note.
+ await page.evaluate(()=>sessionStorage.setItem('wt-mock-ui-state',JSON.stringify({usage_claude:false,usage_codex:true})));
+ await page.goto(baseURL+'/?codexUsage=missing'); await page.bringToFront();
+ await page.waitForFunction(()=>window.__planUsageCalls?.codex_usage>0);
+ await page.waitForFunction(()=>document.querySelector('.usage-minimal.only'));
+ assert.equal((await meter.innerText()).trim(),'Usage ▾');
+ await meter.click();
+ assert.equal(await page.locator('[data-provider="codex"]').innerText(),'Codex CLI was not found.');
+ results.push({engine,missingCliOnly:'generic trigger and one-line note'});
+ await page.goto(baseURL+'/?codexUsage=ready');
  // Apply persisted settings before reload: independent switches and migration.
  for(const [claude,codex,place] of [[true,false,'strip'],[false,true,'strip'],[false,false,'strip'],[true,true,'off'],[true,true,'rail']]) {
   await page.evaluate(s=>sessionStorage.setItem('wt-mock-ui-state',JSON.stringify(s)),{usage_claude:claude,usage_codex:codex,usage_place:place});

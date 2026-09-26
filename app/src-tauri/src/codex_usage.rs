@@ -3,6 +3,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex};
@@ -135,15 +136,27 @@ fn normalize(value: &Value, now: i64) -> Info {
 // The guard also reaps on parse/write errors and unwinding. Never leave a second
 // Codex service running after a usage read. Reader threads finish when pipes close.
 struct Server(Child);
+impl Server {
+    fn kill_group(&self) {
+        // Every server is spawned into its own process group, including children.
+        unsafe {
+            libc::kill(-(self.0.id() as i32), libc::SIGKILL);
+        }
+    }
+}
 impl Drop for Server {
     fn drop(&mut self) {
         self.0.stdin.take();
         let until = Instant::now() + Duration::from_secs(2);
         loop {
             match self.0.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(_)) => {
+                    self.kill_group();
+                    return;
+                }
                 Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(10)),
                 _ => {
+                    self.kill_group();
                     let _ = self.0.kill();
                     let _ = self.0.wait();
                     return;
@@ -175,16 +188,19 @@ struct Rpc {
 impl Rpc {
     fn open(binary: &Path, cwd: &Path, home: &Path, budget: Duration) -> Result<Self, Fault> {
         let deadline = Instant::now() + budget;
-        let mut child = Command::new(binary)
-            .args(["app-server", "--listen", "stdio://"])
-            .current_dir(cwd)
-            .env("CODEX_HOME", home)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| "spawn")?;
-        let stdout = child.stdout.take().ok_or("pipe")?;
+        let mut server = Server(
+            Command::new(binary)
+                .args(["app-server", "--listen", "stdio://"])
+                .current_dir(cwd)
+                .env("CODEX_HOME", home)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .map_err(|_| "spawn")?,
+        );
+        let stdout = server.0.stdout.take().ok_or("pipe")?;
         let (tx, lines) = mpsc::channel();
         std::thread::spawn(move || {
             // Bound the ENTIRE exchange, including notifications and malformed data.
@@ -212,7 +228,7 @@ impl Rpc {
             }
         });
         Ok(Self {
-            server: Server(child),
+            server,
             lines,
             deadline,
         })
@@ -478,6 +494,13 @@ pub fn read(cwd: PathBuf) -> Info {
     })
 }
 
+fn failure_level(reason: &str) -> &'static str {
+    match reason {
+        "missing_cli" | "signed_out" | "unsupported_auth" => "info",
+        _ => "warn",
+    }
+}
+
 fn read_cached(
     state: &Mutex<Option<Cache>>,
     key: String,
@@ -499,7 +522,7 @@ fn read_cached(
     }
     let observation = fetch();
     if let Some(reason) = observation.info.reason {
-        super::applog("warn", &format!("codex_usage: {reason}"));
+        super::applog(failure_level(reason), &format!("codex_usage: {reason}"));
     }
     cache.update(observation, epoch(), Instant::now())
 }
@@ -511,6 +534,16 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn expected_account_states_are_info_but_protocol_failures_warn() {
+        for reason in ["missing_cli", "signed_out", "unsupported_auth"] {
+            assert_eq!(failure_level(reason), "info");
+        }
+        for reason in ["rpc", "timeout", "malformed", "unexpected_request"] {
+            assert_eq!(failure_level(reason), "warn");
+        }
+    }
 
     #[test]
     fn success_and_failure_ttl_boundaries_use_monotonic_time() {
@@ -754,9 +787,87 @@ open('exited','w').write('yes')
         let out = probe(&binary, &tmp.0, &tmp.0, Duration::from_secs(3));
         assert_eq!(out.info.state, "ready");
         assert!(tmp.0.join("exited").exists());
-        let text = serde_json::to_string(&out.info).unwrap();
-        assert!(!text.contains("private"));
+        // Exercise the cache boundary that holds identity, not just normalize().
+        let mut cache = Cache::default();
+        let now = epoch();
+        let ready = cache.update(out, now, Instant::now());
+        assert_eq!(cache.identity.as_deref(), Some("private-account"));
+        assert!(cache
+            .auth
+            .as_ref()
+            .unwrap()
+            .contains("private@example.invalid"));
+        let stale = cache.update(failure(), now + 120, Instant::now());
+        assert_eq!(stale.state, "stale");
+        for info in [ready, stale] {
+            let text = serde_json::to_string(&info).unwrap();
+            assert!(!text.contains("private@example.invalid"));
+            assert!(!text.contains("private-account"));
+        }
     }
+    #[test]
+    fn drop_and_timeout_close_descendant_sockets_even_after_leader_exit() {
+        use std::net::TcpStream;
+        // A listening descendant is positive evidence of a live process. Testing
+        // the socket closing avoids treating a not-yet-reaped zombie as alive.
+        for leader_exits in [false, true] {
+            let tmp = Scratch::new();
+            let binary = tmp.script(&format!(
+                r#"import os,socket,sys,time
+pid=os.fork()
+if pid==0:
+ s=socket.socket();s.bind(('127.0.0.1',0));s.listen()
+ with open('ready','w') as f: f.write(str(os.getpid())+' '+str(s.getsockname()[1]))
+ s.settimeout(.1)
+ until=time.monotonic()+60
+ while time.monotonic()<until:
+  try:
+   connection,_=s.accept();connection.close()
+  except socket.timeout: pass
+else:
+ while not os.path.exists('ready'): time.sleep(.01)
+ if {leader_exits}: sys.exit(0)
+ time.sleep(60)
+"#,
+                leader_exits = if leader_exits { "True" } else { "False" }
+            ));
+            let mut rpc = Rpc::open(&binary, &tmp.0, &tmp.0, Duration::from_secs(2)).unwrap();
+            let until = Instant::now() + Duration::from_secs(2);
+            let ready = loop {
+                if let Ok(text) = std::fs::read_to_string(tmp.0.join("ready")) {
+                    if text.split_whitespace().count() == 2 {
+                        break text;
+                    }
+                }
+                assert!(Instant::now() < until, "fake descendant did not start");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let parts: Vec<_> = ready.split_whitespace().collect();
+            let pid: i32 = parts[0].parse().unwrap();
+            let address = format!("127.0.0.1:{}", parts[1]);
+            assert!(TcpStream::connect(&address).is_ok());
+            if !leader_exits {
+                assert_eq!(
+                    rpc.request(1, "initialize", json!({})).unwrap_err().reason,
+                    "timeout"
+                );
+            }
+            drop(rpc);
+            let until = Instant::now() + Duration::from_secs(2);
+            while TcpStream::connect(&address).is_ok() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let stopped = TcpStream::connect(&address).is_err();
+            // Clean up this fixture even when verifying the pre-fix failure.
+            if !stopped {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+            assert!(stopped, "descendant survived (leader_exits={leader_exits})");
+        }
+    }
+
     #[test]
     fn fake_cli_malformed_eof_buffer_cap_and_deadline_are_bounded() {
         for (script, reason) in [

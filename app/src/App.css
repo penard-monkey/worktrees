@@ -3273,3 +3273,5 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
   .usage-provider-summary { display: none; }
   .usage-minimal { display: inline; }
 }
+
+.usage-minimal.only { display: inline; }

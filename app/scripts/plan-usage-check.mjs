@@ -1,17 +1,43 @@
 // Exercise the real normalization and polling hook with a virtual scheduler.
 import fs from "node:fs";
 import assert from "node:assert/strict";
+import React, { Fragment } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { transformWithEsbuild } from "vite";
 const src = fs.readFileSync(new URL("../src/planUsage.ts", import.meta.url), "utf8");
 const js = (await transformWithEsbuild(src, "planUsage.ts", { loader: "ts" })).code;
 const model = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
-const { adaptCodex, adaptClaude, viewUsage, summaryLimit, windowLabel, checking, expired } = model;
+const { adaptCodex, adaptClaude, viewUsage, summaryLimit, windowLabel, checking, expired, CODEX_STALE_SECS, compactUsage } = model;
 let checks = 0;
 function test(name, fn) { fn(); checks++; console.log(`ok ${name}`); }
 const limit = (role, minutes, percent, reset, bucket = "codex") => ({ id: `${bucket}:${role}`, bucket_id: bucket,
   bucket_label: bucket, window_role: role, window_minutes: minutes, percent, severity: "normal", resets_at: reset });
 const wire = { state: "ready", source: "app_server", fetched_at: 100, reason: null,
   limits: [limit("primary", 10080, 24, 110), limit("secondary", null, 21, 3000)] };
+const rust = fs.readFileSync(new URL("../src-tauri/src/codex_usage.rs", import.meta.url), "utf8").split("#[cfg(test)]")[0];
+test("Codex age ceiling mirrors the backend constant", () => {
+  const definitions = [...rust.matchAll(/^const STALE: i64 = ([\d_]+);/gm)];
+  assert.equal(definitions.length, 1, "expected exactly one backend STALE definition");
+  assert.equal(CODEX_STALE_SECS, Number(definitions[0][1].replaceAll("_", "")));
+});
+test("Codex reset boundary mirrors the backend expiry rule", () => {
+  const rules = [...rust.matchAll(/\.any\(\|l\| l\.resets_at\.is_some_and\(\|t\| t (<=|<) now\)\)/g)];
+  assert.equal(rules.length, 1, "backend reset rule changed; review the frontend mirror");
+  const info = adaptCodex(wire);
+  for (const reset of [null, 99, 100, 101]) {
+    const backend = reset !== null && (rules[0][1] === "<=" ? reset <= 100 : reset < 100);
+    assert.equal(expired(info, { ...info.limits[0], resets_at: reset }, 100), backend);
+  }
+});
+test("missing Codex has no compact slot, while other states keep theirs", () => {
+  const claude = checking("claude");
+  const missing = { ...checking("codex"), state: "missing_cli" };
+  assert.deepEqual(compactUsage([claude, missing]), [claude]);
+  assert.deepEqual(compactUsage([missing]), []);
+  for (const state of ["signed_out", "unsupported_auth", "unavailable"]) {
+    assert.equal(compactUsage([{ ...missing, state }]).length, 1);
+  }
+});
 test("duration labels come from the window, not its role", () => {
   assert.equal(windowLabel(10080, "primary"), "7d"); assert.equal(windowLabel(300, "secondary"), "5h");
   assert.equal(windowLabel(90, "primary"), "90m"); assert.equal(windowLabel(null, "primary"), "Primary");
@@ -22,8 +48,8 @@ test("reset invalidates only its own row between polls", () => {
   assert.equal(summaryLimit(info, 110).id, "codex:secondary");
 });
 test("age ceiling is inclusive and future timestamps are unavailable", () => {
-  assert.equal(viewUsage(adaptCodex(wire), 1900).limits.length, 2);
-  assert.equal(viewUsage(adaptCodex(wire), 1901).limits.length, 0);
+  assert.equal(viewUsage(adaptCodex(wire), 100 + CODEX_STALE_SECS).limits.length, 2);
+  assert.equal(viewUsage(adaptCodex(wire), 101 + CODEX_STALE_SECS).limits.length, 0);
   assert.equal(viewUsage(adaptCodex(wire), 99).state, "unavailable");
 });
 test("reserve is never summarized as the main allowance", () => {
@@ -43,6 +69,20 @@ test("Claude preserves the existing over-limit severity fallback", () => {
 });
 
 const app = fs.readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+// Render the actual row component, including its countdown formatter. A copy of
+// the display rule would miss regressions in the JSX branch itself.
+const rowsSource = app.slice(app.indexOf("function UsageRows("), app.indexOf("function UsageMeter("));
+const etaSource = app.slice(app.indexOf("function fmtEta("), app.indexOf("/** Is anyone actually looking"));
+const rowJs = (await transformWithEsbuild(etaSource + rowsSource, "rows.tsx", { loader: "tsx" })).code;
+const UsageRows = new Function("React", "Fragment", "expired", `${rowJs}; return UsageRows;`)(React, Fragment, expired);
+test("Claude known resets in the past are not unknown", () => {
+  const row = reset => renderToStaticMarkup(React.createElement(UsageRows, { nowSec: 100,
+    info: adaptClaude({ source: "oauth", fetched_at: 90, limits: [
+      { kind: "session", label: "Session", percent: 20, severity: "normal", resets_at: reset }] }) }));
+  for (const reset of [99, 100]) assert(!row(reset).includes("Reset unknown"));
+  assert(row(null).includes("Reset unknown"));
+  assert(row(200).includes("in 1m"));
+});
 const from = app.indexOf("function useProviderUsage("); const to = app.indexOf("function UsageRows(", from);
 assert(from >= 0 && to > from);
 const hooks = (await transformWithEsbuild(app.slice(from, to), "hooks.ts", { loader: "ts" })).code;
@@ -73,7 +113,7 @@ function host() {
     cursor = 0; const result = useUsage(enabled, claude, codex, visible, onError);
     while (pending.length) pending.shift()(); return result;
   };
-  return { render, requests, timers, document, focus: () => listeners.get("focus")?.forEach(f => f()),
+  return { render, requests, timers, document, providerState: provider => states.find(s => s?.provider === provider), focus: () => listeners.get("focus")?.forEach(f => f()),
     unmount: () => effects.forEach(e => e?.cleanup?.()) };
 }
 const flush = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
@@ -99,10 +139,19 @@ test("hidden startup, transition and focus do not invoke", () => {
   h.requests[3].resolve({ ...wire, fetched_at: Math.floor(Date.now()/1000) }); await flush();
   h.requests[1].reject(new Error("late failure")); await flush();
   test("older failure cannot replace newer success", () => assert.notEqual(h.render().info[1].state, "unavailable"));
-  h.render(true, true, false); h.requests[2].resolve({ source: "unavailable", fetched_at: 0, limits: [] }); await flush();
-  test("disabled provider cannot repopulate meter", () => assert.equal(h.render(true, true, false).info.length, 1));
+  h.focus();
+  const pendingCodex = h.requests.at(-1);
+  assert.equal(pendingCodex.command, "codex_usage");
+  h.render(true, true, false);
+  assert.equal(h.providerState("codex").state, "checking");
+  pendingCodex.resolve({ ...wire, fetched_at: Math.floor(Date.now()/1000) }); await flush();
+  test("disabled Codex reply cannot repopulate its state", () => {
+    assert.equal(h.providerState("codex").state, "checking");
+    assert.equal(h.render(true, true, false).info.length, 1);
+  });
   h.unmount();
 }
-console.log(`plan-usage-check: ${checks} passed`);
 assert.match(app, /useUsage\(settingsReady && settings\.usage_place !== "off"/,
   "saved Off must gate startup, before settings hydration");
+
+console.log(`plan-usage-check: ${checks} passed`);

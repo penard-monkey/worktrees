@@ -1,4 +1,5 @@
 // Plan quotas, separate from usage.ts (local UI click telemetry).
+export const CODEX_STALE_SECS = 1800;
 export type Provider = "claude" | "codex";
 export type PlanLimit = {
   id: string; bucket: string; bucketLabel: string; label: string;
@@ -40,7 +41,7 @@ export function adaptCodex(info: CodexUsage): PlanUsage {
 export function viewUsage(info: PlanUsage, now: number): PlanUsage {
   if (info.provider !== "codex" || info.fetched_at === null) return info;
   const age = now - info.fetched_at;
-  if (age < 0 || age > 1800) return { ...info, state: "unavailable", reason: "expired", limits: [] };
+  if (age < 0 || age > CODEX_STALE_SECS) return { ...info, state: "unavailable", reason: "expired", limits: [] };
   if (info.limits.some(l => expired(info, l, now))) return { ...info, state: "stale" };
   return info;
 }
@@ -66,3 +67,5 @@ export function detailMessage(info: PlanUsage): string {
     default: return "";
   }
 }
+
+export const compactUsage = (info: PlanUsage[]) => info.filter(i => !(i.provider === "codex" && i.state === "missing_cli"));
