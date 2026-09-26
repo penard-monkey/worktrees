@@ -54,7 +54,12 @@ common_setup() {
   # override (ops::cmd_status), so a value left exported by status.bats — or by a
   # developer debugging one case — would age every OTHER test's freshly made
   # commit past STALE_SECS and turn "active" into "cold" suite-wide.
-  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME WORKTREES_PROFILE WORKTREES_SYNC_HUB CLAUDE_PROJECTS WORKTREES_STATUS_NOW || true
+  # CLAUDE_PROJECT_DIR and WORKTREES_MCP_PROVIDER decide which directory
+  # `worktrees mcp` pins itself to — and so which repo's git dir a `report`
+  # writes into. Run from inside a Claude session, the first is the REAL repo;
+  # inherited, it would aim every mcp test at the developer's checkout rather
+  # than $REPO. CODEX_HOME is where rollouts are read from (activity).
+  unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME WORKTREES_PROFILE WORKTREES_SYNC_HUB CLAUDE_PROJECTS WORKTREES_STATUS_NOW CLAUDE_PROJECT_DIR WORKTREES_MCP_PROVIDER CODEX_HOME || true
 
   make_repo
 }

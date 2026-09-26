@@ -374,6 +374,54 @@ fn pick_ai_pane<'a>(panes: &[(&'a str, &'a str, &'a str)], ai_word: &str) -> Opt
         .map(|(id, _, _)| *id)
 }
 
+/// The pane in `session` running a PROGRAM (not a shell), as a `%id` —
+/// preferring one whose command names `prefer`. This is how `send` finds a
+/// Codex pane: keyed on "not a shell" rather than "is codex", because an npm
+/// install runs codex under `node` (the rule `session_runs_program` uses).
+pub fn program_pane(session: &str, prefer: &str) -> Option<PaneId> {
+    let target = format!("={session}");
+    let o = tmux(&["list-panes", "-t", &target, "-F", "#{pane_id}\t#{pane_current_command}"]).ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&o.stdout);
+    let panes: Vec<(&str, &str)> = text.lines().filter_map(|l| l.split_once('\t')).collect();
+    pick_program_pane(&panes, prefer).map(|id| PaneId(id.to_string()))
+}
+
+/// `program_pane`'s rule, pure: only `%N` ids, never a shell, `prefer` first.
+fn pick_program_pane<'a>(panes: &[(&'a str, &'a str)], prefer: &str) -> Option<&'a str> {
+    let programs: Vec<&(&str, &str)> =
+        panes.iter().filter(|(id, cmd)| id.starts_with('%') && !is_shell_command(cmd)).collect();
+    programs
+        .iter()
+        .find(|(_, cmd)| cmd.contains(prefer))
+        .or_else(|| programs.first())
+        .map(|(id, _)| *id)
+}
+
+/// Type `text` into `pane` as KEYSTROKES and press Enter — `send-keys -l`, the
+/// opposite choice from `paste_to_ai`, on purpose: this is a message the agent
+/// is meant to act on as if typed, and Codex's composer queues typed input
+/// mid-turn. `-l` makes every character literal (no key names), `--` ends
+/// option parsing so text that begins with `-` is not a flag, and Enter goes
+/// separately after a short pause so a TUI's paste-burst detection does not
+/// read it as a newline inside the burst. The caller has already refused
+/// control characters, so the text cannot carry an Enter of its own.
+pub fn type_into(pane: &PaneId, text: &str) -> Result<(), String> {
+    let run = |args: &[&str]| -> Result<(), String> {
+        let o = tmux(args).map_err(|e| e.to_string())?;
+        if o.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+        }
+    };
+    run(&["send-keys", "-t", pane.as_str(), "-l", "--", text])?;
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    run(&["send-keys", "-t", pane.as_str(), "Enter"])
+}
+
 /// `%0=zsh %1=vim`, so a refusal can be diagnosed from one log line.
 fn pane_summary(session: &str) -> String {
     let target = format!("={session}");
@@ -648,6 +696,14 @@ pub fn kill_session(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_pane_is_never_a_shell_and_prefers_the_named_program() {
+        assert_eq!(pick_program_pane(&[("%1", "zsh"), ("%2", "node")], "codex"), Some("%2"));
+        assert_eq!(pick_program_pane(&[("%1", "node"), ("%2", "codex")], "codex"), Some("%2"));
+        assert_eq!(pick_program_pane(&[("%1", "-zsh"), ("%2", "bash")], "codex"), None);
+        assert_eq!(pick_program_pane(&[("0", "codex")], "codex"), None, "only %N ids enter a PaneId");
+    }
 
     fn pl(rows: &[(&str, &str, &str)]) -> PaneList {
         PaneList {

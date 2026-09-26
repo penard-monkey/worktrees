@@ -258,6 +258,17 @@ or run `worktrees mcp --install --ai codex` for Codex. The unqualified MCP setup
 command still targets Claude. The MCP `create_worktree` tool accepts an optional
 `provider: "claude" | "codex"`; without one it uses the project's AI command.
 
+Agents in different places of one project can talk through the same server,
+whichever provider each one is. `report` posts a message to another place
+(`(main)` unless told otherwise; `reply_to` threads an answer), `messages`
+reads what was sent to your place, and `wait` blocks for up to two minutes
+until another place's agent goes idle or a message arrives, so an agent
+waits instead of polling. The sender is always the place the agent is working
+in. Messages live in the repository's shared git data, untracked, and expire
+after a week. With `--mutations`, `send` types one line into another place's
+Codex; for a Claude place it answers with the session name to use with
+Claude's own `SendMessage`.
+
 ## Compatibility notes
 
 - macOS: stock `/bin/bash` 3.2 is fully supported (CI runs the whole suite on it).
