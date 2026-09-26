@@ -17,7 +17,7 @@ import { type McpStatus } from "./McpPanel";
 import { dismissPatch, pendingOffers, type Offer } from "./offers";
 import type { CatId } from "./SettingsSheet";
 import {
-  driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed,
+  driftedSlugs, InitBanner, issueCount, ProjectSheet, reportFailed, StrayBanner,
   type DoctorReport, type InitSuggestion,
 } from "./ProjectSheet";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
@@ -6358,7 +6358,7 @@ function App() {
               data-track="nav.project.strays"
               title={`${pv.snapshot!.strays!.length} worktree${pv.snapshot!.strays!.length === 1 ? "" : "s"} registered outside .worktrees/ — this app can't see ${pv.snapshot!.strays!.length === 1 ? "it" : "them"}. Open the project sheet for the adopt command.`}
               onClick={() => setProjSheet(pv.root)}
-            >⊟</button>
+            >⊟{pv.snapshot!.strays!.length}</button>
           ) : null}
           {/* The sync entry point David asked for on day one: hover-revealed,
               next to + and ×, opening the popover the ctx menu duplicates.
@@ -6395,6 +6395,13 @@ function App() {
                 />
               );
             })()}
+            {/* Above the places, like the init nudge: a stray has no row by
+                construction — that IS the condition — so the only honest place
+                for it is beside the list it is missing from. Not dismissible
+                (see `StrayBanner`), and it disappears when the strays do. */}
+            {(pv.snapshot?.strays?.length ?? 0) > 0 && (
+              <StrayBanner count={pv.snapshot!.strays!.length} onOpen={() => setProjSheet(pv.root)} />
+            )}
             {main && <ul className="places"><PlaceRow repo={pv.root} p={main} /></ul>}
             {/* above the tier groups, not inside one: which tier it lands in is
                 not known until it exists */}
