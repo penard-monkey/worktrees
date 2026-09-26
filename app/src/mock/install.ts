@@ -2831,7 +2831,8 @@ function emitEvent(event: string, payload: unknown) {
   metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
 };
 
-// simulated Claude working state — cycles the sessions:busy push (lib.rs poll
+// simulated agent working state (Claude's probes + Codex's rollouts, merged
+// into one set by lib.rs; billing-refactor is the Codex place) — cycles the sessions:busy push (lib.rs poll
 // thread's event) so the busy (green blink) + waiting (amber static) dots and the
 // project rollup badge are exercisable in the harness. Payload is now { busy,
 // waiting } keyed by WORKTREE PATH (== place.path in fixtures.ts, which builds

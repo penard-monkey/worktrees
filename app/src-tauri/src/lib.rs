@@ -1670,9 +1670,37 @@ fn probe_model(p: &worktrees_core::agent::ClaudeProbe) -> Option<String> {
         .map(|id| worktrees_core::agent::model_display(&id))
 }
 
+/// Last answer per codex rollout: its length when read, the model it named and
+/// where its newest turn stands. One cache and one tail read serve both, so a
+/// streaming turn costs a single 256K read per tick, not one per question.
+static CODEX_TAIL: Mutex<Option<HashMap<PathBuf, (u64, Option<String>, Option<worktrees_core::codex::Turn>)>>> =
+    Mutex::new(None);
+
+/// `path`'s (model, turn), re-read only once the file has GROWN. A tail that
+/// now names neither (one enormous tool result filling it) keeps the last
+/// answer for each: nothing changed because a big line landed.
+fn codex_tail(path: &Path) -> (Option<String>, Option<worktrees_core::codex::Turn>) {
+    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
+        return (None, None);
+    };
+    let mut guard = CODEX_TAIL.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if let Some((l, m, t)) = cache.get(path) {
+        if *l == len {
+            return (m.clone(), t.clone());
+        }
+    }
+    let (pm, pt) = cache.get(path).map(|(_, m, t)| (m.clone(), t.clone())).unwrap_or((None, None));
+    let lines = tail_lines(path, TRANSCRIPT_TAIL_BYTES);
+    let m = worktrees_core::codex::rollout_model(&lines).or(pm);
+    let t = worktrees_core::codex::rollout_turn(&lines).or(pt);
+    cache.insert(path.to_path_buf(), (len, m.clone(), t.clone()));
+    (m, t)
+}
+
 /// The model the newest codex session in worktree `cwd` last ran a turn on.
 fn codex_model(cwd: &str) -> Option<String> {
-    cached_model(&worktrees_core::codex::latest_rollout(cwd)?, worktrees_core::codex::rollout_model)
+    codex_tail(&worktrees_core::codex::latest_rollout(cwd)?).0
 }
 
 /// Record what a snapshot showed for `cwd`'s codex session (`None` = no live
@@ -1687,22 +1715,60 @@ fn codex_watch_set(cwd: &str, live: bool, model: &Option<String>) {
     }
 }
 
-/// True when any watched codex session's model differs from what was last
-/// shown. Updates the record itself, so one change is one re-list.
-fn codex_models_moved() -> bool {
+/// One tick's read of every watched (live) codex session.
+#[derive(Default)]
+struct CodexTick {
+    /// Some session's model differs from what the last snapshot showed.
+    models_moved: bool,
+    /// Places whose codex is mid-turn — merged into `sessions:busy`, so the
+    /// nav's green dot needs no codex-specific path.
+    busy: Vec<String>,
+    /// (place, epoch) of each session's newest FINISHED turn, dated by codex's
+    /// own `completed_at`. The caller stamps only what moved.
+    done: Vec<(String, i64)>,
+}
+
+/// Read every watched codex session's rollout once: the model the label shows
+/// and the turn state the dots show. Only sessions the snapshot saw UP are
+/// watched, so a codex killed mid-turn (its rollout ending on `task_started`
+/// forever) stops counting as busy as soon as the next snapshot lists it down.
+/// No waiting/amber: nothing codex writes tells an approval prompt from a
+/// running command (`findings.md`, 2026-09-26).
+fn codex_tick() -> CodexTick {
     let watched: Vec<(String, Option<String>)> = {
         let guard = CODEX_WATCH.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|w| w.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
     };
-    let mut moved = false;
+    let mut out = CodexTick::default();
     for (cwd, shown) in watched {
-        let now = codex_model(&cwd);
-        if now != shown {
-            codex_watch_set(&cwd, true, &now);
-            moved = true;
+        let (model, turn) = match worktrees_core::codex::latest_rollout(&cwd) {
+            Some(r) => codex_tail(&r),
+            None => (None, None),
+        };
+        if model != shown {
+            codex_watch_set(&cwd, true, &model);
+            out.models_moved = true;
+        }
+        match turn {
+            Some(worktrees_core::codex::Turn::Busy) => out.busy.push(cwd),
+            Some(worktrees_core::codex::Turn::Done { at: Some(at), .. }) => out.done.push((cwd, at)),
+            _ => {}
         }
     }
-    moved
+    out
+}
+
+/// The codex completions not yet stamped: those whose epoch differs from the
+/// one last seen for that place. The store stamp is forward-only anyway, but
+/// reaching it costs a git spawn (`place_key_for`), so a turn that finished an
+/// hour ago must not be re-offered every 3s. Pure, for the test; the memory is
+/// the caller's.
+fn codex_new_dones(seen: &mut HashMap<String, i64>, done: &[(String, i64)]) -> Vec<(String, i64)> {
+    let fresh: Vec<(String, i64)> = done.iter().filter(|(p, at)| seen.get(p) != Some(at)).cloned().collect();
+    for (p, at) in &fresh {
+        seen.insert(p.clone(), *at);
+    }
+    fresh
 }
 
 fn is_work_prompt(display: &str) -> bool {
@@ -7183,6 +7249,9 @@ pub fn run() {
                 // Consecutive ticks each path has been busy — the dwell guard's
                 // memory, and the only state a completion edge needs.
                 let mut busy_ticks: HashMap<String, u32> = HashMap::new();
+                // The codex completion last stamped per place (see
+                // `codex_new_dones`).
+                let mut codex_done_seen: HashMap<String, i64> = HashMap::new();
                 // Dock-shell cwd sampling, every 5th tick (~15s). Slow on
                 // purpose: the exit hook is the accurate capture, this one only
                 // has to bound how much a crash or a force-quit can lose.
@@ -7326,11 +7395,21 @@ pub fn run() {
                     // a `/model` switch, codex's next turn) → re-list, so the
                     // agent label follows within a tick rather than on the 30s
                     // safety tick. `None` first: the launch already listed.
-                    let codex_moved = codex_models_moved();
-                    if codex_moved || last_models.as_ref().is_some_and(|m| *m != models) {
+                    let codex = codex_tick();
+                    if codex.models_moved || last_models.as_ref().is_some_and(|m| *m != models) {
                         let _ = handle.emit("places:changed", ());
                     }
                     last_models = Some(models);
+                    // Claude's busy set alone feeds the dwell counter below:
+                    // a codex turn is dated by its own `task_complete`, and an
+                    // interrupted one (`turn_aborted`) is not work to announce.
+                    let claude_busy = {
+                        let mut b = busy.clone();
+                        b.sort_unstable();
+                        b.dedup();
+                        b
+                    };
+                    busy.extend(codex.busy);
                     busy.sort_unstable();
                     waiting.sort_unstable();
                     // Two sessions in the SAME dir each push their cwd. The
@@ -7351,12 +7430,24 @@ pub fn run() {
                     }
                     // Completion edges, computed AFTER the busy emit so the dot's
                     // hand-off (green out, ember in) arrives in that order.
-                    let exits = completion_edges(&mut busy_ticks, &busy);
+                    let exits = completion_edges(&mut busy_ticks, &claude_busy);
                     if !exits.is_empty() {
                         // read_projects only on a real edge — not every 3s tick
                         let roots = read_projects(&handle);
                         let epoch = sysclock::now_epoch();
                         for path in exits {
+                            if stamp_worked(&roots, &path, epoch) {
+                                let _ = handle.emit("sessions:done", TaskDone { path, epoch });
+                            }
+                        }
+                    }
+                    let fresh = codex_new_dones(&mut codex_done_seen, &codex.done);
+                    if !fresh.is_empty() {
+                        let roots = read_projects(&handle);
+                        let now = sysclock::now_epoch();
+                        for (path, at) in fresh {
+                            // Bounded by now: `completed_at` is codex's clock.
+                            let epoch = at.min(now);
                             if stamp_worked(&roots, &path, epoch) {
                                 let _ = handle.emit("sessions:done", TaskDone { path, epoch });
                             }
@@ -8085,6 +8176,20 @@ mod tests {
         let mut t = HashMap::new();
         completion_edges(&mut t, &v(&["/a", "/a"]));
         assert_eq!(t["/a"], 2, "documents WHY the caller must dedup before this");
+    }
+
+    /// A finished codex turn stays the rollout's newest boundary until the next
+    /// one starts, so it is offered on every tick. Only a NEW epoch may reach
+    /// `stamp_worked` (a git spawn each), and a later turn in the same place
+    /// must still get through.
+    #[test]
+    fn a_codex_completion_is_stamped_once_per_turn() {
+        let mut seen = HashMap::new();
+        let d = |p: &str, at: i64| vec![(p.to_string(), at)];
+        assert_eq!(codex_new_dones(&mut seen, &d("/a", 100)), d("/a", 100));
+        assert!(codex_new_dones(&mut seen, &d("/a", 100)).is_empty());
+        assert_eq!(codex_new_dones(&mut seen, &d("/a", 160)), d("/a", 160));
+        assert_eq!(codex_new_dones(&mut seen, &d("/b", 100)), d("/b", 100), "places are independent");
     }
 
     /// The backfill's only judgement call: which history lines are WORK. Slash

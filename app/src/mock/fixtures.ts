@@ -86,6 +86,13 @@ function place(prefix: string, root: string, o: Opt): Place {
     // and the stale verdicts would be unreachable in the harness.
     created_epoch: o.created_epoch ?? o.last_commit_epoch ?? NOW - DAY,
     tmux_session: o.tmux_session ?? { name: sessionName(prefix, o.slug), up: false },
+    // lib.rs sets this on EVERY place. Without it the nav's provider mark has
+    // nothing to read in the harness; a live `tmux_session` is Claude unless a
+    // fixture says codex.
+    agent_sessions: o.agent_sessions ?? {
+      claude: { name: sessionName(prefix, o.slug), up: o.tmux_session?.up ?? false, model: null },
+      codex: { name: `${sessionName(prefix, o.slug)}~agent~codex`, up: false, model: null },
+    },
     claude_session_present: o.claude_session_present ?? false,
     declared: o.declared ?? null,
     lifecycle_effective: o.lifecycle_effective ?? "closed",
@@ -139,8 +146,14 @@ function cdv(): ProjectView {
     }),
     place(P, root, {
       slug: "billing-refactor", branch: "feat/billing-v2",
-      ahead: 5, behind: 1, tmux_session: { name: `${P}-billing-refactor`, up: true },
-      claude_session_present: true, last_commit_subject: "extract invoice service",
+      ahead: 5, behind: 1, tmux_session: { name: `${P}-billing-refactor~agent~codex`, up: true },
+      // The Codex place: its nav row carries >_ and its busy turns (the
+      // activity cycle in install.ts) light the same dots Claude's do.
+      agent_sessions: {
+        claude: { name: `${P}-billing-refactor`, up: false, model: null },
+        codex: { name: `${P}-billing-refactor~agent~codex`, up: true, model: "gpt-6-astra" },
+      },
+      claude_session_present: false, last_commit_subject: "extract invoice service",
       declared: { last_opened_epoch: NOW - 3600 }, lifecycle_effective: "active",
     }),
     place(P, root, {

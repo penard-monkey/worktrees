@@ -247,6 +247,55 @@ pub fn launch_flags(wt: &str) -> Vec<String> {
     permission_flags(mode, common.as_deref())
 }
 
+/// Where a codex thread's CURRENT turn stands, per the newest turn-boundary
+/// record in its rollout. Codex writes no status file, but since 0.15x every
+/// turn is bracketed in the rollout: `task_started` when it begins, then
+/// `task_complete` (carrying `completed_at`) or `turn_aborted` (Esc). Measured
+/// on 0.157.1, 2026-09-26 (`findings.md`): legacy `notify` reports only the
+/// completion and nothing at all for an interrupt, so the rollout is the one
+/// source that can end a busy turn either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Turn {
+    /// A turn is running — possibly parked on an approval prompt, which
+    /// nothing codex writes tells apart from a command that is simply running.
+    Busy,
+    /// The last turn finished at `at` (epoch seconds, codex's own
+    /// `completed_at` — CONTENT, never the file's mtime, which a live session
+    /// keeps moving). `None` when the record carries no time.
+    Done { at: Option<i64>, turn_id: Option<String> },
+    /// The last turn was interrupted. Not work to be told about: the user was
+    /// at the prompt when it stopped.
+    Aborted,
+}
+
+/// The state of the newest turn among rollout `lines` (oldest first), or
+/// `None` when the lines hold no turn boundary at all — a fresh session, or a
+/// tail filled by one enormous tool result, which the caller treats as "no new
+/// answer" rather than "idle". Reads only record TYPES and codex's own
+/// timestamps/ids; `last_agent_message` is content and is never looked at.
+pub fn rollout_turn(lines: &[String]) -> Option<Turn> {
+    lines.iter().rev().find_map(|l| {
+        // Cheap reject before a parse: most lines are token counts and items.
+        if !(l.contains("\"task_") || l.contains("\"turn_aborted\"")) {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v.get("type")?.as_str()? != "event_msg" {
+            return None;
+        }
+        let p = v.get("payload")?;
+        match p.get("type")?.as_str()? {
+            "task_started" => Some(Turn::Busy),
+            "task_complete" => Some(Turn::Done {
+                at: p.get("completed_at").and_then(|c| c.as_i64()),
+                turn_id: p.get("turn_id").and_then(|t| t.as_str()).map(str::to_string),
+            }),
+            "turn_aborted" => Some(Turn::Aborted),
+            _ => None,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +385,42 @@ mod tests {
             permission_flags(Permissions::AutoReview, Some("/a'b\"c/.git"))[2],
             r#"'sandbox_workspace_write.writable_roots=["/a'\''b\"c/.git"]'"#
         );
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Shapes from the 2026-09-26 probe (0.157.1), content fields dropped.
+    const STARTED: &str = r#"{"timestamp":"2026-09-26T20:31:40.648Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2","started_at":1790454700}}"#;
+    const COMPLETE: &str = r#"{"timestamp":"2026-09-26T20:31:14.445Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","started_at":1790454672,"completed_at":1790454674}}"#;
+    const ABORTED: &str = r#"{"timestamp":"2026-09-26T20:33:06.534Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t3","reason":"interrupted","completed_at":1790454786}}"#;
+    const TOOL: &str = r#"{"timestamp":"2026-09-26T20:31:44.814Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec"}}"#;
+
+    #[test]
+    fn a_started_turn_is_busy_until_its_boundary_lands() {
+        assert_eq!(rollout_turn(&lines(&[COMPLETE, STARTED, TOOL])), Some(Turn::Busy));
+        assert_eq!(
+            rollout_turn(&lines(&[STARTED, TOOL, COMPLETE])),
+            Some(Turn::Done { at: Some(1790454674), turn_id: Some("t1".into()) })
+        );
+    }
+
+    /// Esc writes `turn_aborted` and sends no notify — the case a
+    /// completion-only source leaves busy forever.
+    #[test]
+    fn an_interrupted_turn_is_not_busy_and_not_done() {
+        assert_eq!(rollout_turn(&lines(&[COMPLETE, STARTED, ABORTED])), Some(Turn::Aborted));
+    }
+
+    /// No boundary in the tail is "no answer", never "idle": a huge tool
+    /// result can push the `task_started` out of the window mid-turn.
+    #[test]
+    fn a_tail_with_no_boundary_has_no_answer() {
+        assert_eq!(rollout_turn(&lines(&[TOOL, TOOL])), None);
+        assert_eq!(rollout_turn(&[]), None);
+        // A content field that merely MENTIONS a record type is not one.
+        let quoted = r#"{"type":"response_item","payload":{"type":"message","text":"\"task_complete\""}}"#;
+        assert_eq!(rollout_turn(&lines(&[STARTED, quoted])), Some(Turn::Busy));
     }
 }

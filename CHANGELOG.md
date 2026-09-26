@@ -36,6 +36,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   mode, your next Codex launch moves from Ask to auto-review; pick Ask to keep
   the old behaviour. A change applies to the next Codex launch. The CLI reads
   the same choice from `codex_permissions` or `WORKTREES_CODEX_PERMISSIONS`.
+- **Codex places light the nav's activity dots.** A Codex turn now shows the
+  same green "working" dot as Claude, and a finished turn leaves the same
+  "not seen yet" ring, dated by when Codex says the turn completed. An
+  interrupted turn clears the dot without a ring. Codex has no equivalent of
+  the amber "needs input" dot yet: nothing it writes tells an approval prompt
+  apart from a running command.
+- **Each nav row shows which agent is live:** ✻ for Claude, >_ for Codex,
+  nothing when no agent is running. The dot's tooltip names the agent too
+  ("Codex working").
 
 ## [0.30.0] - 2026-09-23
 

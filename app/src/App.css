@@ -735,6 +735,12 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 /* An unsent prompt. Dim, not amber: the waiting dot already owns "Claude needs
    input", and this is the quieter cousin — YOU left something half-typed. */
 .g-draft { color: var(--txt-dim); }
+/* Which agent is live (✻ Claude, >_ Codex). Text token, no hue: the status dot
+   is the row's only colour signal, and a hued mark beside it would read as a
+   second state. The codex mark is two glyphs, so it is set in the terminal face
+   and tightened to sit in the same width as ✻. */
+.g-agent { color: var(--txt-dim); }
+.g-agent-codex { font-family: var(--font-mono); letter-spacing: -0.08em; font-weight: var(--fw-bold); }
 .row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; }
 /* The enter affordance rides in the age's slot. Both children occupy grid cell
    1/1, so the slot is sized by the WIDER of them and the hover swap cannot

@@ -45,15 +45,28 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   `/model` in the Codex TUI should change it within a few seconds with no
   message sent. That case was verified only at the snapshot level, because the
   rollout event it relies on (`thread_settings_applied`) is Codex's to rename.
+  Same for the nav dots: a turn lights green and ends in the afterglow ring,
+  and Esc ends it with no ring — they ride `task_started` / `task_complete` /
+  `turn_aborted`, also Codex's to rename.
   _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md),
   [2026-09-23 model-label](docs/sessions/2026-09-23-model-label/summary.md)_
+
+- **A Codex place never shows the amber "needs input" dot.** Nothing Codex
+  writes tells an approval prompt from a running command: legacy `notify`
+  sends no `approval-requested` (measured on 0.157.1), hooks passed through
+  `-c` stop on a trust prompt, and the rollout's last record is the same
+  pending `exec` call either way. The screen is the one witness — the approval
+  box ("Would you like to run the following command?") — so the draft scan's
+  one-tmux-call capture could look for it on its 15s beat. Re-probe `notify`
+  and hooks on a Codex upgrade first; see `findings.md` in the session archive.
+  _From: codex-activity-nav (2026-09-26)_
 
 - **`CODEX_WATCH` keeps a removed project's worktrees.** The poll re-checks
   the model of every worktree a snapshot last saw with live Codex. A worktree
   is dropped only when a later snapshot of ITS repo sees Codex down, so
   removing the project while Codex runs leaves the entry until the app
   restarts. That costs a few `read_dir` calls per tick. Prune against
-  `read_projects` in `codex_models_moved`.
+  `read_projects` in `codex_tick` (was `codex_models_moved`).
   _From: [2026-09-23 model-label](docs/sessions/2026-09-23-model-label/summary.md)_
 
 - **`codex::session_present` opens every rollout on each launch.** It walks all
