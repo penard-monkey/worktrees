@@ -296,6 +296,33 @@ pub fn rollout_turn(lines: &[String]) -> Option<Turn> {
     })
 }
 
+/// The footer Codex's approval modals end on — a command, a file edit, a
+/// permission grant — captured from the 0.157.1 TUI (`findings.md`).
+const APPROVAL_FOOTER: &str = "Press enter to confirm or esc to cancel";
+/// The footers of a plan-mode `request_user_input` modal: one question, or
+/// the last of several (the key-hint strings in the 0.157.1 binary).
+const QUESTION_FOOTERS: [&str; 2] = ["to submit answer", "to submit all"];
+
+/// Whether a captured Codex pane is sitting on a modal that waits for the
+/// user: an approval (command, edits, permissions) or a plan-mode question.
+/// Nothing Codex writes to disk says so — the rollout's last record is the
+/// same pending tool call whether the command is running or awaiting a yes,
+/// and legacy `notify` has no approval event — so the screen is the witness.
+///
+/// Keyed on the modal's FOOTER being the bottom of the screen, not on its
+/// question line anywhere in it: history can quote "Would you like to run the
+/// following command?" (a diff of this very file), but only a live modal puts
+/// its key hints below everything else, where the composer otherwise sits.
+/// The last two lines are joined so a narrow pane that wraps the footer still
+/// matches. An answered modal leaves no trace, scrollback included, so this
+/// can never stick. A modal whose footer is not listed here reads as busy —
+/// the quiet failure, where a false amber dot would cry wolf.
+pub fn waiting_on_screen(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(2)..].join(" ");
+    tail.contains(APPROVAL_FOOTER) || QUESTION_FOOTERS.iter().any(|f| tail.contains(f))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +449,83 @@ mod tests {
         // A content field that merely MENTIONS a record type is not one.
         let quoted = r#"{"type":"response_item","payload":{"type":"message","text":"\"task_complete\""}}"#;
         assert_eq!(rollout_turn(&lines(&[STARTED, quoted])), Some(Turn::Busy));
+    }
+
+    /// Screens captured from the 0.157.1 TUI in tmux (paths shortened).
+    const RUN_APPROVAL: &str = "\
+› Create an empty file named b.txt using the shell command touch b.txt.
+• I’ll run touch b.txt to create the file.
+• Running touch b.txt
+  Would you like to run the following command?
+  Environment: local
+  Reason: Allow running touch b.txt to create the requested file? The filesystem sandbox is read-only.
+  $ touch b.txt
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch b.txt` (p)
+  3. No, and tell Codex what to do differently (esc)
+  Press enter to confirm or esc to cancel
+
+
+";
+    const EDIT_APPROVAL: &str = "\
+• Edited a.txt (+1 -0)
+    2 +hello
+    + Show details
+  Would you like to make the following edits?
+  Description: Apply proposed file edits
+  Destination: /w/a.txt
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for these files (a)
+  3. No, and tell Codex what to do differently (esc)
+  Press enter to confirm or esc to cancel
+";
+    const QUESTION: &str = "\
+› Use the request_user_input tool to ask me one short multiple-choice question.
+
+
+
+  Question 1/1 (1 unanswered)
+  Which color?
+
+  › 1. Red                Choose red.
+    2. Blue               Choose blue.
+    3. None of the above  Optionally, add details in notes (tab)
+
+  tab to add notes | enter to submit answer | esc to interrupt
+";
+    const IDLE: &str = "\
+• Appended hello to a.txt using a file edit.
+  15:54
+                                                  Tip: Press ctrl+t to open the full transcript.
+› Ask Codex to do anything
+  GPT-6-Astra default · ~/w · Append hello to a.txt
+  ? for shortcuts
+";
+
+    #[test]
+    fn an_approval_or_a_question_on_screen_is_waiting() {
+        assert!(waiting_on_screen(RUN_APPROVAL));
+        assert!(waiting_on_screen(EDIT_APPROVAL));
+        assert!(waiting_on_screen(QUESTION));
+        // The last question of several ends on "submit all" instead.
+        assert!(waiting_on_screen("  Question 2/2 (1 unanswered)\n  tab to add notes | enter to submit all | esc to interrupt\n"));
+        assert!(!waiting_on_screen(IDLE));
+        assert!(!waiting_on_screen(""));
+    }
+
+    /// History that QUOTES a modal is not a modal: only a live one puts its
+    /// footer at the bottom, below where the composer otherwise sits.
+    #[test]
+    fn a_modal_quoted_in_history_is_not_waiting() {
+        let quoted = format!("• Edited codex.rs\n{RUN_APPROVAL}\n{QUESTION}\n{IDLE}");
+        assert!(!waiting_on_screen(&quoted));
+    }
+
+    /// A narrow pane wraps the footer onto two lines; the join finds it. A
+    /// wrapped footer with the composer back under it is history, not a modal.
+    #[test]
+    fn a_wrapped_footer_still_counts() {
+        assert!(waiting_on_screen("  3. No, and tell Codex what to do differently (esc)\n  Press enter to confirm or esc\n  to cancel\n"));
+        assert!(!waiting_on_screen("  Press enter to confirm or esc\n  to cancel\n› Ask Codex to do anything\n  ? for shortcuts\n"));
     }
 }

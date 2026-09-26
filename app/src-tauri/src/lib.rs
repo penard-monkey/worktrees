@@ -290,7 +290,7 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             let place_path = place.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string();
             let claude_model = if claude_up { claude_model(&probes, &claude_name) } else { None };
             let codex_model = if codex_up { codex_model(&place_path) } else { None };
-            codex_watch_set(&place_path, codex_up, &codex_model);
+            codex_watch_set(&place_path, codex_up.then_some(&codex_name), &codex_model);
             place["agent_sessions"] = serde_json::json!({
                 "claude": { "name": claude_name, "up": claude_up, "model": claude_model },
                 "codex": { "name": codex_name, "up": codex_up, "model": codex_model }
@@ -1629,11 +1629,18 @@ fn transcript_epoch(path: &Path) -> Option<i64> {
 /// named. Read on the 3s snapshot poll, so a file is re-read only once it has
 /// GROWN — an idle session costs one `stat`.
 static MODEL_CACHE: Mutex<Option<HashMap<PathBuf, (u64, Option<String>)>>> = Mutex::new(None);
-/// Worktrees with a live codex session, and the model the last snapshot showed
-/// for each. Codex writes no status file, so nothing else tells the poll a
-/// codex turn landed; the tick re-reads these and re-lists when one CHANGES —
-/// exactly when the label would, and never while a turn merely streams.
-static CODEX_WATCH: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+/// Worktrees with a live codex session: its tmux session name and the model
+/// the last snapshot showed. Codex writes no status file, so nothing else
+/// tells the poll a codex turn landed; the tick re-reads these and re-lists
+/// when a model CHANGES — exactly when the label would, and never while a turn
+/// merely streams. The session name is what the approval sample captures.
+static CODEX_WATCH: Mutex<Option<HashMap<String, CodexWatched>>> = Mutex::new(None);
+
+#[derive(Clone)]
+struct CodexWatched {
+    session: String,
+    model: Option<String>,
+}
 
 /// The model named in `path`'s tail by `parse`, cached by file length. A tail
 /// that now names nothing (one enormous tool result filling it) KEEPS the last
@@ -1703,15 +1710,18 @@ fn codex_model(cwd: &str) -> Option<String> {
     codex_tail(&worktrees_core::codex::latest_rollout(cwd)?).0
 }
 
-/// Record what a snapshot showed for `cwd`'s codex session (`None` = no live
-/// session, which stops the tick watching it).
-fn codex_watch_set(cwd: &str, live: bool, model: &Option<String>) {
+/// Record what a snapshot showed for `cwd`'s codex session: its tmux session
+/// while live, `None` when down (which stops the tick watching it).
+fn codex_watch_set(cwd: &str, session: Option<&String>, model: &Option<String>) {
     let mut guard = CODEX_WATCH.lock().unwrap_or_else(|e| e.into_inner());
     let w = guard.get_or_insert_with(HashMap::new);
-    if live {
-        w.insert(cwd.to_string(), model.clone());
-    } else {
-        w.remove(cwd);
+    match session {
+        Some(session) => {
+            w.insert(cwd.to_string(), CodexWatched { session: session.clone(), model: model.clone() });
+        }
+        None => {
+            w.remove(cwd);
+        }
     }
 }
 
@@ -1723,6 +1733,9 @@ struct CodexTick {
     /// Places whose codex is mid-turn — merged into `sessions:busy`, so the
     /// nav's green dot needs no codex-specific path.
     busy: Vec<String>,
+    /// Mid-turn places whose pane shows an approval or a question — moved out
+    /// of `busy` and into `sessions:busy`'s waiting set (the amber dot).
+    waiting: Vec<String>,
     /// (place, epoch) of each session's newest FINISHED turn, dated by codex's
     /// own `completed_at`. The caller stamps only what moved.
     done: Vec<(String, i64)>,
@@ -1732,30 +1745,91 @@ struct CodexTick {
 /// and the turn state the dots show. Only sessions the snapshot saw UP are
 /// watched, so a codex killed mid-turn (its rollout ending on `task_started`
 /// forever) stops counting as busy as soon as the next snapshot lists it down.
-/// No waiting/amber: nothing codex writes tells an approval prompt from a
-/// running command (`findings.md`, 2026-09-26).
-fn codex_tick() -> CodexTick {
-    let watched: Vec<(String, Option<String>)> = {
+///
+/// A mid-turn session may be parked on an approval or a plan-mode question,
+/// which nothing codex writes to disk tells apart from a running command
+/// (`findings.md`, 2026-09-26) — so those panes, and only those, are captured
+/// and read with `codex::waiting_on_screen`. `sessions` is the tick's tmux
+/// fingerprint, reused exactly as `scan_drafts` reuses it.
+fn codex_tick(sessions: &str) -> CodexTick {
+    let watched: Vec<(String, CodexWatched)> = {
         let guard = CODEX_WATCH.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|w| w.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
     };
     let mut out = CodexTick::default();
-    for (cwd, shown) in watched {
+    let mut mid_turn: Vec<(String, String)> = Vec::new();
+    for (cwd, w) in watched {
         let (model, turn) = match worktrees_core::codex::latest_rollout(&cwd) {
             Some(r) => codex_tail(&r),
             None => (None, None),
         };
-        if model != shown {
-            codex_watch_set(&cwd, true, &model);
+        if model != w.model {
+            codex_watch_set(&cwd, Some(&w.session), &model);
             out.models_moved = true;
         }
         match turn {
-            Some(worktrees_core::codex::Turn::Busy) => out.busy.push(cwd),
+            Some(worktrees_core::codex::Turn::Busy) => mid_turn.push((cwd, w.session)),
             Some(worktrees_core::codex::Turn::Done { at: Some(at), .. }) => out.done.push((cwd, at)),
             _ => {}
         }
     }
+    let parked = codex_waiting_panes(sessions, &mid_turn);
+    for (cwd, _) in mid_turn {
+        if parked.contains(&cwd) {
+            out.waiting.push(cwd);
+        } else {
+            out.busy.push(cwd);
+        }
+    }
     out
+}
+
+/// Capture the codex panes in `targets` (cwd, tmux session) in ONE `tmux`
+/// call and return the cwds whose screen is sitting on a modal. Costs nothing
+/// while no codex turn is running, which is nearly always; during one it is a
+/// single spawn per 3s tick, however many sessions are mid-turn.
+///
+/// Same chaining as `scan_drafts`: sessions missing from the fingerprint are
+/// dropped first (a dead target aborts the rest of the chain), and a marker
+/// precedes each capture so a chain that dies part-way still attributes what
+/// it did print. `=name:` is the session's current window and active pane,
+/// which is codex unless the user split it — then the screen shows no codex
+/// footer and the place simply reads busy. A tmux failure reads the same way:
+/// the quiet failure, never a false amber.
+fn codex_waiting_panes(sessions: &str, targets: &[(String, String)]) -> Vec<String> {
+    let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
+    let targets: Vec<(&String, String)> = targets
+        .iter()
+        .filter(|(_, s)| live.contains(&s.as_str()))
+        .map(|(cwd, s)| (cwd, format!("={s}:")))
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let marks: Vec<String> = (0..targets.len()).map(|i| format!("@@ {i} @@")).collect();
+    let mut args: Vec<&str> = Vec::with_capacity(targets.len() * 9);
+    for (i, (_, target)) in targets.iter().enumerate() {
+        if i > 0 {
+            args.push(";");
+        }
+        args.extend(["display-message", "-p", &marks[i], ";", "capture-pane", "-p", "-t", target]);
+    }
+    let Ok(out) = worktrees_core::tmux::tmux(&args) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parked = Vec::new();
+    for (i, (cwd, _)) in targets.iter().enumerate() {
+        let Some(rest) = text.split(&format!("{}\n", marks[i])).nth(1) else { continue };
+        let screen = match marks.get(i + 1).and_then(|m| rest.find(m.as_str())) {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+        if worktrees_core::codex::waiting_on_screen(screen) {
+            parked.push((*cwd).clone());
+        }
+    }
+    parked
 }
 
 /// The codex completions not yet stamped: those whose epoch differs from the
@@ -7395,7 +7469,7 @@ pub fn run() {
                     // a `/model` switch, codex's next turn) → re-list, so the
                     // agent label follows within a tick rather than on the 30s
                     // safety tick. `None` first: the launch already listed.
-                    let codex = codex_tick();
+                    let codex = codex_tick(&fp);
                     if codex.models_moved || last_models.as_ref().is_some_and(|m| *m != models) {
                         let _ = handle.emit("places:changed", ());
                     }
@@ -7410,6 +7484,7 @@ pub fn run() {
                         b
                     };
                     busy.extend(codex.busy);
+                    waiting.extend(codex.waiting);
                     busy.sort_unstable();
                     waiting.sort_unstable();
                     // Two sessions in the SAME dir each push their cwd. The

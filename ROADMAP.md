@@ -51,14 +51,15 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md),
   [2026-09-23 model-label](docs/sessions/2026-09-23-model-label/summary.md)_
 
-- **A Codex place never shows the amber "needs input" dot.** Nothing Codex
-  writes tells an approval prompt from a running command: legacy `notify`
-  sends no `approval-requested` (measured on 0.157.1), hooks passed through
-  `-c` stop on a trust prompt, and the rollout's last record is the same
-  pending `exec` call either way. The screen is the one witness — the approval
-  box ("Would you like to run the following command?") — so the draft scan's
-  one-tmux-call capture could look for it on its 15s beat. Re-probe `notify`
-  and hooks on a Codex upgrade first; see `findings.md` in the session archive.
+- **The Codex amber dot reads the screen, and the screen is Codex's to
+  change.** `codex::waiting_on_screen` matches the modal footers of the
+  0.157.1 TUI ("Press enter to confirm or esc to cancel", "to submit
+  answer"/"to submit all"). A reworded footer degrades quietly to busy (green)
+  rather than a false amber, so nothing will complain. Add it to the Codex
+  manual check: park a turn on an approval and on a plan-mode question, and
+  watch the dot go amber and back. MCP elicitation's footer was never
+  captured. Re-probe `notify` for an `approval-requested` event on each Codex
+  upgrade too — if it ever fires, it is the better source.
   _From: codex-activity-nav (2026-09-26)_
 
 - **`CODEX_WATCH` keeps a removed project's worktrees.** The poll re-checks

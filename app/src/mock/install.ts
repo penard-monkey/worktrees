@@ -2842,13 +2842,15 @@ const WT = "/Users/demo/workspace/worktrees/.worktrees";
 const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
   // both states visible: one place working, another needs input
   { busy: [`${CDV}/billing-refactor`], waiting: [`${WT}/feat-redesign`] },
-  // working shifts, nothing waiting
-  { busy: [`${CDV}/messaging`], waiting: [] },
-  // only a waiting session (amber, no green)
-  { busy: [], waiting: [`${CDV}/kitchen-sink`] },
+  // working shifts; the Codex place parks on an approval (amber, from its
+  // pane — lib.rs `codex_waiting_panes`)
+  { busy: [`${CDV}/messaging`], waiting: [`${CDV}/billing-refactor`] },
+  // approved: the Codex turn runs on, and a Claude session waits
+  { busy: [`${CDV}/billing-refactor`], waiting: [`${CDV}/kitchen-sink`] },
   // idle — no dots at all
   { busy: [], waiting: [] },
 ];
+const CODEX_PLACES = new Set([`${CDV}/billing-refactor`]);
 let actIdx = 0;
 setTimeout(() => emitEvent("sessions:busy", ACTIVITY_CYCLE[0]), 400);
 setInterval(() => {
@@ -2860,8 +2862,12 @@ setInterval(() => {
   // busy set finished a task, and gets its own `sessions:done` stamp right
   // after the busy emit. Without this the harness could never show the
   // green→ember hand-off, which is the whole point of the state.
+  // Except a CODEX place moving to waiting: its turn has not completed (lib.rs
+  // stamps codex only from the rollout's `task_complete`), so no ember.
   for (const path of before) {
-    if (!now.busy.includes(path)) emitEvent("sessions:done", { path, epoch: nowSec() });
+    if (now.busy.includes(path)) continue;
+    if (CODEX_PLACES.has(path) && now.waiting.includes(path)) continue;
+    emitEvent("sessions:done", { path, epoch: nowSec() });
   }
 }, 5000);
 const nowSec = () => Math.floor(Date.now() / 1000);
