@@ -28,6 +28,7 @@ use worktrees_core::{git, mcpsetup, mention, ops, store, sync, sysclock, tmux, P
 mod docserver;
 mod viewer;
 mod winstate;
+mod codex_usage;
 
 // ── app log ──────────────────────────────────────────────────────────────────
 // Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
@@ -2327,6 +2328,13 @@ async fn claude_usage() -> Result<UsageInfo, String> {
             Ok(out)
         }
     }
+}
+
+#[tauri::command]
+async fn codex_usage(app: tauri::AppHandle) -> Result<codex_usage::Info, String> {
+    let cwd = app.path().app_cache_dir().map_err(|_| "usage cache directory unavailable")?.join("codex-usage");
+    tauri::async_runtime::spawn_blocking(move || codex_usage::read(cwd))
+        .await.map_err(|_| "Codex usage worker failed".to_string())
 }
 
 // ── Claude service status (status.claude.com) ───────────────────────────────
@@ -7611,6 +7619,7 @@ pub fn run() {
             tmux_check,
             set_zoom,
             claude_usage,
+            codex_usage,
             claude_status,
             log_info,
             list_drafts,

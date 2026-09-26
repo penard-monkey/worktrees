@@ -177,15 +177,17 @@ export type Settings = {
   // Global, like the rest of the nav's state and unlike the dock's: it is how
   // you LEAVE a space, so it must not move under you when you arrive somewhere.
   places_side: "left" | "right";
-  // ── where the Claude plan bars live ─────────────────────────────────────
+  // ── where account plan usage lives ─────────────────────────────────────
   // They used to be sidebar-only, which the auto-hiding sidebar turned into
   // "usually not on screen". Three hosts now, all of them always visible:
   // "strip" is a row across the bottom of the WINDOW (so it survives ⌘B and is
   // the one placement that also shows on Home), "footer" is the row under the
   // terminal (a selected place only), "rail" is a tile in the left rail.
-  // "off" is a real off switch: App stops calling `claude_usage` entirely,
+  // "off" is a real off switch: App stops both provider usage commands,
   // rather than hiding a component that keeps polling.
   usage_place: "strip" | "footer" | "rail" | "off";
+  usage_claude: boolean;
+  usage_codex: boolean;
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal" | "docs" | "plan" | "automations"; // last-used dock tab
@@ -392,6 +394,8 @@ export const DEFAULTS: Settings = {
   nav_hover_reveal: true,
   places_side: "left",
   usage_place: "strip",
+  usage_claude: true,
+  usage_codex: true,
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
@@ -644,6 +648,8 @@ export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await invoke<Partial<Settings> | null>("get_settings");
     const s = { ...DEFAULTS, ...(raw ?? {}) };
+    s.usage_claude = typeof s.usage_claude === "boolean" ? s.usage_claude : true;
+    s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
     s.theme = normalizeTheme(s.theme);
     s.theme_light = normalizePair(s.theme_light, "light", DEFAULTS.theme_light);
     s.theme_dark = normalizePair(s.theme_dark, "dark", DEFAULTS.theme_dark);

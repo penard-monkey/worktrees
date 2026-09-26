@@ -1,3 +1,4 @@
+import { adaptClaude, adaptCodex, checking, detailMessage, expired, providerName, stateLabel, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage, type Provider } from "./planUsage";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -2022,39 +2023,9 @@ function usePopPos(shown: boolean, side: "up" | "right" | "left") {
   return { trigRef, popRef, style };
 }
 
-// ── Claude plan usage (nav footer) ──────────────────────────────────────────
-// The same bars as Claude Code's /usage panel: 5h session window, weekly
-// all-models, plus any model-scoped weekly bucket ("Fable"). Backend
-// (`claude_usage`) never errors on missing data — it answers
-// source: "unavailable" and we render nothing, so a machine without Claude Code
-// credentials just has a plain nav.
-//
-// Module scope with props, per CLAUDE.md: it owns poll state, which a component
-// declared inside App() would throw away (and re-fetch) on every render.
-type UsageLimit = {
-  kind: string;
-  label: string;
-  percent: number;
-  severity: string;
-  resets_at: number | null;
-};
-// source: oauth | cached | statusline | unavailable (lib.rs). Everything that
-// is not "oauth" is a reading we are STANDING IN with — dimmed, and named in
-// the panel — rather than a live one.
-type UsageInfo = { source: string; fetched_at: number; limits: UsageLimit[] };
-
-/** What the widget is actually showing, for the tooltip and the panel's head.
- *  "cached" is the last live answer, kept on screen through a failed poll: the
- *  endpoint 429s for minutes at a time and the widget used to vanish for the
- *  whole episode. */
-function usageSourceLabel(source: string): string {
-  return source === "oauth" ? "live"
-    : source === "cached" ? "last good reading"
-      : "statusline snapshot";
-}
-
-// 180s — the endpoint is undocumented and has rate-limited hard before; the
-// backend also caps real fetches at one per 120s.
+// ── Account plan usage ────────────────────────────────────────────────────
+// Account scope: place changes never select a different meter. Each provider
+// owns its request lifecycle; expected failures stay visible in its own slot.
 const USAGE_POLL_MS = 180_000;
 /// Afterglow re-tier cadence. Boundaries then land within ±60s of true, which is
 /// invisible at 15m/2h/12h — and it is a pure recompute, no I/O.
@@ -2068,13 +2039,6 @@ const SEEN_DWELL_MS = 1000;
 // absolute, so a 15s tick keeps the minute display honest without touching the
 // rate-limited endpoint (polling harder to animate a clock would be absurd).
 const USAGE_TICK_MS = 15_000;
-
-/** "5h" / "7d" for the two standard windows; model buckets keep their name. */
-function usageTick(l: UsageLimit): string {
-  if (l.kind === "session") return "5h";
-  if (l.kind === "weekly_all") return "7d";
-  return l.label;
-}
 
 /** Seconds-until-reset → two units, biggest first: "2d 5h", "3h 02m", "42m",
  *  "<1m". Empty once the window has rolled over — a window whose reset is in the
@@ -2130,263 +2094,148 @@ function useWindowAwake() {
  *  somewhere else does not flash a panel. */
 const USAGE_HOVER_MS = 140;
 
-/** The poll and the countdown, lifted OUT of the widget so App owns them.
- *
- *  Two reasons it does not live in the meter any more: the meter now has three
- *  possible hosts (Settings → Appearance → Usage meter) and one poller must
- *  serve all of them, and `enabled: false` has to mean the endpoint is never
- *  called — an "off" that still fetches every 180s would be a lie. */
-function useUsage(enabled: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
-  const [info, setInfo] = useState<UsageInfo | null>(null);
-  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
-
-  // Own timer, deliberately separate from the poll effect: cheap, and it must
-  // keep running between the 180s pulls — but only while the window is actually
-  // on screen. Nobody needs a countdown animated at a minimized window.
+/** Provider reads settle independently. Hidden windows do not fetch, and late
+ * replies cannot overwrite a newer request or repopulate a disabled provider. */
+function useProviderUsage(provider: Provider, enabled: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
+  const [info, setInfo] = useState<PlanUsage>(() => checking(provider));
   useEffect(() => {
-    if (!enabled || !pageVisible) return;
-    setNowSec(Math.floor(Date.now() / 1000)); // re-zero: we may have been away for hours
-    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), USAGE_TICK_MS);
-    return () => clearInterval(id);
-  }, [enabled, pageVisible]);
-
+    setInfo(checking(provider));
+  }, [provider, enabled]);
   useEffect(() => {
-    if (!enabled) {
-      // Drop what we hold: turning the meter off and on again should show the
-      // endpoint's answer, not a snapshot from before it was switched off.
-      setInfo(null);
-      return;
-    }
+    if (!enabled) return;
     let alive = true;
+    let generation = 0;
     const pull = () => {
-      // a pull is also the moment to re-zero the countdown clock: coming back
-      // from sleep, the 15s tick may be up to a tick behind
-      setNowSec(Math.floor(Date.now() / 1000));
-      invoke<UsageInfo>("claude_usage")
-        .then((u) => { if (alive) setInfo(u); })
-        .catch((e) => { if (alive) onError(e); });
+      if (document.visibilityState === "hidden") return;
+      const request = ++generation;
+      const result = provider === "claude"
+        ? invoke<ClaudeUsage>("claude_usage").then(adaptClaude)
+        : invoke<CodexUsage>("codex_usage").then(adaptCodex);
+      result.then(value => { if (alive && request === generation) setInfo(value); })
+        .catch(error => {
+          if (!alive || request !== generation) return;
+          setInfo({ ...checking(provider), state: "unavailable" });
+          onError(error);
+        });
     };
-    // Hidden → no pull and no interval. The guard covers the immediate pull too:
-    // this effect re-runs on the hidden edge, and invoking there would spend a
-    // fetch on the transition into going quiet. Coming back re-runs it visible,
-    // so the catch-up pull is free. A doubled pull with the focus listener below
-    // is harmless: the backend caps real fetches at one per 120s.
     if (pageVisible) pull();
-    const id = pageVisible ? setInterval(pull, USAGE_POLL_MS) : null;
-    // coming back to the window is exactly when a stale bar is most visible
+    const timer = pageVisible ? setInterval(pull, USAGE_POLL_MS) : null;
     window.addEventListener("focus", pull);
-    return () => {
-      alive = false;
-      if (id) clearInterval(id);
-      window.removeEventListener("focus", pull);
-    };
-  }, [enabled, onError, pageVisible]);
-
-  // One gate for every host: a null `info` is what makes App skip the strip row
-  // and the footer row entirely, rather than painting an empty 26px band.
-  const ready = enabled && !!info && info.source !== "unavailable" && info.limits.length > 0;
-  return { info: ready ? info : null, nowSec };
+    return () => { alive = false; if (timer) clearInterval(timer); window.removeEventListener("focus", pull); };
+  }, [provider, enabled, pageVisible, onError]);
+  return info;
 }
 
-/** The three full rows — what the sidebar used to carry, now the hover detail.
- *  Unchanged from the sidebar version on purpose: this is the reading, and the
- *  compact forms above it are only a summary of it. */
-function UsageRows({ info, nowSec }: { info: UsageInfo; nowSec: number }) {
-  // no row has a live reset (endpoint dropped the field, or every window has
-  // already rolled over) → no column at all, rather than a strip of blanks
-  const anyEta = info.limits.some((l) => l.resets_at && l.resets_at > nowSec);
-  return (
-    <div className="usage">
-      {info.limits.map((l) => {
-        const pct = Math.max(0, Math.min(100, Math.round(l.percent)));
-        const tone = l.severity === "normal" ? "" : l.severity === "warning" ? " warn" : " over";
-        const eta = l.resets_at ? fmtEta(l.resets_at - nowSec) : "";
-        const resets = l.resets_at ? `, resets ${new Date(l.resets_at * 1000).toLocaleString()}` : "";
-        return (
-          <div
-            className={"usage-row" + tone}
-            key={l.kind + "|" + l.label}
-            title={`${l.label} — ${pct}% used${eta ? `, ${eta} left` : ""}${resets}`}
-          >
-            <span className="usage-label">{usageTick(l)}</span>
-            <span className="usage-bar"><i style={{ width: `${pct}%` }} /></span>
+function useUsage(enabled: boolean, claude: boolean, codex: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
+  const c = useProviderUsage("claude", enabled && claude, pageVisible, onError);
+  const x = useProviderUsage("codex", enabled && codex, pageVisible, onError);
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (!enabled || (!claude && !codex) || !pageVisible) return;
+    const tick = () => setNowSec(Math.floor(Date.now() / 1000));
+    tick();
+    const timer = setInterval(tick, USAGE_TICK_MS);
+    window.addEventListener("focus", tick);
+    return () => { clearInterval(timer); window.removeEventListener("focus", tick); };
+  }, [enabled, claude, codex, pageVisible]);
+  const info = enabled ? [...(claude ? [c] : []), ...(codex ? [x] : [])].map(i => viewUsage(i, nowSec)) : [];
+  return { info: info.length ? info : null, nowSec };
+}
+
+function UsageRows({ info, nowSec }: { info: PlanUsage; nowSec: number }) {
+  return <div className="usage">
+    {info.limits.map((l, index) => {
+      const past = expired(info, l, nowSec);
+      const pct = Math.round(l.percent);
+      const eta = l.resets_at ? fmtEta(l.resets_at - nowSec) : "";
+      const bucketHeading = info.provider === "codex" && l.bucket !== "codex" && info.limits[index - 1]?.bucket !== l.bucket;
+      return <Fragment key={l.id}>
+        {bucketHeading && <div className="usage-bucket" title={l.bucketLabel}>{l.bucketLabel}</div>}
+        <div className={"usage-row" + (l.severity === "warning" ? " warn" : l.severity === "over" ? " over" : "")}
+          title={`${l.bucketLabel} ${l.label}${past ? " — awaiting update" : ` — ${pct}% used`}${l.resets_at ? `, resets ${new Date(l.resets_at * 1000).toLocaleString()}` : ""}`}>
+          <span className="usage-label">{l.label}</span>
+          {past ? <span className="usage-awaiting">Awaiting update</span> : <>
+            <span className="usage-bar"><i style={{ width: `${Math.max(0, Math.min(100, l.percent))}%` }} /></span>
             <span className="usage-pct">{pct}%</span>
-            {/* column is reserved even when a row's reset has passed, so the
-                three ETAs stay right-aligned with each other */}
-            {anyEta && <span className="usage-eta">{eta}</span>}
-          </div>
-        );
-      })}
-    </div>
-  );
+            <span className="usage-eta">{eta ? `in ${eta}` : "Reset unknown"}</span>
+          </>}
+        </div>
+      </Fragment>;
+    })}
+  </div>;
 }
 
-/** The meter: a compact trigger at rest, the full rows on hover.
- *
- *  `shape` is what it looks like, `side` is where the detail goes — the rail is
- *  44px wide, so its tile carries no text at all and its panel flies right
- *  instead of up. Both hosts of the "line" shape are the last row of their box,
- *  so both drop upward. */
 function UsageMeter({ info, nowSec, shape, side, status, onError }: {
-  info: UsageInfo;
-  nowSec: number;
-  shape: "line" | "tile";
-  side: "up" | "right" | "left";
-  /** Set only by the rail host, where the tile IS the status indicator: there
-   *  is no room beside it for a chip, so the badge rides the tile and the
-   *  reading joins the panel this trigger already opens. The line hosts get a
-   *  `StatusChip` next to them instead and pass nothing here. */
-  status?: ClaudeStatusInfo | null;
-  onError?: (e: unknown) => void;
+  info: PlanUsage[]; nowSec: number; shape: "line" | "tile"; side: "up" | "right" | "left";
+  status?: ClaudeStatusInfo | null; onError?: (e: unknown) => void;
 }) {
   const [hovering, setHovering] = useState(false);
-  // A click PINS the panel open: the numbers are worth reading with the pointer
-  // somewhere else, and on the rail the panel is not big enough to park on.
   const [pinned, setPinned] = useState(false);
   const armed = useRef<number | null>(null);
   const shown = hovering || pinned;
   const { trigRef, popRef, style: popStyle } = usePopPos(shown, side);
-
+  const close = () => { setPinned(false); setHovering(false); };
+  useEscape(close, pinned);
   useEffect(() => () => { if (armed.current) window.clearTimeout(armed.current); }, []);
-
   useEffect(() => {
     if (!pinned) return;
     const onDown = (e: PointerEvent) => {
-      const t = e.target as Node;
-      // The trigger's own click toggles `pinned` itself; closing here too would
-      // unpin and immediately re-pin.
-      if (trigRef.current?.contains(t)) return;
-      // …and the PANEL is no longer inert: a pinned one takes the pointer
-      // (`.usage-pop.pinned`, App.css) so the status band's link out to
-      // status.claude.com can be clicked. Without this arm, pointerdown on that
-      // link unpins, React unmounts the panel, and the `click` that would have
-      // opened the URL never lands on anything — a link that does nothing, and
-      // only in the rail host.
-      if (popRef.current?.contains(t)) return;
-      setPinned(false);
-      setHovering(false);
+      if (trigRef.current?.contains(e.target as Node) || popRef.current?.contains(e.target as Node)) return;
+      setPinned(false); setHovering(false);
     };
-    // Bubble phase and NO stopPropagation: Escape here must not be taken away
-    // from the terminal (vim, a prompt) for as long as the panel is pinned, and
-    // an Escape that also reaches something else is harmless.
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      setPinned(false);
-      setHovering(false);
-    };
-    window.addEventListener("keydown", onKey);
     window.addEventListener("pointerdown", onDown, true);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pointerdown", onDown, true);
-    };
+    return () => window.removeEventListener("pointerdown", onDown, true);
   }, [pinned]);
-
-  const arm = () => {
-    if (armed.current) window.clearTimeout(armed.current);
-    armed.current = window.setTimeout(() => setHovering(true), USAGE_HOVER_MS);
-  };
-  const disarm = () => {
-    if (armed.current) window.clearTimeout(armed.current);
-    armed.current = null;
-    setHovering(false);
-  };
-
-  // anything but a live oauth answer: a local statusline snapshot, or the last
-  // good reading held over a failed poll. Both are dimmed and both say so in
-  // the panel — the distinction that matters here is live / not live, and the
-  // `.stale` styling is written once against that.
-  const stale = info.source !== "oauth";
-  const segs = info.limits.map((l) => {
-    const pct = Math.max(0, Math.min(100, Math.round(l.percent)));
-    return {
-      key: l.kind + "|" + l.label,
-      tick: usageTick(l),
-      pct,
-      tone: l.severity === "normal" ? "" : l.severity === "warning" ? " warn" : " over",
-    };
-  });
-  const worst = segs.reduce((a, b) => (b.pct > a.pct ? b : a), segs[0]);
-
-  return (
-    <>
-      <button
-        ref={trigRef}
-        type="button"
-        className={"usage-trig " + shape + (stale ? " stale" : "") + (pinned ? " pinned" : "")}
-        data-testid="usage-meter"
-        aria-label="Claude plan usage"
-        aria-expanded={shown}
-        title={
-          (stale
-            ? `Claude usage — ${usageSourceLabel(info.source)} from ${new Date(info.fetched_at * 1000).toLocaleString()}`
-            : `Claude plan usage — ${worst.tick} at ${worst.pct}%`) + " · click to keep open"
-        }
-        onPointerEnter={arm}
-        onPointerLeave={disarm}
-        onFocus={() => setHovering(true)}
-        onBlur={() => setHovering(false)}
-        onClick={() => setPinned((v) => !v)}
-      >
-        {/* The flex container is this SPAN, never the button. WebKit shrink-
-            wraps a `<button>` that is itself a flex container without counting
-            its `overflow: hidden` children, so the box comes out too narrow and
-            the labels — the only shrinkable items — lose every pixel: bars and
-            percentages, no "5h"/"7d". Chrome sizes it correctly, which is why
-            the mock harness passed and the real app did not.
-            Today's rows laid ACROSS rather than down, which is why each segment
-            keeps the `usage-row` class: every severity rule in App.css is
-            written against it, so warn/over colour the line for free. */}
-        <span className={"usage-shape " + shape}>
-          {shape === "line"
-            ? segs.map((g) => (
-                <span className={"usage-row usage-seg" + g.tone} key={g.key}>
-                  <span className="usage-label">{g.tick}</span>
-                  <span className="usage-bar"><i style={{ width: `${g.pct}%` }} /></span>
-                  <span className="usage-pct">{g.pct}%</span>
-                </span>
-              ))
-            : segs.map((g) => (
-                <span className={"usage-row" + g.tone} key={g.key}>
-                  <span className="usage-bar"><i style={{ width: `${g.pct}%` }} /></span>
-                </span>
-              ))}
-        </span>
-        {/* Always red, never amber: the bars under it are already amber at
-            `warning` severity, and two ambers 4px apart meaning unrelated
-            things ("your weekly is nearly spent" / "the API is degraded") is
-            not a distinction anyone can read at 32px. Degraded vs. down is
-            made in words, in the panel. Geometry is `.rail-icon.upd::after`'s,
-            unchanged — the rail already teaches this dot. */}
-        {status && <span className="usage-badge" aria-hidden="true" />}
-      </button>
-      {shown && (
-        <div
-          ref={popRef}
-          className={"usage-pop" + (stale ? " stale" : "") + (pinned ? " pinned" : "")}
-          style={popStyle}
-        >
-          {/* The outage goes ABOVE the plan bars: it is the answer to the
-              question the bars are usually asked ("can I work right now"), and
-              it is the reason the tile is wearing a badge at all. */}
-          {status && (
-            <div className={"status-band" + (status.severity === "down" ? " down" : "")}>
-              <div className="status-band-head">
-                <span className="status-chip-dot" />
-                {statusLabel(status)}
-              </div>
-              <StatusDetail info={status} onError={onError ?? (() => {})} />
-            </div>
-          )}
-          <div className="usage-pop-head">
-            <span>Claude plan usage</span>
-            <span>{usageSourceLabel(info.source)}</span>
-          </div>
-          <UsageRows info={info} nowSec={nowSec} />
+  const names = info.map(i => providerName(i.provider)).join(" and ");
+  const label = info.map(i => {
+    const l = summaryLimit(i, nowSec);
+    const bucket = l && l.bucketLabel !== providerName(i.provider) ? `${l.bucketLabel} ` : "";
+    return `${providerName(i.provider)} ${l ? `${bucket}${l.label} ${Math.round(l.percent)}% used${i.state === "stale" ? ", stale" : ""}` : stateLabel(i)}`;
+  }).join("; ");
+  return <>
+    <button ref={trigRef} type="button" data-testid="usage-meter" data-track="plan_usage"
+      className={"usage-trig " + shape + (pinned ? " pinned" : "")} aria-label={`${names} plan usage: ${label}`}
+      aria-expanded={shown} title={`${label} · click to keep open`}
+      onPointerEnter={() => { if (armed.current) clearTimeout(armed.current); armed.current = window.setTimeout(() => setHovering(true), USAGE_HOVER_MS); }}
+      onPointerLeave={() => { if (armed.current) clearTimeout(armed.current); setHovering(false); }}
+      onFocus={() => setHovering(true)} onBlur={() => setHovering(false)} onClick={() => setPinned(v => !v)}>
+      <span className={"usage-shape " + shape}>
+        {shape === "tile" ? <span aria-hidden="true">▥</span> : <>
+          <span className="usage-minimal" aria-hidden="true">Usage ▾</span>
+          {info.map(i => {
+            const l = summaryLimit(i, nowSec);
+            return <span key={i.provider} className={"usage-provider-summary" + (i.state === "stale" ? " stale" : "")}>
+              <span className="usage-provider-name">{providerName(i.provider)}</span>
+              {l ? <>
+                <span className="usage-window-label">{l.label}</span>
+                <span className={"usage-bar " + l.severity}><i style={{ width: `${Math.min(100, l.percent)}%` }} /></span>
+                <span className="usage-pct">{Math.round(l.percent)}%</span>
+                {i.state === "stale" && <span className="usage-state">stale</span>}
+              </> : <span className="usage-state">{stateLabel(i)}</span>}
+            </span>;
+          })}
+        </>}
+      </span>
+      {status && <span className="usage-badge" aria-hidden="true" />}
+    </button>
+    {shown && <div ref={popRef} className={"usage-pop" + (pinned ? " pinned" : "")} style={popStyle}
+      aria-label="Plan usage" role="region" tabIndex={pinned ? 0 : undefined}>
+      {status && <div className={"status-band" + (status.severity === "down" ? " down" : "")}>
+        <div className="status-band-head"><span className="status-chip-dot" />Claude service status: {statusLabel(status)}</div>
+        <StatusDetail info={status} onError={onError ?? (() => {})} />
+      </div>}
+      <div className="usage-pop-head"><span>Plan usage</span><span>Account limits · used %</span></div>
+      {info.map(i => <section className={"usage-provider-detail" + (i.state === "stale" ? " stale" : "")} key={i.provider} data-provider={i.provider}>
+        <div className="usage-provider-head"><strong>{providerName(i.provider)}</strong>
+          <span>{i.state === "stale" ? "Stale" : i.state === "ready" ? "Updated" : stateLabel(i)}
+            {i.fetched_at !== null && <time title={new Date(i.fetched_at * 1000).toLocaleString()}> · {Math.max(0, Math.floor((nowSec - i.fetched_at) / 60))} min ago</time>}
+          </span>
         </div>
-      )}
-    </>
-  );
+        {detailMessage(i) && <p className="usage-message">{detailMessage(i)}</p>}
+        <UsageRows info={i} nowSec={nowSec} />
+      </section>)}
+    </div>}
+  </>;
 }
 
 // ── Claude service status (status.claude.com) ───────────────────────────────
@@ -3251,6 +3100,8 @@ function App() {
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>({});
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
+  // A persisted Off must suppress even the first usage request at startup.
+  const [settingsReady, setSettingsReady] = useState(false);
   const [activeProvider, setActiveProvider] = useState<"claude" | "codex">("claude");
   // Where Settings was asked to open. One state, never a boolean beside it:
   // `settingsOpen` is derived, so "the sheet is up" and "which section it went
@@ -3563,7 +3414,7 @@ function App() {
   // than inside the meter because the placement setting decides where the meter
   // MOUNTS, and a poller that moved with it would refetch on every change of
   // mind — and because "off" has to reach the effect, not just the render.
-  const usage = useUsage(settings.usage_place !== "off", pageVisible, fail);
+  const usage = useUsage(settingsReady && settings.usage_place !== "off", settings.usage_claude, settings.usage_codex, pageVisible, fail);
   // Claude's own service status. Polled independently of the usage endpoint —
   // they fail for different reasons, and a machine with no Claude Code
   // credentials (no bars at all) still wants to be told the API is down.
@@ -4149,6 +4000,7 @@ function App() {
       hydrated.current = true;
       applySettings(merged);
       setSettings(merged);
+      setSettingsReady(true);
       // Lets the file restore run for a place that was selected while this
       // invoke was still in flight.
       setHydratedTick((n) => n + 1);

@@ -230,13 +230,13 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
 
 .nav-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: var(--s2); }
 
-/* Claude plan usage — ambient, so it reads as chrome: micro type, hairline
-   bars, no heading. Colors follow the endpoint's own `severity`.
+/* Account plan usage — ambient micro type and hairline bars.
+   Severity colors belong to fills; text uses the neutral theme tokens.
    The three-row block is the hover DETAIL now, so it carries no padding or
    border of its own: `.usage-pop` is its only host and supplies both. */
 .usage { display: flex; flex-direction: column; gap: 3px; }
 /* statusline snapshot: a local file only as fresh as the last Claude session */
-.usage.stale, .usage-trig.stale, .usage-pop.stale { opacity: 0.55; }
+.usage-provider-detail.stale .usage-bar > i, .usage-provider-summary.stale .usage-bar > i { opacity: 0.55; }
 .usage-row {
   display: flex; align-items: center; gap: var(--s2);
   font-size: var(--fs-micro); color: var(--txt-dim);
@@ -259,8 +259,8 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
 .usage-row.warn > .usage-bar > i { background: var(--warn); }
 .usage-row.over > .usage-bar > i { background: var(--danger); }
 .usage-pct { flex: 0 0 auto; min-width: 2.6em; text-align: right; font-variant-numeric: tabular-nums; }
-.usage-row.warn > .usage-pct { color: var(--warn); }
-.usage-row.over > .usage-pct { color: var(--danger); }
+.usage-row.warn > .usage-pct { color: var(--txt-hi); }
+.usage-row.over > .usage-pct { color: var(--txt-hi); }
 /* time until the window resets. Deliberately NOT tinted by severity: the
    countdown is the same neutral fact whether you're at 5% or 95% — only the
    bar and the number carry the alarm. Fixed width + tabular figures so the
@@ -277,6 +277,9 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
    the window-wide row; the footer is the same shape under the terminal; the
    rail gets the tile, the only form that fits 44px. */
 .usage-strip {
+  /* Positioned after .app so overflowing Home content cannot intercept the
+     meter at large text sizes. Keep the popover in the shared stacking order. */
+  position: relative;
   flex: none; display: flex; align-items: center; gap: var(--s3);
   padding: var(--s1) var(--s3);
   border-top: 1px solid var(--line); background: var(--bg-panel);
@@ -300,30 +303,9 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
 .usage-shape { display: flex; align-items: center; }
 .usage-shape.line { gap: var(--s3); }
 .usage-shape.tile { flex-direction: column; justify-content: center; gap: 3px; height: 100%; }
-/* Each segment keeps `usage-row`, so every severity rule above still applies —
-   the compact line is today's rows laid across, not a second implementation.
-   `usage-seg`, NOT `seg`: the Settings segmented control owns `.seg`, and the
-   first cut of this line borrowed the name. Every segment rendered as a
-   bordered, overflow-hidden pill, and `overflow: hidden` made each one a flex
-   item that could shrink to nothing — which in a narrow window it did: labels
-   gone, percentages clipped. Invisible in the harness at 1280px. */
-.usage-row.usage-seg { gap: 6px; }
-/* The label can never be the shrink victim again: it is 2–5 characters, and
-   the 6em ellipsis cap on `.usage-label` still bounds a long model name. */
-.usage-row.usage-seg > .usage-label { flex: none; }
-/* Fixed, never flex: three bars sharing one row must not resize each other as
-   the percentages move, or the strip twitches on every 180s poll.
-   `width` as well as the basis, and it is not redundant: an empty span whose
-   size comes ONLY from `flex-basis` contributes nothing to WebKit's intrinsic
-   width for the button around it, so the button came out exactly 120px (three
-   bars) too narrow and its hover wash stopped mid-line. An explicit width is
-   counted by every engine (headless WebKit: 201px → 321px, Chrome's number). */
-.usage-row.usage-seg > .usage-bar { flex: 0 0 40px; width: 40px; min-width: 0; }
-.usage-row.usage-seg > .usage-pct { min-width: 2.4em; }
-.usage-shape.tile > .usage-row { width: 100%; }
-.usage-shape.tile .usage-bar { min-width: 0; }
 .usage-pop {
-  position: fixed; z-index: 45; width: 250px;
+  position: fixed; z-index: 45; width: min(360px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px); overflow-y: auto;
   padding: var(--s2) var(--s3);
   background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-md);
   box-shadow: var(--shadow-float);
@@ -339,7 +321,7 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
 .usage-pop-head {
   display: flex; justify-content: space-between; gap: var(--s3);
   margin-bottom: var(--s2);
-  font-size: var(--fs-micro); color: var(--txt-mute);
+  font-size: var(--fs-micro); color: var(--txt-dim);
 }
 
 /* ── Claude service status ──────────────────────────────────────────────────
@@ -3263,4 +3245,31 @@ body.dragging-place .term-wrap[data-drop="mention"] {
 }
 body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
   outline: 2px solid var(--accent);
+}
+
+/* Account usage: the button is a block; its inner span owns flex (WebKit).
+   Query the host, not the button, so collapsing labels never causes oscillation. */
+.usage-strip, .statusbar { container-type: inline-size; }
+.usage-provider-summary { display: flex; align-items: center; gap: 6px; color: var(--txt-hi); font-size: var(--fs-micro); }
+.usage-provider-summary + .usage-provider-summary { border-left: 1px solid var(--line); padding-left: var(--s3); }
+.usage-provider-name, .usage-window-label, .usage-state { flex: none; }
+.usage-window-label { max-width: 8em; overflow: hidden; text-overflow: ellipsis; }
+.usage-provider-summary .usage-bar { flex: 0 0 40px; width: 40px; min-width: 0; }
+.usage-bar.warning > i { background: var(--warn); }
+.usage-bar.over > i { background: var(--danger); }
+.usage-provider-head { display: flex; justify-content: space-between; gap: var(--s2); color: var(--txt-dim); font-size: var(--fs-micro); }
+.usage-provider-head strong { color: var(--txt-hi); }
+.usage-provider-detail + .usage-provider-detail { border-top: 1px solid var(--line); margin-top: var(--s3); padding-top: var(--s3); }
+.usage-provider-detail .usage { margin-top: var(--s2); }
+.usage-message { color: var(--txt-dim); font-size: var(--fs-micro); margin: var(--s2) 0; }
+.usage-bucket { color: var(--txt-hi); font-size: var(--fs-micro); margin-top: var(--s2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-awaiting { margin-left: auto; color: var(--txt-dim); }
+.usage-minimal { display: none; font-size: var(--fs-micro); color: var(--txt-hi); }
+.usage-setting-toggle { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
+.usage-trig.tile { color: var(--txt-hi); }
+@container (max-width: 610px) { .usage-provider-summary .usage-bar { display: none; } }
+@container (max-width: 480px) { .usage-window-label { display: none; } }
+@container (max-width: 360px) {
+  .usage-provider-summary { display: none; }
+  .usage-minimal { display: inline; }
 }

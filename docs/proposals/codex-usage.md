@@ -4,7 +4,8 @@ title: "Proposal — Codex plan usage"
 
 # Codex plan usage
 
-**Status:** proposed; design only, pending review. 2026-09-26.
+**Status:** approved and implemented on `codex-usage-meter`. 2026-09-26.
+The design below records the approved contract; validation results are in the PR.
 
 ## Decision
 

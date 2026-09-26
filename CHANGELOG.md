@@ -45,6 +45,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **Each nav row shows which agent is live:** the Claude logo or the OpenAI
   logo (for Codex), nothing when no agent is running. The dot's tooltip names
   the agent too ("Codex working").
+- **Claude and Codex account limits in one usage meter.** Each provider keeps
+  its own summary and detailed quota windows, including reset times and explicit
+  stale, unavailable and sign-in states. Codex reads limits through its existing
+  CLI login without reading conversations or changing configuration. Appearance
+  settings can turn either provider's usage checks off independently.
 
 ## [0.30.0] - 2026-09-23
 
