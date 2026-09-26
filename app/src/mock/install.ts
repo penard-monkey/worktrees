@@ -1303,13 +1303,43 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "set_zoom":
       return null;
 
+    // Codex account quotas. Independent states, delay, sequence and invocation
+    // counts let browser checks verify real Off and overlapping request behavior.
+    case "codex_usage": {
+      const q = new URLSearchParams(location.search);
+      const global = window as unknown as { __planUsageCalls?: Record<string, number> };
+      const counts = global.__planUsageCalls ??= {};
+      const call = counts.codex_usage = (counts.codex_usage ?? 0) + 1;
+      const delay = Number(q.get("codexUsageDelay")) || 0;
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, Math.min(delay, 15000)));
+      const mode = q.get("codexUsageSequence")?.split(",")[call - 1] ?? q.get("codexUsage") ?? "ready";
+      const t = now();
+      const states: Record<string, string> = { unavailable: "unavailable", signedout: "signed_out", missing: "missing_cli", unsupported: "unsupported_auth" };
+      if (states[mode]) return { provider: "codex", state: states[mode], source: "unavailable", fetched_at: null, retry_at: t + 60, reason: mode, limits: [] };
+      const quotaWindow = (role: string, minutes: number | null, percent: number, reset: number | null, bucket = "codex", label = "Codex") => ({
+        id: `${bucket}:${role}`, bucket_id: bucket, bucket_label: label, window_role: role, window_minutes: minutes,
+        percent, severity: percent >= 100 ? "over" : percent >= 80 ? "warning" : "normal", resets_at: reset,
+      });
+      const limits = mode === "weekly" ? [quotaWindow("primary", 10080, 24, t + 4 * 86400)]
+        : mode === "edge" ? [quotaWindow("primary", null, 105, t + 30), quotaWindow("secondary", 90, 80, null)]
+        : [quotaWindow("primary", 300, 48, mode === "expired" ? t - 1 : t + 7200), quotaWindow("secondary", 10080, 21, t + 4 * 86400)];
+      if (mode === "multi") limits.push(quotaWindow("primary", 10080, 8, t + 4 * 86400, "base_model_inference", "gpt-reserve with a very long bucket label"));
+      if (mode === "many") for (let i = 0; i < 12; i++) limits.push(quotaWindow("primary", 10080, i, t + 86400, `extra_${i}`, `Additional quota ${i}`));
+      return { provider: "codex", state: mode === "stale" || mode === "expired" ? "stale" : "ready",
+        source: mode === "stale" || mode === "expired" ? "cached" : "app_server", reason: null, retry_at: t + 120,
+        fetched_at: t - (mode === "old" ? 2520 : mode === "stale" || mode === "expired" ? 480 : 0), limits };
+    }
+
     // Claude plan usage → the nav-footer bars. Mirrors the oauth shape from
     // lib.rs: a Fable bucket at severity "warning" so the amber tier is
     // exercisable, and `?usage=stale` / `?usage=cached` / `?usage=off` for the
     // three degraded sources (statusline snapshot and last-good-reading → both
-    // dimmed, named apart in the panel; unavailable → widget hidden).
+    // marked stale, named apart in the panel; unavailable → named placeholder).
     // `?usage=edge` drives the reset-countdown formatter through every branch.
     case "claude_usage": {
+      const global = window as unknown as { __planUsageCalls?: Record<string, number> };
+      const counts = global.__planUsageCalls ??= {};
+      counts.claude_usage = (counts.claude_usage ?? 0) + 1;
       const t = now();
       if (location.search.includes("usage=off")) return { source: "unavailable", fetched_at: t, limits: [] };
       // What a failed poll now answers instead of hiding the widget: the last

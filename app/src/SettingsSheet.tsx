@@ -913,11 +913,16 @@ export function SettingsSheet({
               ))}
             </div>
             <div className="hint">
-              Where the Claude plan bars live. Strip is a row across the bottom of the window, so it
+              Where account plan limits live. Strip is a row across the bottom of the window, so it
               stays put through ⌘B and is the only one that also shows on Home. Footer puts them
               under the terminal, on a place only. Rail is a tile beside the ＋ and ⚙ icons. Hover
               any of them for the full windows and how long until each resets.
             </div>
+            <label className="usage-setting-toggle"><input type="checkbox" checked={settings.usage_claude}
+              onChange={e => onChange({ usage_claude: e.target.checked })} /> Claude plan usage</label>
+            <label className="usage-setting-toggle"><input type="checkbox" checked={settings.usage_codex}
+              onChange={e => onChange({ usage_codex: e.target.checked })} /> Codex plan usage</label>
+            <div className="hint">Account limits use your existing CLI sign-ins. Turning a provider off stops its usage checks.</div>
           </section>
           </>}
 
