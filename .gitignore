@@ -2,6 +2,15 @@ dist/
 *.log
 .DS_Store
 
+# pnpm's content-addressable store. `app/.gitignore` already covers
+# `node_modules`, but the store is a SIBLING of it and pnpm does not always put
+# it in $HOME: where it lands depends on the pnpm version and on `store-dir`,
+# and this repo pins neither — a `pnpm install` run with a newer pnpm than the
+# one on PATH dropped it at the repo ROOT, where nothing was ignoring it. Not
+# anchored with a leading slash for that reason: the point is to catch it
+# wherever that resolution puts it, not only here.
+.pnpm-store/
+
 # app declared-store / worktrees created while dogfooding THIS repo in the app
 /.worktrees.places.json
 /.worktrees/
