@@ -182,6 +182,16 @@ impl PaneList {
         self.panes.iter().any(|(s, _, _)| s == name)
     }
 
+    /// Whether `name` exists and some pane in it is running something other
+    /// than a shell. An agent session is launched as `<agent> …; exec
+    /// "$SHELL"`, so it OUTLIVES the agent: when codex exits (or is killed —
+    /// nothing then writes `turn_aborted`), the session is still there with a
+    /// bare shell in it. Keyed on "not a shell" rather than "is codex": an npm
+    /// install runs codex under `node`, which must not read as exited.
+    pub fn session_runs_program(&self, name: &str) -> bool {
+        self.panes.iter().any(|(s, _, cmd)| s == name && !is_shell_command(cmd))
+    }
+
     /// Recognize an older Codex pane launched under the canonical place name.
     /// Keep this strict: `node` and version-like names identify Claude on some
     /// installs, so they cannot distinguish the two providers here.
@@ -242,6 +252,13 @@ impl PaneList {
         }
         best
     }
+}
+
+/// `#{pane_current_command}` names an interactive shell (`-zsh` for a login
+/// shell): what an agent pane shows once the agent itself has gone.
+pub fn is_shell_command(cmd: &str) -> bool {
+    let base = cmd.rsplit('/').next().unwrap_or(cmd).trim_start_matches('-');
+    matches!(base, "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "elvish" | "xonsh")
 }
 
 pub fn session_is_codex(name: &str) -> bool {
@@ -636,6 +653,24 @@ mod tests {
         PaneList {
             panes: rows.iter().map(|(s, p, c)| (s.to_string(), p.to_string(), c.to_string())).collect(),
         }
+    }
+
+    /// A codex session is `codex …; exec "$SHELL"`: once codex dies the
+    /// session stays up with a bare shell, and must stop reading as a running
+    /// agent. `node` (npm's codex) and `codex` both count as running.
+    #[test]
+    fn a_session_left_with_only_a_shell_runs_no_program() {
+        let list = pl(&[
+            ("p~agent~codex", "/wt/p", "zsh"),
+            ("q~agent~codex", "/wt/q", "codex"),
+            ("r~agent~codex", "/wt/r", "node"),
+            ("s~agent~codex", "/wt/s", "-zsh"),
+        ]);
+        assert!(!list.session_runs_program("p~agent~codex"));
+        assert!(list.session_runs_program("q~agent~codex"));
+        assert!(list.session_runs_program("r~agent~codex"));
+        assert!(!list.session_runs_program("s~agent~codex"), "a login shell is a shell");
+        assert!(!list.session_runs_program("missing"));
     }
 
     #[test]

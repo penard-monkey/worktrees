@@ -898,7 +898,21 @@ is invisible to the bats suite — there is no fake claude. Re-run
   `parent_thread_id`) write rollouts with the SAME cwd that start LATER, so
   "newest rollout for this cwd" is routinely not the user's session. And the
   file exists seconds before its 20KB `session_meta` first line does, so never
-  cache a miss on a line with no trailing newline. Anything the snapshot
+  cache a miss on a line with no trailing newline.
+  Turn STATE is in the rollout too, since 0.15x: `task_started`, then
+  `task_complete` (`completed_at`, epoch secs) or `turn_aborted` on Esc —
+  `codex::rollout_turn`. A count over live sessions reads as "no completion
+  record exists" while their turns are simply still running, which is how a
+  brief once concluded the rollout was not enough. Legacy `notify` sends only
+  `agent-turn-complete`, nothing on Esc; `-c` hooks stop on a trust prompt.
+  "Waiting on the user" is on disk NOWHERE — an approval's rollout tail is the
+  same pending tool call as a running command — so the amber dot captures the
+  pane of a mid-turn session (`codex_waiting_panes`) and keys on the modal's
+  FOOTER being the bottom line, never on its question text, which history can
+  quote. A codex session OUTLIVES codex (`codex …; exec "$SHELL"`), and a
+  kill writes no `turn_aborted`, so a rollout ending on `task_started` means
+  nothing until the pane is checked: `PaneList::session_runs_program` keys on
+  "not a shell", never "is codex" — npm's codex runs as `node`. Anything the snapshot
   derives from agent state also needs its own re-list trigger. The poll
   re-lists on a tmux fingerprint change or every 30s, and neither a finished
   turn nor a `/model` moves tmux; `claude_activity` + `codex_models_moved`

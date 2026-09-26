@@ -50,10 +50,22 @@ const ROLLOUT_DAYS: usize = 14;
 /// the same cwd, and those start AFTER the session that spawned them — so
 /// without this the newest rollout is routinely the reviewer, and the label
 /// names `codex-auto-review` instead of the model the user chose.
+///
+/// `codex exec` runs are excluded for the same reason: `source: "exec"`, no
+/// parent, same cwd. A script or an agent running `codex exec` in the worktree
+/// would otherwise become "the newest session" and hijack the dot, the
+/// worked stamp and the label — and stay newest long after it exited.
+///
+/// Still ambiguous: two INTERACTIVE sessions in one cwd (a second `codex`
+/// opened by hand beside the managed one). The newer one wins, whichever the
+/// user is looking at; one provider session per place is the app's rule, and
+/// this does not try to enforce it.
 fn is_user_thread(meta: &serde_json::Value, cwd: &str) -> bool {
+    let source = meta.get("source");
     meta.get("cwd").and_then(|c| c.as_str()) == Some(cwd)
         && meta.get("parent_thread_id").is_none_or(|p| p.is_null())
-        && meta.get("source").and_then(|s| s.get("subagent")).is_none()
+        && source.and_then(|s| s.get("subagent")).is_none()
+        && source.and_then(|s| s.as_str()) != Some("exec")
 }
 
 /// The newest rollout file for a user thread in `cwd` (see `is_user_thread`),
@@ -247,6 +259,85 @@ pub fn launch_flags(wt: &str) -> Vec<String> {
     permission_flags(mode, common.as_deref())
 }
 
+/// Where a codex thread's CURRENT turn stands, per the newest turn-boundary
+/// record in its rollout. Codex writes no status file, but since 0.15x every
+/// turn is bracketed in the rollout: `task_started` when it begins, then
+/// `task_complete` (carrying `completed_at`) or `turn_aborted` (Esc). Measured
+/// on 0.157.1, 2026-09-26 (`findings.md`): legacy `notify` reports only the
+/// completion and nothing at all for an interrupt, so the rollout is the one
+/// source that can end a busy turn either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Turn {
+    /// A turn is running — possibly parked on an approval prompt, which
+    /// nothing codex writes tells apart from a command that is simply running.
+    Busy,
+    /// The last turn finished at `at` (epoch seconds, codex's own
+    /// `completed_at`, else the record's own RFC3339 `timestamp` — CONTENT
+    /// either way, never the file's mtime, which a live session keeps moving).
+    /// `None` only when the record carries neither.
+    Done { at: Option<i64>, turn_id: Option<String> },
+    /// The last turn was interrupted. Not work to be told about: the user was
+    /// at the prompt when it stopped.
+    Aborted,
+}
+
+/// The state of the newest turn among rollout `lines` (oldest first), or
+/// `None` when the lines hold no turn boundary at all — a fresh session, or a
+/// tail filled by one enormous tool result, which the caller treats as "no new
+/// answer" rather than "idle". Reads only record TYPES and codex's own
+/// timestamps/ids; `last_agent_message` is content and is never looked at.
+pub fn rollout_turn(lines: &[String]) -> Option<Turn> {
+    lines.iter().rev().find_map(|l| {
+        // Cheap reject before a parse: most lines are token counts and items.
+        if !(l.contains("\"task_") || l.contains("\"turn_aborted\"")) {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v.get("type")?.as_str()? != "event_msg" {
+            return None;
+        }
+        let p = v.get("payload")?;
+        match p.get("type")?.as_str()? {
+            "task_started" => Some(Turn::Busy),
+            "task_complete" => Some(Turn::Done {
+                at: p.get("completed_at").and_then(|c| c.as_i64()).or_else(|| {
+                    v.get("timestamp").and_then(|t| t.as_str()).and_then(crate::sysclock::parse_iso8601)
+                }),
+                turn_id: p.get("turn_id").and_then(|t| t.as_str()).map(str::to_string),
+            }),
+            "turn_aborted" => Some(Turn::Aborted),
+            _ => None,
+        }
+    })
+}
+
+/// The footer Codex's approval modals end on — a command, a file edit, a
+/// permission grant — captured from the 0.157.1 TUI (`findings.md`).
+const APPROVAL_FOOTER: &str = "Press enter to confirm or esc to cancel";
+/// The footers of a plan-mode `request_user_input` modal: one question, or
+/// the last of several (the key-hint strings in the 0.157.1 binary).
+const QUESTION_FOOTERS: [&str; 2] = ["to submit answer", "to submit all"];
+
+/// Whether a captured Codex pane is sitting on a modal that waits for the
+/// user: an approval (command, edits, permissions) or a plan-mode question.
+/// Nothing Codex writes to disk says so — the rollout's last record is the
+/// same pending tool call whether the command is running or awaiting a yes,
+/// and legacy `notify` has no approval event — so the screen is the witness.
+///
+/// Keyed on the modal's FOOTER being the bottom of the screen, not on its
+/// question line anywhere in it: history can quote "Would you like to run the
+/// following command?" (a diff of this very file), but only a live modal puts
+/// its key hints below everything else, where the composer otherwise sits.
+/// The last two lines are joined so a narrow pane that wraps the footer still
+/// matches. An answered modal leaves no trace, scrollback included, so this
+/// can never stick. A modal whose footer is not listed here reads as busy —
+/// the quiet failure, where a false amber dot would cry wolf.
+pub fn waiting_on_screen(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(2)..].join(" ");
+    tail.contains(APPROVAL_FOOTER) || QUESTION_FOOTERS.iter().any(|f| tail.contains(f))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +353,9 @@ mod tests {
         assert!(is_user_thread(&user, "/w"));
         assert!(is_user_thread(&vscode, "/w"));
         assert!(!is_user_thread(&guardian, "/w"));
+        // `codex exec` in the same worktree: no parent, but not a user thread.
+        let exec = serde_json::json!({"cwd":"/w","source":"exec","parent_thread_id":null});
+        assert!(!is_user_thread(&exec, "/w"));
         assert!(!is_user_thread(&user, "/elsewhere"));
     }
 
@@ -336,5 +430,132 @@ mod tests {
             permission_flags(Permissions::AutoReview, Some("/a'b\"c/.git"))[2],
             r#"'sandbox_workspace_write.writable_roots=["/a'\''b\"c/.git"]'"#
         );
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Shapes from the 2026-09-26 probe (0.157.1), content fields dropped.
+    const STARTED: &str = r#"{"timestamp":"2026-09-26T20:31:40.648Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2","started_at":1790454700}}"#;
+    const COMPLETE: &str = r#"{"timestamp":"2026-09-26T20:31:14.445Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","started_at":1790454672,"completed_at":1790454674}}"#;
+    const ABORTED: &str = r#"{"timestamp":"2026-09-26T20:33:06.534Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t3","reason":"interrupted","completed_at":1790454786}}"#;
+    const TOOL: &str = r#"{"timestamp":"2026-09-26T20:31:44.814Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec"}}"#;
+
+    #[test]
+    fn a_started_turn_is_busy_until_its_boundary_lands() {
+        assert_eq!(rollout_turn(&lines(&[COMPLETE, STARTED, TOOL])), Some(Turn::Busy));
+        assert_eq!(
+            rollout_turn(&lines(&[STARTED, TOOL, COMPLETE])),
+            Some(Turn::Done { at: Some(1790454674), turn_id: Some("t1".into()) })
+        );
+    }
+
+    /// A `task_complete` with no `completed_at` is dated by the record's own
+    /// timestamp — still content — rather than dropped, which would leave the
+    /// ring dark for a turn that did finish.
+    #[test]
+    fn a_completion_without_completed_at_uses_its_timestamp() {
+        let bare = r#"{"timestamp":"2026-09-26T20:31:14.445Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}"#;
+        assert_eq!(
+            rollout_turn(&lines(&[STARTED, bare])),
+            Some(Turn::Done { at: Some(1790454674), turn_id: Some("t1".into()) })
+        );
+    }
+
+    /// Esc writes `turn_aborted` and sends no notify — the case a
+    /// completion-only source leaves busy forever.
+    #[test]
+    fn an_interrupted_turn_is_not_busy_and_not_done() {
+        assert_eq!(rollout_turn(&lines(&[COMPLETE, STARTED, ABORTED])), Some(Turn::Aborted));
+    }
+
+    /// No boundary in the tail is "no answer", never "idle": a huge tool
+    /// result can push the `task_started` out of the window mid-turn.
+    #[test]
+    fn a_tail_with_no_boundary_has_no_answer() {
+        assert_eq!(rollout_turn(&lines(&[TOOL, TOOL])), None);
+        assert_eq!(rollout_turn(&[]), None);
+        // A content field that merely MENTIONS a record type is not one.
+        let quoted = r#"{"type":"response_item","payload":{"type":"message","text":"\"task_complete\""}}"#;
+        assert_eq!(rollout_turn(&lines(&[STARTED, quoted])), Some(Turn::Busy));
+    }
+
+    /// Screens captured from the 0.157.1 TUI in tmux (paths shortened).
+    const RUN_APPROVAL: &str = "\
+› Create an empty file named b.txt using the shell command touch b.txt.
+• I’ll run touch b.txt to create the file.
+• Running touch b.txt
+  Would you like to run the following command?
+  Environment: local
+  Reason: Allow running touch b.txt to create the requested file? The filesystem sandbox is read-only.
+  $ touch b.txt
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `touch b.txt` (p)
+  3. No, and tell Codex what to do differently (esc)
+  Press enter to confirm or esc to cancel
+
+
+";
+    const EDIT_APPROVAL: &str = "\
+• Edited a.txt (+1 -0)
+    2 +hello
+    + Show details
+  Would you like to make the following edits?
+  Description: Apply proposed file edits
+  Destination: /w/a.txt
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for these files (a)
+  3. No, and tell Codex what to do differently (esc)
+  Press enter to confirm or esc to cancel
+";
+    const QUESTION: &str = "\
+› Use the request_user_input tool to ask me one short multiple-choice question.
+
+
+
+  Question 1/1 (1 unanswered)
+  Which color?
+
+  › 1. Red                Choose red.
+    2. Blue               Choose blue.
+    3. None of the above  Optionally, add details in notes (tab)
+
+  tab to add notes | enter to submit answer | esc to interrupt
+";
+    const IDLE: &str = "\
+• Appended hello to a.txt using a file edit.
+  15:54
+                                                  Tip: Press ctrl+t to open the full transcript.
+› Ask Codex to do anything
+  GPT-6-Astra default · ~/w · Append hello to a.txt
+  ? for shortcuts
+";
+
+    #[test]
+    fn an_approval_or_a_question_on_screen_is_waiting() {
+        assert!(waiting_on_screen(RUN_APPROVAL));
+        assert!(waiting_on_screen(EDIT_APPROVAL));
+        assert!(waiting_on_screen(QUESTION));
+        // The last question of several ends on "submit all" instead.
+        assert!(waiting_on_screen("  Question 2/2 (1 unanswered)\n  tab to add notes | enter to submit all | esc to interrupt\n"));
+        assert!(!waiting_on_screen(IDLE));
+        assert!(!waiting_on_screen(""));
+    }
+
+    /// History that QUOTES a modal is not a modal: only a live one puts its
+    /// footer at the bottom, below where the composer otherwise sits.
+    #[test]
+    fn a_modal_quoted_in_history_is_not_waiting() {
+        let quoted = format!("• Edited codex.rs\n{RUN_APPROVAL}\n{QUESTION}\n{IDLE}");
+        assert!(!waiting_on_screen(&quoted));
+    }
+
+    /// A narrow pane wraps the footer onto two lines; the join finds it. A
+    /// wrapped footer with the composer back under it is history, not a modal.
+    #[test]
+    fn a_wrapped_footer_still_counts() {
+        assert!(waiting_on_screen("  3. No, and tell Codex what to do differently (esc)\n  Press enter to confirm or esc\n  to cancel\n"));
+        assert!(!waiting_on_screen("  Press enter to confirm or esc\n  to cancel\n› Ask Codex to do anything\n  ? for shortcuts\n"));
     }
 }

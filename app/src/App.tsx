@@ -774,6 +774,30 @@ const DRAFT_LEAD = 48;
 const draftLead = (d: Draft) =>
   d.text.length > DRAFT_LEAD ? d.text.slice(0, DRAFT_LEAD) + "…" : d.text;
 
+/** The provider whose session is live in `p`, or null. One provider runs per
+ *  place; if a stray pair is ever up at once, Claude is named, matching the
+ *  snapshot, which keeps `tmux_session` on Claude's in that case. */
+function liveAgent(p: Place): "claude" | "codex" | null {
+  const a = p.agent_sessions;
+  if (a?.claude.up) return "claude";
+  if (a?.codex.up) return "codex";
+  return null;
+}
+
+/** The nav row's provider mark: the Claude spark or the OpenAI blossom (Codex),
+ *  nothing when no agent is live. The SVG is aria-hidden, so the span carries
+ *  the label; `title` is the hover. Sized in `em` by `.g-agent svg`, so it
+ *  follows the glyph cluster's font (and `--ui-rem`), not a fixed px. */
+function AgentMark({ agent }: { agent: "claude" | "codex" | null }) {
+  if (!agent) return null;
+  const label = agent === "claude" ? "Claude session live" : "Codex session live";
+  return (
+    <span className={"g g-agent g-agent-" + agent} title={label} aria-label={label} role="img">
+      {agent === "claude" ? <Icons.ClaudeMark /> : <Icons.OpenAIMark />}
+    </span>
+  );
+}
+
 function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, onPick, onClose }: {
   open: boolean;
   items: SwitchItem[];
@@ -3924,15 +3948,23 @@ function App() {
     const tier = doneOf(p);
     return tier > 1 ? { opacity: doneOpacity(tier, doneSteps) } : undefined;
   };
+  // Which agent the dot is about. A place runs one provider at a time, so the
+  // live one is the only honest name; with nothing live the afterglow could be
+  // either, and it says "Agent" rather than guess.
+  const agentName = (p: Place) => {
+    const a = liveAgent(p);
+    return a === "codex" ? "Codex" : a === "claude" ? "Claude" : "Agent";
+  };
   const dotTitle = (p: Place) => {
     const act = activityOf(p);
-    if (act === "busy") return "Claude working";
-    if (act === "waiting") return "Claude needs input";
+    const who = agentName(p);
+    if (act === "busy") return `${who} working`;
+    if (act === "waiting") return `${who} needs input`;
     if (!doneOf(p)) return undefined;
     const a = ago(workedAt(p));
     if (unreadOf(p))
-      return a === "now" ? "Claude finished just now — not seen yet" : `Claude finished ${a} ago — not seen yet`;
-    return a === "now" ? "Claude finished just now" : `Claude finished ${a} ago`;
+      return a === "now" ? `${who} finished just now — not seen yet` : `${who} finished ${a} ago — not seen yet`;
+    return a === "now" ? `${who} finished just now` : `${who} finished ${a} ago`;
   };
 
   // ── project config: drift + the init suggestion ──
@@ -6270,6 +6302,11 @@ function App() {
           {draftPaths.has(p.path) && (
             <span className="g g-draft" title={draftTitle(draftPaths.get(p.path)!)}>✎</span>
           )}
+          {/* Which agent is live here. Shape carries it, not hue — the dot
+              slot already owns colour, and a second hued mark on the row would
+              read as a second state. Outside `glyphs()` like ✎, so truncation
+              cannot drop it. */}
+          <AgentMark agent={liveAgent(p)} />
           {/* Age and the enter button share ONE grid cell, stacked: the slot is
               always as wide as the wider of the two, so swapping them on hover
               cannot move the name beside it. Visibility (not display) does the

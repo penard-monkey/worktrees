@@ -45,15 +45,34 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   `/model` in the Codex TUI should change it within a few seconds with no
   message sent. That case was verified only at the snapshot level, because the
   rollout event it relies on (`thread_settings_applied`) is Codex's to rename.
+  Same for the nav dots: a turn lights green and ends in the afterglow ring,
+  and Esc ends it with no ring — they ride `task_started` / `task_complete` /
+  `turn_aborted`, also Codex's to rename.
   _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md),
   [2026-09-23 model-label](docs/sessions/2026-09-23-model-label/summary.md)_
+
+- **The Codex amber dot reads the screen, and the screen is Codex's to
+  change.** `codex::waiting_on_screen` matches the modal footers of the
+  0.157.1 TUI ("Press enter to confirm or esc to cancel", "to submit
+  answer"/"to submit all"). A reworded footer degrades quietly to busy (green)
+  rather than a false amber, so nothing will complain. Add it to the Codex
+  manual check: park a turn on an approval and on a plan-mode question, and
+  watch the dot go amber and back; then open `/model` and `/permissions` mid-turn
+  and check it stays green (on 0.157.1 their footers are "enter select · esc
+  back", and `/experimental`'s is "space toggle · enter save · esc save/close",
+  so neither matches). MCP elicitation's footer was never captured. Also kill a
+  codex mid-turn (`kill <pid>`): the dot must clear within a tick, since
+  nothing writes `turn_aborted` and only the pane going back to its shell says
+  so. Re-probe `notify` for an `approval-requested` event on each Codex
+  upgrade too — if it ever fires, it is the better source.
+  _From: codex-activity-nav (2026-09-26)_
 
 - **`CODEX_WATCH` keeps a removed project's worktrees.** The poll re-checks
   the model of every worktree a snapshot last saw with live Codex. A worktree
   is dropped only when a later snapshot of ITS repo sees Codex down, so
   removing the project while Codex runs leaves the entry until the app
   restarts. That costs a few `read_dir` calls per tick. Prune against
-  `read_projects` in `codex_models_moved`.
+  `read_projects` in `codex_tick` (was `codex_models_moved`).
   _From: [2026-09-23 model-label](docs/sessions/2026-09-23-model-label/summary.md)_
 
 - **`codex::session_present` opens every rollout on each launch.** It walks all
