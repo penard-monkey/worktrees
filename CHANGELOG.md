@@ -31,7 +31,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   covers the worktree plus two things it would otherwise refuse, both found by
   trying: the repository's shared git data, without which `git commit` fails
   in any worktree but the main one, and the network, without which `git push`
-  and `gh` cannot reach GitHub. A change applies to the next Codex launch.
+  and `gh` cannot reach GitHub. That git data includes `.git/hooks` and
+  `.git/config`, which auto-review can therefore change. If you never picked a
+  mode, your next Codex launch moves from Ask to auto-review; pick Ask to keep
+  the old behaviour. A change applies to the next Codex launch. The CLI reads
+  the same choice from `codex_permissions` or `WORKTREES_CODEX_PERMISSIONS`.
 
 ## [0.30.0] - 2026-09-23
 

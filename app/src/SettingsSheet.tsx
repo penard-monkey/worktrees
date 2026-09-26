@@ -749,7 +749,7 @@ export function SettingsSheet({
                 what you are NOT picking. The current one is bold. */}
             {([
               ["ask", "Ask", "Codex asks before running commands."],
-              ["auto-review", "Auto-review", "a reviewer approves or refuses each request; commands run sandboxed to this worktree and its git data, with network."],
+              ["auto-review", "Auto-review", "a reviewer approves or refuses each request; commands run sandboxed to this worktree plus the repo's git data (hooks and config included, so commits work) and the network."],
               ["full", "Full access", "no prompts and no sandbox."],
             ] as const).map(([mode, label, line]) => (
               <div className="hint" key={mode}>

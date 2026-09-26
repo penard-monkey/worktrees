@@ -20,6 +20,10 @@ export type AgentReport = {
   skills: AgentSkillState[];
   fixable: boolean;
   conflicts: boolean;
+  /** The fix branch exists: a previous fix awaits its merge. The base ref does
+   *  not move until then, so `fixable` stays true — this is what retires the
+   *  offer instead. */
+  pending: string | null;
 };
 export type UserSkill = { name: string; status: "linked" | "missing" | "conflict" };
 export type AgentSetupStatus = { repo: AgentReport; user_skills: UserSkill[] };
@@ -41,7 +45,7 @@ const missingUser = (s: AgentSetupStatus) => s.user_skills.filter((u) => u.statu
  *  machine-wide, so an offer about them would stand under EVERY project at
  *  once. The sheet lists both. */
 export function agentSetupOffers(s: AgentSetupStatus | null | undefined): boolean {
-  return !!s && s.repo.fixable;
+  return !!s && s.repo.fixable && !s.repo.pending;
 }
 
 /** The dismissal key: a hash of what the offer is ABOUT — the dirs and the
@@ -194,7 +198,7 @@ export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
     <section className="setting" ref={ref} data-testid="agent-setup">
       <label>
         Agent setup
-        {repo?.fixable ? <span className="upd-tag warn">{todo} to fix</span> : null}
+        {repo?.pending ? <span className="upd-tag">PR waiting</span> : repo?.fixable ? <span className="upd-tag warn">{todo} to fix</span> : null}
         {repo?.conflicts ? <span className="upd-tag warn">merge by hand</span> : null}
       </label>
       {loadErr ? (
@@ -228,7 +232,7 @@ export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
         <button
           className={"ctrl sm" + (armed ? " danger armed" : "")}
           data-testid="agent-setup-fix"
-          disabled={busy || !repo?.fixable}
+          disabled={busy || !repo?.fixable || !!repo?.pending}
           title={armed ? "click again to push the branch and open a PR" : `commit the fix on 'agent-instructions' off ${repo?.reference ?? "the default branch"}, push it and open a PR`}
           onClick={fix}
         >
@@ -236,6 +240,12 @@ export function AgentSetupSection({ root, open, focus, onChanged, onError }: {
         </button>
         <button className="ctrl sm" disabled={busy} onClick={load}>Re-check</button>
       </div>
+      {repo?.pending && !outcome && (
+        <div className="hint">
+          A fix is waiting on branch <code>{repo.pending}</code>: merge its PR to finish. If that PR was
+          closed, delete the branch (locally and on origin) to fix again.
+        </div>
+      )}
       <div className="hint">
         AGENTS.md becomes the one instruction file — Codex and other agents read it directly — and
         CLAUDE.md a one-line <code>@AGENTS.md</code> import, so Claude reads the same words. Judged

@@ -46,7 +46,9 @@ pub enum DirKind {
     AgentsOnly,
     /// CLAUDE.md imports AGENTS.md — the target layout.
     Stub,
-    /// One file is a symlink to the other. Works for both; left alone.
+    /// A symlink is involved (either file, alone or paired). Whatever it
+    /// points at, renaming it would carry the LINK and point AGENTS.md at the
+    /// new stub — so it is reported and left alone.
     Linked,
     /// Two real files with different content. A person has to merge them.
     Diverged,
@@ -84,6 +86,11 @@ pub struct Report {
     pub fixable: bool,
     /// Something only a person can resolve (diverged pairs).
     pub conflicts: bool,
+    /// The fix branch already exists (locally or on origin): a previous fix is
+    /// waiting to be merged, so nothing should offer another. The base ref does
+    /// not move until that PR merges, so without this `fixable` stays true after
+    /// a successful fix and the offer would invite a push that can only refuse.
+    pub pending: Option<String>,
 }
 
 /// One tracked entry from `git ls-tree -r`.
@@ -143,9 +150,9 @@ pub fn classify(entries: &[Entry], read: &dyn Fn(&str) -> Option<String>) -> (Ve
             }
             continue;
         }
-        // Claude's own config dir can hold a CLAUDE.md that no Codex walk from
-        // the repo root would ever reach; it is not an instruction dir.
-        if e.path.starts_with(".claude/") {
+        // Claude's own config dir (at any depth) can hold a CLAUDE.md that no
+        // Codex walk from the repo root would ever reach; not an instruction dir.
+        if e.path.split('/').any(|c| c == ".claude") {
             continue;
         }
         match basename(&e.path) {
@@ -154,16 +161,23 @@ pub fn classify(entries: &[Entry], read: &dyn Fn(&str) -> Option<String>) -> (Ve
             _ => {}
         }
     }
+    // A hand-made `.agents/skills -> ../.claude/skills` (or a linked `.agents`)
+    // already exposes every skill; adding per-skill links under it would fail
+    // in git ("appears as both a file and as a directory").
+    let skills_dir_linked = entries.iter().any(|e| e.is_link() && (e.path == ".agents/skills" || e.path == ".agents"));
     let dirs_all: BTreeSet<&String> = claude.keys().chain(agents.keys()).collect();
     let mut dirs = Vec::new();
     for dir in dirs_all {
-        let kind = match (claude.get(dir), agents.get(dir)) {
+        let (c, a) = (claude.get(dir), agents.get(dir));
+        if c.is_some_and(|e| e.is_link()) || a.is_some_and(|e| e.is_link()) {
+            dirs.push(DirState { dir: dir.clone(), kind: DirKind::Linked });
+            continue;
+        }
+        let kind = match (c, a) {
             (Some(_), None) => DirKind::ClaudeOnly,
             (None, Some(_)) => DirKind::AgentsOnly,
             (Some(c), Some(a)) => {
-                if c.is_link() || a.is_link() {
-                    DirKind::Linked
-                } else if c.sha == a.sha {
+                if c.sha == a.sha {
                     // Identical copies: both agents read the same words today,
                     // but they WILL drift. Folding one into a stub is safe.
                     DirKind::ClaudeOnly
@@ -180,7 +194,7 @@ pub fn classify(entries: &[Entry], read: &dyn Fn(&str) -> Option<String>) -> (Ve
     let skills = claude_skills
         .into_iter()
         .map(|name| {
-            let kind = if agent_skills.contains(&name) { SkillKind::Present } else { SkillKind::Missing };
+            let kind = if skills_dir_linked || agent_skills.contains(&name) { SkillKind::Present } else { SkillKind::Missing };
             SkillState { name, kind }
         })
         .collect();
@@ -191,7 +205,7 @@ pub fn report_from(reference: &str, dirs: Vec<DirState>, skills: Vec<SkillState>
     let fixable = dirs.iter().any(|d| matches!(d.kind, DirKind::ClaudeOnly | DirKind::AgentsOnly))
         || skills.iter().any(|s| s.kind == SkillKind::Missing);
     let conflicts = dirs.iter().any(|d| d.kind == DirKind::Diverged);
-    Report { reference: reference.to_string(), dirs, skills, fixable, conflicts }
+    Report { reference: reference.to_string(), dirs, skills, fixable, conflicts, pending: None }
 }
 
 // ── git plumbing ─────────────────────────────────────────────────────────────
@@ -218,6 +232,47 @@ fn git_env(root: &str, index: Option<&Path>, args: &[&str], input: Option<&[u8]>
     }
 }
 
+/// A network command (fetch, push, gh) with the hardening the app's own
+/// background fetch has (`lib.rs::fetch_origin_root`): under launchd there is
+/// no terminal, so a credential or host-key prompt must fail instead of
+/// hanging, and a wedged remote must not hold the sheet on "Pushing…" until TCP
+/// gives up. From a terminal the CLI keeps git's prompts.
+fn run_net(mut c: Command, what: &str) -> Result<String, String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        c.env("GIT_TERMINAL_PROMPT", "0").env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes").env("GH_PROMPT_DISABLED", "1");
+    }
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn().map_err(|e| format!("{what}: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(NET_DEADLINE_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{what} timed out after {NET_DEADLINE_SECS}s"));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => return Err(format!("{what}: {e}")),
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| format!("{what}: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!("{what} failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
+const NET_DEADLINE_SECS: u64 = 60;
+
+fn git_net(root: &str, args: &[&str]) -> Result<String, String> {
+    let mut c = Command::new("git");
+    c.arg("-C").arg(root).args(args);
+    run_net(c, &format!("git {}", args.first().unwrap_or(&"")))
+}
+
 /// `git ls-tree -r` of `reference`, parsed.
 pub fn tree(root: &str, reference: &str) -> Result<Vec<Entry>, String> {
     let out = git_env(root, None, &["ls-tree", "-r", "--full-tree", "-z", reference], None)?;
@@ -238,16 +293,44 @@ pub fn reference(p: &crate::project::Project) -> String {
     p.base_ref()
 }
 
+/// Classification per (repo, tree id). `ls-tree -r` over a large monorepo is
+/// megabytes, and the app asks every five minutes per project and on every
+/// sheet open, while the default branch's tree rarely changes between asks.
+static CLASSIFIED: std::sync::Mutex<Vec<(String, String, Vec<DirState>, Vec<SkillState>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The fix branch, if it exists locally or on origin.
+pub fn pending_branch(root: &str) -> Option<String> {
+    let exists = |r: String| crate::git::git_ok(root, &["show-ref", "--verify", "-q", &r]);
+    (exists(format!("refs/heads/{FIX_BRANCH}")) || exists(format!("refs/remotes/origin/{FIX_BRANCH}")))
+        .then(|| FIX_BRANCH.to_string())
+}
+
 pub fn inspect(p: &crate::project::Project) -> Result<Report, String> {
     let reference = reference(p);
-    if !crate::git::git_ok(&p.main_root, &["rev-parse", "--verify", "-q", &format!("{reference}^{{commit}}")]) {
+    let Some(tree_id) = crate::git::git_out(&p.main_root, &["rev-parse", "--verify", "-q", &format!("{reference}^{{tree}}")]) else {
         return Err(format!("{reference} has no commits yet"));
-    }
-    let entries = tree(&p.main_root, &reference)?;
-    let root = p.main_root.clone();
-    let read = move |sha: &str| git_env(&root, None, &["cat-file", "blob", sha], None).ok();
-    let (dirs, skills) = classify(&entries, &read);
-    Ok(report_from(&reference, dirs, skills))
+    };
+    let cached = {
+        let g = CLASSIFIED.lock().unwrap_or_else(|e| e.into_inner());
+        g.iter().find(|(r, t, _, _)| *r == p.main_root && *t == tree_id).map(|(_, _, d, k)| (d.clone(), k.clone()))
+    };
+    let (dirs, skills) = match cached {
+        Some(v) => v,
+        None => {
+            let entries = tree(&p.main_root, &reference)?;
+            let root = p.main_root.clone();
+            let read = move |sha: &str| git_env(&root, None, &["cat-file", "blob", sha], None).ok();
+            let v = classify(&entries, &read);
+            let mut g = CLASSIFIED.lock().unwrap_or_else(|e| e.into_inner());
+            g.retain(|(r, _, _, _)| *r != p.main_root);
+            g.push((p.main_root.clone(), tree_id, v.0.clone(), v.1.clone()));
+            v
+        }
+    };
+    let mut r = report_from(&reference, dirs, skills);
+    r.pending = pending_branch(&p.main_root);
+    Ok(r)
 }
 
 /// One change the fix makes, in index terms.
@@ -307,11 +390,24 @@ fn has_origin(root: &str) -> bool {
 /// fix is waiting to be merged (or was abandoned), and a second one would race
 /// it. The message names both ways out.
 pub fn fix(p: &crate::project::Project) -> Result<FixOutcome, String> {
+    // `WORKTREES_GH_BIN` is a seam for the bats suite, which must not reach GitHub.
+    let gh = std::env::var("WORKTREES_GH_BIN").unwrap_or_else(|_| "gh".into());
+    fix_with(p, &gh)
+}
+
+pub fn fix_with(p: &crate::project::Project, gh_bin: &str) -> Result<FixOutcome, String> {
     let root = p.main_root.as_str();
+    // Here, not in the CLI wrapper: the app calls this in-process and never
+    // passes through the CLI's dispatch, and a hub copy is exactly the tree
+    // that must never push.
+    if let Some(msg) = crate::sync::hub_copy_refusal(Path::new(root)) {
+        return Err(msg);
+    }
     let origin = has_origin(root);
     if origin {
         // Judge and build against what the remote has NOW, not the last fetch.
-        let _ = crate::git::git_status_captured(root, &["fetch", "--quiet", "origin"]);
+        // A failed fetch is not fatal (offline): the last fetch is still a ref.
+        let _ = git_net(root, &["fetch", "--quiet", "origin"]);
     }
     let report = inspect(p)?;
     let mut out = FixOutcome { branch: FIX_BRANCH.into(), base: report.reference.clone(), ..Default::default() };
@@ -330,7 +426,7 @@ pub fn fix(p: &crate::project::Project) -> Result<FixOutcome, String> {
         || crate::git::git_ok(root, &["show-ref", "--verify", "-q", &remote])
     {
         return Err(format!(
-            "a branch named '{FIX_BRANCH}' already exists — merge or close its PR, or delete the branch, then run the fix again"
+            "a branch named '{FIX_BRANCH}' already exists — merge its PR first. If that PR was merged or closed and there is still something to fix, delete the branch and run the fix again: git branch -D {FIX_BRANCH}; git push origin --delete {FIX_BRANCH}"
         ));
     }
 
@@ -379,8 +475,8 @@ pub fn fix(p: &crate::project::Project) -> Result<FixOutcome, String> {
         out.notes.push("No 'origin' remote — merge the branch into your default branch yourself.".into());
         return Ok(out);
     }
-    match crate::git::git_status_captured(root, &["push", "--quiet", "-u", "origin", &format!("{local}:{local}")]) {
-        Ok(()) => out.pushed = true,
+    match git_net(root, &["push", "--quiet", "-u", "origin", &format!("{local}:{local}")]) {
+        Ok(_) => out.pushed = true,
         Err(e) => {
             out.notes.push(format!("Push failed: {e}. The branch is committed locally; push it and open a PR yourself."));
             return Ok(out);
@@ -388,26 +484,20 @@ pub fn fix(p: &crate::project::Project) -> Result<FixOutcome, String> {
     }
     let base_branch = report.reference.strip_prefix("origin/").unwrap_or(&report.reference).to_string();
     let body = pr_body(&report, &changes, &out.left_alone);
-    // `WORKTREES_GH_BIN` is a test seam: the fix test must not reach GitHub.
-    let gh_bin = std::env::var("WORKTREES_GH_BIN").unwrap_or_else(|_| "gh".into());
-    let gh = Command::new(gh_bin)
-        .current_dir(root)
-        .args(["pr", "create", "--base", &base_branch, "--head", FIX_BRANCH, "--title", "Agent instructions: AGENTS.md for every agent", "--body", &body])
-        .stdin(Stdio::null())
-        .output();
-    match gh {
-        Ok(o) if o.status.success() => {
-            let url = String::from_utf8_lossy(&o.stdout).lines().rev().find(|l| l.starts_with("http")).map(str::to_string);
+    let mut gh = Command::new(gh_bin);
+    gh.current_dir(root).args(["pr", "create", "--base", &base_branch, "--head", FIX_BRANCH, "--title", "Agent instructions: AGENTS.md for every agent", "--body", &body]);
+    match run_net(gh, "gh pr create") {
+        Ok(stdout) => {
+            let url = stdout.lines().rev().find(|l| l.starts_with("http")).map(str::to_string);
             if let Some(u) = &url {
                 out.notes.push(format!("Opened {u} — merge it to finish."));
             }
             out.pr_url = url;
         }
-        Ok(o) => out.notes.push(format!(
-            "Pushed '{FIX_BRANCH}', but `gh pr create` failed: {} — open the PR yourself.",
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(_) => out.notes.push(format!("Pushed '{FIX_BRANCH}'. The GitHub CLI (gh) is not installed — open the PR yourself.")),
+        Err(e) if e.contains("No such file") || e.contains("not found") && e.starts_with("gh pr create:") => {
+            out.notes.push(format!("Pushed '{FIX_BRANCH}'. The GitHub CLI (gh) is not installed — open the PR yourself."))
+        }
+        Err(e) => out.notes.push(format!("Pushed '{FIX_BRANCH}', but {e} — open the PR yourself.")),
     }
     for f in &out.left_alone {
         out.notes.push(format!("{f} and its AGENTS.md differ — left alone; merge them by hand."));
@@ -540,7 +630,7 @@ fn kind_line(d: &DirState) -> String {
         DirKind::ClaudeOnly => "CLAUDE.md only — fix moves it to AGENTS.md and leaves a stub",
         DirKind::AgentsOnly => "AGENTS.md only — Claude reads nothing here; fix adds the stub",
         DirKind::Stub => "ok (CLAUDE.md imports AGENTS.md)",
-        DirKind::Linked => "ok (one file links to the other)",
+        DirKind::Linked => "a symlink is involved — left alone",
         DirKind::Diverged => "CLAUDE.md and AGENTS.md differ — merge them by hand",
     };
     format!("  {dir}: {what}")
@@ -563,6 +653,9 @@ pub fn cmd_agent_setup(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, 
                 return 0;
             }
             ui.header(&format!("Agent instructions on {}", r.reference));
+            if let Some(b) = &r.pending {
+                ui.plain(&format!("  a fix is waiting on branch '{b}' — merge its PR"));
+            }
             if r.dirs.is_empty() {
                 ui.plain("  no CLAUDE.md or AGENTS.md — nothing to fix");
             }
@@ -585,10 +678,7 @@ pub fn cmd_agent_setup(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, 
             0
         }
         "fix" => {
-            if let Some(msg) = crate::sync::hub_copy_refusal(Path::new(&p.main_root)) {
-                ui.error(&msg);
-                return 1;
-            }
+            // `fix` carries the hub-copy guard itself (the app calls it too).
             match fix(p) {
                 Ok(o) => {
                     if json {
@@ -647,6 +737,8 @@ mod tests {
             e("100644", "same", "ops/CLAUDE.md"),              // ops: identical copies
             e("100644", "same", "ops/AGENTS.md"),
             e("100644", "x", ".claude/CLAUDE.md"),             // not an instruction dir
+            e("100644", "x2", "pkg/.claude/CLAUDE.md"),        // …at any depth
+            e("120000", "l6", "sub/CLAUDE.md"),                // sub: a LONE link
             e("100644", "y", "README.md"),
         ];
         let read = reader(&[("s3", "# web\n  @AGENTS.md  \n"), ("c5", "# db rules\n")]);
@@ -658,6 +750,7 @@ mod tests {
             ("cli", DirKind::Linked),
             ("db", DirKind::Diverged),
             ("ops", DirKind::ClaudeOnly),
+            ("sub", DirKind::Linked),
             ("web", DirKind::Stub),
         ]);
     }
@@ -676,6 +769,16 @@ mod tests {
             SkillState { name: "deploy".into(), kind: SkillKind::Missing },
             SkillState { name: "review".into(), kind: SkillKind::Present },
         ]);
+    }
+
+    #[test]
+    fn a_linked_agents_skills_dir_already_exposes_every_skill() {
+        let entries = vec![
+            e("100644", "1", ".claude/skills/deploy/SKILL.md"),
+            e("120000", "2", ".agents/skills"),
+        ];
+        let (_, skills) = classify(&entries, &|_| None);
+        assert_eq!(skills, vec![SkillState { name: "deploy".into(), kind: SkillKind::Present }]);
     }
 
     #[test]
@@ -759,20 +862,23 @@ mod tests {
         sh(&repo, &["commit", "-q", "-m", "init"]);
         sh(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
         sh(&repo, &["push", "-q", "-u", "origin", "main"]);
+        // A gh that records its argv, so a wrong --base/--head cannot pass.
         let fake_gh = t.join("gh");
-        std::fs::write(&fake_gh, "#!/bin/sh\necho https://example.invalid/pr/1\n").unwrap();
+        let gh_log = t.join("gh.log");
+        std::fs::write(&fake_gh, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho https://example.invalid/pr/1\n", gh_log.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("WORKTREES_GH_BIN", &fake_gh);
 
         let p = crate::project::Project::discover(&repo).unwrap();
         let before = inspect(&p).unwrap();
         assert!(before.fixable && !before.conflicts);
         let head_before = sh(&repo, &["rev-parse", "HEAD"]);
 
-        let out = fix(&p).unwrap();
+        let out = fix_with(&p, fake_gh.to_str().unwrap()).unwrap();
         assert!(out.pushed, "{:?}", out.notes);
         assert_eq!(out.pr_url.as_deref(), Some("https://example.invalid/pr/1"));
+        let argv = std::fs::read_to_string(&gh_log).unwrap();
+        assert!(argv.contains("--base\nmain\n--head\nagent-instructions\n"), "{argv}");
         // The checkout and main did not move; the working tree is untouched.
         assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), head_before);
         assert_eq!(sh(&repo, &["status", "--porcelain"]), "");
@@ -785,9 +891,12 @@ mod tests {
         assert_eq!(sh(&origin, &["rev-parse", FIX_BRANCH]), sh(&repo, &["rev-parse", &b]));
         // Built on main: one commit ahead of it.
         assert_eq!(sh(&repo, &["rev-list", "--count", &format!("main..{b}")]), "1");
+        // The offer retires: the base has not moved, but the fix is pending.
+        let after = inspect(&p).unwrap();
+        assert!(after.fixable, "main still needs it until the PR merges");
+        assert_eq!(after.pending.as_deref(), Some(FIX_BRANCH));
         // A second run refuses rather than racing the open PR.
-        assert!(fix(&p).unwrap_err().contains("already exists"));
-        std::env::remove_var("WORKTREES_GH_BIN");
+        assert!(fix_with(&p, fake_gh.to_str().unwrap()).unwrap_err().contains("already exists"));
         let _ = std::fs::remove_dir_all(&t);
     }
 }

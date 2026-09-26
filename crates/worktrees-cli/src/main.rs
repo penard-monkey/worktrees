@@ -182,8 +182,9 @@ fn run() -> i32 {
         // deliberately absent from MUTATING.
         "show" => worktrees_core::inbox::cmd_show(&project, &mut ui, rest),
         "init" => ops::cmd_init(&project, &mut ui, rest),
-        // `fix` writes a branch and pushes, so it carries the hub-copy guard
-        // itself; `status` is read-only and must work on a hub copy too.
+        // Not in MUTATING: `status` is read-only and must work on a hub copy.
+        // `fix` pushes, and `agentfiles::fix` refuses a hub copy itself — the
+        // app calls it in-process, past this dispatch.
         "agent-setup" => worktrees_core::agentfiles::cmd_agent_setup(&project, &mut ui, rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));

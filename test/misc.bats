@@ -468,3 +468,36 @@ write_config() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"removed worktree feat-sym"* ]]   # git-removed, NOT plain-deleted
 }
+
+@test "agent-setup status reads the default branch and reports a CLAUDE.md-only root" {
+  cd "$REPO"   # the fixture — never the checkout the suite runs from
+  echo "# rules" > "$REPO/CLAUDE.md"
+  git -C "$REPO" add CLAUDE.md && git -C "$REPO" commit -qm rules && git -C "$REPO" push -q origin main
+  run "$WT_BIN" agent-setup status --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"kind": "claude-only"'* ]]
+  [[ "$output" == *'"fixable": true'* ]]
+  [[ "$output" == *'"pending": null'* ]]
+}
+
+@test "agent-setup fix commits on its own branch, pushes, and leaves main alone" {
+  # `fix` PUSHES to origin. From any cwd but the fixture it would push the REAL
+  # repo's branch to its real remote (it did, once). Refuse unless we are in
+  # the fixture and its origin is the fixture's bare repo.
+  cd "$REPO"
+  [ "$(git remote get-url origin)" = "$ORIGIN" ] || { echo "not the fixture origin"; return 1; }
+  echo "# rules" > "$REPO/CLAUDE.md"
+  git -C "$REPO" add CLAUDE.md && git -C "$REPO" commit -qm rules && git -C "$REPO" push -q origin main
+  install_fake_cmd gh
+  export WORKTREES_GH_BIN="$SHIMS/gh"
+  local before; before=$(git -C "$REPO" rev-parse main)
+  run "$WT_BIN" agent-setup fix
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$REPO" rev-parse main)" = "$before" ]
+  [ "$(git -C "$REPO" show agent-instructions:AGENTS.md)" = "# rules" ]
+  git -C "$REPO" show agent-instructions:CLAUDE.md | grep -qx '@AGENTS.md'
+  git -C "$ORIGIN" rev-parse --verify -q agent-instructions
+  run "$WT_BIN" agent-setup fix
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already exists"* ]]
+}
