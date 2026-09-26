@@ -7,13 +7,26 @@ import { clampSteps, snapHorizon } from "./afterglow";
 
 // Shippable themes: each id is a [data-theme] color map in tokens.css.
 // "system" follows macOS appearance and resolves to the Tokyo Night pair.
+/// `family` groups the picker: the brand pair first, then everything that
+/// shipped before it under "Classic". It is presentation only — `id` is what
+/// is persisted, so an existing install keeps the exact theme it had and no
+/// migration is needed. Adding a family here adds an optgroup; the order of
+/// this array is the order they are listed in.
+export const THEME_FAMILIES = [
+  { id: "hecaton", label: "Hecaton" },
+  { id: "classic", label: "Classic" },
+] as const;
+export type ThemeFamily = (typeof THEME_FAMILIES)[number]["id"];
+
 export const THEMES = [
-  { id: "tokyo-night", label: "Tokyo Night", appearance: "dark" },
-  { id: "tokyo-day", label: "Tokyo Night Day", appearance: "light" },
-  { id: "catppuccin-mocha", label: "Catppuccin Mocha", appearance: "dark" },
-  { id: "catppuccin-latte", label: "Catppuccin Latte", appearance: "light" },
-  { id: "nord", label: "Nord", appearance: "dark" },
-  { id: "gruvbox-dark", label: "Gruvbox Dark", appearance: "dark" },
+  { id: "hecaton", label: "Hecaton", appearance: "dark", family: "hecaton" },
+  { id: "hecaton-light", label: "Hecaton Light", appearance: "light", family: "hecaton" },
+  { id: "tokyo-night", label: "Tokyo Night", appearance: "dark", family: "classic" },
+  { id: "tokyo-day", label: "Tokyo Night Day", appearance: "light", family: "classic" },
+  { id: "catppuccin-mocha", label: "Catppuccin Mocha", appearance: "dark", family: "classic" },
+  { id: "catppuccin-latte", label: "Catppuccin Latte", appearance: "light", family: "classic" },
+  { id: "nord", label: "Nord", appearance: "dark", family: "classic" },
+  { id: "gruvbox-dark", label: "Gruvbox Dark", appearance: "dark", family: "classic" },
 ] as const;
 export type ThemeId = (typeof THEMES)[number]["id"];
 export type ThemeSetting = ThemeId | "system";
@@ -367,9 +380,12 @@ export const DEFAULTS: Settings = {
   app_zoom: 1,
   term_family: '"SF Mono", Menlo, Monaco, monospace',
   term_size: 13,
-  theme: "tokyo-night",
-  theme_light: "tokyo-day",
-  theme_dark: "tokyo-night",
+  // The brand pair is the DEFAULT for a fresh install only. Deliberately no
+  // `settings_rev` bump: an existing install has a stored `theme` and keeps it,
+  // because someone who chose Gruvbox did not ask to be rebranded.
+  theme: "hecaton",
+  theme_light: "hecaton-light",
+  theme_dark: "hecaton",
   density: "comfortable",
   nav_width: 300,
   nav_guides: true,

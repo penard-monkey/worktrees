@@ -9,7 +9,7 @@ import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
-import { clampNav, clampRem, clampTerm, clampZoom, THEMES, ZOOM_STEPS } from "./settings";
+import { clampNav, clampRem, clampTerm, clampZoom, THEME_FAMILIES, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
 import { humanSize } from "./filekind";
 
@@ -820,10 +820,17 @@ export function SettingsSheet({
             <label>Theme</label>
             <select value={settings.theme} onChange={(e) => onChange({ theme: e.currentTarget.value as ThemeSetting })}>
               <option value="system">System (match macOS)</option>
-              {THEMES.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.label} ({t.appearance})
-                </option>
+              {/* Grouped, not flat: the brand pair reads as the product's own
+                  and everything that shipped before it as "Classic". `id` is
+                  unchanged, so a stored theme still resolves. */}
+              {THEME_FAMILIES.map((f) => (
+                <optgroup key={f.id} label={f.label}>
+                  {THEMES.filter((t) => t.family === f.id).map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.label} ({t.appearance})
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             {settings.theme === "system" && (
@@ -831,15 +838,25 @@ export function SettingsSheet({
                 <label className="sub">Light ↔ dark pair</label>
                 <div className="row2">
                   <select value={settings.theme_light} onChange={(e) => onChange({ theme_light: e.currentTarget.value as ThemeId })}>
-                    {THEMES.filter((t) => t.appearance === "light").map((t) => (
-                      <option key={t.id} value={t.id}>{t.label}</option>
-                    ))}
+                    {THEME_FAMILIES.map((f) => {
+                      const opts = THEMES.filter((t) => t.appearance === "light" && t.family === f.id);
+                      return opts.length ? (
+                        <optgroup key={f.id} label={f.label}>
+                          {opts.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+                        </optgroup>
+                      ) : null;
+                    })}
                   </select>
                   <span className="times">↔</span>
                   <select value={settings.theme_dark} onChange={(e) => onChange({ theme_dark: e.currentTarget.value as ThemeId })}>
-                    {THEMES.filter((t) => t.appearance === "dark").map((t) => (
-                      <option key={t.id} value={t.id}>{t.label}</option>
-                    ))}
+                    {THEME_FAMILIES.map((f) => {
+                      const opts = THEMES.filter((t) => t.appearance === "dark" && t.family === f.id);
+                      return opts.length ? (
+                        <optgroup key={f.id} label={f.label}>
+                          {opts.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+                        </optgroup>
+                      ) : null;
+                    })}
                   </select>
                 </div>
                 <div className="hint">Follows macOS appearance: this light theme by day, this dark theme in dark mode.</div>

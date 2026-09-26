@@ -155,6 +155,117 @@
  * txt/txt-hi are official fg darkened (official #3760bf is 3.99:1 on the
  * sidebar); ansi 0/8 use day dark5/comment — kitty's near-bg blacks are
  * illegible on a light terminal. */
+/* ── Hecaton (brand) ─────────────────────────────────────────────────────────
+   The identity palette carried through the whole app, not just the logo.
+   Blue #7AA2F7 is the interactive accent it already was; mint #5BD6BA becomes
+   `--ok` — the "live session" colour — which is where the brand's second hue
+   earns its place instead of decorating.
+
+   The AI purple, dirty amber, danger and warn are deliberately NOT rebranded:
+   the handoff says the accent fills "are part of the identity, not status
+   colors. Preserve existing live, dirty, danger, AI and terminal semantics."
+   A user who learns purple = Claude must not have to relearn it per theme.
+
+   ANSI is tokyo-night's, by the same rule — a brand palette pasted over the
+   terminal's 16 colours breaks every program that means something by them.
+   Only `--ansi-0` moves, to sit on the new background. */
+:root[data-theme="hecaton"] {
+  --bg-abyss: #11121a;   /* brand canvas */
+  --bg-tree: #171825;
+  --bg-panel: #1c1e2d;   /* distinct from abyss: a recessed box needs a surface it does not equal */
+  --bg-elev: #242742;
+  --bg-input: #0d0e15;
+  --line: #272b40;
+  --line-strong: #3b4060;
+  --txt-hi: #f3f5fa;     /* brand wordmark-on-dark */
+  --txt: #c9d1e0;
+  --txt-dim: #98a2b8;
+  --txt-mute: #626c86;
+  --accent: #7aa2f7;     /* brand primary */
+  --accent-ink: #11121a; /* brand ink on accent fills */
+  --branch: #9aa5ce;
+  --branch-hi: #7dcfff;
+  --ok: #5bd6ba;         /* brand mint — live tmux / ahead / listening */
+  --ai: #bb9af7;
+  --dirty: #e0af68;
+  --danger: #f7768e;
+  --warn: #ff9e64;
+  --idle: #7e8ab8;
+  --sticky: #626c86;
+  --pin: #f2c97d;
+  --find-hit: #4a3b23;
+  --find-on: #916418;
+  --find-on-ink: #f5f0e6;
+  --guide: #272c40;
+  --guide-hot: #3d4566;
+  --guide-sel: rgba(122, 162, 247, 0.5);
+  --term-bg: #11121a;
+  --term-fg: #c9d1e0;
+  --term-cursor: #c9d1e0;
+  --term-sel: rgba(122, 162, 247, 0.3);
+  --ansi-0: #16171f;  --ansi-8: #414868;
+  --ansi-1: #f7768e;  --ansi-9: #ff899d;
+  --ansi-2: #9ece6a;  --ansi-10: #9fe044;
+  --ansi-3: #e0af68;  --ansi-11: #faba4a;
+  --ansi-4: #7aa2f7;  --ansi-12: #8db0ff;
+  --ansi-5: #bb9af7;  --ansi-13: #c7a9ff;
+  --ansi-6: #7dcfff;  --ansi-14: #a4daff;
+  --ansi-7: #a9b1d6;  --ansi-15: #c9d1e0;
+}
+
+/* Hecaton Light — the brand's light surface (#f6f4ee) as the RAISED panel, with
+   a slightly deeper backdrop beneath it so the stack still reads.
+
+   The logo blue and mint are NOT reused for text here, and that is the whole
+   point of the block: the handoff measures them at 2.29:1 and 1.62:1 on this
+   surface, far under 4.5. "Logo artwork is exempt from WCAG's text contrast
+   criterion; do not extend that exemption to buttons, links or body text." So
+   text-bearing tokens take darkened relatives (#2f63c4 = 5.16:1,
+   #127260 = 5.30:1) while the ARTWORK keeps the exact brand hues. */
+:root[data-theme="hecaton-light"] {
+  --bg-abyss: #eae7dd;
+  --bg-tree: #f0eee6;
+  --bg-panel: #f6f4ee;   /* brand light surface */
+  --bg-elev: #e2ded1;
+  --bg-input: #fbfaf6;
+  --line: #d6d1c3;
+  --line-strong: #b0aa99;
+  --txt-hi: #11121a;     /* brand ink */
+  --txt: #2b2d3a;
+  --txt-dim: #565a6b;
+  --txt-mute: #82869a;
+  --accent: #2f63c4;     /* darkened brand blue — 5.16:1 on the light surface */
+  --accent-ink: #f6f4ee;
+  --branch: #4a4f63;
+  --branch-hi: #1f6f97;
+  --ok: #127260;         /* darkened brand mint — 5.30:1 */
+  --ai: #7040b8;
+  --dirty: #8a5a0c;
+  --danger: #b62a44;
+  --warn: #99500f;
+  --idle: #6b7085;
+  --sticky: #82869a;
+  --pin: #9a6a12;
+  --find-hit: #f2e2a8;
+  --find-on: #e8c65c;
+  --find-on-ink: #2b2415;
+  --guide: #d6d1c3;
+  --guide-hot: #b0aa99;
+  --guide-sel: rgba(47, 99, 196, 0.45);
+  --term-bg: #f6f4ee;
+  --term-fg: #2b2d3a;
+  --term-cursor: #2b2d3a;
+  --term-sel: rgba(47, 99, 196, 0.22);
+  --ansi-0: #2b2d3a;  --ansi-8: #6b7085;
+  --ansi-1: #b62a44;  --ansi-9: #d14060;
+  --ansi-2: #2f7a34;  --ansi-10: #3f9445;
+  --ansi-3: #8a5a0c;  --ansi-11: #a87214;
+  --ansi-4: #2f63c4;  --ansi-12: #3f79db;
+  --ansi-5: #7040b8;  --ansi-13: #8a5ad0;
+  --ansi-6: #12707f;  --ansi-14: #1a8a9c;
+  --ansi-7: #4a4f63;  --ansi-15: #11121a;
+}
+
 :root[data-theme="tokyo-day"] {
   color-scheme: light;
   --bg-abyss: #c1c9df;
