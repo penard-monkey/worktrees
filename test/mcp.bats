@@ -545,3 +545,30 @@ print(p["agent_state"], a["provider"], a["state"], a["last_done"], a["session"])
   grep -q -- 'send-keys -t %0 -l --' "$TMUX_LOG"
   ! grep -q 'send-keys -t %0 Enter' "$TMUX_LOG"
 }
+
+@test "a running MCP server reports a replaced binary without executing it" {
+  local root
+  root="$(cd "$(dirname "$WT_BIN")/.." && pwd)"
+  local binary="$root/target/release/worktrees"
+  [ -x "$binary" ] || binary="$root/target/debug/worktrees"
+  run bash -c 'cd "$1" && python3 "$2/scripts/mcp-stale-check.py" "$3"' _ "$REPO" "$root" "$binary"
+  [ "$status" -eq 0 ]
+}
+
+@test "legacy tool requests receive provider capabilities even with a current server" {
+  mcp "--mutations" \
+    '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"--invalid"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"(main)"}}}'
+  [ "$status" -eq 0 ]
+  jq_out '
+import json, sys
+results = [json.loads(line)["result"] for line in sys.stdin]
+assert [r["isError"] for r in results] == [True, False]
+for r in results:
+    assert len(r["content"]) == 2, r
+    notice = r["content"][1]["text"]
+    assert "create_worktree.provider accepts claude or codex" in notice, notice
+    assert "full session restart is unverified" in notice, notice
+    assert "installed binary" not in notice, notice
+'
+}

@@ -9,6 +9,7 @@ use worktrees_core::render::error_line;
 use worktrees_core::{CliUi, Project};
 
 mod mcp;
+mod stale;
 
 const USAGE: &str = "\
 worktrees — one git worktree per branch, one active agent per worktree.
@@ -55,7 +56,7 @@ fn run() -> i32 {
             return 0;
         }
         Some("-V") | Some("--version") => {
-            println!("worktrees {}", env!("CARGO_PKG_VERSION"));
+            println!("worktrees {}", stale::version());
             return 0;
         }
         // The skill store is USER-GLOBAL, so managing it must not require

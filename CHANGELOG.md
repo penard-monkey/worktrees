@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **MCP results explain provider support even when the client caches old tools.**
+  `create_worktree` and `place_status` replies name the supported providers even
+  when the server version matches the installed binary. Reconnect can retain
+  old tool definitions; a full session restart refreshing them is unverified.
+  Separately, results warn when the executable on disk has a different version,
+  read from a version marker without executing the replacement binary.
+
+### Changed
+- **Agent providers share one core registry.** MCP provider choices, validation,
+  resume defaults and tmux lifecycle naming derive from the same registry.
+  Existing Claude and Codex session names and launch behavior stay unchanged.
+
 ## [0.32.0] - 2026-09-27
 
 ### Added

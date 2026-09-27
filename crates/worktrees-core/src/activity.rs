@@ -247,11 +247,7 @@ pub fn codex_panes_in(text: &str, cwds: &[&str]) -> Vec<(String, CodexPane)> {
 /// sidecar, or — for a session launched before sidecars — the canonical name
 /// when that session is running codex. Answered from a pane snapshot.
 pub fn codex_session_for(panes: &tmux::PaneList, canonical: &str) -> String {
-    if panes.session_is_codex(canonical) {
-        canonical.to_string()
-    } else {
-        tmux::codex_session_name(canonical)
-    }
+    crate::provider::CODEX.session_name(canonical, panes.canonical_provider(canonical).id, false)
 }
 
 /// The Codex half of `place_activity`, for one place: `None` unless the place's

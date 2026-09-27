@@ -539,7 +539,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
 /// must call THIS, so the copies cannot drift apart again.
 pub fn ai_word_of(ai_cmd: &str) -> String {
     let full = ai_cmd.split_whitespace().next().unwrap_or("");
-    let word = if full.is_empty() { "claude" } else { full };
+    let word = if full.is_empty() { crate::provider::CLAUDE.match_word } else { full };
     basename(word)
 }
 
@@ -648,7 +648,7 @@ impl AiLaunch {
     /// alone would say `claude` for the printf case too.
     pub fn launch_cmd(&self, session: &str) -> String {
         let provider = ai_word_of(&self.cmd);
-        if self.cmd.is_empty() || (provider != "claude" && provider != "codex") {
+        if self.cmd.is_empty() || crate::provider::by_word(&provider).is_none() {
             return self.cmd.clone();
         }
         // Worktrees-owned Codex panes use ChatGPT account sign-in. Put the
@@ -670,8 +670,10 @@ impl AiLaunch {
             }
             format!("{head}{}", &self.cmd[split..])
         } else { self.cmd.clone() };
-        if provider == "claude" && !session.is_empty() {
-            cmd.push_str(" --name ");
+        if let Some(arg) = crate::provider::by_word(&provider).and_then(|p| p.name_arg).filter(|_| !session.is_empty()) {
+            cmd.push(' ');
+            cmd.push_str(arg);
+            cmd.push(' ');
             cmd.push_str(&shell_quote(session));
         }
         if let Some(o) = self.opener.as_deref().filter(|o| !o.trim().is_empty()) {

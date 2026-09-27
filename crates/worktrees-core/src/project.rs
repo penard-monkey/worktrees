@@ -310,8 +310,8 @@ impl Project {
     fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Place {
         let slug = if is_main { "(main)".to_string() } else { basename(dir) };
         let canonical = self.session_name(&slug);
-        let codex_session = crate::tmux::codex_session_name(&canonical);
-        let claude_session = crate::tmux::claude_session_name(&canonical);
+        let sidecar = crate::provider::PROVIDERS.iter().map(|p| p.sidecar_name(&canonical))
+            .find(|name| panes.is_some_and(|pl| pl.has_session(name)));
         // Canonical name first (exact match). If it's down, adopt any session
         // with a pane cwd'd in this dir — the SAME session `open` reuses. Without
         // this an adopted (foreign-named) session read as "down", the app never
@@ -329,10 +329,8 @@ impl Project {
             (canonical, true)
         } else if let Some(adopted) = panes.and_then(|pl| pl.session_in(dir, ai_word, exclude)) {
             (adopted, true)
-        } else if panes.is_some_and(|pl| pl.has_session(&claude_session)) {
-            (claude_session, true)
-        } else if panes.is_some_and(|pl| pl.has_session(&codex_session)) {
-            (codex_session, true)
+        } else if let Some(sidecar) = sidecar {
+            (sidecar, true)
         } else {
             (canonical, false)
         };
