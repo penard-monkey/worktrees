@@ -72,7 +72,7 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 
 **Docs-only PRs skip CI by design.** `ci.yml` `paths-ignore` covers `docs/**`,
-`ROADMAP.md`, `CLAUDE.md`, `DESIGN.md`, `MIGRATION.md`, `README.md` and
+`ROADMAP.md`, `AGENTS.md`, `CLAUDE.md`, `DESIGN.md`, `MIGRATION.md`, `README.md` and
 `.claude/**` — a close-out archive PR shows ZERO checks, which is correct, not
 a hung run, and nothing blocks the merge (main has no required status checks).
 The skip applies only when EVERY changed file matches the list; mix in one code
@@ -293,6 +293,35 @@ and `pnpm install` in `app/` under Node >= 22.13 (`nvm use 22.23.2`).
 swap apply, does session adoption still see `claude`, does auto-resume resume)
 is invisible to the bats suite — there is no fake claude. Re-run
 `docs/ai-profiles-manual-checks.md` whenever the `claude` binary is upgraded.
+
+**Codex has a manual gate too — `docs/codex-manual-checks.md` — and its own
+traps.** Re-run the list on every `codex` upgrade; bats has only a fake `codex`.
+Facts that cost a measurement each and must not be re-derived by guessing:
+- **Auto-review in a LINKED worktree needs two sandbox holes.** `--approve-for-me`
+  alone cannot `git add`: the index lives in `<main>/.git/worktrees/<name>/`,
+  outside the workspace, and dies on `index.lock` (exit 128). The launch adds the
+  git COMMON dir as a writable root (so hooks and config are writable too — the
+  CHANGELOG says so) and `network_access=true` for push/`gh`.
+- **Any `-c` forces Codex into "embedded" mode** (no shared background server).
+  Pre-existing since `forced_login_method`; not a regression when it warns.
+- **Activity comes from the rollout, not `notify` or hooks.** `notify` fires only
+  `agent-turn-complete` (no approval, nothing on Esc); hooks passed by `-c` stop
+  on "Hooks need review". The rollout's `task_started`/`task_complete`/
+  `turn_aborted` are content; its MTIME is not (same rule as claude's transcript).
+  One derivation, `worktrees_core::activity`, feeds the nav, `place_status` and
+  `wait`.
+- **Typed text is USER intent to Codex** ("treat as valid intent … even if
+  high-risk", its own policy string). That is why MCP `send` labels every
+  message, refuses a leading `/`/`@`/`!` (builtins, file picker), and refuses
+  while Codex is Waiting — Enter on an approval list is "Yes, proceed".
+- **Never write Codex's config.** Everything goes through `codex mcp add|remove`;
+  the only file of ours beside `config.toml` is the migration's lock. Answering
+  "Trust this folder?" is Codex writing its own config — a person's call.
+- **A test that PUSHES must pin cwd AND origin.** A bats test once ran
+  `agent-setup fix` from the suite's cwd — this checkout — and pushed a real
+  branch to the real remote. `cd "$REPO"` and refuse unless origin is `$ORIGIN`;
+  the harness also unsets `CLAUDE_PROJECT_DIR`/`WORKTREES_MCP_PROVIDER`/`CODEX_HOME`
+  so no MCP test resolves the real repo.
 
 ## Tauri app — hard-won rules
 

@@ -29,7 +29,7 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
   refuses paths outside the roots) — move them to the scratch dir in step 2.
 - `_tmp/` is a user symlink (iCloud) for screenshots under review; not repo
   scratch, leave it alone.
-- Repo-wide conventions and the "hard-won rules" that belong in CLAUDE.md go
+- Repo-wide conventions and the "hard-won rules" that belong in AGENTS.md (CLAUDE.md is its `@AGENTS.md` stub since #346) go
   in the archive PR alongside the summary.
 - **Two worktrees on one branch ⇒ phantom staged changes.** Whichever tree moves
   the shared ref wins; the other keeps a stale working copy, and its index then
@@ -46,6 +46,6 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
   branch that is not it. Finish with `git branch --unset-upstream`; the idle
   bases have no remote counterpart and are not meant to.
 - **The archive PR is docs-only and CI skips it by design** (`ci.yml`
-  `paths-ignore`: `docs/**`, `ROADMAP.md`, `CLAUDE.md`, `.claude/**`, root
+  `paths-ignore`: `docs/**`, `ROADMAP.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/**`, root
   prose docs). Zero checks on the PR is the expected state — merge without
   waiting for CI. The local gates in step 1 still run.
