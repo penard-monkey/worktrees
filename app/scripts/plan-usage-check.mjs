@@ -68,6 +68,23 @@ test("Claude preserves the existing over-limit severity fallback", () => {
   assert.equal(info.limits[0].severity, "over");
 });
 
+test("strip windows are all current limits in stable duration and bucket order", () => {
+  const info = adaptCodex({ ...wire, limits: [limit("primary", 10080, 24, 3000),
+    limit("secondary", 300, 21, 3000), limit("primary", 10080, 99, 3000, "reserve"),
+    limit("primary", 60, 90, 99, "expired")] });
+  assert.deepEqual(model.stripLimits(info, 100).map(l => l.id), ["codex:secondary", "codex:primary", "reserve:primary"]);
+  assert.equal(summaryLimit(info, 100).percent, 24, "reserve does not replace the main allowance summary");
+  assert.deepEqual(model.stripLimits({ ...info, limits: [...info.limits].reverse() }, 100), model.stripLimits(info, 100));
+  const claude = adaptClaude({ source: "oauth", fetched_at: 90, limits: [
+    {kind:"weekly_scoped",label:"Fable",percent:80,resets_at:3000,severity:"warning"},
+    {kind:"weekly_all",label:"Weekly",percent:59,resets_at:3000,severity:"normal"},
+    {kind:"session",label:"Session",percent:32,resets_at:null,severity:"normal"},
+    {kind:"weekly_scoped",label:"Past reset",percent:99,resets_at:99,severity:"warning"}] });
+  assert.deepEqual(model.stripLimits(claude, 100).map(l => l.label), ["5h", "7d", "Fable 7d", "Past reset 7d"]);
+  assert.equal(summaryLimit({ ...claude, limits: model.stripLimits(claude, 100) }, 100).id,
+    summaryLimit(claude, 100).id, "strip and accessible summary keep the same Claude window after reset");
+});
+
 const app = fs.readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 // Render the actual row component, including its countdown formatter. A copy of
 // the display rule would miss regressions in the JSX branch itself.

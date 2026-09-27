@@ -51,6 +51,18 @@ export function summaryLimit(info: PlanUsage, now: number): PlanLimit | undefine
   return info.limits.filter(l => !expired(info, l, now) && (info.provider === "claude" || l.bucket === "codex"))
     .reduce<PlanLimit | undefined>((a, b) => !a || b.percent > a.percent ? b : a, undefined);
 }
+// Display order never depends on percentages or the provider's response order.
+// Main windows precede model/bucket-specific windows; shortest duration first.
+export function stripLimits(info: PlanUsage, now: number): PlanLimit[] {
+  const duration = (label: string) => {
+    const match = /^(\d+)([mhd])$/.exec(label);
+    return match ? Number(match[1]) * ({ m: 1, h: 60, d: 1440 }[match[2]] ?? 1) : Infinity;
+  };
+  const main = (l: PlanLimit) => l.bucket === info.provider && Number.isFinite(duration(l.label));
+  return info.limits.filter(l => !expired(info, l, now)).sort((a, b) =>
+    Number(main(b)) - Number(main(a)) || a.bucket.localeCompare(b.bucket) ||
+    (duration(a.label) - duration(b.label) || 0) || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
+}
 export const stateLabel = (info: PlanUsage) => ({ checking: "checking...", signed_out: "sign in",
   unsupported_auth: "plan unavailable", missing_cli: "CLI missing", stale: "stale" }[info.state]
   ?? (info.state === "ready" && info.limits.length ? "details" : "unavailable"));

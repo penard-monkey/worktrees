@@ -295,13 +295,13 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
   background: transparent; border: 0; border-radius: var(--r-sm);
   color: inherit; font: inherit; text-align: left;
 }
-.usage-trig.line { padding: 2px var(--s2); }
+.usage-trig.line { padding: 2px var(--s2); min-width: 0; max-width: 100%; }
 /* `position: relative` is load-bearing: `.usage-badge` is the rail host's
    whole status indicator and hangs off this box's top-right corner. */
 .usage-trig.tile { position: relative; width: 32px; height: 32px; padding: 0 7px; }
 .usage-trig:hover, .usage-trig.pinned { background: var(--bg-elev); }
 .usage-shape { display: flex; align-items: center; }
-.usage-shape.line { gap: var(--s3); }
+.usage-shape.line { gap: var(--s3); flex-wrap: wrap; }
 .usage-shape.tile { flex-direction: column; justify-content: center; gap: 3px; height: 100%; }
 .usage-pop {
   position: fixed; z-index: 45; width: min(360px, calc(100vw - 16px));
@@ -3279,9 +3279,11 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
 
 /* Account usage: the button is a block; its inner span owns flex (WebKit).
    Query the host, not the button, so collapsing labels never causes oscillation. */
-.usage-strip, .statusbar { container-type: inline-size; }
-.usage-provider-summary { display: flex; align-items: center; gap: 6px; color: var(--txt-hi); font-size: var(--fs-micro); }
-.usage-provider-summary + .usage-provider-summary { border-left: 1px solid var(--line); padding-left: var(--s3); }
+.usage-strip, .statusbar { container-type: inline-size; flex-wrap: wrap; }
+.usage-provider-summary { display: flex; flex-wrap: wrap; min-width: 0; align-items: center; gap: 6px; color: var(--txt-hi); font-size: var(--fs-micro); }
+.usage-provider-summary + .usage-provider-summary { border-left: 2px solid var(--txt-dim); padding-left: var(--s3); min-height: 18px; }
+.usage-window { display: flex; align-items: center; gap: 6px; flex: none; max-width: 100%; }
+.usage-window + .usage-window { margin-left: var(--s2); }
 .usage-provider-name, .usage-window-label, .usage-state { flex: none; }
 .usage-window-label { max-width: 8em; overflow: hidden; text-overflow: ellipsis; }
 .usage-provider-summary .usage-bar { flex: 0 0 40px; width: 40px; min-width: 0; }
@@ -3297,6 +3299,12 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
 .usage-minimal { display: none; font-size: var(--fs-micro); color: var(--txt-hi); }
 .usage-setting-toggle { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
 .usage-trig.tile { color: var(--txt-hi); }
+/* Keep each provider's main allowance with the highest usage as space tightens.
+   Wrapping above this breakpoint also accommodates arbitrary extra buckets. */
+@container (max-width: 900px) {
+  .usage-window:not(.worst) { display: none; }
+  .usage-window.worst { margin-left: 0; }
+}
 @container (max-width: 610px) { .usage-provider-summary .usage-bar { display: none; } }
 @container (max-width: 480px) { .usage-window-label { display: none; } }
 @container (max-width: 360px) {
