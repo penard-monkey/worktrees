@@ -1,0 +1,40 @@
+  • Blue
+  • Green
+
+
+› [worktrees: message from place "(main)", not from the user] Scratch transport test only; keep the color question
+  unanswered. This sentence is harmless transport padding. This sentence is harmless transport padding. This sentence
+  is harmless transport padding. This sentence is harmless transport padding. This sentence is harmless transport
+  padding. This sentence is harmless transport padding. This sentence is harmless transport padding. This sentence is
+  harmless transport padding. This sentence is harmless transport padding. This sentence is harmless transport padding.
+  This sentence is harmless transport padding. This sentence is harmless transport padding. This sentence is harmless
+  transport padding. This sentence is harmless transport padding. This sentence is harmless transport padding. This
+  sentence is harmless transport padding. This sentence is harmless transport padding. This sentence is harmless
+  transport padding. This sentence is harmless transport padding. This sentence is harmless transport padding. This
+  sentence is harmless transport padding. This sentence is harmless transport padding. This sentence is harmless
+  transport padding. This sentence is harmless transport padding.  Reply RECEIVED when this message arrives.
+
+
+• RECEIVED
+
+
+› Ask the Blue-or-Green question again using request_user_input_async, then run sleep 120 with exec_command while the
+  answer is pending. This is only a scratch UI test. Do not delegate or modify files.
+
+
+• I’ll ask again and start sleep 120 while the answer is pending.
+
+• Should the demo use Blue or Green?
+
+  • Blue
+  • Green
+
+• Working (56s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+
+• Queued follow-up inputs
+  ? 1 question · 19s
+    shift+← to answer
+
+› [Pasted Content 1163 chars]
+
+  tab to queue message · Plan mode                                                                    97% context left

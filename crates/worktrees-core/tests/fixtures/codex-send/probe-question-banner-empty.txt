@@ -1,0 +1,40 @@
+╭──────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.1)                               │
+│                                                          │
+│ model:     GPT-6-Astra   /model to change                │
+│ directory: /private/var/folders/_w/…/.worktrees/question │
+╰──────────────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+• Model changed to gpt-6-astra medium for Plan mode.
+
+
+› This is an isolated question UI test. Use request_user_input now to ask me whether the scratch demo should use Blue
+  or Green. Do not choose for me, delegate, or modify files. Wait for my answer.
+
+
+■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the
+issue.
+
+
+› This is a scratch TUI test. Use request_user_input_async to ask whether the demo should use Blue or Green, then while
+  the question remains unanswered run sleep 180. Do not modify files, delegate, or choose an answer for me.
+
+
+• I’ll ask for the color and wait while the question remains unanswered.
+
+• Should the demo use Blue or Green?
+
+  • Blue
+  • Green
+
+• Working (12s • esc to interrupt)
+
+• Queued follow-up inputs
+  ? 1 question
+    shift+← to answer
+
+› Ask Codex to do anything
+
+  GPT-6-Astra medium · /private/var/folders/_w/yrlpc1n126d2hps22hgz3xrc0000gn/T/wt-codex-probe-u9fcfixx/rep… Plan mode

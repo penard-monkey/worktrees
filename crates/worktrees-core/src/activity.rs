@@ -377,6 +377,26 @@ mod tests {
         assert_eq!(codex_panes_in(&format!("@@ 0 @@\ncodex\n{idle}"), &["/a", "/b"]).len(), 1);
     }
 
+    #[test]
+    fn real_codex_busy_and_modal_screens_do_not_read_as_idle() {
+        let started = include_str!("../tests/fixtures/codex-send/probe-task-started.jsonl");
+        let turn = codex::rollout_turn(&started.lines().map(str::to_string).collect::<Vec<_>>());
+        assert_eq!(turn, Some(Turn::Busy));
+        for (screen, expected) in [
+            (include_str!("../tests/fixtures/codex-send/probe-busy.txt"), State::Busy),
+            (include_str!("../tests/fixtures/codex-send/probe-approval.txt"), State::Waiting),
+            (include_str!("../tests/fixtures/codex-send/probe-question-modal.txt"), State::Waiting),
+            (include_str!("../tests/fixtures/codex-send/probe-question-banner-empty.txt"), State::Busy),
+        ] {
+            for command in ["codex", "node"] {
+                let capture = format!("@@ 0 @@\n{command}\n{screen}");
+                let panes = codex_panes_in(&capture, &["/scratch"]);
+                assert_eq!(panes.len(), 1);
+                assert_eq!(codex_state(turn.as_ref(), Some(panes[0].1)), (expected, None));
+            }
+        }
+    }
+
     /// The rollout tail is re-read only when the file GROWS. Proven with a
     /// same-length rewrite that WOULD answer differently if read (`task_started`
     /// and `turn_aborted` are both 12 bytes): the cached Busy must still be

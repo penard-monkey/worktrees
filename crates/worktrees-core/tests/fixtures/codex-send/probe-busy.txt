@@ -1,0 +1,23 @@
+╭──────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.1)                           │
+│                                                      │
+│ model:     GPT-6-Astra   /model to change            │
+│ directory: /private/var/folders/_w/…/.worktrees/busy │
+╰──────────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+
+› This is an isolated TUI transport test. Run sleep 300 using your shell tool, wait for it to finish, then reply DONE.
+  Do not delegate or touch files.
+
+
+• I’ll run sleep 300 and wait for it to finish.
+
+• Waiting for background terminal (19s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to clo…
+  └ sleep 300
+
+
+› Ask Codex to do anything
+
+  GPT-6-Astra default · /private/var/folders/_w/yrlpc1n126d2hps22hgz3xrc0000gn/T/wt-codex-probe-u9fcfixx/repo/.worktree…

@@ -1,0 +1,25 @@
+╭──────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.1)                               │
+│                                                          │
+│ model:     GPT-6-Astra   /model to change                │
+│ directory: /private/var/folders/_w/…/.worktrees/question │
+╰──────────────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+• Model changed to gpt-6-astra medium for Plan mode.
+
+
+› This is an isolated question UI test. Use request_user_input now to ask me whether the scratch demo should use Blue
+  or Green. Do not choose for me, delegate, or modify files. Wait for my answer.
+
+
+
+  Question 1/1 (1 unanswered)
+  Should the scratch demo use Blue or Green?
+
+  › 1. Blue               Use Blue for the scratch demo.
+    2. Green              Use Green for the scratch demo.
+    3. None of the above  Optionally, add details in notes (tab)
+
+  tab to add notes | enter to submit answer | esc to interrupt

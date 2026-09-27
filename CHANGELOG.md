@@ -3,6 +3,15 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Codex send/wait regressions are pinned to real 0.157.1 screens.** Tests
+  cover busy turns, approval and question modals, and typed or pasted input
+  beneath a pending-question banner. Verification with the current release
+  confirmed that busy turns stay busy and sends require a cleared composer;
+  a stuck composer must still return an unconfirmed result.
+
 ## [0.32.1] - 2026-09-27
 
 ### Fixed
