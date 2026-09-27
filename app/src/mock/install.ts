@@ -2212,7 +2212,18 @@ Phase 3: Frontend pane and mock harness
       if (cfgErr) {
         return { code: 1, schema_version: 1, findings: [], error: cfgErr };
       }
-      const all = [...(mockFileFindings[root] ?? []), ...(mockPortFindings[root] ?? [])];
+      // Strays are doctor findings too, and the mock only modelled them on the
+      // SNAPSHOT (`ls --json`'s `strays`). The real `cmd_doctor` emits one
+      // `stray-worktree` per registered worktree outside `.worktrees/`, which
+      // is what `remedies()` buckets and the To-do list reports — so without
+      // them here the stray row was undrivable and the sheet's own count and
+      // its to-do disagreed. Derived from the same snapshot the sheet reads,
+      // so the two can never drift apart in the harness.
+      const strayFindings = (findProject(root)?.snapshot?.strays ?? []).map((st) => ({
+        severity: "warn", code: "stray-worktree", place: null,
+        message: `worktree ${st.path} (on '${st.branch ?? "(detached)"}') is registered outside .worktrees/`,
+      }));
+      const all = [...(mockFileFindings[root] ?? []), ...(mockPortFindings[root] ?? []), ...strayFindings];
       const findings = args.slug ? all.filter((f) => f.place === args.slug) : all;
       return {
         code: findings.some((f) => f.severity === "error") ? 2 : 0,

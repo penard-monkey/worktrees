@@ -36,6 +36,7 @@ export type TodoId =
   | "doctor-relink"
   | "doctor-force"
   | "doctor-provision"
+  | "doctor-stray"
   | "doctor-manual"
   | "agent-dirs"
   | "agent-skills"
@@ -50,7 +51,7 @@ export type Todo = {
   label: string;
   action: TodoAction;
   /** The ProjectSheet section that explains it in full. */
-  section: "health" | "agent";
+  section: "health" | "agent" | "strays";
   /** What this row adds to the project's count. 0 = informational. */
   n: number;
   sev: "error" | "warn" | "info";
@@ -58,7 +59,7 @@ export type Todo = {
 
 /** Doctor's actionable findings by the command that clears them. Built by
  *  `remedies()` in ProjectSheet.tsx; sums to `issueCount`. */
-export type Remedies = { relink: number; force: number; provision: number; manual: number };
+export type Remedies = { relink: number; force: number; provision: number; stray: number; manual: number };
 
 /** The slice of App's `ProjectHealth` this needs — the sheet builds the same
  *  shape from its own fresher report. */
@@ -78,7 +79,7 @@ export function projectTodos(
       action: null, section: "health", n: 0, sev: "error",
     });
   } else if (health) {
-    const { relink, force, provision, manual } = health.remedies;
+    const { relink, force, provision, stray, manual } = health.remedies;
     if (relink > 0) {
       out.push({
         id: "doctor-relink", label: `${relink} declared file${s(relink)} not linked into ${relink === 1 ? "a worktree" : "worktrees"}`,
@@ -97,6 +98,22 @@ export function projectTodos(
       out.push({
         id: "doctor-provision", label: `${provision} port setup${s(provision)} missing — provision allocates a slot`,
         action: "provision", section: "health", n: provision, sev: "warn",
+      });
+    }
+    // Strays get their OWN row, because the remedy is not the manual bucket's.
+    // `stray-worktree` used to fall through `remedies()`'s `default:` into
+    // `manual`, whose label reads "fix by editing .worktrees.toml or by hand" —
+    // and editing that file does nothing whatever for a worktree registered
+    // outside `.worktrees/`. It is a `git worktree move`, which the sheet's own
+    // strays section already spells out per path. One project had eight of
+    // these and was told, eight times over, to edit a config that could not
+    // help. `n: 0` and `sev: "info"` deliberately: nothing is broken, the trees
+    // are simply unmanaged, and that is the severity doctor itself assigns.
+    if (stray > 0) {
+      out.push({
+        id: "doctor-stray",
+        label: `${stray} worktree${s(stray)} registered outside .worktrees/ — adopting ${stray === 1 ? "it" : "them"} is a move, not a config edit`,
+        action: null, section: "strays", n: 0, sev: "info",
       });
     }
     if (manual > 0) {
