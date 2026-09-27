@@ -352,25 +352,28 @@ pub fn composer_on_screen(screen: &str) -> Option<Composer> {
         return None;
     }
     let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
-    // The status line has a model followed by a directory. Hints can also
-    // contain separators ("← for agents · ? for shortcuts"), so a separator
-    // alone is not a footer. Everything below this status line is TUI hints,
-    // including "tab to queue message" while a turn is running.
-    let footer = lines.iter().rposition(|line| {
+    let prompt = lines.iter().rposition(|l| l.starts_with("› ") || *l == "›")?;
+    let below = &lines[prompt + 1..];
+    // The status line has a model followed by a directory. Navigation hints
+    // also contain separators, so a separator alone cannot identify it.
+    let status = below.iter().rposition(|line| {
         let Some((model, rest)) = line.strip_prefix("  ").and_then(|l| l.split_once(" · ")) else {
             return false;
         };
         let path = rest.split(" · ").next().unwrap_or("").trim();
         !model.trim().is_empty() && (path.starts_with('/') || path.starts_with("~/") || path == "~")
-    })?;
-    let prompt = lines[..footer]
-        .iter()
-        .rposition(|l| l.starts_with("› ") || *l == "›")?;
+    });
+    // While typing mid-turn, Codex can replace the entire status line with
+    // this queue hint and a context percentage. It can delimit occupied input,
+    // but is not evidence of an empty/submitted composer. After Enter, the
+    // model/path status returns. Both layouts have real captured fixtures.
+    let footer = status.or_else(|| below.iter().position(|l| l.starts_with("  tab to queue message")))?;
     let mut content = lines[prompt].trim_start_matches('›').trim().to_string();
     if content.is_empty() || content == "Ask Codex to do anything" {
-        return Some(Composer::Empty);
+        return status.map(|_| Composer::Empty);
     }
-    for line in &lines[prompt + 1..footer] {
+    // All rows below the footer are hints; they do not belong to the input.
+    for line in &below[..footer] {
         if !line.is_empty() && !line.starts_with("  ") {
             return None;
         }
@@ -464,6 +467,17 @@ mod tests {
         let wrapped = include_str!("../tests/fixtures/codex-send/review-typed400.txt");
         assert!(composer_settled(wrapped, wrapped));
         assert!(!composer_submitted(wrapped));
+    }
+
+    #[test]
+    fn send_review_busy_composer_can_replace_status_with_queue_hint() {
+        let typed = include_str!("../tests/fixtures/codex-send/busy-no-status-typed.txt");
+        let queued = include_str!("../tests/fixtures/codex-send/busy-no-status-queued.txt");
+        assert!(typed.contains("tab to queue message"));
+        assert_eq!(composer_on_screen(typed), Some(Composer::Text("Second transport probe: reply QUEUED_OK.".into())));
+        assert!(composer_settled(typed, typed));
+        assert!(!composer_submitted(typed));
+        assert!(composer_submitted(queued));
     }
 
     /// Shapes copied from real session_meta lines: codex's auto-reviewer shares

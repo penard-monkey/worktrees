@@ -17,3 +17,9 @@ shortened paths, with only trailing blank rows removed. `review-busy-typed`
 shows the queue hint; `review-busy-queued`, both idle screens, and
 `review-post-final` show the Agent Command Center navigation hint.
 `review-typed400` covers wrapped, nonempty input.
+
+`busy-no-status-{typed,queued}.txt` were captured during the review fixes on
+2026-09-26 from the same dedicated scratch pane, running Codex 0.157.1 with
+the shared daemon. While a `sleep 30` turn ran, typing replaced the whole
+model/path status with the queue hint and context percentage; after Enter,
+the queue banner appeared and the empty composer regained its status line.

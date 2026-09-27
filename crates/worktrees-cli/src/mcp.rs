@@ -3096,19 +3096,26 @@ mod tests {
     #[test]
     fn send_review_busy_input_queues_and_confirms_without_retry() {
         use std::cell::Cell;
-        let clock = Cell::new(0);
-        let presses = Cell::new(0);
-        let outcome = submit_codex(
-            || Some(if presses.get() == 0 {
-                include_str!("../../worktrees-core/tests/fixtures/codex-send/review-busy-typed.txt")
-            } else {
-                include_str!("../../worktrees-core/tests/fixtures/codex-send/review-busy-queued.txt")
-            }.into()),
-            || { presses.set(presses.get() + 1); Ok(()) },
-            || clock.get(), |ms| clock.set(clock.get() + ms),
-        );
-        assert_eq!(outcome, SendOutcome::Submitted);
-        assert_eq!(presses.get(), 1);
+        for (typed, queued) in [
+            (include_str!("../../worktrees-core/tests/fixtures/codex-send/review-busy-typed.txt"),
+             include_str!("../../worktrees-core/tests/fixtures/codex-send/review-busy-queued.txt")),
+            (include_str!("../../worktrees-core/tests/fixtures/codex-send/busy-no-status-typed.txt"),
+             include_str!("../../worktrees-core/tests/fixtures/codex-send/busy-no-status-queued.txt")),
+        ] {
+            let clock = Cell::new(0);
+            let presses = Cell::new(0);
+            let outcome = submit_codex(
+                || Some(if presses.get() == 0 {
+                    typed
+                } else {
+                    queued
+                }.into()),
+                || { presses.set(presses.get() + 1); Ok(()) },
+                || clock.get(), |ms| clock.set(clock.get() + ms),
+            );
+            assert_eq!(outcome, SendOutcome::Submitted);
+            assert_eq!(presses.get(), 1);
+        }
     }
 
     #[test]
