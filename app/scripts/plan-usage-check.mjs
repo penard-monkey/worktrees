@@ -79,8 +79,10 @@ test("strip windows are all current limits in stable duration and bucket order",
     {kind:"weekly_scoped",label:"Fable",percent:80,resets_at:3000,severity:"warning"},
     {kind:"weekly_all",label:"Weekly",percent:59,resets_at:3000,severity:"normal"},
     {kind:"session",label:"Session",percent:32,resets_at:null,severity:"normal"},
-    {kind:"weekly_scoped",label:"Expired",percent:99,resets_at:100,severity:"warning"}] });
-  assert.deepEqual(model.stripLimits(claude, 100).map(l => l.label), ["5h", "7d", "Fable 7d"]);
+    {kind:"weekly_scoped",label:"Past reset",percent:99,resets_at:99,severity:"warning"}] });
+  assert.deepEqual(model.stripLimits(claude, 100).map(l => l.label), ["5h", "7d", "Fable 7d", "Past reset 7d"]);
+  assert.equal(summaryLimit({ ...claude, limits: model.stripLimits(claude, 100) }, 100).id,
+    summaryLimit(claude, 100).id, "strip and accessible summary keep the same Claude window after reset");
 });
 
 const app = fs.readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
