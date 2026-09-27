@@ -333,35 +333,37 @@ setup() {
 
 @test "new: pnpm-lock.yaml → pane 1 runs pnpm install" {
   add_lockfile pnpm-lock.yaml
-  run_wt new feat-pl
+  run_wt new feat-pl --spare
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane1_cmd repo-feat-pl)" == *"pnpm install"* ]]
 }
 
 @test "new: yarn.lock → pane 1 runs yarn" {
   add_lockfile yarn.lock
-  run_wt new feat-yl
+  run_wt new feat-yl --spare
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane1_cmd repo-feat-yl)" == *yarn* ]]
 }
 
 @test "new: no lockfile → pane 1 has no install command" {
-  run_wt new feat-nl
+  run_wt new feat-nl --spare
   [ "$status" -eq 0 ]
   local p1; p1="$(tmux_pane1_cmd repo-feat-nl)"
+  [ -n "$p1" ]
   [[ "$p1" != *install* ]]
   [[ "$p1" != *yarn* ]]
 }
 
 @test "new: --no-install → pane 1 has no install despite lockfile" {
   add_lockfile pnpm-lock.yaml
-  run_wt new feat-ni --no-install
+  run_wt new feat-ni --spare --no-install
   [ "$status" -eq 0 ]
+  [ -n "$(tmux_pane1_cmd repo-feat-ni)" ]
   [[ "$(tmux_pane1_cmd repo-feat-ni)" != *install* ]]
 }
 
-@test "new (default) splits a spare shell into pane 1" {
-  run_wt new feat-sp
+@test "new --spare splits a spare shell into pane 1" {
+  run_wt new feat-sp --spare
   [ "$status" -eq 0 ]
   [ -n "$(tmux_pane1_cmd repo-feat-sp)" ]   # split-window ran → pane 1 exists
   grep -q 'split-window' "$TMUX_LOG"
@@ -459,4 +461,28 @@ setup() {
   [[ "$output" == *"Checking out remote branch origin/rb3"* ]]
   [ -d "$REPO/.worktrees/rb3" ]
   [ "$(git -C "$REPO/.worktrees/rb3" rev-parse --abbrev-ref '@{u}')" = "origin/rb3" ]
+}
+
+@test "new default: agent only, detected install is a hint and never launched" {
+  add_lockfile pnpm-lock.yaml
+  run_wt new feat-default
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-default
+  [[ "$(tmux_pane0_cmd repo-feat-default)" == *fake-ai* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-default)" ]
+  ! grep -qE 'split-window|pnpm install' "$TMUX_LOG"
+  [[ "$output" == *"then: pnpm install"* ]]
+}
+
+@test "co default: agent only with install hint; --spare opts into install pane" {
+  add_lockfile pnpm-lock.yaml
+  run_wt co feat-co-default
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd repo-feat-co-default)" == *fake-ai* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-co-default)" ]
+  ! grep -qE 'split-window|pnpm install' "$TMUX_LOG"
+  [[ "$output" == *"then: pnpm install"* ]]
+  run_wt co feat-co-spare --spare
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane1_cmd repo-feat-co-spare)" == *"pnpm install"* ]]
 }

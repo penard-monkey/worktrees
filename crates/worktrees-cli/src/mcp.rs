@@ -994,10 +994,8 @@ impl Server {
                 // keyboard to use a spare shell, and the pane it would take is
                 // width claude reads by. Typed strictly, like set_pin's bool.
                 match a.get("spare") {
-                    None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => {
-                        args.push("--no-spare".to_string())
-                    }
-                    Some(serde_json::Value::Bool(true)) => {}
+                    None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => {}
+                    Some(serde_json::Value::Bool(true)) => args.push("--spare".to_string()),
                     Some(_) => return Ok(text_err("spare must be true or false")),
                 }
                 // The brief is free text and never a flag: it rides as the value

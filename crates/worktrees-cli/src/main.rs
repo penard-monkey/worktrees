@@ -13,7 +13,7 @@ mod mcp;
 const USAGE: &str = "\
 worktrees — one git worktree per branch, one active agent per worktree.
 
-  worktrees new <branch> [base]         create a worktree + tmux (AI | shell)
+  worktrees new <branch> [base]         create a worktree + tmux (agent only by default)
   worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
   worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
   worktrees open <name> [--ai claude|codex]  open or switch the active agent
@@ -39,7 +39,10 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees mcp --migrate --ai codex [--json] [--apply <name>…] copy Claude user servers
   worktrees mcp --install [--read-only] [--ai codex] connect tools to Claude or Codex (--uninstall removes)
   worktrees -V | --version              print version   (also: help / -h)
-  worktrees                             (no args) -> ls";
+  worktrees                             (no args) -> ls
+
+  new/co/open: --spare adds a shell pane (new/co install deps there).
+               --no-spare keeps the default; accepted for compatibility.";
 
 fn main() {
     std::process::exit(run());

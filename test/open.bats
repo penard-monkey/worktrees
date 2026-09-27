@@ -31,9 +31,9 @@ session_count() {
   [[ "$(tmux_pane0_cmd repo-feat-x)" == *fake-ai* ]]
 }
 
-@test "open (default) keeps the spare shell as pane 1" {
+@test "open --spare keeps the spare shell as pane 1" {
   make_worktree feat-sp
-  run_wt open feat-sp
+  run_wt open feat-sp --spare
   [ "$status" -eq 0 ]
   [ -n "$(tmux_pane1_cmd repo-feat-sp)" ]   # split-window ran → pane 1 exists
 }
@@ -185,4 +185,15 @@ session_count() {
   run_wt open feat-x
   [ "$status" -eq 1 ]
   [[ "$output" == *"tmux not found"* ]]
+}
+
+@test "open default: agent only, even with a detected install" {
+  add_lockfile pnpm-lock.yaml
+  make_worktree feat-default
+  run_wt open feat-default
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-default
+  [[ "$(tmux_pane0_cmd repo-feat-default)" == *fake-ai* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-default)" ]
+  ! grep -qE 'split-window|pnpm install' "$TMUX_LOG"
 }

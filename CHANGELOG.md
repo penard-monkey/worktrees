@@ -3,6 +3,15 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **New tmux sessions open with just the agent by default.** CLI `new`, `co`,
+  and `open` now match the app and MCP. Pass `--spare` to add a shell pane
+  (and run the detected dependency install there on `new`/`co`); without it,
+  the install command is printed as a hint. `--no-spare` remains accepted,
+  and MCP `spare: true` still opts into the two-pane layout.
+
 ## [0.31.0] - 2026-09-26
 
 ### Added

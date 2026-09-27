@@ -3,7 +3,7 @@
 **A durable place for every work stream.** Not a throwaway worktree per branch —
 a place you keep: `ui-changes`, `prod-reviews`, `mcp-server`. Each place is a
 git worktree + a tmux session — pane 0 runs your AI CLI (claude, codex,
-opencode, …), pane 1 installs deps and gives you a shell — and it lives as long
+opencode, …) in a single pane by default — and it lives as long
 as the work does: an afternoon, or weeks of async iteration until it's right.
 
 **Branches flow through places.** The place keeps the expensive parts
@@ -136,7 +136,7 @@ building from source needs a Rust toolchain.
 ## Commands
 
 ```
-worktrees new <branch> [base]         create a worktree + tmux (AI | shell)
+worktrees new <branch> [base]         create a worktree + tmux (agent only by default)
 worktrees new <branch> --name <topic> ...place named independently of the branch
 worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
 worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
@@ -157,7 +157,7 @@ Flags:
 
 | Command | Flags |
 |---|---|
-| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--no-spare` (single pane — no spare shell, and for `new` no auto-install) |
+| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--spare` (add a shell pane; `new`/`co` install deps there) · `--no-spare` (keep the single-pane default; accepted for compatibility) |
 | `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` · `--brief <text>` (write the agent's task to `.planning/brief.md` and launch the selected agent on it) |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |
@@ -171,10 +171,13 @@ silently mint a junk branch.
 ## The tmux layout
 
 Each worktree gets a session named `<prefix>-<slug>`: pane 0 launches your AI
-CLI through an interactive shell (so shell aliases resolve), pane 1 runs the
-detected package-manager install (pnpm/bun/yarn/npm, by lockfile) and drops to a
-shell. Sessions are reused, never duplicated — `open` finds a session already
-living in the worktree even under a different name.
+CLI through an interactive shell (so shell aliases resolve). By default it is
+the only pane, and `new`/`co` print the detected install command as a `then:`
+hint without running it. Pass `--spare` to add a shell in pane 1; on `new`/`co`,
+it runs the detected package-manager install (pnpm/bun/yarn/npm, by lockfile)
+unless `--no-install` is set, then drops to a shell. `--no-spare` remains
+accepted for compatibility. Sessions are reused, never duplicated — `open`
+finds a session already living in the worktree even under a different name.
 
 ## JSON output
 

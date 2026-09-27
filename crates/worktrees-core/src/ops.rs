@@ -278,11 +278,8 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         } else {
             keep.to_string()
         };
-        // The spare shell is a SECOND pane next to pane0 (AI). The CLI keeps it
-        // (it's where deps install; `new` and `open` both split by default,
-        // unless `--no-spare`). The app opens
-        // single-pane (`spare_shell=false`) so Claude gets full width — its
-        // scratch shell lives in the right dock's Terminal tab instead. An
+        // The optional spare shell is a SECOND pane next to pane0 (AI).
+        // CLI --spare / MCP spare:true opt in; the app uses its dock Terminal.
         // install_cmd is only ever passed WITH the spare shell.
         let pane1 = if !install_cmd.is_empty() {
             format!("{install_cmd} && echo '✓ deps ready'; {keep}")
@@ -490,10 +487,9 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // worktree; claude then opens on BRIEF_OPENER. This is how an orchestrator
     // (the MCP `create_worktree` tool) hands a place its work.
     let mut brief: Option<String> = None;
-    // Default keeps the CLI's spare shell (pane 1) — that's where deps install.
-    // The app passes --no-spare so its embedded view is single-pane (Claude
-    // full-width); deps install by hand in the dock's Terminal tab.
-    let mut spare_shell = true;
+    // Give the agent full width by default. --spare opts into a shell pane
+    // where deps install; without it, the detected command stays a hint.
+    let mut spare_shell = false;
     let mut expect = "";
     for arg in args {
         if !expect.is_empty() {
@@ -517,6 +513,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             "--no-install" => do_install = false,
             "--no-tmux" => do_tmux = false,
             "--no-attach" => do_attach = false,
+            "--spare" => spare_shell = true,
             "--no-spare" => spare_shell = false,
             "--no-fetch" => do_fetch = false,
             "-r" | "--resume" => resume = true,
@@ -744,10 +741,9 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // The worktree already exists at this point — a failed session is a partial
     // success the user MUST see (loud-guard). Propagate launch's rc so cmd_new
     // returns nonzero. (Fake shims always succeed → bats success path unchanged.)
-    // `new` keeps the spare shell (pane 1) unless --no-spare — that's where deps
-    // install, so suppressing it also suppresses the install command (launch's
-    // contract: an install_cmd only ever rides along WITH the spare shell). The
-    // detected command isn't lost silently — it's echoed as a hint, same as the
+    // `new --spare` adds pane 1 for deps to install; without it, suppress the
+    // install command (launch only receives install_cmd WITH the spare shell).
+    // The detected command isn't lost silently — it's echoed as a hint, same as the
     // --no-tmux branch above.
     if !spare_shell && !install_cmd.is_empty() {
         ui.info(&format!("then: {install_cmd}"));
@@ -863,10 +859,8 @@ pub fn cmd_switch(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 // ── open ─────────────────────────────────────────────────────────────────────
 pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut name, mut ai_flag, mut resume, mut do_attach) = (String::new(), None::<String>, false, true);
-    // Default keeps the CLI's spare shell (pane 1). The app passes --no-spare so
-    // its embedded view is single-pane (Claude full-width); the scratch shell
-    // moves to the dock's Terminal tab.
-    let mut spare_shell = true;
+    // Match new/co: only an explicit --spare adds a shell beside the agent.
+    let mut spare_shell = false;
     let mut expect = false;
     for a in args {
         if expect {
@@ -880,6 +874,7 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         match a.as_str() {
             "--no-attach" => do_attach = false,
+            "--spare" => spare_shell = true,
             "--no-spare" => spare_shell = false,
             "-r" | "--resume" => resume = true,
             "--ai" => expect = true,

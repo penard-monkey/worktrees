@@ -151,6 +151,7 @@ print("ok")
 
 @test "create_worktree opens a single pane by default; spare:true keeps the split" {
   # An agent's place has nobody at the keyboard for a spare shell.
+  add_lockfile pnpm-lock.yaml
   mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-a"}}}'
   [[ "$output" == *'"isError":false'* ]]
   tmux_session_exists repo-agent-a
@@ -158,7 +159,7 @@ print("ok")
   ! grep -q 'split-window' "$TMUX_LOG"
   mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-b","spare":true}}}'
   [[ "$output" == *'"isError":false'* ]]
-  [ -n "$(tmux_pane1_cmd repo-agent-b)" ]
+  [[ "$(tmux_pane1_cmd repo-agent-b)" == *"pnpm install"* ]]
   mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-c","spare":"yes"}}}'
   [[ "$output" == *'"isError":true'* ]]
   [ ! -d "$REPO/.worktrees/agent-c" ]
