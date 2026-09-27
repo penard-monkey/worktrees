@@ -1,0 +1,13 @@
+╭──────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.1)                           │
+│                                                      │
+│ model:     GPT-6-Astra   /model to change            │
+│ directory: /private/tmp/worktrees-send-confirm-probe │
+╰──────────────────────────────────────────────────────╯
+
+  Tip: Try the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true
+
+
+› Reply only with OK.
+
+  GPT-6-Astra default · /private/tmp/worktrees-send-confirm-probe

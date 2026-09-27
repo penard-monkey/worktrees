@@ -238,6 +238,12 @@ case "$sub" in
         screen_of "$t" ;;
     esac ;;
   capture-pane) screen_of "$target" ;;
+  send-keys)
+    # Opt-in send confirmation fixture: the composer clears only after Enter.
+    if [ "${positional[0]:-}" = Enter ] && [ -f "$TMUX_STATE/.after-enter" ]; then
+      t="$(cat "$TMUX_STATE/.pane-$target" 2>/dev/null || true)"
+      [ -z "$t" ] || cp "$TMUX_STATE/.after-enter" "$TMUX_STATE/$t.screen"
+    fi ;;
   list-panes)
     # `-t <session>` with a pane-id format (tmux::agent_pane): that session's
     # one pane, as `%0<TAB>path<TAB>command`.

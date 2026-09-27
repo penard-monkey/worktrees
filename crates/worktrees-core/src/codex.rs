@@ -338,9 +338,108 @@ pub fn waiting_on_screen(screen: &str) -> bool {
     tail.contains(APPROVAL_FOOTER) || QUESTION_FOOTERS.iter().any(|f| tail.contains(f))
 }
 
+/// Composer content from a captured Codex TUI. Unknown layouts are not evidence
+/// of submission. The model/path footer anchors the live prompt so transcript
+/// messages (including old paste placeholders) cannot stand in for the composer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Composer {
+    Empty,
+    Text(String),
+}
+
+pub fn composer_on_screen(screen: &str) -> Option<Composer> {
+    if waiting_on_screen(screen) {
+        return None;
+    }
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    let footer = lines
+        .iter()
+        .rposition(|l| l.starts_with("  ") && l.contains(" · "))?;
+    // Only the optional shortcut hint may follow the model/path footer.
+    if lines[footer + 1..]
+        .iter()
+        .any(|l| !l.trim().is_empty() && l.trim() != "? for shortcuts")
+    {
+        return None;
+    }
+    let prompt = lines[..footer]
+        .iter()
+        .rposition(|l| l.starts_with("› ") || *l == "›")?;
+    let mut content = lines[prompt].trim_start_matches('›').trim().to_string();
+    for line in &lines[prompt + 1..footer] {
+        if !line.is_empty() && !line.starts_with("  ") {
+            return None;
+        }
+        if !line.trim().is_empty() {
+            content.push('\n');
+            content.push_str(line.trim());
+        }
+    }
+    Some(
+        if content.is_empty() || content == "Ask Codex to do anything" {
+            Composer::Empty
+        } else {
+            Composer::Text(content)
+        },
+    )
+}
+
+/// A paste chip belongs to the live composer, not to a message in history.
+pub fn composer_has_paste(screen: &str) -> bool {
+    let Some(Composer::Text(text)) = composer_on_screen(screen) else {
+        return false;
+    };
+    text.split("[Pasted Content ").skip(1).any(|tail| {
+        tail.split_once(" chars]")
+            .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// Only unchanged, nonempty composer content can settle. A blank or failed
+/// capture, a modal, and the pre-typing empty prompt must never arm Enter.
+pub fn composer_settled(previous: &str, current: &str) -> bool {
+    matches!((composer_on_screen(previous), composer_on_screen(current)),
+        (Some(Composer::Text(a)), Some(Composer::Text(b))) if a == b)
+}
+
+pub fn composer_submitted(screen: &str) -> bool {
+    composer_on_screen(screen) == Some(Composer::Empty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SEND_EMPTY: &str = include_str!("../tests/fixtures/codex-send/empty.txt");
+    const SEND_TYPED: &str = include_str!("../tests/fixtures/codex-send/typed.txt");
+    const SEND_PASTED: &str = include_str!("../tests/fixtures/codex-send/pasted.txt");
+
+    #[test]
+    fn send_composer_decisions_use_real_captures() {
+        assert!(SEND_PASTED.contains("[Pasted Content 1284 chars]"));
+        assert!(composer_submitted(SEND_EMPTY));
+        assert!(!composer_submitted(SEND_TYPED));
+        assert!(!composer_submitted(SEND_PASTED));
+        assert!(composer_has_paste(SEND_PASTED));
+        assert!(!composer_has_paste(SEND_TYPED));
+        assert!(composer_settled(SEND_PASTED, SEND_PASTED));
+        assert!(composer_settled(SEND_TYPED, SEND_TYPED));
+        assert!(!composer_settled(SEND_TYPED, SEND_PASTED));
+        assert!(!composer_settled(SEND_EMPTY, SEND_EMPTY));
+        assert!(!composer_submitted(""));
+        assert!(!composer_submitted("› Ask Codex to do anything"));
+        assert!(!composer_submitted(RUN_APPROVAL));
+        assert!(!composer_settled(RUN_APPROVAL, RUN_APPROVAL));
+        // History may quote both a chip and a modal. Only the live composer counts.
+        let history = format!("{SEND_PASTED}\n{RUN_APPROVAL}\n{SEND_EMPTY}");
+        assert!(composer_submitted(&history));
+        assert!(!composer_has_paste(&history));
+        // Transcript animations do not reset a settled composer.
+        assert!(composer_settled(
+            SEND_TYPED,
+            &format!("• Working...\n{SEND_TYPED}")
+        ));
+    }
 
     /// Shapes copied from real session_meta lines: codex's auto-reviewer shares
     /// the cwd and starts later, so it must not be taken for the user's thread.
