@@ -338,9 +338,147 @@ pub fn waiting_on_screen(screen: &str) -> bool {
     tail.contains(APPROVAL_FOOTER) || QUESTION_FOOTERS.iter().any(|f| tail.contains(f))
 }
 
+/// Composer content from a captured Codex TUI. Unknown layouts are not evidence
+/// of submission. The model/path footer anchors the live prompt so transcript
+/// messages (including old paste placeholders) cannot stand in for the composer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Composer {
+    Empty,
+    Text(String),
+}
+
+pub fn composer_on_screen(screen: &str) -> Option<Composer> {
+    if waiting_on_screen(screen) {
+        return None;
+    }
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    let prompt = lines.iter().rposition(|l| l.starts_with("› ") || *l == "›")?;
+    let below = &lines[prompt + 1..];
+    // The status line has a model followed by a directory. Navigation hints
+    // also contain separators, so a separator alone cannot identify it.
+    let status = below.iter().rposition(|line| {
+        let Some((model, rest)) = line.strip_prefix("  ").and_then(|l| l.split_once(" · ")) else {
+            return false;
+        };
+        let path = rest.split(" · ").next().unwrap_or("").trim();
+        !model.trim().is_empty() && (path.starts_with('/') || path.starts_with("~/") || path == "~")
+    });
+    // While typing mid-turn, Codex can replace the entire status line with
+    // this queue hint and a context percentage. It can delimit occupied input,
+    // but is not evidence of an empty/submitted composer. After Enter, the
+    // model/path status returns. Both layouts have real captured fixtures.
+    let footer = status.or_else(|| below.iter().position(|l| l.starts_with("  tab to queue message")))?;
+    let mut content = lines[prompt].trim_start_matches('›').trim().to_string();
+    if content.is_empty() || content == "Ask Codex to do anything" {
+        return status.map(|_| Composer::Empty);
+    }
+    // All rows below the footer are hints; they do not belong to the input.
+    for line in &below[..footer] {
+        if !line.is_empty() && !line.starts_with("  ") {
+            return None;
+        }
+        if !line.trim().is_empty() {
+            content.push('\n');
+            content.push_str(line.trim());
+        }
+    }
+    Some(Composer::Text(content))
+}
+
+/// A paste chip belongs to the live composer, not to a message in history.
+pub fn composer_has_paste(screen: &str) -> bool {
+    let Some(Composer::Text(text)) = composer_on_screen(screen) else {
+        return false;
+    };
+    text.split("[Pasted Content ").skip(1).any(|tail| {
+        tail.split_once(" chars]")
+            .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// Only unchanged, nonempty composer content can settle. A blank or failed
+/// capture, a modal, and the pre-typing empty prompt must never arm Enter.
+pub fn composer_settled(previous: &str, current: &str) -> bool {
+    matches!((composer_on_screen(previous), composer_on_screen(current)),
+        (Some(Composer::Text(a)), Some(Composer::Text(b))) if a == b)
+}
+
+pub fn composer_submitted(screen: &str) -> bool {
+    composer_on_screen(screen) == Some(Composer::Empty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SEND_EMPTY: &str = include_str!("../tests/fixtures/codex-send/empty.txt");
+    const SEND_TYPED: &str = include_str!("../tests/fixtures/codex-send/typed.txt");
+    const SEND_PASTED: &str = include_str!("../tests/fixtures/codex-send/pasted.txt");
+
+    #[test]
+    fn send_composer_decisions_use_real_captures() {
+        assert!(SEND_PASTED.contains("[Pasted Content 1284 chars]"));
+        assert!(composer_submitted(SEND_EMPTY));
+        assert!(!composer_submitted(SEND_TYPED));
+        assert!(!composer_submitted(SEND_PASTED));
+        assert!(composer_has_paste(SEND_PASTED));
+        assert!(!composer_has_paste(SEND_TYPED));
+        assert!(composer_settled(SEND_PASTED, SEND_PASTED));
+        assert!(composer_settled(SEND_TYPED, SEND_TYPED));
+        assert!(!composer_settled(SEND_TYPED, SEND_PASTED));
+        assert!(!composer_settled(SEND_EMPTY, SEND_EMPTY));
+        assert!(!composer_submitted(""));
+        assert!(!composer_submitted("› Ask Codex to do anything"));
+        assert!(!composer_submitted(RUN_APPROVAL));
+        assert!(!composer_settled(RUN_APPROVAL, RUN_APPROVAL));
+        // History may quote both a chip and a modal. Only the live composer counts.
+        let history = format!("{SEND_PASTED}\n{RUN_APPROVAL}\n{SEND_EMPTY}");
+        assert!(composer_submitted(&history));
+        assert!(!composer_has_paste(&history));
+        // Transcript animations do not reset a settled composer.
+        assert!(composer_settled(
+            SEND_TYPED,
+            &format!("• Working...\n{SEND_TYPED}")
+        ));
+    }
+
+    #[test]
+    fn send_review_busy_composer_settles_despite_queue_hint() {
+        let screen = include_str!("../tests/fixtures/codex-send/review-busy-typed.txt");
+        assert!(screen.contains("tab to queue message"));
+        assert_eq!(composer_on_screen(screen), Some(Composer::Text("Second message: reply OK".into())));
+        assert!(composer_settled(screen, screen));
+        assert!(!composer_submitted(screen));
+    }
+
+    #[test]
+    fn send_review_empty_composers_ignore_agent_navigation_hints() {
+        for screen in [
+            include_str!("../tests/fixtures/codex-send/review-idle.txt"),
+            include_str!("../tests/fixtures/codex-send/review-idle-git.txt"),
+            include_str!("../tests/fixtures/codex-send/review-busy-queued.txt"),
+            include_str!("../tests/fixtures/codex-send/review-post-final.txt"),
+        ] {
+            assert!(screen.contains("← for agents · ? for shortcuts"));
+            assert_eq!(composer_on_screen(screen), Some(Composer::Empty));
+            assert!(composer_submitted(screen));
+            assert!(!composer_settled(screen, screen));
+        }
+        let wrapped = include_str!("../tests/fixtures/codex-send/review-typed400.txt");
+        assert!(composer_settled(wrapped, wrapped));
+        assert!(!composer_submitted(wrapped));
+    }
+
+    #[test]
+    fn send_review_busy_composer_can_replace_status_with_queue_hint() {
+        let typed = include_str!("../tests/fixtures/codex-send/busy-no-status-typed.txt");
+        let queued = include_str!("../tests/fixtures/codex-send/busy-no-status-queued.txt");
+        assert!(typed.contains("tab to queue message"));
+        assert_eq!(composer_on_screen(typed), Some(Composer::Text("Second transport probe: reply QUEUED_OK.".into())));
+        assert!(composer_settled(typed, typed));
+        assert!(!composer_submitted(typed));
+        assert!(composer_submitted(queued));
+    }
 
     /// Shapes copied from real session_meta lines: codex's auto-reviewer shares
     /// the cwd and starts later, so it must not be taken for the user's thread.

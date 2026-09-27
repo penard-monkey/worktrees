@@ -12,6 +12,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   old tool definitions; a full session restart refreshing them is unverified.
   Separately, results warn when the executable on disk has a different version,
   read from a version marker without executing the replacement binary.
+- **Messages sent to Codex are confirmed before being marked delivered.**
+  `send` waits for the composer to settle, checks that Enter cleared it, and
+  presses Enter at most three times in total. If submission cannot be
+  confirmed, it returns `delivered: false` and leaves the message copy unread
+  for `messages` to retrieve. Approval and question prompts still stop Enter,
+  and interrupted sends now also leave an unread copy. Submitting the retained
+  composer text later and reading that copy can deliver the instruction twice.
 
 ### Changed
 - **Agent providers share one core registry.** MCP provider choices, validation,

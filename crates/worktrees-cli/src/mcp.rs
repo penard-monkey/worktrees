@@ -1657,41 +1657,22 @@ impl Server {
             if let Err(e) = tmux::send_literal(&pane, &typed) {
                 return Ok(text_err(&format!("could not type into {codex}: {e}")));
             }
-            std::thread::sleep(std::time::Duration::from_millis(SEND_SETTLE_MS));
-            // A fresh look before Enter: a modal that opened in the pause
-            // would take the Enter as its answer.
-            if tmux::capture(&pane).is_some_and(|screen| worktrees_core::codex::waiting_on_screen(&screen)) {
-                return Ok(text_ok(
-                    &serde_json::to_string_pretty(&serde_json::json!({
-                        "delivered": false, "provider": "codex", "session": codex,
-                        "reason": "Codex opened an approval or a question while the text was being \
-                                   typed, so Enter was NOT pressed (it would have answered it). The \
-                                   text may be sitting in its input; the user has to answer the \
-                                   prompt. Use report, or wait until: idle and send again.",
-                    }))
-                    .unwrap_or_default(),
-                ));
-            }
-            if let Err(e) = tmux::press_enter(&pane) {
-                return Ok(text_err(&format!("typed into {codex} but could not press Enter: {e}")));
-            }
-            // The record. Filed already-read for the recipient: the text is
-            // in its composer, and serving it again from `messages` would be
-            // the same instruction twice.
+            let t0 = std::time::Instant::now();
+            let outcome = submit_codex(
+                || tmux::capture(&pane),
+                || tmux::press_enter(&pane),
+                || t0.elapsed().as_millis() as u64,
+                |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+            );
+            // Keep an unread fallback unless an empty composer confirms that
+            // Codex consumed the input. A successful send-keys is not a receipt.
             let dir = messages::dir(std::path::Path::new(&project.git_common));
-            let copy = messages::post(&dir, &me.slug, &slug, text, None, Some("send"), messages::now_ms());
-            let id = match copy {
-                Ok(m) => {
-                    let _ = messages::ack(&dir, &slug, std::slice::from_ref(&m.id));
-                    Some(m.id)
-                }
-                Err(_) => None,
-            };
+            let id = record_send(&dir, &me.slug, &slug, text, &outcome);
             return Ok(text_ok(
                 &serde_json::to_string_pretty(&serde_json::json!({
-                    "delivered": true, "provider": "codex", "session": codex, "id": id, "typed": typed,
-                    "note": "Typed into its prompt and submitted; Codex queues it if a turn is running. \
-                             Ask it to report back, then wait until: message.",
+                    "delivered": outcome == SendOutcome::Submitted, "provider": "codex", "session": codex, "id": id, "typed": typed,
+                    "note": outcome.note(),
+                    "reason": if outcome == SendOutcome::Submitted { None } else { Some(outcome.note()) },
                 }))
                 .unwrap_or_default(),
             ));
@@ -1970,9 +1951,99 @@ fn send_text_ok(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// How long `send` lets typed text settle before looking again and pressing
-/// Enter (see `tmux::send_literal`).
-const SEND_SETTLE_MS: u64 = 250;
+// Bounds cover both paste conversion and lost Enter retries, without letting
+// a changing or unreadable screen hold an MCP request forever.
+const SEND_POLL_MS: u64 = 100;
+const SEND_STABLE_MS: u64 = 300;
+const SEND_VERIFY_MS: u64 = 1_000;
+const SEND_TIMEOUT_MS: u64 = 8_000;
+const SEND_ENTER_TRIES: usize = 3;
+
+#[derive(Debug, PartialEq, Eq)]
+enum SendOutcome {
+    Submitted,
+    Modal,
+    Unconfirmed,
+    EnterFailed(String),
+}
+
+impl SendOutcome {
+    fn note(&self) -> String {
+        match self {
+            Self::Submitted => "Typed into its prompt and confirmed submitted; Codex queues it if a turn is running. Ask it to report back, then wait until: message.".into(),
+            Self::Modal => "Codex opened an approval or a question while sending. No Enter was pressed into that prompt. The text may be sitting in its input; the user has to answer the prompt. Submission is not confirmed; the message copy is left unread if recorded. Submitting the composer later and reading messages can deliver the same instruction twice; check the composer and inbox before resending.".into(),
+            Self::Unconfirmed => "Text was typed but submission could not be confirmed within the retry limit. It may still be in the composer. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates.".into(),
+            Self::EnterFailed(e) => format!("Text was typed but Enter failed: {e}. Submission is not confirmed. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates."),
+        }
+    }
+}
+
+fn record_send(
+    dir: &std::path::Path,
+    from: &str,
+    to: &str,
+    text: &str,
+    outcome: &SendOutcome,
+) -> Option<String> {
+    let m = messages::post(dir, from, to, text, None, Some("send"), messages::now_ms()).ok()?;
+    if *outcome == SendOutcome::Submitted {
+        let _ = messages::ack(dir, to, std::slice::from_ref(&m.id));
+    }
+    Some(m.id)
+}
+
+/// Poll only the live composer, so transcript animation cannot prevent a
+/// settle. Every Enter (including retries) is gated by a fresh, recognized,
+/// nonempty composer and the modal guard. Failed captures never authorize a
+/// keypress or count as confirmation. Clock and I/O seams keep timing tests
+/// deterministic; production uses exactly this loop.
+fn submit_codex(
+    mut capture: impl FnMut() -> Option<String>,
+    mut enter: impl FnMut() -> Result<(), String>,
+    now: impl Fn() -> u64,
+    mut sleep: impl FnMut(u64),
+) -> SendOutcome {
+    use worktrees_core::codex::{composer_settled, composer_submitted, waiting_on_screen};
+    let start = now();
+    let mut previous = String::new();
+    let mut stable_since = start;
+    let mut tries = 0;
+    let mut last_enter = None;
+    loop {
+        let time = now();
+        if time.saturating_sub(start) >= SEND_TIMEOUT_MS {
+            return SendOutcome::Unconfirmed;
+        }
+        if let Some(screen) = capture() {
+            if waiting_on_screen(&screen) {
+                return SendOutcome::Modal;
+            }
+            if tries > 0 && composer_submitted(&screen) {
+                return SendOutcome::Submitted;
+            }
+            if !composer_settled(&previous, &screen) {
+                stable_since = time;
+            } else if time.saturating_sub(stable_since) >= SEND_STABLE_MS
+                && last_enter.is_none_or(|at| time.saturating_sub(at) >= SEND_VERIFY_MS)
+            {
+                if tries == SEND_ENTER_TRIES {
+                    return SendOutcome::Unconfirmed;
+                }
+                if let Err(e) = enter() {
+                    return SendOutcome::EnterFailed(e);
+                }
+                tries += 1;
+                last_enter = Some(time);
+                stable_since = time;
+            }
+            previous = screen;
+        } else {
+            previous.clear();
+            stable_since = time;
+        }
+        sleep(SEND_POLL_MS);
+    }
+}
 
 /// What is actually typed: the message behind a label saying where it came
 /// from. Codex treats text at its prompt as the USER's own words — valid
@@ -2981,6 +3052,202 @@ mod tests {
             assert_eq!(r["isError"], serde_json::json!(true), "{args}: {t}");
             assert!(t.contains(want), "{args}: {t}");
         }
+    }
+
+    const SEND_EMPTY: &str =
+        include_str!("../../worktrees-core/tests/fixtures/codex-send/empty.txt");
+    const SEND_TYPED: &str =
+        include_str!("../../worktrees-core/tests/fixtures/codex-send/typed.txt");
+    const SEND_PASTED: &str =
+        include_str!("../../worktrees-core/tests/fixtures/codex-send/pasted.txt");
+    const SEND_MODAL: &str = "  Press enter to confirm or esc to cancel\n";
+
+    #[test]
+    fn send_waits_for_conversion_and_retries_a_lost_enter() {
+        use std::cell::{Cell, RefCell};
+        let clock = Cell::new(0);
+        let presses = RefCell::new(Vec::new());
+        let outcome = submit_codex(
+            || {
+                Some(
+                    if presses.borrow().len() >= 2 {
+                        SEND_EMPTY
+                    } else if clock.get() < 200 {
+                        SEND_EMPTY
+                    } else if clock.get() < 400 {
+                        SEND_TYPED
+                    } else {
+                        SEND_PASTED
+                    }
+                    .into(),
+                )
+            },
+            || {
+                presses.borrow_mut().push(clock.get());
+                Ok(())
+            },
+            || clock.get(),
+            |ms| clock.set(clock.get() + ms),
+        );
+        assert_eq!(outcome, SendOutcome::Submitted);
+        assert_eq!(*presses.borrow(), vec![700, 1700]);
+    }
+
+    #[test]
+    fn send_review_busy_input_queues_and_confirms_without_retry() {
+        use std::cell::Cell;
+        for (typed, queued) in [
+            (include_str!("../../worktrees-core/tests/fixtures/codex-send/review-busy-typed.txt"),
+             include_str!("../../worktrees-core/tests/fixtures/codex-send/review-busy-queued.txt")),
+            (include_str!("../../worktrees-core/tests/fixtures/codex-send/busy-no-status-typed.txt"),
+             include_str!("../../worktrees-core/tests/fixtures/codex-send/busy-no-status-queued.txt")),
+        ] {
+            let clock = Cell::new(0);
+            let presses = Cell::new(0);
+            let outcome = submit_codex(
+                || Some(if presses.get() == 0 {
+                    typed
+                } else {
+                    queued
+                }.into()),
+                || { presses.set(presses.get() + 1); Ok(()) },
+                || clock.get(), |ms| clock.set(clock.get() + ms),
+            );
+            assert_eq!(outcome, SendOutcome::Submitted);
+            assert_eq!(presses.get(), 1);
+        }
+    }
+
+    #[test]
+    fn send_stuck_paste_is_bounded_and_unknown_screens_never_confirm() {
+        use std::cell::Cell;
+        for screen in [Some(SEND_PASTED), Some(SEND_EMPTY), Some(""), None] {
+            let clock = Cell::new(0);
+            let presses = Cell::new(0);
+            let outcome = submit_codex(
+                || screen.map(str::to_string),
+                || {
+                    presses.set(presses.get() + 1);
+                    Ok(())
+                },
+                || clock.get(),
+                |ms| clock.set(clock.get() + ms),
+            );
+            assert_eq!(outcome, SendOutcome::Unconfirmed);
+            assert_eq!(
+                presses.get(),
+                if screen == Some(SEND_PASTED) { 3 } else { 0 }
+            );
+            assert!(clock.get() <= SEND_TIMEOUT_MS);
+        }
+        let clock = Cell::new(0);
+        let presses = Cell::new(0);
+        assert_eq!(
+            submit_codex(
+                || if presses.get() == 0 {
+                    Some(SEND_TYPED.into())
+                } else {
+                    None
+                },
+                || {
+                    presses.set(presses.get() + 1);
+                    Ok(())
+                },
+                || clock.get(),
+                |ms| clock.set(clock.get() + ms),
+            ),
+            SendOutcome::Unconfirmed
+        );
+        assert_eq!(
+            presses.get(),
+            1,
+            "capture failure after Enter must not authorize a retry"
+        );
+    }
+
+    #[test]
+    fn send_checks_modals_before_initial_enter_and_every_retry() {
+        use std::cell::Cell;
+        for before_first in [true, false] {
+            let clock = Cell::new(0);
+            let presses = Cell::new(0);
+            assert_eq!(
+                submit_codex(
+                    || Some(
+                        if before_first || presses.get() > 0 {
+                            SEND_MODAL
+                        } else {
+                            SEND_PASTED
+                        }
+                        .into()
+                    ),
+                    || {
+                        presses.set(presses.get() + 1);
+                        Ok(())
+                    },
+                    || clock.get(),
+                    |ms| clock.set(clock.get() + ms),
+                ),
+                SendOutcome::Modal
+            );
+            assert_eq!(presses.get(), if before_first { 0 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn send_changing_composer_times_out_and_enter_errors_are_unconfirmed() {
+        use std::cell::Cell;
+        let clock = Cell::new(0);
+        assert_eq!(
+            submit_codex(
+                || Some(
+                    if clock.get() % 200 == 0 {
+                        SEND_TYPED
+                    } else {
+                        SEND_PASTED
+                    }
+                    .into()
+                ),
+                || panic!("changing composer must not get Enter"),
+                || clock.get(),
+                |ms| clock.set(clock.get() + ms),
+            ),
+            SendOutcome::Unconfirmed
+        );
+        assert_eq!(
+            submit_codex(
+                || Some(SEND_TYPED.into()),
+                || Err("pane gone".into()),
+                || clock.get(),
+                |ms| clock.set(clock.get() + ms),
+            ),
+            SendOutcome::EnterFailed("pane gone".into())
+        );
+    }
+
+    #[test]
+    fn send_only_acknowledges_confirmed_submission() {
+        let root = std::env::temp_dir().join(format!("wt-send-ack-{}", std::process::id()));
+        for (i, outcome) in [
+            SendOutcome::Unconfirmed,
+            SendOutcome::Modal,
+            SendOutcome::EnterFailed("gone".into()),
+            SendOutcome::Submitted,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let dir = root.join(i.to_string());
+            let id = record_send(&dir, "from", "to", "hello", outcome).unwrap();
+            let unread = messages::unread(&dir, "to", None, messages::now_ms());
+            if *outcome == SendOutcome::Submitted {
+                assert!(unread.is_empty());
+            } else {
+                assert_eq!(unread.len(), 1);
+                assert_eq!(unread[0].id, id);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A modal takes typed keys as its ANSWER — text plus Enter confirms

@@ -503,6 +503,10 @@ print(p["agent_state"], a["provider"], a["state"], a["last_done"], a["session"])
   export CODEX_HOME="$BATS_TEST_TMPDIR/codex"; mkdir -p "$CODEX_HOME"
   printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/repo-feat-s~agent~codex"
   printf 'codex' > "$TMUX_STATE/repo-feat-s~agent~codex.cmd"
+  printf '%s' 'repo-feat-s~agent~codex' > "$TMUX_STATE/.pane-%0"
+  local fixtures="$BATS_TEST_DIRNAME/../crates/worktrees-core/tests/fixtures/codex-send"
+  cp "$fixtures/typed.txt" "$TMUX_STATE/repo-feat-s~agent~codex.screen"
+  cp "$fixtures/empty.txt" "$TMUX_STATE/.after-enter"
   mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
   [[ "$output" == *'"isError":false'* ]]
   [[ "$output" == *'\"delivered\": true'* ]]
@@ -571,4 +575,21 @@ for r in results:
     assert "full session restart is unverified" in notice, notice
     assert "installed binary" not in notice, notice
 '
+}
+
+@test "send leaves a stuck Codex paste unconfirmed and its message unread" {
+  run_wt new feat-s --no-tmux
+  local wt="$REPO/.worktrees/feat-s" s='repo-feat-s~agent~codex'
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"; mkdir -p "$CODEX_HOME"
+  printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/$s"
+  printf 'codex' > "$TMUX_STATE/$s.cmd"
+  printf '%s' "$s" > "$TMUX_STATE/.pane-%0"
+  cp "$BATS_TEST_DIRNAME/../crates/worktrees-core/tests/fixtures/codex-send/pasted.txt" "$TMUX_STATE/$s.screen"
+  grep -q '\[Pasted Content 1284 chars\]' "$TMUX_STATE/$s.screen"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *'\"delivered\": false'* ]]
+  local store="$REPO/.git/worktrees-messages"
+  grep -q '"text":"hi"' "$store"/*.json
+  [ ! -d "$store/.read" ] || [ "$(find "$store/.read" -type f | wc -l | tr -d ' ')" = 0 ]
+  [ "$(grep -c 'send-keys -t %0 Enter' "$TMUX_LOG")" = 3 ]
 }

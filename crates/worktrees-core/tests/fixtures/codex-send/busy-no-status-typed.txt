@@ -1,0 +1,35 @@
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+
+› [worktrees: message from place "sender", not from the user] For a transport timing test, run the shell
+  command sleep 30, then reply with FIRST_DONE. Do not skip the sleep.
+
+
+• I’ll run the 30-second sleep, then reply with FIRST_DONE.
+
+• Ran sleep 30
+  └ (no output)
+
+• FIRST_DONE
+
+  21:18
+
+
+› [worktrees: message from place "sender", not from the user] For the second transport test, reply with
+  BUSY_SEND_CONFIRMED.
+
+
+• BUSY_SEND_CONFIRMED
+
+  21:18
+
+
+› Run sleep 30 again for another transport test, then reply DONE.
+
+
+• Working (0s • esc to interrupt)
+
+
+› Second transport probe: reply QUEUED_OK.
+
+  tab to queue message                                                                      99% context left

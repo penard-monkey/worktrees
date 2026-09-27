@@ -1,0 +1,35 @@
+╭────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.1)                     │
+│                                                │
+│ model:     GPT-6-Astra   /model to change      │
+│ directory: /private/tmp/…/scratchpad/probe-git │
+╰────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                     Tip: Type / to open the command popup; Tab autocompletes slash commands.
+
+› Ask Codex to do anything
+
+  GPT-6-Astra default · /private/tmp/claude-501/-Users-davidpena-workspace-worktrees/ce44de92-1fd2-4740-99f6-…
+  ← for agents · ? for shortcuts
