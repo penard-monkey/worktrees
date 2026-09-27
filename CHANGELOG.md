@@ -17,6 +17,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **Agent providers share one core registry.** MCP provider choices, validation,
   resume defaults and tmux lifecycle naming derive from the same registry.
   Existing Claude and Codex session names and launch behavior stay unchanged.
+- **See every usage window across the bottom of the app.** The strip and footer
+  show each current Claude and Codex window in a stable order, with a clearer
+  divider between providers. Narrow layouts keep the highest-usage main window
+  for each provider; all limits remain available in the details panel.
 
 ## [0.32.0] - 2026-09-27
 

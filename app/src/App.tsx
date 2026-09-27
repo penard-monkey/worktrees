@@ -1,4 +1,4 @@
-import { adaptClaude, adaptCodex, checking, compactUsage, detailMessage, expired, providerName, stateLabel, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage, type Provider } from "./planUsage";
+import { adaptClaude, adaptCodex, checking, compactUsage, detailMessage, expired, providerName, stateLabel, stripLimits, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage, type Provider } from "./planUsage";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -2206,15 +2206,17 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
         {shape === "tile" ? <span aria-hidden="true">▥</span> : <>
           <span className={"usage-minimal" + (!compact.length ? " only" : "")} aria-hidden="true">Usage ▾</span>
           {compact.map(i => {
-            const l = summaryLimit(i, nowSec);
+            const limits = stripLimits(i, nowSec);
+            const summary = summaryLimit({ ...i, limits }, nowSec);
+            const worst = summary ?? limits.reduce<typeof limits[number] | undefined>((a, b) => !a || b.percent > a.percent ? b : a, undefined);
             return <span key={i.provider} className={"usage-provider-summary" + (i.state === "stale" ? " stale" : "")}>
               <span className="usage-provider-name">{providerName(i.provider)}</span>
-              {l ? <>
-                <span className="usage-window-label">{l.label}</span>
-                <span className={"usage-bar " + l.severity}><i style={{ width: `${Math.min(100, l.percent)}%` }} /></span>
+              {limits.map(l => <span key={l.id} className={"usage-window" + (l === worst ? " worst" : "")}>
+                <span className="usage-window-label">{l.bucket !== i.provider ? `${l.bucketLabel} ` : ""}{l.label}</span>
+                <span className={"usage-bar " + l.severity}><i style={{ width: `${Math.max(0, Math.min(100, l.percent))}%` }} /></span>
                 <span className="usage-pct">{Math.round(l.percent)}%</span>
-                {i.state === "stale" && <span className="usage-state">stale</span>}
-              </> : <span className="usage-state">{stateLabel(i)}</span>}
+              </span>)}
+              {(!limits.length || i.state === "stale") && <span className="usage-state">{stateLabel(i)}</span>}
             </span>;
           })}
         </>}

@@ -1,9 +1,10 @@
 // Optional browser gate. Install Playwright in scratch space and its WebKit /
 // Chromium engines, then run against pnpm dev:mock --port 1438 --force:
 // PLAYWRIGHT_MODULE=/tmp/browser/node_modules/playwright/index.mjs node app/scripts/plan-usage-browser.mjs
+// USAGE_SCREENSHOTS optionally saves strip screenshots at three viewport widths.
 // USAGE_MOCK_URL overrides the URL; USAGE_REPORT optionally saves full measurements.
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
-const baseURL = process.env.USAGE_MOCK_URL ?? "http://127.0.0.1:1438";
+const baseURL = process.env.USAGE_MOCK_URL ?? "http://localhost:1438";
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const results = [];
@@ -26,6 +27,9 @@ for (const [engine, type] of Object.entries({chromium, webkit})) {
    bars:[...button.querySelectorAll('.usage-bar')].map(e=>e.getBoundingClientRect().width),
    reached:[...document.querySelectorAll('.usage-provider-detail')].every(e=>{const r=e.getBoundingClientRect();return e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height-2));})};
  });
+ assert.deepEqual(layout.labels.filter(l => !['Claude','Codex'].includes(l.text)).map(l => l.text),
+  ['5h','7d','Fable 7d','5h','7d','gpt-reserve with a very long bucket label 7d'],
+  'strip shows every provider window in stable order');
  assert(layout.labels.every(l=>l.width>0)); assert(layout.bars.every(w=>w===40)); assert(layout.button>=layout.inner); assert(layout.reached);
  results.push({engine,layout});
  for (const theme of ['tokyo-night','tokyo-day','catppuccin-mocha','catppuccin-latte','nord','gruvbox-dark']) {
@@ -40,15 +44,45 @@ for (const [engine, type] of Object.entries({chromium, webkit})) {
    const lum=c=>c.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((s,v,i)=>s+v*[.2126,.7152,.0722][i],0);
    const swatch=document.createElement('span');document.body.append(swatch);
    const neutral=['--txt-hi','--txt-dim'].map(token=>{swatch.style.color=`var(${token})`;return getComputedStyle(swatch).color;});swatch.remove();
-   return [...document.querySelectorAll('.usage-pop .usage-label,.usage-pop .usage-pct,.usage-pop .usage-eta,.usage-provider-head,.usage-pop-head,.usage-provider-name')].map(e=>{
+   const text = [...document.querySelectorAll('.usage-pop .usage-label,.usage-pop .usage-pct,.usage-pop .usage-eta,.usage-provider-head,.usage-pop-head,.usage-provider-name')].map(e=>{
     const cs=getComputedStyle(e),bg=background(e),fg=over(rgba(cs.color),bg);const a=lum(fg),b=lum(bg);
     return {text:e.textContent,ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05),color:cs.color,neutral:neutral.includes(cs.color)};
    });
+   const divider=document.querySelector('.usage-provider-summary + .usage-provider-summary');
+   const cs=getComputedStyle(divider), bg=background(divider), fg=over(rgba(cs.borderLeftColor),bg);
+   const a=lum(fg), b=lum(bg);
+   return {text,divider:{ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05),width:parseFloat(cs.borderLeftWidth),height:divider.getBoundingClientRect().height}};
   });
-  assert(contrast.every(c=>c.neutral), "Usage text must use neutral tokens, never severity accents");
-  results.push({engine,theme,minContrast:Math.min(...contrast.map(c=>c.ratio)),contrast});
+  assert(contrast.divider.ratio>=3 && contrast.divider.width===2 && contrast.divider.height>=18,
+   `${engine} ${theme}: provider divider must be visible`);
+  assert(contrast.text.every(c=>c.neutral), "Usage text must use neutral tokens, never severity accents");
+  results.push({engine,theme,minContrast:Math.min(...contrast.text.map(c=>c.ratio)),divider:contrast.divider,contrast});
  }
  await page.keyboard.press('Escape'); assert.equal(await page.locator('.usage-pop.pinned').count(),0);
+ for (const theme of ['tokyo-night','tokyo-day']) {
+  await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+  for (const width of [1280,900,600]) {
+   await page.setViewportSize({width,height:800});
+   const compact=await meter.evaluate(e=>{
+    const visible=n=>n.getBoundingClientRect().width>0 && n.getBoundingClientRect().height>0;
+    const r=e.getBoundingClientRect();
+    return {width:r.width,right:r.right,windows:[...e.querySelectorAll('.usage-window')].filter(visible).map(n=>n.textContent),
+     bars:[...e.querySelectorAll('.usage-bar')].filter(visible).map(n=>n.getBoundingClientRect().width),
+     reachable:[...e.querySelectorAll('.usage-window')].filter(visible).every(n=>{const r=n.getBoundingClientRect();return e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})};
+   });
+   assert(compact.right<=width && compact.reachable);
+   assert.equal(compact.windows.length,width===1280?6:2);
+   assert.equal(compact.bars.length,width===1280?6:width===900?2:0);
+   if(width<1280) assert.deepEqual(compact.windows,['Fable 7d80%','5h48%']);
+   results.push({engine,theme,viewport:width,compact});
+   if(process.env.USAGE_SCREENSHOTS && engine==='webkit') {
+    fs.mkdirSync(process.env.USAGE_SCREENSHOTS,{recursive:true});
+    await page.locator('.usage-strip').screenshot({path:`${process.env.USAGE_SCREENSHOTS}/${theme}-${width}.png`});
+   }
+  }
+ }
+ await page.setViewportSize({width:1280,height:800});
+
  for (const mode of ['weekly','stale','expired','old','unavailable','signedout','missing','unsupported','edge']) {
   await page.goto(`${baseURL}/?codexUsage=${mode}`); await page.bringToFront();
   await page.waitForFunction(()=>window.__planUsageCalls?.codex_usage>0);
@@ -101,8 +135,8 @@ for(const [engine,type] of Object.entries({chromium,webkit})) {
  await page.waitForFunction(()=>document.querySelector('.usage-trig')?.textContent.includes('48%'));
  for(const width of [600,450,300]) {
   await page.locator('.usage-strip').evaluate((e,w)=>e.style.width=`${w}px`,width);
-  const m=await page.locator('.usage-trig').evaluate(e=>({width:e.getBoundingClientRect().width,labels:[...e.querySelectorAll('.usage-window-label')].map(n=>getComputedStyle(n).display),bars:[...e.querySelectorAll('.usage-bar')].map(n=>getComputedStyle(n).display),minimal:getComputedStyle(e.querySelector('.usage-minimal')).display}));
-  assert(m.width<width);if(width<=600)assert(m.bars.every(d=>d==='none'));if(width<=450)assert(m.labels.every(d=>d==='none'));if(width===300)assert(m.minimal!=='none');
+  const m=await page.locator('.usage-trig').evaluate(e=>({width:e.getBoundingClientRect().width,labels:[...e.querySelectorAll('.usage-window-label')].map(n=>n.getBoundingClientRect().width),bars:[...e.querySelectorAll('.usage-bar')].map(n=>getComputedStyle(n).display),minimal:getComputedStyle(e.querySelector('.usage-minimal')).display}));
+  assert(m.width<width);if(width<=600)assert(m.bars.every(d=>d==='none'));if(width<=450)assert(m.labels.every(w=>w===0));if(width===300)assert(m.minimal!=='none');
   results.push({engine,hostWidth:width,...m});
  }
  await page.locator('.usage-strip').evaluate(e=>e.style.width='');
@@ -110,6 +144,23 @@ for(const [engine,type] of Object.entries({chromium,webkit})) {
   await page.evaluate(s=>sessionStorage.setItem('wt-mock-ui-state',JSON.stringify({...s,nav_pinned:true})),settings);
   await page.reload();await page.bringToFront();
   if(settings.usage_place==='footer'){ if(!await page.locator('li.row[data-slug]:visible').count()) await page.locator('[data-testid="places-rail"]').click(); await page.locator('li.row[data-slug]:visible').first().click(); }
+  await page.waitForFunction(()=>document.querySelector('.usage-trig')?.textContent.includes('48%') || document.querySelector('.usage-trig.tile'));
+  if(settings.usage_place==='footer') {
+   for(const width of [1280,900,600]) {
+    await page.setViewportSize({width,height:650});
+    const footer=await page.locator('.statusbar').evaluate(e=>{
+     const cs=getComputedStyle(e),r=e.getBoundingClientRect(),b=e.querySelector('.usage-trig').getBoundingClientRect();
+     const windows=[...e.querySelectorAll('.usage-window')].filter(n=>n.getBoundingClientRect().width>0);
+     return {hostWidth:r.width-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight),buttonWidth:b.width,
+      contained:b.x>=r.x && b.right<=r.right,windows:windows.map(n=>n.textContent),
+      reachable:windows.every(n=>{const r=n.getBoundingClientRect();return e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})};
+    });
+    assert(footer.contained && footer.reachable);
+    assert.equal(footer.windows.length,footer.hostWidth<=360?0:footer.hostWidth<=900?2:6);
+    results.push({engine,footerViewport:width,footer});
+   }
+   await page.setViewportSize({width:1100,height:650});
+  }
   await page.waitForSelector('.usage-trig');await page.locator('.usage-trig').click();
   await page.waitForSelector('.usage-pop.pinned');
   const bounds=await page.locator('.usage-pop').evaluate(e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width};});
