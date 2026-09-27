@@ -374,52 +374,103 @@ fn pick_ai_pane<'a>(panes: &[(&'a str, &'a str, &'a str)], ai_word: &str) -> Opt
         .map(|(id, _, _)| *id)
 }
 
-/// The pane in `session` running a PROGRAM (not a shell), as a `%id` —
-/// preferring one whose command names `prefer`. This is how `send` finds a
-/// Codex pane: keyed on "not a shell" rather than "is codex", because an npm
-/// install runs codex under `node` (the rule `session_runs_program` uses).
-pub fn program_pane(session: &str, prefer: &str) -> Option<PaneId> {
+/// The pane in `session` that is the place's agent, as a `%id`: a pane of THAT
+/// session, whose current path is the place (`place_path`, or under it — but
+/// never under `exclude_under`, which the main checkout passes as its
+/// `.worktrees/` root), and whose command is the agent (`is_ai_command`).
+///
+/// All three, because a session NAME alone proves little: two clones of one
+/// repo share a prefix, so `<prefix>-feat~agent~codex` can belong to the other
+/// clone; and a session whose codex exited can have a split pane running vim,
+/// which "the first program pane" would have typed into. No fallback — no
+/// match is a refusal.
+pub fn agent_pane(session: &str, place_path: &str, exclude_under: Option<&str>, ai_word: &str) -> Option<PaneId> {
     let target = format!("={session}");
-    let o = tmux(&["list-panes", "-t", &target, "-F", "#{pane_id}\t#{pane_current_command}"]).ok()?;
+    let o = tmux(&[
+        "list-panes",
+        "-t",
+        &target,
+        "-F",
+        "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}",
+    ])
+    .ok()?;
     if !o.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&o.stdout);
-    let panes: Vec<(&str, &str)> = text.lines().filter_map(|l| l.split_once('\t')).collect();
-    pick_program_pane(&panes, prefer).map(|id| PaneId(id.to_string()))
+    let rows: Vec<(&str, &str, &str)> = text
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(3, '\t');
+            Some((it.next()?, it.next()?, it.next()?))
+        })
+        .collect();
+    pick_agent_pane(&rows, place_path, exclude_under, ai_word).map(|id| PaneId(id.to_string()))
 }
 
-/// `program_pane`'s rule, pure: only `%N` ids, never a shell, `prefer` first.
-fn pick_program_pane<'a>(panes: &[(&'a str, &'a str)], prefer: &str) -> Option<&'a str> {
-    let programs: Vec<&(&str, &str)> =
-        panes.iter().filter(|(id, cmd)| id.starts_with('%') && !is_shell_command(cmd)).collect();
-    programs
-        .iter()
-        .find(|(_, cmd)| cmd.contains(prefer))
-        .or_else(|| programs.first())
-        .map(|(id, _)| *id)
+/// `agent_pane`'s rule, pure: `(pane_id, path, command)` rows of one session.
+fn pick_agent_pane<'a>(
+    rows: &[(&'a str, &str, &str)],
+    place_path: &str,
+    exclude_under: Option<&str>,
+    ai_word: &str,
+) -> Option<&'a str> {
+    let under = |p: &str, dir: &str| p == dir || p.starts_with(&format!("{dir}/"));
+    rows.iter()
+        .find(|(id, path, cmd)| {
+            id.starts_with('%')
+                && under(path, place_path)
+                && !exclude_under.is_some_and(|x| under(path, x))
+                && is_ai_command(cmd, ai_word)
+        })
+        .map(|(id, _, _)| *id)
 }
 
-/// Type `text` into `pane` as KEYSTROKES and press Enter — `send-keys -l`, the
-/// opposite choice from `paste_to_ai`, on purpose: this is a message the agent
-/// is meant to act on as if typed, and Codex's composer queues typed input
-/// mid-turn. `-l` makes every character literal (no key names), `--` ends
-/// option parsing so text that begins with `-` is not a flag, and Enter goes
-/// separately after a short pause so a TUI's paste-burst detection does not
-/// read it as a newline inside the burst. The caller has already refused
-/// control characters, so the text cannot carry an Enter of its own.
-pub fn type_into(pane: &PaneId, text: &str) -> Result<(), String> {
-    let run = |args: &[&str]| -> Result<(), String> {
-        let o = tmux(args).map_err(|e| e.to_string())?;
-        if o.status.success() {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
-        }
+/// `send-keys` argv that types `text` LITERALLY into `pane`. `-l` makes every
+/// character literal (no key names) and `--` ends option parsing, so text that
+/// begins with `-` is not a flag.
+///
+/// tmux's own command parser still eats a TRAILING `;` as a command separator
+/// — even after `-l --` (measured) — so a message ending in one lost it. A
+/// trailing `\;` is tmux's escape for a literal semicolon there.
+pub fn send_literal_args(pane: &str, text: &str) -> Vec<String> {
+    let text = match text.strip_suffix(';') {
+        Some(head) => format!("{head}\\;"),
+        None => text.to_string(),
     };
-    run(&["send-keys", "-t", pane.as_str(), "-l", "--", text])?;
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    run(&["send-keys", "-t", pane.as_str(), "Enter"])
+    ["send-keys", "-t", pane, "-l", "--"].iter().map(|s| s.to_string()).chain(std::iter::once(text)).collect()
+}
+
+fn run_ok(args: &[&str]) -> Result<(), String> {
+    let o = tmux(args).map_err(|e| e.to_string())?;
+    if o.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+    }
+}
+
+/// Type `text` into `pane` as KEYSTROKES, without Enter — `send-keys -l`, the
+/// opposite choice from `paste_to_ai`, on purpose: this is a message an agent
+/// is meant to act on as if typed, and Codex's composer queues typed input
+/// mid-turn. The caller presses Enter separately (`press_enter`), after a
+/// pause and a fresh look at the screen, so a TUI's paste-burst detection does
+/// not read it as a newline and a modal that appeared meanwhile is not
+/// answered by it.
+pub fn send_literal(pane: &PaneId, text: &str) -> Result<(), String> {
+    let args = send_literal_args(pane.as_str(), text);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_ok(&argv)
+}
+
+pub fn press_enter(pane: &PaneId) -> Result<(), String> {
+    run_ok(&["send-keys", "-t", pane.as_str(), "Enter"])
+}
+
+/// The visible screen of `pane`, or `None` when tmux cannot say.
+pub fn capture(pane: &PaneId) -> Option<String> {
+    let o = tmux(&["capture-pane", "-p", "-t", pane.as_str()]).ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 /// `%0=zsh %1=vim`, so a refusal can be diagnosed from one log line.
@@ -698,11 +749,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_program_pane_is_never_a_shell_and_prefers_the_named_program() {
-        assert_eq!(pick_program_pane(&[("%1", "zsh"), ("%2", "node")], "codex"), Some("%2"));
-        assert_eq!(pick_program_pane(&[("%1", "node"), ("%2", "codex")], "codex"), Some("%2"));
-        assert_eq!(pick_program_pane(&[("%1", "-zsh"), ("%2", "bash")], "codex"), None);
-        assert_eq!(pick_program_pane(&[("0", "codex")], "codex"), None, "only %N ids enter a PaneId");
+    fn the_agent_pane_must_be_in_the_place_and_running_the_agent() {
+        let w = "/r/.worktrees/feat";
+        assert_eq!(pick_agent_pane(&[("%1", w, "zsh"), ("%2", w, "codex")], w, None, "codex"), Some("%2"));
+        assert_eq!(pick_agent_pane(&[("%1", "/r/.worktrees/feat/src", "codex")], w, None, "codex"), Some("%1"));
+        // A split window running vim after codex exited: no agent, no pane.
+        assert_eq!(pick_agent_pane(&[("%1", w, "zsh"), ("%2", w, "vim")], w, None, "codex"), None);
+        // Same session NAME, another clone's path: not ours.
+        assert_eq!(pick_agent_pane(&[("%1", "/other/.worktrees/feat", "codex")], w, None, "codex"), None);
+        assert_eq!(pick_agent_pane(&[("%1", "/r/.worktrees/feature", "codex")], w, None, "codex"), None);
+        // The main checkout does not own panes in its worktrees.
+        assert_eq!(pick_agent_pane(&[("%1", w, "codex")], "/r", Some("/r/.worktrees"), "codex"), None);
+        assert_eq!(pick_agent_pane(&[("0", w, "codex")], w, None, "codex"), None, "only %N ids enter a PaneId");
+    }
+
+    #[test]
+    fn a_trailing_semicolon_is_escaped_for_tmux() {
+        let a = send_literal_args("%3", "run the tests;");
+        assert_eq!(a, vec!["send-keys", "-t", "%3", "-l", "--", "run the tests\\;"]);
+        assert_eq!(send_literal_args("%3", "a;b").last().unwrap(), "a;b", "only the TRAILING one is eaten");
+        assert_eq!(send_literal_args("%3", "-x").last().unwrap(), "-x");
     }
 
     fn pl(rows: &[(&str, &str, &str)]) -> PaneList {

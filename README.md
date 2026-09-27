@@ -263,10 +263,12 @@ whichever provider each one is. `report` posts a message to another place
 (`(main)` unless told otherwise; `reply_to` threads an answer), `messages`
 reads what was sent to your place, and `wait` blocks for up to two minutes
 until another place's agent goes idle or a message arrives, so an agent
-waits instead of polling. The sender is always the place the agent is working
-in. Messages live in the repository's shared git data, untracked, and expire
+waits instead of polling. The sender is the place the agent is working in,
+never a name it passes; anything running as your user can still write the
+log, so that is the trust boundary. Messages live in the repository's shared git data, untracked, and expire
 after a week. With `--mutations`, `send` types one line into another place's
-Codex; for a Claude place it answers with the session name to use with
+Codex, labelled as coming from the sending place and never while that Codex is
+waiting on an approval; for a Claude place it answers with the session name to use with
 Claude's own `SendMessage`.
 
 ## Compatibility notes

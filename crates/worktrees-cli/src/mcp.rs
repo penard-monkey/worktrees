@@ -45,9 +45,11 @@
 //! neither report back nor be waited on. Claude↔Claude still uses Claude's own
 //! `SendMessage`; this is the bus that works across providers.
 //!
-//! - **`from` is never an argument.** It is the place this server resolved
-//!   itself to at startup (`CLAUDE_PROJECT_DIR` for Claude, the cwd for Codex)
-//!   — so a model cannot sign a message as another place.
+//! - **`from` is never taken from a tool argument.** It is the place this
+//!   server resolved itself to at startup (`CLAUDE_PROJECT_DIR` for Claude, the
+//!   cwd for Codex). That stops a model signing as another place through the
+//!   protocol; it is not authentication — anything running as the same user
+//!   can write the log directly, so the trust boundary is the user account.
 //! - **`report`, `messages` and `wait` are in the read-only tier.** They touch
 //!   only this project's own message log (untracked, in the git common dir) or
 //!   read state; nothing in a worktree, a branch or another session changes.
@@ -774,7 +776,9 @@ impl Server {
                  time tool calls out): call wait again in a loop until it returns something \
                  else. Right after handing a place a task its agent may not have started yet, \
                  so an immediate idle can be the old turn — asking the peer to `report` and \
-                 waiting for the message is the reliable handshake.",
+                 waiting for the message is the reliable handshake. While it waits it holds this \
+                 server's stdio loop, so your other calls to this server queue behind it for up \
+                 to timeout_s.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -794,9 +798,12 @@ impl Server {
                 "send",
                 "Deliver a message INTO another place's agent, as if typed at its prompt — for a \
                  Codex place, which has no messaging of its own (its input box queues text \
-                 mid-turn). A Claude place is not typed into: you get back the session name to \
-                 use with Claude's own SendMessage instead. One line of plain text, no control \
-                 characters, up to 4 KB; a copy is filed in the message log as already read. \
+                 mid-turn). It arrives labelled as a message from your place, not from the user. \
+                 Refused while that Codex is waiting on an approval or a question. A Claude place \
+                 is not typed into: you get back the session name to use with Claude's own \
+                 SendMessage instead. One line of plain text, no control characters, not \
+                 starting with / @ or !, up to 4 KB; a copy is filed in the message log as \
+                 already read. \
                  Prefer `report` for anything the agent can pick up at its own pace.",
                 serde_json::json!({
                     "type": "object",
@@ -1608,12 +1615,44 @@ impl Server {
         };
         let canonical = project.session_name(&slug);
         let codex = activity::codex_session_for(&panes, &canonical);
-        if panes.session_runs_program(&codex) {
-            let Some(pane) = tmux::program_pane(&codex, "codex") else {
-                return Ok(text_err(&format!("no program pane found in {codex}")));
+        let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
+        if let Some(act) = activity::codex_activity(&panes, &canonical, &path) {
+            // A modal (an approval, a plan-mode question) takes typed keys as
+            // its ANSWER: text plus Enter confirms the highlighted option,
+            // which is "Yes, proceed". So a Codex that is waiting on someone
+            // is never typed into, and neither is one that has exited.
+            if let Err(e) = may_type(act.state) {
+                return Ok(text_err(&e));
+            }
+            // Ownership by what the pane IS, not by its session's name: in this
+            // place, and running codex. No fallback.
+            let Some(pane) = tmux::agent_pane(&codex, &path, exclude.as_deref(), "codex") else {
+                return Ok(text_err(&format!(
+                    "{codex} has no pane running codex in {path}; send only types into this \
+                     project's own Codex pane. Use report instead."
+                )));
             };
-            if let Err(e) = tmux::type_into(&pane, text) {
+            let typed = attributed(&me.slug, text);
+            if let Err(e) = tmux::send_literal(&pane, &typed) {
                 return Ok(text_err(&format!("could not type into {codex}: {e}")));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(SEND_SETTLE_MS));
+            // A fresh look before Enter: a modal that opened in the pause
+            // would take the Enter as its answer.
+            if tmux::capture(&pane).is_some_and(|screen| worktrees_core::codex::waiting_on_screen(&screen)) {
+                return Ok(text_ok(
+                    &serde_json::to_string_pretty(&serde_json::json!({
+                        "delivered": false, "provider": "codex", "session": codex,
+                        "reason": "Codex opened an approval or a question while the text was being \
+                                   typed, so Enter was NOT pressed (it would have answered it). The \
+                                   text may be sitting in its input; the user has to answer the \
+                                   prompt. Use report, or wait until: idle and send again.",
+                    }))
+                    .unwrap_or_default(),
+                ));
+            }
+            if let Err(e) = tmux::press_enter(&pane) {
+                return Ok(text_err(&format!("typed into {codex} but could not press Enter: {e}")));
             }
             // The record. Filed already-read for the recipient: the text is
             // in its composer, and serving it again from `messages` would be
@@ -1629,7 +1668,7 @@ impl Server {
             };
             return Ok(text_ok(
                 &serde_json::to_string_pretty(&serde_json::json!({
-                    "delivered": true, "provider": "codex", "session": codex, "id": id,
+                    "delivered": true, "provider": "codex", "session": codex, "id": id, "typed": typed,
                     "note": "Typed into its prompt and submitted; Codex queues it if a turn is running. \
                              Ask it to report back, then wait until: message.",
                 }))
@@ -1648,7 +1687,6 @@ impl Server {
         // Something is running there, but not in a session this project
         // created: adopted, or under another prefix. Not ours to type into.
         let owned = [canonical.clone(), codex.clone(), tmux::claude_session_name(&canonical)];
-        let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
         if let Some((name, provider)) = panes
             .agents_in(&path, exclude.as_deref())
             .into_iter()
@@ -1898,7 +1936,45 @@ fn send_text_ok(text: &str) -> Result<(), String> {
     if text.chars().any(char::is_control) {
         return Err("text contains a control character (newline, tab, escape…); send types ONE line".into());
     }
+    // Belt to `attributed`'s braces: at the start of Codex's composer `/` runs
+    // a builtin (`/logout`, `/clear`, `/quit`…), `@` opens the file picker and
+    // `!` runs a shell command. The prefix already moves them off the first
+    // column; refusing them as well means a change to the prefix cannot
+    // reopen this.
+    if let Some(c) = text.trim_start().chars().next().filter(|c| matches!(c, '/' | '@' | '!')) {
+        return Err(format!(
+            "text may not start with '{c}' — at Codex's prompt that is a command, not a message"
+        ));
+    }
     Ok(())
+}
+
+/// How long `send` lets typed text settle before looking again and pressing
+/// Enter (see `tmux::send_literal`).
+const SEND_SETTLE_MS: u64 = 250;
+
+/// What is actually typed: the message behind a label saying where it came
+/// from. Codex treats text at its prompt as the USER's own words — valid
+/// intent even when high-risk — and this is not the user speaking. The label
+/// also makes the first character `[`, so nothing at the start of a message can
+/// be read as a composer command. The log copy stays raw.
+fn attributed(from: &str, text: &str) -> String {
+    format!("[worktrees: message from place \"{from}\", not from the user] {text}")
+}
+
+/// Whether a Codex in `state` may be typed into. Only a Codex that is running
+/// and not stopped on someone: `Waiting` means a modal is up and would take the
+/// keys as its answer; `None` means codex has exited and the pane is a shell.
+fn may_type(state: activity::State) -> Result<(), String> {
+    match state {
+        activity::State::Busy | activity::State::Idle => Ok(()),
+        activity::State::Waiting => Err(
+            "Codex is waiting on you (an approval or a question) — typing would answer it. Answer \
+             it, or wait until: idle first."
+                .into(),
+        ),
+        activity::State::None => Err("Codex is not running there (its pane is back at a shell). Use report.".into()),
+    }
 }
 
 /// Poll `check` every `step_ms` until it answers or `timeout_ms` has passed —
@@ -2830,6 +2906,9 @@ mod tests {
             (serde_json::json!({ "slug": "(main)", "text": "\u{1b}[A" }), "control character"),
             (serde_json::json!({ "slug": "(main)", "text": "x".repeat(SEND_MAX + 1) }), "4096"),
             (serde_json::json!({ "slug": "(main)", "text": "  " }), "empty"),
+            (serde_json::json!({ "slug": "(main)", "text": "/logout" }), "may not start with '/'"),
+            (serde_json::json!({ "slug": "(main)", "text": "  @src/main.rs" }), "may not start with '@'"),
+            (serde_json::json!({ "slug": "(main)", "text": "!rm -rf ." }), "may not start with '!'"),
             (serde_json::json!({ "slug": "feat", "text": "hi" }), "your own place"),
             (serde_json::json!({ "slug": "ghost", "text": "hi" }), "no such place"),
         ] {
@@ -2838,5 +2917,30 @@ mod tests {
             assert_eq!(r["isError"], serde_json::json!(true), "{args}: {t}");
             assert!(t.contains(want), "{args}: {t}");
         }
+    }
+
+    /// A modal takes typed keys as its ANSWER — text plus Enter confirms
+    /// "Yes, proceed" — so a waiting Codex is never typed into, nor one that
+    /// has exited.
+    #[test]
+    fn a_waiting_or_gone_codex_may_not_be_typed_into() {
+        assert!(may_type(activity::State::Idle).is_ok());
+        assert!(may_type(activity::State::Busy).is_ok(), "a busy composer queues typed input");
+        let e = may_type(activity::State::Waiting).unwrap_err();
+        assert!(e.contains("waiting on you"), "{e}");
+        assert!(may_type(activity::State::None).is_err());
+    }
+
+    /// What is typed says who it is from — Codex treats prompt text as the
+    /// user's — and its first character is never a composer command.
+    #[test]
+    fn typed_text_is_labelled_with_its_sending_place() {
+        let t = attributed("feat", "/logout please");
+        assert_eq!(t, "[worktrees: message from place \"feat\", not from the user] /logout please");
+        assert!(t.starts_with('['));
+        for lead in ["/clear", "@file", "!ls", "  /quit"] {
+            assert!(send_text_ok(lead).is_err(), "{lead:?} must be refused as well");
+        }
+        assert!(send_text_ok("run the tests; then report").is_ok());
     }
 }

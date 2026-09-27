@@ -206,7 +206,13 @@ pub fn post(
 /// marker whose message is gone and any temp file a crashed writer left. Never
 /// errors: a prune that fails is retried by the next post.
 pub fn prune(dir: &Path, now_ms: i64) {
-    let all = entries(dir);
+    prune_listed(dir, now_ms, entries(dir));
+}
+
+/// `prune` over a listing taken earlier — which, with other writers about, is
+/// always somewhat STALE by the time it is acted on. Split out so a test can
+/// hand it one.
+fn prune_listed(dir: &Path, now_ms: i64, all: Vec<(String, String, PathBuf)>) {
     let cutoff = now_ms - MAX_AGE_SECS * 1000;
     let (expired, live): (Vec<_>, Vec<_>) =
         all.into_iter().partition(|(id, _, _)| id_ms(id).is_none_or(|ms| ms < cutoff));
@@ -214,12 +220,20 @@ pub fn prune(dir: &Path, now_ms: i64) {
     for (_, _, p) in expired.iter().chain(live.iter().take(excess)) {
         let _ = std::fs::remove_file(p);
     }
-    let kept: std::collections::HashSet<&str> = live.iter().skip(excess).map(|(id, _, _)| id.as_str()).collect();
+    // A read marker goes only when its message file is GONE — asked of the
+    // filesystem at the moment of removal, never of the listing above. The
+    // listing is stale by construction: a post and an ack can land between it
+    // and this loop, and a marker judged against it would be a LIVE one
+    // deleted, bringing that message back unread. The marker's own path names
+    // the message's (`.read/<hex(to)>/<id>` ↔ `<id>.<hex(to)>.json`), so this
+    // is one stat per marker.
     if let Ok(rd) = std::fs::read_dir(dir.join(".read")) {
         for who in rd.flatten() {
+            let to_hex = who.file_name().to_string_lossy().into_owned();
             if let Ok(marks) = std::fs::read_dir(who.path()) {
                 for m in marks.flatten() {
-                    if !kept.contains(m.file_name().to_string_lossy().as_ref()) {
+                    let id = m.file_name().to_string_lossy().into_owned();
+                    if !dir.join(format!("{id}.{to_hex}.json")).exists() {
                         let _ = std::fs::remove_file(m.path());
                     }
                 }
@@ -253,6 +267,11 @@ pub fn for_place(dir: &Path, to: &str, now_ms: i64) -> Vec<Stored> {
         .into_iter()
         .filter(|(id, h, _)| *h == want && id_ms(id).is_some_and(|ms| ms >= cutoff))
         .filter_map(|(id, h, p)| {
+            // Nothing `post` wrote can be this big; a file that is was put
+            // here by something else, and is not read into memory to find out.
+            if std::fs::metadata(&p).map(|m| m.len()).unwrap_or(u64::MAX) > (MAX_TEXT + 1024) as u64 {
+                return None;
+            }
             let msg: Message = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
             // The name is the index; the body is the record. If they disagree
             // the file was not written by `post`, and it is not served.
@@ -428,6 +447,21 @@ mod tests {
         assert_eq!(unread(&t.0, "y", Some("x"), T0 + 5).len(), 1);
     }
 
+    /// The race: prune lists, then another writer posts and the recipient acks,
+    /// then prune sweeps markers. A marker for a message the stale listing
+    /// never saw is LIVE and must survive — or that message comes back unread.
+    #[test]
+    fn prune_with_a_stale_listing_keeps_a_live_read_marker() {
+        let t = tmp("race");
+        post(&t.0, "x", "y", "old", None, None, T0).unwrap();
+        let stale = entries(&t.0);
+        let m = post(&t.0, "x", "y", "new", None, None, T0 + 1).unwrap();
+        ack(&t.0, "y", std::slice::from_ref(&m.id)).unwrap();
+        prune_listed(&t.0, T0 + 2, stale);
+        assert!(marker(&t.0, &hex("y"), &m.id).exists(), "a live read marker was deleted");
+        assert!(unread(&t.0, "y", None, T0 + 3).iter().all(|u| u.id != m.id));
+    }
+
     #[test]
     fn reply_to_must_name_a_message_in_the_log() {
         let t = tmp("reply");
@@ -450,5 +484,11 @@ mod tests {
         assert!(for_place(&t.0, "z", T0).is_empty());
         std::fs::write(t.0.join(format!("{T0:013}-1-00000000.{}.json", hex("y"))), "{ nope").unwrap();
         assert_eq!(for_place(&t.0, "y", T0).len(), 1, "junk is skipped, not fatal");
+        // An oversized file is skipped by its SIZE, even when its body is valid.
+        let mut big = m.clone();
+        big.id = format!("{:013}-1-00000001", T0);
+        big.text = "x".repeat(MAX_TEXT + 2048);
+        std::fs::write(t.0.join(format!("{}.{}.json", big.id, hex("y"))), serde_json::to_string(&big).unwrap()).unwrap();
+        assert_eq!(for_place(&t.0, "y", T0).len(), 1, "an oversized file is not served");
     }
 }

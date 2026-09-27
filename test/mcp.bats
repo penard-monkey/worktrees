@@ -496,3 +496,52 @@ print(p["agent_state"], a["provider"], a["state"], a["last_done"], a["session"])
   # Nothing was typed anywhere.
   ! grep -q 'send-keys' "$TMUX_LOG"
 }
+
+@test "send types a labelled line into this project's own Codex pane and files the copy read" {
+  run_wt new feat-s --no-tmux
+  local wt="$REPO/.worktrees/feat-s"
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"; mkdir -p "$CODEX_HOME"
+  printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/repo-feat-s~agent~codex"
+  printf 'codex' > "$TMUX_STATE/repo-feat-s~agent~codex.cmd"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  [[ "$output" == *'\"delivered\": true'* ]]
+  # Typed literally, labelled, then Enter as its own keystroke — in that order.
+  local typed enter
+  typed="$(grep -n -F 'tmux send-keys -t %0 -l -- [worktrees: message from place "(main)", not from the user] hi' "$TMUX_LOG" | cut -d: -f1)"
+  enter="$(grep -n -F 'tmux send-keys -t %0 Enter' "$TMUX_LOG" | cut -d: -f1)"
+  # Separate assertions: in an `a && b && c` line, set -e ignores a false
+  # `a`, and the test passes having checked nothing.
+  [ -n "$typed" ]
+  [ -n "$enter" ]
+  [ "$typed" -lt "$enter" ]
+  # The log copy is RAW, and filed already-read for the recipient.
+  local store="$REPO/.git/worktrees-messages"
+  grep -q '"text":"hi"' "$store"/*.json
+  [ "$(find "$store/.read" -type f | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "send refuses a Codex that is waiting on an approval, and never presses Enter into one" {
+  run_wt new feat-s --no-tmux
+  local wt="$REPO/.worktrees/feat-s"
+  local s='repo-feat-s~agent~codex'
+  printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/$s"
+  printf 'codex' > "$TMUX_STATE/$s.cmd"
+  printf '  1. Yes, proceed\n  Press enter to confirm or esc to cancel\n' > "$TMUX_STATE/$s.screen"
+  printf '%s' "$s" > "$TMUX_STATE/.pane-%0"
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"
+  local day="$CODEX_HOME/sessions/2026/09/26"; mkdir -p "$day"
+  # Mid-turn per the rollout, and the screen shows the approval modal.
+  printf '{"type":"session_meta","payload":{"cwd":"%s","source":"cli"}}\n{"type":"event_msg","payload":{"type":"task_started"}}\n' "$wt" > "$day/rollout-a.jsonl"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [[ "$output" == *"waiting on you"* ]]
+  ! grep -q 'send-keys' "$TMUX_LOG"
+  # The modal opens only AFTER the look (the rollout says idle): the text is
+  # typed, but the fresh look before Enter sees the modal and holds Enter back.
+  printf '{"type":"event_msg","payload":{"type":"task_complete","completed_at":1790000000}}\n' >> "$day/rollout-a.jsonl"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *'\"delivered\": false'* ]]
+  grep -q -- 'send-keys -t %0 -l --' "$TMUX_LOG"
+  ! grep -q 'send-keys -t %0 Enter' "$TMUX_LOG"
+}

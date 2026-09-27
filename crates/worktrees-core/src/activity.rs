@@ -381,27 +381,27 @@ mod tests {
         assert_eq!(codex_panes_in(&format!("@@ 0 @@\ncodex\n{idle}"), &["/a", "/b"]).len(), 1);
     }
 
-    /// The rollout tail is re-read only when the file GROWS, and a tail that
-    /// names no turn keeps the last answer.
+    /// The rollout tail is re-read only when the file GROWS. Proven with a
+    /// same-length rewrite that WOULD answer differently if read (`task_started`
+    /// and `turn_aborted` are both 12 bytes): the cached Busy must still be
+    /// served. Then growth is read, and answers Done.
     #[test]
-    fn codex_tail_rereads_only_on_growth_and_keeps_the_last_answer() {
+    fn codex_tail_rereads_only_on_growth() {
         let d = std::env::temp_dir().join(format!("wtact-tail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let f = d.join("r.jsonl");
         let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+        let aborted = r#"{"type":"event_msg","payload":{"type":"turn_aborted"}}"#;
+        assert_eq!(started.len(), aborted.len());
+        assert_eq!(codex::rollout_turn(&[aborted.to_string()]), Some(Turn::Aborted), "it WOULD answer differently");
         std::fs::write(&f, format!("{started}\n")).unwrap();
         assert_eq!(codex_tail(&f).1, Some(Turn::Busy));
-        // Same length, different bytes: served from the cache (the length IS the key).
-        let same_len = r#"{"type":"event_msg","payload":{"type":"task_startex"}}"#;
-        std::fs::write(&f, format!("{same_len}\n")).unwrap();
-        assert_eq!(codex_tail(&f).1, Some(Turn::Busy));
-        // Grew with nothing turn-shaped: the last answer stands.
-        std::fs::write(&f, format!("{same_len}\n{{\"type\":\"response_item\"}}\n")).unwrap();
-        assert_eq!(codex_tail(&f).1, Some(Turn::Busy));
+        std::fs::write(&f, format!("{aborted}\n")).unwrap();
+        assert_eq!(codex_tail(&f).1, Some(Turn::Busy), "same length: served from the cache, not re-read");
         let done = r#"{"type":"event_msg","payload":{"type":"task_complete","completed_at":123}}"#;
         std::fs::write(&f, format!("{started}\n{done}\n")).unwrap();
-        assert_eq!(codex_tail(&f).1, Some(Turn::Done { at: Some(123), turn_id: None }));
+        assert_eq!(codex_tail(&f).1, Some(Turn::Done { at: Some(123), turn_id: None }), "growth is read");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

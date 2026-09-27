@@ -185,27 +185,36 @@ install_fake_tmux() {
   cat > "$SHIMS/tmux" <<'EOF'
 #!/usr/bin/env bash
 echo "tmux $*" >> "$TMUX_LOG"
+all="$*"
 sub="${1:-}"; shift || true
-target=""; session=""; cwd=""; positional=()
+target=""; session=""; cwd=""; fmt=""; positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -t) target="$2"; shift 2 ;;
     -s) session="$2"; shift 2 ;;
     -c) cwd="$2"; shift 2 ;;
     -d|-h|-P) shift ;;
-    -F) shift 2 ;;
+    -F) fmt="$2"; shift 2 ;;
     -L|-f) shift 2 ;;
     *) positional+=("$1"); shift ;;
   esac
 done
 target="${target#=}"   # exact-match prefix used by kill-session -t "=name"
+# A planted session's screen is $TMUX_STATE/<session>.screen; a `%N` pane
+# target resolves through $TMUX_STATE/.pane-%N (a file holding the session).
+screen_of() {
+  local t="${1%:}"
+  case "$t" in %*) t="$(cat "$TMUX_STATE/.pane-$t" 2>/dev/null || true)" ;; esac
+  [ -n "$t" ] && [ -f "$TMUX_STATE/$t.screen" ] && cat "$TMUX_STATE/$t.screen"
+  return 0
+}
 case "$sub" in
   has-session)   [ -f "$TMUX_STATE/$target" ] ;;
   list-sessions)
     found=1
     for f in "$TMUX_STATE"/*; do
       [ -f "$f" ] || continue
-      case "$f" in *.cmd|*/.last) continue ;; esac
+      case "$f" in *.cmd|*.screen|*/.last) continue ;; esac
       basename "$f"; found=0
     done
     exit $found ;;
@@ -218,10 +227,30 @@ case "$sub" in
     [ -n "$last" ] && echo "cmd1=${positional[0]:-}" >> "$TMUX_STATE/$last" ;;
   select-pane|attach|attach-session|switch-client) : ;;
   kill-session)  rm -f "$TMUX_STATE/$target" 2>/dev/null; : ;;
+  display-message)
+    # The codex pane sample (activity::codex_panes): one chained call per
+    # target, `@@ 0 @@`, the pane's command, then its screen. One target only.
+    case "$all" in
+      *"@@ 0 @@"*capture-pane*)
+        t="${target%:}"
+        echo "@@ 0 @@"
+        if [ -f "$TMUX_STATE/$t.cmd" ]; then cat "$TMUX_STATE/$t.cmd"; echo; else echo bash; fi
+        screen_of "$t" ;;
+    esac ;;
+  capture-pane) screen_of "$target" ;;
   list-panes)
+    # `-t <session>` with a pane-id format (tmux::agent_pane): that session's
+    # one pane, as `%0<TAB>path<TAB>command`.
+    if [ -n "$target" ] && [ "${fmt#\#\{pane_id\}}" != "$fmt" ]; then
+      [ -f "$TMUX_STATE/$target" ] || exit 1
+      c="$(sed -n 's/^cwd=//p' "$TMUX_STATE/$target" | head -n1)"
+      cmd="bash"; [ -f "$TMUX_STATE/$target.cmd" ] && cmd="$(cat "$TMUX_STATE/$target.cmd")"
+      printf '%%0\t%s\t%s\n' "$c" "$cmd"
+      exit 0
+    fi
     for f in "$TMUX_STATE"/*; do
       [ -f "$f" ] || continue
-      case "$f" in *.cmd|*/.last) continue ;; esac
+      case "$f" in *.cmd|*.screen|*/.last) continue ;; esac
       s="$(basename "$f")"
       c="$(sed -n 's/^cwd=//p' "$f" | head -n1)"
       cmd="bash"; [ -f "$TMUX_STATE/$s.cmd" ] && cmd="$(cat "$TMUX_STATE/$s.cmd")"
