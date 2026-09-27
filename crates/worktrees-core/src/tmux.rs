@@ -18,18 +18,18 @@ use std::process::{Command, Output};
 /// to the sidecar of a place named "long", and closing one could kill the
 /// other's live Claude session.
 pub const SHELL_SIDECAR_MARKER: &str = "~term";
-pub const CODEX_SIDECAR_MARKER: &str = "~agent~codex";
-pub const CLAUDE_SIDECAR_MARKER: &str = "~agent~claude";
+pub const CODEX_SIDECAR_MARKER: &str = crate::provider::CODEX.sidecar_suffix;
+pub const CLAUDE_SIDECAR_MARKER: &str = crate::provider::CLAUDE.sidecar_suffix;
 
 /// Codex's managed session name. A provider switch ends the other agent's
 /// session first; `~` cannot occur in a git ref, so this cannot collide with
 /// a place's canonical name.
 pub fn codex_session_name(canonical: &str) -> String {
-    format!("{canonical}{CODEX_SIDECAR_MARKER}")
+    crate::provider::CODEX.sidecar_name(canonical)
 }
 
 pub fn claude_session_name(canonical: &str) -> String {
-    format!("{canonical}{CLAUDE_SIDECAR_MARKER}")
+    crate::provider::CLAUDE.sidecar_name(canonical)
 }
 
 /// The sidecar session name for a place's (canonical) session + a 1-based tab
@@ -196,7 +196,14 @@ impl PaneList {
     /// Keep this strict: `node` and version-like names identify Claude on some
     /// installs, so they cannot distinguish the two providers here.
     pub fn session_is_codex(&self, name: &str) -> bool {
-        self.panes.iter().any(|(s, _, cmd)| s == name && cmd.rsplit('/').next() == Some("codex"))
+        self.canonical_provider(name).id == crate::provider::CODEX.id
+    }
+
+    /// Legacy canonical sessions default to Claude (including a bare shell).
+    pub fn canonical_provider(&self, name: &str) -> &'static crate::provider::Provider {
+        crate::provider::PROVIDERS.iter().filter(|p| !p.canonical_default)
+            .find(|p| self.panes.iter().any(|(s, _, cmd)| s == name && cmd.rsplit('/').next() == Some(p.match_word)))
+            .unwrap_or(crate::provider::CLAUDE)
     }
 
     /// Running provider panes in one place, including sessions left under an
@@ -208,8 +215,8 @@ impl PaneList {
         for (session, path, cmd) in &self.panes {
             if is_shell_sidecar(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
             if exclude_under.is_some_and(|dir| path == dir || path.starts_with(&format!("{dir}/"))) { continue; }
-            let provider = if cmd.rsplit('/').next() == Some("codex") { "codex" }
-                else if is_ai_command(cmd, "claude") { "claude" } else { continue };
+            let Some(provider) = crate::provider::for_pane(cmd) else { continue };
+            let provider = provider.id;
             if !found.iter().any(|(name, _)| name == session) {
                 found.push((session.clone(), provider));
             }
@@ -235,7 +242,7 @@ impl PaneList {
             // the worktree and runs a bare shell — never let it be adopted AS the
             // place's session (that would attach the AI view to a plain shell and
             // skip launching Claude). It's addressed by its exact name instead.
-            if is_shell_sidecar(sess) || sess.contains(CODEX_SIDECAR_MARKER) || sess.contains(CLAUDE_SIDECAR_MARKER) {
+            if is_shell_sidecar(sess) || crate::provider::is_sidecar(sess) {
                 continue;
             }
             if let Some((eroot, eprefix)) = &excl {
@@ -259,6 +266,10 @@ impl PaneList {
 pub fn is_shell_command(cmd: &str) -> bool {
     let base = cmd.rsplit('/').next().unwrap_or(cmd).trim_start_matches('-');
     matches!(base, "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "elvish" | "xonsh")
+}
+
+pub fn canonical_provider(name: &str) -> &'static crate::provider::Provider {
+    PaneList::fetch().map(|p| p.canonical_provider(name)).unwrap_or(crate::provider::CLAUDE)
 }
 
 pub fn session_is_codex(name: &str) -> bool {
@@ -747,6 +758,26 @@ pub fn kill_session(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_session_names_are_persistent() {
+        for (provider, owner, sidecar, expected) in [
+            (crate::provider::CLAUDE, "claude", false, "repo-feature"),
+            (crate::provider::CLAUDE, "claude", true, "repo-feature~agent~claude"),
+            (crate::provider::CLAUDE, "codex", false, "repo-feature~agent~claude"),
+            (crate::provider::CODEX, "claude", false, "repo-feature~agent~codex"),
+            (crate::provider::CODEX, "codex", false, "repo-feature"),
+            (crate::provider::CODEX, "codex", true, "repo-feature"),
+        ] {
+            assert_eq!(provider.session_name("repo-feature", owner, sidecar), expected);
+        }
+        assert_eq!(codex_session_name("repo-feature"), "repo-feature~agent~codex");
+        assert_eq!(claude_session_name("repo-feature"), "repo-feature~agent~claude");
+        let panes = pl(&[("repo-feature", "/repo", "codex")]);
+        assert_eq!(crate::activity::codex_session_for(&panes, "repo-feature"), "repo-feature");
+        let panes = pl(&[("repo-feature", "/repo", "claude")]);
+        assert_eq!(crate::activity::codex_session_for(&panes, "repo-feature"), "repo-feature~agent~codex");
+    }
 
     #[test]
     fn the_agent_pane_must_be_in_the_place_and_running_the_agent() {

@@ -545,3 +545,12 @@ print(p["agent_state"], a["provider"], a["state"], a["last_done"], a["session"])
   grep -q -- 'send-keys -t %0 -l --' "$TMUX_LOG"
   ! grep -q 'send-keys -t %0 Enter' "$TMUX_LOG"
 }
+
+@test "a running MCP server reports a replaced binary without executing it" {
+  local root
+  root="$(cd "$(dirname "$WT_BIN")/.." && pwd)"
+  local binary="$root/target/release/worktrees"
+  [ -x "$binary" ] || binary="$root/target/debug/worktrees"
+  run bash -c 'cd "$1" && python3 "$2/scripts/mcp-stale-check.py" "$3"' _ "$REPO" "$root" "$binary"
+  [ "$status" -eq 0 ]
+}

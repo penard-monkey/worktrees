@@ -184,11 +184,11 @@ pub fn resolve_ai_cmd_from(
         .or(env_ai.filter(|s| !s.is_empty()))
         .or(env_claude.filter(|s| !s.is_empty()))
         .or(cfg.filter(|s| !s.is_empty()))
-        .unwrap_or("claude");
+        .unwrap_or(crate::provider::CLAUDE.match_word);
     if v == "none" {
         String::new()
     } else {
-        v.to_string()
+        crate::provider::by_id(v).map_or(v, |p| p.match_word).to_string()
     }
 }
 
@@ -239,7 +239,7 @@ pub fn resolve_prefix_from(
 pub fn resolve_ai_resume_arg_from(env: Option<&str>, cfg: Option<&str>) -> String {
     env.filter(|s| !s.is_empty())
         .or(cfg.filter(|s| !s.is_empty()))
-        .unwrap_or("-r")
+        .unwrap_or(crate::provider::CLAUDE.resume_arg)
         .to_string()
 }
 
@@ -265,7 +265,8 @@ pub fn resolve_ai_resume_arg_for(ai_cmd: &str) -> String {
     if let Some(arg) = env.as_deref().filter(|s| !s.is_empty()).or(cfg.as_deref().filter(|s| !s.is_empty())) {
         return arg.to_string();
     }
-    if crate::profile::ai_word_of(ai_cmd) == "codex" { "resume --last".into() } else { "-r".into() }
+    crate::provider::by_word(&crate::profile::ai_word_of(ai_cmd))
+        .unwrap_or(crate::provider::CLAUDE).resume_arg.into()
 }
 
 #[cfg(test)]

@@ -122,6 +122,7 @@ const EXIT_NEEDS_CONFIRM: i32 = 3;
 const NO_PROJECT: &str = "not inside a git repository — this server has no project to manage";
 
 struct Server {
+    stale: crate::stale::Stale,
     /// `None` when the server was launched outside a git repository.
     ///
     /// It used to be fatal: `Project::discover` failing exited before the
@@ -413,7 +414,7 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     // the MCP servers it starts. A per-call read would be the same answer with
     // more places to forget it.
     let in_run = std::env::var("WORKTREES_RUN_ID").is_ok_and(|v| !v.trim().is_empty());
-    let mut server = Server { project, mutations, in_run, here: Some(root), ready: ready.clone() };
+    let mut server = Server { stale: crate::stale::Stale::current(), project, mutations, in_run, here: Some(root), ready: ready.clone() };
 
     if let Some((wt_root, repo)) = watch {
         spawn_list_watcher(wt_root, repo, ready);
@@ -548,7 +549,17 @@ impl Server {
             "initialize" => Ok(self.initialize(&params)),
             "ping" => Ok(serde_json::json!({})),
             "tools/list" => Ok(serde_json::json!({ "tools": self.tools() })),
-            "tools/call" => self.call(&params).map_err(|e| (-32602, e)),
+            "tools/call" => {
+                let result = self.call(&params).map_err(|e| (-32602, e));
+                result.map(|mut result| {
+                    if let Some(warning) = self.stale.warning() {
+                        if let Some(content) = result["content"].as_array_mut() {
+                            content.push(serde_json::json!({ "type": "text", "text": warning }));
+                        }
+                    }
+                    result
+                })
+            },
             "resources/list" => Ok(self.resources()),
             "resources/read" => self.read_resource(&params),
             // Advertised as empty rather than left unimplemented: a client that
@@ -828,7 +839,7 @@ impl Server {
                     "properties": {
                         "branch": { "type": "string" },
                         "base": { "type": "string", "description": "Base ref for a new branch. Optional." },
-                        "provider": { "type": "string", "enum": ["claude", "codex"], "description": "Agent to start. Omit to use the project's AI command." },
+                        "provider": { "type": "string", "enum": worktrees_core::provider::ids(), "description": "Agent to start. Omit to use the project's AI command." },
                         "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; the chosen agent opens on it. Optional." },
                         "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." }
                     },
@@ -1214,11 +1225,11 @@ impl Server {
                 let mut args = vec![branch, "--no-attach".to_string()];
                 match a.get("provider") {
                     None | Some(serde_json::Value::Null) => {}
-                    Some(serde_json::Value::String(p)) if p == "claude" || p == "codex" => {
+                    Some(serde_json::Value::String(p)) if worktrees_core::provider::by_id(p).is_some() => {
                         args.push("--ai".to_string());
                         args.push(p.clone());
                     }
-                    Some(_) => return Ok(text_err("provider must be claude or codex")),
+                    Some(_) => return Ok(text_err(&format!("provider must be {}", worktrees_core::provider::choices()))),
                 }
                 if !raw_base.trim().is_empty() {
                     match safe_arg(&raw_base, "base") {
@@ -2126,6 +2137,15 @@ mod tests {
     /// The protocol-shaping helpers are testable without a repo; the tool bodies
     /// need one, and get exercised end to end from bats instead.
     #[test]
+    fn create_provider_schema_pins_existing_ids() {
+        let sc = scratch("provider-schema");
+        let server = server_at(&sc.root, true, false);
+        let tools = server.tools();
+        let create = tools.iter().find(|t| t["name"] == "create_worktree").unwrap();
+        assert_eq!(create["inputSchema"]["properties"]["provider"]["enum"], serde_json::json!(["claude", "codex"]));
+    }
+
+    #[test]
     fn version_negotiation_echoes_a_known_version_else_falls_back() {
         // Calls the real function, not a copy of the rule — the previous version
         // of this test re-implemented negotiation locally and would have stayed
@@ -2185,7 +2205,7 @@ mod tests {
     #[test]
     fn with_no_project_it_still_handshakes_and_advertises_no_tools() {
         use serde_json::json;
-        let mut server = Server { project: None, mutations: true, in_run: false, here: None, ready: Default::default() };
+        let mut server = Server { stale: Default::default(), project: None, mutations: true, in_run: false, here: None, ready: Default::default() };
 
         let init = server
             .handle_line(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }).to_string())
@@ -2248,7 +2268,7 @@ mod tests {
         .unwrap();
 
         let project = Project::discover(&root).expect("a git repo");
-        let mut server = Server { project: Some(project), mutations: true, in_run: false, here: None, ready: Default::default() };
+        let mut server = Server { stale: Default::default(), project: Some(project), mutations: true, in_run: false, here: None, ready: Default::default() };
 
         // Reading is how you find out WHAT this tree is — never refused.
         let r = server.call(&json!({ "name": "list_places", "arguments": {} })).unwrap();
@@ -2362,7 +2382,7 @@ mod tests {
 
         let names = |m: bool| -> Vec<String> {
             let p = Project::discover(&root).expect("a git repo");
-            Server { project: Some(p), mutations: m, in_run: false, here: None, ready: Default::default() }
+            Server { stale: Default::default(), project: Some(p), mutations: m, in_run: false, here: None, ready: Default::default() }
                 .tools()
                 .iter()
                 .map(|t| t["name"].as_str().unwrap_or_default().to_string())
@@ -2372,7 +2392,7 @@ mod tests {
         assert!(names(true).contains(&"show_doc".to_string()), "--mutations server must offer it");
 
         let p = Project::discover(&root).expect("a git repo");
-        let mut server = Server { project: Some(p), mutations: true, in_run: false, here: None, ready: Default::default() };
+        let mut server = Server { stale: Default::default(), project: Some(p), mutations: true, in_run: false, here: None, ready: Default::default() };
 
         // Relative resolves against the repo root, not the process cwd.
         let r = server.call(&json!({ "name": "show_doc", "arguments": { "path": "CLAUDE.md" } })).unwrap();
@@ -2413,7 +2433,7 @@ mod tests {
             .expect("git init")
             .success());
         let project = Project::discover(&base).expect("a git repo");
-        let server = Server { project: Some(project), mutations: false, in_run: false, here: None, ready: Default::default() };
+        let server = Server { stale: Default::default(), project: Some(project), mutations: false, in_run: false, here: None, ready: Default::default() };
 
         let caps = server.initialize(&json!({ "protocolVersion": LATEST }))["capabilities"].clone();
         assert_eq!(caps["resources"]["listChanged"], json!(true));
@@ -2536,6 +2556,7 @@ mod tests {
 
     fn server_at(root: &std::path::Path, mutations: bool, in_run: bool) -> Server {
         Server {
+            stale: Default::default(),
             project: Some(Project::discover(root).expect("a git repo")),
             mutations,
             in_run,
@@ -2725,6 +2746,7 @@ mod tests {
 
     fn server_in(root: &std::path::Path, here: &std::path::Path, mutations: bool) -> Server {
         Server {
+            stale: Default::default(),
             project: Some(Project::discover(root).expect("a git repo")),
             mutations,
             in_run: false,

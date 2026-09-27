@@ -192,7 +192,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
     // the app's auto-resume off.
     let ai_word = ai.match_word.clone();
     let ai_cmd = ai.cmd.as_str();
-    let _switch_lock = if ai_word == "claude" || ai_word == "codex" {
+    let _switch_lock = if crate::provider::by_word(&ai_word).is_some() {
         match lock_agent_switch(&p.main_root) {
             Ok(file) => Some(file),
             Err(e) => { ui.error(&e); return 1; }
@@ -201,15 +201,15 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
     // Provider changes are explicit opens. End the other Worktrees-managed AI
     // session before this one starts, so a place never has two active agents.
     // The canonical name predates provider sidecars; it may contain either AI.
-    if ai_word == "claude" || ai_word == "codex" {
+    if crate::provider::by_word(&ai_word).is_some() {
         let slug = if wt == p.main_root { "(main)" } else { wt.rsplit('/').next().unwrap_or("") };
         let canonical = p.session_name(slug);
-        let codex_sidecar = tmux::codex_session_name(&canonical);
-        let claude_sidecar = tmux::claude_session_name(&canonical);
+        let selected = crate::provider::by_word(&ai_word).unwrap();
+        let managed: Vec<String> = crate::provider::PROVIDERS.iter().map(|p| p.sidecar_name(&canonical)).collect();
         let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
         if let Some(panes) = tmux::PaneList::fetch() {
             for (name, provider) in panes.agents_in(wt, exclude) {
-                if provider != ai_word && name != canonical && name != codex_sidecar && name != claude_sidecar {
+                if provider != selected.id && name != canonical && !managed.contains(&name) {
                     ui.error(&format!(
                         "{provider} is running in adopted tmux session '{name}'; close that session explicitly before switching to {ai_word}"
                     ));
@@ -217,17 +217,11 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
                 }
             }
         }
-        let mut other = Vec::new();
-        if ai_word == "claude" {
-            other.push(codex_sidecar);
-            if session_in != canonical && tmux::session_is_codex(&canonical) {
-                other.push(canonical);
-            }
-        } else {
-            other.push(claude_sidecar);
-            if session_in != canonical && tmux::session_exists(&canonical) && !tmux::session_is_codex(&canonical) {
-                other.push(canonical);
-            }
+        let mut other: Vec<String> = crate::provider::PROVIDERS.iter()
+            .filter(|p| p.id != selected.id).map(|p| p.sidecar_name(&canonical)).collect();
+        if session_in != canonical && tmux::canonical_provider(&canonical).id != selected.id
+            && (selected.canonical_default || tmux::session_exists(&canonical)) {
+            other.push(canonical);
         }
         for name in other {
             if name == session_in || !tmux::session_exists(&name) { continue; }
@@ -240,7 +234,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
     }
     let mut session = session_in.to_string();
-    if !tmux::session_exists(&session) && !session.contains(tmux::CODEX_SIDECAR_MARKER) && !session.contains(tmux::CLAUDE_SIDECAR_MARKER) {
+    if !tmux::session_exists(&session) && !crate::provider::is_sidecar(&session) {
         // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
         // inside the main root, so without the exclusion opening main could
         // adopt (and attach to) a worktree's session instead of creating main's.
@@ -439,12 +433,10 @@ pub const BRIEF_PATH: &str = ".planning/brief.md";
 pub const BRIEF_OPENER: &str = "Read .planning/brief.md and begin.";
 
 pub fn agent_session_name(canonical: &str, ai_word: &str) -> String {
-    if ai_word == "codex" {
-        if tmux::session_is_codex(canonical) { canonical.to_string() }
-        else { tmux::codex_session_name(canonical) }
-    } else if ai_word == "claude" && (tmux::session_is_codex(canonical) || tmux::session_exists(&tmux::claude_session_name(canonical))) {
-        tmux::claude_session_name(canonical)
-    } else { canonical.to_string() }
+    let Some(provider) = crate::provider::by_word(ai_word) else { return canonical.to_string() };
+    let owner = tmux::canonical_provider(canonical);
+    let sidecar_exists = provider.canonical_default && tmux::session_exists(&provider.sidecar_name(canonical));
+    provider.session_name(canonical, owner.id, sidecar_exists)
 }
 
 pub fn resume_command(ai_cmd: &str) -> String {
@@ -948,7 +940,7 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut want_val = false;
     for a in args {
         if want_provider {
-            if a != "claude" && a != "codex" { ui.error("--ai must be claude or codex"); return 1; }
+            if crate::provider::by_id(a).is_none() { ui.error(&format!("--ai must be {}", crate::provider::choices())); return 1; }
             provider = Some(a.clone());
             want_provider = false;
             continue;
@@ -985,8 +977,8 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         ui.error("--ai needs a value");
         return 1;
     }
-    if provider.as_deref().is_some_and(|v| v != "claude" && v != "codex") {
-        ui.error("--ai must be claude or codex");
+    if provider.as_deref().is_some_and(|v| crate::provider::by_id(v).is_none()) {
+        ui.error(&format!("--ai must be {}", crate::provider::choices()));
         return 1;
     }
     if want_val {
@@ -1010,38 +1002,23 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let mut rc = 0;
     for n in &names {
-        if provider.as_deref() == Some("claude") {
+        if let Some(selected) = provider.as_deref().and_then(crate::provider::by_id) {
             let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
             let canonical = p.session_name(&slug);
-            let session = tmux::claude_session_name(&canonical);
-            if tmux::session_is_codex(&canonical) || tmux::session_exists(&session) {
+            let session = agent_session_name(&canonical, selected.match_word);
+            // Claude's canonical path retains adoption and confirmation handling.
+            if !selected.canonical_default || session != canonical {
                 if tmux::session_exists(&session) {
                     if expect.as_deref().is_some_and(|e| e != session) {
-                        ui.error("Claude session changed since confirmation; nothing was closed.");
+                        ui.error(&format!("{} session changed since confirmation; nothing was closed.", selected.label));
                         rc = worse_rc(rc, 1);
                     } else {
                         tmux::kill_session(&session);
-                        ui.info(&format!("closed Claude tmux {session}"));
+                        ui.info(&format!("closed {} tmux {session}", selected.label));
                     }
-                } else { ui.info(&format!("no live Claude session for '{slug}'")); }
+                } else { ui.info(&format!("no live {} session for '{slug}'", selected.label)); }
                 continue;
             }
-        }
-        if provider.as_deref() == Some("codex") {
-            let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
-            let session = agent_session_name(&p.session_name(&slug), "codex");
-            if tmux::session_exists(&session) {
-                if expect.as_deref().is_some_and(|e| e != session) {
-                    ui.error("Codex session changed since confirmation; nothing was closed.");
-                    rc = worse_rc(rc, 1);
-                } else {
-                    tmux::kill_session(&session);
-                    ui.info(&format!("closed Codex tmux {session}"));
-                }
-            } else {
-                ui.info(&format!("no live Codex session for '{slug}'"));
-            }
-            continue;
         }
         // A hard failure OUTRANKS a needs-confirmation stop: across several
         // names the caller must see "something broke" (1) rather than "ask the
@@ -1051,10 +1028,13 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             Err(code) => rc = worse_rc(rc, code),
             Ok(()) if provider.is_none() => {
                 let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
-                let codex = tmux::codex_session_name(&p.session_name(&slug));
-                if tmux::session_exists(&codex) { tmux::kill_session(&codex); ui.info(&format!("closed Codex tmux {codex}")); }
-                let claude = tmux::claude_session_name(&p.session_name(&slug));
-                if tmux::session_exists(&claude) { tmux::kill_session(&claude); ui.info(&format!("closed Claude tmux {claude}")); }
+                for provider in crate::provider::PROVIDERS.iter().rev() {
+                    let session = provider.sidecar_name(&p.session_name(&slug));
+                    if tmux::session_exists(&session) {
+                        tmux::kill_session(&session);
+                        ui.info(&format!("closed {} tmux {session}", provider.label));
+                    }
+                }
             }
             Ok(()) => {}
         }
@@ -1283,10 +1263,10 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
         tmux::kill_session(session);
         ui.info(&format!("killed tmux {session}"));
     }
-    let codex = tmux::codex_session_name(&p.session_name(&slug));
-    if tmux::session_exists(&codex) { tmux::kill_session(&codex); ui.info(&format!("killed tmux {codex}")); }
-    let claude = tmux::claude_session_name(&p.session_name(&slug));
-    if tmux::session_exists(&claude) { tmux::kill_session(&claude); ui.info(&format!("killed tmux {claude}")); }
+    for provider in crate::provider::PROVIDERS.iter().rev() {
+        let session = provider.sidecar_name(&p.session_name(&slug));
+        if tmux::session_exists(&session) { tmux::kill_session(&session); ui.info(&format!("killed tmux {session}")); }
+    }
     tmux::kill_shell_sidecars(&session); // dock shells die with the worktree (past the refusal guards)
     if reg {
         if git::git_status(&p.main_root, &["worktree", "remove", "--force", &path]) {

@@ -5,6 +5,14 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Connect frontend provider types to the core registry before adding a provider.**
+  The MCP/provider-registry refactor deliberately leaves `app/src/planUsage.ts`,
+  `settings.ts`, `App.tsx` and other frontend Claude/Codex unions unchanged.
+  Add a drift check (or generate the types) and extend provider-specific UI and
+  activity adapters when a third provider is approved. Core discovery, lifecycle
+  naming and MCP validation now derive from `worktrees_core::provider`; this
+  does not by itself make the app support an arbitrary new agent.
+
 - **Finish hand-checking window restore, then quiet its log.** A real
   full-screen restore is confirmed in `app.log`. Still unobserved: leaving full
   screen after a restore lands on the pre-full-screen frame, the switch off

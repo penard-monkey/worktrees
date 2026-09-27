@@ -30,6 +30,7 @@ pub mod ops;
 pub mod plan;
 pub mod proc;
 pub mod profile;
+pub mod provider;
 pub mod projcfg;
 pub mod project;
 pub mod provision;
