@@ -6,10 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
-- **Long-running MCP sessions report an outdated server.** Tool responses warn
-  when the executable on disk has a different version and explain that the
-  session needs restarting to pick up the current tools and provider schema.
-  Detection reads a version marker without executing the replacement binary.
+- **MCP results explain provider support even when the client caches old tools.**
+  `create_worktree` and `place_status` replies name the supported providers even
+  when the server version matches the installed binary. Reconnect can retain
+  old tool definitions; a full session restart refreshing them is unverified.
+  Separately, results warn when the executable on disk has a different version,
+  read from a version marker without executing the replacement binary.
 
 ### Changed
 - **Agent providers share one core registry.** MCP provider choices, validation,

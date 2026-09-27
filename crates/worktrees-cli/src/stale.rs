@@ -37,7 +37,7 @@ impl Stale {
         }
         let installed = self.cached.as_ref()?.1.as_deref()?;
         (installed != version()).then(|| format!(
-            "This session's worktrees server is v{}, the installed binary is v{installed}; restart the session to get the current tools and provider schema.", version()
+            "This session's worktrees server is v{}, the installed binary is v{installed}; reload the MCP server to use the installed version. Client-cached tool definitions may survive reconnect; schema refresh after a full session restart is unverified.", version()
         ))
     }
 }
@@ -112,7 +112,7 @@ mod tests {
         let warning = probe.warning().unwrap();
         assert!(warning.contains(&format!("server is v{}", version())));
         assert!(warning.contains("installed binary is v99.8.7"));
-        assert!(warning.contains("restart the session"));
+        assert!(warning.contains("full session restart is unverified"));
         assert_eq!(probe.warning().as_deref(), Some(warning.as_str()));
         fs::write(&path, b"old binary without marker").unwrap();
         assert_eq!(probe.warning(), None);

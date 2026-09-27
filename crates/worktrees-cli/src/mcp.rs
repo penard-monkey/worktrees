@@ -552,6 +552,16 @@ impl Server {
             "tools/call" => {
                 let result = self.call(&params).map_err(|e| (-32602, e));
                 result.map(|mut result| {
+                    // A current server cannot observe the client's cached
+                    // schema. Results do refresh, even when definitions don't.
+                    if matches!(params["name"].as_str(), Some("create_worktree" | "place_status")) {
+                        if let Some(content) = result["content"].as_array_mut() {
+                            content.push(serde_json::json!({ "type": "text", "text": format!(
+                                "Provider capability (server v{}): create_worktree.provider accepts {} (--mutations required); omission uses the project's configured AI command. If provider is missing from your client's schema, it may be cached: reconnect can retain old definitions; refreshing them via a full session restart is unverified.",
+                                env!("CARGO_PKG_VERSION"), worktrees_core::provider::choices()
+                            ) }));
+                        }
+                    }
                     if let Some(warning) = self.stale.warning() {
                         if let Some(content) = result["content"].as_array_mut() {
                             content.push(serde_json::json!({ "type": "text", "text": warning }));
@@ -2136,6 +2146,38 @@ mod tests {
 
     /// The protocol-shaping helpers are testable without a repo; the tool bodies
     /// need one, and get exercised end to end from bats instead.
+    #[test]
+    fn legacy_requests_receive_provider_capabilities_without_a_stale_binary() {
+        let sc = scratch("cached-schema");
+        let mut server = server_at(&sc.root, true, false);
+        // No version mismatch and no tools/list refresh. These requests use
+        // only fields an old client already knows, including no provider.
+        for (name, arguments) in [
+            ("create_worktree", serde_json::json!({"branch": "--invalid"})),
+            ("place_status", serde_json::json!({"slug": "(main)"})),
+        ] {
+            let params = serde_json::json!({"name": name, "arguments": arguments});
+            let original = server.call(&params).unwrap();
+            assert_eq!(original["isError"], serde_json::json!(name == "create_worktree"));
+            let reply = server.handle_line(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params
+            }).to_string()).unwrap();
+            let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+            let result = &reply["result"];
+            assert_eq!(result["isError"], original["isError"]);
+            let content = result["content"].as_array().unwrap();
+            assert_eq!(content.len(), original["content"].as_array().unwrap().len() + 1);
+            assert_eq!(content[0]["type"], original["content"][0]["type"]);
+            let notice = content.last().unwrap()["text"].as_str().unwrap();
+            assert!(notice.contains("create_worktree.provider"));
+            for provider in worktrees_core::provider::ids() { assert!(notice.contains(provider)); }
+            assert!(notice.contains("project's configured AI command"));
+            assert!(notice.contains("cached"));
+            assert!(notice.contains("full session restart is unverified"));
+            assert!(!notice.contains("installed binary"));
+        }
+    }
+
     #[test]
     fn create_provider_schema_pins_existing_ids() {
         let sc = scratch("provider-schema");

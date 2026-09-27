@@ -36,7 +36,10 @@ with tempfile.TemporaryDirectory(prefix="wt-mcp-stale-") as tmp:
         version = request("initialize", {"protocolVersion": "2025-06-18"})["serverInfo"]["version"]
         original = call()
         assert original["isError"] is True
-        assert len(original["content"]) == 1, original
+        assert len(original["content"]) == 2, original
+        capability = original["content"][-1]["text"]
+        assert "create_worktree.provider accepts claude or codex" in capability, capability
+        assert "full session restart is unverified" in capability, capability
         same = b"\0WORKTREES_CLI_VERSION=" + version.encode() + b"\0"
         assert same in binary.read_bytes(), "release binary must retain the version marker"
         replace(same)
@@ -48,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix="wt-mcp-stale-") as tmp:
         warning = changed["content"][-1]["text"]
         assert f"server is v{version}" in warning, warning
         assert "installed binary is v99.8.7" in warning, warning
-        assert "restart the session" in warning, warning
+        assert "full session restart is unverified" in warning, warning
         assert call() == changed, "cached warning persists"
         replace(same)
         assert call() == original, "restoring version clears warning"
