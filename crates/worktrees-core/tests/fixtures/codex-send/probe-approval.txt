@@ -1,0 +1,33 @@
+╭──────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.1)                               │
+│                                                          │
+│ model:     GPT-6-Astra   /model to change                │
+│ directory: /private/var/folders/_w/…/.worktrees/approval │
+╰──────────────────────────────────────────────────────────╯
+
+  Tip: Use /status to see the current model, approvals, and token usage.
+
+
+› This is an isolated approval UI test. Run pwd with sandbox_permissions=require_escalated and ask for permission with
+  justification: May I run pwd for this scratch approval test? Do not delegate or touch files.
+
+
+• I’ll run pwd with the requested approval prompt.
+
+• Running pwd
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: May I run pwd for this scratch approval test?
+
+  $ pwd
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `pwd` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

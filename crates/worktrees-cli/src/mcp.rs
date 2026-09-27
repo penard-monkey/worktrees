@@ -3166,6 +3166,30 @@ mod tests {
     }
 
     #[test]
+    fn send_async_question_banner_confirms_only_after_the_composer_clears() {
+        use std::cell::Cell;
+        let typed = include_str!("../../worktrees-core/tests/fixtures/codex-send/probe-question-banner-typed.txt");
+        let pasted = include_str!("../../worktrees-core/tests/fixtures/codex-send/probe-question-banner-pasted.txt");
+        let submitted = include_str!("../../worktrees-core/tests/fixtures/codex-send/probe-question-submitted.txt");
+        for input in [typed, pasted] {
+            // One lost Enter retries; a stuck composer never becomes delivered.
+            for clears in [true, false] {
+                let clock = Cell::new(0);
+                let presses = Cell::new(0);
+                let outcome = submit_codex(
+                    || Some(if clears && presses.get() >= 2 { submitted } else { input }.into()),
+                    || { presses.set(presses.get() + 1); Ok(()) },
+                    || clock.get(),
+                    |ms| clock.set(clock.get() + ms),
+                );
+                assert_eq!(outcome, if clears { SendOutcome::Submitted } else { SendOutcome::Unconfirmed });
+                assert_eq!(presses.get(), if clears { 2 } else { SEND_ENTER_TRIES });
+                assert!(clock.get() <= SEND_TIMEOUT_MS);
+            }
+        }
+    }
+
+    #[test]
     fn send_checks_modals_before_initial_enter_and_every_retry() {
         use std::cell::Cell;
         for before_first in [true, false] {

@@ -416,6 +416,33 @@ mod tests {
     const SEND_PASTED: &str = include_str!("../tests/fixtures/codex-send/pasted.txt");
 
     #[test]
+    fn async_question_banner_keeps_the_live_composer_distinct_from_history() {
+        let empty = include_str!("../tests/fixtures/codex-send/probe-question-banner-empty.txt");
+        let typed = include_str!("../tests/fixtures/codex-send/probe-question-banner-typed.txt");
+        let pasted = include_str!("../tests/fixtures/codex-send/probe-question-banner-pasted.txt");
+        for screen in [empty, typed, pasted] {
+            assert!(screen.contains("shift+← to answer"));
+            assert!(!waiting_on_screen(screen), "an async question leaves the composer usable");
+        }
+        assert!(composer_submitted(empty));
+        assert_eq!(composer_on_screen(typed), Some(Composer::Text(
+            "Transport preview: no answer to the pending question.".into()
+        )));
+        assert!(composer_has_paste(pasted));
+        for screen in [typed, pasted] {
+            assert!(!composer_submitted(screen));
+            assert!(composer_settled(screen, screen));
+        }
+        assert!(!composer_settled(typed, pasted));
+        let submitted = include_str!("../tests/fixtures/codex-send/probe-question-submitted.txt");
+        assert!(composer_submitted(submitted));
+        // A former modal or paste in history must not mask the current input.
+        let history = format!("{RUN_APPROVAL}\n{pasted}\n{submitted}");
+        assert!(composer_submitted(&history));
+        assert!(!composer_has_paste(&history));
+    }
+
+    #[test]
     fn send_composer_decisions_use_real_captures() {
         assert!(SEND_PASTED.contains("[Pasted Content 1284 chars]"));
         assert!(composer_submitted(SEND_EMPTY));
