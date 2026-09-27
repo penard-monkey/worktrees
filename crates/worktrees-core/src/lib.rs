@@ -5,6 +5,7 @@
 //! wrappers, error). Later increments add project/place discovery, ops, the
 //! declared store, and rendering. See MIGRATION.md.
 
+pub mod activity;
 pub mod agent;
 pub mod agentfiles;
 pub mod automation;
@@ -23,6 +24,7 @@ pub mod materialize;
 pub mod mcpsetup;
 pub mod mcpmigrate;
 pub mod mention;
+pub mod messages;
 pub mod model;
 pub mod ops;
 pub mod plan;

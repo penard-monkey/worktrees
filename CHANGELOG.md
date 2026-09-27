@@ -3,6 +3,28 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Agents in different places can message each other, Claude and Codex
+  alike.** The `worktrees` MCP server gains `report` (post a message to
+  another place, `(main)` by default, optionally as a reply), `messages` (read
+  what was sent to your place, marked read as you read it) and `wait` (block
+  until another place's agent stops working, or until a message arrives, up
+  to two minutes a call). A message is signed with the place the sender is
+  working in, never with a name the agent supplies; anything running under
+  your user account can still write the log, so that is the trust boundary.
+  Messages are kept in the repository's shared git data, never in a
+  checkout, capped at 8 KB each and 500 per project, and dropped after a
+  week. With mutations on, `send` types a line
+  into another place's Codex, labelled as a message from that place rather
+  than from you (a Claude place is told to use Claude's own messaging
+  instead). It refuses a Codex that is waiting on an approval or a question,
+  text starting with `/`, `@` or `!`, and panes the project did not create.
+  `place_status` now reports what a Codex place is doing (busy, waiting on
+  you, idle, and when its last turn finished) the way it already did for
+  Claude, read the same way as the nav's dots.
+
 ## [0.31.0] - 2026-09-26
 
 ### Added

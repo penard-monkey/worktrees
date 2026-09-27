@@ -7,7 +7,7 @@
 // See DESIGN.md / MIGRATION.md.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1219,9 +1219,12 @@ fn claude_activity() -> (Vec<String>, Vec<String>, Vec<(i32, Option<String>)>) {
         if probe.tmux.is_some() {
             models.push((probe.pid, probe_model(&probe)));
         }
-        match worktrees_core::agent::effective_state(&probe).as_str() {
-            "busy" => busy.push(probe.cwd),
-            "waiting" => waiting.push(probe.cwd),
+        // The mapping is core's (`activity::claude_state`), shared with the
+        // MCP server's `place_status` / `wait`, so the dot and an orchestrator
+        // cannot disagree about what "busy" means.
+        match activity::claude_state(&worktrees_core::agent::effective_state(&probe)) {
+            activity::State::Busy => busy.push(probe.cwd),
+            activity::State::Waiting => waiting.push(probe.cwd),
             _ => {} // idle / shell / parked-away busy (`delegated`) → no dot
         }
     }
@@ -1684,33 +1687,11 @@ fn probe_model(p: &worktrees_core::agent::ClaudeProbe) -> Option<String> {
         .map(|id| worktrees_core::agent::model_display(&id))
 }
 
-/// Last answer per codex rollout: its length when read, the model it named and
-/// where its newest turn stands. One cache and one tail read serve both, so a
-/// streaming turn costs a single 256K read per tick, not one per question.
-static CODEX_TAIL: Mutex<Option<HashMap<PathBuf, (u64, Option<String>, Option<worktrees_core::codex::Turn>)>>> =
-    Mutex::new(None);
-
-/// `path`'s (model, turn), re-read only once the file has GROWN. A tail that
-/// now names neither (one enormous tool result filling it) keeps the last
-/// answer for each: nothing changed because a big line landed.
-fn codex_tail(path: &Path) -> (Option<String>, Option<worktrees_core::codex::Turn>) {
-    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
-        return (None, None);
-    };
-    let mut guard = CODEX_TAIL.lock().unwrap_or_else(|e| e.into_inner());
-    let cache = guard.get_or_insert_with(HashMap::new);
-    if let Some((l, m, t)) = cache.get(path) {
-        if *l == len {
-            return (m.clone(), t.clone());
-        }
-    }
-    let (pm, pt) = cache.get(path).map(|(_, m, t)| (m.clone(), t.clone())).unwrap_or((None, None));
-    let lines = tail_lines(path, TRANSCRIPT_TAIL_BYTES);
-    let m = worktrees_core::codex::rollout_model(&lines).or(pm);
-    let t = worktrees_core::codex::rollout_turn(&lines).or(pt);
-    cache.insert(path.to_path_buf(), (len, m.clone(), t.clone()));
-    (m, t)
-}
+// The rollout tail cache (`codex_tail`) and the whole codex state derivation
+// live in core (`worktrees_core::activity`), shared with the MCP server's
+// `place_status` / `wait`. What stays here is the scheduling: which sessions
+// the tick watches (`CODEX_WATCH`) and what it does with the answer.
+use worktrees_core::activity::{self, codex_tail};
 
 /// The model the newest codex session in worktree `cwd` last ran a turn on.
 fn codex_model(cwd: &str) -> Option<String> {
@@ -1764,6 +1745,7 @@ fn codex_tick(sessions: &str) -> CodexTick {
         guard.as_ref().map(|w| w.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
     };
     let mut out = CodexTick::default();
+    let mut turns: Vec<(String, Option<worktrees_core::codex::Turn>)> = Vec::new();
     let mut mid_turn: Vec<(String, String)> = Vec::new();
     for (cwd, w) in watched {
         let (model, turn) = match worktrees_core::codex::latest_rollout(&cwd) {
@@ -1774,102 +1756,28 @@ fn codex_tick(sessions: &str) -> CodexTick {
             codex_watch_set(&cwd, Some(&w.session), &model);
             out.models_moved = true;
         }
-        match turn {
-            Some(worktrees_core::codex::Turn::Busy) => mid_turn.push((cwd, w.session)),
-            Some(worktrees_core::codex::Turn::Done { at: Some(at), .. }) => out.done.push((cwd, at)),
+        if matches!(turn, Some(worktrees_core::codex::Turn::Busy)) {
+            mid_turn.push((cwd.clone(), w.session));
+        }
+        turns.push((cwd, turn));
+    }
+    // Only mid-turn panes are captured: one chained tmux call for all of them,
+    // none at all while no codex turn runs.
+    let panes = activity::codex_panes(sessions, &mid_turn);
+    for (cwd, turn) in turns {
+        let pane = panes.iter().find(|(c, _)| *c == cwd).map(|(_, p)| *p);
+        // ONE derivation (core's), the same `place_status` and `wait` use.
+        let (state, done) = activity::codex_state(turn.as_ref(), pane);
+        match state {
+            activity::State::Busy => out.busy.push(cwd.clone()),
+            activity::State::Waiting => out.waiting.push(cwd.clone()),
             _ => {}
         }
-    }
-    let panes = codex_panes(sessions, &mid_turn);
-    for (cwd, _) in mid_turn {
-        match panes.iter().find(|(c, _)| *c == cwd).map(|(_, p)| p) {
-            Some(CodexPane::Waiting) => out.waiting.push(cwd),
-            // The snapshot's liveness check can be up to 30s old; this one is
-            // this tick's. A dead codex is not busy, whatever its rollout says.
-            Some(CodexPane::Gone) => {}
-            // Running, or no answer at all (a tmux failure, a chain cut short):
-            // the rollout says busy, and busy is the quiet failure.
-            _ => out.busy.push(cwd),
+        if let Some(at) = done {
+            out.done.push((cwd, at));
         }
     }
     out
-}
-
-/// What a mid-turn codex pane shows, per one capture.
-#[derive(Debug, PartialEq)]
-enum CodexPane {
-    /// The pane is back at a bare shell: codex exited or was killed.
-    Gone,
-    /// Codex is running and not asking anything.
-    Running,
-    /// Codex is sitting on an approval or a question (`waiting_on_screen`).
-    Waiting,
-}
-
-/// Capture the codex panes in `targets` (cwd, tmux session) in ONE `tmux`
-/// call: each pane's current command, then its screen. Costs nothing while no
-/// codex turn is running, which is nearly always; during one it is a single
-/// spawn per 3s tick, however many sessions are mid-turn.
-///
-/// Same chaining as `scan_drafts`: sessions missing from the fingerprint are
-/// dropped first (a dead target aborts the rest of the chain), and a marker
-/// precedes each pane so a chain that dies part-way still attributes what it
-/// did print. `=name:` is the session's current window and active pane,
-/// which is codex unless the user split it — then the screen shows no codex
-/// footer and the place simply reads busy.
-fn codex_panes(sessions: &str, targets: &[(String, String)]) -> Vec<(String, CodexPane)> {
-    let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
-    let targets: Vec<(&String, String)> = targets
-        .iter()
-        .filter(|(_, s)| live.contains(&s.as_str()))
-        .map(|(cwd, s)| (cwd, format!("={s}:")))
-        .collect();
-    if targets.is_empty() {
-        return Vec::new();
-    }
-    let marks: Vec<String> = (0..targets.len()).map(|i| format!("@@ {i} @@")).collect();
-    let mut args: Vec<&str> = Vec::with_capacity(targets.len() * 15);
-    for (i, (_, target)) in targets.iter().enumerate() {
-        if i > 0 {
-            args.push(";");
-        }
-        args.extend(["display-message", "-p", &marks[i], ";"]);
-        args.extend(["display-message", "-p", "-t", target, "#{pane_current_command}", ";"]);
-        args.extend(["capture-pane", "-p", "-t", target]);
-    }
-    let Ok(out) = worktrees_core::tmux::tmux(&args) else {
-        return Vec::new();
-    };
-    let cwds: Vec<&str> = targets.iter().map(|(c, _)| c.as_str()).collect();
-    codex_panes_in(&String::from_utf8_lossy(&out.stdout), &cwds)
-}
-
-/// Parse `codex_panes`'s chained output: per target `i`, the line `@@ i @@`,
-/// then the pane's current command, then its screen up to the next marker.
-/// Pure, so the marker split and the bound are testable without tmux. A
-/// target with no marker in the output (the chain died before it) is left
-/// out — no answer, which the caller reads as the rollout's busy.
-fn codex_panes_in(text: &str, cwds: &[&str]) -> Vec<(String, CodexPane)> {
-    let marks: Vec<String> = (0..cwds.len()).map(|i| format!("@@ {i} @@")).collect();
-    let mut panes = Vec::new();
-    for (i, cwd) in cwds.iter().enumerate() {
-        let Some(rest) = text.split(&format!("{}\n", marks[i])).nth(1) else { continue };
-        // The next marker ends this pane's block (the last one runs to EOF).
-        let block = match marks.get(i + 1).and_then(|m| rest.find(m.as_str())) {
-            Some(end) => &rest[..end],
-            None => rest,
-        };
-        let (cmd, screen) = block.split_once('\n').unwrap_or((block, ""));
-        let state = if worktrees_core::tmux::is_shell_command(cmd.trim()) {
-            CodexPane::Gone
-        } else if worktrees_core::codex::waiting_on_screen(screen) {
-            CodexPane::Waiting
-        } else {
-            CodexPane::Running
-        };
-        panes.push((cwd.to_string(), state));
-    }
-    panes
 }
 
 /// One tick's dot sets: what `sessions:busy` carries, and what the dwell
@@ -1932,27 +1840,17 @@ fn is_work_prompt(display: &str) -> bool {
 /// of pasted prompts — and a strict decode would throw away the whole tail, not
 /// just the fragment that is discarded anyway. Worse, the boundary only moves as
 /// the file grows, so a strict failure would be silent AND sticky.
+///
+/// The reader itself is core's (`activity::tail_lines_checked`), shared with
+/// the codex rollout tail; this wrapper only puts its failures in the app log.
 fn tail_lines(path: &Path, max_bytes: u64) -> Vec<String> {
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return Vec::new();
-    };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let partial = len > max_bytes;
-    if partial && f.seek(std::io::SeekFrom::Start(len - max_bytes)).is_err() {
-        applog("warn", &format!("tail seek failed: {}", path.display()));
-        return Vec::new();
+    match activity::tail_lines_checked(path, max_bytes) {
+        Ok(lines) => lines,
+        Err(e) => {
+            applog("warn", &e);
+            Vec::new()
+        }
     }
-    let mut buf = Vec::new();
-    if let Err(e) = f.read_to_end(&mut buf) {
-        applog("warn", &format!("tail read failed ({e}): {}", path.display()));
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines = text.lines().map(|s| s.to_string()).collect::<Vec<_>>();
-    if partial && !lines.is_empty() {
-        lines.remove(0);
-    }
-    lines
 }
 
 /// Backfill afterglow from `history.jsonl` at startup, so a machine where the
@@ -8327,28 +8225,8 @@ mod tests {
         assert_eq!(t["/claude"], 2, "claude is counted once per tick, de-duplicated");
     }
 
-    /// The chained capture, two panes: each block runs from its marker to the
-    /// NEXT marker (not to EOF — the first pane must not see the second's
-    /// footer), its first line is the pane's command, and a bare shell there
-    /// means codex is gone whatever the screen shows.
-    #[test]
-    fn codex_panes_split_the_chain_per_pane() {
-        let modal = "  3. No, and tell Codex what to do differently (esc)\n  Press enter to confirm or esc to cancel\n";
-        let idle = "› Ask Codex to do anything\n  ? for shortcuts\n";
-        let text = format!("@@ 0 @@\ncodex\n{idle}@@ 1 @@\ncodex\n{modal}");
-        assert_eq!(
-            codex_panes_in(&text, &["/a", "/b"]),
-            vec![("/a".into(), CodexPane::Running), ("/b".into(), CodexPane::Waiting)]
-        );
-        // codex exited: the pane is back at its shell. Not busy, not waiting.
-        let text = format!("@@ 0 @@\nzsh\n{modal}@@ 1 @@\nnode\n{idle}");
-        assert_eq!(
-            codex_panes_in(&text, &["/a", "/b"]),
-            vec![("/a".into(), CodexPane::Gone), ("/b".into(), CodexPane::Running)]
-        );
-        // The chain died after the first pane: the second has no answer.
-        assert_eq!(codex_panes_in(&format!("@@ 0 @@\ncodex\n{idle}"), &["/a", "/b"]).len(), 1);
-    }
+    // `codex_panes_split_the_chain_per_pane` moved to core with the parser
+    // (`worktrees_core::activity`), where the MCP server's reading shares it.
 
     /// A finished codex turn stays the rollout's newest boundary until the next
     /// one starts, so it is offered on every tick. Only a NEW epoch may reach

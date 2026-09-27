@@ -388,3 +388,160 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   [[ "$output" == *'"state":"installed"'* ]]
   [[ "$output" == *'"mutations":true'* ]]
 }
+
+# ── place↔place messaging ───────────────────────────────────────────────────
+# Every server below is started with its cwd PINNED to a directory inside
+# $REPO (the fixture), never the suite's own cwd: a `report` writes into the
+# git common dir of whatever repo the server discovers, and the suite's cwd is
+# this repository.
+
+# mcp_in <dir> "<extra server args>" '<msg>'...
+mcp_in() {
+  local dir="$1" extra="$2"; shift 2
+  case "$dir" in "$REPO"|"$REPO"/*) ;; *) echo "mcp_in: $dir is outside the fixture" >&2; return 1 ;; esac
+  printf '%s\n' "$@" > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$dir' && '$WT_BIN' mcp $extra < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+}
+
+# The first frame's tool-result body, parsed.
+result_body='
+import sys, json
+frames = [json.loads(l) for l in sys.stdin.read().splitlines() if l.strip()]
+r = frames[-1]["result"]
+print(json.dumps({"isError": r["isError"], "body": r["content"][0]["text"]}))'
+
+@test "report from a worktree reaches (main) through messages, signed by the sender's place" {
+  run_wt new feat-m --no-tmux
+  local wt="$REPO/.worktrees/feat-m"
+  # `from` in the arguments is ignored: the server signs with its own place.
+  mcp_in "$wt" "" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"report","arguments":{"text":"done: tests green","from":"(main)"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  # Stored in the git COMMON dir, untracked — not in either checkout.
+  [ "$(find "$REPO/.git/worktrees-messages" -name '*.json' | wc -l | tr -d ' ')" = 1 ]
+  [ -z "$(git -C "$REPO" status --porcelain)" ]
+  local pick='
+import sys, json
+frames = [json.loads(l) for l in sys.stdin.read().splitlines() if l.strip()]
+b = json.loads(frames[-1]["result"]["content"][0]["text"])
+print(b["place"], len(b["messages"]), *(m["from"] + ":" + m["text"] for m in b["messages"]))'
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"messages","arguments":{}}}'
+  [ "$(jq_out "$pick")" = "(main) 1 feat-m:done: tests green" ]
+  # Acked on read: the next look is empty.
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"messages","arguments":{}}}'
+  [ "$(jq_out "$pick")" = "(main) 0" ]
+  # wait until: message from the worktree now sees nothing new, at once.
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"wait","arguments":{"until":"message","timeout_s":0}}}'
+  [[ "$output" == *'\"event\": \"timeout\"'* ]]
+}
+
+@test "wait until idle answers at once for a place with no agent" {
+  run_wt new feat-w --no-tmux
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait","arguments":{"until":"idle","slug":"feat-w","timeout_s":5}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  [[ "$output" == *'\"event\": \"none\"'* ]]
+}
+
+@test "place_status reports a Codex place's activity from its rollout" {
+  run_wt new feat-cx --no-tmux
+  local wt="$REPO/.worktrees/feat-cx"
+  # The managed codex session, running codex (not a shell).
+  printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/repo-feat-cx~agent~codex"
+  printf 'codex' > "$TMUX_STATE/repo-feat-cx~agent~codex.cmd"
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"
+  local day="$CODEX_HOME/sessions/2026/09/26"; mkdir -p "$day"
+  printf '{"type":"session_meta","payload":{"cwd":"%s","source":"cli"}}\n{"type":"event_msg","payload":{"type":"task_started"}}\n{"type":"event_msg","payload":{"type":"task_complete","completed_at":1790000000}}\n' "$wt" > "$day/rollout-a.jsonl"
+  local q='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"feat-cx"}}}'
+  local pick='
+import sys, json
+frames = [json.loads(l) for l in sys.stdin.read().splitlines() if l.strip()]
+p = json.loads(frames[-1]["result"]["content"][0]["text"])
+a = p["activity"]
+print(p["agent_state"], a["provider"], a["state"], a["last_done"], a["session"])'
+  mcp_in "$REPO" "" "$q"
+  [ "$(jq_out "$pick")" = "idle codex idle 1790000000 repo-feat-cx~agent~codex" ]
+  # Mid-turn: busy (the fake tmux answers no capture, which reads as busy).
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$day/rollout-a.jsonl"
+  mcp_in "$REPO" "" "$q"
+  [ "$(jq_out "$pick")" = "busy codex busy None repo-feat-cx~agent~codex" ]
+  # …and `wait until: idle` on it times out rather than lying.
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wait","arguments":{"until":"idle","slug":"feat-cx","timeout_s":0}}}'
+  [[ "$output" == *'\"event\": \"timeout\"'* ]]
+}
+
+@test "send is a --mutations tool and refuses what it must not type" {
+  run_wt new feat-s --no-tmux
+  local wt="$REPO/.worktrees/feat-s"
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  [[ "$output" != *'"name":"send"'* ]]
+  [[ "$output" == *'"name":"report"'* ]]
+  # A control character: refused before anything is looked up.
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"a\nb"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [[ "$output" == *"control character"* ]]
+  # Nobody there.
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *"no agent is running in feat-s"* ]]
+  # A codex in a session this project did NOT create (another prefix): refused.
+  printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/other-feat-s"
+  printf 'codex' > "$TMUX_STATE/other-feat-s.cmd"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *"did not create"* ]]
+  rm -f "$TMUX_STATE/other-feat-s" "$TMUX_STATE/other-feat-s.cmd"
+  # A Claude place is not typed into: the answer names its session for SendMessage.
+  mkdir -p "$HOME/.claude/sessions"
+  printf '{"pid":%s,"cwd":"%s","status":"idle","name":"repo-feat-s","updatedAt":5,"statusUpdatedAt":5}' "$$" "$wt" > "$HOME/.claude/sessions/$$.json"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [[ "$output" == *'SendMessage to \"repo-feat-s\"'* ]]
+  # Nothing was typed anywhere.
+  ! grep -q 'send-keys' "$TMUX_LOG"
+}
+
+@test "send types a labelled line into this project's own Codex pane and files the copy read" {
+  run_wt new feat-s --no-tmux
+  local wt="$REPO/.worktrees/feat-s"
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"; mkdir -p "$CODEX_HOME"
+  printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/repo-feat-s~agent~codex"
+  printf 'codex' > "$TMUX_STATE/repo-feat-s~agent~codex.cmd"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  [[ "$output" == *'\"delivered\": true'* ]]
+  # Typed literally, labelled, then Enter as its own keystroke — in that order.
+  local typed enter
+  typed="$(grep -n -F 'tmux send-keys -t %0 -l -- [worktrees: message from place "(main)", not from the user] hi' "$TMUX_LOG" | cut -d: -f1)"
+  enter="$(grep -n -F 'tmux send-keys -t %0 Enter' "$TMUX_LOG" | cut -d: -f1)"
+  # Separate assertions: in an `a && b && c` line, set -e ignores a false
+  # `a`, and the test passes having checked nothing.
+  [ -n "$typed" ]
+  [ -n "$enter" ]
+  [ "$typed" -lt "$enter" ]
+  # The log copy is RAW, and filed already-read for the recipient.
+  local store="$REPO/.git/worktrees-messages"
+  grep -q '"text":"hi"' "$store"/*.json
+  [ "$(find "$store/.read" -type f | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "send refuses a Codex that is waiting on an approval, and never presses Enter into one" {
+  run_wt new feat-s --no-tmux
+  local wt="$REPO/.worktrees/feat-s"
+  local s='repo-feat-s~agent~codex'
+  printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/$s"
+  printf 'codex' > "$TMUX_STATE/$s.cmd"
+  printf '  1. Yes, proceed\n  Press enter to confirm or esc to cancel\n' > "$TMUX_STATE/$s.screen"
+  printf '%s' "$s" > "$TMUX_STATE/.pane-%0"
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"
+  local day="$CODEX_HOME/sessions/2026/09/26"; mkdir -p "$day"
+  # Mid-turn per the rollout, and the screen shows the approval modal.
+  printf '{"type":"session_meta","payload":{"cwd":"%s","source":"cli"}}\n{"type":"event_msg","payload":{"type":"task_started"}}\n' "$wt" > "$day/rollout-a.jsonl"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *'"isError":true'* ]]
+  [[ "$output" == *"waiting on you"* ]]
+  ! grep -q 'send-keys' "$TMUX_LOG"
+  # The modal opens only AFTER the look (the rollout says idle): the text is
+  # typed, but the fresh look before Enter sees the modal and holds Enter back.
+  printf '{"type":"event_msg","payload":{"type":"task_complete","completed_at":1790000000}}\n' >> "$day/rollout-a.jsonl"
+  mcp_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send","arguments":{"slug":"feat-s","text":"hi"}}}'
+  [[ "$output" == *'\"delivered\": false'* ]]
+  grep -q -- 'send-keys -t %0 -l --' "$TMUX_LOG"
+  ! grep -q 'send-keys -t %0 Enter' "$TMUX_LOG"
+}

@@ -29,6 +29,11 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   user-scope `claude mcp add -s user worktrees -- worktrees mcp --mutations`
   serves every repo (cwd discovery), and a PROFILE needs
   `worktrees_mcp_mutations` or its injected server is read-only.
+  Across PROVIDERS the bus is the MCP message log (`worktrees_core::messages`,
+  in the git common dir; `report`/`messages`/`wait`, `from` derived from the
+  server's own place) — Claude↔Claude still uses Claude's own messaging, and
+  Codex activity for `place_status`/`wait` and the nav dots comes from ONE
+  derivation, `worktrees_core::activity`.
 
 **`~/.claude.json` is claude's live state — READ it, never write it.** It is the
 user-scope `mcpServers` home (`mcpsetup.rs`), a few hundred KB of onboarding
