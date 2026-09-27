@@ -5,6 +5,15 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **A long-lived `worktrees mcp` keeps serving a replaced binary, silently.**
+  Each agent session starts its server once; after an install, every running
+  session answers from old code. On 2026-09-27 ten servers were running, some
+  from four days earlier, and a peer reported two already-fixed bugs as live.
+  Cheap fix: record the executable's mtime/inode at startup and, when it
+  changes, add a line to every tool reply ("this server predates the installed
+  worktrees vX; reconnect with /mcp") and flag it in `doctor`. See
+  [the session](docs/sessions/2026-09-27-codex-live-testing/summary.md).
+
 - **Connect frontend provider types to the core registry before adding a provider.**
   The MCP/provider-registry refactor deliberately leaves `app/src/planUsage.ts`,
   `settings.ts`, `App.tsx` and other frontend Claude/Codex unions unchanged.

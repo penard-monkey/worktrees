@@ -137,6 +137,14 @@ RUNNING job as a failure. Both fired within a minute of each other on #304, one
 claiming green and one claiming nine failures, neither true. Watch the run, not
 the PR view: `gh run watch <run-id> --exit-status`, then read raw conclusions.
 
+**An MCP bug report describes the server that answered it, not the installed
+binary.** Every agent session launches `worktrees mcp` once and keeps it for
+its life, so an install upgrades nobody already running. Two "live" Codex bugs
+reported by a peer were a v0.32.0-era server answering after v0.32.1 was
+installed. Before debugging one, compare `ps -Ao pid,lstart,command | grep
+"worktrees mcp"` with the binary's mtime, and `git log -S` the reply text the
+peer quotes: if the string only exists in history, so does the bug.
+
 **A CONFLICTED PR gets no CI at all, and it does not look like a conflict.**
 `on: pull_request` builds `refs/pull/N/merge`, which GitHub cannot create while
 the branch conflicts with main — so `gh run list --branch <b>` comes back EMPTY
