@@ -10,3 +10,10 @@ The directory was `/private/tmp/worktrees-send-confirm-probe`.
 
 Pressing Enter after the pasted capture produced an OK response and returned
 an empty composer. Only trailing blank screen rows were removed; all visible text is preserved.
+
+The six `review-*.txt` captures were supplied in the #352 review on 2026-09-26
+from throwaway Codex 0.157.1 panes on this machine. They retain the review's
+shortened paths, with only trailing blank rows removed. `review-busy-typed`
+shows the queue hint; `review-busy-queued`, both idle screens, and
+`review-post-final` show the Agent Command Center navigation hint.
+`review-typed400` covers wrapped, nonempty input.

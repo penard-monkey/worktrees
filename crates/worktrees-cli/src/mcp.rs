@@ -1971,7 +1971,7 @@ impl SendOutcome {
     fn note(&self) -> String {
         match self {
             Self::Submitted => "Typed into its prompt and confirmed submitted; Codex queues it if a turn is running. Ask it to report back, then wait until: message.".into(),
-            Self::Modal => "Codex opened an approval or a question while sending. No Enter was pressed into that prompt. The text may be sitting in its input; the user has to answer the prompt. Submission is not confirmed; the message copy is left unread if recorded. Read it with messages before retrying to avoid duplicates.".into(),
+            Self::Modal => "Codex opened an approval or a question while sending. No Enter was pressed into that prompt. The text may be sitting in its input; the user has to answer the prompt. Submission is not confirmed; the message copy is left unread if recorded. Submitting the composer later and reading messages can deliver the same instruction twice; check the composer and inbox before resending.".into(),
             Self::Unconfirmed => "Text was typed but submission could not be confirmed within the retry limit. It may still be in the composer. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates.".into(),
             Self::EnterFailed(e) => format!("Text was typed but Enter failed: {e}. Submission is not confirmed. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates."),
         }
@@ -3091,6 +3091,24 @@ mod tests {
         );
         assert_eq!(outcome, SendOutcome::Submitted);
         assert_eq!(*presses.borrow(), vec![700, 1700]);
+    }
+
+    #[test]
+    fn send_review_busy_input_queues_and_confirms_without_retry() {
+        use std::cell::Cell;
+        let clock = Cell::new(0);
+        let presses = Cell::new(0);
+        let outcome = submit_codex(
+            || Some(if presses.get() == 0 {
+                include_str!("../../worktrees-core/tests/fixtures/codex-send/review-busy-typed.txt")
+            } else {
+                include_str!("../../worktrees-core/tests/fixtures/codex-send/review-busy-queued.txt")
+            }.into()),
+            || { presses.set(presses.get() + 1); Ok(()) },
+            || clock.get(), |ms| clock.set(clock.get() + ms),
+        );
+        assert_eq!(outcome, SendOutcome::Submitted);
+        assert_eq!(presses.get(), 1);
     }
 
     #[test]

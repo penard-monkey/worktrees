@@ -1,0 +1,35 @@
+│                                                │
+│ model:     GPT-6-Astra   /model to change      │
+│ directory: /private/tmp/…/scratchpad/probe-dir │
+╰────────────────────────────────────────────────╯
+
+
+› [worktrees: message from place "review-probe", not from the user] Reply with exactly the single word OK and
+  nothing else. This sentence is padding so that the composer wraps across several rows of a 110 column pane
+  without reaching the paste threshold, padding padding padding, more padding here, and still more padding to
+  be safe, one more clause for good measure, and done.
+
+
+• OK
+
+  21:01
+
+
+› Count from 1 to 40, one number per line, nothing else.
+
+
+• 1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+
+
+› Second message: reply OK
+
+  GPT-6-Astra default · /private/tmp/claude-501/-Users-davidpena-workspace-worktrees/ce44de92-1fd2-4740-99f6-…
+  tab to queue message

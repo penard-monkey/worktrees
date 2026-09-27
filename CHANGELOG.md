@@ -16,7 +16,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `send` waits for the composer to settle, checks that Enter cleared it, and
   presses Enter at most three times in total. If submission cannot be
   confirmed, it returns `delivered: false` and leaves the message copy unread
-  for `messages` to retrieve. Approval and question prompts still stop Enter.
+  for `messages` to retrieve. Approval and question prompts still stop Enter,
+  and interrupted sends now also leave an unread copy. Submitting the retained
+  composer text later and reading that copy can deliver the instruction twice.
 
 ### Changed
 - **Agent providers share one core registry.** MCP provider choices, validation,

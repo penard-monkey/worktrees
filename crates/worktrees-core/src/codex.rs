@@ -352,20 +352,24 @@ pub fn composer_on_screen(screen: &str) -> Option<Composer> {
         return None;
     }
     let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
-    let footer = lines
-        .iter()
-        .rposition(|l| l.starts_with("  ") && l.contains(" · "))?;
-    // Only the optional shortcut hint may follow the model/path footer.
-    if lines[footer + 1..]
-        .iter()
-        .any(|l| !l.trim().is_empty() && l.trim() != "? for shortcuts")
-    {
-        return None;
-    }
+    // The status line has a model followed by a directory. Hints can also
+    // contain separators ("← for agents · ? for shortcuts"), so a separator
+    // alone is not a footer. Everything below this status line is TUI hints,
+    // including "tab to queue message" while a turn is running.
+    let footer = lines.iter().rposition(|line| {
+        let Some((model, rest)) = line.strip_prefix("  ").and_then(|l| l.split_once(" · ")) else {
+            return false;
+        };
+        let path = rest.split(" · ").next().unwrap_or("").trim();
+        !model.trim().is_empty() && (path.starts_with('/') || path.starts_with("~/") || path == "~")
+    })?;
     let prompt = lines[..footer]
         .iter()
         .rposition(|l| l.starts_with("› ") || *l == "›")?;
     let mut content = lines[prompt].trim_start_matches('›').trim().to_string();
+    if content.is_empty() || content == "Ask Codex to do anything" {
+        return Some(Composer::Empty);
+    }
     for line in &lines[prompt + 1..footer] {
         if !line.is_empty() && !line.starts_with("  ") {
             return None;
@@ -375,13 +379,7 @@ pub fn composer_on_screen(screen: &str) -> Option<Composer> {
             content.push_str(line.trim());
         }
     }
-    Some(
-        if content.is_empty() || content == "Ask Codex to do anything" {
-            Composer::Empty
-        } else {
-            Composer::Text(content)
-        },
-    )
+    Some(Composer::Text(content))
 }
 
 /// A paste chip belongs to the live composer, not to a message in history.
@@ -439,6 +437,33 @@ mod tests {
             SEND_TYPED,
             &format!("• Working...\n{SEND_TYPED}")
         ));
+    }
+
+    #[test]
+    fn send_review_busy_composer_settles_despite_queue_hint() {
+        let screen = include_str!("../tests/fixtures/codex-send/review-busy-typed.txt");
+        assert!(screen.contains("tab to queue message"));
+        assert_eq!(composer_on_screen(screen), Some(Composer::Text("Second message: reply OK".into())));
+        assert!(composer_settled(screen, screen));
+        assert!(!composer_submitted(screen));
+    }
+
+    #[test]
+    fn send_review_empty_composers_ignore_agent_navigation_hints() {
+        for screen in [
+            include_str!("../tests/fixtures/codex-send/review-idle.txt"),
+            include_str!("../tests/fixtures/codex-send/review-idle-git.txt"),
+            include_str!("../tests/fixtures/codex-send/review-busy-queued.txt"),
+            include_str!("../tests/fixtures/codex-send/review-post-final.txt"),
+        ] {
+            assert!(screen.contains("← for agents · ? for shortcuts"));
+            assert_eq!(composer_on_screen(screen), Some(Composer::Empty));
+            assert!(composer_submitted(screen));
+            assert!(!composer_settled(screen, screen));
+        }
+        let wrapped = include_str!("../tests/fixtures/codex-send/review-typed400.txt");
+        assert!(composer_settled(wrapped, wrapped));
+        assert!(!composer_submitted(wrapped));
     }
 
     /// Shapes copied from real session_meta lines: codex's auto-reviewer shares
