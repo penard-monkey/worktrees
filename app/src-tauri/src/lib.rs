@@ -1017,7 +1017,7 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: O
             let session = ops::agent_session_name(&p.session_name("(main)"), &provider);
             let mut ai_cmd = provider.clone();
             if resume && !ai_cmd.is_empty() {
-                ai_cmd = ops::resume_command(&ai_cmd);
+                ai_cmd = ops::resume_command(&ai_cmd, &p.main_root);
             }
             // Propagate launch's rc: a failed new-session must reach the UI
             // banner / app.log, not silently report success. Single-pane

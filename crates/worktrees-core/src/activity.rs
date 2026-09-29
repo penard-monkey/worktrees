@@ -275,36 +275,15 @@ pub fn claude_activity(probes: &[agent::ClaudeProbe], path: &str) -> Option<Acti
     Some(Activity { provider: Some("claude"), state: claude_state(&a.state), last_done: None, session })
 }
 
-/// The more active of two readings; Claude first on a tie (it is the one with
-/// its own bus, so naming it is the more useful answer).
-pub fn most_active(claude: Option<Activity>, codex: Option<Activity>) -> Activity {
-    match (claude, codex) {
-        (Some(c), Some(x)) => {
-            if x.state.rank() < c.state.rank() {
-                x
-            } else {
-                c
-            }
-        }
-        (Some(c), None) => c,
-        (None, Some(x)) => x,
-        (None, None) => Activity::none(),
-    }
-}
-
-/// Both providers' readings for one place, from a probe scan and a pane
-/// snapshot the caller already holds (so a caller asking about several places
-/// pays for each once).
-pub fn place_activities(
-    project: &Project,
-    slug: &str,
-    path: &str,
-    probes: &[agent::ClaudeProbe],
-    panes: Option<&tmux::PaneList>,
-) -> (Option<Activity>, Option<Activity>) {
-    let claude = claude_activity(probes, path);
-    let codex = panes.and_then(|p| codex_activity(p, &project.session_name(slug), path));
-    (claude, codex)
+/// The most active of any number of readings (one per harness, in registry
+/// order); the EARLIER reading wins a tie — Claude first, since it is the one
+/// with its own bus, so naming it is the more useful answer.
+pub fn most_active(readings: impl IntoIterator<Item = Activity>) -> Activity {
+    readings.into_iter().fold(None, |best: Option<Activity>, x| match best {
+        Some(b) if b.state.rank() <= x.state.rank() => Some(b),
+        _ => Some(x),
+    })
+    .unwrap_or_else(Activity::none)
 }
 
 /// What the agent in one place is doing — the answer `place_status` and
@@ -312,8 +291,8 @@ pub fn place_activities(
 pub fn place_activity(project: &Project, slug: &str, path: &str) -> Activity {
     let probes = agent::live_probes();
     let panes = tmux::PaneList::fetch();
-    let (c, x) = place_activities(project, slug, path, &probes, panes.as_ref());
-    most_active(c, x)
+    let scan = crate::harness::Scan { probes: &probes, panes: panes.as_ref() };
+    most_active(crate::harness::place_activities(project, slug, path, &scan).into_iter().map(|(_, x)| x))
 }
 
 #[cfg(test)]
@@ -347,11 +326,16 @@ mod tests {
 
     #[test]
     fn the_more_active_provider_answers() {
-        let a = |p, s| Some(Activity { provider: Some(p), state: s, last_done: None, session: None });
-        assert_eq!(most_active(a("claude", State::Idle), a("codex", State::Busy)).provider, Some("codex"));
-        assert_eq!(most_active(a("claude", State::Waiting), a("codex", State::Waiting)).provider, Some("claude"));
-        assert_eq!(most_active(None, a("codex", State::Idle)).state, State::Idle);
-        assert_eq!(most_active(None, None), Activity::none());
+        let a = |p, s| Activity { provider: Some(p), state: s, last_done: None, session: None };
+        assert_eq!(most_active([a("claude", State::Idle), a("codex", State::Busy)]).provider, Some("codex"));
+        assert_eq!(most_active([a("claude", State::Waiting), a("codex", State::Waiting)]).provider, Some("claude"));
+        assert_eq!(most_active([a("codex", State::Idle)]).state, State::Idle);
+        assert_eq!(most_active([]), Activity::none());
+        // N-ary: the first of the most active wins, wherever it sits.
+        let three = [a("claude", State::Idle), a("codex", State::Waiting), a("third", State::Waiting)];
+        assert_eq!(most_active(three).provider, Some("codex"));
+        let three = [a("claude", State::Idle), a("codex", State::Idle), a("third", State::Busy)];
+        assert_eq!(most_active(three).provider, Some("third"));
         let v = serde_json::to_value(Activity::none()).unwrap();
         assert_eq!(v, serde_json::json!({ "provider": null, "state": "none", "last_done": null }));
     }

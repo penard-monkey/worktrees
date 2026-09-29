@@ -215,7 +215,7 @@ impl PaneList {
         for (session, path, cmd) in &self.panes {
             if is_shell_sidecar(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
             if exclude_under.is_some_and(|dir| path == dir || path.starts_with(&format!("{dir}/"))) { continue; }
-            let Some(provider) = crate::provider::for_pane(cmd) else { continue };
+            let Some(provider) = crate::provider::for_pane(session, cmd) else { continue };
             let provider = provider.id;
             if !found.iter().any(|(name, _)| name == session) {
                 found.push((session.clone(), provider));
@@ -930,6 +930,22 @@ mod tests {
         assert_eq!(list.agents_in("/repo", Some("/repo/.worktrees")), vec![
             ("old-prefix".into(), "claude"),
             ("codex-sidecar".into(), "codex"),
+        ]);
+    }
+
+    /// npm's codex (and any node-based harness) reports `node`. In a provider
+    /// sidecar the session name says whose it is; before `for_pane` looked at
+    /// it, both of these read as Claude.
+    #[test]
+    fn agents_in_reads_a_node_pane_by_its_sidecar() {
+        let list = pl(&[
+            ("repo-feat~agent~codex", "/wt/feat", "node"),
+            ("repo-feat~agent~pi", "/wt/feat", "node"),
+            ("repo-feat", "/wt/feat", "node"),
+        ]);
+        assert_eq!(list.agents_in("/wt/feat", None), vec![
+            ("repo-feat~agent~codex".into(), "codex"),
+            ("repo-feat".into(), "claude"),
         ]);
     }
 

@@ -473,11 +473,13 @@ pub struct AiLaunch {
     /// `launch_cmd`, after `--name` for Claude: another AI tool
     /// would read it as something else entirely.
     pub opener: Option<String>,
-    /// Extra Codex arguments, each ALREADY shell-quoted, inserted by
-    /// `launch_cmd` right after the executable (before a `resume` subcommand).
-    /// Filled by `ops::ai_launch_for` because it depends on the worktree (the
-    /// auto-review sandbox needs the repo's git common dir). Empty for claude.
-    pub codex_flags: Vec<String>,
+    /// Harness arguments that depend on the worktree, each ALREADY
+    /// shell-quoted (`harness::Adapter::place_flags` — Codex's permission mode,
+    /// whose auto-review sandbox needs the repo's git common dir). Filled by
+    /// `ops::ai_launch_for`, emitted by `launch_cmd` through the adapter's
+    /// `launch_args` head, right after the executable (before a `resume`
+    /// subcommand). Empty for claude.
+    pub place_flags: Vec<String>,
 }
 
 /// Compose the profiled launch for claude: the config-dir swap plus the flags
@@ -528,7 +530,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         // the app's auto-resume gate match the PROGRAM, never this string.
         match_word: base.match_word.clone(),
         opener: base.opener.clone(),
-        codex_flags: Vec::new(),
+        place_flags: Vec::new(),
     }
 }
 
@@ -594,7 +596,7 @@ impl AiLaunch {
             cmd: ai_cmd.to_string(),
             match_word: ai_word_of(ai_cmd),
             opener: None,
-            codex_flags: Vec::new(),
+            place_flags: Vec::new(),
         }
     }
 
@@ -604,9 +606,15 @@ impl AiLaunch {
     /// `sh -ic` runs. The caller separately wraps the whole body in `tmux::sq`
     /// for tmux's own parse — two nested layers, each quoting for a different
     /// reader.
+    ///
+    /// The harness's own `launch_env` follows the profile's (empty for every
+    /// harness today; it is where a per-launch value would ride).
     pub fn shell_prefix(&self) -> String {
+        let harness = crate::harness::for_cmd(&self.cmd).filter(|_| !self.cmd.is_empty());
+        let extra = harness.map(|a| a.launch_env(self)).unwrap_or_default();
         self.env
             .iter()
+            .chain(extra.iter())
             // Values are quoted; a KEY cannot be, since `K=v` is shell syntax.
             // `env` is a pub field, so the day a phase adds profile-defined env
             // vars a key of `X; evil #` would inject straight into the inner
@@ -647,34 +655,23 @@ impl AiLaunch {
     /// neither: `ai_word_of(cmd)` is the program actually run, and `match_word`
     /// alone would say `claude` for the printf case too.
     pub fn launch_cmd(&self, session: &str) -> String {
-        let provider = ai_word_of(&self.cmd);
-        if self.cmd.is_empty() || crate::provider::by_word(&provider).is_none() {
+        let Some(adapter) = crate::harness::for_cmd(&self.cmd).filter(|_| !self.cmd.is_empty()) else {
             return self.cmd.clone();
+        };
+        // The adapter's words: `head` right after the executable (so a resume
+        // SUBCOMMAND like Codex's `resume --last` comes after them), `tail` on
+        // the end — before the opener, which must never follow `-r` directly.
+        let args = adapter.launch_args(self, session);
+        let split = self.cmd.find(char::is_whitespace).unwrap_or(self.cmd.len());
+        let mut cmd = self.cmd[..split].to_string();
+        for w in &args.head {
+            cmd.push(' ');
+            cmd.push_str(w);
         }
-        // Worktrees-owned Codex panes use ChatGPT account sign-in. Put the
-        // config override immediately after the executable, before a possible
-        // `resume` subcommand, and leave Codex's own browser OAuth flow and
-        // credential store to the CLI. No Worktrees API key is created or read.
-        //
-        // `project_doc_fallback_filenames` makes Codex read a directory's
-        // CLAUDE.md when it has no AGENTS.md (measured with `codex debug
-        // prompt-input`, 0.157.1: nested directories too, and AGENTS.md still
-        // wins where both exist) — so a CLAUDE.md-only project briefs Codex
-        // with no repo change. Per-launch `-c`, never a write to Codex's config.
-        let mut cmd = if provider == "codex" {
-            let split = self.cmd.find(char::is_whitespace).unwrap_or(self.cmd.len());
-            let mut head = format!("{} -c forced_login_method=chatgpt -c {}", &self.cmd[..split], shell_quote(CODEX_DOC_FALLBACK));
-            for f in &self.codex_flags {
-                head.push(' ');
-                head.push_str(f);
-            }
-            format!("{head}{}", &self.cmd[split..])
-        } else { self.cmd.clone() };
-        if let Some(arg) = crate::provider::by_word(&provider).and_then(|p| p.name_arg).filter(|_| !session.is_empty()) {
+        cmd.push_str(&self.cmd[split..]);
+        for w in &args.tail {
             cmd.push(' ');
-            cmd.push_str(arg);
-            cmd.push(' ');
-            cmd.push_str(&shell_quote(session));
+            cmd.push_str(w);
         }
         if let Some(o) = self.opener.as_deref().filter(|o| !o.trim().is_empty()) {
             cmd.push(' ');
@@ -1657,7 +1654,7 @@ mod tests {
             cmd: "claude --append-system-prompt-file /data/profiles/work/rules.md".into(),
             match_word: ai_word_of("claude"),
             opener: None,
-            codex_flags: Vec::new(),
+            place_flags: Vec::new(),
         };
         assert_eq!(l.match_word, "claude", "adoption matches the program, not the env prefix");
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/data/profiles/work' ");
@@ -1687,7 +1684,7 @@ mod tests {
             cmd: "claude -r".into(),
             match_word: "claude".into(),
             opener: None,
-            codex_flags: Vec::new(),
+            place_flags: Vec::new(),
         };
         assert_eq!(
             l.pane0_body(keep),
@@ -1705,7 +1702,7 @@ mod tests {
         let fb = r#"-c 'project_doc_fallback_filenames=["CLAUDE.md"]'"#;
         assert_eq!(AiLaunch::plain("codex").launch_cmd("proj-feat"), format!("codex -c forced_login_method=chatgpt {fb}"));
         let mut resumed = AiLaunch::plain("codex resume --last");
-        resumed.codex_flags = vec!["--approve-for-me".into()];
+        resumed.place_flags = vec!["--approve-for-me".into()];
         assert_eq!(resumed.launch_cmd("proj-feat"), format!("codex -c forced_login_method=chatgpt {fb} --approve-for-me resume --last"));
         let mut codex = AiLaunch::plain("codex");
         codex.opener = Some("Read .planning/brief.md and begin.".into());
@@ -1725,7 +1722,7 @@ mod tests {
             cmd: "claude --model 'opus'".into(),
             match_word: "claude".into(),
             opener: None,
-            codex_flags: Vec::new(),
+            place_flags: Vec::new(),
         };
         assert_eq!(
             prof.pane0_body_for(keep, "proj-x"),
@@ -1767,7 +1764,7 @@ mod tests {
             cmd: "claude".into(),
             match_word: "claude".into(),
             opener: None,
-            codex_flags: Vec::new(),
+            place_flags: Vec::new(),
         };
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");
     }

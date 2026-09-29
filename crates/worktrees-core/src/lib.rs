@@ -17,6 +17,7 @@ pub mod diag;
 pub mod docs;
 pub mod error;
 pub mod git;
+pub mod harness;
 pub mod health;
 pub mod inbox;
 pub mod init;

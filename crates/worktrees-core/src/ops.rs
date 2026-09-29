@@ -94,10 +94,11 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
 /// back out of it.
 pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
     let mut plain = crate::profile::AiLaunch::plain(ai_cmd);
-    // Codex's permission mode rides on EVERY Codex launch, profiled or not —
-    // profiles are claude-only, and this is not a profile setting.
-    if plain.match_word == "codex" {
-        plain.codex_flags = crate::codex::launch_flags(wt);
+    // A harness's place-derived flags (Codex's permission mode) ride on EVERY
+    // launch of it, profiled or not — profiles are claude-only, and these are
+    // not a profile setting.
+    if let Some(a) = crate::harness::by_word(&plain.match_word) {
+        plain.place_flags = a.place_flags(wt);
     }
     // Reads the same flag the PROBE side reads, so the two cannot get out of
     // step — `claude_config_dir_for_repo` returns `~/.claude` while this is off.
@@ -107,7 +108,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
     // `ai_cmd = none` (plain shell), or a different AI tool. The profile model
     // is tool-agnostic but the recipe is claude's; anything else launches
     // exactly as it does today rather than being handed flags it never had.
-    if plain.cmd.is_empty() || plain.match_word != "claude" {
+    if plain.cmd.is_empty() || plain.match_word != crate::provider::CLAUDE.match_word {
         return plain;
     }
     let Some(prof) = crate::profile::resolve_profile(&p.main_root) else {
@@ -150,7 +151,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
                 cmd: format!("printf '%s\\n' {} >&2", crate::profile::shell_quote(&msg)),
                 match_word: plain.match_word,
                 opener: None,
-                codex_flags: Vec::new(),
+                place_flags: Vec::new(),
             }
         }
     }
@@ -439,8 +440,16 @@ pub fn agent_session_name(canonical: &str, ai_word: &str) -> String {
     provider.session_name(canonical, owner.id, sidecar_exists)
 }
 
-pub fn resume_command(ai_cmd: &str) -> String {
-    format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg_for(ai_cmd))
+pub fn resume_command(ai_cmd: &str, cwd: &str) -> String {
+    format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg_for(ai_cmd, cwd))
+}
+
+/// Whether a resume asked for in `wt` may be launched: always for a
+/// non-harness command and for Claude, only with a conversation there for a
+/// harness whose resume would otherwise reach outside the place
+/// (`harness::Adapter::may_resume`).
+pub fn may_resume(p: &Project, ai_cmd: &str, wt: &str) -> bool {
+    crate::harness::for_cmd(ai_cmd).is_none_or(|a| a.may_resume(p, wt))
 }
 
 /// What the Plan tab's "Generate plan" button pastes into a place's Claude
@@ -720,9 +729,8 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 
     let install_cmd = if do_install && !already { detect_install_cmd(&wt) } else { String::new() };
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
-    if resume && !ai_cmd.is_empty() &&
-        (crate::profile::ai_word_of(&ai_cmd) != "codex" || crate::codex::session_present(&wt)) {
-        ai_cmd = resume_command(&ai_cmd);
+    if resume && !ai_cmd.is_empty() && may_resume(p, &ai_cmd, &wt) {
+        ai_cmd = resume_command(&ai_cmd, &wt);
     }
 
     if !do_tmux {
@@ -919,9 +927,8 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let session = p.session_name(&slug);
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
-    if resume && !ai_cmd.is_empty() &&
-        (crate::profile::ai_word_of(&ai_cmd) != "codex" || crate::codex::session_present(&wt)) {
-        ai_cmd = resume_command(&ai_cmd);
+    if resume && !ai_cmd.is_empty() && may_resume(p, &ai_cmd, &wt) {
+        ai_cmd = resume_command(&ai_cmd, &wt);
     }
     let ai = ai_launch_for(p, ui, &wt, &ai_cmd);
     let session = agent_session_name(&session, &ai.match_word);
