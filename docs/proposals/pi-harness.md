@@ -47,8 +47,11 @@ Each claim is marked with its source:
 Taken on 2026-09-29, after the first draft:
 
 - **Q3, trust default: yes.** pi launches with `--no-approve` by default. A
-  user setting can switch it to `ask`. Worktrees never passes `--approve`
-  (§8).
+  user setting can switch it to `ask`.
+- **Q3 follow-up, per-repo allowance: yes.** A repo the user has allowed
+  launches with `--approve`, so its `.pi/` and `.agents/skills` load without
+  pi's prompt. The allowance is user-scoped and keyed by repo root. That is
+  the only case in which worktrees passes `--approve` (§8, item 5).
 - **Q5, unreachable host at launch: refuse, with "launch anyway".**
   - App: a "launch anyway" button.
   - CLI: `--force`.
@@ -679,8 +682,8 @@ Proposal:
    resources are skipped for this run, and pi's context files
    (`AGENTS.md`/`CLAUDE.md`) still load, which is what worktrees relies on.
    A user setting (`pi_project_trust: "never" | "ask"`) can switch to `ask`
-   for people who want repo skills. Worktrees never passes `--approve`, and
-   never writes `trust.json`.
+   for people who want repo skills. Worktrees passes `--approve` only for a
+   repo the user has allowed (item 5), and never writes `trust.json`.
 2. `send` and `may_type` treat the trust modal as **waiting**. Its footer is
    `↑↓ navigate  enter select  escape/ctrl+c cancel` under a `Trust project
    folder?` heading. Enter is never pressed into it.
@@ -689,6 +692,29 @@ Proposal:
 4. The worktrees extension/skill (§3.3, §4.2) is loaded by **path from
    worktrees' own data dir**, the same provenance as the brief opener. It is
    never installed into `~/.pi`, and never read from the repo.
+5. **Per-repo allowance (decided 2026-09-29).** The user can allow a repo
+   once, and every pi lane in that repo then launches with `--approve`
+   instead of `--no-approve`.
+   - **Where it lives:** `~/.config/worktrees/config.toml`, as a list of
+     canonicalised repo roots per harness (for example
+     `[trust] pi = ["/path/to/repo"]`). This is the provenance ADR 0001
+     prescribes for `post_create`. The key joins `USER_ONLY_KEYS`, so a
+     `.worktrees.toml` that sets it is a hard parse error.
+   - **Scope:** the repo root (the parent of the git common dir), so it
+     covers every worktree of that repo, including ones created later. It
+     is never inferred from a place directory a repo could fake.
+   - **Who can grant it:** only the user, from Settings → pi or a CLI verb
+     (`worktrees trust pi [<repo>]` / `--revoke`). MCP `create_worktree`
+     cannot grant it, and an orchestrating agent cannot either. MCP may
+     *report* whether a repo is allowed.
+   - **What it changes:** one flag. Worktrees still never writes pi's
+     `trust.json`, so the allowance does not leak into `pi` runs outside
+     worktrees, and revoking it takes effect at the next launch.
+   - **The app shows it:** the pi row of a place in an allowed repo, and
+     the launch confirmation, say that repo code will load.
+   - **Shared with opencode:** the same `[trust]` table is the allowance
+     the opencode proposal's §8 gate needs, keyed `opencode = [...]`. One
+     mechanism, one place for the user to look.
 
 Worth saying plainly: pi itself states it has no sandbox and no per-tool
 approval **[source: security.md]**. Worktrees' contribution is not making
@@ -866,7 +892,9 @@ change:
 
 - Registry entry `pi`, sidecar `~agent~pi`. Launch is `pi --model
   <backend>/<id> --session-id <derived> --session-dir <pi default>
-  --no-approve "<BRIEF_OPENER>"`. Resume is the same minus `--model`.
+  --no-approve "<BRIEF_OPENER>"` (`--approve` instead for a repo in the
+  user's `[trust] pi` allowance, §8 item 5). Resume is the same minus
+  `--model`.
 - `AgentChoice` / `ModelRef` / `ModelOption`. The pi model adapter parses
   `pi --list-models` (fixture-pinned to the version phase 2 is built against), with `auth check` for
   reasons. MCP `create_worktree` gains `model`. CLI `--model`.
@@ -910,7 +938,8 @@ change:
    worktrees only *show* the gap, or also offer "add to pi's models.json"?
    That would be a write to pi's config, which this proposal currently
    forbids, the same as `~/.claude.json`.
-3. **Answered (see Decisions): `--no-approve` by default.** Original
+3. **Answered (see Decisions): `--no-approve` by default, plus a
+   user-scoped per-repo allowance (§8 item 5).** Original
    question kept for the record. **Trust default (one decision for pi AND
    opencode).** This is the same
    question as the opencode proposal's Q1. opencode runs a repo's
