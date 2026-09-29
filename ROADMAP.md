@@ -14,13 +14,39 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   worktrees vX; reconnect with /mcp") and flag it in `doctor`. See
   [the session](docs/sessions/2026-09-27-codex-live-testing/summary.md).
 
-- **Connect frontend provider types to the core registry before adding a provider.**
-  The MCP/provider-registry refactor deliberately leaves `app/src/planUsage.ts`,
-  `settings.ts`, `App.tsx` and other frontend Claude/Codex unions unchanged.
-  Add a drift check (or generate the types) and extend provider-specific UI and
-  activity adapters when a third provider is approved. Core discovery, lifecycle
-  naming and MCP validation now derive from `worktrees_core::provider`; this
-  does not by itself make the app support an arbitrary new agent.
+- **`app/src/harness.ts` mirrors `provider::PROVIDERS` with no drift check.**
+  #364 replaced every frontend `"claude" | "codex"` union with one `Harness`
+  type + `HARNESSES`, but nothing fails when a registry row is added in Rust
+  and not in `harness.ts` (or the order differs — the first is the default and
+  wins ties on both sides). Same shape as `dnd-check.mjs`: parse the ids out of
+  `provider.rs` and compare. See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
+
+- **`running_model` is still an app-side match, not an adapter method.**
+  `lib.rs::live_model` dispatches `"claude"`/`"codex"` by id because Claude's
+  reader caches transcript tails in the app and logs a failed read through
+  `applog`; moving it into `harness::Adapter` would swallow that error (core
+  cannot log). Move it once core has a log seam, or pass a logger in. See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
+
+- **`launch_env` rides in the pane's shell prefix, which is tmux argv.**
+  `harness::Adapter::launch_env` is empty for both harnesses and is emitted by
+  `AiLaunch::shell_prefix`. That is fine for plain values and wrong for a
+  per-launch SECRET (opencode's `OPENCODE_SERVER_PASSWORD`): it would be
+  visible in `ps` and tmux's command line. The harness that first needs one
+  picks the channel (env file, `tmux set-environment`); the trait doc says so.
+  See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
+
+- **Per-harness test id on the Switch item.** The ⋯ menu's
+  `data-testid="topbar-switch-provider"` is now emitted once per OTHER
+  harness — unique with two, duplicated with three. Make it
+  `topbar-switch-provider-${to}` (and update any harness script that selects
+  it) before a third harness ships. From the phase-1 review. See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
+
+- **No mock-harness visual pass was done for #364.** The Chrome DevTools
+  browser was held by another session and Playwright is not installed in that
+  worktree; the rendered strings are identical by construction
+  (`HARNESS_LABEL`), and tsc + all 22 checks passed. Worth one look at the
+  Open/Switch/new-worktree segment surfaces the next time someone has the mock
+  up. See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
 
 - **Finish hand-checking window restore, then quiet its log.** A real
   full-screen restore is confirmed in `app.log`. Still unobserved: leaving full
