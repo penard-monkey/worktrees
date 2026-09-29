@@ -14,3 +14,4 @@ maintained documentation. Where a proposal and the code disagree, the code wins.
 | [Per-place docs](place-docs.html) | a Docs tab per place — index, staleness header, and a tool-owned browser viewer for long reads and diagrams |
 | [Project automations](automations.html) | a brief on a schedule, run across a project's worktrees — a fourth dock tab, a per-machine run ledger, proposals applied with one click |
 | [Codex support](codex-support.html) | Codex launch, resume, MCP setup, and app behavior |
+| [pi as a third harness](pi-harness.html) | pi (pi.dev) beside Claude and Codex, with harness × model as a first-class choice — launch, activity, bus, availability, node policy |
