@@ -87,8 +87,32 @@ pub struct Declared {
     pub profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_epoch: Option<i64>,
+    /// The harness and model this place's agent was last LAUNCHED with
+    /// (pi-harness §2.3.6). A fresh pi launch with no `--model` reuses it, so a
+    /// place keeps the model it was given rather than falling to pi's default —
+    /// which on the machine this was built on is a provider that is not signed
+    /// in. Written only when a session is CREATED, never on an attach, and only
+    /// for pi or an explicitly chosen model: an unprofiled claude launch with no
+    /// model must not start rewriting this file for everyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentDecl>,
+    /// The generation of this place's pi session id (`pi::session_id`). A fresh
+    /// launch bumps it; a resume reuses it. Never inferred from pi's session
+    /// directory: the id is how worktrees NAMES the file, so it has to be
+    /// decided before the file exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_session_gen: Option<u32>,
     #[serde(flatten)]
     pub extra: Map<String, serde_json::Value>,
+}
+
+/// `Declared::agent`: `{harness, model}`, the model in the harness's own
+/// spelling (`backend/model` for pi).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentDecl {
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

@@ -480,6 +480,19 @@ pub struct AiLaunch {
     /// `launch_args` head, right after the executable (before a `resume`
     /// subcommand). Empty for claude.
     pub place_flags: Vec<String>,
+    /// The model the user chose for THIS launch, validated
+    /// (`choice::validate_model`). Emitted by the adapter through the
+    /// registry's `model_arg`, on a fresh launch only — never on a resume, which
+    /// keeps the session's own model. `None`: the harness's default, which pi
+    /// does not have (`harness::Pi::prepare` resolves one or refuses).
+    pub model: Option<String>,
+    /// This launch resumes the place's conversation. Claude and Codex still
+    /// carry their resume WORDS in `cmd` (`ops::resume_command`); this is what
+    /// tells an adapter not to pass a model, and pi which session id to reopen.
+    pub resume: bool,
+    /// Launch even though the model host did not answer (`--force`, the app's
+    /// "launch anyway"). Never overrides a harness that cannot run at all.
+    pub force: bool,
 }
 
 /// Compose the profiled launch for claude: the config-dir swap plus the flags
@@ -531,6 +544,9 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         match_word: base.match_word.clone(),
         opener: base.opener.clone(),
         place_flags: Vec::new(),
+        model: base.model.clone(),
+        resume: base.resume,
+        force: base.force,
     }
 }
 
@@ -597,6 +613,9 @@ impl AiLaunch {
             match_word: ai_word_of(ai_cmd),
             opener: None,
             place_flags: Vec::new(),
+            model: None,
+            resume: false,
+            force: false,
         }
     }
 
@@ -1655,6 +1674,9 @@ mod tests {
             match_word: ai_word_of("claude"),
             opener: None,
             place_flags: Vec::new(),
+            model: None,
+            resume: false,
+            force: false,
         };
         assert_eq!(l.match_word, "claude", "adoption matches the program, not the env prefix");
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/data/profiles/work' ");
@@ -1685,6 +1707,9 @@ mod tests {
             match_word: "claude".into(),
             opener: None,
             place_flags: Vec::new(),
+            model: None,
+            resume: false,
+            force: false,
         };
         assert_eq!(
             l.pane0_body(keep),
@@ -1723,6 +1748,9 @@ mod tests {
             match_word: "claude".into(),
             opener: None,
             place_flags: Vec::new(),
+            model: None,
+            resume: false,
+            force: false,
         };
         assert_eq!(
             prof.pane0_body_for(keep, "proj-x"),
@@ -1765,6 +1793,9 @@ mod tests {
             match_word: "claude".into(),
             opener: None,
             place_flags: Vec::new(),
+            model: None,
+            resume: false,
+            force: false,
         };
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");
     }

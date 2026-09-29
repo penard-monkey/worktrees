@@ -41,8 +41,26 @@ const DEFAULT_MAX_SLOTS: u32 = 50;
 /// Keys a project may NEVER set (§5). Anything that becomes argv, or names a
 /// program to run, is user-scoped permanently — a cloned repo writing the
 /// tool's command line is the one thing this design refuses to allow.
-const USER_ONLY_KEYS: &[&str] =
-    &["ai_cmd", "ai_resume_arg", "post_create", "hooks", "infra", "install_cmd", "no_install"];
+///
+/// `harness`/`model` look inert but are not: for pi a model selects a
+/// PROVIDER, and a provider can carry an `apiKey: "!command"` pi runs — the
+/// user wrote the command, but a repo would be choosing when it runs. `trust`
+/// is the per-repo allowance that makes pi load a repo's own extensions; a repo
+/// granting itself that is the whole thing it exists to prevent
+/// (pi-harness §8).
+const USER_ONLY_KEYS: &[&str] = &[
+    "ai_cmd",
+    "ai_resume_arg",
+    "post_create",
+    "hooks",
+    "infra",
+    "install_cmd",
+    "no_install",
+    "harness",
+    "model",
+    "trust",
+    "pi_project_trust",
+];
 
 // ── errors ───────────────────────────────────────────────────────────────────
 
@@ -1207,6 +1225,20 @@ mod tests {
         assert_eq!(e.line, Some(3), "{e}");
         assert!(e.message.starts_with("ai_cmd may not be set by a project"), "{e}");
         let e = parse("[project]\npost_create = \"x\"\n").unwrap_err();
+        assert_eq!(e.line, Some(2), "{e}");
+        // The agent choice and pi's trust allowance are the user's, like argv.
+        for t in [
+            "harness = \"pi\"\n",
+            "model = \"lm-studio/qwen3.6-27b\"\n",
+            "pi_project_trust = \"ask\"\n",
+            "[trust]\npi = [\"/repo\"]\n",
+            "[model]\npi = \"x/y\"\n",
+        ] {
+            let e = parse(t).unwrap_err();
+            assert!(e.message.contains("may not be set by a project"), "{t}: {e}");
+            assert_eq!(e.line, Some(1), "{t}");
+        }
+        let e = parse("[project]\nmodel = \"x\"\n").unwrap_err();
         assert_eq!(e.line, Some(2), "{e}");
     }
 

@@ -922,12 +922,29 @@ mod tests {
         let list = pl(&[
             ("repo-feat~agent~codex", "/wt/feat", "node"),
             ("repo-feat~agent~pi", "/wt/feat", "node"),
+            ("repo-feat~agent~opencode", "/wt/feat", "node"),
             ("repo-feat", "/wt/feat", "node"),
         ]);
         assert_eq!(list.agents_in("/wt/feat", None), vec![
             ("repo-feat~agent~codex".into(), "codex"),
+            ("repo-feat~agent~pi".into(), "pi"),
             ("repo-feat".into(), "claude"),
         ]);
+    }
+
+    /// Adoption finds a place's CANONICAL session by pane cwd. A provider
+    /// sidecar is never it — including one for a harness this build does not
+    /// know, which runs `node` and would otherwise be the preferred match.
+    #[test]
+    fn session_in_never_adopts_a_sidecar_known_or_not() {
+        let list = pl(&[
+            ("repo-feat~agent~opencode", "/wt/feat", "node"),
+            ("repo-feat~agent~pi", "/wt/feat", "node"),
+            ("repo-feat-hand", "/wt/feat", "zsh"),
+        ]);
+        assert_eq!(list.session_in("/wt/feat", "claude", None).as_deref(), Some("repo-feat-hand"));
+        let only = pl(&[("repo-feat~agent~opencode", "/wt/feat", "node")]);
+        assert_eq!(only.session_in("/wt/feat", "claude", None), None);
     }
 
     #[test]

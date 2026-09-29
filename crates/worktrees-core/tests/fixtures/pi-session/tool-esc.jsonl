@@ -1,0 +1,16 @@
+{"type":"session","version":3,"id":"01a0ede8-d46d-7251-a926-843bed277489","timestamp":"2026-09-29T16:04:14.061Z"}
+{"type":"model_change","id":"4e17cdaa","parentId":null,"timestamp":"2026-09-29T16:04:14.095Z","provider":"lm-studio","modelId":"qwen3.6-27b"}
+{"type":"thinking_level_change","id":"00a79f05","parentId":"4e17cdaa","timestamp":"2026-09-29T16:04:14.095Z","thinkingLevel":"off"}
+{"type":"message","id":"2a5cf5af","parentId":"00a79f05","timestamp":"2026-09-29T16:04:33.652Z","message":{"role":"system"}}
+{"type":"message","id":"018b491f","parentId":"2a5cf5af","timestamp":"2026-09-29T16:04:33.652Z","message":{"role":"user"}}
+{"type":"message","id":"17ad4bfe","parentId":"018b491f","timestamp":"2026-09-29T16:04:38.585Z","message":{"role":"assistant","stopReason":"toolUse","provider":"lm-studio","model":"qwen3.6-27b"}}
+{"type":"message","id":"6855cad1","parentId":"17ad4bfe","timestamp":"2026-09-29T16:04:38.591Z","message":{"role":"toolResult"}}
+{"type":"message","id":"0f7dd6e5","parentId":"6855cad1","timestamp":"2026-09-29T16:04:39.634Z","message":{"role":"assistant","stopReason":"stop","provider":"lm-studio","model":"qwen3.6-27b"}}
+{"type":"message","id":"7bc7cde0","parentId":"0f7dd6e5","timestamp":"2026-09-29T16:05:58.596Z","message":{"role":"user"}}
+{"type":"message","id":"d71ca565","parentId":"7bc7cde0","timestamp":"2026-09-29T16:06:03.635Z","message":{"role":"assistant","stopReason":"aborted","errorMessage":"Operation aborted","provider":"lm-studio","model":"qwen3.6-27b"}}
+{"type":"message","id":"ed781e8b","parentId":"d71ca565","timestamp":"2026-09-29T16:06:34.130Z","message":{"role":"user"}}
+{"type":"message","id":"8526d693","parentId":"ed781e8b","timestamp":"2026-09-29T16:06:41.623Z","message":{"role":"assistant","stopReason":"stop","provider":"lm-studio","model":"qwen3.6-27b"}}
+{"type":"message","id":"6cc6abde","parentId":"8526d693","timestamp":"2026-09-29T16:06:53.791Z","message":{"role":"user"}}
+{"type":"message","id":"db52e179","parentId":"6cc6abde","timestamp":"2026-09-29T16:07:08.845Z","message":{"role":"assistant","stopReason":"stop","provider":"lm-studio","model":"qwen3.6-27b"}}
+{"type":"message","id":"ad48b190","parentId":"db52e179","timestamp":"2026-09-29T16:07:08.847Z","message":{"role":"user"}}
+{"type":"message","id":"a6cf9bfb","parentId":"ad48b190","timestamp":"2026-09-29T16:07:13.376Z","message":{"role":"assistant","stopReason":"stop","provider":"lm-studio","model":"qwen3.6-27b"}}

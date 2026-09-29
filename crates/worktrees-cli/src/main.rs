@@ -17,7 +17,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees new <branch> [base]         create a worktree + tmux (AI | shell)
   worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
   worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
-  worktrees open <name> [--ai claude|codex]  open or switch the active agent
+  worktrees open <name> [--ai claude|codex|pi]  open or switch the active agent
+                                        (--model <m>: pi takes backend/id; --force: launch though the model host is down)
   worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
                                         (-y to kill an adopted session; --session <s> binds that answer)
   worktrees ls [--json]                 list worktrees + state (--json = machine-readable)
@@ -25,6 +26,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees relink [<name>|--all]       re-apply .worktrees.toml's files (--force to overwrite)
   worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
   worktrees doctor [<name>]             report file drift, declared and un- (--json --strict --config-only)
+  worktrees doctor --pi                 which pi, on which node; each pi model and why it can't run (--json)
+  worktrees trust pi [<repo>] [--revoke]  let a repo's own pi resources load (.pi/, .agents/skills)
   worktrees status <name>               health verdict for one worktree (--json)
   worktrees automations [ls|add|rm]     briefs Claude runs across this project
   worktrees automations run <slug>      run one now (0 clean, 2 findings, 1 failed)
@@ -188,6 +191,10 @@ fn run() -> i32 {
         // `fix` pushes, and `agentfiles::fix` refuses a hub copy itself — the
         // app calls it in-process, past this dispatch.
         "agent-setup" => worktrees_core::agentfiles::cmd_agent_setup(&project, &mut ui, rest),
+        // Not in MUTATING: it writes the USER's config.toml, never the repo —
+        // and it is the user's act by construction (the MCP server has no path
+        // to it).
+        "trust" => worktrees_core::trust::cmd_trust(&project, &mut ui, rest),
         other => {
             eprintln!("{}", error_line(&format!("Unknown command: {other}")));
             println!();

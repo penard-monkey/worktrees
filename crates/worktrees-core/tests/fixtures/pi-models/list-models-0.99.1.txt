@@ -1,0 +1,2 @@
+provider   model        context  max-out  thinking  images
+lm-studio  qwen3.6-27b  128K     16.4K    no        no    

@@ -311,6 +311,9 @@ fn live_model(id: &str, probes: &[worktrees_core::agent::ClaudeProbe], session: 
     match id {
         "claude" => claude_model(probes, session),
         "codex" => codex_model(cwd),
+        "pi" => session
+            .strip_suffix(provider::PI.sidecar_suffix)
+            .and_then(|canonical| worktrees_core::pi::running_model(canonical, cwd)),
         _ => None,
     }
 }
@@ -1088,7 +1091,8 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: O
             // banner / app.log, not silently report success. Single-pane
             // (spare_shell=false): Claude gets full width; the scratch shell
             // lives in the dock's Terminal tab.
-            let ai = ops::ai_launch_for(p, ui, &p.main_root, &ai_cmd);
+            let mut ai = ops::ai_launch_for(p, ui, &p.main_root, &ai_cmd);
+            ai.resume = resume;
             ops::launch(p, ui, &p.main_root, &session, "", &ai, false, false)
         } else {
             let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
@@ -7746,10 +7750,17 @@ mod tests {
                 .into_iter()
                 .map(|s| (s.name, s.up))
                 .collect();
-            assert_eq!(got, old(panes.as_ref(), c, primary, *up), "primary {primary} up={up}");
+            // Claude and Codex exactly as the formula had them; pi, which the
+            // formula predates, is its sidecar and nothing else.
+            assert_eq!(&got[..2], &old(panes.as_ref(), c, primary, *up)[..], "primary {primary} up={up}");
+            let pi_up = panes.as_ref().is_some_and(|p| p.has_session("p-feat~agent~pi"));
+            assert_eq!(got[2], ("p-feat~agent~pi".to_string(), pi_up), "primary {primary} up={up}");
         }
+        let pi = rows(&[("p-feat~agent~pi", "node")]);
+        let got = agent_sessions_for(Some(&pi), &[], c, c, false, "/nonexistent");
+        assert!(got[2].up && !got[0].up && !got[1].up, "a node pane in pi's sidecar is pi, not Claude");
         let ids: Vec<&str> = agent_sessions_for(None, &[], c, c, false, "").iter().map(|s| s.id).collect();
-        assert_eq!(ids, ["claude", "codex"], "one entry per harness, registry order");
+        assert_eq!(ids, ["claude", "codex", "pi"], "one entry per harness, registry order");
     }
 
     fn v(paths: &[&str]) -> Vec<String> {

@@ -21,8 +21,9 @@
 //! - **The pane is not the only channel.** `send` returns a `Delivery`, and
 //!   the harness owns both the delivery and its confirmation.
 //!
-//! Only methods with a caller live on the trait. Model choice (`model_arg`,
-//! `ModelRef`, a catalog) arrives with its first consumer.
+//! Only methods with a caller live on the trait. A model reaches argv through
+//! the registry's `model_arg`, emitted here and only on a fresh launch; what a
+//! picker lists is `choice::options_for`.
 
 use crate::activity::{self, Activity, State};
 use crate::profile::{shell_quote, AiLaunch};
@@ -73,6 +74,17 @@ pub enum Delivery {
     Elsewhere(String),
 }
 
+/// Why a harness will not start a session. `Hard`: it cannot run at all
+/// (pi missing, node below pi's floor, no model to pass) — forcing it would
+/// only start something broken. `Soft`: its model host did not answer; the
+/// user may launch anyway (`AiLaunch::force`), and the exit code says so
+/// (`diag::EXIT_LAUNCH_REFUSED`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Hard(String),
+    Soft(String),
+}
+
 /// Whether a typed message was confirmed submitted.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SendOutcome {
@@ -119,8 +131,36 @@ pub trait Adapter: Sync {
 
     /// The resume words appended to the command (`-r`, `resume --last`). A
     /// method, not a registry string: a harness that resumes an exact session
-    /// derives the id from the place.
+    /// derives the id from the place. Empty for such a harness — its resume is
+    /// carried by `AiLaunch::resume` and emitted by `prepare`/`launch_args`.
     fn resume_arg(&self, cwd: &str) -> String;
+
+    /// How Settings shows this harness's resume, with no place to derive one
+    /// from. Equal to `resume_arg` for a harness whose resume is a fixed word.
+    fn resume_display(&self) -> String {
+        self.resume_arg("")
+    }
+
+    /// Whether resume names an EXACT session, so a user-configured
+    /// `ai_resume_arg` must not replace it (`config::resolve_ai_resume_arg_for`).
+    fn exact_resume(&self) -> bool {
+        false
+    }
+
+    /// Last word before a session is CREATED for `launch` in place `slug`:
+    /// decide what argv needs the place's declared state for (pi's session id
+    /// and generation), and refuse a launch that cannot or should not start.
+    /// Runs before `ops::launch` closes the place's other agent, so a refusal
+    /// costs nothing that was running. Never runs for an attach.
+    fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, _launch: &mut AiLaunch) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    /// The model the place's running session is on, from the harness's own
+    /// record, when it keeps one we read.
+    fn running_model(&self, _canonical: &str, _path: &str) -> Option<String> {
+        None
+    }
 
     /// Whether this harness has a conversation on disk for `cwd`.
     fn session_present(&self, project: &Project, cwd: &str) -> bool;
@@ -157,13 +197,24 @@ pub trait Adapter: Sync {
 
 pub struct Claude;
 pub struct Codex;
+pub struct Pi;
 
 pub const CLAUDE: &Claude = &Claude;
 pub const CODEX: &Codex = &Codex;
+pub const PI: &Pi = &Pi;
 
 /// Every adapter, in registry order (`provider::PROVIDERS`). A new harness is
 /// a row there and an entry here; `registry_and_adapters_line_up` pins it.
-pub const ALL: &[&dyn Adapter] = &[CLAUDE, CODEX];
+pub const ALL: &[&dyn Adapter] = &[CLAUDE, CODEX, PI];
+
+/// `<model_arg> '<model>'` for a fresh launch that names one; nothing on a
+/// resume (a resumed session keeps its own model) or without a model.
+fn model_words(p: &Provider, launch: &AiLaunch) -> Vec<String> {
+    match (p.model_arg, launch.model.as_deref().filter(|m| !m.trim().is_empty())) {
+        (Some(arg), Some(m)) if !launch.resume => vec![arg.to_string(), shell_quote(m)],
+        _ => Vec::new(),
+    }
+}
 
 pub fn by_id(id: &str) -> Option<&'static dyn Adapter> {
     ALL.iter().copied().find(|a| a.provider().id == id)
@@ -191,12 +242,16 @@ impl Adapter for Claude {
 
     /// `--name <session>`: what makes the agent addressable by claude's own
     /// cross-session messaging (see `AiLaunch::launch_cmd`).
-    fn launch_args(&self, _launch: &AiLaunch, session: &str) -> LaunchArgs {
+    ///
+    /// A chosen model goes in `head`; a profile's own `--model` is on the END
+    /// of `cmd` (`profile::claude_launch`), and claude takes the last one — so
+    /// `Profile.model` keeps winning, as §2.3.6 decided.
+    fn launch_args(&self, launch: &AiLaunch, session: &str) -> LaunchArgs {
         let tail = match self.provider().name_arg {
             Some(arg) if !session.is_empty() => vec![arg.to_string(), shell_quote(session)],
             _ => Vec::new(),
         };
-        LaunchArgs { head: Vec::new(), tail }
+        LaunchArgs { head: model_words(self.provider(), launch), tail }
     }
 
     fn resume_arg(&self, _cwd: &str) -> String {
@@ -250,6 +305,7 @@ impl Adapter for Codex {
             shell_quote(crate::profile::CODEX_DOC_FALLBACK),
         ];
         head.extend(launch.place_flags.iter().cloned());
+        head.extend(model_words(self.provider(), launch));
         LaunchArgs { head, tail: Vec::new() }
     }
 
@@ -269,13 +325,17 @@ impl Adapter for Codex {
         scan.panes.and_then(|p| activity::codex_activity(p, canonical, path))
     }
 
+    fn running_model(&self, _canonical: &str, path: &str) -> Option<String> {
+        crate::codex::latest_rollout(path).and_then(|r| activity::codex_tail(&r).0)
+    }
+
     fn send(&self, req: &SendRequest) -> Delivery {
         let codex = activity::codex_session_for(req.panes, req.canonical);
         // A modal (an approval, a plan-mode question) takes typed keys as its
         // ANSWER: text plus Enter confirms the highlighted option, which is
         // "Yes, proceed". So a Codex that is waiting on someone is never typed
         // into, and neither is one that has exited.
-        if let Err(e) = may_type(req.reading.state) {
+        if let Err(e) = may_type(self.provider().label, req.reading.state) {
             return Delivery::Refused(e);
         }
         // Ownership by what the pane IS, not by its session's name: in this
@@ -302,6 +362,173 @@ impl Adapter for Codex {
     }
 }
 
+/// The slug of the place whose directory is `cwd`.
+fn place_slug(p: &Project, cwd: &str) -> String {
+    if std::path::Path::new(cwd) == std::path::Path::new(&p.main_root) {
+        "(main)".to_string()
+    } else {
+        cwd.rsplit('/').next().unwrap_or(cwd).to_string()
+    }
+}
+
+/// The place's current pi session generation (0: never launched).
+fn pi_generation(p: &Project, slug: &str) -> u32 {
+    crate::store::read_lenient(&p.main_root).places.get(slug).and_then(|d| d.pi_session_gen).unwrap_or(0)
+}
+
+/// pi (pi-harness §1–§3, §7–§9). Runs as `node`, in its `~agent~pi` sidecar,
+/// never as a place's canonical session.
+///
+/// Its launch is `pi --session-dir <dir> [--no-approve|--approve]
+/// --session-id <id> [--model <backend>/<id>] "<opener>"`, and a resume is the
+/// same minus `--model`. The exact session id is the point: resume, activity
+/// and the model label all read THE SAME NAMED FILE, where Codex has only
+/// "the newest rollout for this cwd".
+impl Adapter for Pi {
+    fn provider(&self) -> &'static Provider {
+        provider::PI
+    }
+
+    /// `--session-dir` is passed explicitly, set to pi's own default for the
+    /// place: a repo's `.pi/settings.json` `sessionDir` is read BEFORE trust is
+    /// decided, and the flag is the one thing that outranks it — so a repo
+    /// cannot move the file activity is read from. Then the trust flag
+    /// (`trust::pi_flag`).
+    fn place_flags(&self, wt: &str) -> Vec<String> {
+        let mut f = vec!["--session-dir".to_string(), shell_quote(&crate::pi::session_dir(wt).to_string_lossy())];
+        f.extend(crate::trust::pi_flag(wt).map(str::to_string));
+        f
+    }
+
+    fn launch_args(&self, launch: &AiLaunch, _session: &str) -> LaunchArgs {
+        let mut head = launch.place_flags.clone();
+        head.extend(model_words(self.provider(), launch));
+        LaunchArgs { head, tail: Vec::new() }
+    }
+
+    fn resume_arg(&self, _cwd: &str) -> String {
+        String::new()
+    }
+
+    fn resume_display(&self) -> String {
+        "--session-id <per place>".into()
+    }
+
+    fn exact_resume(&self) -> bool {
+        true
+    }
+
+    fn session_present(&self, project: &Project, cwd: &str) -> bool {
+        let slug = place_slug(project, cwd);
+        let gen = pi_generation(project, &slug);
+        gen > 0 && crate::pi::session_file(&crate::pi::session_dir(cwd), &crate::pi::session_id(&project.session_name(&slug), gen)).is_some()
+    }
+
+    /// Only with a file to reopen: `--session-id` for a session pi never wrote
+    /// would CREATE one, and a resume carries no `--model` — so it would start
+    /// on pi's own default, which is exactly the trap a fresh launch avoids.
+    fn may_resume(&self, project: &Project, cwd: &str) -> bool {
+        self.session_present(project, cwd)
+    }
+
+    /// The launch gate. In order: can pi run in the pane at all (preflight,
+    /// hard); which model (fresh: `--model` > the place's last > the user's
+    /// `[model] pi` > refuse — never pi's default); does its host answer
+    /// (soft, `--force` passes). Only then is the generation bumped, so a
+    /// refused launch leaves the next resume pointing at the old session.
+    fn prepare(&self, p: &Project, slug: &str, wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
+        if let Some(why) = crate::pimodels::preflight().problem {
+            return Err(Refusal::Hard(why));
+        }
+        let canonical = p.session_name(slug);
+        let (gen, model) = if launch.resume {
+            (pi_generation(p, slug), self.running_model(&canonical, wt))
+        } else {
+            let declared = crate::store::read_lenient(&p.main_root).places.get(slug).and_then(|d| d.agent.clone());
+            let model = launch
+                .model
+                .clone()
+                .or_else(|| declared.filter(|a| a.harness == self.provider().id).and_then(|a| a.model))
+                .or_else(|| crate::config::default_model(self.provider().id));
+            let Some(model) = model else {
+                let ready = crate::pimodels::ready_names(&crate::pimodels::options());
+                return Err(Refusal::Hard(format!(
+                    "pi needs a model, and none was chosen for this place: pass --model <backend>/<id>, or set \
+                     `[model] pi = \"…\"` in ~/.config/worktrees/config.toml. pi's own default is never \
+                     used. Ready: {}",
+                    if ready.is_empty() { "none".to_string() } else { ready.join(", ") }
+                )));
+            };
+            crate::choice::validate_model(&model).map_err(Refusal::Hard)?;
+            (0, Some(model))
+        };
+        if !launch.force {
+            if let Some((_, why)) = model.as_deref().and_then(crate::pimodels::launch_reason) {
+                return Err(Refusal::Soft(format!("{why} — pi was not started")));
+            }
+        }
+        let gen = if launch.resume {
+            gen
+        } else {
+            let model = model.clone().unwrap_or_default();
+            let next = std::cell::Cell::new(0);
+            crate::store::edit(&p.main_root, slug, |d| {
+                next.set(d.pi_session_gen.unwrap_or(0) + 1);
+                d.pi_session_gen = Some(next.get());
+                d.agent = Some(crate::store::AgentDecl { harness: self.provider().id.into(), model: Some(model.clone()) });
+            })
+            .map_err(|e| Refusal::Hard(format!("could not record this place's pi session: {e}")))?;
+            launch.model = model_arg_value(model);
+            next.get()
+        };
+        launch.place_flags.push("--session-id".into());
+        launch.place_flags.push(shell_quote(&crate::pi::session_id(&canonical, gen)));
+        Ok(())
+    }
+
+    fn running_model(&self, canonical: &str, path: &str) -> Option<String> {
+        crate::pi::running_model(canonical, path)
+    }
+
+    fn activity(&self, scan: &Scan, canonical: &str, path: &str) -> Option<Activity> {
+        scan.panes.and_then(|p| crate::pi::pi_activity(p, canonical, path))
+    }
+
+    fn agents(&self, _scan: &Scan, path: &str, reading: Option<&Activity>) -> Vec<serde_json::Value> {
+        reading
+            .map(|x| {
+                let canonical = x.session.as_deref().and_then(|s| s.strip_suffix(self.provider().sidecar_suffix)).unwrap_or("");
+                serde_json::json!({
+                    "provider": self.provider().id,
+                    "state": x.state,
+                    "tmux": x.session,
+                    "last_done": x.last_done,
+                    "model": self.running_model(canonical, path),
+                })
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// Not yet: typing into pi and confirming it (from the JSONL user entry)
+    /// is phase 3. The trust modal is refused first and by name, because that
+    /// is the case where a stray Enter does damage.
+    fn send(&self, req: &SendRequest) -> Delivery {
+        if let Err(e) = may_type(self.provider().label, req.reading.state) {
+            return Delivery::Refused(e);
+        }
+        Delivery::Refused(
+            "send does not type into pi yet. Ask the user to relay it, or post it with report for \
+             when the place's agent can read messages."
+                .into(),
+        )
+    }
+}
+
+fn model_arg_value(model: String) -> Option<String> {
+    Some(model).filter(|m| !m.is_empty())
+}
+
 /// Every harness's reading for one place, in registry order, from a probe scan
 /// and a pane snapshot the caller already holds (so a caller asking about
 /// several places pays for each once). Only harnesses that are there.
@@ -317,18 +544,18 @@ pub fn place_activities(
 
 // Bounds cover both paste conversion and lost Enter retries, without letting
 // a changing or unreadable screen hold an MCP request forever.
-pub const SEND_POLL_MS: u64 = 100;
-pub const SEND_STABLE_MS: u64 = 300;
-pub const SEND_VERIFY_MS: u64 = 1_000;
-pub const SEND_TIMEOUT_MS: u64 = 8_000;
-pub const SEND_ENTER_TRIES: usize = 3;
+pub(crate) const SEND_POLL_MS: u64 = 100;
+pub(crate) const SEND_STABLE_MS: u64 = 300;
+pub(crate) const SEND_VERIFY_MS: u64 = 1_000;
+pub(crate) const SEND_TIMEOUT_MS: u64 = 8_000;
+pub(crate) const SEND_ENTER_TRIES: usize = 3;
 
 /// Poll only the live composer, so transcript animation cannot prevent a
 /// settle. Every Enter (including retries) is gated by a fresh, recognized,
 /// nonempty composer and the modal guard. Failed captures never authorize a
 /// keypress or count as confirmation. Clock and I/O seams keep timing tests
 /// deterministic; production uses exactly this loop.
-pub fn submit_codex(
+pub(crate) fn submit_codex(
     mut capture: impl FnMut() -> Option<String>,
     mut enter: impl FnMut() -> Result<(), String>,
     now: impl Fn() -> u64,
@@ -376,18 +603,20 @@ pub fn submit_codex(
     }
 }
 
-/// Whether a Codex in `state` may be typed into. Only a Codex that is running
+/// Whether a harness in `state` may be typed into. Only one that is running
 /// and not stopped on someone: `Waiting` means a modal is up and would take the
-/// keys as its answer; `None` means codex has exited and the pane is a shell.
-pub fn may_type(state: State) -> Result<(), String> {
+/// keys as its answer — Codex's approval ("Yes, proceed" is highlighted), pi's
+/// project-trust prompt (**Trust** is highlighted, so one Enter lets the repo
+/// run its own extensions inside pi) — and `None` means the harness has exited
+/// and the pane is a shell.
+pub(crate) fn may_type(label: &str, state: State) -> Result<(), String> {
     match state {
         State::Busy | State::Idle => Ok(()),
-        State::Waiting => Err(
-            "Codex is waiting on you (an approval or a question) — typing would answer it. Answer \
-             it, or wait until: idle first."
-                .into(),
-        ),
-        State::None => Err("Codex is not running there (its pane is back at a shell). Use report.".into()),
+        State::Waiting => Err(format!(
+            "{label} is waiting on you (an approval, a question or a trust prompt) — typing would \
+             answer it. Answer it, or wait until: idle first."
+        )),
+        State::None => Err(format!("{label} is not running there (its pane is back at a shell). Use report.")),
     }
 }
 
@@ -406,6 +635,66 @@ mod tests {
     fn resume_words_are_the_registry_strings_they_replace() {
         assert_eq!(CLAUDE.resume_arg("/w"), "-r");
         assert_eq!(CODEX.resume_arg("/w"), "resume --last");
+        // pi resumes an EXACT session: no words, and no user override either.
+        assert_eq!(PI.resume_arg("/w"), "");
+        assert!(PI.exact_resume() && !CLAUDE.exact_resume() && !CODEX.exact_resume());
+        assert_eq!(crate::ops::resume_command("pi", "/w"), "pi", "no trailing space into argv");
+        // Settings' display default is never a session id derived from "".
+        assert_eq!(CLAUDE.resume_display(), "-r");
+        assert_eq!(PI.resume_display(), "--session-id <per place>");
+        assert!(!PI.resume_display().contains("place-"), "not a derived id");
+    }
+
+    /// The launch a place's pi gets, and the resume: identical but for
+    /// `--model`, which a resume never carries (pi reopens a session on its
+    /// own model, and a `--model` would write a `model_change` into it).
+    #[test]
+    fn a_pi_launch_names_its_session_dir_trust_id_and_model_and_a_resume_drops_the_model() {
+        let mut l = AiLaunch::plain("pi");
+        l.place_flags = vec![
+            "--session-dir".into(),
+            "'/h/.pi/agent/sessions/--w--'".into(),
+            "--no-approve".into(),
+            "--session-id".into(),
+            "'p-feat-abc123-g2'".into(),
+        ];
+        l.model = Some("lm-studio/qwen3.6-27b".into());
+        l.opener = Some(crate::ops::BRIEF_OPENER.into());
+        assert_eq!(
+            l.launch_cmd("p-feat~agent~pi"),
+            "pi --session-dir '/h/.pi/agent/sessions/--w--' --no-approve --session-id 'p-feat-abc123-g2' \
+             --model 'lm-studio/qwen3.6-27b' 'Read .planning/brief.md and begin.'"
+        );
+        l.resume = true;
+        l.opener = None;
+        assert_eq!(
+            l.launch_cmd("p-feat~agent~pi"),
+            "pi --session-dir '/h/.pi/agent/sessions/--w--' --no-approve --session-id 'p-feat-abc123-g2'"
+        );
+        assert_eq!(PI.provider().name_arg, None, "pi's --name is a label, not an address");
+    }
+
+    /// `--model` reaches claude and codex through their registry `model_arg`,
+    /// only when chosen and never on a resume — and with none chosen their
+    /// launch is byte-identical to before.
+    #[test]
+    fn a_chosen_model_reaches_claude_and_codex_and_nothing_changes_without_one() {
+        let mut c = AiLaunch::plain("claude");
+        assert_eq!(c.launch_cmd("s"), "claude --name 's'");
+        c.model = Some("opus".into());
+        assert_eq!(c.launch_cmd("s"), "claude --model 'opus' --name 's'");
+        let mut r = AiLaunch::plain("claude -r");
+        r.model = Some("opus".into());
+        r.resume = true;
+        assert_eq!(r.launch_cmd("s"), "claude -r --name 's'");
+        let mut x = AiLaunch::plain("codex");
+        x.model = Some("gpt-5-codex".into());
+        assert!(x.launch_cmd("s").ends_with(" -m 'gpt-5-codex'"), "{}", x.launch_cmd("s"));
+        let mut xr = AiLaunch::plain("codex resume --last");
+        xr.model = Some("gpt-5-codex".into());
+        xr.resume = true;
+        assert!(!xr.launch_cmd("s").contains(" -m "), "{}", xr.launch_cmd("s"));
+        assert!(xr.launch_cmd("s").ends_with("resume --last"));
     }
 
     #[test]
@@ -423,6 +712,7 @@ mod tests {
         assert_eq!(&a.head[..2], &["-c".to_string(), "forced_login_method=chatgpt".to_string()]);
         assert_eq!(&a.head[4..], &["--sandbox".to_string(), "workspace-write".to_string()]);
         assert!(ALL.iter().all(|a| a.launch_env(&plain).is_empty()), "no harness needs launch env yet");
+        assert_eq!(default_adapter().provider().id, "claude", "pi is never the default");
     }
 
     const SEND_EMPTY: &str =
@@ -625,10 +915,10 @@ mod tests {
     /// has exited.
     #[test]
     fn a_waiting_or_gone_codex_may_not_be_typed_into() {
-        assert!(may_type(State::Idle).is_ok());
-        assert!(may_type(State::Busy).is_ok(), "a busy composer queues typed input");
-        let e = may_type(State::Waiting).unwrap_err();
-        assert!(e.contains("waiting on you"), "{e}");
-        assert!(may_type(State::None).is_err());
+        assert!(may_type("Codex", State::Idle).is_ok());
+        assert!(may_type("Codex", State::Busy).is_ok(), "a busy composer queues typed input");
+        let e = may_type("Codex", State::Waiting).unwrap_err();
+        assert!(e.contains("Codex is waiting on you"), "{e}");
+        assert!(may_type("Codex", State::None).is_err());
     }
 }

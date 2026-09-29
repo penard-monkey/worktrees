@@ -34,6 +34,14 @@ pub const EXIT_FINDINGS: i32 = 2;
 /// findings / `3` target not found / `4` needs confirmation.
 pub const EXIT_NEEDS_CONFIRM: i32 = 4;
 
+/// A harness refused to START because its model host did not answer (pi's
+/// reachability probe): the worktree and its brief exist, only the agent is
+/// not running. Distinct from `1` so a caller can offer "launch anyway" —
+/// the app's button, the CLI's `--force` — for exactly this and nothing else. A
+/// harness that CANNOT run (pi missing, node below its floor) is a plain `1`:
+/// forcing it would only start something broken.
+pub const EXIT_LAUNCH_REFUSED: i32 = 5;
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {

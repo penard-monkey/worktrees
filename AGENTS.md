@@ -302,6 +302,13 @@ swap apply, does session adoption still see `claude`, does auto-resume resume)
 is invisible to the bats suite — there is no fake claude. Re-run
 `docs/ai-profiles-manual-checks.md` whenever the `claude` binary is upgraded.
 
+**pi has one as well, and its fixtures are version-pinned.** There is no fake
+pi either: `docs/pi-manual-checks.md` covers launch, resume, the trust modal,
+the allowance, a dead model host and Esc, and says which pi version each
+fixture under `tests/fixtures/pi-*` was captured on. Re-run it when pi is
+upgraded — pi's `--list-models` table has no JSON form, and a changed header
+parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
+
 ## Tauri app — hard-won rules
 
 - **Commands must be `async fn`** — sync handlers run on the main thread and
