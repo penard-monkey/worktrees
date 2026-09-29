@@ -19,7 +19,7 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{git, mcpsetup, mention, ops, store, sync, sysclock, tmux, Project, Ui};
+use worktrees_core::{git, harness, mcpsetup, mention, ops, provider, store, sync, sysclock, tmux, Project, Ui};
 
 // The documentation viewer: one supervised child, N places, and a port. Its own
 // file because it is the only part of this backend that can hand a document to
@@ -252,6 +252,69 @@ async fn skill_remove(name: String) -> Result<Vec<String>, String> {
 
 /// One repo's merged snapshot: core's live `ls` + DECLARED store overlay +
 /// reconciled `lifecycle_effective` per place.
+/// One harness's session in one place, as the snapshot reports it.
+struct AgentSession {
+    id: &'static str,
+    name: String,
+    up: bool,
+    model: Option<String>,
+}
+
+/// Every harness's session for a place, in registry order.
+///
+/// A non-default harness (Codex) runs in its `~agent~<id>` sidecar, or — for a
+/// session launched before sidecars — in the canonical session when that
+/// session is running it. The default harness (Claude) owns the canonical
+/// session historically: it is up in its sidecar, or in the place's primary
+/// session when no other harness claims that one.
+fn agent_sessions_for(
+    panes: Option<&tmux::PaneList>,
+    probes: &[worktrees_core::agent::ClaudeProbe],
+    canonical: &str,
+    primary_name: &str,
+    primary_up: bool,
+    place_path: &str,
+) -> Vec<AgentSession> {
+    let owner = panes.map_or(provider::CLAUDE.id, |p| p.canonical_provider(canonical).id);
+    let has = |name: &str| panes.is_some_and(|p| p.has_session(name));
+    let others: Vec<String> = provider::PROVIDERS
+        .iter()
+        .filter(|p| !p.canonical_default)
+        .map(|p| p.session_name(canonical, owner, false))
+        .collect();
+    harness::ALL
+        .iter()
+        .map(|a| {
+            let p = a.provider();
+            let (name, up) = if p.canonical_default {
+                let sidecar = p.sidecar_name(canonical);
+                let sidecar_up = has(&sidecar);
+                let up = sidecar_up || (primary_up && owner == p.id && !others.iter().any(|n| n == primary_name));
+                let name = if sidecar_up { sidecar } else if up { primary_name.to_string() } else { canonical.to_string() };
+                (name, up)
+            } else {
+                let name = p.session_name(canonical, owner, false);
+                let up = has(&name);
+                (name, up)
+            };
+            // The model each live agent last answered with — `null` until its
+            // first reply, and never looked up for a session that is down.
+            let model = if up { live_model(p.id, probes, &name, place_path) } else { None };
+            AgentSession { id: p.id, name, up, model }
+        })
+        .collect()
+}
+
+/// The model a live harness session names. Kept app-side: Claude's reader
+/// caches transcript tails here and logs a failed read through `applog`.
+fn live_model(id: &str, probes: &[worktrees_core::agent::ClaudeProbe], session: &str, cwd: &str) -> Option<String> {
+    match id {
+        "claude" => claude_model(probes, session),
+        "codex" => codex_model(cwd),
+        _ => None,
+    }
+}
+
 fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     let project = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
     let mut v = serde_json::to_value(project.ls()).map_err(|e| e.to_string())?;
@@ -277,35 +340,35 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
         for place in places.iter_mut() {
             let slug = place.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
             let canonical = project.session_name(&slug);
-            let legacy_codex = agent_panes.as_ref().is_some_and(|panes| panes.session_is_codex(&canonical));
-            let codex_name = if legacy_codex { canonical.clone() } else { tmux::codex_session_name(&canonical) };
-            let codex_up = agent_panes.as_ref().is_some_and(|panes| panes.has_session(&codex_name));
             let primary_up = place.pointer("/tmux_session/up").and_then(|b| b.as_bool()).unwrap_or(false);
             let primary_name = place.pointer("/tmux_session/name").and_then(|s| s.as_str()).unwrap_or(&canonical).to_string();
-            let claude_sidecar = tmux::claude_session_name(&canonical);
-            let sidecar_up = agent_panes.as_ref().is_some_and(|panes| panes.has_session(&claude_sidecar));
-            let claude_up = sidecar_up || (primary_up && !legacy_codex && primary_name != codex_name);
-            let claude_name = if sidecar_up { claude_sidecar } else if claude_up { primary_name } else { canonical.clone() };
-            // The model each live agent last answered with — `null` until its
-            // first reply, and never looked up for a session that is down.
             let place_path = place.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            let claude_model = if claude_up { claude_model(&probes, &claude_name) } else { None };
-            let codex_model = if codex_up { codex_model(&place_path) } else { None };
+            let sessions = agent_sessions_for(agent_panes.as_ref(), &probes, &canonical, &primary_name, primary_up, &place_path);
             // Watched only while codex itself runs in the session: the pane is
             // `codex …; exec "$SHELL"`, so a codex that exited or was killed
             // leaves the session up with a shell in it, and its rollout ending
             // on `task_started` (nothing writes `turn_aborted` on a kill)
             // would otherwise hold the place green indefinitely.
-            let codex_running = codex_up && agent_panes.as_ref().is_some_and(|panes| panes.session_runs_program(&codex_name));
-            codex_watch_set(&place_path, codex_running.then_some(&codex_name), &codex_model);
-            place["agent_sessions"] = serde_json::json!({
-                "claude": { "name": claude_name, "up": claude_up, "model": claude_model },
-                "codex": { "name": codex_name, "up": codex_up, "model": codex_model }
-            });
-            let tmux_up = claude_up || codex_up;
-            if !claude_up && codex_up {
-                place["tmux_session"] = serde_json::json!({ "name": codex_name, "up": true });
+            if let Some(codex) = sessions.iter().find(|s| s.id == provider::CODEX.id) {
+                let codex_running = codex.up && agent_panes.as_ref().is_some_and(|panes| panes.session_runs_program(&codex.name));
+                codex_watch_set(&place_path, codex_running.then_some(&codex.name), &codex.model);
             }
+            let tmux_up = sessions.iter().any(|s| s.up);
+            // Profiles are claude's recipe, so only a live Claude can be stale.
+            let claude_up = sessions.iter().any(|s| s.up && s.id == provider::CLAUDE.id);
+            // `tmux_session` stays on the default harness's session when it is
+            // up (a stray pair keeps Claude's, which is what the nav names);
+            // otherwise it follows the first live harness.
+            let default_up = sessions.iter().any(|s| s.up && s.id == harness::default_adapter().provider().id);
+            if let Some(live) = sessions.iter().find(|s| s.up).filter(|_| !default_up) {
+                place["tmux_session"] = serde_json::json!({ "name": live.name, "up": true });
+            }
+            place["agent_sessions"] = serde_json::Value::Object(
+                sessions
+                    .into_iter()
+                    .map(|s| (s.id.to_string(), serde_json::json!({ "name": s.name, "up": s.up, "model": s.model })))
+                    .collect(),
+            );
             let decl = store.places.get(&slug);
             place["declared"] = decl
                 .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
@@ -915,8 +978,8 @@ async fn new_place(
     name: Option<String>,
     provider: Option<String>,
 ) -> Result<CmdResult, String> {
-    let provider = provider.unwrap_or_else(|| "claude".into());
-    if provider != "claude" && provider != "codex" { return Err("provider must be claude or codex".into()); }
+    let provider = provider.unwrap_or_else(|| harness::default_adapter().provider().id.into());
+    known_harness(&provider)?;
     if provider == "codex" && worktrees_core::profile::codex_bin().is_none() {
         return Err("Codex CLI is not installed. Install it, then sign in with `codex login`.".into());
     }
@@ -987,14 +1050,20 @@ async fn list_branches(repo: String, slug: String) -> Result<BranchList, String>
     Ok(BranchList { branches: p.branch_names(), current, default_base: p.default_base() })
 }
 
+/// The adapter for a provider id the frontend sent, or the refusal naming the
+/// ones there are.
+fn known_harness(id: &str) -> Result<&'static dyn harness::Adapter, String> {
+    harness::by_id(id).ok_or_else(|| format!("provider must be {}", provider::choices()))
+}
+
 /// Enter a place: ensure its tmux session exists (create if down) WITHOUT attaching
 /// — the app embeds it via its own PTY. Worktrees go through `open` (reuses the
 /// existing launch path); the main checkout is launched directly since `open` only
 /// targets worktrees under `.worktrees/`.
 #[tauri::command]
 async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: Option<String>) -> Result<CmdResult, String> {
-    let provider = provider.unwrap_or_else(|| "claude".into());
-    if provider != "claude" && provider != "codex" { return Err("provider must be claude or codex".into()); }
+    let provider = provider.unwrap_or_else(|| harness::default_adapter().provider().id.into());
+    let adapter = known_harness(&provider)?;
     if provider == "codex" && worktrees_core::profile::codex_bin().is_none() {
         return Err("Codex CLI is not installed. Install it, then sign in with `codex login`.".into());
     }
@@ -1004,11 +1073,7 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: O
         // `fresh` (right-click "Open fresh") skips it. Gated on the configured
         // AI actually being Claude — appending -r to an arbitrary ai_cmd breaks it.
         let wt = p.place_dir(&slug);
-        let resume = !fresh.unwrap_or(false) && match provider.as_str() {
-            "claude" => p.claude_session_present(&wt),
-            "codex" => worktrees_core::codex::session_present(&wt),
-            _ => false,
-        };
+        let resume = !fresh.unwrap_or(false) && adapter.session_present(p, &wt);
         if slug == "(main)" {
             if !worktrees_core::tmux::have_tmux() {
                 ui.error("tmux not found");
@@ -1059,8 +1124,8 @@ async fn close_place(
     provider: Option<String>,
     shells: State<'_, Shells>,
 ) -> Result<CmdResult, String> {
-    if provider.as_deref().is_some_and(|p| p != "claude" && p != "codex") {
-        return Err("provider must be claude or codex".into());
+    if let Some(p) = provider.as_deref() {
+        known_harness(p)?;
     }
     // core cmd_close sweeps this place's tmux-era sidecars; the owned dock
     // shells are app state, so they're swept here — same rule as before, the
@@ -4990,9 +5055,9 @@ async fn place_plan(app: AppHandle, root: String) -> Result<worktrees_core::plan
 async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), String> {
     // Addressed by the AI's pane, not by an index (`tmux::ai_pane`), and an
     // honest error when no Claude is there rather than a paste onto a shell.
-    let ai_word = provider.as_deref().unwrap_or("claude");
-    if ai_word != "claude" && ai_word != "codex" { return Err("unknown agent provider".into()); }
-    tmux::paste_to_ai(&session, &ai_word, ops::PLAN_PROMPT)?;
+    let ai_word = provider.as_deref().unwrap_or(harness::default_adapter().provider().id);
+    let Some(adapter) = harness::by_id(ai_word) else { return Err("unknown agent provider".into()) };
+    tmux::paste_to_ai(&session, adapter.provider().match_word, ops::PLAN_PROMPT)?;
     applog("info", &format!("plan_prompt: pasted into {session}"));
     Ok(())
 }
@@ -7640,6 +7705,52 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The snapshot's per-harness sessions, pinned against the two-provider
+    /// formula they replaced (kept here verbatim as the reference), across a
+    /// legacy canonical Codex, both sidecars, a primary Claude, a shell, and
+    /// no tmux at all.
+    #[test]
+    fn agent_sessions_match_the_two_provider_rule_they_replaced() {
+        fn old(panes: Option<&tmux::PaneList>, canonical: &str, primary: &str, primary_up: bool) -> Vec<(String, bool)> {
+            let legacy_codex = panes.is_some_and(|p| p.canonical_provider(canonical).id == "codex");
+            let codex_name = if legacy_codex { canonical.to_string() } else { format!("{canonical}~agent~codex") };
+            let codex_up = panes.is_some_and(|p| p.has_session(&codex_name));
+            let sidecar = format!("{canonical}~agent~claude");
+            let sidecar_up = panes.is_some_and(|p| p.has_session(&sidecar));
+            let claude_up = sidecar_up || (primary_up && !legacy_codex && primary != codex_name);
+            let claude_name = if sidecar_up { sidecar } else if claude_up { primary.to_string() } else { canonical.to_string() };
+            vec![(claude_name, claude_up), (codex_name, codex_up)]
+        }
+        let rows = |r: &[(&str, &str)]| {
+            tmux::PaneList::from_rows(r.iter().map(|(s, c)| (s.to_string(), "/w".to_string(), c.to_string())).collect())
+        };
+        let c = "p-feat";
+        let cases: Vec<(Option<tmux::PaneList>, &str, bool)> = vec![
+            (None, c, false),
+            (None, c, true),
+            (Some(rows(&[])), c, false),
+            (Some(rows(&[(c, "claude")])), c, true),
+            (Some(rows(&[(c, "node")])), c, true),
+            (Some(rows(&[(c, "zsh")])), c, true),
+            (Some(rows(&[(c, "codex")])), c, true),
+            (Some(rows(&[("p-feat~agent~codex", "codex")])), c, false),
+            (Some(rows(&[("p-feat~agent~codex", "node")])), c, false),
+            (Some(rows(&[("p-feat~agent~claude", "claude")])), c, false),
+            (Some(rows(&[("p-feat~agent~claude", "claude"), (c, "zsh")])), c, true),
+            (Some(rows(&[("adopted", "claude")])), "adopted", true),
+            (Some(rows(&[("p-feat~agent~codex", "codex")])), "p-feat~agent~codex", true),
+        ];
+        for (panes, primary, up) in &cases {
+            let got: Vec<(String, bool)> = agent_sessions_for(panes.as_ref(), &[], c, primary, *up, "/nonexistent")
+                .into_iter()
+                .map(|s| (s.name, s.up))
+                .collect();
+            assert_eq!(got, old(panes.as_ref(), c, primary, *up), "primary {primary} up={up}");
+        }
+        let ids: Vec<&str> = agent_sessions_for(None, &[], c, c, false, "").iter().map(|s| s.id).collect();
+        assert_eq!(ids, ["claude", "codex"], "one entry per harness, registry order");
+    }
 
     fn v(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| s.to_string()).collect()

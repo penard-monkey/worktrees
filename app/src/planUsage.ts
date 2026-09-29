@@ -1,12 +1,14 @@
 // Plan quotas, separate from usage.ts (local UI click telemetry).
+// Type-only import: plan-usage-check loads this file as a data: URL, which
+// cannot resolve a runtime one.
+import type { Harness } from "./harness";
 export const CODEX_STALE_SECS = 1800;
-export type Provider = "claude" | "codex";
 export type PlanLimit = {
   id: string; bucket: string; bucketLabel: string; label: string;
   percent: number; severity: string; resets_at: number | null;
 };
 export type PlanUsage = {
-  provider: Provider; state: string; source: string;
+  provider: Harness; state: string; source: string;
   fetched_at: number | null; reason?: string | null; limits: PlanLimit[];
 };
 export type ClaudeUsage = {
@@ -18,8 +20,7 @@ export type CodexUsage = {
   limits: { id: string; bucket_id: string; bucket_label: string; window_role: string;
     window_minutes: number | null; percent: number; severity: string; resets_at: number | null }[];
 };
-export const providerName = (p: Provider) => p === "claude" ? "Claude" : "Codex";
-export const checking = (provider: Provider): PlanUsage => ({ provider, state: "checking", source: "unavailable", fetched_at: null, limits: [] });
+export const checking = (provider: Harness): PlanUsage => ({ provider, state: "checking", source: "unavailable", fetched_at: null, limits: [] });
 export function windowLabel(minutes: number | null, role: string): string {
   if (!minutes || minutes <= 0) return role === "primary" ? "Primary" : "Secondary";
   if (minutes % 1440 === 0) return `${minutes / 1440}d`;

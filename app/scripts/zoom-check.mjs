@@ -91,16 +91,22 @@ if (from < 0 || to < 0 || !dirTables) {
 const BLOCK = appLines.slice(from, gTo + 1).join("\n") + "\n" + appLines.slice(zFrom, to).join("\n");
 
 // settings.ts imports the Tauri bridge; stub it so the module loads under node.
-// It also imports ./afterglow, and a data: URL has no base to resolve a
-// relative specifier against — so INLINE that module's real source ahead of it
-// rather than stubbing the two functions. A stub would be a second answer to
-// `snapHorizon`, which is the exact drift these scripts exist to prevent;
-// afterglow.ts imports nothing, so concatenating it is safe.
+// It also imports ./afterglow and ./harness, and a data: URL has no base to
+// resolve a relative specifier against — so INLINE those modules' real source
+// ahead of it rather than stubbing what it uses. A stub would be a second
+// answer to `snapHorizon` (or to which harnesses exist), which is the exact
+// drift these scripts exist to prevent; neither module imports anything, so
+// concatenating them is safe.
+const inline = (rel) => read(rel).replace(/^export /gm, "") + "\n";
+const stripImport = (src, mod) => {
+  const re = new RegExp(`^import \\{[^}]*\\} from "\\./${mod}";$`, "m");
+  if (!re.test(src)) fail(`settings.ts: no \`import { … } from "./${mod}"\` line — the inlining below is stale`);
+  return src.replace(re, "");
+};
 const settingsSrc =
-  read("../src/afterglow.ts").replace(/^export /gm, "") + "\n" +
-  ts
-    .replace(/^import \{ invoke \}.*$/m, "const invoke = () => Promise.resolve();")
-    .replace(/^import \{[^}]*\} from "\.\/afterglow";$/m, "");
+  inline("../src/afterglow.ts") + inline("../src/harness.ts") +
+  stripImport(stripImport(ts, "afterglow"), "harness")
+    .replace(/^import \{ invoke \}.*$/m, "const invoke = () => Promise.resolve();");
 const load = async (src, name) => {
   const js = (await transformWithEsbuild(src, name, { loader: "ts", format: "esm" })).code;
   return import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
