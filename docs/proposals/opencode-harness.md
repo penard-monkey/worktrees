@@ -317,8 +317,9 @@ secret, pid}`, created by `launch_args` and read by `activity` / `send` /
 
 The proposed form is a `launch_env(choice) -> Vec<(String, String)>` beside
 `launch_args`. It keeps the secret out of argv and lets pi and Codex return
-an empty list. I have asked the pi lane to fold it into §2.3, so the shape
-stays in one place.
+an empty list. It is now part of [pi §2.3](pi-harness.html#shared-shape),
+along with the runtime handle and the rule that resume is keyed by the place
+directory, never the repo.
 
 ### 3.5 Recommendation
 
@@ -657,7 +658,8 @@ status, and a hosted-model toggle.
    repo's `AGENTS.md`. Are you OK with worktrees refusing to start opencode
    in any repo that carries opencode config, until you allow that repo in
    your user config? The alternatives are a warning only, or not shipping
-   opencode until upstream separates the two.
+   opencode until upstream separates the two. This is the same decision as
+   pi's Question 3 (its trust default), so one answer covers both.
 2. **Hosted `opencode/*` models.** They need no sign-in and cost nothing
    today, but they send the place's code to opencode's service, and the
    list changes from call to call. Should the picker show them, hide them,
