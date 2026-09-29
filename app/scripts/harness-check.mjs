@@ -56,4 +56,14 @@ const aliases = [{ ...opt(null, "opus", true), model: { harness: "claude", backe
 eq("claude with no default keeps the CLI's own (never the first alias)", defaultModel(aliases, undefined, "claude"), "");
 eq("claude's configured default is used", defaultModel(aliases, "opus", "claude"), "opus");
 
+// ── the refusal line the Launch-anyway dialog shows, from the real App.tsx ──
+const app = read("../src/App.tsx");
+const rl = app.slice(app.indexOf("function refusalLine("), app.indexOf("\n}\n", app.indexOf("function refusalLine(")) + 3);
+const rjs = (await transformWithEsbuild(`${rl}\nexport { refusalLine };`, "rl.ts", { loader: "ts", format: "esm" })).code;
+const { refusalLine } = await import("data:text/javascript;base64," + Buffer.from(rjs).toString("base64"));
+const out = "═══ Worktree for 'feat' ═══\nCreating new branch 'feat' off 'main'.\nbrief: .planning/brief.md\n" +
+  "lm-dead's host http://h/v1 did not answer within 3s — pi was not started. The place is ready; to launch anyway: worktrees open feat --force";
+eq("the dialog shows the refusal, not the steps before it", refusalLine(out), "lm-dead's host http://h/v1 did not answer within 3s — pi was not started");
+eq("with no marker, the last line core wrote", refusalLine("a\nb\nsomething else."), "something else");
+
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }

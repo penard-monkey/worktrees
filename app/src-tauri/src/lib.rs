@@ -4298,7 +4298,10 @@ async fn set_pi_trust(mode: String) -> Result<(), String> {
 /// core keys the allowance on the parent of its git common dir.
 #[tauri::command]
 async fn set_pi_allowed(repo: String, allow: bool) -> Result<bool, String> {
-    let root = worktrees_core::trust::repo_root(&repo).ok_or_else(|| format!("{repo} is not inside a git repository"))?;
+    // A revoke takes the LISTED string as it is (Settings' Revoke button sends
+    // exactly that), so a repo that has moved or been deleted can still be
+    // revoked; a grant resolves the repo's root through git.
+    let root = worktrees_core::trust::root_for("pi", &repo, allow).ok_or_else(|| format!("{repo} is not inside a git repository"))?;
     worktrees_core::trust::set_allowed("pi", &root, allow).inspect_err(|e| applog("error", &format!("set_pi_allowed: {e}")))
 }
 

@@ -1221,7 +1221,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           p.tmux_session = { name: sessionName(pv?.snapshot?.prefix ?? "repo", slug), up: false };
           reconcile(p);
         });
-        return { ok: false, code: 5, slug, output: `${String(args.model).split("/")[0]}'s host http://10.0.0.9:1234/v1 did not answer within 3s — pi was not started. The place is ready; to launch anyway: worktrees open ${slug} --force` };
+        // Multi-line, as core's is: every step `new` took comes before the refusal.
+        return { ok: false, code: 5, slug, output: `═══ Worktree for '${args.branch}' ═══\nCreating new branch '${args.branch}' off 'main'.\nbrief: .planning/brief.md\n${String(args.model).split("/")[0]}'s host http://10.0.0.9:1234/v1 did not answer within 3s — pi was not started. The place is ready; to launch anyway: worktrees open ${slug} --force` };
       }
       // Return the computed slug (mirrors core's new_place contract) so the
       // frontend selects the right place headlessly.

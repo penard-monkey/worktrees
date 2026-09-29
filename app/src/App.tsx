@@ -168,6 +168,17 @@ function AgentSwitchSheet({ pending, defaultModels, onClose, onConfirm, onError 
  *  user — and only the user — may launch anyway. */
 type LaunchRefused = { repo: string; slug: string; provider: Harness; model: string; reason: string };
 
+/** The one line of an op's output that IS the refusal: `new` reports every
+ *  step it took before the launch was refused (the worktree, the brief), and
+ *  those are not the reason. Core's refusal line says "not started"; failing
+ *  that, the last line is the one core wrote last. The "to launch anyway: …"
+ *  tail is the CLI's instruction — the dialog's button is this surface's. */
+function refusalLine(output: string): string {
+  const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
+  const line = lines.find((l) => l.includes("not started")) ?? lines[lines.length - 1] ?? "";
+  return line.split(". The place is ready")[0].replace(/\.$/, "");
+}
+
 function LaunchRefusedDialog({ refused, onClose, onForce }: {
   refused: LaunchRefused; onClose: () => void; onForce: () => void;
 }) {
@@ -177,7 +188,7 @@ function LaunchRefusedDialog({ refused, onClose, onForce }: {
       data-testid="launch-refused" onClick={(e) => e.stopPropagation()}>
       <header className="sync-h"><b>{HARNESS_LABEL[refused.provider]} was not started</b></header>
       <div className="sync-body">
-        <div>{refused.reason.split(". The place is ready")[0]}.</div>
+        <div data-testid="launch-refused-reason">{refused.reason}.</div>
         <div className="sync-live">The worktree is ready. Launched anyway, {HARNESS_LABEL[refused.provider]} will
           wait on {refused.model || "its model"} until the host answers or its retries run out.</div>
       </div>
@@ -4999,7 +5010,7 @@ function App() {
   /** Core refused to START the agent (its model host did not answer): the
    *  place is fine, so ask whether to launch anyway rather than paint an error. */
   const noteRefusal = (r: CmdResult | null, repo: string, slug: string, provider: Harness, model: string) => {
-    if (r?.code === EXIT_LAUNCH_REFUSED) setLaunchRefused({ repo, slug, provider, model, reason: r.output });
+    if (r?.code === EXIT_LAUNCH_REFUSED) setLaunchRefused({ repo, slug, provider, model, reason: refusalLine(r.output) });
   };
   const openAgent = (provider: Harness, chosen = "", opts?: { fresh?: boolean; force?: boolean }) => {
     if (!sel) return;
