@@ -239,8 +239,8 @@ pub fn resolve_prefix_from(
 pub fn resolve_ai_resume_arg_from(env: Option<&str>, cfg: Option<&str>) -> String {
     env.filter(|s| !s.is_empty())
         .or(cfg.filter(|s| !s.is_empty()))
-        .unwrap_or(crate::provider::CLAUDE.resume_arg)
-        .to_string()
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::harness::default_adapter().resume_arg(""))
 }
 
 /// Live resolution reading env + user config.
@@ -257,16 +257,17 @@ pub fn resolve_ai_resume_arg() -> String {
     resolve_ai_resume_arg_from(env.as_deref(), cfg.as_deref())
 }
 
-/// Codex resumes by subcommand. An explicitly configured resume argument still
-/// wins, preserving the existing user override for every AI command.
-pub fn resolve_ai_resume_arg_for(ai_cmd: &str) -> String {
+/// The resume words for `ai_cmd` in `cwd`, as its harness spells them (Codex
+/// resumes by subcommand); a non-harness command inherits the default
+/// harness's. An explicitly configured resume argument still wins, preserving
+/// the existing user override for every AI command.
+pub fn resolve_ai_resume_arg_for(ai_cmd: &str, cwd: &str) -> String {
     let env = std::env::var("WORKTREES_AI_RESUME_ARG").ok();
     let cfg = user_cfg("ai_resume_arg");
     if let Some(arg) = env.as_deref().filter(|s| !s.is_empty()).or(cfg.as_deref().filter(|s| !s.is_empty())) {
         return arg.to_string();
     }
-    crate::provider::by_word(&crate::profile::ai_word_of(ai_cmd))
-        .unwrap_or(crate::provider::CLAUDE).resume_arg.into()
+    crate::harness::for_cmd(ai_cmd).unwrap_or_else(crate::harness::default_adapter).resume_arg(cwd)
 }
 
 #[cfg(test)]

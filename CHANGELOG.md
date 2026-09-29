@@ -3,6 +3,17 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **An agent that runs as `node` in its own session is no longer taken for
+  Claude.** tmux reports an npm-installed Codex as `node`, and worktrees read
+  every `node` pane as Claude — so listing a place's running agents (the
+  provider-switch check, MCP `send`'s ownership check) named the wrong one. A
+  pane in a `~agent~<harness>` session now belongs to that harness, and to none
+  when the harness is unknown; a place's own pre-sidecar session still reads a
+  `node` pane as Claude, as before.
+
 ## [0.32.1] - 2026-09-27
 
 ### Fixed
