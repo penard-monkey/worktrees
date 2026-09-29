@@ -22,7 +22,7 @@ talking to the agent through its own loopback API instead of through the pane.
 **Evidence base:** opencode **1.18.30** (Homebrew, `/opt/homebrew/bin/opencode`),
 run live in a throwaway tmux server (`tmux -L ocprobe`, killed afterwards)
 against scratch git repos. All model calls went to the LM Studio host
-(`http://100.119.64.78:1234/v1`, `qwen3.6-27b`), which was **reachable**
+(`http://<lm-studio-host>:1234/v1`, `qwen3.6-27b`), which was **reachable**
 throughout. **No paid or hosted provider was used.** Every probe ran under
 `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME`
 pointed into `~/.cache/worktrees/worktrees/opencode-harness-research/`, and
@@ -181,7 +181,7 @@ opencode process start (≈1 s), paid only at launch, never in a poll.
 | `reason = endpoint_unreachable` | Worktrees' **own** `GET <baseURL>/models` with a short timeout, for `openai-compatible` backends. opencode does not check (a dead host took **63 s** of retries before `Cannot connect to API` **[observed]**). |
 | `reason = not_served` | The catalog lists it and the endpoint does not serve it. That was three of four `lmstudio/*` rows here. |
 | `meta` | `limit.context`, `limit.output`, `capabilities.reasoning` / `attachment`, and `cost` (**0** for local and free models) |
-| `opencode/*` hosted models | Listed with a **"hosted by opencode"** caption, `ready` per its catalog `status`. Question 2 asks whether to show them at all. |
+| `opencode/*` hosted models | Listed with a **"hosted by opencode"** caption, `ready` per its catalog `status`. Open question 1 (§12) asks whether to show them at all. |
 
 Where the catalog is read: the API when a lane is running, otherwise a
 cached `opencode models` run from a **neutral** directory. A place directory
@@ -256,7 +256,8 @@ must not be used, because the repo's `opencode.json` can add providers
 
 - a random secret per launch, written 0600 into a worktrees-owned runtime
   file next to the message log in the git common dir;
-- that file also holds `{port, pid, started}`;
+- that file also holds `{port, pid, started}`, so the file is the whole
+  runtime handle `{port, secret, pid, started}` (§3.4);
 - it is passed in the pane's **environment**, never in argv;
 - `--hostname` is always `127.0.0.1`.
 
@@ -312,7 +313,7 @@ will be rare, and when it shows up it matters.
 
 The shared trait already lets `send` and `activity` be API calls. For
 opencode the adapter also needs a **per-launch runtime handle**, `{port,
-secret, pid}`, created by `launch_args` and read by `activity` / `send` /
+secret, pid, started}`, created by `launch_args` and read by `activity` / `send` /
 `running_model`.
 
 The proposed form is a `launch_env(choice) -> Vec<(String, String)>` beside
@@ -406,14 +407,14 @@ opencode lane.
 ## 5. UI and settings (opencode rows)
 
 The surfaces themselves (harness segment + model select, "Switch agent…",
-`default_agent`) are defined in [pi §2.4](pi-harness.html#shared-shape).
+`default_agent`) are defined in [pi §2.4](pi-harness.html#surfaces).
 opencode adds:
 
 - **Mark:** opencode's square "O" glyph as a small monochrome mark, sourced
   as data like the other agent marks. The trademark question is the same
   one as for Codex.
 - **Model select groups** by backend. `opencode/*` hosted models appear only
-  if Question 2 says so, captioned "hosted by opencode".
+  if §12 open question 1 says so, captioned "hosted by opencode".
 - **Settings → opencode:**
   - MCP setup (install/uninstall through `opencode mcp add/remove`);
   - "binary found / version";
@@ -427,7 +428,7 @@ opencode adds:
   is in opencode's own UI (and `opencode export`).
 - **Memory:** each TUI held **0.77–1.05 GB RSS** **[observed]**. Nine idle
   opencode lanes is roughly 9 GB. The dialog should not hide that. See
-  Question 5.
+  §12 open question 4.
 
 ---
 
@@ -448,8 +449,8 @@ phase 4 at most.
 ## 7. Availability
 
 - **At creation:** worktrees' own `GET <baseURL>/models` probe (§2.2) marks
-  the option `endpoint_unreachable`. Refuse with "launch anyway", the same
-  answer pi's Question 5 asks for; both harnesses should give one answer.
+  the option `endpoint_unreachable`. Refuse, with a "launch anyway" button.
+  **Decided 2026-09-29** for both harnesses (pi Question 5).
 - **Mid-session:** with the host dead, opencode retried for **63 s**, then
   printed `Error: Cannot connect to API: Unable to connect. Is the computer
   able to access the url?` **[observed via `run`]**. In the TUI that minute
@@ -574,7 +575,7 @@ Its job is to never be the channel through which a repo gets to execute.
   The release cadence is fast (the probe binary is `1.18.30_2`, and the
   schema carries 38 migrations), so the pane fallback's strings are the
   part most likely to break.
-- **David's existing install** is untouched and essentially unused (config
+- **The existing Homebrew install** is untouched and essentially unused (config
   = `$schema` only, DB last written 2026-05-15). The first real launch
   will run opencode's pending migrations on that DB. That is opencode's own
   data and expected, but worth knowing if the DB was being kept as-is.
@@ -606,7 +607,7 @@ This sits on top of the shared phase-1 refactor (pi §10–11):
 
 **Phase 0: land this proposal** (docs only, beside pi's).
 
-**Phase 1: shared "two → N".** Owned by [pi §11](pi-harness.html#shared-shape).
+**Phase 1: shared "two → N".** Owned by [pi §11](pi-harness.html#phases).
 Whichever harness lands first builds it. opencode's only ask of it is
 `launch_env` (§3.4).
 
@@ -650,34 +651,37 @@ status, and a hosted-model toggle.
 
 ---
 
-## 12. Open questions for David
+## 12. Decisions and open questions
 
-1. **The repo-surface gate (§8).** opencode runs a repo's
-   `.opencode/plugin/*.js` and `opencode.json` MCP commands on launch.
-   Nothing in 1.18.30 turns off the first without also turning off the
-   repo's `AGENTS.md`. Are you OK with worktrees refusing to start opencode
-   in any repo that carries opencode config, until you allow that repo in
-   your user config? The alternatives are a warning only, or not shipping
-   opencode until upstream separates the two. This is the same decision as
-   pi's Question 3 (its trust default), so one answer covers both.
-2. **Hosted `opencode/*` models.** They need no sign-in and cost nothing
+**Decided (2026-09-29, answered on the pi proposal):**
+
+- **Trust default.** pi launches with `--no-approve` by default. The §8
+  item 2 repo-surface gate is opencode's equivalent (refuse in a repo that
+  carries opencode config until the user allows that repo). It follows from
+  the pi answer and is to be confirmed when opencode is built.
+- **Availability.** An unreachable model host at launch refuses, with a
+  "launch anyway" button (§7).
+
+**Open questions:**
+
+1. **Hosted `opencode/*` models.** They need no sign-in and cost nothing
    today, but they send the place's code to opencode's service, and the
    list changes from call to call. Should the picker show them, hide them,
    or show them behind a setting?
-3. **API in phase 2 or 3?** The API gives an exact send receipt, a real
+2. **API in phase 2 or 3?** The API gives an exact send receipt, a real
    "waiting" state and retry visibility, at the cost of a password-protected
    loopback port per lane. My recommendation is phase 3, after the pane path
    works. Do you want it sooner?
-4. **DB reads at all?** The model label in phase 2 needs either the
+3. **DB reads at all?** The model label in phase 2 needs either the
    `sqlite3` CLI (present on macOS; not guaranteed on Linux) or waiting for
    the API in phase 3. Is "no model label for opencode until phase 3"
    acceptable?
-5. **Memory.** ~1 GB per opencode TUI. Should the dialog or `doctor` warn
+4. **Memory.** ~1 GB per opencode TUI. Should the dialog or `doctor` warn
    past N live opencode lanes, or is that the user's business?
-6. **Scrollback.** opencode panes have no tmux history. Is that acceptable
+5. **Scrollback.** opencode panes have no tmux history. Is that acceptable
    as a documented difference, or does it argue for the API-driven phase 3
    (where the app could render the transcript itself) sooner?
-7. **Upstream asks.** Are you willing to file these with opencode:
+6. **Upstream asks.** Are you willing to file these with opencode:
    - a project-trust gate that is separate from instruction loading;
    - `--continue` scoped to the directory, or at least documented as
      project-wide;
