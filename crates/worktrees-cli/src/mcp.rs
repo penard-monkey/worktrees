@@ -1580,9 +1580,12 @@ impl Server {
                 }
                 let path = project.place_dir(&slug);
                 let mut last = activity::Activity::none();
+                let mut prev: Option<activity::Activity> = None;
                 let got = poll_until(timeout_s * 1000, WAIT_IDLE_STEP_MS, now_ms, sleep_ms, || {
                     last = activity::place_activity(project, &slug, &path);
-                    (last.state != activity::State::Busy).then(|| last.clone())
+                    let done = settled(prev.as_ref(), &last);
+                    prev = Some(last.clone());
+                    done.then(|| last.clone())
                 });
                 let waited = t0.elapsed().as_secs();
                 match got {
@@ -1938,6 +1941,22 @@ fn safe_arg(v: &str, what: &str) -> Result<String, String> {
     Ok(t.to_string())
 }
 
+/// Whether `wait until: idle` may answer on `cur`, given the sample before it.
+/// Claude's and Codex's non-busy states are recorded facts and one sample is
+/// enough. pi's can be a moment between writes: before the opener is
+/// submitted a fresh lane's screen shows no status yet, and a steering message
+/// lands as its own user entry ~2ms after the reply it follows — so a pi
+/// reading counts only when the sample before it was non-busy pi as well.
+fn settled(prev: Option<&activity::Activity>, cur: &activity::Activity) -> bool {
+    if cur.state == activity::State::Busy {
+        return false;
+    }
+    if cur.provider != Some(worktrees_core::provider::PI.id) {
+        return true;
+    }
+    prev.is_some_and(|p| p.provider == cur.provider && p.state != activity::State::Busy)
+}
+
 /// A `create_worktree.model`, checked as DATA before it becomes `--model`: the
 /// charset always, and for a harness whose catalog is the whole truth (pi —
 /// it can only run the models it lists) membership and readiness, refused
@@ -2198,6 +2217,22 @@ mod tests {
         let create = tools.iter().find(|t| t["name"] == "create_worktree").unwrap();
         assert_eq!(create["inputSchema"]["properties"]["provider"]["enum"], serde_json::json!(["claude", "codex", "pi"]));
         assert_eq!(create["inputSchema"]["properties"]["model"]["type"], "string");
+    }
+
+    /// One non-busy sample ends a wait on Claude or Codex; pi needs two in a
+    /// row, so a startup gap or a steering write cannot end it early.
+    #[test]
+    fn a_pi_wait_needs_two_quiet_samples() {
+        use worktrees_core::activity::{Activity, State};
+        let a = |p: &'static str, s| Activity { provider: Some(p), state: s, last_done: None, session: None };
+        assert!(settled(None, &a("claude", State::Idle)));
+        assert!(settled(None, &a("codex", State::Waiting)));
+        assert!(!settled(None, &a("pi", State::Idle)), "one pi sample is not enough");
+        assert!(!settled(Some(&a("pi", State::Busy)), &a("pi", State::Idle)));
+        assert!(settled(Some(&a("pi", State::Idle)), &a("pi", State::Idle)));
+        assert!(settled(Some(&a("pi", State::Idle)), &a("pi", State::Waiting)), "a trust modal twice is waiting");
+        assert!(!settled(Some(&a("pi", State::Idle)), &a("pi", State::Busy)));
+        assert!(settled(None, &Activity::none()), "nothing running ends the wait");
     }
 
     /// A model is data: the charset for every harness, and for pi the catalog

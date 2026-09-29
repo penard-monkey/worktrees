@@ -10,10 +10,15 @@
 //!   so worktrees always passes the dir it will read, and a repo cannot move it.
 //!   The default dir is `<agent dir>/sessions/--<cwd, leading / dropped, / \ :
 //!   → ->--` (0.99.1 `session-manager.js::getDefaultSessionDirPath`).
-//! - **No file until the first reply.** A fresh session writes nothing while
-//!   its first turn is in flight, and a dead host can hold it there for
-//!   minutes. So the file cannot tell "idle before a prompt" from "first turn
-//!   running" — the screen does (`Working`/`Retrying` on the composer border).
+//! - **No file until the first USER message.** 0.99.1 keeps setup entries
+//!   (model, thinking level, system prompt) in memory and creates the file only
+//!   once the session holds a user or assistant message
+//!   (`session-manager.js::_hasConversation`; 0.87.1, which the proposal
+//!   measured, waited for the first REPLY). So a lane launched with the opener
+//!   has a file ending on its user message almost at once — busy, correctly —
+//!   and the only windows the file cannot see are pi's startup before the
+//!   opener is submitted and a trust modal holding it back. The screen covers
+//!   those (the composer border, and the modal).
 //! - **State keys on the newest MESSAGE entry**, never the last line (a
 //!   `usage`/`label`/`custom` entry arrives without a turn) and never the
 //!   file's mtime (the AGENTS.md transcript rule). A failed request is written
@@ -116,8 +121,9 @@ pub fn session_file(dir: &Path, id: &str) -> Option<PathBuf> {
 /// and its generation. Used by the activity reader, which runs every tick over
 /// every live pi lane and so does not read the declared store: the highest
 /// generation on disk is the place's current session except in the window
-/// between a fresh launch and its first reply — exactly when the screen, not
-/// the file, answers (`pi_state`).
+/// between a fresh launch and its first user message — pi's startup, or a
+/// trust modal holding the opener back — exactly when the screen, not the
+/// file, answers (`pi_state`).
 pub fn latest_session_file(dir: &Path, stem: &str) -> Option<(u32, PathBuf)> {
     let marker = format!("_{stem}");
     std::fs::read_dir(dir)
@@ -152,11 +158,14 @@ pub enum PiTurn {
 /// hold no message pi counts as a turn (a header only, or a resumed session's
 /// `system` entry with nothing after it and nothing before in the tail).
 pub fn session_turn(lines: &[String]) -> Option<PiTurn> {
-    let mut retracted = false;
+    // The ids later `context_edit`s took back out of context. Keyed on the
+    // edit's `targetId`, not on "some edit came after": an edit that removed
+    // something else (a compaction, an extension) says nothing about the error.
+    let mut retracted: Vec<String> = Vec::new();
     for l in lines.iter().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
         match v.get("type").and_then(|t| t.as_str()) {
-            Some("context_edit") => retracted = true,
+            Some("context_edit") => retracted.extend(v.get("targetId").and_then(|t| t.as_str()).map(str::to_string)),
             Some("message") => {
                 let m = v.get("message");
                 let role = m.and_then(|m| m.get("role")).and_then(|r| r.as_str()).unwrap_or("");
@@ -168,7 +177,11 @@ pub fn session_turn(lines: &[String]) -> Option<PiTurn> {
                         at: v.get("timestamp").and_then(|t| t.as_str()).and_then(crate::sysclock::parse_iso8601),
                     },
                     ("assistant", "aborted") => PiTurn::Aborted,
-                    ("assistant", "error") if retracted => PiTurn::Busy,
+                    ("assistant", "error")
+                        if v.get("id").and_then(|i| i.as_str()).is_some_and(|id| retracted.iter().any(|r| r == id)) =>
+                    {
+                        PiTurn::Busy
+                    }
                     ("assistant", "error") => PiTurn::Failed,
                     ("assistant", _) | ("user", _) | ("toolResult", _) => PiTurn::Busy,
                     _ => continue,
@@ -278,16 +291,35 @@ pub fn read_screen(screen: &str) -> PiScreen {
     let Some(top) = lines[..bottom].iter().rposition(|l| l.starts_with('─')) else {
         return PiScreen::Other;
     };
-    let t = lines[top];
-    if !is_rule(t) && (t.contains(" Working") || t.contains(" Retrying (")) {
+    if border_is_busy(lines[top]) {
         return PiScreen::Working;
     }
     PiScreen::Other
 }
 
+/// Whether a composer top border carries a working status. It FAILS SAFE: pi
+/// 0.99.1 puts any status it likes there (`custom-editor.js::renderTopBorder`)
+/// — `Working`, `Retrying (n/3)`, `Compacting context…`, an extension's own
+/// working message, or on a narrow pane a spinner with no word at all
+/// (`renderSpinnerInBorder`) — so this does not match words. The one
+/// non-status thing an idle border carries is the input's overflow label
+/// (` ↑ N more `); with that removed, anything left that is not rule is a
+/// status, and a status means a turn is running.
+pub fn border_is_busy(line: &str) -> bool {
+    let t = line.trim_end();
+    let stripped = match (t.find(" ↑ "), t.find(" more ")) {
+        (Some(a), Some(b)) if a < b && t[a + " ↑ ".len()..b].chars().all(|c| c.is_ascii_digit()) => {
+            format!("{}{}", &t[..a], &t[b + " more ".len()..])
+        }
+        _ => t.to_string(),
+    };
+    !stripped.chars().all(|c| c == '─' || c == ' ')
+}
+
 /// A pi lane's state from its session file's newest turn and one capture of
-/// its pane. The screen answers first — it is the only witness of a first turn
-/// (no file yet) and of the trust modal — and the file answers the rest.
+/// its pane. The screen answers first — it is the only witness of the gap
+/// before the first user message (no file yet) and of the trust modal — and
+/// the file answers the rest.
 ///
 /// A modal is `Waiting` whatever the file says: a RESUMED session in `ask`
 /// mode has a file that ends idle and a modal on screen. No capture at all
@@ -439,6 +471,10 @@ mod tests {
         // The final error has no context_edit after it.
         assert!(all.last().unwrap().contains("\"error\""));
         assert_eq!(session_turn(&all), Some(PiTurn::Failed));
+        // An edit that took back something ELSE is not a retry of this error.
+        let mut other = all.clone();
+        other.push(r#"{"type":"context_edit","id":"ffff0000","targetId":"not-the-error","replacement":null}"#.into());
+        assert_eq!(session_turn(&other), Some(PiTurn::Failed));
     }
 
     #[test]
@@ -494,10 +530,68 @@ mod tests {
         assert_eq!(read_screen(""), PiScreen::Other);
     }
 
+    /// 0.99.1's border shapes, from `custom-editor.js::renderTopBorder`: a
+    /// status the reader has never heard of, a spinner with no word on a narrow
+    /// pane, and an IDLE border carrying only the input's overflow label.
+    #[test]
+    fn a_border_status_reads_busy_whatever_it_says_and_an_overflow_label_does_not() {
+        let w = |t: &str| border_is_busy(t);
+        assert!(w("── ⠙ Working ────────────"));
+        assert!(w("── ⠼ Retrying (3/3) in 7s... (escape to cancel) ────"));
+        assert!(w("── ⠋ Compacting context… ──────────"), "a status this build never saw is still a status");
+        assert!(w("── ⠋ Auto-compacting… ─────── ↑ 4 more ─────"), "a status beside an overflow label");
+        assert!(w("───⠋─────"), "spinner only, no word (narrow pane)");
+        assert!(!w("──────────────────"));
+        assert!(!w("─────────── ↑ 12 more ───────────"), "idle, with typed input overflowing");
+        assert!(!w("────────────────── "));
+        // Through the full screen reader, positionally.
+        let base = include_str!("../tests/fixtures/pi-screen/turn-done.txt");
+        let bottom_rule = base.lines().rev().find(|l| is_rule(l)).unwrap().to_string();
+        let with_top = |top: &str| {
+            let mut lines: Vec<String> = base.lines().map(str::to_string).collect();
+            let b = lines.iter().rposition(|l| is_rule(l)).unwrap();
+            let t = lines[..b].iter().rposition(|l| l.starts_with('─')).unwrap();
+            lines[t] = top.to_string();
+            lines.join("\n")
+        };
+        assert_eq!(read_screen(&with_top("── ⠋ Compacting context… ───────")), PiScreen::Working);
+        assert_eq!(read_screen(&with_top("──⠋────────")), PiScreen::Working);
+        assert_eq!(read_screen(&with_top("──────── ↑ 3 more ────────")), PiScreen::Other);
+        assert!(!bottom_rule.is_empty());
+    }
+
+    /// Re-pinned on pi 0.99.1 (2026-09-29, live, `lm-studio/qwen3.6-27b`):
+    /// the same readers on the version this was built against.
+    #[test]
+    fn pi_0_99_1_screens_and_sessions_read_as_measured() {
+        for (screen, want) in [
+            (include_str!("../tests/fixtures/pi-screen/0.99.1/working.txt"), PiScreen::Working),
+            (include_str!("../tests/fixtures/pi-screen/0.99.1/retrying.txt"), PiScreen::Working),
+            (include_str!("../tests/fixtures/pi-screen/0.99.1/trust-modal.txt"), PiScreen::TrustModal),
+            (include_str!("../tests/fixtures/pi-screen/0.99.1/done.txt"), PiScreen::Other),
+            (include_str!("../tests/fixtures/pi-screen/0.99.1/aborted.txt"), PiScreen::Other),
+        ] {
+            assert_eq!(read_screen(screen), want);
+        }
+        // Launch → tool turn → a second turn → Esc; model from the file.
+        let turns = lines(include_str!("../tests/fixtures/pi-session/0.99.1/turns-esc-resume.jsonl"));
+        assert_eq!(session_turn(&turns), Some(PiTurn::Aborted));
+        assert_eq!(session_model(&turns).as_deref(), Some("lm-studio/qwen3.6-27b"));
+        // 0.99.1 writes the file at the first USER message: its first
+        // conversational entry is the user's, and a prefix ending there is busy.
+        let first_user = turns.iter().position(|l| l.contains("\"role\":\"user\"")).unwrap();
+        assert_eq!(session_turn(&turns[..=first_user]), Some(PiTurn::Busy));
+        // A refused host: busy through every retry, failed at the end.
+        let refused = lines(include_str!("../tests/fixtures/pi-session/0.99.1/refused.jsonl"));
+        let retry = refused.iter().rposition(|l| l.contains("\"context_edit\"")).unwrap();
+        assert_eq!(session_turn(&refused[..=retry]), Some(PiTurn::Busy));
+        assert_eq!(session_turn(&refused), Some(PiTurn::Failed));
+    }
+
     #[test]
     fn the_screen_answers_first_and_the_file_the_rest() {
         let done = PiTurn::Done { at: Some(5) };
-        // First turn in flight: no file, a Working border.
+        // Before the first user message lands: no file, a Working border.
         assert_eq!(pi_state(None, Some(PiScreen::Working)), (State::Busy, None));
         assert_eq!(pi_state(None, Some(PiScreen::Other)), (State::Idle, None));
         // A resumed session in ask mode: idle file, modal on screen.

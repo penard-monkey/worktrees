@@ -94,6 +94,18 @@ pub fn allowed(harness: &str) -> Vec<String> {
     std::fs::read_to_string(crate::config::config_toml_path()).map(|t| allowed_in(&t, harness)).unwrap_or_default()
 }
 
+/// The root a grant or revoke for `repo` names: on a revoke, a string already
+/// in the list is taken literally (the repo may be gone); otherwise the repo's
+/// root via git.
+pub fn root_for(harness: &str, repo: &str, allow: bool) -> Option<String> {
+    if !allow {
+        if let Some(r) = allowed(harness).into_iter().find(|r| r == repo) {
+            return Some(r);
+        }
+    }
+    repo_root(repo)
+}
+
 pub fn is_allowed(harness: &str, repo_root: &str) -> bool {
     allowed(harness).iter().any(|r| r == repo_root)
 }
@@ -267,7 +279,11 @@ pub fn cmd_trust(p: &crate::Project, ui: &mut dyn crate::Ui, args: &[String]) ->
         return 1;
     }
     let wt = pos.get(1).map(|s| s.to_string()).unwrap_or_else(|| p.main_root.clone());
-    let Some(root) = repo_root(&wt) else {
+    // A revoke names what is LISTED, which may be a repo that has since moved
+    // or been deleted — git cannot resolve it any more, and that must not make
+    // an allowance permanent. So the listed string is matched first, as is.
+    let listed = if revoke { allowed(harness).into_iter().find(|r| r == &wt) } else { None };
+    let Some(root) = listed.or_else(|| repo_root(&wt)) else {
         ui.error(&format!("{wt} is not inside a git repository"));
         return 1;
     };

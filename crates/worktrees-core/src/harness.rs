@@ -156,6 +156,15 @@ pub trait Adapter: Sync {
         Ok(())
     }
 
+    /// Whether this harness has never STARTED a session in place `slug` — so
+    /// a fresh `open` there is the first launch, and a brief waiting in the
+    /// place has never been read. Only a harness whose first launch can be
+    /// refused after the brief was written (pi: a dead model host) needs to
+    /// know; the rest answer false and `open` stays as it was.
+    fn never_launched(&self, _p: &Project, _slug: &str) -> bool {
+        false
+    }
+
     /// The model the place's running session is on, from the harness's own
     /// record, when it keeps one we read.
     fn running_model(&self, _canonical: &str, _path: &str) -> Option<String> {
@@ -444,11 +453,12 @@ impl Adapter for Pi {
         let (gen, model) = if launch.resume {
             (pi_generation(p, slug), self.running_model(&canonical, wt))
         } else {
-            let declared = crate::store::read_lenient(&p.main_root).places.get(slug).and_then(|d| d.agent.clone());
+            // The place's last model only from a store THIS machine wrote: a
+            // committed `.worktrees.places.json` is repo input (ADR 0001).
             let model = launch
                 .model
                 .clone()
-                .or_else(|| declared.filter(|a| a.harness == self.provider().id).and_then(|a| a.model))
+                .or_else(|| crate::store::declared_model(&p.main_root, slug, self.provider().id))
                 .or_else(|| crate::config::default_model(self.provider().id));
             let Some(model) = model else {
                 let ready = crate::pimodels::ready_names(&crate::pimodels::options());
@@ -488,6 +498,12 @@ impl Adapter for Pi {
 
     fn running_model(&self, canonical: &str, path: &str) -> Option<String> {
         crate::pi::running_model(canonical, path)
+    }
+
+    /// No generation recorded: `prepare` bumps it only once a launch is
+    /// actually going ahead, so a create whose launch was refused leaves 0.
+    fn never_launched(&self, p: &Project, slug: &str) -> bool {
+        pi_generation(p, slug) == 0
     }
 
     fn activity(&self, scan: &Scan, canonical: &str, path: &str) -> Option<Activity> {

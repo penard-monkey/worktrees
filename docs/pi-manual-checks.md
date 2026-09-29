@@ -16,8 +16,14 @@ are all pinned by fixtures to one version:
 | Fixture | Version | Where |
 |---|---|---|
 | `pi --list-models` table | 0.99.1 | `crates/worktrees-core/tests/fixtures/pi-models/` |
-| session JSONL (`message`, `context_edit`, `model_change`) | 0.87.1 captures; 0.99.1 source agrees (`session-manager.js`, session version 3) | `…/fixtures/pi-session/` |
-| TUI screens (Working, Retrying, trust modal) | 0.87.1 | `…/fixtures/pi-screen/` |
+| session JSONL (`message`, `context_edit` + `targetId`, `model_change`) | 0.99.1 live (`pi-session/0.99.1/`), 0.87.1 kept beside it | `…/fixtures/pi-session/` |
+| TUI screens (Working, Retrying, trust modal, done, Esc) | 0.99.1 live (`pi-screen/0.99.1/`), 0.87.1 kept beside it | `…/fixtures/pi-screen/` |
+
+Last run: 2026-09-29, pi 0.99.1, `lm-studio/qwen3.6-27b`, through the release
+binary on a private tmux socket. Sections 1, 2, 4, 5, 6, 7 and 8 passed, and
+section 3's model label did; its `/model` switch was not run (only one model
+was ready, and the other configured provider is a paid one). What differed from 0.87.1: the
+session file now appears at the first USER message, not the first reply.
 
 Record what you tested:
 
@@ -61,10 +67,10 @@ t display -p -t '=repo-feat~agent~pi:' '#{pane_start_command}'
       `--model 'lm-studio/qwen3.6-27b'` and the opener, in that order.
 - [ ] `pane_current_command` reads `node`, and `worktrees ls --json` /
       `place_status` attribute the session to **pi**, not Claude.
-- [ ] While the first turn runs there is **no** session file yet, and
-      `place_status` still says `busy` (from the screen's `Working` border).
-- [ ] Once pi replies, `<ts>_repo-feat-XXXXXX-g1.jsonl` exists, and the state
-      goes `idle` with a `last_done`.
+- [ ] `<ts>_repo-feat-XXXXXX-g1.jsonl` appears as soon as the opener is
+      submitted (0.99.1 writes at the first USER message; 0.87.1 waited for
+      the reply), ending on that user message, and `place_status` says `busy`.
+- [ ] When pi replies the state goes `idle` with a `last_done`.
 - [ ] `.worktrees.places.json` has `"agent": {"harness":"pi","model":"lm-studio/qwen3.6-27b"}`
       and `"pi_session_gen": 1` for `feat`.
 
@@ -78,8 +84,9 @@ wt open feat --ai pi -r --no-attach --no-spare
 - [ ] The command is the same **minus `--model`**, with the same `-g1` id.
 - [ ] pi reopens the conversation on its recorded model (the footer shows it),
       and the JSONL gains no `model_change`.
-- [ ] A resume with no session file (close the lane before its first reply,
-      then `open -r`) launches FRESH instead, with `-g2` and a `--model`.
+- [ ] A resume with no session file (close the lane before any message was
+      submitted — e.g. while a trust modal holds the opener — then `open -r`)
+      launches FRESH instead, with `-g2` and a `--model`.
 
 ## 3. Model label
 

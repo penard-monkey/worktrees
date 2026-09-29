@@ -1005,6 +1005,16 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
     (ai.model, ai.resume, ai.force) = (model, resume, force);
+    // `new --brief` whose launch was REFUSED (pi's model host down) wrote the
+    // brief and started nothing; the launch-anyway that follows is this
+    // `open`. Without the opener that agent would start blank and the brief
+    // would never be read — so a first fresh launch of such a harness in a
+    // place with a brief gets the same opener `new` would have passed.
+    if !resume && !ai.cmd.is_empty() && Path::new(&wt).join(BRIEF_PATH).is_file() {
+        if crate::harness::by_word(&ai.match_word).is_some_and(|a| a.never_launched(p, &slug)) {
+            ai.opener = Some(BRIEF_OPENER.to_string());
+        }
+    }
     let session = agent_session_name(&session, &ai.match_word);
     launch(p, ui, &wt, &session, "", &ai, do_attach, spare_shell)
 }

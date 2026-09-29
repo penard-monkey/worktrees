@@ -160,15 +160,27 @@ pub enum Reach {
 /// and no credentials are sent — an `apiKey` in models.json may be a
 /// `!command`, which is never evaluated here.
 pub fn probe_now(base_url: &str) -> Reach {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let Some(url) = probe_url(base_url) else { return Reach::Down };
     let mut cmd = std::process::Command::new("curl");
-    cmd.args(["-s", "-m", "3", "--connect-timeout", "2", "-o", "-", "-w", "\n%{http_code}", &url]);
+    // `--url`, never a bare positional: the value is from a file pi reads and
+    // worktrees does not own, and a positional starting with `-` is an option.
+    cmd.args(["-s", "-m", "3", "--connect-timeout", "2", "-o", "-", "-w", "\n%{http_code}", "--url", &url]);
     let Ok(out) = crate::proc::run_deadline(cmd, 4) else { return Reach::Down };
     let text = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() {
         return Reach::Down;
     }
     parse_models_reply(&text)
+}
+
+/// `<baseUrl>/models`, or `None` for anything but a plain http(s) URL — a
+/// `file://`, a `-o …`-shaped value or whitespace is not a model host and is
+/// never handed to curl. `None` reads as unreachable, which refuses the launch
+/// with a reason the user can see rather than guessing.
+pub fn probe_url(base_url: &str) -> Option<String> {
+    let b = base_url.trim_end_matches('/');
+    let ok = (b.starts_with("http://") || b.starts_with("https://")) && !b.chars().any(|c| c.is_whitespace() || c.is_control());
+    ok.then(|| format!("{b}/models"))
 }
 
 /// `probe_now`'s output: the body, a newline, then the HTTP status.
@@ -318,13 +330,64 @@ pub fn options() -> Vec<ModelOption> {
     }
     let Some(out) = run_pi(&["--list-models", "--offline"], 10) else { return Vec::new() };
     let listed = parse_list_models(&String::from_utf8_lossy(&out.stdout));
-    let auth = |b: &str| {
-        run_pi(&["auth", "check", "--provider", b, "--json", "--no-refresh"], 5)
-            .and_then(|o| parse_auth_check(&String::from_utf8_lossy(&o.stdout)))
-    };
-    let v = merge_options(&listed, &declared(), default_model(), &auth, &probe);
+    let declared = declared();
+    let default = default_model();
+    // Only providers pi did NOT list are asked about, all at once, under ONE
+    // deadline: a picker waits on this, and N serial checks at 5s each is a
+    // dialog that opens N×5s late. A check still running at the deadline is
+    // simply unanswered (the row still says it is unusable).
+    let mut unlisted: Vec<String> = declared.iter().map(|d| d.backend.clone()).chain(default.iter().map(|(b, _)| b.clone())).collect();
+    unlisted.retain(|b| !listed.iter().any(|l| &l.backend == b));
+    unlisted.dedup();
+    let answers = auth_checks(&unlisted, AUTH_DEADLINE);
+    let auth = |b: &str| answers.get(b).cloned().flatten();
+    let v = merge_options(&listed, &declared, default, &auth, &probe);
     *CATALOG.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), v.clone()));
     v
+}
+
+/// The whole budget for `auth check`s in one catalog read.
+pub const AUTH_DEADLINE: Duration = Duration::from_secs(5);
+
+/// `pi auth check` for each of `backends`, in parallel, answered within
+/// `deadline` overall. A backend with no answer by then maps to `None`.
+fn auth_checks(backends: &[String], deadline: Duration) -> HashMap<String, Option<Option<String>>> {
+    let secs = deadline.as_secs().max(1);
+    gather(backends, deadline, move |b| {
+        run_pi(&["auth", "check", "--provider", b, "--json", "--no-refresh"], secs)
+            .and_then(|o| parse_auth_check(&String::from_utf8_lossy(&o.stdout)))
+    })
+}
+
+/// `check` for every key, concurrently, collecting what answered within
+/// `deadline` of the start — the bound is on the WHOLE set.
+fn gather<R: Send + 'static>(
+    keys: &[String],
+    deadline: Duration,
+    check: impl Fn(&str) -> R + Send + Sync + 'static,
+) -> HashMap<String, R> {
+    let check = std::sync::Arc::new(check);
+    let (tx, rx) = std::sync::mpsc::channel();
+    for b in keys {
+        let (tx, b, check) = (tx.clone(), b.clone(), check.clone());
+        std::thread::spawn(move || {
+            let r = check(&b);
+            let _ = tx.send((b, r));
+        });
+    }
+    drop(tx);
+    let end = Instant::now() + deadline;
+    let mut out = HashMap::new();
+    while out.len() < keys.len() {
+        let left = end.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok((b, r)) => {
+                out.insert(b, r);
+            }
+            Err(_) => break,
+        }
+    }
+    out
 }
 
 /// The ready rows, as `backend/model`, for an error that has to name them.
@@ -532,6 +595,12 @@ mod tests {
         assert_eq!(reach_reason(&Reach::Served(vec!["a".into()]), "b"), Some(Reason::NotServed));
         assert_eq!(reach_reason(&Reach::Served(vec!["a".into()]), "a"), None);
         assert_eq!(reach_reason(&Reach::Up, "a"), None, "an auth wall is a live host");
+        assert_eq!(probe_url("http://h:1234/v1/").as_deref(), Some("http://h:1234/v1/models"));
+        assert_eq!(probe_url("https://api.x/v1").as_deref(), Some("https://api.x/v1/models"));
+        for bad in ["file:///etc/passwd", "-o/tmp/x", "http://h/v1 -o /tmp/x", "ftp://h", "", "gopher://h"] {
+            assert_eq!(probe_url(bad), None, "{bad}");
+            assert_eq!(probe_now(bad), Reach::Down, "{bad} is never fetched");
+        }
     }
 
     #[test]
@@ -555,6 +624,23 @@ mod tests {
         assert_eq!(rows(Reach::Down)[0].reason, Some(Reason::EndpointUnreachable), "pi calls a dead host ready; we do not");
         assert_eq!(rows(Reach::Served(vec![])) [0].reason, Some(Reason::NotServed));
         assert_eq!(ready_names(&up), vec!["lm-studio/qwen3.6-27b".to_string()]);
+    }
+
+    /// Every check runs at once and the deadline bounds the SET: three
+    /// 300ms checks finish in about 300ms, and one that hangs is dropped at the
+    /// deadline instead of holding the rest.
+    #[test]
+    fn auth_checks_run_together_under_one_deadline() {
+        let keys: Vec<String> = ["a", "b", "c", "slow"].iter().map(|s| s.to_string()).collect();
+        let t0 = Instant::now();
+        let got = gather(&keys, Duration::from_millis(900), |k| {
+            std::thread::sleep(Duration::from_millis(if k == "slow" { 5_000 } else { 300 }));
+            k.len()
+        });
+        let took = t0.elapsed();
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(!got.contains_key("slow"));
+        assert!(took < Duration::from_millis(1_500), "{took:?}: serial would be 900ms+ before the slow one");
     }
 
     #[test]

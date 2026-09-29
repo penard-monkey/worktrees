@@ -12,8 +12,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   signed in to. Each place gets its own exact pi session, so a resume (`-r`)
   reopens THAT conversation on its own model rather than the newest one in the
   directory. The dot, `place_status` and `wait` read pi's session file, and its
-  screen for the first turn, which pi does not write down until it answers;
-  `place_status` also names the model a pi lane is on.
+  screen for the moments before pi has written one (startup, or its trust
+  prompt holding the brief back); `place_status` also names the model a pi
+  lane is on.
 - **`--model` for every agent.** `new`/`open --model` and MCP
   `create_worktree`'s new `model` field pass a model to Claude (`--model`),
   Codex (`-m`) or pi. It is checked as data (letters, digits and `. _ / : -`),
@@ -43,7 +44,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Changed
 - **`harness`, `model`, `trust` and `pi_project_trust` are user settings.** A
   `.worktrees.toml` that sets them is a hard parse error, like `ai_cmd`: for pi
-  a model selects a provider, and a provider can run a command.
+  a model selects a provider, and a provider can run a command. For the same
+  reason a `.worktrees.places.json` that a repo COMMITTED is never where a pi
+  lane's model comes from.
 
 ### Fixed
 - **An agent that runs as `node` in its own session is no longer taken for
