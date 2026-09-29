@@ -44,7 +44,7 @@ Each claim is marked with its source:
 
 ## Decisions
 
-Taken by David on 2026-09-29, after the first draft:
+Taken on 2026-09-29, after the first draft:
 
 - **Q3, trust default: yes.** pi launches with `--no-approve` by default. A
   user setting can switch it to `ask`. Worktrees never passes `--approve`
