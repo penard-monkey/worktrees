@@ -7,11 +7,16 @@
 // zoom check loads `settings.ts` as a data: URL that cannot resolve a runtime
 // import (a type-only one is erased before it gets there).
 
-export type Harness = "claude" | "codex";
+export type Harness = "claude" | "codex" | "pi";
 
 /** Registry order: the first is the default, and wins a tie wherever one is named. */
-export const HARNESSES: readonly Harness[] = ["claude", "codex"];
+export const HARNESSES: readonly Harness[] = ["claude", "codex", "pi"];
 
-export const HARNESS_LABEL: Record<Harness, string> = { claude: "Claude", codex: "Codex" };
+export const HARNESS_LABEL: Record<Harness, string> = { claude: "Claude", codex: "Codex", pi: "pi" };
+
+/** Whether a harness must be launched on a named model. pi's own default may be
+ *  a provider nobody signed in to (pi-harness §2.2), so worktrees never leaves
+ *  it to pi; Claude and Codex default safely to their CLI's choice. */
+export const NEEDS_MODEL: Record<Harness, boolean> = { claude: false, codex: false, pi: true };
 
 export const isHarness = (v: unknown): v is Harness => HARNESSES.includes(v as Harness);

@@ -7,7 +7,8 @@
 // harness during a redesign.
 
 import type { MigrationRow, MigrationOutcome } from "../CodexMcpPanel";
-import { initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
+import { agentSessions, initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
+import { isHarness, type Harness } from "../harness";
 
 /** `worktrees_core::docs::DocEntry` — see the `list_docs` case. */
 type MockDoc = { path: string; rel: string; title: string; group: string; mtime_ms: number };
@@ -30,6 +31,30 @@ const now = () => Math.floor(Date.now() / 1000);
 function findProject(root: string) {
   return ws.projects.find((p) => p.root === root);
 }
+/** The model a mock launch "replies" with: the one asked for, else what each
+ *  harness's CLI would default to. The real backend reads it from the
+ *  transcript once the agent has answered; the mock has none. */
+function mockModel(h: Harness, asked: unknown): string {
+  if (typeof asked === "string" && asked) return asked;
+  return h === "claude" ? "Opus 5.5" : h === "codex" ? "gpt-6-astra" : "lm-studio/qwen3.6-27b";
+}
+
+// Settings → pi's state: the trust mode pushed from settings and the user's
+// allowance (core keeps it in ~/.config/worktrees/config.toml).
+let piTrust = "never";
+const piAllowed = new Set<string>();
+
+/** pi's catalog as `choice::options_for("pi")` shapes it: pi's list, the
+ *  default it cannot use, and a declared host that does not answer. */
+const PI_MODELS = [
+  { model: { harness: "pi", backend: "lm-studio", model: "qwen3.6-27b", label: null }, ready: true, reason: null,
+    source: "pi-list-models", meta: { context: "128K", max_out: "16.4K", thinking: false, images: false } },
+  { model: { harness: "pi", backend: "lm-dead", model: "qwen3-coder-30b", label: null }, ready: false, reason: "endpoint_unreachable",
+    source: "pi-list-models", meta: { context: "256K", max_out: "32K", thinking: false, images: false } },
+  { model: { harness: "pi", backend: "kimi-coding", model: "kimi-for-coding", label: null }, ready: false, reason: "no_credentials",
+    source: "pi-config", meta: {} },
+];
+
 function editPlace(repo: string, slug: string, fn: (p: Place) => void) {
   const pv = findProject(repo);
   const pl = pv?.snapshot?.places.find((p) => p.slug === slug);
@@ -1174,19 +1199,30 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       }
       const pv = findProject(args.repo);
       const slug = (args.name || args.branch).replace(/\//g, "-");
+      const provider: Harness = isHarness(args.provider) ? args.provider : "claude";
+      // pi's launch gate, mirrored: a model whose host is down is refused with
+      // exit 5 AFTER the worktree exists (core's order), unless forced. Any
+      // model naming "dead" takes it, so "Launch anyway" is drivable headlessly.
+      const refused = provider === "pi" && String(args.model ?? "").includes("dead") && !args.force;
       if (pv?.snapshot && !pv.snapshot.places.find((p) => p.slug === slug)) {
         pv.snapshot.places.push({
           slug, path: `${args.repo}/.worktrees/${slug}`, is_main: false, registered: true,
           branch: args.branch, detached: false, dirty: false, dirty_files: 0,
           ahead: 0, behind: 0, last_commit_subject: "wip", last_commit_epoch: now(),
-          tmux_session: { name: `${sessionName(pv.snapshot.prefix, slug)}${args.provider === "codex" ? "~agent~codex" : ""}`, up: true },
-          agent_sessions: {
-            claude: { name: sessionName(pv.snapshot.prefix, slug), up: args.provider !== "codex", model: null },
-            codex: { name: `${sessionName(pv.snapshot.prefix, slug)}~agent~codex`, up: args.provider === "codex", model: null },
-          },
-          claude_session_present: args.provider !== "codex",
+          tmux_session: { name: agentSessions(sessionName(pv.snapshot.prefix, slug), provider)[provider].name, up: true },
+          agent_sessions: agentSessions(sessionName(pv.snapshot.prefix, slug), provider, mockModel(provider, args.model)),
+          claude_session_present: provider === "claude",
           declared: { last_opened_epoch: now() }, lifecycle_effective: "active",
         });
+      }
+      if (refused) {
+        editPlace(args.repo, slug, (p) => {
+          p.agent_sessions = agentSessions(sessionName(pv?.snapshot?.prefix ?? "repo", slug), null);
+          p.tmux_session = { name: sessionName(pv?.snapshot?.prefix ?? "repo", slug), up: false };
+          reconcile(p);
+        });
+        // Multi-line, as core's is: every step `new` took comes before the refusal.
+        return { ok: false, code: 5, slug, output: `═══ Worktree for '${args.branch}' ═══\nCreating new branch '${args.branch}' off 'main'.\nbrief: .planning/brief.md\n${String(args.model).split("/")[0]}'s host http://10.0.0.9:1234/v1 did not answer within 3s — pi was not started. The place is ready; to launch anyway: worktrees open ${slug} --force` };
       }
       // Return the computed slug (mirrors core's new_place contract) so the
       // frontend selects the right place headlessly.
@@ -1194,20 +1230,17 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     }
     case "open_place": {
       console.info("[mock] open_place", args); // includes args.fresh so headless tests can assert the flag
+      const provider: Harness = isHarness(args.provider) ? args.provider : "claude";
+      if (provider === "pi" && String(args.model ?? "").includes("dead") && !args.force) {
+        return { ok: false, code: 5, output: `lm-dead's host http://10.0.0.9:1234/v1 did not answer within 3s — pi was not started. The place is ready; to launch anyway: worktrees open ${args.slug} --force` };
+      }
       editPlace(args.repo, args.slug, (p) => {
-        const provider = args.provider === "codex" ? "codex" : "claude";
         const canonical = sessionName(findProject(args.repo)?.snapshot?.prefix ?? "repo", args.slug as string);
-        p.agent_sessions ??= {
-          claude: { name: canonical, up: p.tmux_session.up },
-          codex: { name: `${canonical}~agent~codex`, up: false },
-        };
-        p.agent_sessions[provider].up = true;
-        // What the real backend reads out of the transcript once the agent has
-        // replied; the mock has no transcript, so it just names one.
-        p.agent_sessions[provider].model = provider === "claude" ? "Opus 5.5" : "gpt-6-astra";
-        p.tmux_session.up = true;
-        if (provider === "codex" && !p.agent_sessions.claude.up) p.tmux_session.name = p.agent_sessions.codex.name;
-        if (provider === "claude") { p.tmux_session.name = p.agent_sessions.claude.name; p.claude_session_present = true; }
+        // One agent per place: opening one closes whichever other was live (ops::launch).
+        const prev = p.agent_sessions?.[provider]?.model ?? null;
+        p.agent_sessions = agentSessions(canonical, provider, mockModel(provider, args.model) ?? prev);
+        p.tmux_session = { name: p.agent_sessions[provider].name, up: true };
+        if (provider === "claude") p.claude_session_present = true;
         p.declared = { ...(p.declared ?? {}), last_opened_epoch: now() };
         reconcile(p);
       });
@@ -1224,13 +1257,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // user's word, collected by the frontend's two-click arm. A canonical
       // name is never a question.
       const canonical = sessionName(pv.snapshot.prefix, args.slug as string);
-      if (args.provider === "codex") {
+      if (isHarness(args.provider) && args.provider !== "claude") {
+        const h = args.provider;
         editPlace(args.repo, args.slug, (p) => {
-          if (p.agent_sessions) p.agent_sessions.codex.up = false;
+          if (p.agent_sessions) p.agent_sessions[h].up = false;
           p.tmux_session = p.agent_sessions?.claude.up ? p.agent_sessions.claude : { name: canonical, up: false };
           reconcile(p);
         });
-        return { ok: true, code: 0, output: `closed Codex tmux ${canonical}~agent~codex` };
+        return { ok: true, code: 0, output: `closed tmux ${canonical}~agent~${h}` };
       }
       const live = pl.tmux_session.name;
       // `session` is the name the frontend's arm displayed. Consent is bound to
@@ -1242,7 +1276,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
           output: `${args.session} is no longer the session in ${pl.path} — ${live} is.`,
         };
       }
-      if (live !== canonical && live !== `${canonical}~agent~codex` && !args.yes) {
+      if (live !== canonical && !live.startsWith(`${canonical}~agent~`) && !args.yes) {
         return {
           ok: false, code: 4, needs_confirm: live,
           output: `tmux ${live} was not opened under this repo's name (${canonical}) — adopted because a pane is cwd'd in ${pl.path}.`,
@@ -1251,11 +1285,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       editPlace(args.repo, args.slug, (p) => {
         if (p.agent_sessions) {
           p.agent_sessions.claude.up = false;
-          if (!args.provider) p.agent_sessions.codex.up = false;
+          if (!args.provider) for (const s of Object.values(p.agent_sessions)) s.up = false;
         }
         // The adopted session is gone, so the name falls back to canonical —
         // what core's snapshot reports for a place with nothing live.
-        p.tmux_session = p.agent_sessions?.codex.up ? p.agent_sessions.codex : { name: canonical, up: false };
+        const still = p.agent_sessions && Object.values(p.agent_sessions).find((s) => s.up);
+        p.tmux_session = still ? { name: still.name, up: true } : { name: canonical, up: false };
         reconcile(p);
       });
       return { ok: true, code: 0, output: `closed tmux ${live} — worktree kept.` };
@@ -2506,6 +2541,38 @@ Phase 3: Frontend pane and mock harness
       const done = mockUserSkills.filter((u) => u.status === "missing").map((u) => u.name);
       for (const u of mockUserSkills) if (u.status === "missing") u.status = "linked";
       return done;
+    }
+    case "agent_models": {
+      const h = String(args.harness);
+      if (h === "pi") return PI_MODELS;
+      if (h === "claude") return ["opus", "sonnet", "haiku", "fable"].map((m) => ({
+        model: { harness: "claude", backend: null, model: m, label: null }, ready: true, reason: null, source: "claude-aliases", meta: {},
+      }));
+      if (h === "codex") return [];
+      throw `provider must be claude or codex or pi`;
+    }
+    case "pi_status": {
+      const root = typeof args.repo === "string" ? args.repo : null;
+      return {
+        preflight: {
+          pi_path: "/Users/demo/.local/bin/pi", pi_version: "0.99.1",
+          node_path: "/Users/demo/.local/share/pi-node/current/bin/node", node_version: "26.10.0",
+          node_floor: "22.19.0", problem: null,
+        },
+        trust: piTrust, allowed: [...piAllowed], repo_root: root, repo_allowed: !!root && piAllowed.has(root),
+      };
+    }
+    case "set_pi_trust": {
+      const mode = String(args.mode);
+      if (!["never", "ask"].includes(mode)) throw `unknown pi trust mode '${mode}' (expected never or ask)`;
+      piTrust = mode;
+      return null;
+    }
+    case "set_pi_allowed": {
+      const root = String(args.repo);
+      const had = piAllowed.has(root);
+      if (args.allow) piAllowed.add(root); else piAllowed.delete(root);
+      return had !== !!args.allow;
     }
     case "set_codex_permissions": {
       const mode = String(args.mode);

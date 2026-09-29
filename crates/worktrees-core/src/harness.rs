@@ -109,6 +109,13 @@ pub trait Adapter: Sync {
     /// This harness's registry row.
     fn provider(&self) -> &'static Provider;
 
+    /// Whether this harness's CLI is here to launch at all — the reason, when
+    /// it is not, is the one the app shows. Checked before any launch path
+    /// that the UI drives; `prepare` still refuses on its own for the CLI/MCP.
+    fn installed(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Flags derived from the PLACE at launch time (Codex's permission mode,
     /// which needs the worktree's git common dir). Carried on
     /// `AiLaunch::place_flags` and emitted by `launch_args`.
@@ -294,6 +301,12 @@ impl Adapter for Codex {
         provider::CODEX
     }
 
+    fn installed(&self) -> Result<(), String> {
+        crate::profile::codex_bin()
+            .map(|_| ())
+            .ok_or_else(|| "Codex CLI is not installed. Install it, then sign in with `codex login`.".into())
+    }
+
     fn place_flags(&self, wt: &str) -> Vec<String> {
         crate::codex::launch_flags(wt)
     }
@@ -396,6 +409,12 @@ fn pi_generation(p: &Project, slug: &str) -> u32 {
 impl Adapter for Pi {
     fn provider(&self) -> &'static Provider {
         provider::PI
+    }
+
+    fn installed(&self) -> Result<(), String> {
+        crate::pimodels::pi_bin()
+            .map(|_| ())
+            .ok_or_else(|| "pi is not installed. Install it with: curl -fsSL https://pi.dev/install.sh | sh".into())
     }
 
     /// `--session-dir` is passed explicitly, set to pi's own default for the

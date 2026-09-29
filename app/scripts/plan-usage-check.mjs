@@ -100,8 +100,10 @@ test("Claude known resets in the past are not unknown", () => {
   assert(row(null).includes("Reset unknown"));
   assert(row(200).includes("in 1m"));
 });
-const from = app.indexOf("function useProviderUsage("); const to = app.indexOf("function UsageRows(", from);
-assert(from >= 0 && to > from);
+// From the dispatch table the hook reads (`USAGE_READ`) through the hooks, so
+// the check runs the real per-harness dispatch rather than a stand-in for it.
+const from = app.indexOf("const USAGE_READ"); const to = app.indexOf("function UsageRows(", from);
+assert(from >= 0 && to > from && app.indexOf("function useProviderUsage(", from) > from && app.indexOf("function useProviderUsage(", from) < to);
 const hooks = (await transformWithEsbuild(app.slice(from, to), "hooks.ts", { loader: "ts" })).code;
 function host() {
   const states = [], effects = [], pending = [], requests = [], timers = new Map(), listeners = new Map();

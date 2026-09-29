@@ -126,6 +126,8 @@ export function panelsFor(s: Settings, key: string | null): Settings {
 // The same three strings `worktrees_core::codex::Permissions::parse` accepts.
 export const CODEX_PERMISSIONS = ["ask", "auto-review", "full"] as const;
 export type CodexPermissions = (typeof CODEX_PERMISSIONS)[number];
+export const PI_PROJECT_TRUST = ["never", "ask"] as const;
+export type PiProjectTrust = (typeof PI_PROJECT_TRUST)[number];
 
 export type Settings = {
   ui_rem: number; // 13–22 — the BASE chrome size (see `app_zoom` for the overall knob)
@@ -302,6 +304,14 @@ export type Settings = {
   // backend (`set_codex_permissions`) at load and on every change; it applies to
   // the NEXT launch. Mirrors `worktrees_core::codex::Permissions`.
   codex_permissions: CodexPermissions;
+  // The model each harness is preselected on in the new-worktree dialog and the
+  // Switch agent sheet. Absent: Claude and Codex use their CLI's default; pi has
+  // none worktrees will use, so the first ready model is offered instead.
+  default_models: Partial<Record<Harness, string>>;
+  // What a repo NOT in the user's allowance gets from pi: `never` launches with
+  // --no-approve, `ask` lets pi's own trust prompt decide. Pushed to the backend
+  // (`set_pi_trust`) like `codex_permissions`. Mirrors `worktrees_core::trust::PiTrust`.
+  pi_project_trust: PiProjectTrust;
   ai_auto_resume: boolean; // single-click Enter resumes the selected provider when possible
   update_auto_check: boolean; // check for updates ~3s after launch (manual check always works)
   fetch_interval_min: number; // background `git fetch origin` cadence (0 = off, else 5 | 15 | 60)
@@ -416,6 +426,8 @@ export const DEFAULTS: Settings = {
   terminal_cmd: "",
   default_provider: "claude",
   codex_permissions: "auto-review",
+  default_models: {},
+  pi_project_trust: "never",
   ai_auto_resume: true,
   update_auto_check: true,
   fetch_interval_min: 0,
@@ -662,6 +674,10 @@ export async function loadSettings(): Promise<Settings> {
     s.done_steps = clampSteps(s.done_steps);
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     if (!CODEX_PERMISSIONS.includes(s.codex_permissions)) s.codex_permissions = "auto-review";
+    if (!PI_PROJECT_TRUST.includes(s.pi_project_trust)) s.pi_project_trust = "never";
+    // A hand-edited model string must still be data before it can reach argv.
+    s.default_models = Object.fromEntries(Object.entries(s.default_models && typeof s.default_models === "object" ? s.default_models : {})
+      .filter(([h, m]) => isHarness(h) && typeof m === "string" && /^[A-Za-z0-9._/:-]{1,200}$/.test(m) && !m.startsWith("-")));
     if (migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0)) saveSettings(s);
     return s;
   } catch {

@@ -3,7 +3,7 @@
 // it with no code changes. Covers every lifecycle group + pinned + main + a
 // dead/broken project, so the design review sees all states at once.
 
-import type { Harness } from "../harness";
+import { HARNESSES, type Harness } from "../harness";
 
 export type Declared = {
   lifecycle?: string;
@@ -64,6 +64,18 @@ const MIN = 60;
  *  builds the name by hand drifts the moment a fixture slug has a dot in it. */
 export const sessionName = (prefix: string, slug: string) => `${prefix}-${slug}`.replace(/\./g, "-");
 
+/** Every harness's session for a place, keyed like lib.rs's `agent_sessions`:
+ *  Claude on the canonical name, every other harness on its `~agent~<id>`
+ *  sidecar. `live` is the one that is up (one agent per place), `model` what it
+ *  last replied with. */
+export function agentSessions(canonical: string, live: Harness | null, model: string | null = null) {
+  return Object.fromEntries(HARNESSES.map((h) => [h, {
+    name: h === "claude" ? canonical : `${canonical}~agent~${h}`,
+    up: h === live,
+    model: h === live ? model : null,
+  }])) as Record<Harness, { name: string; up: boolean; model: string | null }>;
+}
+
 type Opt = Partial<Place> & { slug: string; branch: string | null };
 function place(prefix: string, root: string, o: Opt): Place {
   const isMain = o.is_main ?? false;
@@ -91,10 +103,7 @@ function place(prefix: string, root: string, o: Opt): Place {
     // lib.rs sets this on EVERY place. Without it the nav's provider mark has
     // nothing to read in the harness; a live `tmux_session` is Claude unless a
     // fixture says codex.
-    agent_sessions: o.agent_sessions ?? {
-      claude: { name: sessionName(prefix, o.slug), up: o.tmux_session?.up ?? false, model: null },
-      codex: { name: `${sessionName(prefix, o.slug)}~agent~codex`, up: false, model: null },
-    },
+    agent_sessions: o.agent_sessions ?? agentSessions(sessionName(prefix, o.slug), o.tmux_session?.up ? "claude" : null),
     claude_session_present: o.claude_session_present ?? false,
     declared: o.declared ?? null,
     lifecycle_effective: o.lifecycle_effective ?? "closed",
@@ -151,10 +160,7 @@ function cdv(): ProjectView {
       ahead: 5, behind: 1, tmux_session: { name: `${P}-billing-refactor~agent~codex`, up: true },
       // The Codex place: its nav row carries the OpenAI mark and its busy turns (the
       // activity cycle in install.ts) light the same dots Claude's do.
-      agent_sessions: {
-        claude: { name: `${P}-billing-refactor`, up: false, model: null },
-        codex: { name: `${P}-billing-refactor~agent~codex`, up: true, model: "gpt-6-astra" },
-      },
+      agent_sessions: agentSessions(`${P}-billing-refactor`, "codex", "gpt-6-astra"),
       claude_session_present: false, last_commit_subject: "extract invoice service",
       declared: { last_opened_epoch: NOW - 3600 }, lifecycle_effective: "active",
     }),
