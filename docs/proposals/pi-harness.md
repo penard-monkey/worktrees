@@ -202,6 +202,14 @@ Today the only model knob is `Profile.model` (Claude-only, `--model`,
     `--model` writes a `model_change` entry **[observed]**.
 - `resume_arg: &str` becomes an adapter method. pi resumes with
   `--session-id <derived id>` (§1.3), which a static string cannot express.
+- **Resume is keyed by the PLACE directory, never the repo.** opencode's
+  `-c` is repo-scoped: in worktree B it resumed worktree A's session, whose
+  bash then ran in A **[observed by the opencode lane]**. opencode therefore
+  resumes with `-s <id>`, picked from `session list --format json` filtered
+  by `directory == place`.
+- pi is safe on both paths. `--continue` looks only in the cwd's session
+  directory, and the `--session-id` worktrees derives comes from the place's
+  canonical name.
 
 **3. Value types (outside the registry):**
 
@@ -240,6 +248,13 @@ launches that fail.
 - There is no trait today (§10). Phase 1 extracts one from the two existing
   harnesses **before** a third lands:
   - `launch_args(choice, fresh | resume)`
+  - `launch_env(choice) -> Vec<(String, String)>`: so a per-launch secret
+    never reaches argv. opencode needs `OPENCODE_SERVER_PASSWORD`; pi and
+    Codex return `[]`.
+  - A per-launch **runtime handle** (e.g. `{port, secret, pid}` for
+    opencode) that `activity`, `send` and `running_model` read. It may be
+    adapter-private, but the trait must not assume a launch is argv-only or
+    stateless.
   - `session_for(panes, canonical)`
   - `activity(panes, canonical, path) -> Option<Activity>`
   - `session_present(cwd)`
@@ -250,10 +265,13 @@ launches that fail.
     to the harness.
     - Codex confirms from the screen (#352).
     - pi confirms from the JSONL user entry (§4.3).
-    - opencode's TUI runs an embedded HTTP server
-      (`/tui/append-prompt`, `/tui/submit-prompt`, `/session/status`, SSE)
-      **[per the opencode lane; not verified here]**, so its `send` and
-      `activity` may be API calls rather than pane reads.
+    - opencode's TUI, **started with `--port`**, serves `/session/status`,
+      `/permission`, `/tui/append-prompt` + `/tui/submit-prompt` and SSE
+      `/event` in-process. Without `--port` it listens on nothing, whatever
+      its docs say. It has no Host check (a foreign Host gets 200);
+      `OPENCODE_SERVER_PASSWORD` turns unauthenticated requests into 401.
+      **[verified on 1.18.30 by the opencode lane]**. So its `send` and
+      `activity` are API calls rather than pane reads.
     - The trait must not assume the pane is the only channel.
 - `activity::most_active` becomes N-ary.
 
@@ -847,7 +865,12 @@ change:
    worktrees only *show* the gap, or also offer "add to pi's models.json"?
    That would be a write to pi's config, which this proposal currently
    forbids, the same as `~/.claude.json`.
-3. **Trust default.** Is `--no-approve` right by default? It means repo
+3. **Trust default (one decision for pi AND opencode).** This is the same
+   question as the opencode proposal's Q1. opencode runs a repo's
+   `.opencode/plugin/*.js` and `opencode.json` MCP commands at launch
+   without prompting, and its only off-switch also drops `AGENTS.md`, so
+   that lane proposes a user-scoped per-repo allowance gate. Answer once for
+   both. For pi: is `--no-approve` right by default? It means repo
    `.agents/skills` and `.pi/` never load in pi lanes unless you opt in, and
    this repo's own layout will raise the prompt otherwise.
 4. **Extension vs. skill.** Are you comfortable with worktrees shipping a
