@@ -8,6 +8,9 @@ title: "Proposal — pi as a third harness"
 extends [Codex support](codex-support.html), which added a harness, and
 [Codex plan usage](codex-usage.html), which covered a harness's account
 limits. It does not change the one-live-provider-per-place rule.
+**§2.3 is shared:** it is the one harness × model shape for every new
+harness, agreed with the parallel opencode research lane, whose proposal
+references it.
 
 **Evidence base:** pi **0.87.1** (managed install), run live in throwaway tmux
 servers (`tmux -L piprobe…`, killed afterwards) in a scratch git repo. All
@@ -162,56 +165,131 @@ default **[observed]**. Passing `--model` on resume would write a
 `model_change` entry. That is correct only when the user actually asked to
 switch.
 
-### 2.3 The data shape
+<a id="shared-shape"></a>
+
+### 2.3 Shared harness × model shape (canonical for every new harness)
+
+**This section is shared.** It was agreed on 2026-09-29 with the
+`opencode-harness-research` lane, which is researching opencode as a harness
+in parallel. The opencode proposal references this section and records only
+opencode-specific rows. Change the shape **here**, not in a harness doc.
 
 Today the only model knob is `Profile.model` (Claude-only, `--model`,
-`shell_quote`d; `profile.rs:248`, `:518`). Codex has none. Proposed:
+`shell_quote`d; `profile.rs:248`, `:518`). Codex has none. The shape:
+
+**1. `provider::Provider` stays the harness registry.**
+
+- No rename. The prose says "harness" and the code keeps `Provider`, since
+  renaming is churn with no payoff.
+- New entries: `pi`, `opencode`. Sidecars: `~agent~pi`, `~agent~opencode`,
+  with `canonical_default: false`. Existing names (`<canonical>`,
+  `~agent~codex`) stay byte-identical.
+- The registry does **not** grow a model dimension. A harness × model
+  product in a static table would go stale the moment someone edits pi's
+  `models.json`.
+
+**2. One new registry field: `model_arg: Option<&'static str>`.**
+
+- It is the only way a model reaches argv. Values:
+  - Claude: `--model`
+  - Codex: `-m`
+  - pi: `--model`, taking `<backend>/<id>[:thinking]`
+  - opencode: per its doc
+- The adapter decides **when** to pass it:
+  - on a fresh launch;
+  - on an explicit model switch;
+  - **never on resume**. pi reopens a session on its own model, and passing
+    `--model` writes a `model_change` entry **[observed]**.
+- `resume_arg: &str` becomes an adapter method. pi resumes with
+  `--session-id <derived id>` (§1.3), which a static string cannot express.
+
+**3. Value types (outside the registry):**
 
 ```text
+ModelRef                          # a model, as the harness names it
+  harness: string                 # provider.rs id
+  backend: string | null          # pi/opencode "provider" (lm-studio, kimi-coding, anthropic…);
+                                  #   null for claude/codex. Named `backend` because
+                                  #   `provider` already means the harness in provider.rs.
+  model:   string                 # qwen3.6-27b / opus / gpt-5-codex
+  label:   string | null          # display only
+  # serialises to the harness's own string: backend/model for pi and opencode
+
+ModelOption                       # what a picker lists (derived, cached, recomputed)
+  model:  ModelRef
+  ready:  bool
+  reason: "no_credentials" | "endpoint_unreachable" | "not_served" | null
+                                  # no_credentials covers OAuth sign-in AND API keys
+                                  #   (pi: auth check `credentials_not_configured`)
+  source: string                  # "pi-list-models", "opencode-models", "claude-aliases", "user"
+  meta:   { context?, max_out?, thinking?, images? }
+
 AgentChoice                       # what a lane is launched with
-  harness: "claude" | "codex" | "pi"      # provider.rs id (unchanged meaning)
-  model:   ModelRef | null                # null = harness default (claude/codex only)
-  thinking: string | null                 # pi: off..max; claude/codex: unused for now
-
-ModelRef
-  backend: string | null   # pi's provider ("lm-studio", "kimi-coding"); null for claude/codex
-  id:      string          # "qwen3.6-27b" / "opus" / "gpt-5-codex"
-  label:   string          # display only
-
-ModelOption                       # what a picker lists (derived, recomputed)
-  ref: ModelRef
-  harness: string
-  ready: bool
-  reason: "not_signed_in" | "endpoint_unreachable" | null
-  source: "pi-list-models" | "claude-aliases" | "codex-config" | "user"
-  meta: { context?, max_out?, thinking?, images? }
+  harness:  string
+  model:    ModelRef | null       # null = the CLI's own default; NOT offered for pi (§2.2)
+  thinking: string | null
 ```
 
-- **The registry does not grow a model dimension.** `provider.rs` stays
-  about harness identity and lifecycle, which is what #351 made it. Models
-  are *derived* per harness by an adapter (`fn models(&self) ->
-  Vec<ModelOption>`), in the same spirit as activity being derived. A
-  harness × model product in a static table would go stale the moment
-  someone edits `models.json`.
-- **Validation is structural, not by list.** A ModelRef reaches argv
-  `shell_quote`d, like `Profile.model` (`profile.rs:2285` test), and for pi
-  it must also match `[A-Za-z0-9._/:-]+`. The list is a UI convenience, not
-  a gate: a model the list does not know can still be typed, as with
+`ready`/`reason` are not optional decoration. On this machine pi's default
+provider is not signed in (§2.2), and pi reports a dead model host as ready
+(§7). A picker that cannot say *why* a model is unusable offers exactly the
+launches that fail.
+
+**4. Per-harness adapter.**
+
+- There is no trait today (§10). Phase 1 extracts one from the two existing
+  harnesses **before** a third lands:
+  - `launch_args(choice, fresh | resume)`
+  - `session_for(panes, canonical)`
+  - `activity(panes, canonical, path) -> Option<Activity>`
+  - `session_present(cwd)`
+  - `running_model(cwd)`: the label reader, separate from the catalog
+  - `models() -> Vec<ModelOption>`
+  - `usage() -> Option<…>`: `None` is legitimate, e.g. for local models
+  - `send(pane, text) -> Delivery`: delivery **and** its confirmation belong
+    to the harness.
+    - Codex confirms from the screen (#352).
+    - pi confirms from the JSONL user entry (§4.3).
+    - opencode's TUI runs an embedded HTTP server
+      (`/tui/append-prompt`, `/tui/submit-prompt`, `/session/status`, SSE)
+      **[per the opencode lane; not verified here]**, so its `send` and
+      `activity` may be API calls rather than pane reads.
+    - The trait must not assume the pane is the only channel.
+- `activity::most_active` becomes N-ary.
+
+**5. Validation.**
+
+- A model string reaches argv `shell_quote`d, like `Profile.model` (the
+  `profile.rs:2285` test), **and** it must match `[A-Za-z0-9._/:-]+`.
+- The catalog is a UI convenience, not a gate. Free text is allowed, as with
   `--model` today.
-- **Generalising back:**
-  - Claude: `--model <alias|id>`. Options are a small static alias set
-    (`opus`, `sonnet`, `haiku`, `fable`) plus free text. Claude's model list
-    is not locally queryable **[inferred; not probed this lane]**.
-  - Codex: `-m <model>`. Options are the models named in `~/.codex`
-    profiles, plus free text **[inferred; not probed this lane]**.
-  - Both keep `model: null` as "whatever the CLI defaults to", which is safe
-    for them. For pi, `null` is not offered (§2.2).
-- **Where it is remembered:**
-  - The *last launched* AgentChoice per place goes in declared state
-    (`.worktrees.places.json`, the user's machine file, not the repo), so
-    Switch and Open can show "pi · qwen3.6-27b" before launching.
-  - The *default* goes in Settings → Agents (§5).
-  - A profile (`Profile.model`) keeps working and wins for Claude, as today.
+- `model` and `harness` join `USER_ONLY_KEYS` (ADR 0001, §8). Values come
+  only from the user, the app or an MCP call's validated data, never from
+  repo files.
+
+**6. Persistence.**
+
+- The last-launched choice per place goes in `.worktrees.places.json` as
+  `agent_model` next to the provider choice. That is the user's machine
+  file, not the repo.
+- The per-harness default goes in Settings → Agents (§5).
+- `Profile.model` keeps winning for Claude.
+
+**7. Pane identity.**
+
+- `for_pane` must prefer the session-name suffix / `pane_start_command` over
+  the `node`/version heuristic. Today it attributes any `node` pane to
+  Claude, and pi's pane reports `node` (§1.3).
+- This is shared phase-1 work for every node-based harness.
+
+**Generalising back to Claude and Codex:**
+
+- Claude: a small static alias set (`opus`, `sonnet`, `haiku`, `fable`) plus
+  free text. Its model list is not locally queryable **[inferred; not probed
+  this lane]**.
+- Codex: models named in `~/.codex` profiles plus free text **[inferred]**.
+- Both keep `model: null` as "whatever the CLI defaults to", which is safe
+  for them.
 
 ### 2.4 Where the choice is exposed
 
@@ -707,8 +785,11 @@ From a read-only survey of the current tree (line numbers as of `91b5ed0`):
 **Phase 1 — make "two" into "N", with no pi yet.** One PR, no behaviour
 change:
 
-- Extract a `Harness` adapter trait (session, activity, resume, model
-  label). `most_active` becomes N-ary.
+- Extract the adapter trait from [§2.3](#shared-shape) (launch args,
+  session, activity, resume, running model, models, usage, send) with the
+  two existing implementations. `most_active` becomes N-ary. **This phase is
+  shared with the opencode proposal**: whichever harness lands first builds
+  it, and neither re-plans it.
 - One shared `Harness` type in the frontend. `agent_sessions` becomes a
   keyed map. "Switch to the other one" becomes "Switch agent…".
 - Fix `for_pane` to prefer the session-name suffix / `pane_start_command`
