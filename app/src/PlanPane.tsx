@@ -20,6 +20,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSPrope
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Markdown } from "./markdown";
+import { HARNESS_LABEL, type Harness } from "./harness";
 
 export type PlanPhaseStatus = "pending" | "in_progress" | "complete" | "blocked" | "unknown";
 export type PlanPhase = { name: string; status: PlanPhaseStatus; done: number; total: number };
@@ -77,7 +78,7 @@ export type PlanPaneProps = {
    *  knows" rows and for the session "Generate plan" pastes into. */
   place: PlanPlace;
   agentSession: string | null;
-  agentProvider: "claude" | "codex";
+  agentProvider: Harness;
   /** When Claude last finished work here, epoch SECONDS (`workedAt`: the
    *  declared stamp merged with the live `sessions:done` overlay, which a
    *  snapshot alone does not carry). */
@@ -448,7 +449,7 @@ export function PlanPane({ root, slug, place, agentSession, agentProvider, worke
                 data-track="dock.plan.generate"
                 disabled={!session || pasting}
                 title={session
-                  ? `Put a fixed prompt at this place's ${agentProvider === "claude" ? "Claude" : "Codex"} prompt asking it to write its plan files. Nothing is sent until you press Enter there.`
+                  ? `Put a fixed prompt at this place's ${HARNESS_LABEL[agentProvider]} prompt asking it to write its plan files. Nothing is sent until you press Enter there.`
                   : "start an agent session in this place first"}
                 onClick={generate}
               >

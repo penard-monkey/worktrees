@@ -13,6 +13,7 @@ import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, clampZoom, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
 import { humanSize } from "./filekind";
+import { HARNESSES, HARNESS_LABEL } from "./harness";
 
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
@@ -792,10 +793,10 @@ export function SettingsSheet({
           <section className="setting">
             <label>Default agent</label>
             <div className="seg">
-              {(["claude", "codex"] as const).map((provider) => (
+              {HARNESSES.map((provider) => (
                 <button key={provider} className={settings.default_provider === provider ? "on" : ""}
                   onClick={() => onChange({ default_provider: provider })}>
-                  {provider === "claude" ? "Claude" : "Codex"}
+                  {HARNESS_LABEL[provider]}
                 </button>
               ))}
             </div>

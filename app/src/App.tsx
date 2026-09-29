@@ -1,4 +1,5 @@
-import { adaptClaude, adaptCodex, checking, compactUsage, detailMessage, expired, providerName, stateLabel, stripLimits, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage, type Provider } from "./planUsage";
+import { adaptClaude, adaptCodex, checking, compactUsage, detailMessage, expired, stateLabel, stripLimits, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage } from "./planUsage";
+import { HARNESSES, HARNESS_LABEL, type Harness } from "./harness";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -64,8 +65,8 @@ type ProviderSwitch = {
   repo: string;
   slug: string;
   placeName: string;
-  from: "claude" | "codex";
-  to: "claude" | "codex";
+  from: Harness;
+  to: Harness;
   session: string;
 };
 
@@ -75,8 +76,8 @@ function ProviderSwitchDialog({ pending, onClose, onConfirm }: {
   onConfirm: () => void;
 }) {
   useEscape(onClose);
-  const from = pending.from === "claude" ? "Claude" : "Codex";
-  const to = pending.to === "claude" ? "Claude" : "Codex";
+  const from = HARNESS_LABEL[pending.from];
+  const to = HARNESS_LABEL[pending.to];
   return <div className="scrim scrim-center" onClick={onClose}>
     <div className="sync-modal rm-modal" role="dialog" aria-modal="true"
       aria-label={`Switch from ${from} to ${to}`} data-testid="provider-switch-dialog"
@@ -137,7 +138,7 @@ type Place = {
   tmux_session: { name: string; up: boolean };
   /** `model`: what the live agent last replied with, display-named (`Opus 5.5`,
    *  or codex's id verbatim); null before its first reply. */
-  agent_sessions?: { claude: AgentSession; codex: AgentSession };
+  agent_sessions?: Record<Harness, AgentSession>;
   last_commit_epoch?: number | null;
   claude_session_present: boolean;
   /// The AI profile the LIVE session was started with, and whether that profile
@@ -777,23 +778,26 @@ const DRAFT_LEAD = 48;
 const draftLead = (d: Draft) =>
   d.text.length > DRAFT_LEAD ? d.text.slice(0, DRAFT_LEAD) + "…" : d.text;
 
-/** The provider whose session is live in `p`, or null. One provider runs per
- *  place; if a stray pair is ever up at once, Claude is named, matching the
- *  snapshot, which keeps `tmux_session` on Claude's in that case. */
-function liveAgent(p: Place): "claude" | "codex" | null {
-  const a = p.agent_sessions;
-  if (a?.claude.up) return "claude";
-  if (a?.codex.up) return "codex";
-  return null;
+/** The harness whose session is live in `p`, or null. One harness runs per
+ *  place; if a stray pair is ever up at once, the first in registry order
+ *  (Claude) is named, matching the snapshot, which keeps `tmux_session` on
+ *  Claude's in that case. */
+function liveAgent(p: Place): Harness | null {
+  return liveAgents(p.agent_sessions)[0] ?? null;
+}
+
+/** Every harness live in `a`, in registry order. */
+function liveAgents(a: Place["agent_sessions"] | null | undefined): Harness[] {
+  return HARNESSES.filter((h) => a?.[h]?.up);
 }
 
 /** The nav row's provider mark: the Claude spark or the OpenAI blossom (Codex),
  *  nothing when no agent is live. The SVG is aria-hidden, so the span carries
  *  the label; `title` is the hover. Sized in `em` by `.g-agent svg`, so it
  *  follows the glyph cluster's font (and `--ui-rem`), not a fixed px. */
-function AgentMark({ agent }: { agent: "claude" | "codex" | null }) {
+function AgentMark({ agent }: { agent: Harness | null }) {
   if (!agent) return null;
-  const label = agent === "claude" ? "Claude session live" : "Codex session live";
+  const label = `${HARNESS_LABEL[agent]} session live`;
   return (
     <span className={"g g-agent g-agent-" + agent} title={label} aria-label={label} role="img">
       {agent === "claude" ? <Icons.ClaudeMark /> : <Icons.OpenAIMark />}
@@ -1643,11 +1647,11 @@ function NewPlaceDialog({
   places: Place[];
   unborn: boolean;
   /** A REJECTED create, handed back so a typo costs one edit and not a retype. */
-  initial: { branch: string; name: string; base: string; provider: "claude" | "codex" } | null;
+  initial: { branch: string; name: string; base: string; provider: Harness } | null;
   /** ctx-menu "New worktree from this branch…" — a base, nothing else. */
   initialBase: string;
-  defaultProvider: "claude" | "codex";
-  onCreate: (branch: string, name: string, base: string, provider: "claude" | "codex") => void;
+  defaultProvider: Harness;
+  onCreate: (branch: string, name: string, base: string, provider: Harness) => void;
   onClose: () => void;
   onOpenPlace: (slug: string) => void;
   onInitialCommit: (repo: string) => Promise<void>;
@@ -1656,8 +1660,8 @@ function NewPlaceDialog({
   const [branch, setBranch] = useState(initial?.branch ?? "");
   const [base, setBase] = useState(initial?.base || initialBase);
   const [name, setName] = useState(initial?.name ?? "");
-  const [provider, setProvider] = useState<"claude" | "codex">(initial?.provider ?? defaultProvider);
-  const [available, setAvailable] = useState<{ claude: boolean; codex: boolean } | null>(null);
+  const [provider, setProvider] = useState<Harness>(initial?.provider ?? defaultProvider);
+  const [available, setAvailable] = useState<Record<Harness, boolean> | null>(null);
   // Until this flips, the folder name MIRRORS the branch. Emptying the field
   // hands it back — which is what the hint under it says.
   const [touched, setTouched] = useState(!!initial?.name);
@@ -1671,11 +1675,12 @@ function NewPlaceDialog({
       invoke<{ codex_bin: string | null }>("codex_mcp_status"),
     ]).then(([claude, codex]) => {
       if (!alive) return;
-      const next = { claude: !!claude.claude_bin, codex: !!codex.codex_bin };
+      const next: Record<Harness, boolean> = { claude: !!claude.claude_bin, codex: !!codex.codex_bin };
       setAvailable(next);
       // A rejected create reopens with the user's exact choice, even if CLI
       // availability changed while the operation was running.
-      if (!initial && next.claude !== next.codex) setProvider(next.claude ? "claude" : "codex");
+      const installed = HARNESSES.filter((h) => next[h]);
+      if (!initial && installed.length === 1) setProvider(installed[0]);
     }).catch((e) => { if (alive) onError(e); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per open
@@ -1895,14 +1900,14 @@ function NewPlaceDialog({
                 </span>
               </label>
 
-              {available?.claude && available.codex && (
+              {HARNESSES.filter((h) => available?.[h]).length > 1 && (
                 <div className="np-field">
                   <span className="np-label">Start with</span>
                   <div className="seg" role="group" aria-label="Agent provider">
-                    {(["claude", "codex"] as const).map((choice) => (
+                    {HARNESSES.filter((h) => available?.[h]).map((choice) => (
                       <button key={choice} type="button" data-testid={`nw-provider-${choice}`}
                         className={provider === choice ? "on" : ""} aria-pressed={provider === choice}
-                        onClick={() => setProvider(choice)}>{choice === "claude" ? "Claude" : "Codex"}</button>
+                        onClick={() => setProvider(choice)}>{HARNESS_LABEL[choice]}</button>
                     ))}
                   </div>
                   <span className="np-hint">You can switch agents later; the current session closes first.</span>
@@ -2098,7 +2103,7 @@ const USAGE_HOVER_MS = 140;
 
 /** Provider reads settle independently. Hidden windows do not fetch, and late
  * replies cannot overwrite a newer request or repopulate a disabled provider. */
-function useProviderUsage(provider: Provider, enabled: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
+function useProviderUsage(provider: Harness, enabled: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
   const [info, setInfo] = useState<PlanUsage>(() => checking(provider));
   useEffect(() => {
     setInfo(checking(provider));
@@ -2189,11 +2194,11 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
     return () => window.removeEventListener("pointerdown", onDown, true);
   }, [pinned]);
   const compact = compactUsage(info);
-  const names = compact.map(i => providerName(i.provider)).join(" and ") || "Account";
+  const names = compact.map(i => HARNESS_LABEL[i.provider]).join(" and ") || "Account";
   const label = compact.map(i => {
     const l = summaryLimit(i, nowSec);
-    const bucket = l && l.bucketLabel !== providerName(i.provider) ? `${l.bucketLabel} ` : "";
-    return `${providerName(i.provider)} ${l ? `${bucket}${l.label} ${Math.round(l.percent)}% used${i.state === "stale" ? ", stale" : ""}` : stateLabel(i)}`;
+    const bucket = l && l.bucketLabel !== HARNESS_LABEL[i.provider] ? `${l.bucketLabel} ` : "";
+    return `${HARNESS_LABEL[i.provider]} ${l ? `${bucket}${l.label} ${Math.round(l.percent)}% used${i.state === "stale" ? ", stale" : ""}` : stateLabel(i)}`;
   }).join("; ") || "Usage details";
   return <>
     <button ref={trigRef} type="button" data-testid="usage-meter" data-track="plan_usage"
@@ -2210,7 +2215,7 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
             const summary = summaryLimit({ ...i, limits }, nowSec);
             const worst = summary ?? limits.reduce<typeof limits[number] | undefined>((a, b) => !a || b.percent > a.percent ? b : a, undefined);
             return <span key={i.provider} className={"usage-provider-summary" + (i.state === "stale" ? " stale" : "")}>
-              <span className="usage-provider-name">{providerName(i.provider)}</span>
+              <span className="usage-provider-name">{HARNESS_LABEL[i.provider]}</span>
               {limits.map(l => <span key={l.id} className={"usage-window" + (l === worst ? " worst" : "")}>
                 <span className="usage-window-label">{l.bucket !== i.provider ? `${l.bucketLabel} ` : ""}{l.label}</span>
                 <span className={"usage-bar " + l.severity}><i style={{ width: `${Math.max(0, Math.min(100, l.percent))}%` }} /></span>
@@ -2233,7 +2238,7 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
       {info.map(i => i.provider === "codex" && i.state === "missing_cli"
         ? <p key={i.provider} className="usage-message" data-provider="codex">Codex CLI was not found.</p>
         : <section className={"usage-provider-detail" + (i.state === "stale" ? " stale" : "")} key={i.provider} data-provider={i.provider}>
-        <div className="usage-provider-head"><strong>{providerName(i.provider)}</strong>
+        <div className="usage-provider-head"><strong>{HARNESS_LABEL[i.provider]}</strong>
           <span>{i.state === "stale" ? "Stale" : i.state === "ready" ? "Updated" : stateLabel(i)}
             {i.fetched_at !== null && <time title={new Date(i.fetched_at * 1000).toLocaleString()}> · {Math.max(0, Math.floor((nowSec - i.fetched_at) / 60))} min ago</time>}
           </span>
@@ -3074,7 +3079,7 @@ function App() {
   const [newBase, setNewBase] = useState("");
   // What a REJECTED create had typed in it, so reopening the form restores the
   // fields instead of handing back three empty boxes. Null for a fresh form.
-  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string; provider: "claude" | "codex" } | null>(null);
+  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string; provider: Harness } | null>(null);
   // Places whose `new` is still running. Creating one takes seconds of network
   // and disk (git fetch, worktree add, materialize, tmux) and the nav had NO
   // representation of it, so the app read as hung — the whole complaint. Each
@@ -3109,7 +3114,7 @@ function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   // A persisted Off must suppress even the first usage request at startup.
   const [settingsReady, setSettingsReady] = useState(false);
-  const [activeProvider, setActiveProvider] = useState<"claude" | "codex">("claude");
+  const [activeProvider, setActiveProvider] = useState<Harness>(HARNESSES[0]);
   // Where Settings was asked to open. One state, never a boolean beside it:
   // `settingsOpen` is derived, so "the sheet is up" and "which section it went
   // to" cannot disagree. `{}`-with-no-cat is the ordinary ⌘, open.
@@ -3824,7 +3829,7 @@ function App() {
   // either, and it says "Agent" rather than guess.
   const agentName = (p: Place) => {
     const a = liveAgent(p);
-    return a === "codex" ? "Codex" : a === "claude" ? "Claude" : "Agent";
+    return a ? HARNESS_LABEL[a] : "Agent";
   };
   const dotTitle = (p: Place) => {
     const act = activityOf(p);
@@ -4324,13 +4329,16 @@ function App() {
 
   const selected: Place | null =
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
-  const selectedAgents: Place["agent_sessions"] | null = selected?.agent_sessions ?? (selected ? {
-    claude: selected.tmux_session,
-    codex: { name: `${selected.tmux_session.name}~agent~codex`, up: false },
-  } : null);
+  // A snapshot from before `agent_sessions` existed: the place's session is the
+  // default harness's, and every other harness is down in its own sidecar.
+  const selectedAgents: Place["agent_sessions"] | null = selected?.agent_sessions ?? (selected
+    ? Object.fromEntries(HARNESSES.map((h, i) => [h, i === 0 ? selected.tmux_session
+      : { name: `${selected.tmux_session.name}~agent~${h}`, up: false }])) as Record<Harness, AgentSession>
+    : null);
+  const liveHere = liveAgents(selectedAgents);
   const reconciledLegacyAgents = useRef(new Set<string>());
   useEffect(() => {
-    if (!sel || !selectedAgents?.claude.up || !selectedAgents.codex.up) return;
+    if (!sel || liveHere.length < 2) return;
     const key = `${sel.repo}|${sel.slug}|${settings.default_provider}`;
     if (reconciledLegacyAgents.current.has(key)) return;
     reconciledLegacyAgents.current.add(key);
@@ -4344,9 +4352,9 @@ function App() {
         else { setActiveProvider(settings.default_provider); void refresh(); }
       })
       .catch((e) => setErr(String(e)));
-  }, [sel?.repo, sel?.slug, selectedAgents?.claude.up, selectedAgents?.codex.up, settings.default_provider, refresh]);
-  const planProvider = selectedAgents?.[activeProvider].up ? activeProvider
-    : selectedAgents?.claude.up ? "claude" : "codex";
+  }, [sel?.repo, sel?.slug, liveHere.join(","), settings.default_provider, refresh]);
+  // With nothing live, `agentSession` is null and this names nobody.
+  const planProvider: Harness = selectedAgents?.[activeProvider].up ? activeProvider : liveHere[0] ?? activeProvider;
   // The status chip's host, declared HERE and not up with `statusOnTile`,
   // because the footer renders under `selected && sel` — and `selected` is a
   // LOOKUP into the workspace, so it is null for the seconds between a restored
@@ -4806,7 +4814,7 @@ function App() {
   // Only EXPLICIT gestures reach here: double-click or the ▸ button on a nav row,
   // the topbar/empty-state Enter, the ctx-menu entries, quick-switch, and the
   // home Resume rows. A plain nav click goes to `selectPlace` above.
-  const ensureCodexCli = async (provider: "claude" | "codex") => {
+  const ensureCodexCli = async (provider: Harness) => {
     if (provider !== "codex") return true;
     try {
       const status = await invoke<{ codex_bin: string | null }>("codex_mcp_status");
@@ -4816,9 +4824,8 @@ function App() {
     return false;
   };
   const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
-    const agents = p.agent_sessions;
-    const provider = agents?.claude.up && !agents.codex.up ? "claude"
-      : agents?.codex.up && !agents.claude.up ? "codex" : settings.default_provider;
+    const live = liveAgents(p.agent_sessions);
+    const provider = live.length === 1 ? live[0] : settings.default_provider;
     setSel({ repo, slug: p.slug });
     setActiveProvider(provider);
     setMenu(null);
@@ -4836,7 +4843,7 @@ function App() {
       await runCmd("open_place", { repo, slug: p.slug, fresh, provider });
     })();
   };
-  const openAgent = (provider: "claude" | "codex") => {
+  const openAgent = (provider: Harness) => {
     if (!sel) return;
     setActiveProvider(provider);
     setTermFocus((v) => v + 1);
@@ -4845,11 +4852,12 @@ function App() {
         await runCmd("open_place", { repo: sel.repo, slug: sel.slug, fresh: !settings.ai_auto_resume, provider });
     })();
   };
-  const requestOpenAgent = (provider: "claude" | "codex") => {
+  const requestOpenAgent = (provider: Harness) => {
     if (!sel || !selected) return;
-    const from = provider === "claude" ? "codex" : "claude";
-    const current = selectedAgents?.[from];
-    if (current?.up) {
+    // Switching away from whichever OTHER harness is live asks first.
+    const from = liveHere.find((h) => h !== provider);
+    const current = from && selectedAgents?.[from];
+    if (from && current) {
       setPendingProviderSwitch({ repo: sel.repo, slug: sel.slug, placeName: nameOf(selected), from, to: provider, session: current.name });
       return;
     }
@@ -5538,7 +5546,7 @@ function App() {
     return () => clearTimeout(t);
   }, [undo]);
 
-  const createPlace = async (repo: string, branch: string, name: string, base: string, provider: "claude" | "codex") => {
+  const createPlace = async (repo: string, branch: string, name: string, base: string, provider: Harness) => {
     if (!branch) return;
     if (!(await ensureCodexCli(provider))) return;
     // Dismiss the form and put a ghost row in the nav IMMEDIATELY — the click is
@@ -6820,14 +6828,14 @@ function App() {
                             onClick={() => closeFromMenu(sel.repo, sel.slug, false)}>Close session</button>
                         )
                       )}
-                      {selectedAgents?.claude.up !== selectedAgents?.codex.up && (
-                        <button className="pop-item" data-testid="topbar-switch-provider" onClick={() => {
+                      {liveHere.length === 1 && HARNESSES.filter((h) => h !== liveHere[0]).map((to) => (
+                        <button key={to} className="pop-item" data-testid="topbar-switch-provider" onClick={() => {
                           closeMenu();
-                          requestOpenAgent(selectedAgents?.claude.up ? "codex" : "claude");
+                          requestOpenAgent(to);
                         }}>
-                          Switch to {selectedAgents?.claude.up ? "Codex" : "Claude"}
+                          Switch to {HARNESS_LABEL[to]}
                         </button>
-                      )}
+                      ))}
                       {/* Live sessions only. A session-less place shows the same
                           check inline in the main window (it is all that is
                           there), so the item would open a sheet over a copy of
@@ -6866,22 +6874,22 @@ function App() {
           <main className="main">
             {selected && sel ? (
               <>
-                {!selectedAgents?.claude.up && !selectedAgents?.codex.up && (
+                {liveHere.length === 0 && (
                   <div className="agent-actions" aria-label="Agents in this place">
-                    {(["claude", "codex"] as const).map((provider) => (
+                    {HARNESSES.map((provider) => (
                       <button key={provider} className="ctrl sm" onClick={() => requestOpenAgent(provider)}>
-                        Open {provider === "claude" ? "Claude" : "Codex"}
+                        Open {HARNESS_LABEL[provider]}
                       </button>
                     ))}
                   </div>
                 )}
-                {(selectedAgents?.claude.up || selectedAgents?.codex.up) ? (
+                {liveHere.length > 0 ? (
                   <div className="agent-grid">
                     {([planProvider] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => (
                       <div className="agent-cell" key={provider} onFocusCapture={() => setActiveProvider(provider)}>
                         <div className="agent-label">
                           <span className="agent-name">
-                            {provider === "claude" ? "Claude" : "Codex"}
+                            {HARNESS_LABEL[provider]}
                             {selectedAgents?.[provider].model && (
                               <span className="agent-model" title="the model this session last replied with">
                                 {selectedAgents[provider].model}

@@ -3,6 +3,8 @@
 // it with no code changes. Covers every lifecycle group + pinned + main + a
 // dead/broken project, so the design review sees all states at once.
 
+import type { Harness } from "../harness";
+
 export type Declared = {
   lifecycle?: string;
   pinned?: boolean;
@@ -34,7 +36,7 @@ export type Place = {
   last_commit_subject?: string | null;
   last_commit_epoch?: number | null;
   tmux_session: { name: string; up: boolean };
-  agent_sessions?: { claude: { name: string; up: boolean; model?: string | null }; codex: { name: string; up: boolean; model?: string | null } };
+  agent_sessions?: Record<Harness, { name: string; up: boolean; model?: string | null }>;
   claude_session_present: boolean;
   profile_name?: string | null;
   profile_stale?: boolean;

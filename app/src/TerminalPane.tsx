@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Harness } from "./harness";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -578,7 +579,7 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnable
 }
 
 export function TerminalPane({ session, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, ...find }: {
-  session: string; provider?: "claude" | "codex"; termVersion?: number; focusToken?: number; focusEnabled?: boolean;
+  session: string; provider?: Harness; termVersion?: number; focusToken?: number; focusEnabled?: boolean;
 } & TermFindProps) {
   return (
     <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}

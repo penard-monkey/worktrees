@@ -4,6 +4,7 @@
 // variable assignment — no component re-render logic.
 import { invoke } from "@tauri-apps/api/core";
 import { clampSteps, snapHorizon } from "./afterglow";
+import { HARNESSES, isHarness, type Harness } from "./harness";
 
 // Shippable themes: each id is a [data-theme] color map in tokens.css.
 // "system" follows macOS appearance and resolves to the Tokyo Night pair.
@@ -296,7 +297,7 @@ export type Settings = {
   place_panels: Record<string, PlacePanels>;
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
-  default_provider: "claude" | "codex"; // app's initial agent; both may run in one place
+  default_provider: Harness; // app's initial agent
   // How much a Worktrees-launched Codex may do without asking. Pushed to the
   // backend (`set_codex_permissions`) at load and on every change; it applies to
   // the NEXT launch. Mirrors `worktrees_core::codex::Permissions`.
@@ -659,7 +660,7 @@ export async function loadSettings(): Promise<Settings> {
     // ui-state.json must be corrected HERE rather than everywhere they are used.
     s.done_horizon_secs = snapHorizon(s.done_horizon_secs);
     s.done_steps = clampSteps(s.done_steps);
-    if (s.default_provider !== "claude" && s.default_provider !== "codex") s.default_provider = "claude";
+    if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     if (!CODEX_PERMISSIONS.includes(s.codex_permissions)) s.codex_permissions = "auto-review";
     if (migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0)) saveSettings(s);
     return s;

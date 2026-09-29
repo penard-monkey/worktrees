@@ -18,20 +18,6 @@ use std::process::{Command, Output};
 /// to the sidecar of a place named "long", and closing one could kill the
 /// other's live Claude session.
 pub const SHELL_SIDECAR_MARKER: &str = "~term";
-pub const CODEX_SIDECAR_MARKER: &str = crate::provider::CODEX.sidecar_suffix;
-pub const CLAUDE_SIDECAR_MARKER: &str = crate::provider::CLAUDE.sidecar_suffix;
-
-/// Codex's managed session name. A provider switch ends the other agent's
-/// session first; `~` cannot occur in a git ref, so this cannot collide with
-/// a place's canonical name.
-pub fn codex_session_name(canonical: &str) -> String {
-    crate::provider::CODEX.sidecar_name(canonical)
-}
-
-pub fn claude_session_name(canonical: &str) -> String {
-    crate::provider::CLAUDE.sidecar_name(canonical)
-}
-
 /// The sidecar session name for a place's (canonical) session + a 1-based tab
 /// index. Index ≤1 is the bare `~term`; 2+ append `~N`.
 pub fn shell_sidecar_name(session: &str, index: u32) -> String {
@@ -174,6 +160,12 @@ impl PaneList {
         Some(PaneList { panes })
     }
 
+    /// A snapshot from rows a caller already holds, as
+    /// `(session, pane_current_path, pane_current_command)`.
+    pub fn from_rows(panes: Vec<(String, String, String)>) -> PaneList {
+        PaneList { panes }
+    }
+
     /// Does a session named EXACTLY `name` exist, per this snapshot? The
     /// prefetched answer to `session_exists`, for a caller that has to ask once
     /// per place: every live session has at least one pane, so `list-panes -a`
@@ -190,13 +182,6 @@ impl PaneList {
     /// install runs codex under `node`, which must not read as exited.
     pub fn session_runs_program(&self, name: &str) -> bool {
         self.panes.iter().any(|(s, _, cmd)| s == name && !is_shell_command(cmd))
-    }
-
-    /// Recognize an older Codex pane launched under the canonical place name.
-    /// Keep this strict: `node` and version-like names identify Claude on some
-    /// installs, so they cannot distinguish the two providers here.
-    pub fn session_is_codex(&self, name: &str) -> bool {
-        self.canonical_provider(name).id == crate::provider::CODEX.id
     }
 
     /// Legacy canonical sessions default to Claude (including a bare shell).
@@ -270,10 +255,6 @@ pub fn is_shell_command(cmd: &str) -> bool {
 
 pub fn canonical_provider(name: &str) -> &'static crate::provider::Provider {
     PaneList::fetch().map(|p| p.canonical_provider(name)).unwrap_or(crate::provider::CLAUDE)
-}
-
-pub fn session_is_codex(name: &str) -> bool {
-    PaneList::fetch().is_some_and(|panes| panes.session_is_codex(name))
 }
 
 /// Multi-client sizing: by default tmux clamps a window to its SMALLEST
@@ -771,8 +752,8 @@ mod tests {
         ] {
             assert_eq!(provider.session_name("repo-feature", owner, sidecar), expected);
         }
-        assert_eq!(codex_session_name("repo-feature"), "repo-feature~agent~codex");
-        assert_eq!(claude_session_name("repo-feature"), "repo-feature~agent~claude");
+        assert_eq!(crate::provider::CODEX.sidecar_name("repo-feature"), "repo-feature~agent~codex");
+        assert_eq!(crate::provider::CLAUDE.sidecar_name("repo-feature"), "repo-feature~agent~claude");
         let panes = pl(&[("repo-feature", "/repo", "codex")]);
         assert_eq!(crate::activity::codex_session_for(&panes, "repo-feature"), "repo-feature");
         let panes = pl(&[("repo-feature", "/repo", "claude")]);
