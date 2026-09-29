@@ -1,6 +1,7 @@
 import { adaptClaude, adaptCodex, checking, compactUsage, detailMessage, expired, stateLabel, stripLimits, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage } from "./planUsage";
-import { HARNESSES, HARNESS_LABEL, type Harness } from "./harness";
-import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, type Harness } from "./harness";
+import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -61,35 +62,128 @@ function CodexInstallDialog({ onClose, onReport }: { onClose: () => void; onRepo
   </div>;
 }
 
-type ProviderSwitch = {
+/** Under a pi choice: what pi will load of the repo's own. An allowed repo
+ *  launches with --approve, and its `.pi/` extensions run inside pi — the user
+ *  granted that, and should see it at the moment it takes effect (§8 item 5). */
+function PiTrustNote({ status }: { status: PiStatus | null }) {
+  if (!status) return null;
+  if (status.repo_allowed) {
+    return <span className="np-hint warn" data-testid="pi-trust-note">This repo is allowed: pi loads its .pi/ and .agents/skills, and runs its extensions.</span>;
+  }
+  return <span className="np-hint" data-testid="pi-trust-note">
+    {status.trust === "ask"
+      ? "pi asks before loading this repo's .pi/ and .agents/skills."
+      : "pi skips this repo's own .pi/ and .agents/skills (AGENTS.md and CLAUDE.md still load)."}
+  </span>;
+}
+
+/** `pi_status` for `repo`, read while `on`. */
+function usePiStatus(repo: string, on: boolean): PiStatus | null {
+  const [st, setSt] = useState<PiStatus | null>(null);
+  useEffect(() => {
+    if (!on) return;
+    let alive = true;
+    invoke<PiStatus>("pi_status", { repo }).then((v) => { if (alive) setSt(v); }).catch(() => {});
+    return () => { alive = false; };
+  }, [repo, on]);
+  return on ? st : null;
+}
+
+/** "Switch agent…" (pi-harness §2.4): one sheet choosing harness AND model,
+ *  instead of an N×M list of menu items. `live` is what is running now, if
+ *  anything; the confirm text names both the outgoing and the incoming choice. */
+type AgentSwitch = {
   repo: string;
   slug: string;
   placeName: string;
-  from: Harness;
+  live: { harness: Harness; session: string; model: string | null } | null;
+  /** The harness the sheet opens on. */
   to: Harness;
-  session: string;
 };
 
-function ProviderSwitchDialog({ pending, onClose, onConfirm }: {
-  pending: ProviderSwitch;
+function AgentSwitchSheet({ pending, defaultModels, onClose, onConfirm, onError }: {
+  pending: AgentSwitch;
+  defaultModels: Partial<Record<Harness, string>>;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: (to: Harness, model: string) => void;
+  onError: (e: unknown) => void;
 }) {
   useEscape(onClose);
-  const from = HARNESS_LABEL[pending.from];
-  const to = HARNESS_LABEL[pending.to];
+  const [to, setTo] = useState<Harness>(pending.to);
+  const models = useAgentModels(to, onError);
+  const piStatus = usePiStatus(pending.repo, to === "pi");
+  const [pick, setPick] = useState<{ h: Harness; m: string } | null>(null);
+  const model = pick?.h === to ? pick.m : defaultModel(models, defaultModels[to], to);
+  const live = pending.live;
+  const from = live ? agentLabel(live.harness, live.model) : null;
+  const incoming = model ? `${HARNESS_LABEL[to]} · ${model}` : HARNESS_LABEL[to];
+  // Same harness, same model: nothing would change. Same harness, another
+  // model: the session is closed and relaunched fresh, since a resume keeps
+  // its own model by design.
+  const same = !!live && live.harness === to && (!model || model === live.model);
+  const ok = !same && !(NEEDS_MODEL[to] && !model) && (!model || modelOk(model));
   return <div className="scrim scrim-center" onClick={onClose}>
-    <div className="sync-modal rm-modal" role="dialog" aria-modal="true"
-      aria-label={`Switch from ${from} to ${to}`} data-testid="provider-switch-dialog"
+    <div className="sync-modal nw-modal" role="dialog" aria-modal="true"
+      aria-label="Switch agent" data-testid="agent-switch-sheet"
       onClick={(e) => e.stopPropagation()}>
-      <header className="sync-h"><b>Switch from {from} to {to}?</b></header>
-      <div className="sync-body">
-        <div>In {pending.placeName}, switching closes the current {from} session <code>{pending.session}</code>.</div>
-        <div className="sync-live">Any work still running in that session will stop. Your worktree and files stay in place.</div>
+      <header className="sync-h"><b>{live ? "Switch agent" : "Open an agent"}</b><span className="sync-hub">{pending.placeName}</span></header>
+      <div className="sync-body nw-body">
+        <div className="np-field">
+          <span className="np-label">Agent</span>
+          <div className="seg" role="group" aria-label="Agent provider">
+            {HARNESSES.map((h) => (
+              <button key={h} type="button" data-testid={`switch-harness-${h}`}
+                className={to === h ? "on" : ""} aria-pressed={to === h}
+                onClick={() => setTo(h)}>{HARNESS_LABEL[h]}</button>
+            ))}
+          </div>
+        </div>
+        <div className="np-field">
+          <span className="np-label">Model</span>
+          <ModelPicker harness={to} value={model} options={models} testid="switch-model"
+            onChange={(m) => setPick({ h: to, m })} />
+          {to === "pi" && <PiTrustNote status={piStatus} />}
+        </div>
+        {live && !same && (
+          <div className="sync-live" data-testid="agent-switch-effect">
+            Closes {from} (<code>{live.session}</code>) and opens {incoming}. Any work still
+            running in that session stops; the worktree and its files stay.
+          </div>
+        )}
+        {same && <div className="np-hint">That is what is running now.</div>}
       </div>
       <footer className="sync-foot">
-        <button className="ctrl" autoFocus onClick={onClose}>Keep {from} open</button>
-        <button className="enter-btn" data-testid="provider-switch-confirm" onClick={onConfirm}>Close {from} and open {to}</button>
+        <button className="ctrl" autoFocus onClick={onClose}>{live ? `Keep ${from}` : "Cancel"}</button>
+        <button className="enter-btn" data-testid="agent-switch-confirm" disabled={!ok}
+          onClick={() => onConfirm(to, model)}>
+          {live && !same ? `Close ${HARNESS_LABEL[live.harness]} and open ${incoming}` : `Open ${incoming}`}
+        </button>
+      </footer>
+    </div>
+  </div>;
+}
+
+/** A launch core refused because the model host did not answer
+ *  (`diag::EXIT_LAUNCH_REFUSED`): the place exists, the agent does not. The
+ *  user — and only the user — may launch anyway. */
+type LaunchRefused = { repo: string; slug: string; provider: Harness; model: string; reason: string };
+
+function LaunchRefusedDialog({ refused, onClose, onForce }: {
+  refused: LaunchRefused; onClose: () => void; onForce: () => void;
+}) {
+  useEscape(onClose);
+  return <div className="scrim scrim-center" onClick={onClose}>
+    <div className="sync-modal rm-modal" role="dialog" aria-modal="true" aria-label="Agent not started"
+      data-testid="launch-refused" onClick={(e) => e.stopPropagation()}>
+      <header className="sync-h"><b>{HARNESS_LABEL[refused.provider]} was not started</b></header>
+      <div className="sync-body">
+        <div>{refused.reason.split(". The place is ready")[0]}.</div>
+        <div className="sync-live">The worktree is ready. Launched anyway, {HARNESS_LABEL[refused.provider]} will
+          wait on {refused.model || "its model"} until the host answers or its retries run out.</div>
+      </div>
+      <footer className="sync-foot">
+        <button className="ctrl" autoFocus onClick={onClose}>Not now</button>
+        <button className="enter-btn" data-testid="launch-anyway" onClick={onForce}>Launch anyway</button>
       </footer>
     </div>
   </div>;
@@ -185,6 +279,8 @@ const isBareArm = (k: string | null) =>
   !!k && (k.startsWith("hdr|") || k.startsWith("close|") || k.startsWith("closectx|"));
 /** core's `diag::EXIT_NEEDS_CONFIRM` — "I stopped to ask", never a failure. */
 const EXIT_NEEDS_CONFIRM = 4;
+/** `diag::EXIT_LAUNCH_REFUSED`: the model host did not answer; offer "Launch anyway". */
+const EXIT_LAUNCH_REFUSED = 5;
 /** The "nothing collapsed" answer for a place with no `docs_collapsed` entry,
  *  which is most of them. One frozen array rather than a fresh `[]` per render:
  *  `DocsPane` derives a `Set` from it with `useMemo`, and a new identity every
@@ -795,12 +891,27 @@ function liveAgents(a: Place["agent_sessions"] | null | undefined): Harness[] {
  *  nothing when no agent is live. The SVG is aria-hidden, so the span carries
  *  the label; `title` is the hover. Sized in `em` by `.g-agent svg`, so it
  *  follows the glyph cluster's font (and `--ui-rem`), not a fixed px. */
-function AgentMark({ agent }: { agent: Harness | null }) {
+const HARNESS_MARK: Record<Harness, ComponentType<{ size?: number }>> = {
+  claude: Icons.ClaudeMark,
+  codex: Icons.OpenAIMark,
+  pi: Icons.PiMark,
+};
+
+/** How a live agent is named on a row: the harness, and for pi the model too —
+ *  a pi lane is defined by which model it runs (`pi · qwen3.6-27b`), where
+ *  Claude's and Codex's model is a detail. */
+function agentLabel(agent: Harness, model?: string | null): string {
+  if (agent === "pi" && model) return `pi · ${model.includes("/") ? model.slice(model.indexOf("/") + 1) : model}`;
+  return HARNESS_LABEL[agent];
+}
+
+function AgentMark({ agent, model }: { agent: Harness | null; model?: string | null }) {
   if (!agent) return null;
-  const label = `${HARNESS_LABEL[agent]} session live`;
+  const label = `${agentLabel(agent, model)} session live`;
+  const Mark = HARNESS_MARK[agent];
   return (
     <span className={"g g-agent g-agent-" + agent} title={label} aria-label={label} role="img">
-      {agent === "claude" ? <Icons.ClaudeMark /> : <Icons.OpenAIMark />}
+      <Mark />
     </span>
   );
 }
@@ -1636,7 +1747,7 @@ type Verdict = {
  *  Module scope (CLAUDE.md): it owns its fields, and App re-renders on the 3s
  *  poll — defined inside App() it would remount and drop focus per keystroke. */
 function NewPlaceDialog({
-  project, prefix, places, unborn, initial, initialBase, defaultProvider,
+  project, prefix, places, unborn, initial, initialBase, defaultProvider, defaultModels,
   onCreate, onClose, onOpenPlace, onInitialCommit, onError,
 }: {
   project: string;
@@ -1647,11 +1758,12 @@ function NewPlaceDialog({
   places: Place[];
   unborn: boolean;
   /** A REJECTED create, handed back so a typo costs one edit and not a retype. */
-  initial: { branch: string; name: string; base: string; provider: Harness } | null;
+  initial: { branch: string; name: string; base: string; provider: Harness; model?: string } | null;
   /** ctx-menu "New worktree from this branch…" — a base, nothing else. */
   initialBase: string;
   defaultProvider: Harness;
-  onCreate: (branch: string, name: string, base: string, provider: Harness) => void;
+  defaultModels: Partial<Record<Harness, string>>;
+  onCreate: (branch: string, name: string, base: string, provider: Harness, model: string) => void;
   onClose: () => void;
   onOpenPlace: (slug: string) => void;
   onInitialCommit: (repo: string) => Promise<void>;
@@ -1662,6 +1774,14 @@ function NewPlaceDialog({
   const [name, setName] = useState(initial?.name ?? "");
   const [provider, setProvider] = useState<Harness>(initial?.provider ?? defaultProvider);
   const [available, setAvailable] = useState<Record<Harness, boolean> | null>(null);
+  const models = useAgentModels(provider, onError);
+  const piStatus = usePiStatus(project, provider === "pi");
+  // "" until the user picks: the effective model is then the harness's default
+  // (Settings), or pi's first ready one. A choice survives a harness flip only
+  // if the user made it for THAT harness.
+  const [modelPick, setModelPick] = useState<{ h: Harness; m: string } | null>(
+    initial?.model !== undefined ? { h: initial.provider, m: initial.model } : null);
+  const model = modelPick?.h === provider ? modelPick.m : defaultModel(models, defaultModels[provider], provider);
   // Until this flips, the folder name MIRRORS the branch. Emptying the field
   // hands it back — which is what the hint under it says.
   const [touched, setTouched] = useState(!!initial?.name);
@@ -1673,9 +1793,10 @@ function NewPlaceDialog({
     Promise.all([
       invoke<McpStatus>("mcp_status", { repo: project }),
       invoke<{ codex_bin: string | null }>("codex_mcp_status"),
-    ]).then(([claude, codex]) => {
+      invoke<PiStatus>("pi_status", { repo: project }).catch(() => null),
+    ]).then(([claude, codex, pi]) => {
       if (!alive) return;
-      const next: Record<Harness, boolean> = { claude: !!claude.claude_bin, codex: !!codex.codex_bin };
+      const next: Record<Harness, boolean> = { claude: !!claude.claude_bin, codex: !!codex.codex_bin, pi: !!pi?.preflight.pi_path };
       setAvailable(next);
       // A rejected create reopens with the user's exact choice, even if CLI
       // availability changed while the operation was running.
@@ -1792,8 +1913,9 @@ function NewPlaceDialog({
   // nothing has been decided yet, and a field greyed out before you have typed
   // anything reads as broken, not as inert.
   const baseUsed = !b || !verdict || !!verdict.usesBase || verdict.outcome === "unknown";
-  const ready = !!b && !verdict?.blocking && !busy;
-  const submit = () => { if (ready) onCreate(b, sendName, base.trim(), provider); };
+  const modelMissing = NEEDS_MODEL[provider] && !model;
+  const ready = !!b && !verdict?.blocking && !busy && !modelMissing && (!model || modelOk(model));
+  const submit = () => { if (ready) onCreate(b, sendName, base.trim(), provider, model); };
 
   return (
     <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
@@ -1913,6 +2035,18 @@ function NewPlaceDialog({
                   <span className="np-hint">You can switch agents later; the current session closes first.</span>
                 </div>
               )}
+
+              <div className="np-field">
+                <span className="np-label">Model</span>
+                <ModelPicker harness={provider} value={model} options={models} testid="nw-model"
+                  disabled={busy} onChange={(m) => setModelPick({ h: provider, m })} />
+                <span className="np-hint">
+                  {NEEDS_MODEL[provider]
+                    ? "pi starts on the model named here — never on pi's own default"
+                    : `leave on the CLI's default, or name one for this place's ${HARNESS_LABEL[provider]}`}
+                </span>
+                {provider === "pi" && <PiTrustNote status={piStatus} />}
+              </div>
 
               {/* The preview follows the VERDICT, not the fields. Saying "will
                   create <derived slug>" under a verdict that says an existing
@@ -2101,6 +2235,13 @@ function useWindowAwake() {
  *  somewhere else does not flash a panel. */
 const USAGE_HOVER_MS = 140;
 
+/** Where each harness's plan usage comes from. A harness with none (pi: a
+ *  local model has no plan, §6) has no entry and is never polled. */
+const USAGE_READ: Partial<Record<Harness, () => Promise<PlanUsage>>> = {
+  claude: () => invoke<ClaudeUsage>("claude_usage").then(adaptClaude),
+  codex: () => invoke<CodexUsage>("codex_usage").then(adaptCodex),
+};
+
 /** Provider reads settle independently. Hidden windows do not fetch, and late
  * replies cannot overwrite a newer request or repopulate a disabled provider. */
 function useProviderUsage(provider: Harness, enabled: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
@@ -2115,9 +2256,9 @@ function useProviderUsage(provider: Harness, enabled: boolean, pageVisible: bool
     const pull = () => {
       if (document.visibilityState === "hidden") return;
       const request = ++generation;
-      const result = provider === "claude"
-        ? invoke<ClaudeUsage>("claude_usage").then(adaptClaude)
-        : invoke<CodexUsage>("codex_usage").then(adaptCodex);
+      const read = USAGE_READ[provider];
+      if (!read) return;
+      const result = read();
       result.then(value => { if (alive && request === generation) setInfo(value); })
         .catch(error => {
           if (!alive || request !== generation) return;
@@ -3079,7 +3220,7 @@ function App() {
   const [newBase, setNewBase] = useState("");
   // What a REJECTED create had typed in it, so reopening the form restores the
   // fields instead of handing back three empty boxes. Null for a fresh form.
-  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string; provider: Harness } | null>(null);
+  const [newDraft, setNewDraft] = useState<{ branch: string; name: string; base: string; provider: Harness; model?: string } | null>(null);
   // Places whose `new` is still running. Creating one takes seconds of network
   // and disk (git fetch, worktree add, materialize, tmux) and the nav had NO
   // representation of it, so the app read as hung — the whole complaint. Each
@@ -3104,7 +3245,8 @@ function App() {
   // stop, so it does not share the error register.
   const [notice, setNotice] = useState("");
   const [codexInstallPrompt, setCodexInstallPrompt] = useState(false);
-  const [pendingProviderSwitch, setPendingProviderSwitch] = useState<ProviderSwitch | null>(null);
+  const [agentSwitch, setAgentSwitch] = useState<AgentSwitch | null>(null);
+  const [launchRefused, setLaunchRefused] = useState<LaunchRefused | null>(null);
   // Which topbar popover is open. One member since the Lifecycle ▾ popover left
   // — kept as a union rather than a boolean because the state machine (one
   // popover at a time, every dismissal path through closeMenu) is the point.
@@ -4062,6 +4204,11 @@ function App() {
     if (!hydratedTick) return;
     invoke("set_codex_permissions", { mode: settings.codex_permissions }).catch((e) => fail(`Codex permissions: ${String(e)}`));
   }, [hydratedTick, settings.codex_permissions, fail]);
+  // Same gate, same reason: under the default, a repo gets --no-approve.
+  useEffect(() => {
+    if (!hydratedTick) return;
+    invoke("set_pi_trust", { mode: settings.pi_project_trust }).catch((e) => fail(`pi trust: ${String(e)}`));
+  }, [hydratedTick, settings.pi_project_trust, fail]);
 
   /** The functional form exists for patches that must be built from OTHER
    *  keys' current value — undo restoring one repo's `manual_order` entry.
@@ -4623,7 +4770,9 @@ function App() {
       // asking about it, so the question is moot, not broken (the refresh above
       // shows the place dormant, and doClose says so, through `notice`, which
       // nothing here touches once the run has started).
-      if (!r.ok && r.code !== EXIT_NEEDS_CONFIRM) setErr(r.output || `${name} failed (exit ${r.code})`);
+      // EXIT_LAUNCH_REFUSED is a question too — "launch anyway?" — and the
+      // caller asks it in a dialog that carries core's reason.
+      if (!r.ok && r.code !== EXIT_NEEDS_CONFIRM && r.code !== EXIT_LAUNCH_REFUSED) setErr(r.output || `${name} failed (exit ${r.code})`);
       // Warnings on a SUCCESSFUL op used to go nowhere but app.log. That is fine
       // for cosmetic notes and wrong for the ones that change what a session can
       // do — an AI profile skipping a skill, or a launch that could not apply the
@@ -4840,39 +4989,75 @@ function App() {
       // place to answer the question its session is waiting on still spends the
       // signal — and an enter into a place with nothing unseen writes nothing.
       if (unseenWork(p)) ack(repo, p);
-      await runCmd("open_place", { repo, slug: p.slug, fresh, provider });
+      // The harness's default model rides along; core ignores it on a resume
+      // (a resumed session keeps its own model).
+      const model = settings.default_models[provider] ?? "";
+      const r = await runCmd("open_place", { repo, slug: p.slug, fresh, provider, model: model || null });
+      noteRefusal(r, repo, p.slug, provider, model);
     })();
   };
-  const openAgent = (provider: Harness) => {
+  /** Core refused to START the agent (its model host did not answer): the
+   *  place is fine, so ask whether to launch anyway rather than paint an error. */
+  const noteRefusal = (r: CmdResult | null, repo: string, slug: string, provider: Harness, model: string) => {
+    if (r?.code === EXIT_LAUNCH_REFUSED) setLaunchRefused({ repo, slug, provider, model, reason: r.output });
+  };
+  const openAgent = (provider: Harness, chosen = "", opts?: { fresh?: boolean; force?: boolean }) => {
     if (!sel) return;
+    const model = chosen || (settings.default_models[provider] ?? "");
+    const { repo, slug } = sel;
     setActiveProvider(provider);
     setTermFocus((v) => v + 1);
     (async () => {
-      if (await ensureCodexCli(provider))
-        await runCmd("open_place", { repo: sel.repo, slug: sel.slug, fresh: !settings.ai_auto_resume, provider });
+      if (!(await ensureCodexCli(provider))) return;
+      const r = await runCmd("open_place", {
+        repo, slug, provider, fresh: opts?.fresh ?? !settings.ai_auto_resume,
+        model: model || null, force: !!opts?.force,
+      });
+      noteRefusal(r, repo, slug, provider, model);
     })();
+  };
+  /** The sheet, opened on `to` — with what is live now, so it can say what
+   *  switching closes. */
+  const openSwitch = (to: Harness) => {
+    if (!sel || !selected) return;
+    const h = liveHere[0];
+    const cur = h ? selectedAgents?.[h] : undefined;
+    setAgentSwitch({
+      repo: sel.repo, slug: sel.slug, placeName: nameOf(selected), to,
+      live: h && cur ? { harness: h, session: cur.name, model: cur.model ?? null } : null,
+    });
   };
   const requestOpenAgent = (provider: Harness) => {
     if (!sel || !selected) return;
-    // Switching away from whichever OTHER harness is live asks first.
-    const from = liveHere.find((h) => h !== provider);
-    const current = from && selectedAgents?.[from];
-    if (from && current) {
-      setPendingProviderSwitch({ repo: sel.repo, slug: sel.slug, placeName: nameOf(selected), from, to: provider, session: current.name });
+    // Switching away from a live agent asks first; so does a harness that
+    // cannot start without a model being named (pi).
+    if (liveHere.some((h) => h !== provider) || (NEEDS_MODEL[provider] && !settings.default_models[provider])) {
+      openSwitch(provider);
       return;
     }
     openAgent(provider);
   };
-  const confirmProviderSwitch = () => {
-    if (!pendingProviderSwitch) return;
-    const pending = pendingProviderSwitch;
-    setPendingProviderSwitch(null);
+  const confirmAgentSwitch = (to: Harness, model: string) => {
+    if (!agentSwitch) return;
+    const pending = agentSwitch;
+    setAgentSwitch(null);
+    const live = pending.live;
     if (sel?.repo !== pending.repo || sel.slug !== pending.slug ||
-        !selectedAgents?.[pending.from].up || selectedAgents[pending.from].name !== pending.session) {
+        (live && (!selectedAgents?.[live.harness]?.up || selectedAgents[live.harness].name !== live.session))) {
       setNotice("The active session changed. Check the worktree and try switching again.");
       return;
     }
-    openAgent(pending.to);
+    if (live && live.harness === to) {
+      // Same agent, another model: a resume would keep the old one, so close
+      // this session and start fresh on the new model.
+      (async () => {
+        const r = await runCmd("close_place", { repo: pending.repo, slug: pending.slug, yes: false, session: live.session, provider: to });
+        if (r?.ok) openAgent(to, model, { fresh: true });
+      })();
+      return;
+    }
+    // A new model on another agent is a fresh start there too.
+    openAgent(to, model, model ? { fresh: true } : undefined);
   };
 
   // ── close ──
@@ -5546,7 +5731,7 @@ function App() {
     return () => clearTimeout(t);
   }, [undo]);
 
-  const createPlace = async (repo: string, branch: string, name: string, base: string, provider: Harness) => {
+  const createPlace = async (repo: string, branch: string, name: string, base: string, provider: Harness, model: string) => {
     if (!branch) return;
     if (!(await ensureCodexCli(provider))) return;
     // Dismiss the form and put a ghost row in the nav IMMEDIATELY — the click is
@@ -5561,15 +5746,21 @@ function App() {
     setNewBase("");
     setNewDraft(null);
     try {
-      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null, provider });
+      const r = await runCmd("new_place", { repo, branch, base: base || null, name: name || null, provider, model: model || null });
       // Select core's ACTUAL final slug (origin/ stripped, holder-reuse applied);
       // fall back to the old derivation only if the backend didn't report one.
       if (r?.ok) { setActiveProvider(provider); setSel({ repo, slug: r.slug ?? label }); }
+      // The worktree and brief exist; only the agent was refused. Select the
+      // place and ask — putting the form back would offer to create it twice.
+      else if (r?.code === EXIT_LAUNCH_REFUSED) {
+        setSel({ repo, slug: r.slug ?? label });
+        noteRefusal(r, repo, r.slug ?? label, provider, model);
+      }
       // A rejected create is usually a fixable typo (a base that does not exist,
       // a branch checked out in another worktree). Put the form back with what
       // was typed still in it — dismissing on submit must not also mean losing
       // the input. `runCmd` owns the banner, so this only restores the fields.
-      else if (r) { setNewDraft({ branch, name, base, provider }); setNewBase(base); setNewFor(repo); }
+      else if (r) { setNewDraft({ branch, name, base, provider, model }); setNewBase(base); setNewFor(repo); }
     } finally {
       // `runCmd` awaits its own refresh() before returning, so the real row is
       // already in `ws` by now — the ghost hands over with no empty frame
@@ -6190,7 +6381,7 @@ function App() {
               slot already owns colour, and a second hued mark on the row would
               read as a second state. Outside `glyphs()` like ✎, so truncation
               cannot drop it. */}
-          <AgentMark agent={liveAgent(p)} />
+          <AgentMark agent={liveAgent(p)} model={(() => { const a = liveAgent(p); return a ? p.agent_sessions?.[a]?.model : null; })()} />
           {/* Age and the enter button share ONE grid cell, stacked: the slot is
               always as wide as the wider of the two, so swapping them on hover
               cannot move the name beside it. Visibility (not display) does the
@@ -6828,14 +7019,14 @@ function App() {
                             onClick={() => closeFromMenu(sel.repo, sel.slug, false)}>Close session</button>
                         )
                       )}
-                      {liveHere.length === 1 && HARNESSES.filter((h) => h !== liveHere[0]).map((to) => (
-                        <button key={to} className="pop-item" data-testid="topbar-switch-provider" onClick={() => {
+                      {liveHere.length === 1 && (
+                        <button className="pop-item" data-testid="topbar-switch-agent" onClick={() => {
                           closeMenu();
-                          requestOpenAgent(to);
+                          openSwitch(liveHere[0]);
                         }}>
-                          Switch to {HARNESS_LABEL[to]}
+                          Switch agent…
                         </button>
-                      ))}
+                      )}
                       {/* Live sessions only. A session-less place shows the same
                           check inline in the main window (it is all that is
                           there), so the item would open a sheet over a copy of
@@ -7461,8 +7652,15 @@ function App() {
         skillsOfferPending={!!skillsOffer} onSilenceSkillsOffer={() => skillsOffer && silenceOffer(skillsOffer)} />
 
       {codexInstallPrompt && <CodexInstallDialog onClose={() => setCodexInstallPrompt(false)} onReport={(m) => setNotice(m)} />}
-      {pendingProviderSwitch && <ProviderSwitchDialog pending={pendingProviderSwitch}
-        onClose={() => setPendingProviderSwitch(null)} onConfirm={confirmProviderSwitch} />}
+      {agentSwitch && <AgentSwitchSheet pending={agentSwitch} defaultModels={settings.default_models}
+        onClose={() => setAgentSwitch(null)} onConfirm={confirmAgentSwitch} onError={fail} />}
+      {launchRefused && <LaunchRefusedDialog refused={launchRefused}
+        onClose={() => setLaunchRefused(null)}
+        onForce={() => {
+          const r = launchRefused;
+          setLaunchRefused(null);
+          if (sel?.repo === r.repo && sel.slug === r.slug) openAgent(r.provider, r.model, { fresh: true, force: true });
+        }} />}
 
       {/* ⌘K quick switcher — a full overlay independent of the nav (works in
           rail-only mode). Gated on switchOpen so it MOUNTS FRESH each open (query
@@ -7502,7 +7700,8 @@ function App() {
           initial={newDraft}
           initialBase={newBase}
           defaultProvider={settings.default_provider}
-          onCreate={(b, n, ba, provider) => createPlace(newFor, b, n, ba, provider)}
+          defaultModels={settings.default_models}
+          onCreate={(b, n, ba, provider, model) => createPlace(newFor, b, n, ba, provider, model)}
           onClose={() => { setNewFor(null); setNewBase(""); setNewDraft(null); }}
           onOpenPlace={(slug) => {
             setNewFor(null); setNewBase(""); setNewDraft(null);

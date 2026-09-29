@@ -250,8 +250,6 @@ async fn skill_remove(name: String) -> Result<Vec<String>, String> {
 
 // ── state: core-derived places + declared overlay + reconciled lifecycle ─────
 
-/// One repo's merged snapshot: core's live `ls` + DECLARED store overlay +
-/// reconciled `lifecycle_effective` per place.
 /// One harness's session in one place, as the snapshot reports it.
 struct AgentSession {
     id: &'static str,
@@ -318,6 +316,8 @@ fn live_model(id: &str, probes: &[worktrees_core::agent::ClaudeProbe], session: 
     }
 }
 
+/// One repo's merged snapshot: core's live `ls` + DECLARED store overlay +
+/// reconciled `lifecycle_effective` per place.
 fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     let project = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
     let mut v = serde_json::to_value(project.ls()).map_err(|e| e.to_string())?;
@@ -980,11 +980,14 @@ async fn new_place(
     base: Option<String>,
     name: Option<String>,
     provider: Option<String>,
+    model: Option<String>,
+    force: Option<bool>,
 ) -> Result<CmdResult, String> {
     let provider = provider.unwrap_or_else(|| harness::default_adapter().provider().id.into());
-    known_harness(&provider)?;
-    if provider == "codex" && worktrees_core::profile::codex_bin().is_none() {
-        return Err("Codex CLI is not installed. Install it, then sign in with `codex login`.".into());
+    known_harness(&provider)?.installed()?;
+    let model = model.filter(|m| !m.trim().is_empty());
+    if let Some(m) = &model {
+        worktrees_core::choice::validate_model(m)?;
     }
     let branch_log = branch.clone();
     let name = name.filter(|s| !s.is_empty());
@@ -1005,6 +1008,13 @@ async fn new_place(
     }
     args.push("--ai".into());
     args.push(provider);
+    if let Some(m) = model {
+        args.push("--model".into());
+        args.push(m);
+    }
+    if force.unwrap_or(false) {
+        args.push("--force".into());
+    }
     args.push("--no-attach".into());
     // Single-pane like `open_place` below: Claude gets the full width and the
     // scratch shell lives in the dock's Terminal tab (which is also where deps
@@ -1064,12 +1074,22 @@ fn known_harness(id: &str) -> Result<&'static dyn harness::Adapter, String> {
 /// existing launch path); the main checkout is launched directly since `open` only
 /// targets worktrees under `.worktrees/`.
 #[tauri::command]
-async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: Option<String>) -> Result<CmdResult, String> {
+async fn open_place(
+    repo: String,
+    slug: String,
+    fresh: Option<bool>,
+    provider: Option<String>,
+    model: Option<String>,
+    force: Option<bool>,
+) -> Result<CmdResult, String> {
     let provider = provider.unwrap_or_else(|| harness::default_adapter().provider().id.into());
     let adapter = known_harness(&provider)?;
-    if provider == "codex" && worktrees_core::profile::codex_bin().is_none() {
-        return Err("Codex CLI is not installed. Install it, then sign in with `codex login`.".into());
+    adapter.installed()?;
+    let model = model.filter(|m| !m.trim().is_empty());
+    if let Some(m) = &model {
+        worktrees_core::choice::validate_model(m)?;
     }
+    let force = force.unwrap_or(false);
     run_op(&format!("open {slug} fresh={}", fresh.unwrap_or(false)), &repo, move |p, ui| {
         // Auto-resume: if this place already has a Claude Code conversation on
         // disk, launch the AI pane with the resume arg (-r) instead of cold.
@@ -1092,7 +1112,7 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: O
             // (spare_shell=false): Claude gets full width; the scratch shell
             // lives in the dock's Terminal tab.
             let mut ai = ops::ai_launch_for(p, ui, &p.main_root, &ai_cmd);
-            ai.resume = resume;
+            (ai.model, ai.resume, ai.force) = (model.clone(), resume, force);
             ops::launch(p, ui, &p.main_root, &session, "", &ai, false, false)
         } else {
             let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
@@ -1100,6 +1120,13 @@ async fn open_place(repo: String, slug: String, fresh: Option<bool>, provider: O
             args.push(provider.clone());
             if resume {
                 args.push("-r".into());
+            }
+            if let Some(m) = &model {
+                args.push("--model".into());
+                args.push(m.clone());
+            }
+            if force {
+                args.push("--force".into());
             }
             ops::cmd_open(p, ui, &args)
         }
@@ -4218,6 +4245,63 @@ async fn set_codex_permissions(mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// What a model picker lists for `harness` (`choice::options_for`): Claude's
+/// aliases, nothing for Codex (free text), pi's catalog with each unusable
+/// model's reason. pi's shells out and probes its hosts — cached a minute in
+/// core, and async here so a slow host never holds the main thread.
+#[tauri::command]
+async fn agent_models(harness: String) -> Result<Vec<worktrees_core::choice::ModelOption>, String> {
+    known_harness(&harness)?;
+    Ok(worktrees_core::choice::options_for(&harness))
+}
+
+/// Settings → pi: which pi and node a pane gets, the trust posture, and the
+/// user's allowance — plus, for `repo`, its root and whether it is allowed.
+#[derive(Serialize)]
+struct PiStatus {
+    preflight: worktrees_core::pimodels::Preflight,
+    trust: worktrees_core::trust::PiTrust,
+    allowed: Vec<String>,
+    repo_root: Option<String>,
+    repo_allowed: bool,
+}
+
+#[tauri::command]
+async fn pi_status(repo: Option<String>) -> Result<PiStatus, String> {
+    let repo_root = repo.as_deref().and_then(worktrees_core::trust::repo_root);
+    let allowed = worktrees_core::trust::allowed("pi");
+    let repo_allowed = repo_root.as_ref().is_some_and(|r| allowed.contains(r));
+    Ok(PiStatus {
+        preflight: worktrees_core::pimodels::preflight(),
+        trust: worktrees_core::trust::pi_trust(),
+        allowed,
+        repo_root,
+        repo_allowed,
+    })
+}
+
+/// Settings → pi's trust mode, pushed in-process like Codex's permissions. An
+/// unknown value is refused, never defaulted.
+#[tauri::command]
+async fn set_pi_trust(mode: String) -> Result<(), String> {
+    let Some(t) = worktrees_core::trust::PiTrust::parse(&mode) else {
+        let e = format!("unknown pi trust mode '{mode}' (expected never or ask)");
+        applog("error", &format!("set_pi_trust: {e}"));
+        return Err(e);
+    };
+    worktrees_core::trust::set_pi_trust_override(Some(t));
+    Ok(())
+}
+
+/// Allow (or revoke) a repo's own pi resources. The user's act, from Settings
+/// → pi; the MCP server has no path here. `repo` is any path inside the repo —
+/// core keys the allowance on the parent of its git common dir.
+#[tauri::command]
+async fn set_pi_allowed(repo: String, allow: bool) -> Result<bool, String> {
+    let root = worktrees_core::trust::repo_root(&repo).ok_or_else(|| format!("{repo} is not inside a git repository"))?;
+    worktrees_core::trust::set_allowed("pi", &root, allow).inspect_err(|e| applog("error", &format!("set_pi_allowed: {e}")))
+}
+
 // ── diagnostics (Settings → Logs → Copy diagnostics) ─────────────────────────
 // A single clipboard-ready plaintext block for bug reports. Entirely OFFLINE:
 // no check_update / no network — versions come from the compiled-in constant +
@@ -5061,6 +5145,12 @@ async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), St
     // honest error when no Claude is there rather than a paste onto a shell.
     let ai_word = provider.as_deref().unwrap_or(harness::default_adapter().provider().id);
     let Some(adapter) = harness::by_id(ai_word) else { return Err("unknown agent provider".into()) };
+    // Not into pi yet: its pane runs as `node`, which `ai_pane` cannot tell
+    // from any other program, and its only modal (project trust) takes input
+    // as an answer. Typing into pi — with a check for that modal — is phase 3.
+    if adapter.provider().id == provider::PI.id {
+        return Err("The plan prompt cannot be pasted into pi yet — ask it in pi's own prompt.".into());
+    }
     tmux::paste_to_ai(&session, adapter.provider().match_word, ops::PLAN_PROMPT)?;
     applog("info", &format!("plan_prompt: pasted into {session}"));
     Ok(())
@@ -7615,6 +7705,10 @@ pub fn run() {
             agent_link_skills,
             agent_user_skills,
             set_codex_permissions,
+            agent_models,
+            pi_status,
+            set_pi_trust,
+            set_pi_allowed,
             diagnostics,
             tmux_check,
             set_zoom,

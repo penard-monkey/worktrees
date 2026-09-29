@@ -760,6 +760,7 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .g-agent svg { display: block; width: var(--agent-mark); height: var(--agent-mark); }
 .g-agent-claude { --agent-mark: 1.15em; }
 .g-agent-codex { --agent-mark: 1.18em; }
+.g-agent-pi { --agent-mark: 1.1em; }
 .row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; }
 /* The enter affordance rides in the age's slot. Both children occupy grid cell
    1/1, so the slot is sized by the WIDER of them and the hover swap cannot
@@ -3323,3 +3324,11 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
 .mcp-migration-chip i { width: 6px; height: 6px; flex: none; border-radius: var(--r-full); background: var(--warn); }
 .mcp-migration-chip.copy i, .mcp-migration-chip.exists i { background: var(--ok); }
 .mcp-migration .hint { overflow-wrap: anywhere; }
+
+/* ── model picker (new-worktree dialog, Switch agent sheet, Settings → pi) ──
+   A not-ready model is captioned, never hidden. Words stay --txt-hi; hue lives
+   only in the dot (the accent-as-fill rule). */
+.model-picker { display: flex; flex-direction: column; gap: var(--s1); }
+.np-hint.warn, .setting .hint.warn { color: var(--txt-hi); }
+.pi-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--r-full); margin-right: var(--s2); background: var(--txt-mute); vertical-align: middle; }
+.pi-dot.ok { background: var(--ok); }

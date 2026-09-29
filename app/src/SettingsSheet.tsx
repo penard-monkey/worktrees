@@ -9,6 +9,7 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
+import PiPanel from "./PiPanel";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, clampZoom, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
@@ -97,6 +98,7 @@ const CATS = [
   // card sends people to, so it has to be findable by name.
   { id: "claude", label: "Claude" },
   { id: "codex", label: "Codex" },
+  { id: "pi", label: "pi" },
   { id: "behavior", label: "Behavior" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
@@ -789,6 +791,8 @@ export function SettingsSheet({
             offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />
           </>}
 
+          {cat === "pi" && <PiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport} />}
+
           {cat === "commands" && <>
           <section className="setting">
             <label>Default agent</label>
@@ -800,7 +804,7 @@ export function SettingsSheet({
                 </button>
               ))}
             </div>
-            <div className="hint">Preselected for new worktrees when both agents are installed. Entering a place keeps its running agent; this default applies when none is running. Switching agents closes the current session first.</div>
+            <div className="hint">Preselected for new worktrees when more than one agent is installed. Entering a place keeps its running agent; this default applies when none is running. Switching agents closes the current session first. pi also needs a default model (Settings → pi), or it asks for one each time.</div>
           </section>
           <section className="setting">
             <label>Worktrees tools for agents</label>

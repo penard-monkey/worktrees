@@ -40,6 +40,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   back, and `pi_project_trust = "ask"` lets pi ask instead — a prompt the dot
   shows as waiting and `send` will not type into. The allowance lives in your
   own config; worktrees never writes pi's.
+- **The app offers pi, and a model for every agent.** The new-worktree dialog
+  gains a model picker under the agent choice: grouped by provider, with a
+  model that cannot run right now shown disabled and saying why ("not signed
+  in", "host not answering", "not loaded on its host"). "Switch agent…" in a
+  place's ⋯ menu replaces the per-agent items with one sheet for agent and
+  model, naming what it closes and what it opens. A pi row reads
+  `pi · <model>`. When pi's host is down the place is still created and you
+  are asked whether to launch anyway.
+- **Settings → pi** shows which pi and which node your panes get, every model
+  pi offers and its state, a default pi model, the project-trust choice, and
+  the repos you allowed — with Revoke, and Allow for the current one.
 
 ### Changed
 - **`harness`, `model`, `trust` and `pi_project_trust` are user settings.** A
