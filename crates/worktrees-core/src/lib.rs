@@ -8,6 +8,7 @@
 pub mod activity;
 pub mod agent;
 pub mod agentfiles;
+pub mod choice;
 pub mod automation;
 pub mod config;
 pub mod codex;
@@ -28,6 +29,8 @@ pub mod mention;
 pub mod messages;
 pub mod model;
 pub mod ops;
+pub mod pi;
+pub mod pimodels;
 pub mod plan;
 pub mod proc;
 pub mod profile;
@@ -42,6 +45,7 @@ pub mod store;
 pub mod sync;
 pub mod sysclock;
 pub mod tmux;
+pub mod trust;
 pub mod ui;
 
 pub use error::{Result, WtError};

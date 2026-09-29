@@ -1,0 +1,12 @@
+{"type":"session","version":3,"id":"wt-refused-probe","timestamp":"2026-09-29T16:13:35.568Z"}
+{"type":"model_change","id":"59140fa1","parentId":null,"timestamp":"2026-09-29T16:13:35.598Z","provider":"lm-refused","modelId":"qwen3.6-27b"}
+{"type":"thinking_level_change","id":"26b8c100","parentId":"59140fa1","timestamp":"2026-09-29T16:13:35.598Z","thinkingLevel":"off"}
+{"type":"message","id":"cb568478","parentId":"26b8c100","timestamp":"2026-09-29T16:13:39.408Z","message":{"role":"system"}}
+{"type":"message","id":"05f5fabd","parentId":"cb568478","timestamp":"2026-09-29T16:13:39.409Z","message":{"role":"user"}}
+{"type":"message","id":"4807b269","parentId":"05f5fabd","timestamp":"2026-09-29T16:13:39.422Z","message":{"role":"assistant","stopReason":"error","errorMessage":"Connection error.","provider":"lm-refused","model":"qwen3.6-27b"}}
+{"type":"context_edit","id":"0c1d23b9","parentId":"4807b269","timestamp":"2026-09-29T16:13:39.424Z","targetId":"4807b269","replacement":null}
+{"type":"message","id":"5a9fd30e","parentId":"0c1d23b9","timestamp":"2026-09-29T16:13:41.430Z","message":{"role":"assistant","stopReason":"error","errorMessage":"Connection error.","provider":"lm-refused","model":"qwen3.6-27b"}}
+{"type":"context_edit","id":"1b3f7b88","parentId":"5a9fd30e","timestamp":"2026-09-29T16:13:41.430Z","targetId":"5a9fd30e","replacement":null}
+{"type":"message","id":"066b071a","parentId":"1b3f7b88","timestamp":"2026-09-29T16:13:45.436Z","message":{"role":"assistant","stopReason":"error","errorMessage":"Connection error.","provider":"lm-refused","model":"qwen3.6-27b"}}
+{"type":"context_edit","id":"2a1a3e36","parentId":"066b071a","timestamp":"2026-09-29T16:13:45.436Z","targetId":"066b071a","replacement":null}
+{"type":"message","id":"b275df64","parentId":"2a1a3e36","timestamp":"2026-09-29T16:13:53.439Z","message":{"role":"assistant","stopReason":"error","errorMessage":"Connection error.","provider":"lm-refused","model":"qwen3.6-27b"}}

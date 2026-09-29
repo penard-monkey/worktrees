@@ -13,6 +13,11 @@ pub struct Provider {
     pub canonical_default: bool,
     /// Only Claude accepts --name; other launch-specific flags live in adapters.
     pub name_arg: Option<&'static str>,
+    /// The ONLY way a model reaches argv (pi-harness §2.3.2). The adapter
+    /// decides WHEN: a fresh launch or an explicit switch, never a resume — a
+    /// resumed pi session keeps its own model, and passing one writes a
+    /// `model_change` into it.
+    pub model_arg: Option<&'static str>,
 }
 
 pub const PROVIDERS: &[Provider] = &[
@@ -23,6 +28,7 @@ pub const PROVIDERS: &[Provider] = &[
         sidecar_suffix: "~agent~claude",
         canonical_default: true,
         name_arg: Some("--name"),
+        model_arg: Some("--model"),
     },
     Provider {
         id: "codex",
@@ -31,10 +37,23 @@ pub const PROVIDERS: &[Provider] = &[
         sidecar_suffix: "~agent~codex",
         canonical_default: false,
         name_arg: None,
+        model_arg: Some("-m"),
+    },
+    Provider {
+        id: "pi",
+        label: "pi",
+        match_word: "pi",
+        sidecar_suffix: "~agent~pi",
+        canonical_default: false,
+        // `--name` exists in pi but is a display name, not an address: pi has
+        // no cross-session bus to address it on.
+        name_arg: None,
+        model_arg: Some("--model"),
     },
 ];
 pub const CLAUDE: &Provider = &PROVIDERS[0];
 pub const CODEX: &Provider = &PROVIDERS[1];
+pub const PI: &Provider = &PROVIDERS[2];
 
 pub fn by_id(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
@@ -48,8 +67,12 @@ pub fn ids() -> Vec<&'static str> {
 pub fn choices() -> String {
     ids().join(" or ")
 }
+/// Any provider sidecar, including one for a harness this build does not
+/// know: keyed on the MARKER, so a `~agent~<newer>` session left by a later
+/// build (or another tool on the same prefix) is never adopted as a place's
+/// canonical session.
 pub fn is_sidecar(name: &str) -> bool {
-    PROVIDERS.iter().any(|p| name.contains(p.sidecar_suffix))
+    name.contains(SIDECAR_MARKER)
 }
 /// The marker every provider sidecar carries (`<canonical>~agent~<id>`). `~`
 /// cannot occur in a git ref, so no place's own session contains it.
@@ -108,9 +131,12 @@ mod tests {
         // npm's codex runs as `node`: the sidecar names it.
         assert_eq!(id("repo-feat~agent~codex", "node"), Some("codex"));
         assert_eq!(id("repo-feat~agent~codex", "2.1.277"), Some("codex"));
-        // A harness this build does not know is not Claude either.
-        assert_eq!(id("repo-feat~agent~pi", "node"), None);
+        // pi runs as `node` too; its sidecar names it.
+        assert_eq!(id("repo-feat~agent~pi", "node"), Some("pi"));
         assert_eq!(id("repo-feat~agent~pi", "zsh"), None);
+        // A harness this build does not know is not Claude either.
+        assert_eq!(id("repo-feat~agent~opencode", "node"), None);
+        assert_eq!(id("repo-feat~agent~opencode", "zsh"), None);
         // Claude's own sidecar, and the legacy canonical session, still read as Claude.
         assert_eq!(id("repo-feat~agent~claude", "node"), Some("claude"));
         assert_eq!(id("repo-feat", "node"), Some("claude"));
@@ -120,5 +146,18 @@ mod tests {
         assert_eq!(id("repo-feat~agent~codex", "/usr/local/bin/codex"), Some("codex"));
         assert_eq!(id("repo-feat~agent~codex", "zsh"), None);
         assert_eq!(id("repo-feat", "zsh"), None);
+    }
+
+    /// `for_pane` finds a sidecar by the MARKER and `is_sidecar` keys on it,
+    /// while each row spells its suffix out literally — so a row whose suffix
+    /// drifted from `~agent~<id>` would be a sidecar nobody attributes.
+    #[test]
+    fn every_sidecar_suffix_is_the_marker_plus_the_id() {
+        for p in PROVIDERS {
+            assert_eq!(p.sidecar_suffix, format!("{SIDECAR_MARKER}{}", p.id), "{}", p.id);
+        }
+        assert!(is_sidecar("repo-feat~agent~opencode"), "an unknown harness's sidecar is still a sidecar");
+        assert!(!is_sidecar("repo-feat"));
+        assert!(!is_sidecar("repo-feat-term"));
     }
 }

@@ -63,6 +63,7 @@ use std::io::{BufRead, Read, Write};
 use worktrees_core::mention::uri_map;
 use worktrees_core::model::PlaceRef;
 use worktrees_core::{activity, agent, automation, harness, messages, ops, runs, store, tmux, ui::CaptureUi, Project};
+use worktrees_core::harness::SendOutcome;
 
 /// Who is working in a place and what they are doing. `agents` lists every
 /// session, per harness (Claude's from its probe files, Codex's from its
@@ -837,13 +838,18 @@ impl Server {
                 "Create a worktree for a branch (creating the branch off base if needed) and \
                  start the chosen agent in its own tmux session. Pass `brief` to hand the agent \
                  its task: it is written to .planning/brief.md in the worktree and the chosen \
-                 agent opens on it. `provider` defaults to the project's AI command.",
+                 agent opens on it. `provider` defaults to the project's AI command. `model` picks \
+                 the agent's model (pi: `<backend>/<id>`, required unless the user set a default); \
+                 an unknown or unusable pi model is refused with the ready ones named. If pi's \
+                 model host does not answer, the worktree and brief are still created and the \
+                 agent is NOT started (exit 5) — tell the user; only they can launch it anyway.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "branch": { "type": "string" },
                         "base": { "type": "string", "description": "Base ref for a new branch. Optional." },
                         "provider": { "type": "string", "enum": worktrees_core::provider::ids(), "description": "Agent to start. Omit to use the project's AI command." },
+                        "model": { "type": "string", "description": "The agent's model: pi takes `<backend>/<id>` (e.g. lm-studio/qwen3.6-27b), claude an alias or id, codex a model id. Letters, digits and . _ / : - only. Optional." },
                         "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; the chosen agent opens on it. Optional." },
                         "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." }
                     },
@@ -1227,13 +1233,32 @@ impl Server {
                 };
                 let raw_base = s("base");
                 let mut args = vec![branch, "--no-attach".to_string()];
+                let mut harness = None;
                 match a.get("provider") {
                     None | Some(serde_json::Value::Null) => {}
                     Some(serde_json::Value::String(p)) if worktrees_core::provider::by_id(p).is_some() => {
                         args.push("--ai".to_string());
                         args.push(p.clone());
+                        harness = Some(p.clone());
                     }
                     Some(_) => return Ok(text_err(&format!("provider must be {}", worktrees_core::provider::choices()))),
+                }
+                match a.get("model") {
+                    None | Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::String(m)) => {
+                        let harness = harness.unwrap_or_else(|| {
+                            worktrees_core::profile::ai_word_of(&worktrees_core::config::resolve_ai_cmd(None))
+                        });
+                        if harness == worktrees_core::provider::PI.id && worktrees_core::pimodels::pi_bin().is_none() {
+                            return Ok(text_err("pi is not installed where this server runs, so it offers no models"));
+                        }
+                        if let Err(e) = model_ok(&harness, m, &worktrees_core::choice::options_for(&harness)) {
+                            return Ok(text_err(&e));
+                        }
+                        args.push("--model".to_string());
+                        args.push(m.clone());
+                    }
+                    Some(_) => return Ok(text_err("model must be a string")),
                 }
                 if !raw_base.trim().is_empty() {
                     match safe_arg(&raw_base, "base") {
@@ -1555,9 +1580,12 @@ impl Server {
                 }
                 let path = project.place_dir(&slug);
                 let mut last = activity::Activity::none();
+                let mut prev: Option<activity::Activity> = None;
                 let got = poll_until(timeout_s * 1000, WAIT_IDLE_STEP_MS, now_ms, sleep_ms, || {
                     last = activity::place_activity(project, &slug, &path);
-                    (last.state != activity::State::Busy).then(|| last.clone())
+                    let done = settled(prev.as_ref(), &last);
+                    prev = Some(last.clone());
+                    done.then(|| last.clone())
                 });
                 let waited = t0.elapsed().as_secs();
                 match got {
@@ -1913,6 +1941,44 @@ fn safe_arg(v: &str, what: &str) -> Result<String, String> {
     Ok(t.to_string())
 }
 
+/// Whether `wait until: idle` may answer on `cur`, given the sample before it.
+/// Claude's and Codex's non-busy states are recorded facts and one sample is
+/// enough. pi's can be a moment between writes: before the opener is
+/// submitted a fresh lane's screen shows no status yet, and a steering message
+/// lands as its own user entry ~2ms after the reply it follows — so a pi
+/// reading counts only when the sample before it was non-busy pi as well.
+fn settled(prev: Option<&activity::Activity>, cur: &activity::Activity) -> bool {
+    if cur.state == activity::State::Busy {
+        return false;
+    }
+    if cur.provider != Some(worktrees_core::provider::PI.id) {
+        return true;
+    }
+    prev.is_some_and(|p| p.provider == cur.provider && p.state != activity::State::Busy)
+}
+
+/// A `create_worktree.model`, checked as DATA before it becomes `--model`: the
+/// charset always, and for a harness whose catalog is the whole truth (pi —
+/// it can only run the models it lists) membership and readiness, refused
+/// with the ready ones named so an orchestrator can pick one. Claude's and
+/// Codex's lists are aliases and free text, not a gate.
+fn model_ok(harness: &str, model: &str, options: &[worktrees_core::choice::ModelOption]) -> Result<(), String> {
+    worktrees_core::choice::validate_model(model)?;
+    if harness != worktrees_core::provider::PI.id {
+        return Ok(());
+    }
+    let ready = worktrees_core::pimodels::ready_names(options);
+    let listed = if ready.is_empty() { "none".to_string() } else { ready.join(", ") };
+    match options.iter().find(|o| o.model.arg() == model) {
+        Some(o) if o.ready => Ok(()),
+        Some(o) => Err(format!(
+            "pi model {model} is not usable now ({}). Ready: {listed}",
+            o.reason.map(|r| r.as_str()).unwrap_or("unknown")
+        )),
+        None => Err(format!("pi does not offer {model}. Ready: {listed}")),
+    }
+}
+
 /// What `send` will type: non-empty, at most `SEND_MAX` bytes, and no control
 /// character at all — a newline would submit early, an ESC would drive the
 /// TUI. A refusal says which, so the caller can fix it.
@@ -1939,7 +2005,6 @@ fn send_text_ok(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-use worktrees_core::harness::SendOutcome;
 
 fn record_send(
     dir: &std::path::Path,
@@ -2150,7 +2215,49 @@ mod tests {
         let server = server_at(&sc.root, true, false);
         let tools = server.tools();
         let create = tools.iter().find(|t| t["name"] == "create_worktree").unwrap();
-        assert_eq!(create["inputSchema"]["properties"]["provider"]["enum"], serde_json::json!(["claude", "codex"]));
+        assert_eq!(create["inputSchema"]["properties"]["provider"]["enum"], serde_json::json!(["claude", "codex", "pi"]));
+        assert_eq!(create["inputSchema"]["properties"]["model"]["type"], "string");
+    }
+
+    /// One non-busy sample ends a wait on Claude or Codex; pi needs two in a
+    /// row, so a startup gap or a steering write cannot end it early.
+    #[test]
+    fn a_pi_wait_needs_two_quiet_samples() {
+        use worktrees_core::activity::{Activity, State};
+        let a = |p: &'static str, s| Activity { provider: Some(p), state: s, last_done: None, session: None };
+        assert!(settled(None, &a("claude", State::Idle)));
+        assert!(settled(None, &a("codex", State::Waiting)));
+        assert!(!settled(None, &a("pi", State::Idle)), "one pi sample is not enough");
+        assert!(!settled(Some(&a("pi", State::Busy)), &a("pi", State::Idle)));
+        assert!(settled(Some(&a("pi", State::Idle)), &a("pi", State::Idle)));
+        assert!(settled(Some(&a("pi", State::Idle)), &a("pi", State::Waiting)), "a trust modal twice is waiting");
+        assert!(!settled(Some(&a("pi", State::Idle)), &a("pi", State::Busy)));
+        assert!(settled(None, &Activity::none()), "nothing running ends the wait");
+    }
+
+    /// A model is data: the charset for every harness, and for pi the catalog
+    /// too — refused by name, with the ready options listed.
+    #[test]
+    fn create_worktree_model_is_checked_as_data_and_pi_names_the_ready_ones() {
+        use worktrees_core::choice::{ModelMeta, ModelOption, ModelRef, Reason};
+        let opt = |m: &str, reason: Option<Reason>| ModelOption {
+            model: ModelRef::parse("pi", m),
+            ready: reason.is_none(),
+            reason,
+            source: "pi-list-models".into(),
+            meta: ModelMeta::default(),
+        };
+        let opts = vec![opt("lm-studio/qwen3.6-27b", None), opt("kimi-coding/k3", Some(Reason::NoCredentials))];
+        assert!(model_ok("pi", "lm-studio/qwen3.6-27b", &opts).is_ok());
+        let e = model_ok("pi", "kimi-coding/k3", &opts).unwrap_err();
+        assert!(e.contains("no_credentials") && e.contains("Ready: lm-studio/qwen3.6-27b"), "{e}");
+        let e = model_ok("pi", "lm-studio/other", &opts).unwrap_err();
+        assert!(e.contains("does not offer") && e.contains("lm-studio/qwen3.6-27b"), "{e}");
+        assert!(model_ok("pi", "x", &[]).unwrap_err().contains("Ready: none"));
+        // Claude and Codex: free text, but never argv.
+        assert!(model_ok("claude", "some-new-model", &[]).is_ok());
+        assert!(model_ok("codex", "--dangerously-bypass", &[]).is_err());
+        assert!(model_ok("claude", "x'; id", &[]).is_err());
     }
 
     #[test]

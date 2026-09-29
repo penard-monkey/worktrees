@@ -1,0 +1,24 @@
+
+────────────────────────────────────────────────────────────────────────────────
+
+ This project is not trusted. Project .pi resources and packages are ignored.
+ Use /trust to save a trust decision, then restart pi.
+
+
+ Read .planning/brief.md and begin.
+
+
+ Error: Connection error.
+
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add `set
+ -g extended-keys on` to ~/.tmux.conf and restart tmux.
+
+ Error: Connection error.
+
+ Error: Connection error.
+
+── ⠦ Retrying (3/3) in 8s... (escape to cancel) ────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+~/.cache/worktrees/worktrees/pi-phase2/live/repo/.worktrees/dead2 (dead2)
+3.1%/128k (auto)                                                     qwen3.6-27b

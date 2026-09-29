@@ -152,6 +152,9 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
                 match_word: plain.match_word,
                 opener: None,
                 place_flags: Vec::new(),
+                model: None,
+                resume: false,
+                force: false,
             }
         }
     }
@@ -191,14 +194,41 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
     // against `pane_current_command`, so getting it wrong does not error — it
     // silently downgrades adoption to "first pane in the worktree" and switches
     // the app's auto-resume off.
+    let mut ai = ai.clone();
     let ai_word = ai.match_word.clone();
-    let ai_cmd = ai.cmd.as_str();
+    let ai_cmd = ai.cmd.clone();
     let _switch_lock = if crate::provider::by_word(&ai_word).is_some() {
         match lock_agent_switch(&p.main_root) {
             Ok(file) => Some(file),
             Err(e) => { ui.error(&e); return 1; }
         }
     } else { None };
+    let place_slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+    // The harness's last word on a launch that will CREATE its session — before
+    // the other agent is closed below, so a refused launch (pi's model host is
+    // down, its node is too old) leaves whatever was running exactly as it was.
+    if !ai_cmd.is_empty() && !tmux::session_exists(session_in) {
+        if let Some(adapter) = crate::harness::by_word(&ai_word) {
+            match adapter.prepare(p, &place_slug, wt, &mut ai) {
+                Ok(()) => {}
+                Err(crate::harness::Refusal::Hard(why)) => {
+                    ui.error(&format!("{} not started: {why}", adapter.provider().label));
+                    return 1;
+                }
+                Err(crate::harness::Refusal::Soft(why)) => {
+                    let again = if place_slug == "(main)" {
+                        "re-run with --force (the app: Launch anyway)".to_string()
+                    } else {
+                        format!("worktrees open {place_slug} --force")
+                    };
+                    ui.error(&format!("{why}. The place is ready; to launch anyway: {again}"));
+                    return crate::diag::EXIT_LAUNCH_REFUSED;
+                }
+            }
+        }
+    }
+    let ai = &ai;
+    let ai_cmd = ai_cmd.as_str();
     // Provider changes are explicit opens. End the other Worktrees-managed AI
     // session before this one starts, so a place never has two active agents.
     // The canonical name predates provider sidecars; it may contain either AI.
@@ -326,6 +356,17 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
                     // badge simply never appears, with nothing to explain why.
                     ui.warn(&format!("could not record which profile this session started with: {e}"));
                 }
+                // An explicitly chosen model is the place's until another is
+                // chosen (pi records its own in `prepare`, with its session
+                // generation). Nothing is written for a launch that chose none.
+                if let (Some(model), false) = (ai.model.as_deref(), ai.resume) {
+                    if let Some(h) = crate::provider::by_word(&ai_word).filter(|h| h.id != crate::provider::PI.id) {
+                        let decl = crate::store::AgentDecl { harness: h.id.into(), model: Some(model.to_string()) };
+                        if let Err(e) = crate::store::edit(&p.main_root, &slug, |d| d.agent = Some(decl)) {
+                            ui.warn(&format!("could not record this place's model: {e}"));
+                        }
+                    }
+                }
                 if spare_shell {
                     tmux::split_window(&pid, wt, &pane1);
                     tmux::select_pane(&pid);
@@ -440,8 +481,16 @@ pub fn agent_session_name(canonical: &str, ai_word: &str) -> String {
     provider.session_name(canonical, owner.id, sidecar_exists)
 }
 
+/// `ai_cmd` with its resume words. A harness that resumes an exact session
+/// has none (`AiLaunch::resume` carries it), and gets `ai_cmd` back untouched —
+/// not with a trailing space `launch_cmd` would carry into argv.
 pub fn resume_command(ai_cmd: &str, cwd: &str) -> String {
-    format!("{ai_cmd} {}", crate::config::resolve_ai_resume_arg_for(ai_cmd, cwd))
+    let arg = crate::config::resolve_ai_resume_arg_for(ai_cmd, cwd);
+    if arg.is_empty() {
+        ai_cmd.to_string()
+    } else {
+        format!("{ai_cmd} {arg}")
+    }
 }
 
 /// Whether a resume asked for in `wt` may be launched: always for a
@@ -487,6 +536,7 @@ fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
 pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut do_install, mut do_tmux, mut do_attach, mut do_fetch, mut resume) = (true, true, true, true, false);
     let (mut branch, mut base, mut name, mut ai_flag) = (String::new(), String::new(), None::<String>, None::<String>);
+    let (mut model, mut force) = (None::<String>, false);
     // `--brief <text>`: the agent's task, written to BRIEF_PATH in the new
     // worktree; claude then opens on BRIEF_OPENER. This is how an orchestrator
     // (the MCP `create_worktree` tool) hands a place its work.
@@ -508,6 +558,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             match expect {
                 "name" => name = Some(arg.clone()),
                 "ai" => ai_flag = Some(arg.clone()),
+                "model" => model = Some(arg.clone()),
                 "brief" => brief = Some(arg.clone()),
                 _ => {}
             }
@@ -525,6 +576,9 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s if s.starts_with("--name=") => name = Some(s["--name=".len()..].to_string()),
             "--ai" => expect = "ai",
             s if s.starts_with("--ai=") => ai_flag = Some(s["--ai=".len()..].to_string()),
+            "--model" => expect = "model",
+            s if s.starts_with("--model=") => model = Some(s["--model=".len()..].to_string()),
+            "--force" => force = true,
             "--brief" => expect = "brief",
             s if s.starts_with("--brief=") => brief = Some(s["--brief=".len()..].to_string()),
             s if s.starts_with('-') => {
@@ -549,6 +603,11 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     if branch.is_empty() {
         ui.error("Branch name required.  e.g. worktrees new feat/foo");
+        return 1;
+    }
+    // A bad --model is refused before anything is created.
+    if let Err(e) = check_model(model.as_deref(), &crate::config::resolve_ai_cmd(ai_flag.as_deref())) {
+        ui.error(&e);
         return 1;
     }
     let branch = strip_origin(&branch).to_string();
@@ -729,7 +788,8 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 
     let install_cmd = if do_install && !already { detect_install_cmd(&wt) } else { String::new() };
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
-    if resume && !ai_cmd.is_empty() && may_resume(p, &ai_cmd, &wt) {
+    let resume = resume && !ai_cmd.is_empty() && may_resume(p, &ai_cmd, &wt);
+    if resume {
         ai_cmd = resume_command(&ai_cmd, &wt);
     }
 
@@ -754,6 +814,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let pane1_install = if spare_shell { install_cmd.as_str() } else { "" };
     let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    (ai.model, ai.resume, ai.force) = (model, resume, force);
     if brief.is_some() && !ai.cmd.is_empty() {
         ai.opener = Some(BRIEF_OPENER.to_string());
     }
@@ -863,27 +924,34 @@ pub fn cmd_switch(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 // ── open ─────────────────────────────────────────────────────────────────────
 pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut name, mut ai_flag, mut resume, mut do_attach) = (String::new(), None::<String>, false, true);
+    let (mut model, mut force) = (None::<String>, false);
     // Default keeps the CLI's spare shell (pane 1). The app passes --no-spare so
     // its embedded view is single-pane (Claude full-width); the scratch shell
     // moves to the dock's Terminal tab.
     let mut spare_shell = true;
-    let mut expect = false;
+    let mut expect = "";
     for a in args {
-        if expect {
+        if !expect.is_empty() {
             if a.starts_with('-') {
-                ui.error(&format!("--ai needs a value (got '{a}')"));
+                ui.error(&format!("--{expect} needs a value (got '{a}')"));
                 return 1;
             }
-            ai_flag = Some(a.clone());
-            expect = false;
+            match expect {
+                "ai" => ai_flag = Some(a.clone()),
+                _ => model = Some(a.clone()),
+            }
+            expect = "";
             continue;
         }
         match a.as_str() {
             "--no-attach" => do_attach = false,
             "--no-spare" => spare_shell = false,
             "-r" | "--resume" => resume = true,
-            "--ai" => expect = true,
+            "--force" => force = true,
+            "--ai" => expect = "ai",
             s if s.starts_with("--ai=") => ai_flag = Some(s["--ai=".len()..].to_string()),
+            "--model" => expect = "model",
+            s if s.starts_with("--model=") => model = Some(s["--model=".len()..].to_string()),
             s if s.starts_with('-') => {
                 ui.error(&format!("Unknown flag: {s}"));
                 return 1;
@@ -898,8 +966,8 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             }
         }
     }
-    if expect {
-        ui.error("--ai needs a value");
+    if !expect.is_empty() {
+        ui.error(&format!("--{expect} needs a value"));
         return 1;
     }
     if name.is_empty() {
@@ -927,12 +995,39 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let session = p.session_name(&slug);
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
-    if resume && !ai_cmd.is_empty() && may_resume(p, &ai_cmd, &wt) {
+    if let Err(e) = check_model(model.as_deref(), &ai_cmd) {
+        ui.error(&e);
+        return 1;
+    }
+    let resume = resume && !ai_cmd.is_empty() && may_resume(p, &ai_cmd, &wt);
+    if resume {
         ai_cmd = resume_command(&ai_cmd, &wt);
     }
-    let ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
+    (ai.model, ai.resume, ai.force) = (model, resume, force);
+    // `new --brief` whose launch was REFUSED (pi's model host down) wrote the
+    // brief and started nothing; the launch-anyway that follows is this
+    // `open`. Without the opener that agent would start blank and the brief
+    // would never be read — so a first fresh launch of such a harness in a
+    // place with a brief gets the same opener `new` would have passed.
+    if !resume && !ai.cmd.is_empty() && Path::new(&wt).join(BRIEF_PATH).is_file() {
+        if crate::harness::by_word(&ai.match_word).is_some_and(|a| a.never_launched(p, &slug)) {
+            ai.opener = Some(BRIEF_OPENER.to_string());
+        }
+    }
     let session = agent_session_name(&session, &ai.match_word);
     launch(p, ui, &wt, &session, "", &ai, do_attach, spare_shell)
+}
+
+/// `--model` is data for a harness's `model_arg`: it must pass
+/// `choice::validate_model`, and it needs a harness that takes one.
+fn check_model(model: Option<&str>, ai_cmd: &str) -> Result<(), String> {
+    let Some(m) = model else { return Ok(()) };
+    crate::choice::validate_model(m)?;
+    match crate::harness::for_cmd(ai_cmd).filter(|_| !ai_cmd.is_empty()) {
+        Some(a) if a.provider().model_arg.is_some() => Ok(()),
+        _ => Err(format!("--model needs an agent that takes one ({}); the AI command here is `{ai_cmd}`", crate::provider::choices())),
+    }
 }
 
 // ── close ────────────────────────────────────────────────────────────────────
@@ -1694,6 +1789,82 @@ fn compose_down(p: &Project, ui: &mut dyn Ui, slug: &str, wt: &str) {
 /// feature whose own failure mode is silent does not fix a silent-failure bug
 /// (§7). Exit: 0 clean · 1 usage/guard · 2 findings present.
 pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let json = args.iter().any(|a| a == "--json") || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
+    if args.iter().any(|a| a == "--pi") {
+        if let Some(extra) = args.iter().find(|a| *a != "--pi" && *a != "--json") {
+            ui.error(&format!("doctor --pi takes only --json (got '{extra}')"));
+            return 1;
+        }
+        return pi_doctor(p, ui, json);
+    }
+    let rc = doctor_config(p, ui, args);
+    // The pi block rides on a HUMAN run only, and only once pi is in use here:
+    // `--json`'s schema is the config report's, and a user who never chose pi
+    // must not start paying for a shell probe and a model host round trip.
+    if !json && rc != 1 && pi_in_use(p) {
+        ui.plain("");
+        pi_doctor(p, ui, false);
+    }
+    rc
+}
+
+/// pi is in use when it is the configured AI command, the user named a default
+/// pi model, or some place here was last launched on it.
+fn pi_in_use(p: &Project) -> bool {
+    let pi = crate::provider::PI;
+    crate::profile::ai_word_of(&crate::config::resolve_ai_cmd(None)) == pi.match_word
+        || crate::config::default_model(pi.id).is_some()
+        || crate::store::read_lenient(&p.main_root).places.values().any(|d| d.agent.as_ref().is_some_and(|a| a.harness == pi.id))
+}
+
+/// `doctor --pi`: which pi and node a pane gets, the trust posture for this
+/// repo, and every model pi offers with why an unusable one is unusable — the
+/// same facts a launch is refused on. Exit `2` (findings) when pi cannot run.
+fn pi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
+    let pf = crate::pimodels::preflight();
+    let models = crate::choice::options_for(crate::provider::PI.id);
+    let repo = crate::trust::repo_root(&p.main_root);
+    let allowed = repo.as_deref().is_some_and(|r| crate::trust::is_allowed("pi", r));
+    let mode = crate::trust::pi_trust();
+    let rc = if pf.problem.is_some() { crate::diag::EXIT_FINDINGS } else { 0 };
+    if json {
+        ui.plain(
+            &serde_json::json!({
+                "preflight": pf,
+                "trust": { "mode": mode, "repo": repo, "allowed": allowed },
+                "models": models,
+            })
+            .to_string(),
+        );
+        return rc;
+    }
+    ui.header("pi");
+    let or_none = |o: &Option<String>| o.clone().unwrap_or_else(|| "(none)".into());
+    ui.info(&format!("pi    {}  {}", or_none(&pf.pi_path), or_none(&pf.pi_version)));
+    let floor = pf.node_floor.as_deref().map(|f| format!(" (pi needs ≥ {f})")).unwrap_or_default();
+    ui.info(&format!("node  {}  {}{floor}", or_none(&pf.node_path), or_none(&pf.node_version)));
+    let trust = if allowed {
+        "this repo is ALLOWED — pi lanes load its .pi/ and .agents/skills (--approve)".to_string()
+    } else {
+        format!("{} for this repo (worktrees trust pi to allow it)", if mode == crate::trust::PiTrust::Ask { "pi asks" } else { "--no-approve" })
+    };
+    ui.info(&format!("trust {trust}"));
+    if models.is_empty() {
+        ui.info("models: none listed (pi --list-models printed nothing this build can read)");
+    }
+    for m in &models {
+        match m.reason {
+            None => ui.info(&format!("  ✔ {}", m.model.arg())),
+            Some(r) => ui.info(&format!("  ✘ {} — {}", m.model.arg(), r.as_str())),
+        }
+    }
+    if let Some(why) = &pf.problem {
+        ui.error(why);
+    }
+    rc
+}
+
+fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut json, mut strict, mut config_only) = (false, false, false);
     let mut names: Vec<String> = Vec::new();
     for a in args {

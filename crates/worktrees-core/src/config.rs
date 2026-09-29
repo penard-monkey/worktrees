@@ -235,12 +235,28 @@ pub fn resolve_prefix_from(
     sanitize_prefix(raw)
 }
 
-/// Resume arg (`-r` appends it): `$WORKTREES_AI_RESUME_ARG` > `ai_resume_arg` > `-r`.
+/// Resume arg as SETTINGS shows it: `$WORKTREES_AI_RESUME_ARG` >
+/// `ai_resume_arg` > the default harness's display form. A display string, not
+/// argv: a harness that resumes an exact session derives it per PLACE
+/// (`resolve_ai_resume_arg_for`), and has no place to derive it from here.
 pub fn resolve_ai_resume_arg_from(env: Option<&str>, cfg: Option<&str>) -> String {
     env.filter(|s| !s.is_empty())
         .or(cfg.filter(|s| !s.is_empty()))
         .map(str::to_string)
-        .unwrap_or_else(|| crate::harness::default_adapter().resume_arg(""))
+        .unwrap_or_else(|| crate::harness::default_adapter().resume_display())
+}
+
+/// The user's default model for `harness`: `[model] <harness> = "…"` in
+/// `config.toml`. User tier only — `model` is in `USER_ONLY_KEYS`, so a repo
+/// cannot supply one.
+pub fn default_model_from(text: &str, harness: &str) -> Option<String> {
+    let root: BTreeMap<String, toml::Value> = toml::from_str(text).ok()?;
+    let v = root.get("model")?.get(harness)?.as_str()?.trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+pub fn default_model(harness: &str) -> Option<String> {
+    default_model_from(&std::fs::read_to_string(config_toml_path()).ok()?, harness)
 }
 
 /// Live resolution reading env + user config.
@@ -262,6 +278,12 @@ pub fn resolve_ai_resume_arg() -> String {
 /// harness's. An explicitly configured resume argument still wins, preserving
 /// the existing user override for every AI command.
 pub fn resolve_ai_resume_arg_for(ai_cmd: &str, cwd: &str) -> String {
+    // A harness that resumes an EXACT session (pi's `--session-id`) is not
+    // open to the override: `-r` appended there would reach pi's session
+    // PICKER, a different session than the one activity is read from.
+    if let Some(a) = crate::harness::for_cmd(ai_cmd).filter(|a| a.exact_resume()) {
+        return a.resume_arg(cwd);
+    }
     let env = std::env::var("WORKTREES_AI_RESUME_ARG").ok();
     let cfg = user_cfg("ai_resume_arg");
     if let Some(arg) = env.as_deref().filter(|s| !s.is_empty()).or(cfg.as_deref().filter(|s| !s.is_empty())) {
@@ -365,6 +387,16 @@ mod tests {
         assert_eq!(resolve_prefix_from(None, None, Some("Team.X!"), None, "r"), "team-x-");
         // and the fallback is sanitized too — a repo directory can be named anything
         assert_eq!(resolve_prefix_from(None, None, None, None, "My Repo"), "my-repo");
+    }
+
+    #[test]
+    fn a_default_model_is_a_user_table_entry() {
+        let t = "ai_cmd = \"pi\"\n[model]\npi = \"lm-studio/qwen3.6-27b\"\nclaude = \"  \"\n";
+        assert_eq!(default_model_from(t, "pi").as_deref(), Some("lm-studio/qwen3.6-27b"));
+        assert_eq!(default_model_from(t, "claude"), None, "blank is absent");
+        assert_eq!(default_model_from(t, "codex"), None);
+        assert_eq!(default_model_from("model = \"x\"\n", "pi"), None, "a top-level string is not the table");
+        assert_eq!(default_model_from("[broken", "pi"), None);
     }
 
     #[test]

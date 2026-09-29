@@ -87,8 +87,32 @@ pub struct Declared {
     pub profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_epoch: Option<i64>,
+    /// The harness and model this place's agent was last LAUNCHED with
+    /// (pi-harness §2.3.6). A fresh pi launch with no `--model` reuses it, so a
+    /// place keeps the model it was given rather than falling to pi's default —
+    /// which on the machine this was built on is a provider that is not signed
+    /// in. Written only when a session is CREATED, never on an attach, and only
+    /// for pi or an explicitly chosen model: an unprofiled claude launch with no
+    /// model must not start rewriting this file for everyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentDecl>,
+    /// The generation of this place's pi session id (`pi::session_id`). A fresh
+    /// launch bumps it; a resume reuses it. Never inferred from pi's session
+    /// directory: the id is how worktrees NAMES the file, so it has to be
+    /// decided before the file exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_session_gen: Option<u32>,
     #[serde(flatten)]
     pub extra: Map<String, serde_json::Value>,
+}
+
+/// `Declared::agent`: `{harness, model}`, the model in the harness's own
+/// spelling (`backend/model` for pi).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentDecl {
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -110,6 +134,27 @@ pub struct Store {
 /// `.git/info/exclude` in another.
 fn store_base(repo: &str) -> PathBuf {
     fs::canonicalize(repo).unwrap_or_else(|_| PathBuf::from(repo))
+}
+
+/// Whether `<repo>/.worktrees.places.json` is TRACKED by git — i.e. arrived
+/// with a clone rather than being this machine's own state. The file is meant
+/// to be ignored (`ensure_ignored`), but nothing stops a repo committing one,
+/// and a committed store is repo-supplied input: anything in it that would
+/// choose argv (ADR 0001) must be ignored when this is true.
+pub fn is_tracked(repo: &str) -> bool {
+    crate::git::git_ok(&store_base(repo).to_string_lossy(), &["ls-files", "--error-unmatch", "--", STORE_FILE])
+}
+
+/// The model this place's agent was last launched with, for `harness` — but
+/// only from a store this machine wrote. From a committed store it is `None`:
+/// for pi a model picks a provider, and a provider can carry an `apiKey`
+/// `!command`, so a repo choosing the model is a repo choosing when a command
+/// runs (ADR 0001, pi-harness §8).
+pub fn declared_model(repo: &str, slug: &str, harness: &str) -> Option<String> {
+    if is_tracked(repo) {
+        return None;
+    }
+    read_lenient(repo).places.get(slug)?.agent.clone().filter(|a| a.harness == harness)?.model
 }
 
 /// `<repo>/.worktrees.places.json`.
@@ -541,5 +586,32 @@ mod tests {
 
         assert_eq!(read_lenient(&repo).places["alpha"].pinned, Some(true));
         assert!(!t.0.join(".git").exists(), "no .git may be created to hold an exclude file");
+    }
+
+    /// A store a clone brought with it cannot pick a model (ADR 0001): the
+    /// same entry is honoured untracked and ignored once committed.
+    #[test]
+    fn a_committed_store_cannot_choose_the_model() {
+        let d = std::env::temp_dir().join(format!("wtstore-tracked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let repo = d.to_string_lossy().into_owned();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(
+            d.join(STORE_FILE),
+            r#"{"version":1,"places":{"feat":{"agent":{"harness":"pi","model":"evil/model"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(declared_model(&repo, "feat", "pi").as_deref(), Some("evil/model"), "this machine's own store");
+        assert_eq!(declared_model(&repo, "feat", "claude"), None, "another harness's model is not this one's");
+        git(&["add", "-f", STORE_FILE]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "store"]);
+        assert!(is_tracked(&repo));
+        assert_eq!(declared_model(&repo, "feat", "pi"), None, "a committed store is repo input");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

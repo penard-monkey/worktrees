@@ -5,6 +5,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **pi is a third agent.** `worktrees new|open --ai pi --model <backend>/<id>`
+  starts [pi](https://pi.dev) in the place's `~agent~pi` session, on the model
+  you name — never on pi's own default, which may be a provider you are not
+  signed in to. Each place gets its own exact pi session, so a resume (`-r`)
+  reopens THAT conversation on its own model rather than the newest one in the
+  directory. The dot, `place_status` and `wait` read pi's session file, and its
+  screen for the moments before pi has written one (startup, or its trust
+  prompt holding the brief back); `place_status` also names the model a pi
+  lane is on.
+- **`--model` for every agent.** `new`/`open --model` and MCP
+  `create_worktree`'s new `model` field pass a model to Claude (`--model`),
+  Codex (`-m`) or pi. It is checked as data (letters, digits and `. _ / : -`),
+  and a pi model pi does not offer, or cannot use right now, is refused with
+  the ready ones named. Without `--model`, Claude and Codex launch exactly as
+  before, and an AI profile's model still wins for Claude. A default pi model
+  can live in `~/.config/worktrees/config.toml` as `[model] pi = "…"`.
+- **A pi launch is refused when its model host is down.** pi reports a dead
+  host as ready and then spins on it for minutes, so worktrees asks the host
+  itself (`GET <baseUrl>/models`, 3s, cached a minute) and refuses with the
+  reason — exit 5, with the worktree and its brief already made. `--force`
+  launches anyway; the MCP tool reports the reason and leaves the choice to
+  you. A pi that cannot run at all (not installed, or a node below pi's own
+  `engines.node`) is refused outright.
+- **`worktrees doctor --pi`** shows which pi and which node a pane will get,
+  and every model pi offers with why an unusable one is unusable
+  (`no_credentials`, `endpoint_unreachable`, `not_served`). A plain `doctor`
+  appends it once pi is in use.
+- **pi does not load a repo's own code unless you say so.** pi lanes launch
+  with `--no-approve`, so a repo's `.pi/` extensions and `.agents/skills` are
+  skipped while AGENTS.md and CLAUDE.md still load. `worktrees trust pi`
+  allows one repo (it then launches with `--approve`), `--revoke` takes it
+  back, and `pi_project_trust = "ask"` lets pi ask instead — a prompt the dot
+  shows as waiting and `send` will not type into. The allowance lives in your
+  own config; worktrees never writes pi's.
+
+### Changed
+- **`harness`, `model`, `trust` and `pi_project_trust` are user settings.** A
+  `.worktrees.toml` that sets them is a hard parse error, like `ai_cmd`: for pi
+  a model selects a provider, and a provider can run a command. For the same
+  reason a `.worktrees.places.json` that a repo COMMITTED is never where a pi
+  lane's model comes from.
+
 ### Fixed
 - **An agent that runs as `node` in its own session is no longer taken for
   Claude.** tmux reports an npm-installed Codex as `node`, and worktrees read
@@ -13,6 +56,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   pane in a `~agent~<harness>` session now belongs to that harness, and to none
   when the harness is unknown; a place's own pre-sidecar session still reads a
   `node` pane as Claude, as before.
+- **A session for an agent this build does not know is never adopted as a
+  place's own.** Opening a place skipped only the sidecars of known agents, so
+  a `~agent~<other>` session running `node` in the same directory could be
+  picked up as the place's session.
 
 ## [0.32.1] - 2026-09-27
 

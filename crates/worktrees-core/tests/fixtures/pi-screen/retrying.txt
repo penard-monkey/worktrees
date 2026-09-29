@@ -1,0 +1,40 @@
+Warning: No project session found with id 'wt-refused-probe'; creating a new session with that id.
+
+ pi v0.87.1
+ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Skills]
+  casa-del-valle, close-out, docs, docx, find-skills, import-memory, morning, pdf, planning-with-files, pptx, sentry-cli, skill-creator,
+xlsx
+
+[Skill conflicts]
+  "planning-with-files" collision:
+    ✓ auto (user) ~/.agents/skills/planning-with-files/SKILL.md
+    ✗ ~/.agents/skills/synced/2e38c352-3f1a-4399-b2ad-05d8a29c0935_ea7c4019-5968-4b38-9bec-d6fc4403fef5/planning-with-files/SKILL.md
+(skipped)
+
+
+ Warning: fd not found. Offline mode enabled, skipping download.
+
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.
+
+
+ Reply: K
+
+
+ Error: Connection error.
+
+ Error: Connection error.
+
+ Error: Connection error.
+
+── ⠼ Retrying (3/3) in 7s... (escape to cancel) ────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/.cache/worktrees/worktrees/pi-harness-research/repo (main)
+3.1%/128k (auto)                                                                                                                 qwen3.6-27b
+
+
