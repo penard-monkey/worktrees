@@ -12,6 +12,16 @@ limits. It does not change the one-live-provider-per-place rule.
 harness, agreed with the parallel opencode research lane, whose proposal
 references it.
 
+**Update, 2026-09-29 (after the probes):**
+- Every observation here was made against pi **0.87.1** on 2026-09-29.
+- Since then the managed install has self-updated to **0.99.1**, and the
+  nvm-global copies listed in §9.5 have been removed.
+- `~/.local/share/pi-node/current` now exists (→ `/opt/homebrew/opt/node`,
+  Homebrew node 26.10), so pi's launcher pins that node. §9.1's "does not
+  exist here" and its nvm-22.19.0 result therefore record the earlier state.
+- Before phase 2: re-measure §9.1, and re-pin every fixture (list-models
+  table, screens, JSONL shapes) against the pi version phase 2 is built on.
+
 **Evidence base:** pi **0.87.1** (managed install), run live in throwaway tmux
 servers (`tmux -L piprobe…`, killed afterwards) in a scratch git repo. All
 model calls went to the `lm-studio` provider (`qwen3.6-27b` on the Tailscale
@@ -32,6 +42,22 @@ Each claim is marked with its source:
 
 ---
 
+## Decisions
+
+Taken by David on 2026-09-29, after the first draft:
+
+- **Q3, trust default: yes.** pi launches with `--no-approve` by default. A
+  user setting can switch it to `ask`. Worktrees never passes `--approve`
+  (§8).
+- **Q5, unreachable host at launch: refuse, with "launch anyway".**
+  - App: a "launch anyway" button.
+  - CLI: `--force`.
+  - MCP `create_worktree`: returns the reason and does not launch.
+  - In every case the worktree and its brief are still created, so the lane
+    can be launched later (§7).
+
+---
+
 ## 0. The answer in one screen
 
 | Question | Short answer |
@@ -44,7 +70,7 @@ Each claim is marked with its source:
 | Waiting on user | pi has no approval prompts by design **[source]**. The one modal seen was the project-trust prompt, and its default choice is **Trust**. |
 | MCP | **None in core, by design** **[source + pi.dev]**. The bus is reached through `worktrees` CLI verbs (new) and a worktrees-owned pi extension or skill passed with `-e`/`--skill`, never written into `~/.pi`. |
 | `send` | Typed text (`send-keys -l`) is shown inline, not folded. Enter while busy **queues as "Steering"** and is delivered after the current message **[observed]**. Bracketed paste folds to `[paste #1 N chars]`. |
-| Usage meter | No meter for pi in phase 1. Local models have no plan limit. Kimi has an endpoint, but reading it means worktrees holds the bearer token, which codex-usage already rejected. |
+| Usage meter | No meter for pi in phase 2. Local models have no plan limit. Kimi has an endpoint, but reading it means worktrees holds the bearer token, which codex-usage already rejected. |
 | Availability | A **dead** host is reported `ready` by `pi auth check` and `--list-models` **[observed]**. A blackholed host hangs `pi -p` for **>5 min with no output** **[observed]**. Worktrees must probe the endpoint itself, with a short timeout. |
 | Node | Today a worktrees pane gets managed pi 0.87.1 on **nvm node 22.19.0**, exactly the floor, only because `.zshrc` loads nvm **[observed]**. Below the floor, 22.13 runs **silently** and 20.18 crashes loudly. Recommendation: one pi, installed by pi's own installer, plus a preflight that measures the node the **pane** will get (§9). No bundling. |
 
@@ -79,6 +105,7 @@ exec "${SHELL:-/bin/sh}" -ic 'pi --model lm-studio/qwen3.6-27b; exec $SHELL'
 | pin provider+model | `--model <provider>/<id>[:<thinking>]` | `--provider` also exists. The `:<thinking>` suffix and `--thinking <level>` set the reasoning level. |
 | exact session | `--session-id <id>` | **[observed]** Creates `<ts>_<id>.jsonl` or reopens it. Ids must match `[A-Za-z0-9._-]` and start and end alphanumeric **[observed error text]**, so `~agent~pi` cannot be used as an id. |
 | most recent in cwd | `--continue` / `-c` | The equivalent of `codex resume --last`. |
+| session storage | `--session-dir <dir>` | Env twin: `PI_CODING_AGENT_SESSION_DIR`. The CLI flag has the highest precedence, above a project's `sessionDir` **[source: sessions.md]**. §3.2, §8 and phase 2 rely on it. |
 | display name | `--name <n>` | Session display name only. It is **not** a messaging address (pi has no cross-session bus). |
 | trust | `--approve` / `--no-approve` | A per-run project-trust override (§8). |
 | offline startup | `--offline` / `PI_OFFLINE=1` | Skips startup network work, such as catalog refresh. |
@@ -103,9 +130,19 @@ Provider {
   precedent.
 - **Resume:** `resume_arg` is a static string today. For pi the right resume
   is **`--session-id <deterministic id>`**, not `--continue`:
-  - The id is derived from the canonical session name (`<prefix>-<slug>`,
-    which is already `[a-z0-9-]` after `.`→`-`) plus a generation counter,
-    e.g. `wt-myproj-feature-x-3`.
+  - The id is derived from the canonical session name, **sanitised to pi's
+    id charset**, plus a generation counter.
+    - `Project::session_name` only replaces `.` with `-`. The slug is
+      `basename(worktree dir)`, which can hold any character except `/`, and
+      main's slug is literally `(main)`. So `worktrees-(main)` is a real
+      canonical name, and pi rejects it as an id **[observed error: ids
+      must be `[A-Za-z0-9._-]` with alphanumeric ends]**.
+    - Sanitising: map every character outside `[A-Za-z0-9._-]` to `-`,
+      collapse runs, trim non-alphanumeric ends.
+    - That can collapse two slugs into one id (`a b` and `a-b` both become
+      `a-b`). To keep it unique per place, append a short hash of the
+      **unsanitised** canonical name. Example: `worktrees-main-3f9a1c-g3`
+      for `worktrees-(main)`, generation 3.
   - A fresh launch bumps the generation. Resume reuses the current one.
   - The generation lives in declared state (`.worktrees.places.json`) or in
     a worktrees-owned file. It is never inferred from pi's directory.
@@ -209,7 +246,8 @@ Today the only model knob is `Profile.model` (Claude-only, `--model`,
   by `directory == place`.
 - pi is safe on both paths. `--continue` looks only in the cwd's session
   directory, and the `--session-id` worktrees derives comes from the place's
-  canonical name.
+  canonical name: sanitised to pi's charset and made unique with a hash of
+  the unsanitised name (§1.3).
 
 **3. Value types (outside the registry):**
 
@@ -251,7 +289,7 @@ launches that fail.
   - `launch_env(choice) -> Vec<(String, String)>`: so a per-launch secret
     never reaches argv. opencode needs `OPENCODE_SERVER_PASSWORD`; pi and
     Codex return `[]`.
-  - A per-launch **runtime handle** (e.g. `{port, secret, pid}` for
+  - A per-launch **runtime handle** (e.g. `{port, secret, pid, started}` for
     opencode) that `activity`, `send` and `running_model` read. It may be
     adapter-private, but the trait must not assume a launch is argv-only or
     stateless.
@@ -288,7 +326,8 @@ launches that fail.
 **6. Persistence.**
 
 - The last-launched choice per place goes in `.worktrees.places.json` as
-  `agent_model` next to the provider choice. That is the user's machine
+  a new `agent` field (`{harness, model}`) on `store::Declared`, which has
+  no per-place provider field today. That is the user's machine
   file, not the repo.
 - The per-harness default goes in Settings → Agents (§5).
 - `Profile.model` keeps winning for Claude.
@@ -308,6 +347,8 @@ launches that fail.
 - Codex: models named in `~/.codex` profiles plus free text **[inferred]**.
 - Both keep `model: null` as "whatever the CLI defaults to", which is safe
   for them.
+
+<a id="surfaces"></a>
 
 ### 2.4 Where the choice is exposed
 
@@ -415,7 +456,7 @@ message assistant        stopReason stop
   pi.dev, security.md]**. The only modal seen was project trust (§8). An
   extension-provided `ask_question` tool exists in the ecosystem (`--help`
   example `--exclude-tools ask_question`) **[source]**; it is not in 0.87.1's
-  built-in list. So pi's amber is *rare*: phase 1 can ship with busy / idle
+  built-in list. So pi's amber is *rare*: phase 2 can ship with busy / idle
   / afterglow only, and add amber when a real modal is captured.
 - **The stronger option: a worktrees-owned pi extension.** It is loaded with
   `-e <worktrees data dir>/pi/worktrees.ts`, so nothing is written to
@@ -464,7 +505,9 @@ deepest place containing the launch dir (`mcp.rs:1513`). The CLI has **no
 equivalent verbs** today (explorer: `main.rs`). Proposal:
 
 1. **CLI verbs, harness-neutral:** `worktrees msg report <text>`, `worktrees
-   msg inbox [--ack]`, `worktrees msg wait [--for <place>] [--timeout N]`.
+   msg list [--ack]`, `worktrees msg wait [--for <place>] [--timeout N]`.
+   - `list`, not `inbox`: `worktrees_core::inbox` already names the
+     show-doc drop directory, and a second "inbox" would be ambiguous.
    - `from` is derived from **cwd** with the exact `caller_place` rule. It
      is never taken from an argument. This is the same trust property MCP
      has.
@@ -549,7 +592,7 @@ Consequences:
 | Backend | What is honestly showable | Proposal |
 |---|---|---|
 | Local OpenAI-compatible (LM Studio) | Nothing plan-shaped: no quota, no window. Context use is per-session and already in pi's own footer (`3.6%/128k`). | **No meter.** Reachability belongs to §7, not to the usage meter. |
-| `kimi-coding` | Kimi exposes `GET https://api.kimi.com/coding/v1/usages` with 5h and 7d windows **[web; not called]**, and upstream reports its `used_ratio` can contradict a 403 **[web: MoonshotAI/kimi-code#3951]**. Reading it needs the bearer token, via `pi auth print-bearer-token`. | **Not in phase 1.** codex-usage rejected "direct HTTP with tokens from auth storage" (worktrees would own credentials and an undocumented contract). The same reasoning applies, and here the endpoint's data is known to be wrong. Revisit only if pi itself exposes usage (e.g. an RPC/`auth` subcommand that returns windows, not tokens). |
+| `kimi-coding` | Kimi exposes `GET https://api.kimi.com/coding/v1/usages` with 5h and 7d windows **[web; not called]**, and upstream reports its `used_ratio` can contradict a 403 **[web: MoonshotAI/kimi-code#3951]**. Reading it needs the bearer token, via `pi auth print-bearer-token`. | **Not in phase 2.** codex-usage rejected "direct HTTP with tokens from auth storage" (worktrees would own credentials and an undocumented contract). The same reasoning applies, and here the endpoint's data is known to be wrong. Revisit only if pi itself exposes usage (e.g. an RPC/`auth` subcommand that returns windows, not tokens). |
 | Other pi backends (Anthropic, OpenAI, …) | pi can use the *same* Claude or ChatGPT subscriptions (`openai-codex` bearer tokens appear in `--help`). | Out of scope. If a pi lane runs on the ChatGPT account, the existing Codex meter already shows that account. Do not double-count. |
 
 `codex-usage`'s rule stands: a provider with no reading gets a named
@@ -715,7 +758,7 @@ a mysterious bug.
 |---|---|
 | (a) Bundle our own pi + node | **No.** pi 0.87.1's `node_modules` + a node runtime is on the order of 100+ MB. Worktrees would own pi's upgrade cadence (0.74 → 0.87 on this machine within weeks) and diverge from the pi the user runs by hand, including its sessions, auth and extensions. A second pi is exactly the confusion this lane started from. |
 | (b) Launch an absolute node + pi's entry point | **No.** It couples worktrees to pi's `releases-v1` install layout and bypasses `pi update`'s own switch. |
-| (c) A user setting for the pi path | **Not needed** once there is one pi. Keep a hidden env override (`WORKTREES_PI_BIN`) for development only. No install picker, per your clarification. |
+| (c) A user setting for the pi path | **Not needed** once there is one pi. Keep a hidden env override (`WORKTREES_PI_BIN`) for development only. No install picker: the target is one pi, not a choice of installs. |
 | (d) Preflight that measures the pane's node, and refuses below the floor | **Yes.** |
 | (e) Point users at pi's own installer, and make it pin node | **Yes, as the install story.** |
 
@@ -739,7 +782,7 @@ The end-user path:
    one-line check in their launcher would make (d) a belt rather than the
    only guard. This goes in the open questions, not a dependency.
 
-### 9.5 Cleanup note for David (recommendations; nothing was uninstalled)
+### 9.5 Cleanup note (machine-specific; the first item is done, see Status)
 
 - Remove the two nvm-global pis, so `~/.local/bin/pi` (managed 0.87.1) is
   the only one:
@@ -755,7 +798,7 @@ The end-user path:
   Either `/login` to Kimi, or set the default to `lm-studio/qwen3.6-27b`.
   Worktrees will pass `--model` either way, but a hand-run `pi` currently
   starts on a model that cannot answer.
-- Probe leftovers under `~/.pi/agent/sessions/--Users-davidpena-.cache-worktrees-worktrees-pi-harness-research-repo--/`
+- Probe leftovers under `~/.pi/agent/sessions/--<mangled path of the scratch repo>--/`
   (2 files) are safe to delete.
 
 ---
@@ -796,6 +839,8 @@ From a read-only survey of the current tree (line numbers as of `91b5ed0`):
 
 ---
 
+<a id="phases"></a>
+
 ## 11. Phased plan
 
 **Phase 0 — land this proposal.** Docs only.
@@ -823,7 +868,7 @@ change:
   <backend>/<id> --session-id <derived> --session-dir <pi default>
   --no-approve "<BRIEF_OPENER>"`. Resume is the same minus `--model`.
 - `AgentChoice` / `ModelRef` / `ModelOption`. The pi model adapter parses
-  `pi --list-models` (fixture-pinned to 0.87.1), with `auth check` for
+  `pi --list-models` (fixture-pinned to the version phase 2 is built against), with `auth check` for
   reasons. MCP `create_worktree` gains `model`. CLI `--model`.
   `USER_ONLY_KEYS` gains the new keys.
 - Activity from JSONL (§3.1), with the traps in §3.2, plus the
@@ -838,7 +883,7 @@ change:
 
 **Phase 3 — pi on the bus.**
 
-- `worktrees msg report|inbox|wait` CLI verbs with cwd-derived `from`
+- `worktrees msg report|list|wait` CLI verbs with cwd-derived `from`
   (usable by any harness).
 - A worktrees-owned `worktrees-bus` skill passed with `--skill`.
 - `send` to pi: literal type, confirmation via the JSONL user entry, screen
@@ -855,7 +900,7 @@ change:
 
 ---
 
-## 12. Open questions for David
+## 12. Open questions
 
 1. **Model list source.** Is parsing `pi --list-models`'s text table
    acceptable (fixture-pinned, with an upstream ask for `--json`), or would
@@ -865,7 +910,9 @@ change:
    worktrees only *show* the gap, or also offer "add to pi's models.json"?
    That would be a write to pi's config, which this proposal currently
    forbids, the same as `~/.claude.json`.
-3. **Trust default (one decision for pi AND opencode).** This is the same
+3. **Answered (see Decisions): `--no-approve` by default.** Original
+   question kept for the record. **Trust default (one decision for pi AND
+   opencode).** This is the same
    question as the opencode proposal's Q1. opencode runs a repo's
    `.opencode/plugin/*.js` and `opencode.json` MCP commands at launch
    without prompting, and its only off-switch also drops `AGENTS.md`, so
@@ -877,7 +924,8 @@ change:
    small TypeScript pi extension loaded with `-e` (exact activity edges,
    native bus tools, and our code in pi's process)? Or should it stay
    skill + CLI only (weaker signals, zero coupling)?
-5. **Unreachable host at launch.** Hard refuse with "launch anyway", or warn
+5. **Answered (see Decisions): refuse, with "launch anyway".** Original
+   question: **Unreachable host at launch.** Hard refuse with "launch anyway", or warn
    and launch?
 6. **Kimi.** Do you want Kimi signed in and part of the picker? Nothing here
    needs it, and its usage meter is deferred (§6).
