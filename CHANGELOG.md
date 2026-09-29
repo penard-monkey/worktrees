@@ -3,6 +3,24 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The mouse wheel scrolls the output instead of Claude's prompt history.**
+  tmux starts with mouse mode off, and in that state terminals turn the wheel
+  into arrow keys, so on a fresh install every scroll in a Claude pane walked
+  back through past prompts. worktrees now turns tmux `mouse` on for its own
+  sessions only; your global tmux config is untouched. The wheel scrolls tmux's
+  history, or Claude's own transcript in its fullscreen mode.
+- **Dragging to select in the app's terminal still copies.** With mouse mode
+  on, a drag selects in tmux and copies to the clipboard when you let go. Hold
+  ⌥ while dragging for a plain text selection that ⌘C copies.
+
+### Added
+- **`tmux_mouse = off` opts out of the mouse change** (or
+  `WORKTREES_TMUX_MOUSE=off`). worktrees then leaves `mouse` to your own tmux
+  config.
+
 ## [0.32.1] - 2026-09-27
 
 ### Fixed

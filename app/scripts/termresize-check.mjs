@@ -150,6 +150,8 @@ function mount({ w = 1000, h = 600, openDelayMs = 0, replay = 0, replayCols = nu
       this.rows = 24;
       this.element = {};
       this.queue = [];
+      // useTerm registers an OSC 52 (clipboard) handler; nothing here emits one.
+      this.parser = { registerOscHandler() { return { dispose() {} }; } };
       theTerm = this;
     }
     loadAddon(a) { a.activate?.(this); }

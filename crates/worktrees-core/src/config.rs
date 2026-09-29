@@ -269,6 +269,48 @@ pub fn resolve_ai_resume_arg_for(ai_cmd: &str) -> String {
         .unwrap_or(crate::provider::CLAUDE).resume_arg.into()
 }
 
+/// One top-level on/off switch from `config.toml`: a string as written, or a
+/// TOML boolean as `on`/`off`. `cfg_toml_get` drops booleans on purpose (every
+/// key it serves is a string), but a switch's natural TOML spelling IS a
+/// boolean — `tmux_mouse = false` read as absent would be an opt-out that
+/// silently does nothing.
+pub fn cfg_toml_get_switch(path: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let table: BTreeMap<String, toml::Value> = toml::from_str(&text).ok()?;
+    match table.get(key)? {
+        toml::Value::Boolean(b) => Some(if *b { "on" } else { "off" }.to_string()),
+        v => v.as_str().map(|s| s.to_string()),
+    }
+}
+
+/// `on`/`off` and the usual spellings of each; anything else is not an answer.
+fn parse_switch(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Some(true),
+        "off" | "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether worktrees turns tmux `mouse` on for its own sessions:
+/// `$WORKTREES_TMUX_MOUSE` > `tmux_mouse` user config > on. `off` is an
+/// opt-OUT, not "force mouse off": `tmux::tune_session` then unsets its
+/// session-level value and the user's own tmux config decides. An unrecognised
+/// value falls through to the next tier rather than failing, like
+/// `codex::permissions_from`. Pure form for testing.
+pub fn resolve_tmux_mouse_from(env: Option<&str>, cfg: Option<&str>) -> bool {
+    env.and_then(parse_switch).or_else(|| cfg.and_then(parse_switch)).unwrap_or(true)
+}
+
+pub fn resolve_tmux_mouse() -> bool {
+    let env = std::env::var("WORKTREES_TMUX_MOUSE").ok();
+    let cfg = user_cfg_from(
+        cfg_toml_get_switch(&config_toml_path(), "tmux_mouse").as_deref(),
+        cfg_get(&config_path(), "tmux_mouse").as_deref(),
+    );
+    resolve_tmux_mouse_from(env.as_deref(), cfg.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +482,40 @@ mod tests {
         std::fs::write(&p, "ai_cmd = \n").unwrap();
         assert_eq!(cfg_toml_get(&p, "ai_cmd"), None);
         assert_eq!(cfg_toml_get(&dir.join("absent.toml"), "ai_cmd"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tmux_mouse_is_on_unless_opted_out_and_garbage_falls_through() {
+        assert!(resolve_tmux_mouse_from(None, None), "on by default: that is the fix");
+        assert!(!resolve_tmux_mouse_from(None, Some("off")));
+        assert!(!resolve_tmux_mouse_from(Some("off"), Some("on")), "env beats config");
+        assert!(resolve_tmux_mouse_from(Some("on"), Some("off")));
+        for off in ["off", "OFF", "false", "no", "0", " off "] {
+            assert!(!resolve_tmux_mouse_from(Some(off), None), "{off:?}");
+        }
+        // an unrecognised value is no answer, so the next tier still decides
+        assert!(!resolve_tmux_mouse_from(Some("nope"), Some("off")));
+        assert!(resolve_tmux_mouse_from(Some(""), Some("maybe")));
+    }
+
+    #[test]
+    fn a_toml_boolean_switch_is_read_where_a_string_key_would_drop_it() {
+        let dir = std::env::temp_dir().join(format!("wtcfgswitch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+
+        std::fs::write(&p, "tmux_mouse = false\n").unwrap();
+        assert_eq!(cfg_toml_get(&p, "tmux_mouse"), None, "the string reader drops it…");
+        assert_eq!(cfg_toml_get_switch(&p, "tmux_mouse").as_deref(), Some("off"), "…the switch reader must not");
+        std::fs::write(&p, "tmux_mouse = true\n").unwrap();
+        assert_eq!(cfg_toml_get_switch(&p, "tmux_mouse").as_deref(), Some("on"));
+        std::fs::write(&p, "tmux_mouse = \"off\"\n").unwrap();
+        assert_eq!(cfg_toml_get_switch(&p, "tmux_mouse").as_deref(), Some("off"));
+        std::fs::write(&p, "tmux_mouse = 3\n").unwrap();
+        assert_eq!(cfg_toml_get_switch(&p, "tmux_mouse"), None);
+        assert_eq!(cfg_toml_get_switch(&dir.join("absent.toml"), "tmux_mouse"), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

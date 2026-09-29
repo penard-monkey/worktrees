@@ -1555,6 +1555,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "term_resize":
     case "term_close":
       return null;
+    // An OSC 52 copy from a terminal. Recorded rather than written: the
+    // harness has no user gesture to spend on navigator.clipboard, and a test
+    // wants to read back what was copied (`__mock.clipboard()`).
+    case "clipboard_write":
+      mockClipboard.push(String(args.text));
+      return null;
 
     // ── dock Files tab (virtual FS) + Terminal shells ──
     case "list_dir": {
@@ -2557,6 +2563,7 @@ Phase 3: Frontend pane and mock harness
         "-----------",
         "ai_cmd        : claude",
         "ai_resume_arg : -r",
+        "tmux_mouse    : on",
         "config file   : /Users/demo/.config/worktrees/config (absent)",
         "",
         "log (last 200 lines)",
@@ -2994,9 +3001,12 @@ const mockDrops: MockDrop[] = [];
 /** Every `plan_prompt` this session recorded — the session each "Generate
  *  plan" press would have pasted into. */
 const mockPlanPrompts: { session: string }[] = [];
+const mockClipboard: string[] = [];
 
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
+  /** What terminals put on the clipboard via OSC 52, newest last. */
+  clipboard: () => mockClipboard.slice(),
   /** Every ui-event this session recorded, for the privacy assertions: a
    *  harness run greps this JSON for slugs, paths and filter text. */
   uiEvents: () => mockUiEvents.slice(),

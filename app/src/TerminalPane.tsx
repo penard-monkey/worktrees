@@ -169,6 +169,41 @@ const RESIZE_SETTLE_MS = 80;
  *  rather than quietly truncating again. */
 const TERM_SCROLLBACK = 5000;
 
+/** The text an OSC 52 sequence asks to put on the clipboard, or null. The
+ *  payload is `Pc;Pd`: `Pc` names the selection — tmux sends it EMPTY, and `c`,
+ *  `p`, `s` all mean "the clipboard" here — and `Pd` is base64 of UTF-8. `?` is
+ *  a READ request and is never answered: what is on the user's clipboard is no
+ *  program's business. An empty or undecodable `Pd` (which would CLEAR the
+ *  selection in xterm proper) is ignored rather than wiping the clipboard. */
+function osc52Text(data: string): string | null {
+  const semi = data.indexOf(";");
+  if (semi < 0) return null;
+  const pd = data.slice(semi + 1);
+  if (pd === "" || pd === "?") return null;
+  try {
+    const bin = atob(pd);
+    return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+  } catch {
+    return null;
+  }
+}
+
+/** An OSC 52 copy → the system clipboard. The backend first (`clipboard_write`,
+ *  pbcopy): the write arrives from the pty, outside any gesture, and WebKit's
+ *  clipboard API may refuse it there. The page's own API only where the backend
+ *  has no writer. Logged, never thrown — losing a copy is survivable, taking
+ *  the pane down with it is not. */
+function copyFromTerminal(text: string) {
+  invoke("clipboard_write", { text })
+    .catch((e) => {
+      if (!navigator.clipboard) throw e;
+      return navigator.clipboard.writeText(text);
+    })
+    .catch((e) => {
+      invoke("log_event", { level: "error", msg: `terminal copy (OSC 52): ${e}` }).catch(() => {});
+    });
+}
+
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
 function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number, focusEnabled: boolean) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -211,6 +246,11 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       // raising one without the other fails a gate instead of silently
       // truncating again.
       scrollback: TERM_SCROLLBACK,
+      // Our tmux sessions run `mouse on` (core `tmux::tune_session`), which
+      // sends every click and drag to tmux — so without this there is NO way to
+      // make xterm's own selection on a Mac. ⌥-drag is the escape hatch (xterm
+      // honours Shift for this only off-Mac).
+      macOptionClickForcesSelection: true,
     });
     liveTerms.add(term);
     const fit = new FitAddon();
@@ -326,6 +366,19 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
         applySize();
       });
     };
+
+    // With `mouse on` a drag is a TMUX selection, and it reaches the clipboard
+    // only as OSC 52 — which xterm parses and drops without a handler, so the
+    // copy would silently go nowhere. Muted during a replay exactly like
+    // `onData`: a dock shell's ring can hold an old copy (nvim, a remote tmux),
+    // and re-running it would overwrite whatever the user copied since, on
+    // every tab flip.
+    term.parser.registerOscHandler(52, (data) => {
+      if (parsingReplay) return true;
+      const text = osc52Text(data);
+      if (text != null) copyFromTerminal(text);
+      return true;
+    });
 
     // Attach at the pane's REAL grid, never at xterm's default (see `measured`).
     // Re-fit each frame while we wait, so the size we finally hand over is the

@@ -29,6 +29,26 @@ teardown() {
   [ "${#lines[@]}" -eq 2 ]
 }
 
+# With tmux's default `mouse off` the wheel reaches Claude as arrow keys and
+# scrolls its prompt history, so our sessions turn it on — session-scoped, the
+# global stays whatever the user's tmux config says (here: none, HOME is
+# isolated). The opt-out UNSETS rather than forcing off, and it is spelled as a
+# TOML boolean on purpose: the string-only config reader would drop it.
+# bats test_tags=real-tmux
+@test "real tmux: sessions get mouse on; tmux_mouse = false hands it back to tmux" {
+  command -v tmux >/dev/null || skip "no real tmux"
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  [ "$(tmux show-options -t repo-feat-x -v mouse)" = "on" ]
+  [ "$(tmux show-options -gv mouse)" = "off" ]
+  mkdir -p "$HOME/.config/worktrees"
+  printf 'tmux_mouse = false\n' > "$HOME/.config/worktrees/config.toml"
+  run_wt new feat-y --no-install --no-attach
+  [ "$status" -eq 0 ]
+  tmux has-session -t repo-feat-y
+  [ -z "$(tmux show-options -t repo-feat-y -v mouse)" ]
+}
+
 # bats test_tags=real-tmux
 @test "real tmux: open reattaches the existing session (exit 0, still one session)" {
   command -v tmux >/dev/null || skip "no real tmux"

@@ -4202,6 +4202,7 @@ async fn diagnostics(app: AppHandle) -> Result<String, String> {
 
     let ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
     let ai_resume_arg = worktrees_core::config::resolve_ai_resume_arg();
+    let tmux_mouse = if worktrees_core::config::resolve_tmux_mouse() { "on" } else { "off (tmux config decides)" };
     let cfg_path = worktrees_core::config::config_path();
     let cfg_exists = cfg_path.exists();
 
@@ -4228,6 +4229,7 @@ async fn diagnostics(app: AppHandle) -> Result<String, String> {
          -----------\n\
          ai_cmd        : {ai_cmd}\n\
          ai_resume_arg : {ai_resume_arg}\n\
+         tmux_mouse    : {tmux_mouse}\n\
          config file   : {cfg} ({exists})\n\
          \n\
          log (last 200 lines)\n\
@@ -6656,6 +6658,49 @@ async fn term_resize(id: u32, cols: u16, rows: u16, terms: State<'_, Terminals>)
         .map_err(|e| e.to_string())
 }
 
+/// Put a terminal's OSC 52 copy on the system clipboard. tmux runs with `mouse
+/// on` in our sessions (`tmux::tune_session`), so a drag is a tmux selection
+/// and reaches us only as OSC 52 — xterm.js parses it and does nothing without
+/// a handler. The write happens here rather than in the page because it arrives
+/// from the pty, outside any click, and WebKit may refuse
+/// `navigator.clipboard` without a user gesture.
+///
+/// `LC_ALL` is load-bearing: pbcopy picks its input encoding from the locale,
+/// and a GUI launch has none, so without it every non-ASCII character lands on
+/// the clipboard as MacRoman mojibake (`✓` → `‚úì`, measured). Absolute path
+/// for the same reason — the GUI PATH is not ours to assume.
+#[tauri::command]
+async fn clipboard_write(text: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("/usr/bin/pbcopy")
+            .env("LC_ALL", "en_US.UTF-8")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("pbcopy: {e}"))?;
+        // Scoped so stdin is dropped (EOF) before the wait — pbcopy reads to EOF.
+        {
+            let mut stdin = child.stdin.take().ok_or("pbcopy: no stdin")?;
+            stdin.write_all(text.as_bytes()).map_err(|e| format!("pbcopy: {e}"))?;
+        }
+        let out = child.wait_with_output().map_err(|e| format!("pbcopy: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!("pbcopy exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim()))
+        }
+    }
+    // Elsewhere the page falls back to `navigator.clipboard` on this error.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        Err("no native clipboard writer on this platform".into())
+    }
+}
+
 /// Detach, never kill the session. Killing the `tmux attach-session` CLIENT
 /// process drops the client → tmux detaches it; the session (and its shells /
 /// AI CLI) live on. The killed client also closes the slave, so the reader
@@ -7595,6 +7640,7 @@ pub fn run() {
             term_write,
             term_resize,
             term_close,
+            clipboard_write,
             set_term_history_opts,
             term_history_info,
             term_history_clear,

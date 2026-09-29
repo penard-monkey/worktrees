@@ -282,9 +282,30 @@ pub fn session_is_codex(name: &str) -> bool {
 /// cells outside the region ("undeletable" artifacts). `window-size latest` +
 /// `aggressive-resize` make OUR sessions follow the most recently active
 /// client instead. Session-scoped: the user's global tmux config is untouched.
+///
+/// `mouse on`, for the same reason and with the same scope. tmux ships `mouse
+/// off`, and with it off tmux never asks the terminal for mouse reporting — so
+/// the terminal (xterm.js here, Terminal.app, iTerm) sees an alternate-screen
+/// program with no scrollback and turns the wheel into Up/Down ARROW KEYS. In a
+/// Claude pane that walks the prompt history instead of scrolling the output,
+/// and every fresh install has it. On, the wheel enters copy-mode (inline
+/// Claude, a shell) or reaches the program when it asked for mouse events
+/// itself (Claude's fullscreen renderer). A drag then copies via tmux, which
+/// reaches the clipboard as OSC 52 — the app's terminal handles that
+/// (`TerminalPane.tsx`), and ⌥-drag still makes a native selection.
+///
+/// `tmux_mouse = off` opts out by UNSETTING the session value rather than
+/// forcing it off, so the user's own tmux config decides — and an opt-out
+/// reaches a session tuned before it the next time it is tuned (every attach
+/// from the app).
 pub fn tune_session(session: &str) {
     let _ = tmux(&["set-option", "-t", session, "aggressive-resize", "on"]);
     let _ = tmux(&["set-option", "-w", "-t", session, "window-size", "latest"]);
+    if crate::config::resolve_tmux_mouse() {
+        let _ = tmux(&["set-option", "-t", session, "mouse", "on"]);
+    } else {
+        let _ = tmux(&["set-option", "-u", "-t", session, "mouse"]);
+    }
 }
 
 /// `new-session -d -s <session> -c <wt> -P -F '#{pane_id}' <pane0>` → pane id.

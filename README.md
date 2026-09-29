@@ -205,6 +205,7 @@ lines, `#` comments. It is parsed as data, never executed.
 | AI resume argument (`-r` appends it) | — | `WORKTREES_AI_RESUME_ARG` | `ai_resume_arg` | Claude: `-r`; Codex: `resume --last` |
 | Session/name prefix | — | `WORKTREES_PREFIX` | `prefix` | repo dir name |
 | Codex permissions (`ask`, `auto-review`, `full`) | — | `WORKTREES_CODEX_PERMISSIONS` | `codex_permissions` | `auto-review` |
+| tmux mouse mode in worktrees sessions (`on`, `off`) | — | `WORKTREES_TMUX_MOUSE` | `tmux_mouse` | `on` |
 
 ```ini
 # ~/.config/worktrees/config
@@ -218,6 +219,13 @@ ai_resume_arg = resume
   the env var wins over it.
 - Pane 0 hands the command to your `$SHELL -ic` — aliases work; assumes a
   POSIX-ish (bash/zsh/sh) login shell.
+- worktrees turns tmux `mouse` on for its own sessions (session-scoped; your
+  global tmux config is untouched). With tmux's default `mouse off`, the mouse
+  wheel reaches Claude as arrow keys and scrolls its prompt history instead of
+  the output. With it on, the wheel scrolls, a drag copies through tmux, and
+  in the app ⌥-drag still makes a plain text selection. `tmux_mouse = off` (or
+  `false` in `config.toml`) opts out: worktrees stops setting it, and your own
+  tmux config decides.
 
 - The app's Settings → Codex → Permissions overrides env and config for
   launches the app makes; the CLI (and MCP `create_worktree`) use env/config.

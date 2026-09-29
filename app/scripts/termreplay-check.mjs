@@ -77,6 +77,7 @@ const REPLY = "\x1b[>0;276;0c";           // what xterm 5.5 answers
 function mount(replay, replayCols = null) {
   const host = { clientWidth: 800, clientHeight: 600 };
   const sent = [];        // what reached the pty (tx.write)
+  const copied = [];      // what reached the clipboard (invoke clipboard_write)
   let channel = null;     // the Channel the component handed to `open`
   let resolveOpen = null;
   let term = null;
@@ -85,7 +86,8 @@ function mount(replay, replayCols = null) {
     constructor(opts) {
       this.options = { ...opts }; this.unicode = { activeVersion: "" };
       this.cols = 100; this.rows = 40; this.element = {};
-      this.queue = []; this.listener = null;
+      this.queue = []; this.listener = null; this.osc = {};
+      this.parser = { registerOscHandler: (id, fn) => { this.osc[id] = fn; return { dispose() {} }; } };
       term = this;
     }
     loadAddon(a) { a.activate?.(this); }
@@ -103,6 +105,9 @@ function mount(replay, replayCols = null) {
       if (!w) throw new Error("parseNext: nothing queued");
       const text = new TextDecoder().decode(w.bytes);
       if (text.includes(QUERY)) this.listener?.(REPLY);
+      // …and an OSC 52 reaches its registered handler DURING the parse, the
+      // way xterm's parser dispatches it (BEL- or ST-terminated).
+      for (const m of text.matchAll(/\x1b\]52;([^\x07\x1b]*)(?:\x07|\x1b\\)/g)) this.osc[52]?.(m[1]);
       w.cb?.();
     }
   }
@@ -117,7 +122,7 @@ function mount(replay, replayCols = null) {
     SearchAddon: class { activate() {} dispose() {} onDidChangeResults() { return { dispose() {} }; } clearDecorations() {} findNext() {} findPrevious() {} },
     UnicodeGraphemesAddon: class { activate() {} dispose() {} },
     Channel: class { constructor() { this.onmessage = null; } },
-    invoke: () => Promise.resolve(1),
+    invoke: (cmd, args) => { if (cmd === "clipboard_write") copied.push(args.text); return Promise.resolve(1); },
     FindBar: () => null,
     findColors: () => ({ hit: "#000", on: "#fff" }),
     h: () => null, F: null,
@@ -146,6 +151,7 @@ function mount(replay, replayCols = null) {
   return {
     term: () => term,
     sent,
+    copied,
     deliver: (text) => channel.onmessage(enc.encode(text).buffer),
     // A pre-fix transport resolved with the bare generation; the fixed one with
     // `{ replay }`. Resolving with the object is what the real one now does.
@@ -241,6 +247,38 @@ const RING = `~/x (main) » vim notes.md\r\n${QUERY}\x1b[6n\r\n~/x (main) » `;
   m.deliver("\x1b[c\x1b[>c\x1b]10;?\x1b\\");
   m.term().parseNext();
   check(m.sent.length === 1, "tmux attach burst (no replay): answered");
+  m.dispose();
+}
+
+// 6. A COPY in the ring. With tmux `mouse on`, a drag copies via OSC 52, and a
+//    dock shell's ring keeps any OSC 52 it ever printed (nvim, a remote tmux).
+//    Re-running it on a tab flip would overwrite whatever the user copied since,
+//    so it is muted with the same flag as the replies — and a live copy right
+//    behind it still lands.
+const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
+{
+  const m = mount(RING.length);
+  m.deliver(`${RING}\x1b]52;c;${b64("old copy")}\x07`);
+  await m.resolveOpen();
+  m.term().parseNext();
+  check(m.copied.length === 0, `an OSC 52 in the replay is not copied (${JSON.stringify(m.copied)})`);
+  m.deliver(`\x1b]52;c;${b64("new copy")}\x07`);
+  m.term().parseNext();
+  check(m.copied.length === 1 && m.copied[0] === "new copy", `…and a live one after it is (${JSON.stringify(m.copied)})`);
+  m.dispose();
+}
+
+// 7. tmux's own form: an EMPTY selection field, ST-terminated, UTF-8 inside the
+//    base64. A `?` is a clipboard READ and is neither answered nor copied.
+{
+  const m = mount(0);
+  await m.resolveOpen();
+  m.deliver(`\x1b]52;;${b64("héllo ✓ 日本")}\x1b\\`);
+  m.term().parseNext();
+  check(m.copied.length === 1 && m.copied[0] === "héllo ✓ 日本", `tmux's empty-target OSC 52 is copied, UTF-8 intact (${JSON.stringify(m.copied)})`);
+  m.deliver("\x1b]52;c;?\x07");
+  m.term().parseNext();
+  check(m.copied.length === 1 && m.sent.length === 0, "a clipboard READ request is neither copied nor answered");
   m.dispose();
 }
 
