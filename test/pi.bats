@@ -20,7 +20,9 @@ setup() {
 
 # Pane 0's command with tmux's outer quoting undone ('\'' → '), so a test can
 # assert the inner shell's words as they are written in the -ic string.
-unq() { local c="$1"; printf '%s' "${c//"'\\''"/"'"}"; }
+# sed, not ${c//…/…}: bash 3.2 (macOS /bin/bash) keeps the quote characters of
+# a pattern-substitution REPLACEMENT literally, turning ' into "'".
+unq() { printf '%s' "$1" | sed "s/'\\\\''/'/g"; }
 pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
 
 @test "new --ai pi launches in the pi sidecar with session dir, trust, exact id, model and opener" {
