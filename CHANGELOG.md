@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [0.34.1] - 2026-09-30
 
+### Changed
+- **Agents are told to do their branch work in a place.** The worktrees MCP
+  server's instructions, the one text every connected session reads, used
+  to describe the tools and say nothing about the agent's own work. An
+  orchestrator in `(main)` would then `git checkout -b` there, or
+  `git worktree add` into a scratch directory, with the tools connected the
+  whole time. They now open with the rule: work in a place (`create_worktree`
+  or `worktrees new`), never `git worktree add`, never switch branches in
+  `(main)`. The rule fits in the first 250 characters, which is all Codex shows
+  when the tools are deferred. A second line says where the session is:
+  `(main)`, its own place, an automation run, or a worktree that is not a
+  place, with how to get it back into one. Sessions pick it up in a new
+  conversation; a resumed Claude conversation replays the prompt it started
+  with.
+
 ### Fixed
 - **A pi lane now shows its dot in the app.** The nav's green (working),
   amber (waiting on you — pi's trust prompt) and the afterglow once a turn

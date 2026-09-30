@@ -4,8 +4,9 @@ title: "Proposal — agent guidance"
 
 # Proposal — teach every agent the worktrees paradigm, not just the tools
 
-**Status:** research and proposal, 2026-09-30. Nothing built. A review comes
-before any of it is.
+**Status:** research and proposal, 2026-09-30, reviewed and merged. Phase 1
+(§8) is built on `agent-guidance-phase1`, with the decisions below. Phases 2
+and 3 are not built.
 
 **The problem.** An orchestrator Claude session in `(main)` of this repo had the
 worktrees MCP tools connected for its whole life. It still did its branch work
@@ -36,6 +37,24 @@ Every claim is marked with its source:
 - **[source]**: read in the harness's shipped docs, `--help`, or source at the
   named tag. For worktrees, read in this repo at `d0cda58`.
 - **[inferred]**: my reasoning, not measured.
+
+---
+
+## Decisions
+
+Taken on 2026-09-30, after the review:
+
+- **Q1, `(main)` on its default branch: this repo's habit, not the tool's.**
+  There is no product warning. The `main-off-default` doctor code, the
+  `warnings` field on `LsJson`, and the `place_status` line are all dropped
+  from §5.1 and §8. The instructions may still say "never switch branches in
+  (main)", and they do. The existing stray-worktree warning (doctor
+  `stray-worktree`, `strays` in `ls --json`) stays as it is.
+- **Q2, the Claude PreToolUse guard: off by default, behind a toggle.** It
+  is phase 2.
+- **Q8, the offer's destination: its own "Agent guidance" section in
+  Settings,** not part of AI profiles. The after-update offer (§4.5) links
+  there.
 
 ---
 
@@ -387,6 +406,10 @@ kinds are worth having, at different costs.
 
 ### 5.1 Derived warnings (every harness; recommended, phase 1)
 
+> **Decided (Q1): not built.** `(main)` off its default branch is this
+> repo's habit, not a product rule. The stray half already exists and stays.
+> The rest of this section is kept as the reasoning that was declined.
+
 Both failure shapes are visible in git state.
 
 | Shape | Seen by | Today |
@@ -424,7 +447,7 @@ with no per-surface code.
 warning should name the fix and be dismissible per repo; a declared flag in
 `.worktrees.places.json` would do. It must not refuse anything.
 
-### 5.2 Claude PreToolUse guard (Claude only; phase 2, default on, can be switched off)
+### 5.2 Claude PreToolUse guard (Claude only; phase 2, off by default, a toggle — decided, Q2)
 
 It ships in the per-launch plugin (§4.2), so it installs nothing globally.
 The rule is cwd-aware:
@@ -555,25 +578,44 @@ template repo, arms selected by flag, and the classifier. Run it whenever
 It stays **manual**, like `docs/ai-profiles-manual-checks.md`. It spends real
 tokens and must never run in CI.
 
+### 7.4 Phase 1 re-run (2026-09-30)
+
+The re-run used `scripts/agent-guidance-eval.sh`, with the same task and
+isolation as §7.1 and **no proxy**: each arm's server is a real binary.
+
+| Arm | Server | Runs | Created a place | `checkout -b` in `(main)` | `(main)` moved | Mean cost |
+|---|---|---|---|---|---|---|
+| A | shipped v0.34.0 (`~/.local/bin/worktrees`) | 5 | **0** | 5 | 5 | $0.19 |
+| B | phase-1 release build (244-char head, role lines) | 5 | **5** | 0 | 0 | $0.26 |
+
+**[observed]**, Opus 5.5, Claude Code 2.1.285. The shorter head, which §7.1
+had not evaluated, holds at 5 of 5. The limits in §7.2 still apply.
+
 ---
 
 ## 8. Phased plan
 
-**Phase 1: the floor (small; one PR).**
-- `mcp.rs` `initialize`: the §3.1 text, rule first, with role by own place.
-  All four roles ship here, including automation (`Server::in_run`) and
-  stray (`caller_place()` erring).
-- Unit tests that pin the head at ≤ 250 chars (`chars().count()`), and that
-  the head contains `create_worktree` and "Never `git worktree add`".
-- `main-off-default` diag code (default read from `origin/HEAD` first, §5.1);
-  `warnings: Vec<String>` on `LsJson`, so `ls --json`, MCP `list_places` and
-  the app get it at once; a line in `place_status`.
-- The eval script committed. Re-run it with arm A on the shipped binary
-  (`~/.local/bin/worktrees`) and arm B on the release build, with no proxy.
+**Phase 1: the floor (small; one PR). Built.**
+- `mcp.rs` `initialize`: the §3.1 text, rule first, with a role line for
+  where the server runs. All four roles ship: `(main)`, a lane, an
+  automation run (`Server::in_run`), and a stray worktree. Strays are checked
+  **before** `caller_place()`, which answers `(main)` for a stray that sits
+  inside the main checkout rather than erring. The `(main)` line says "do
+  branch work in a place, not here" and not "keep it on the default branch",
+  per Q1.
+- Unit tests that measure the text a real server sends. The first 250
+  characters must carry the rule. Each role's line must appear, including a
+  stray inside the main root, which is shown red with the stray check
+  removed.
+- ~~`main-off-default` diag code; `warnings` on `LsJson`; a `place_status`
+  line~~: dropped by Q1. `ls --json` is unchanged.
+- `scripts/agent-guidance-eval.sh`, committed and re-run: arm A on the
+  shipped binary (`~/.local/bin/worktrees`, v0.34.0) and arm B on the
+  release build, with no proxy (§7.4).
 
 **Phase 2: per launch.**
 - Materialise `agent/<version>/` from binary constants.
-- Claude `--plugin-dir` (skill, plus the guard behind a setting, default on).
+- Claude `--plugin-dir` (skill, plus the guard behind a setting, **default off**, Q2).
 - pi `--skill` + `--append-system-prompt`.
 - Codex `-c developer_instructions`, guarded by a read of the user's resolved
   config.
@@ -610,9 +652,12 @@ tokens and must never run in CI.
    `--strict`, with a declared opt-out. A wandering `(main)` is not only a
    style problem, because `base_ref()` measures every place's ↑↓ and every
    new branch from it (§5.1).
+
+   **Decided:** this repo's habit only, with no product warning (see
+   Decisions).
 2. **Guard default.** Should the Claude PreToolUse guard (§5.2) ship on by
    default in phase 2, or opt-in? The eval says it works. The cost is false
-   positives from users who meant it.
+   positives from users who meant it. **Decided:** off by default, a toggle.
 3. **Override.** Should a user be able to replace or extend tier (a) (a
    `~/.config/worktrees/agent-guidance.md`)? The recommendation is no for
    phase 1.
@@ -635,6 +680,7 @@ tokens and must never run in CI.
 8. **The offer's destination.** Should Agent guidance be a new Settings
    category (proposed, §4.5), or a section inside AI profiles? Profiles are
    per-profile and Claude-only, which is why the proposal keeps them apart.
+   **Decided:** its own Agent guidance section.
 
 ---
 
