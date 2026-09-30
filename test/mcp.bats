@@ -389,6 +389,50 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   [[ "$output" == *'"mutations":true'* ]]
 }
 
+@test "mcp --status --ai pi reads pi's mcp.json, never runs pi mcp list" {
+  local agent="$BATS_TEST_TMPDIR/pi-agent" bin="$BATS_TEST_TMPDIR/pibin"
+  mkdir -p "$agent" "$bin"
+  # A pi that records every call: status must not make one.
+  printf '#!/bin/sh\necho "$*" >> "%s/calls"\n' "$bin" > "$bin/pi"; chmod +x "$bin/pi"
+  run env PI_CODING_AGENT_DIR="$agent" WORKTREES_PI_BIN="$bin/pi" "$WT_BIN" mcp --status --ai pi --json
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'"state":"absent"'* ]]
+  printf '{"mcpServers":{"worktrees":{"command":"%s","args":["mcp","--mutations"],"env":{"WORKTREES_MCP_PROVIDER":"pi"},"exposure":"direct"}}}' "$WT_BIN" > "$agent/mcp.json"
+  run env PI_CODING_AGENT_DIR="$agent" WORKTREES_PI_BIN="$bin/pi" "$WT_BIN" mcp --status --ai pi --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"state":"installed"'* ]]
+  [[ "$output" == *'"exposure":"direct"'* ]]
+  [ ! -e "$bin/calls" ]
+}
+
+@test "mcp --install --ai pi shells out to pi mcp add with the decided line, in pi's agent dir" {
+  local agent="$BATS_TEST_TMPDIR/pi-agent" bin="$BATS_TEST_TMPDIR/pibin"
+  mkdir -p "$agent" "$bin"
+  # The fake writes what the real `pi mcp add` writes, into ITS agent dir —
+  # so a status that disagreed with the install about the dir would read absent.
+  cat > "$bin/pi" <<'SH'
+#!/bin/sh
+echo "$PI_CODING_AGENT_DIR :: $*" >> "$(dirname "$0")/calls"
+[ "$1 $2" = "mcp add" ] || exit 0
+wt="$9"
+printf '{"mcpServers":{"worktrees":{"command":"%s","args":["mcp","--mutations"],"env":{"WORKTREES_MCP_PROVIDER":"pi"},"exposure":"direct"}}}' "$wt" > "$PI_CODING_AGENT_DIR/mcp.json"
+SH
+  chmod +x "$bin/pi"
+  run env PI_CODING_AGENT_DIR="$agent" WORKTREES_PI_BIN="$bin/pi" WORKTREES_CLI_BIN="$WT_BIN" "$WT_BIN" mcp --install --ai pi --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"state":"installed"'* ]]
+  grep -qF "$agent :: mcp add worktrees --env WORKTREES_MCP_PROVIDER=pi --exposure direct -- $WT_BIN mcp --mutations" "$bin/calls"
+  ! grep -qE -- ' (-l|--local)( |$)' "$bin/calls"
+}
+
+@test "a pi client's server signs from its cwd even with CLAUDE_PROJECT_DIR set" {
+  run_wt new feat-p --no-tmux
+  local wt="$REPO/.worktrees/feat-p"
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"report","arguments":{"text":"hi"}}}' > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$wt' && CLAUDE_PROJECT_DIR='$REPO' WORKTREES_MCP_PROVIDER=pi '$WT_BIN' mcp < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  [[ "$output" == *'\"from\": \"feat-p\"'* ]]
+}
+
 # ── place↔place messaging ───────────────────────────────────────────────────
 # Every server below is started with its cwd PINNED to a directory inside
 # $REPO (the fixture), never the suite's own cwd: a `report` writes into the

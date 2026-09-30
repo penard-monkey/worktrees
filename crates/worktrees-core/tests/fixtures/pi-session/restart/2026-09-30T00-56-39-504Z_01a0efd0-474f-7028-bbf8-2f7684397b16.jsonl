@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"01a0efd0-474f-7028-bbf8-2f7684397b16","timestamp":"2026-09-30T00:56:39.504Z","cwd":"/tmp/wtfix/repo/.worktrees/lane"}
+{"type":"model_change","id":"d87d05c0","parentId":null,"timestamp":"2026-09-30T00:56:39.535Z","provider":"lm-studio","modelId":"qwen/qwen3-coder-480b"}
+{"type":"thinking_level_change","id":"fa27c60e","parentId":"d87d05c0","timestamp":"2026-09-30T00:56:39.535Z","thinkingLevel":"off"}
+{"type":"message","id":"1a824e63","parentId":"fa27c60e","timestamp":"2026-09-30T00:56:39.643Z","message":{"role":"system"}}
+{"type":"message","id":"7f4847b8","parentId":"1a824e63","timestamp":"2026-09-30T00:56:39.643Z","message":{"role":"user","content":[{"type":"text","text":"Reply with just: two"}],"timestamp":1790729799641}}
+{"type":"message","id":"b39875a1","parentId":"7f4847b8","timestamp":"2026-09-30T00:56:42.045Z","message":{"role":"assistant","content":[{"type":"text","text":"two"}],"api":"openai-completions","provider":"lm-studio","model":"qwen/qwen3-coder-480b","usage":{"input":9682,"output":2,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":9684,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1790729799649,"responseId":"chatcmpl-07u9c8sqgev2b2ay3xy6w5t","rawStopReason":"stop","thinkingLevel":"off"}}

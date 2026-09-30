@@ -86,6 +86,36 @@ Taken on 2026-09-29, after the phase 3 research (§4, §12 questions 9–12):
       so a fork's PR checked out as a worktree is covered by it.
 - **Q12, upstream `--timeout` on `pi mcp add`:** left open.
 
+Taken on 2026-09-29, during the phase 3 build:
+
+- **Q3 revised: pi's own trust counts.** The default is now "whatever pi
+  trusts, else `--no-approve`".
+  - worktrees READS pi's `trust.json` and never writes it. It resolves the
+    file exactly as pi 0.99.1's `ProjectTrustStore` does: from the place's
+    realpath up to `/`, the nearest key whose value is `true` or `false`
+    wins; keys are exact strings; a `null` is no decision; a BOM is
+    stripped; and a value that is not a boolean or null invalidates the
+    whole file, as it does for pi.
+  - Precedence, highest first:
+    1. A place whose `.pi/mcp.json` defines `worktrees` never gets
+       `--approve` (Q11).
+    2. The worktrees `[trust] pi` allowance grants `--approve`, even over an
+       explicit distrust in pi's file.
+    3. pi's nearest entry: `true` gives `--approve`, `false` gives
+       `--no-approve`.
+    4. `pi_project_trust` (`never` gives `--no-approve`; `ask` passes no
+       flag).
+  - `doctor --pi` and Settings → pi name the rule that applied and the entry
+    that matched (`trust::pi_launch_trust`).
+- **A place's pi session is the one it actually has.** A bug in v0.33.0 made
+  the dot vanish after a hand restart.
+  - `/new`, a restart after `/trust`, or a bare `pi` in the pane each write
+    a `<ts>_<uuid>.jsonl` into the same pinned session dir.
+  - The reader now takes, among that dir's files whose header `cwd` is the
+    place, the one with the newest entry by content.
+  - A resume passes that file's header id to `--session-id`. pi matches
+    that flag by header id, so a uuid session reopens on its own model.
+
 ---
 
 ## 0. The answer in one screen
@@ -775,6 +805,16 @@ plan:
 | Enter while busy | `Steering: [from (main)] …` above the working rule, plus `↳ Option+Up to edit all queued messages` (`cap-send-steer`). It was delivered after the current answer, and the model answered it. |
 | **When the JSONL entry is written** | **Idle send: at submit** (the entry's timestamp matched the Enter). **Steering send: at DELIVERY**, i.e. when the running turn ends: 00:26:19, versus an Enter at about 00:26:11. |
 
+Built in phase 3. The first live runs found two things the still-frame
+fixtures could not:
+- mid-turn the transcript streams and the border's spinner turns, so
+  settling has to watch the COMPOSER, not the whole screen;
+- on an 80-column pane pi cuts a queued line to `Steering: …user] After...`,
+  so a queue line and the typed text need only agree as far as the shorter
+  one goes. Matching lines are counted before and after the Enter, so an
+  earlier send from the same place that is still queued is not taken for
+  this one.
+
 Consequences for the build:
 
 - **Two confirmations, by state at the time of typing:**
@@ -946,8 +986,10 @@ Proposal:
    resources are skipped for this run, and pi's context files
    (`AGENTS.md`/`CLAUDE.md`) still load, which is what worktrees relies on.
    A user setting (`pi_project_trust: "never" | "ask"`) can switch to `ask`
-   for people who want repo skills. Worktrees passes `--approve` only for a
-   repo the user has allowed (item 5), and never writes `trust.json`.
+   for people who want repo skills. Worktrees passes `--approve` for a repo
+   the user has allowed (item 5), or for a place pi's own `trust.json`
+   trusts (revised during the build, see Decisions). It never writes
+   `trust.json`.
 2. `send` and `may_type` treat the trust modal as **waiting**. Its footer is
    `↑↓ navigate  enter select  escape/ctrl+c cancel` under a `Trust project
    folder?` heading. Enter is never pressed into it.

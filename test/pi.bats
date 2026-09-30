@@ -97,3 +97,50 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   [[ "$output" == *"no longer allowed"* ]]
   ! grep -q gone-repo "$XDG_CONFIG_HOME/worktrees/config.toml"
 }
+
+@test "a resume reopens the session the place actually has, even one pi started by hand" {
+  run_wt new feat-x --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  local wt dir; wt="$(cd "$REPO/.worktrees/feat-x" && pwd -P)"
+  dir="$(pi_cmd feat-x | sed -n "s/.*--session-dir '\([^']*\)'.*/\1/p")"
+  mkdir -p "$dir"
+  # What `/new` or a hand-restarted pi writes: a uuid session, same pinned dir.
+  printf '{"type":"session","version":3,"id":"01a0efd0-566d-7028-bbf8-2f78723dc57e","timestamp":"2026-09-30T00:56:43.373Z","cwd":"%s"}\n{"type":"message","id":"a","timestamp":"2026-09-30T00:56:44.000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n' "$wt" > "$dir/2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl"
+  tmux kill-session -t 'repo-feat-x~agent~pi'
+  run_wt open feat-x --ai pi -r --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  local c; c="$(pi_cmd feat-x)"
+  [[ "$c" == *"--session-id '01a0efd0-566d-7028-bbf8-2f78723dc57e'"* ]]
+  [[ "$c" != *"--model"* ]]
+}
+
+@test "an allowed repo whose place defines a worktrees MCP server launches without --approve, and says why" {
+  run_wt trust pi
+  run_wt new feat-x --no-tmux --no-spare
+  mkdir -p "$REPO/.worktrees/feat-x/.pi"
+  printf '{"mcpServers":{"worktrees":{"command":"sh","args":["-c","true"]}}}' > "$REPO/.worktrees/feat-x/.pi/mcp.json"
+  run_wt open feat-x --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WITHOUT --approve"* ]]
+  local c; c="$(pi_cmd feat-x)"
+  [[ "$c" == *" --no-approve --session-id "* ]]
+  [[ "$c" != *" --approve "* ]]
+}
+
+@test "a place pi's own trust.json trusts launches with --approve; an explicit distrust does not" {
+  local root; root="$(cd "$REPO" && pwd -P)"
+  printf '{"%s": true}\n' "$(dirname "$root")" > "$PI_CODING_AGENT_DIR/trust.json"
+  run_wt new feat-x --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  [[ "$(pi_cmd feat-x)" == *" --approve --session-id "* ]]
+  run_wt doctor --pi
+  [[ "$output" == *"pi's own trust.json trusts $(dirname "$root")"* ]]
+  # The nearest entry wins: a distrust on the repo itself.
+  printf '{"%s": true, "%s": false}\n' "$(dirname "$root")" "$root" > "$PI_CODING_AGENT_DIR/trust.json"
+  run_wt new feat-y --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [[ "$(pi_cmd feat-y)" == *" --no-approve --session-id "* ]]
+  # worktrees' own allowance still grants over pi's distrust.
+  run_wt trust pi
+  run_wt new feat-z --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [[ "$(pi_cmd feat-z)" == *" --approve --session-id "* ]]
+}

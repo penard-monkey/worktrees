@@ -40,14 +40,14 @@
 //! # Place↔place messaging
 //!
 //! `report` / `messages` / `wait` / `send` are how agents in different places
-//! of one project talk — Claude and Codex alike (`worktrees_core::messages`).
-//! Codex has no cross-session messaging of its own, so without these it can
-//! neither report back nor be waited on. Claude↔Claude still uses Claude's own
+//! of one project talk — Claude, Codex and pi alike (`worktrees_core::messages`).
+//! Codex and pi have no cross-session messaging of their own, so without these
+//! they can neither report back nor be waited on. Claude↔Claude still uses Claude's own
 //! `SendMessage`; this is the bus that works across providers.
 //!
 //! - **`from` is never taken from a tool argument.** It is the place this
 //!   server resolved itself to at startup (`CLAUDE_PROJECT_DIR` for Claude, the
-//!   cwd for Codex). That stops a model signing as another place through the
+//!   cwd for every other client — `trusts_claude_project_dir`). That stops a model signing as another place through the
 //!   protocol; it is not authentication — anything running as the same user
 //!   can write the log directly, so the trust boundary is the user account.
 //! - **`report`, `messages` and `wait` are in the read-only tier.** They touch
@@ -143,13 +143,124 @@ struct Server {
     /// from that and can never add, which is why it is a separate bool rather
     /// than a third value of `mutations`.
     in_run: bool,
-    /// The directory this server was launched for (`CLAUDE_PROJECT_DIR`, else
-    /// the cwd). The place it lies in is the CALLER's place — the `from` of
+    /// The directory this server was launched for (`CLAUDE_PROJECT_DIR` for a
+    /// Claude client, else the cwd — `trusts_claude_project_dir`). The place it lies in is the CALLER's place — the `from` of
     /// every message this server posts. Never taken from a tool argument.
     here: Option<std::path::PathBuf>,
     /// Set when `notifications/initialized` arrives. Shared with the watcher
     /// thread, which must not emit before it.
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The request being answered, and how a long one (`wait`) hears that it
+    /// was cancelled and tells the client it is alive.
+    inflight: Inflight,
+}
+
+/// What `handle_line` knows about the request it is answering.
+///
+/// `wait` holds this server's only request loop for up to `WAIT_MAX_S`, and
+/// clients time requests out: pi at 60s by default, re-armed by every
+/// `notifications/progress` for the request's `progressToken`
+/// (pi-harness §4.2). So a wait that carried a token pulses progress, and a
+/// wait the client cancelled stops — which it can only learn because a reader
+/// thread (`cmd_mcp`) records `notifications/cancelled` into `cancels` while
+/// the loop is busy here.
+struct Inflight {
+    id: Option<serde_json::Value>,
+    token: Option<serde_json::Value>,
+    cancels: std::sync::Arc<std::sync::Mutex<Cancels>>,
+    /// Where progress goes — `emit`, or a test's capture.
+    notify: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    progress_every_ms: u64,
+}
+
+impl Default for Inflight {
+    fn default() -> Self {
+        Self {
+            id: None,
+            token: None,
+            cancels: Default::default(),
+            notify: std::sync::Arc::new(emit),
+            progress_every_ms: PROGRESS_EVERY_MS,
+        }
+    }
+}
+
+impl Inflight {
+    fn cancelled(&self) -> bool {
+        self.id.as_ref().is_some_and(|id| lock(&self.cancels).cancelled.contains(&id_key(id)))
+    }
+}
+
+/// How often a blocking call tells the client it is still working: well
+/// inside pi's 60s default, rare enough to be noise-free.
+const PROGRESS_EVERY_MS: u64 = 15_000;
+
+/// Requests read and not yet answered, and which of those the client
+/// cancelled. A cancel for anything else — already answered, never seen — is
+/// ignored, as the spec says, so a late one cannot swallow a later reply.
+#[derive(Default)]
+struct Cancels {
+    pending: std::collections::HashSet<String>,
+    cancelled: std::collections::HashSet<String>,
+}
+
+fn lock(c: &std::sync::Mutex<Cancels>) -> std::sync::MutexGuard<'_, Cancels> {
+    c.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// An id as a set key: `1` and `"1"` are different requests.
+fn id_key(id: &serde_json::Value) -> String {
+    id.to_string()
+}
+
+/// The reader thread's look at one incoming line, BEFORE the loop gets it.
+fn note_incoming(line: &str, cancels: &std::sync::Mutex<Cancels>) {
+    let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else { return };
+    let method = msg.get("method").and_then(|m| m.as_str());
+    match (msg.get("id"), method) {
+        (Some(id), Some(_)) => {
+            lock(cancels).pending.insert(id_key(id));
+        }
+        (None, Some("notifications/cancelled")) => {
+            if let Some(id) = msg.get("params").and_then(|p| p.get("requestId")) {
+                let mut c = lock(cancels);
+                let k = id_key(id);
+                if c.pending.contains(&k) {
+                    c.cancelled.insert(k);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Progress for one blocking call: a notification at most every `every_ms`,
+/// only when the request carried a token. `progress` is the seconds waited —
+/// a NUMBER (pi drops a notification whose `progress` is not one) that only
+/// ever grows, as the spec requires.
+struct Pulse {
+    token: Option<serde_json::Value>,
+    every_ms: u64,
+    last_ms: u64,
+    notify: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
+}
+
+impl Pulse {
+    fn tick(&mut self, now_ms: u64) {
+        let Some(token) = &self.token else { return };
+        if now_ms.saturating_sub(self.last_ms) < self.every_ms || now_ms == 0 {
+            return;
+        }
+        self.last_ms = now_ms;
+        (self.notify)(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": { "progressToken": token, "progress": now_ms / 1000, "message": "still waiting" }
+            })
+            .to_string(),
+        );
+    }
 }
 
 /// Tools that vanish inside a run, whatever `--mutations` says. `remove_worktree`
@@ -216,8 +327,12 @@ pub fn setup_verb(args: &[String]) -> Option<&'static str> {
 /// it is what makes the local/project scopes checkable, and `None` is a normal
 /// answer here (the whole point of hoisting these above the git guard).
 pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
-    if args.windows(2).any(|w| w[0] == "--ai" && w[1] == "codex") || args.iter().any(|a| a == "--ai=codex") {
+    let ai = |name: &str| args.windows(2).any(|w| w[0] == "--ai" && w[1] == name) || args.iter().any(|a| *a == format!("--ai={name}"));
+    if ai("codex") {
         return cmd_codex_mcp_setup(verb, args);
+    }
+    if ai("pi") {
+        return cmd_pi_mcp_setup(verb, args);
     }
     if verb == "migrate" {
         eprintln!("MCP migration requires --migrate --ai codex.");
@@ -278,6 +393,55 @@ pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
                 }
                 Err(e) => {
                     eprintln!("{}", worktrees_core::render::error_line(&e));
+                    1
+                }
+            }
+        }
+        _ => 1,
+    }
+}
+
+/// `worktrees mcp --status|--install|--uninstall --ai pi` — `pimcp`, which reads
+/// pi's `mcp.json` and has `pi mcp add/remove` do every write.
+fn cmd_pi_mcp_setup(verb: &str, args: &[String]) -> i32 {
+    use worktrees_core::pimcp;
+    if verb == "migrate" {
+        eprintln!("--migrate copies Claude's servers into Codex; there is no pi migration.");
+        return 1;
+    }
+    let json = args.iter().any(|a| a == "--json");
+    let mutations = !args.iter().any(|a| a == "--read-only");
+    let report = |s: &pimcp::Status| {
+        if json {
+            println!("{}", serde_json::to_string(s).unwrap_or_default());
+            return;
+        }
+        let exposure = s.entry.as_ref().map(|e| format!(", exposure {}", e.exposure.as_deref().unwrap_or("codemode"))).unwrap_or_default();
+        println!("pi MCP: {}{exposure}", s.state);
+        if let Some(cmd) = &s.command {
+            println!("  install with: {cmd}");
+        }
+        println!("  config: {}", s.config_path);
+    };
+    match verb {
+        "status" => {
+            let s = pimcp::status();
+            report(&s);
+            i32::from(!matches!(s.state, "installed" | "read-only"))
+        }
+        "install" | "uninstall" => {
+            let r = if verb == "install" { pimcp::install(mutations) } else { pimcp::uninstall() };
+            match r {
+                Ok(o) => {
+                    print!("{}", o.output);
+                    report(&o.status);
+                    if o.ok && verb == "install" && !json {
+                        println!("  running pi sessions pick it up on /reload or their next launch");
+                    }
+                    i32::from(!o.ok)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
                     1
                 }
             }
@@ -377,7 +541,7 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     let mutations = args.iter().any(|a| a == "--mutations");
     // Pin the project once, here. `CLAUDE_PROJECT_DIR` is what claude exports for
     // the session's root; fall back to the process cwd.
-    let root = (std::env::var("WORKTREES_MCP_PROVIDER").ok().as_deref() != Some("codex"))
+    let root = trusts_claude_project_dir(std::env::var("WORKTREES_MCP_PROVIDER").ok().as_deref())
         .then(|| std::env::var("CLAUDE_PROJECT_DIR").ok())
         .flatten()
         .filter(|s| !s.is_empty())
@@ -409,17 +573,31 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     // the MCP servers it starts. A per-call read would be the same answer with
     // more places to forget it.
     let in_run = std::env::var("WORKTREES_RUN_ID").is_ok_and(|v| !v.trim().is_empty());
-    let mut server = Server { stale: crate::stale::Stale::current(), project, mutations, in_run, here: Some(root), ready: ready.clone() };
+    let mut server = Server { stale: crate::stale::Stale::current(), project, mutations, in_run, here: Some(root), ready: ready.clone(), inflight: Default::default() };
 
     if let Some((wt_root, repo)) = watch {
         spawn_list_watcher(wt_root, repo, ready);
     }
 
-    let stdin = std::io::stdin();
     // Bounded: `lines()` grows a String until it finds a newline, so a client
     // that never sends one would drive allocation until the process dies.
     const MAX_LINE: u64 = 8 * 1024 * 1024;
-    for line in std::io::BufReader::new(stdin.lock().take(MAX_LINE)).lines() {
+    // stdin is read on its own thread so a cancel reaches `Inflight` while the
+    // loop below is inside a `wait`. It still hands the loop EVERY line, in
+    // order: requests are answered one at a time, exactly as before.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cancels = server.inflight.cancels.clone();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(std::io::stdin().lock().take(MAX_LINE)).lines() {
+            if let Ok(l) = &line {
+                note_incoming(l, &cancels);
+            }
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    for line in rx {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
@@ -438,6 +616,18 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// Whether `CLAUDE_PROJECT_DIR` names this server's place. Only for a Claude
+/// client — or one that does not say, which is how Claude's install has always
+/// looked. Every other client says who it is (`--env WORKTREES_MCP_PROVIDER=…`
+/// in its install) and gets the cwd, which its harness sets to the place: a
+/// server inherits its client's WHOLE environment (pi's stdio transport spreads
+/// `process.env`), so a `CLAUDE_PROJECT_DIR` that leaked into a pi or Codex
+/// pane would otherwise pin a different project and sign messages from the
+/// wrong place. An allowlist, so a harness added later is safe by default.
+fn trusts_claude_project_dir(provider: Option<&str>) -> bool {
+    matches!(provider.map(str::trim), None | Some("") | Some("claude"))
 }
 
 /// The one way anything reaches stdout.
@@ -532,6 +722,26 @@ impl Server {
             return None;
         };
 
+        // Cancelled while it was still queued behind another call: never run
+        // it. And per the spec, a cancelled request gets no response at all —
+        // whatever it did get done stays done (a `wait` simply stops).
+        let key = id_key(&id);
+        if lock(&self.inflight.cancels).cancelled.remove(&key) {
+            lock(&self.inflight.cancels).pending.remove(&key);
+            return None;
+        }
+        self.inflight.id = Some(id.clone());
+        self.inflight.token = params.get("_meta").and_then(|m| m.get("progressToken")).cloned();
+        let out = self.answer(id, method, &params);
+        self.inflight.id = None;
+        self.inflight.token = None;
+        let mut c = lock(&self.inflight.cancels);
+        c.pending.remove(&key);
+        if c.cancelled.remove(&key) { None } else { out }
+    }
+
+    /// A request's reply — `handle_line`'s body once it knows it has one.
+    fn answer(&mut self, id: serde_json::Value, method: Option<&str>, params: &serde_json::Value) -> Option<String> {
         // A request with no `method` is malformed, which is -32600 — distinct
         // from a method we simply do not implement.
         let Some(method) = method else {
@@ -541,11 +751,11 @@ impl Server {
         // -32002 for an unknown uri (the spec's resource-not-found), which a
         // flat -32602 for everything could not express.
         let result: Result<serde_json::Value, (i64, String)> = match method {
-            "initialize" => Ok(self.initialize(&params)),
+            "initialize" => Ok(self.initialize(params)),
             "ping" => Ok(serde_json::json!({})),
             "tools/list" => Ok(serde_json::json!({ "tools": self.tools() })),
             "tools/call" => {
-                let result = self.call(&params).map_err(|e| (-32602, e));
+                let result = self.call(params).map_err(|e| (-32602, e));
                 result.map(|mut result| {
                     // A current server cannot observe the client's cached
                     // schema. Results do refresh, even when definitions don't.
@@ -566,7 +776,7 @@ impl Server {
                 })
             },
             "resources/list" => Ok(self.resources()),
-            "resources/read" => self.read_resource(&params),
+            "resources/read" => self.read_resource(params),
             // Advertised as empty rather than left unimplemented: a client that
             // sees `capabilities.resources` may ask, and MethodNotFound here is
             // logged as a discovery failure.
@@ -789,8 +999,9 @@ impl Server {
                  waits for an unread message to YOUR place (from `slug` only, if given) and \
                  returns it without marking it read — call `messages` to take it. Returns \
                  {\"event\": \"timeout\"} after timeout_s (default 60, max 120, because MCP clients \
-                 time tool calls out): call wait again in a loop until it returns something \
-                 else. Right after handing a place a task its agent may not have started yet, \
+                 time tool calls out; while it waits it sends progress to a client that asked \
+                 for it, which keeps pi's 60s timeout from firing): call wait again in a loop \
+                 until it returns something else. Right after handing a place a task its agent may not have started yet, \
                  so an immediate idle can be the old turn — asking the peer to `report` and \
                  waiting for the message is the reliable handshake. While it waits it holds this \
                  server's stdio loop, so your other calls to this server queue behind it for up \
@@ -1564,7 +1775,17 @@ impl Server {
         let slug_raw = a.get("slug").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let t0 = std::time::Instant::now();
         let now_ms = move || t0.elapsed().as_millis() as u64;
-        let sleep_ms = |ms: u64| std::thread::sleep(std::time::Duration::from_millis(ms));
+        let mut pulse = Pulse {
+            token: self.inflight.token.clone(),
+            every_ms: self.inflight.progress_every_ms,
+            last_ms: 0,
+            notify: self.inflight.notify.clone(),
+        };
+        let sleep_ms = |ms: u64| {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            pulse.tick(now_ms());
+        };
+        let stop = || self.inflight.cancelled();
         let answer = |v: serde_json::Value| Ok(text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default()));
         match a.get("until").and_then(|v| v.as_str()) {
             Some("idle") => {
@@ -1581,7 +1802,7 @@ impl Server {
                 let path = project.place_dir(&slug);
                 let mut last = activity::Activity::none();
                 let mut prev: Option<activity::Activity> = None;
-                let got = poll_until(timeout_s * 1000, WAIT_IDLE_STEP_MS, now_ms, sleep_ms, || {
+                let got = poll_until(timeout_s * 1000, WAIT_IDLE_STEP_MS, now_ms, sleep_ms, stop, || {
                     last = activity::place_activity(project, &slug, &path);
                     let done = settled(prev.as_ref(), &last);
                     prev = Some(last.clone());
@@ -1612,7 +1833,7 @@ impl Server {
                     }
                 };
                 let dir = messages::dir(std::path::Path::new(&project.git_common));
-                let got = poll_until(timeout_s * 1000, WAIT_MSG_STEP_MS, now_ms, sleep_ms, || {
+                let got = poll_until(timeout_s * 1000, WAIT_MSG_STEP_MS, now_ms, sleep_ms, stop, || {
                     let un = messages::unread(&dir, &me.slug, from.as_deref(), messages::now_ms());
                     (!un.is_empty()).then_some(un)
                 });
@@ -1685,12 +1906,14 @@ impl Server {
                     // consumed the input. A successful send-keys is not a receipt.
                     let dir = messages::dir(std::path::Path::new(&project.git_common));
                     let id = record_send(&dir, &me.slug, &slug, text, &outcome);
-                    let submitted = outcome == SendOutcome::Submitted;
+                    let submitted = outcome.confirmed();
+                    let note = outcome.note_for(a.provider().id);
                     return Ok(text_ok(
                         &serde_json::to_string_pretty(&serde_json::json!({
                             "delivered": submitted, "provider": a.provider().id, "session": session, "id": id, "typed": typed,
-                            "note": outcome.note(),
-                            "reason": if submitted { None } else { Some(outcome.note()) },
+                            "queued": outcome == SendOutcome::Queued,
+                            "note": note,
+                            "reason": if submitted { None } else { Some(note.clone()) },
                         }))
                         .unwrap_or_default(),
                     ));
@@ -2014,7 +2237,7 @@ fn record_send(
     outcome: &SendOutcome,
 ) -> Option<String> {
     let m = messages::post(dir, from, to, text, None, Some("send"), messages::now_ms()).ok()?;
-    if *outcome == SendOutcome::Submitted {
+    if outcome.confirmed() {
         let _ = messages::ack(dir, to, std::slice::from_ref(&m.id));
     }
     Some(m.id)
@@ -2032,11 +2255,14 @@ fn attributed(from: &str, text: &str) -> String {
 /// Poll `check` every `step_ms` until it answers or `timeout_ms` has passed —
 /// `wait`'s loop, with the clock and the sleep injected so a test runs it on
 /// virtual time. Always checks at least once, so a timeout of 0 is a look.
+/// `stop` is asked after every sleep: a cancelled call gives up at the next
+/// step rather than at its deadline.
 fn poll_until<T>(
     timeout_ms: u64,
     step_ms: u64,
     now_ms: impl Fn() -> u64,
     mut sleep_ms: impl FnMut(u64),
+    stop: impl Fn() -> bool,
     mut check: impl FnMut() -> Option<T>,
 ) -> Option<T> {
     let start = now_ms();
@@ -2049,6 +2275,9 @@ fn poll_until<T>(
             return None;
         }
         sleep_ms(step_ms.min(timeout_ms - elapsed).max(1));
+        if stop() {
+            return None;
+        }
     }
 }
 
@@ -2320,7 +2549,7 @@ mod tests {
     #[test]
     fn with_no_project_it_still_handshakes_and_advertises_no_tools() {
         use serde_json::json;
-        let mut server = Server { stale: Default::default(), project: None, mutations: true, in_run: false, here: None, ready: Default::default() };
+        let mut server = Server { stale: Default::default(), project: None, mutations: true, in_run: false, here: None, ready: Default::default(), inflight: Default::default() };
 
         let init = server
             .handle_line(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }).to_string())
@@ -2383,7 +2612,7 @@ mod tests {
         .unwrap();
 
         let project = Project::discover(&root).expect("a git repo");
-        let mut server = Server { stale: Default::default(), project: Some(project), mutations: true, in_run: false, here: None, ready: Default::default() };
+        let mut server = Server { stale: Default::default(), project: Some(project), mutations: true, in_run: false, here: None, ready: Default::default(), inflight: Default::default() };
 
         // Reading is how you find out WHAT this tree is — never refused.
         let r = server.call(&json!({ "name": "list_places", "arguments": {} })).unwrap();
@@ -2497,7 +2726,7 @@ mod tests {
 
         let names = |m: bool| -> Vec<String> {
             let p = Project::discover(&root).expect("a git repo");
-            Server { stale: Default::default(), project: Some(p), mutations: m, in_run: false, here: None, ready: Default::default() }
+            Server { stale: Default::default(), project: Some(p), mutations: m, in_run: false, here: None, ready: Default::default(), inflight: Default::default() }
                 .tools()
                 .iter()
                 .map(|t| t["name"].as_str().unwrap_or_default().to_string())
@@ -2507,7 +2736,7 @@ mod tests {
         assert!(names(true).contains(&"show_doc".to_string()), "--mutations server must offer it");
 
         let p = Project::discover(&root).expect("a git repo");
-        let mut server = Server { stale: Default::default(), project: Some(p), mutations: true, in_run: false, here: None, ready: Default::default() };
+        let mut server = Server { stale: Default::default(), project: Some(p), mutations: true, in_run: false, here: None, ready: Default::default(), inflight: Default::default() };
 
         // Relative resolves against the repo root, not the process cwd.
         let r = server.call(&json!({ "name": "show_doc", "arguments": { "path": "CLAUDE.md" } })).unwrap();
@@ -2548,7 +2777,7 @@ mod tests {
             .expect("git init")
             .success());
         let project = Project::discover(&base).expect("a git repo");
-        let server = Server { stale: Default::default(), project: Some(project), mutations: false, in_run: false, here: None, ready: Default::default() };
+        let server = Server { stale: Default::default(), project: Some(project), mutations: false, in_run: false, here: None, ready: Default::default(), inflight: Default::default() };
 
         let caps = server.initialize(&json!({ "protocolVersion": LATEST }))["capabilities"].clone();
         assert_eq!(caps["resources"]["listChanged"], json!(true));
@@ -2677,6 +2906,7 @@ mod tests {
             in_run,
             here: Some(root.to_path_buf()),
             ready: Default::default(),
+            inflight: Default::default(),
         }
     }
 
@@ -2867,6 +3097,7 @@ mod tests {
             in_run: false,
             here: Some(here.to_path_buf()),
             ready: Default::default(),
+            inflight: Default::default(),
         }
     }
 
@@ -2958,6 +3189,106 @@ mod tests {
         assert_eq!(r["isError"], serde_json::json!(true), "a non-bool is refused, not guessed");
     }
 
+    /// The reader thread's bookkeeping: a request is pending until answered, a
+    /// cancel counts only for a pending one, and `1` is not `"1"`.
+    #[test]
+    fn a_cancel_counts_only_for_a_request_still_pending() {
+        let c = std::sync::Mutex::new(Cancels::default());
+        note_incoming(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#, &c);
+        note_incoming(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"1"}}"#, &c);
+        assert!(lock(&c).cancelled.is_empty(), "\"1\" is not 1");
+        note_incoming(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}"#, &c);
+        assert!(lock(&c).cancelled.is_empty(), "never seen: ignored");
+        note_incoming(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#, &c);
+        assert!(lock(&c).cancelled.contains("1"));
+        note_incoming("not json", &c);
+        note_incoming(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &c);
+        assert_eq!(lock(&c).pending.len(), 1);
+    }
+
+    /// Progress on virtual time: nothing without a token, then one numeric,
+    /// growing `progress` per interval — never at t=0, never twice in one.
+    #[test]
+    fn a_pulse_is_numeric_growing_and_only_with_a_token() {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let sink = got.clone();
+        let notify: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> = std::sync::Arc::new(move |l: &str| {
+            sink.lock().unwrap().push(serde_json::from_str(l).unwrap());
+            true
+        });
+        let mut none = Pulse { token: None, every_ms: 15_000, last_ms: 0, notify: notify.clone() };
+        for t in (0..=60_000).step_by(1000) {
+            none.tick(t);
+        }
+        assert!(got.lock().unwrap().is_empty());
+        let mut p = Pulse { token: Some(serde_json::json!(7)), every_ms: 15_000, last_ms: 0, notify };
+        for t in (0..=60_000).step_by(1000) {
+            p.tick(t);
+        }
+        let got = got.lock().unwrap();
+        let progress: Vec<u64> = got.iter().map(|v| v["params"]["progress"].as_u64().expect("a number")).collect();
+        assert_eq!(progress, vec![15, 30, 45, 60]);
+        assert!(got.iter().all(|v| v["method"] == "notifications/progress" && v["params"]["progressToken"] == 7));
+    }
+
+    /// `stop` is asked after each sleep, so a cancelled wait ends at the next
+    /// step instead of its deadline.
+    #[test]
+    fn poll_until_stops_at_the_step_after_a_cancel() {
+        let clock = std::cell::Cell::new(0u64);
+        let got: Option<()> = poll_until(60_000, 1000, || clock.get(), |ms| clock.set(clock.get() + ms), || clock.get() >= 3000, || None);
+        assert!(got.is_none());
+        assert_eq!(clock.get(), 3000);
+    }
+
+    /// A request cancelled while it queued behind another is never run and
+    /// never answered; an uncancelled one runs as before.
+    #[test]
+    fn a_request_cancelled_before_it_ran_does_nothing() {
+        let sc = scratch("msg-cancel-queued");
+        let wt = repo_with_worktree(&sc);
+        let mut feat = server_in(&sc.root, &wt, false);
+        let line = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"report","arguments":{"text":"x"}}}"#;
+        note_incoming(line, &feat.inflight.cancels);
+        note_incoming(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}"#, &feat.inflight.cancels);
+        assert_eq!(feat.handle_line(line), None);
+        let mut main = server_in(&sc.root, &sc.root, false);
+        let w = body(&call(&mut main, "wait", serde_json::json!({ "until": "message", "timeout_s": 0 })));
+        assert_eq!(w["event"], serde_json::json!("timeout"), "the cancelled report was never filed");
+        assert!(feat.handle_line(&line.replace("\"id\":5", "\"id\":6")).is_some());
+        let c = lock(&feat.inflight.cancels);
+        assert!(c.pending.is_empty() && c.cancelled.is_empty(), "nothing left behind");
+    }
+
+    /// End to end through `handle_line`: the request's `_meta.progressToken`
+    /// reaches `wait`, which pulses progress; a cancel arriving mid-wait (as the
+    /// reader thread would record it) stops it, and no response is sent.
+    #[test]
+    fn wait_pulses_the_callers_token_and_stops_silently_on_cancel() {
+        let sc = scratch("msg-wait-cancel");
+        let _wt = repo_with_worktree(&sc);
+        let mut main = server_in(&sc.root, &sc.root, false);
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let (sink, cancels) = (got.clone(), main.inflight.cancels.clone());
+        main.inflight.progress_every_ms = 1;
+        main.inflight.notify = std::sync::Arc::new(move |l: &str| {
+            sink.lock().unwrap().push(serde_json::from_str(l).unwrap());
+            // The client gives up after the first pulse.
+            note_incoming(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"w1"}}"#, &cancels);
+            true
+        });
+        let line = r#"{"jsonrpc":"2.0","id":"w1","method":"tools/call","params":{"name":"wait","arguments":{"until":"message","timeout_s":30},"_meta":{"progressToken":"tok"}}}"#;
+        note_incoming(line, &main.inflight.cancels);
+        let t0 = std::time::Instant::now();
+        assert_eq!(main.handle_line(line), None, "a cancelled request is not answered");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "stopped at the next step, not at 30s");
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["params"]["progressToken"], "tok");
+        assert!(got[0]["params"]["progress"].is_u64());
+        assert!(main.inflight.id.is_none() && main.inflight.token.is_none());
+    }
+
     /// `wait until: message` with a zero timeout is one look — no sleeping in
     /// the suite — and does NOT mark what it returns read.
     #[test]
@@ -2992,13 +3323,26 @@ mod tests {
         }
     }
 
+    /// `CLAUDE_PROJECT_DIR` is trusted for a Claude client (or one that does not
+    /// say) and for nobody else — an allowlist, so pi and anything later get
+    /// their cwd, the place their harness launched them in.
+    #[test]
+    fn only_a_claude_client_is_pinned_by_claude_project_dir() {
+        assert!(trusts_claude_project_dir(None));
+        assert!(trusts_claude_project_dir(Some("")));
+        assert!(trusts_claude_project_dir(Some("claude")));
+        assert!(!trusts_claude_project_dir(Some("codex")));
+        assert!(!trusts_claude_project_dir(Some("pi")));
+        assert!(!trusts_claude_project_dir(Some("opencode")));
+    }
+
     /// `wait`'s loop on a virtual clock: it keeps looking every step, gives up
     /// at the deadline without overshooting it, and a zero timeout still looks.
     #[test]
     fn poll_until_looks_every_step_and_stops_at_the_deadline() {
         let clock = std::cell::Cell::new(0u64);
         let mut looks = 0;
-        let got: Option<()> = poll_until(5000, 2000, || clock.get(), |ms| clock.set(clock.get() + ms), || {
+        let got: Option<()> = poll_until(5000, 2000, || clock.get(), |ms| clock.set(clock.get() + ms), || false, || {
             looks += 1;
             None
         });
@@ -3008,7 +3352,7 @@ mod tests {
 
         let clock = std::cell::Cell::new(0u64);
         let mut n = 0;
-        let got = poll_until(60_000, 1000, || clock.get(), |ms| clock.set(clock.get() + ms), || {
+        let got = poll_until(60_000, 1000, || clock.get(), |ms| clock.set(clock.get() + ms), || false, || {
             n += 1;
             (n == 3).then_some("hit")
         });
@@ -3016,7 +3360,7 @@ mod tests {
         assert_eq!(clock.get(), 2000);
 
         let mut once = 0;
-        let _: Option<()> = poll_until(0, 1000, || 0, |_| panic!("a zero timeout must not sleep"), || {
+        let _: Option<()> = poll_until(0, 1000, || 0, |_| panic!("a zero timeout must not sleep"), || false, || {
             once += 1;
             None
         });
@@ -3064,6 +3408,7 @@ mod tests {
             SendOutcome::Modal,
             SendOutcome::EnterFailed("gone".into()),
             SendOutcome::Submitted,
+            SendOutcome::Queued,
         ]
         .iter()
         .enumerate()
@@ -3071,7 +3416,9 @@ mod tests {
             let dir = root.join(i.to_string());
             let id = record_send(&dir, "from", "to", "hello", outcome).unwrap();
             let unread = messages::unread(&dir, "to", None, messages::now_ms());
-            if *outcome == SendOutcome::Submitted {
+            // A queued send is consumed (pi holds it); an unread copy would
+            // invite the duplicate the note warns about.
+            if outcome.confirmed() {
                 assert!(unread.is_empty());
             } else {
                 assert_eq!(unread.len(), 1);

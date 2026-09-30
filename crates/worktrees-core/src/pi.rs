@@ -5,7 +5,8 @@
 //! (docs/proposals/pi-harness.md §1.3, §3; fixtures in `tests/fixtures/pi-*`):
 //!
 //! - **Session file.** `--session-id <id>` creates or reopens EXACTLY
-//!   `<session dir>/<iso ts>_<id>.jsonl`; `--session-dir` wins over a repo's
+//!   `<session dir>/<iso ts>_<id>.jsonl` (reopening matches the HEADER's id, so
+//!   a uuid-named file reopens the same way); `--session-dir` wins over a repo's
 //!   `.pi/settings.json` `sessionDir`, which pi reads BEFORE trust is decided —
 //!   so worktrees always passes the dir it will read, and a repo cannot move it.
 //!   The default dir is `<agent dir>/sessions/--<cwd, leading / dropped, / \ :
@@ -19,6 +20,14 @@
 //!   and the only windows the file cannot see are pi's startup before the
 //!   opener is submitted and a trust modal holding it back. The screen covers
 //!   those (the composer border, and the modal).
+//! - **The place's session is the one the user actually has**, not the one
+//!   worktrees launched: `/new`, a hand restart after `/trust`, or a bare `pi`
+//!   typed into the pane all write a `<ts>_<uuid>.jsonl` into the same pinned
+//!   dir, and reading only the derived id made the dot vanish while pi worked
+//!   (v0.33.0). `current_session` takes, among the dir's files whose HEADER
+//!   `cwd` is the place, the one with the newest entry — by content, never by
+//!   mtime or the name's creation stamp (a resumed old session is the newest
+//!   by activity and the oldest by name).
 //! - **State keys on the newest MESSAGE entry**, never the last line (a
 //!   `usage`/`label`/`custom` entry arrives without a turn) and never the
 //!   file's mtime (the AGENTS.md transcript rule). A failed request is written
@@ -117,25 +126,73 @@ pub fn session_file(dir: &Path, id: &str) -> Option<PathBuf> {
         .max()
 }
 
-/// The newest-generation session file for the place whose ids share `stem`,
-/// and its generation. Used by the activity reader, which runs every tick over
-/// every live pi lane and so does not read the declared store: the highest
-/// generation on disk is the place's current session except in the window
-/// between a fresh launch and its first user message — pi's startup, or a
-/// trust modal holding the opener back — exactly when the screen, not the
-/// file, answers (`pi_state`).
-pub fn latest_session_file(dir: &Path, stem: &str) -> Option<(u32, PathBuf)> {
-    let marker = format!("_{stem}");
+/// A place's current pi session: its file and the id to `--session-id` it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiSession {
+    pub path: PathBuf,
+    pub id: String,
+}
+
+/// A session file's header — its `id` and `cwd` — from the first line. A
+/// header never changes, so it is read once per path.
+fn header(path: &Path) -> Option<(String, String)> {
+    type Headers = HashMap<PathBuf, Option<(String, String)>>;
+    static HEADERS: Mutex<Option<Headers>> = Mutex::new(None);
+    let mut guard = HEADERS.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if let Some(Some(h)) = cache.get(path) {
+        return Some(h.clone());
+    }
+    // A file pi has only just created may not hold its header line yet: never
+    // cache a miss (the Codex `session_meta` rule in AGENTS.md).
+    let h = parse_header(&first_line(path)?);
+    if h.is_some() {
+        cache.insert(path.to_path_buf(), h.clone());
+    }
+    h
+}
+
+fn first_line(path: &Path) -> Option<String> {
+    use std::io::{BufRead, Read};
+    let f = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    std::io::BufReader::new(f.take(64 * 1024)).read_line(&mut line).ok()?;
+    line.ends_with('\n').then_some(line)
+}
+
+/// `{"type":"session", "id", "cwd", …}` → (id, cwd).
+pub fn parse_header(line: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type")?.as_str()? != "session" {
+        return None;
+    }
+    Some((v.get("id")?.as_str()?.to_string(), v.get("cwd")?.as_str()?.to_string()))
+}
+
+fn same_dir(a: &str, b: &str) -> bool {
+    let (a, b) = (Path::new(a), Path::new(b));
+    a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// The place's current session in `dir`: among the `*.jsonl` whose header
+/// `cwd` is `cwd`, the one whose newest entry is newest. The header check keeps
+/// out a place whose path mangles to the same dir name (`/a-b` and `/a/b`).
+/// `None` when pi has written nothing for this place yet.
+pub fn current_session(dir: &Path, cwd: &str) -> Option<PiSession> {
     std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let rest = &name[name.find(&marker)? + marker.len()..];
-            let gen: u32 = rest.strip_suffix(".jsonl")?.parse().ok()?;
-            Some((gen, e.path()))
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|path| {
+            let (id, hcwd) = header(&path)?;
+            same_dir(&hcwd, cwd).then(|| {
+                let last = tail_info(&path).last_at.unwrap_or_default();
+                (last, path.file_name().map(|n| n.to_os_string()), PiSession { path, id })
+            })
         })
-        .max()
+        .max_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)))
+        .map(|(_, _, s)| s)
 }
 
 /// Where a pi session's newest turn stands, from its JSONL.
@@ -219,28 +276,56 @@ pub fn session_model(lines: &[String]) -> Option<String> {
     })
 }
 
-type TailCache = HashMap<PathBuf, (u64, Option<String>, Option<PiTurn>)>;
+/// What a session file's tail says: its model, its newest turn, and the
+/// timestamp of its newest entry (what `current_session` ranks by).
+#[derive(Debug, Clone, Default)]
+struct TailInfo {
+    model: Option<String>,
+    turn: Option<PiTurn>,
+    last_at: Option<String>,
+}
+
+type TailCache = HashMap<PathBuf, (u64, TailInfo)>;
 static PI_TAIL: Mutex<Option<TailCache>> = Mutex::new(None);
 
-/// `path`'s (model, turn), re-read only once the file has GROWN — the same
-/// shape and reason as `activity::codex_tail`.
-pub fn session_tail(path: &Path) -> (Option<String>, Option<PiTurn>) {
+/// The newest entry `timestamp` among `lines`. pi writes them all as
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ`, so the strings order as the instants do.
+pub fn session_last_at(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v.get("timestamp").and_then(|t| t.as_str()).map(str::to_string))
+        .max()
+}
+
+/// `path`'s tail, re-read only once the file has GROWN — the same shape and
+/// reason as `activity::codex_tail`.
+fn tail_info(path: &Path) -> TailInfo {
     let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
-        return (None, None);
+        return TailInfo::default();
     };
     let mut guard = PI_TAIL.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(HashMap::new);
-    if let Some((l, m, t)) = cache.get(path) {
+    if let Some((l, info)) = cache.get(path) {
         if *l == len {
-            return (m.clone(), t.clone());
+            return info.clone();
         }
     }
-    let (pm, pt) = cache.get(path).map(|(_, m, t)| (m.clone(), t.clone())).unwrap_or((None, None));
+    let prev = cache.get(path).map(|(_, i)| i.clone()).unwrap_or_default();
     let lines = activity::tail_lines_checked(path, activity::ROLLOUT_TAIL_BYTES).unwrap_or_default();
-    let m = session_model(&lines).or(pm);
-    let t = session_turn(&lines).or(pt);
-    cache.insert(path.to_path_buf(), (len, m.clone(), t.clone()));
-    (m, t)
+    let info = TailInfo {
+        model: session_model(&lines).or(prev.model),
+        turn: session_turn(&lines).or(prev.turn),
+        last_at: session_last_at(&lines).or(prev.last_at),
+    };
+    cache.insert(path.to_path_buf(), (len, info.clone()));
+    info
+}
+
+/// `path`'s (model, turn).
+pub fn session_tail(path: &Path) -> (Option<String>, Option<PiTurn>) {
+    let i = tail_info(path);
+    (i.model, i.turn)
 }
 
 /// What one capture of a pi pane shows.
@@ -316,6 +401,181 @@ pub fn border_is_busy(line: &str) -> bool {
     !stripped.chars().all(|c| c == '─' || c == ' ')
 }
 
+/// pi's composer, read by position (`read_screen`'s rule): the input between
+/// its top border and the bottom rule, whether that border carries a status,
+/// and the `Steering:` queue pi shows directly above it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Composer {
+    /// The input, wrapped lines joined with single spaces.
+    pub input: String,
+    pub busy: bool,
+    /// Queued steering messages, in screen order, without the `Steering: `.
+    pub steering: Vec<String>,
+}
+
+pub fn read_composer(screen: &str) -> Option<Composer> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let bottom = lines.iter().rposition(|l| is_rule(l))?;
+    let top = lines[..bottom].iter().rposition(|l| l.starts_with('─'))?;
+    let input = normalize(&lines[top + 1..bottom].join(" "));
+    // The queue sits right above the border, ANCHORED by pi's
+    // `↳ Option+Up to edit all queued messages` hint: the first non-blank line
+    // above the border must be that hint, and the `Steering: …` lines are the
+    // run directly above it. Without the hint there is no queue — so the
+    // conversation's last line, which also sits right above the border, can
+    // never be read as one even when it quotes "Steering:".
+    let mut steering = Vec::new();
+    let mut above = lines[..top].iter().rev().map(|l| l.trim()).skip_while(|t| t.is_empty());
+    if above.next().is_some_and(|t| t.starts_with('↳') && t.contains("queued")) {
+        for t in above {
+            match t.strip_prefix("Steering: ") {
+                Some(text) => steering.push(text.to_string()),
+                None => break,
+            }
+        }
+    }
+    steering.reverse();
+    Some(Composer { input, busy: border_is_busy(lines[top]), steering })
+}
+
+/// Whitespace collapsed: a wrapped composer and a trimmed JSONL entry both
+/// compare equal to what was typed.
+fn normalize(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What a `send` is recognised by: the start of the typed text — the
+/// attributed header and the first words — never its whole length, which a
+/// narrow pane truncates and pi trims.
+pub fn send_prefix(typed: &str) -> String {
+    normalize(typed).chars().take(80).collect()
+}
+
+fn starts(text: &str, prefix: &str) -> bool {
+    !prefix.is_empty() && normalize(text).starts_with(prefix)
+}
+
+/// Whether a `Steering:` line is (the start of) the text `prefix` begins.
+/// pi cuts a queued line to the pane's width and ends it with `...` — on an
+/// 80-column pane the attributed header alone nearly fills it — so the line
+/// and the prefix need only agree as far as the SHORTER goes, and at least
+/// far enough into the header to be ours.
+fn steering_is(line: &str, prefix: &str) -> bool {
+    const MIN: usize = 24;
+    let shown = normalize(line.trim_end().trim_end_matches("...").trim_end_matches('…'));
+    shown.chars().count() >= MIN.min(prefix.chars().count()) && (shown.starts_with(prefix) || prefix.starts_with(&shown))
+}
+
+/// User entries in the session file at `path` whose text starts with
+/// `prefix`. Read from the tail: a just-sent message is always in it.
+pub fn user_entries_starting(path: &Path, prefix: &str) -> usize {
+    let lines = activity::tail_lines_checked(path, activity::ROLLOUT_TAIL_BYTES).unwrap_or_default();
+    user_entries_in(&lines, prefix)
+}
+
+pub fn user_entries_in(lines: &[String], prefix: &str) -> usize {
+    lines
+        .iter()
+        .filter(|l| l.contains("\"user\""))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("message"))
+        .filter_map(|v| {
+            let m = v.get("message")?;
+            if m.get("role")?.as_str()? != "user" {
+                return None;
+            }
+            Some(match m.get("content")? {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(parts) => {
+                    parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("")
+                }
+                _ => String::new(),
+            })
+        })
+        .filter(|t| starts(t, prefix))
+        .count()
+}
+
+/// Press Enter on text already typed into pi's composer, and confirm it —
+/// `harness::submit_codex`'s loop with pi's receipts. Settling watches the
+/// COMPOSER only: mid-turn the transcript streams and the border's spinner
+/// turns every frame, so a whole-screen comparison never settles and Enter is
+/// never pressed (found live — the fixtures are still frames). Every Enter
+/// (retries included) needs a fresh screen whose composer holds OUR text, settled, and
+/// no trust modal; a failed capture never authorizes a keypress or counts as
+/// a receipt. Receipts: the session file gained a user entry starting with
+/// `prefix` (`Submitted`), or the composer is empty and pi's steering queue
+/// holds it (`Queued`). Seams keep it on virtual time in tests.
+pub fn submit_pi(
+    prefix: &str,
+    baseline: usize,
+    mut capture: impl FnMut() -> Option<String>,
+    mut entries: impl FnMut() -> usize,
+    mut enter: impl FnMut() -> Result<(), String>,
+    now: impl Fn() -> u64,
+    mut sleep: impl FnMut(u64),
+) -> crate::harness::SendOutcome {
+    use crate::harness::{SendOutcome, SEND_ENTER_TRIES, SEND_POLL_MS, SEND_STABLE_MS, SEND_TIMEOUT_MS, SEND_VERIFY_MS};
+    let start = now();
+    let mut previous: Option<String> = None; // the composer's input, not the screen
+    // Our lines already in pi's steering queue before we pressed Enter: an
+    // earlier send from the same place can still be waiting there, and must
+    // not be taken for this one's receipt.
+    let mut queued_before = 0;
+    let mut stable_since = start;
+    let mut tries = 0;
+    let mut last_enter: Option<u64> = None;
+    loop {
+        let time = now();
+        if time.saturating_sub(start) >= SEND_TIMEOUT_MS {
+            return SendOutcome::Unconfirmed;
+        }
+        match capture() {
+            Some(screen) => {
+                if read_screen(&screen) == PiScreen::TrustModal {
+                    return SendOutcome::Modal;
+                }
+                let composer = read_composer(&screen);
+                if tries > 0 {
+                    if entries() > baseline {
+                        return SendOutcome::Submitted;
+                    }
+                    if composer.as_ref().is_some_and(|c| {
+                        c.input.is_empty() && c.steering.iter().filter(|t| steering_is(t, prefix)).count() > queued_before
+                    }) {
+                        return SendOutcome::Queued;
+                    }
+                } else if let Some(c) = &composer {
+                    queued_before = c.steering.iter().filter(|t| steering_is(t, prefix)).count();
+                }
+                let input = composer.map(|c| c.input);
+                let ours = input.as_deref().is_some_and(|i| starts(i, prefix));
+                if !ours || previous != input {
+                    stable_since = time;
+                } else if time.saturating_sub(stable_since) >= SEND_STABLE_MS
+                    && last_enter.is_none_or(|at| time.saturating_sub(at) >= SEND_VERIFY_MS)
+                {
+                    if tries == SEND_ENTER_TRIES {
+                        return SendOutcome::Unconfirmed;
+                    }
+                    if let Err(e) = enter() {
+                        return SendOutcome::EnterFailed(e);
+                    }
+                    tries += 1;
+                    last_enter = Some(time);
+                    stable_since = time;
+                }
+                previous = input;
+            }
+            None => {
+                previous = None;
+                stable_since = time;
+            }
+        }
+        sleep(SEND_POLL_MS);
+    }
+}
+
 /// A pi lane's state from its session file's newest turn and one capture of
 /// its pane. The screen answers first — it is the only witness of the gap
 /// before the first user message (no file yet) and of the trust modal — and
@@ -362,15 +622,14 @@ pub fn pi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Optio
     if !panes.session_runs_program(&name) {
         return None;
     }
-    let turn = latest_session_file(&session_dir(path), &session_stem(canonical)).and_then(|(_, f)| session_tail(&f).1);
+    let turn = current_session(&session_dir(path), path).and_then(|s| session_tail(&s.path).1);
     let (state, last_done) = pi_state(turn.as_ref(), capture(&name));
     Some(Activity { provider: Some("pi"), state, last_done, session: Some(name) })
 }
 
 /// The model the place's current pi session is on, from its file.
-pub fn running_model(canonical: &str, path: &str) -> Option<String> {
-    let (_, f) = latest_session_file(&session_dir(path), &session_stem(canonical))?;
-    session_tail(&f).0
+pub fn running_model(_canonical: &str, path: &str) -> Option<String> {
+    session_tail(&current_session(&session_dir(path), path)?.path).0
 }
 
 #[cfg(test)]
@@ -409,23 +668,244 @@ mod tests {
     }
 
     #[test]
-    fn session_files_are_found_by_id_and_by_newest_generation() {
+    fn a_session_file_is_found_by_id() {
         let d = std::env::temp_dir().join(format!("wtpi-files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let stem = session_stem("p-feat");
-        for (ts, g) in [("2026-09-29T10-00-00-000Z", 2), ("2026-09-29T09-00-00-000Z", 10), ("2026-09-29T11-00-00-000Z", 9)] {
-            std::fs::write(d.join(format!("{ts}_{stem}{g}.jsonl")), "").unwrap();
-        }
-        // A near-miss stem (another place) and a non-numeric tail are ignored.
-        std::fs::write(d.join(format!("2026-09-29T12-00-00-000Z_{}99.jsonl", session_stem("p-other"))), "").unwrap();
-        std::fs::write(d.join(format!("2026-09-29T12-00-00-000Z_{stem}x.jsonl")), "").unwrap();
-        let (g, f) = latest_session_file(&d, &stem).unwrap();
-        assert_eq!(g, 10, "numeric, not lexical, and not by timestamp");
-        assert!(f.to_string_lossy().ends_with(&format!("{stem}10.jsonl")));
+        std::fs::write(d.join(format!("2026-09-29T10-00-00-000Z_{stem}2.jsonl")), "").unwrap();
         assert!(session_file(&d, &format!("{stem}2")).is_some());
         assert!(session_file(&d, &format!("{stem}3")).is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Real 0.99.1 files (fixtures/pi-session/restart, cwd rewritten, system
+    /// prompt elided): a launch with the derived id, then a HAND restart (no
+    /// `--session-id`, as after `/trust`), then `/new` in that pi, then the
+    /// `/new` session resumed by its uuid. The v0.33.0 reader keyed on the
+    /// derived id and saw only the first, so the dot vanished.
+    const G1: (&str, &str) = ("2026-09-30T00-51-41-893Z_lane-abc123-g1.jsonl", include_str!("../tests/fixtures/pi-session/restart/2026-09-30T00-51-41-893Z_lane-abc123-g1.jsonl"));
+    const RESTART: (&str, &str) = ("2026-09-30T00-56-39-504Z_01a0efd0-474f-7028-bbf8-2f7684397b16.jsonl", include_str!("../tests/fixtures/pi-session/restart/2026-09-30T00-56-39-504Z_01a0efd0-474f-7028-bbf8-2f7684397b16.jsonl"));
+    const NEW: (&str, &str) = ("2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl", include_str!("../tests/fixtures/pi-session/restart/2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl"));
+    const LANE: &str = "/tmp/wtfix/repo/.worktrees/lane";
+
+    fn session_scratch(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wtpi-cur-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for (name, body) in files {
+            std::fs::write(d.join(name), body).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn the_current_session_is_the_one_the_user_has_not_the_derived_id() {
+        let d = session_scratch("g1", &[G1]);
+        assert_eq!(current_session(&d, LANE).unwrap().id, "lane-abc123-g1", "the usual case");
+
+        let d = session_scratch("restart", &[G1, RESTART]);
+        let cur = current_session(&d, LANE).unwrap();
+        assert_eq!(cur.id, "01a0efd0-474f-7028-bbf8-2f7684397b16", "a hand-restarted pi");
+        assert!(matches!(session_tail(&cur.path).1, Some(PiTurn::Done { .. })));
+
+        // `/new`, then that session resumed: newest by CONTENT. Rename it so its
+        // creation stamp is the OLDEST — the name must not decide.
+        let old_name = NEW.0.replace("2026-09-30T00-56-43-373Z", "2026-09-30T00-00-00-000Z");
+        let d = session_scratch("new", &[G1, RESTART, (&old_name, NEW.1)]);
+        assert_eq!(current_session(&d, LANE).unwrap().id, "01a0efd0-566d-7028-bbf8-2f78723dc57e");
+
+        // A place whose path mangles to the same dir: its newer file is not ours.
+        let other = NEW.1.replace(LANE, "/tmp/wtfix/repo/.worktrees-lane").replace("2026-09-30T00:5", "2026-09-30T09:5");
+        let d = session_scratch("decoy", &[G1, ("2026-09-30T09-00-00-000Z_decoy.jsonl", &other)]);
+        assert_eq!(current_session(&d, LANE).unwrap().id, "lane-abc123-g1");
+
+        // A header-only file (pi mid-create), a non-jsonl, an empty dir.
+        let d = session_scratch("partial", &[G1, ("2026-09-30T10-00-00-000Z_x.jsonl", r#"{"type":"session","id":"x""#), ("notes.txt", "")]);
+        assert_eq!(current_session(&d, LANE).unwrap().id, "lane-abc123-g1");
+        assert!(current_session(&session_scratch("empty", &[]), LANE).is_none());
+    }
+
+    /// A hand-started pi that is mid-turn reads busy, which is what the dot
+    /// failed to show: the restart file cut after its user message.
+    #[test]
+    fn a_hand_started_pi_mid_turn_reads_busy() {
+        let cut: String = RESTART.1.lines().take(5).map(|l| format!("{l}\n")).collect();
+        let d = session_scratch("busy", &[G1, (RESTART.0, &cut)]);
+        let cur = current_session(&d, LANE).unwrap();
+        assert_eq!(session_tail(&cur.path).1, Some(PiTurn::Busy));
+    }
+
+    #[test]
+    fn a_header_is_the_session_line_only() {
+        assert_eq!(parse_header(r#"{"type":"session","version":3,"id":"a","cwd":"/x"}"#), Some(("a".into(), "/x".into())));
+        assert_eq!(parse_header(r#"{"type":"model_change","id":"a","cwd":"/x"}"#), None);
+        assert_eq!(parse_header(r#"{"type":"session","id":"a"}"#), None);
+    }
+
+    // ── send (fixtures/pi-send/0.99.1) ────────────────────────────────────
+    const S_EMPTY: &str = include_str!("../tests/fixtures/pi-send/0.99.1/idle-empty.txt");
+    const S_TYPED: &str = include_str!("../tests/fixtures/pi-send/0.99.1/idle-typed.txt");
+    const S_SUBMITTED: &str = include_str!("../tests/fixtures/pi-send/0.99.1/idle-submitted.txt");
+    const S_BUSY_TYPED: &str = include_str!("../tests/fixtures/pi-send/0.99.1/busy-typed.txt");
+    const S_QUEUED: &str = include_str!("../tests/fixtures/pi-send/0.99.1/busy-queued.txt");
+    const S_LONG: &str = include_str!("../tests/fixtures/pi-send/0.99.1/busy-typed-long.txt");
+    const S_TRUST: &str = include_str!("../tests/fixtures/pi-screen/0.99.1/trust-modal.txt");
+    const H: &str = "[worktrees: message from place \"(main)\", not from the user]";
+
+    #[test]
+    fn the_composer_is_read_by_position() {
+        let first = send_prefix(&format!("{H} Write the numbers 1 to 25, one per line, nothing else."));
+        let second = send_prefix(&format!("{H} After the numbers, reply STEERED."));
+        let c = read_composer(S_EMPTY).unwrap();
+        assert!(c.input.is_empty() && !c.busy && c.steering.is_empty());
+        let c = read_composer(S_TYPED).unwrap();
+        assert!(starts(&c.input, &first) && !c.busy);
+        let c = read_composer(S_SUBMITTED).unwrap();
+        assert!(c.input.is_empty() && c.busy && c.steering.is_empty(), "{c:?}");
+        let c = read_composer(S_BUSY_TYPED).unwrap();
+        assert!(starts(&c.input, &second) && c.busy, "{c:?}");
+        let c = read_composer(S_QUEUED).unwrap();
+        assert!(c.input.is_empty() && c.busy);
+        assert_eq!(c.steering.len(), 1);
+        assert!(steering_is(&c.steering[0], &second));
+        // Cut to a narrow pane's width, it is still ours; another message is not.
+        assert!(steering_is(&format!("{H} After..."), &second));
+        assert!(steering_is("[worktrees: message from place \"(main)\"…", &second));
+        assert!(!steering_is(&format!("{H} Something else entirely"), &second));
+        assert!(!steering_is("[worktrees...", &second), "too short to be ours");
+        // Wrapped input joins back into one line that still starts with ours.
+        let c = read_composer(S_LONG).unwrap();
+        assert!(starts(&c.input, &send_prefix(&format!("{H} please ignore this padding"))), "{c:?}");
+        // The history above a composer can quote the queue; only the block
+        // directly on the border counts.
+        let quoted = S_SUBMITTED.replacen(H, &format!("Steering: {H}"), 1);
+        assert!(read_composer(&quoted).unwrap().steering.is_empty());
+    }
+
+    #[test]
+    fn user_entries_match_a_trimmed_prefix_in_either_content_shape() {
+        let p = send_prefix(&format!("{H} hello   there   "));
+        let lines = vec![
+            format!(r#"{{"type":"message","message":{{"role":"user","content":[{{"type":"text","text":"{} hello there"}}]}}}}"#, H.replace('"', "\\\"")),
+            format!(r#"{{"type":"message","message":{{"role":"user","content":"{} hello there"}}}}"#, H.replace('"', "\\\"")),
+            format!(r#"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"text","text":"{} hello there"}}]}}}}"#, H.replace('"', "\\\"")),
+            r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"something else"}]}}"#.to_string(),
+        ];
+        assert_eq!(user_entries_in(&lines, &p), 2);
+    }
+
+    /// Drives `submit_pi` on a virtual clock through a scripted pane: each
+    /// Enter advances to the next screen and may add a session entry.
+    fn drive(before: &[&str], after: &[&str], entry_on_enter: bool) -> (crate::harness::SendOutcome, usize) {
+        let clock = std::cell::Cell::new(0u64);
+        let enters = std::cell::Cell::new(0usize);
+        let prefix = send_prefix(&format!("{H} x"))[..H.len()].to_string();
+        let screen = |n: usize| -> Option<String> {
+            let seq = if n == 0 { before } else { after };
+            seq.get(0).map(|s| s.to_string())
+        };
+        let out = submit_pi(
+            &prefix,
+            0,
+            || screen(enters.get()),
+            || if entry_on_enter && enters.get() > 0 { 1 } else { 0 },
+            || {
+                enters.set(enters.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            |ms| clock.set(clock.get() + ms),
+        );
+        (out, enters.get())
+    }
+
+    /// Mid-turn the screen never holds still — pi streams the answer and the
+    /// border's spinner turns — while the composer does. Settling must watch
+    /// the composer, or no Enter is ever pressed (seen live, fixed here).
+    #[test]
+    fn a_busy_send_settles_on_the_composer_while_the_screen_streams() {
+        use crate::harness::SendOutcome;
+        let clock = std::cell::Cell::new(0u64);
+        let enters = std::cell::Cell::new(0usize);
+        let frame = std::cell::Cell::new(0usize);
+        let spin = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let out = submit_pi(
+            &send_prefix(H),
+            0,
+            || {
+                frame.set(frame.get() + 1);
+                let base = if enters.get() == 0 { S_BUSY_TYPED } else { S_QUEUED };
+                // A new streamed line and a new spinner frame on every capture.
+                let s = base.replacen("── ⠋ Working", &format!("── {} Working", spin[frame.get() % 10]), 1)
+                    .replacen("── ⠦ Working", &format!("── {} Working", spin[frame.get() % 10]), 1);
+                Some(format!(" streamed line {}\n{s}", frame.get()))
+            },
+            || 0,
+            || {
+                enters.set(enters.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            |ms| clock.set(clock.get() + ms),
+        );
+        assert_eq!((out, enters.get()), (SendOutcome::Queued, 1));
+    }
+
+    /// On a narrow pane pi truncates the queued line; an earlier send from the
+    /// same place already queued is not this one's receipt.
+    #[test]
+    fn a_truncated_steering_line_counts_and_an_old_one_does_not() {
+        use crate::harness::SendOutcome;
+        let typed = format!("{H} After the numbers, reply STEERED.");
+        let narrow = |line: &str| S_QUEUED.lines().map(|l| if l.contains("Steering: ") { line.to_string() } else { l.to_string() }).collect::<Vec<_>>().join("\n");
+        let truncated = narrow(&format!(" Steering: {H} After..."));
+        let run = |before: String, after: String| {
+            let clock = std::cell::Cell::new(0u64);
+            let enters = std::cell::Cell::new(0usize);
+            let out = submit_pi(&send_prefix(&typed), 0, || Some(if enters.get() == 0 { before.clone() } else { after.clone() }), || 0,
+                || { enters.set(enters.get() + 1); Ok(()) }, || clock.get(), |ms| clock.set(clock.get() + ms));
+            (out, enters.get())
+        };
+        assert_eq!(run(S_BUSY_TYPED.to_string(), truncated.clone()), (SendOutcome::Queued, 1));
+        // The same line was ALREADY queued above our typed text: no new entry.
+        let typed_with_old = {
+            let mut l: Vec<String> = S_BUSY_TYPED.lines().map(str::to_string).collect();
+            let top = l.iter().rposition(|x| x.starts_with("── ")).unwrap();
+            l.insert(top, " ↳ Option+Up to edit all queued messages".into());
+            l.insert(top, format!(" Steering: {H} After..."));
+            l.join("\n")
+        };
+        assert_eq!(run(typed_with_old, truncated).0, SendOutcome::Unconfirmed);
+    }
+
+    #[test]
+    fn an_idle_send_is_submitted_when_the_session_file_has_it() {
+        use crate::harness::SendOutcome;
+        assert_eq!(drive(&[S_TYPED], &[S_SUBMITTED], true), (SendOutcome::Submitted, 1));
+        // The file lagging behind the screen is not a receipt by itself: an
+        // empty composer with no queue and no entry never confirms.
+        assert_eq!(drive(&[S_TYPED], &[S_SUBMITTED], false).0, SendOutcome::Unconfirmed);
+    }
+
+    #[test]
+    fn a_busy_send_is_queued_when_it_appears_as_steering() {
+        use crate::harness::SendOutcome;
+        assert_eq!(drive(&[S_BUSY_TYPED], &[S_QUEUED], false), (SendOutcome::Queued, 1));
+    }
+
+    #[test]
+    fn a_send_never_presses_enter_into_the_trust_modal_or_onto_other_text() {
+        use crate::harness::SendOutcome;
+        assert_eq!(drive(&[S_TRUST], &[S_TRUST], true), (SendOutcome::Modal, 0));
+        // Our text never showed up in the composer: no Enter at all.
+        assert_eq!(drive(&[S_EMPTY], &[S_EMPTY], true), (SendOutcome::Unconfirmed, 0));
+        // A lost Enter is retried, boundedly.
+        assert_eq!(drive(&[S_TYPED], &[S_TYPED], false), (SendOutcome::Unconfirmed, crate::harness::SEND_ENTER_TRIES));
+        // A pane that cannot be captured is never typed at.
+        let clock = std::cell::Cell::new(0u64);
+        let out = submit_pi(H, 0, || None, || 5, || panic!("no Enter without a screen"), || clock.get(), |ms| clock.set(clock.get() + ms));
+        assert_eq!(out, SendOutcome::Unconfirmed);
     }
 
     const TWO_TURNS: &str = include_str!("../tests/fixtures/pi-session/two-turns.jsonl");
