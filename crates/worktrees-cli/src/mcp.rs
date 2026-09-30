@@ -112,6 +112,67 @@ const LATEST: &str = "2025-11-25";
 
 const EXIT_NEEDS_CONFIRM: i32 = 3;
 
+/// The first thing every session in a MANAGED repo reads (agent-guidance
+/// proposal §3.1; `Server::managed` decides which repos are). It is the RULE,
+/// and it has to stand alone in 247 chars of one line: Codex turns server
+/// instructions into a tool-namespace description and, when the tools are
+/// deferred, shows only its first line cut to 250 chars, the last 3 of them its
+/// own "..." (`MAX_NAMESPACE_DESCRIPTION_CHARS`, 0.157–0.159). "(main)" and not "a checkout you did not create": a lane
+/// moving its OWN place between branches (parking on a `-next` base) is the
+/// paradigm, not a breach of it.
+const GUIDANCE_HEAD: &str = "Managed by worktrees: every branch lives in its own PLACE (a git worktree \
+under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new \
+<branch>`. Never `git worktree add`; never switch branches in (main).";
+
+/// Where this server runs, for the instructions' role line. Resolved from
+/// what the server already holds (`here`, `in_run`), never from a tool
+/// argument.
+#[derive(Debug, PartialEq)]
+enum Role {
+    /// Held by an automation run: its cwd is `.worktrees/`, the container, so
+    /// it has no place to name.
+    Automation,
+    /// A worktree git registers for this repo that is not a place — where the
+    /// miss the proposal starts from did its work.
+    Stray,
+    Main,
+    Lane { slug: String, branch: Option<String> },
+    /// A directory under `.worktrees/` that git does not register: `ls` lists
+    /// it (stale), but it is no working tree to be told is "yours".
+    Unregistered { slug: String },
+    /// In the repo, but in no place and no worktree (`.worktrees/` itself,
+    /// outside a run). Nothing to say beyond the repository.
+    Unplaced,
+}
+
+fn role_line(role: &Role, root: &str) -> String {
+    match role {
+        Role::Automation => format!(
+            "You are an automation run for {root} (not in a place); do only what the brief asks and \
+             propose changes through the run's proposal output, never new places."
+        ),
+        Role::Stray => format!(
+            "This directory is a worktree of {root} but not a place. Move it under .worktrees/ with \
+             `git worktree move`, or create a place and continue there."
+        ),
+        Role::Main => format!(
+            "This repository is {root}. You are in (main), the base checkout: do branch work in a \
+             place, not here. A place with an agent running belongs to that agent; hand work over \
+             with a brief instead of editing its tree."
+        ),
+        Role::Lane { slug, branch } => format!(
+            "This repository is {root}. You are in the place {slug} (branch {}); this tree is yours. \
+             Do not edit other places' trees; talk to their agents instead.",
+            branch.as_deref().unwrap_or("detached")
+        ),
+        Role::Unregistered { slug } => format!(
+            "This repository is {root}. You are in .worktrees/{slug}, which is not a registered git \
+             worktree, so it is not a working place; create one with create_worktree and work there."
+        ),
+        Role::Unplaced => format!("This repository is {root}."),
+    }
+}
+
 /// Said by every tool that is somehow reached without a project. Also the
 /// `initialize` instructions' shorter cousin.
 const NO_PROJECT: &str = "not inside a git repository — this server has no project to manage";
@@ -860,12 +921,25 @@ impl Server {
                          manage and this server exposes no tools. Start a session inside a \
                          worktrees-managed repository to use it."
                     .to_string(),
-                Some(p) => format!(
+                // Today's neutral text, verbatim: the rule is a claim about THIS
+                // repo, and a user-scope server is launched in every repo a
+                // session opens.
+                Some(p) if !self.managed(p) => format!(
                     "Worktree management for the repository at {}. One git worktree per branch, \
                      one tmux session per worktree. Use list_places to see the current state. \
                      Agents in different places talk through report / messages / wait. \
                      {}",
                     p.main_root,
+                    if self.mutations {
+                        "Mutating tools are enabled; destructive ones need confirm: true."
+                    } else {
+                        "This server is read-only apart from note/pin/lifecycle metadata."
+                    }
+                ),
+                Some(p) => format!(
+                    "{GUIDANCE_HEAD} {} list_places shows every place; agents in different \
+                     places talk through report / messages / wait. {}",
+                    role_line(&self.role(p), &p.main_root),
                     if self.mutations {
                         "Mutating tools are enabled; destructive ones need confirm: true."
                     } else {
@@ -1784,6 +1858,40 @@ impl Server {
     /// the transport down with it.
     fn proj(&self) -> Result<&Project, String> {
         self.project.as_ref().ok_or_else(|| NO_PROJECT.to_string())
+    }
+
+    /// Whether this repo is worktrees-managed, i.e. whether the rule applies
+    /// to it (decision, 2026-09-30). The cheapest signals the CLI can see on
+    /// its own: a `.worktrees.toml` at the main root (one stat), or a
+    /// REGISTERED place under `.worktrees/` (one `git worktree list`, which
+    /// `role` needs anyway). A plain directory there is not enough, and the
+    /// app's project list is not readable from here. An automation run
+    /// implies management: runs are a worktrees feature.
+    fn managed(&self, project: &Project) -> bool {
+        self.in_run
+            || std::path::Path::new(&project.main_root).join(".worktrees.toml").is_file()
+            || project.place_index().iter().any(|p| !p.is_main && p.registered)
+    }
+
+    /// The role line's subject. A stray is checked BEFORE `caller_place`,
+    /// which answers `(main)` for a stray that lies inside the main checkout
+    /// (any path under the main root that is not under `.worktrees/`).
+    fn role(&self, project: &Project) -> Role {
+        if self.in_run {
+            return Role::Automation;
+        }
+        let Some(here) = self.here.as_ref() else { return Role::Unplaced };
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let here = canon(here);
+        if project.stray_worktrees().iter().any(|s| here.starts_with(canon(std::path::Path::new(&s.path)))) {
+            return Role::Stray;
+        }
+        match self.caller_place() {
+            Ok(p) if p.is_main => Role::Main,
+            Ok(p) if !p.registered => Role::Unregistered { slug: p.slug },
+            Ok(p) => Role::Lane { slug: p.slug, branch: p.branch },
+            Err(_) => Role::Unplaced,
+        }
     }
 
     /// The place this server is running FOR — the `from` of its messages.
@@ -3554,5 +3662,121 @@ mod tests {
             assert!(send_text_ok(lead).is_err(), "{lead:?} must be refused as well");
         }
         assert!(send_text_ok("run the tests; then report").is_ok());
+    }
+
+    /// The `initialize` instructions a server at `here` would send.
+    fn instructions_at(root: &std::path::Path, here: &std::path::Path, in_run: bool) -> String {
+        let mut s = server_in(root, here, true);
+        s.in_run = in_run;
+        let init = s
+            .handle_line(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }).to_string())
+            .expect("initialize is answered");
+        let v: serde_json::Value = serde_json::from_str(&init).unwrap();
+        v["result"]["instructions"].as_str().unwrap_or_default().to_string()
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .expect("git")
+            .success();
+        assert!(ok, "git {args:?} in {}", dir.display());
+    }
+
+    /// Agent-guidance proposal §3.1. Codex shows a deferred namespace's
+    /// description as its FIRST LINE, cut to 250 chars of which the last 3 are
+    /// its "..." suffix (`world_state/tools.rs`, 0.157–0.159) — so the rule
+    /// must be whole inside 247 chars of one line. Measured on the text a real
+    /// server sends, not on a constant that could drift from it.
+    #[test]
+    fn the_first_247_chars_of_the_instructions_carry_the_rule() {
+        let sc = scratch("guidance-head");
+        git_in(&sc.root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git_in(&sc.root, &["worktree", "add", "-q", ".worktrees/lane", "-b", "lane"]);
+        let text = instructions_at(&sc.root, &sc.root, false);
+        assert!(!text.contains('\n'), "Codex keeps only the first line: {text}");
+        let head: String = text.chars().take(247).collect();
+        for needle in ["PLACE", "create_worktree", "worktrees new", "Never `git worktree add`", "never switch branches in (main)"] {
+            assert!(head.contains(needle), "{needle:?} must be inside the first 250 chars:\n{head}");
+        }
+    }
+
+    /// §3.1's role lines: the server knows where it runs, so it says so. The
+    /// stray INSIDE the main root is the trap — `caller_place()` answers
+    /// `(main)` for it, because it lies under the main checkout's path.
+    #[test]
+    fn the_instructions_name_the_role_of_where_the_server_runs() {
+        let sc = scratch("guidance-roles");
+        git_in(&sc.root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git_in(&sc.root, &["worktree", "add", "-q", ".worktrees/lane", "-b", "lane"]);
+        let outside = sc.base.join("stray-out");
+        git_in(&sc.root, &["worktree", "add", "-q", outside.to_str().unwrap(), "-b", "stray-out"]);
+        git_in(&sc.root, &["worktree", "add", "-q", "inner-stray", "-b", "inner"]);
+        std::fs::create_dir_all(sc.root.join(".worktrees/plain-dir")).unwrap();
+        let root = std::fs::canonicalize(&sc.root).unwrap();
+        let r = root.display().to_string();
+
+        let main = instructions_at(&sc.root, &sc.root, false);
+        assert!(main.contains("You are in (main)"), "{main}");
+        assert!(main.contains(&r), "(main) names the repository: {main}");
+
+        let lane = instructions_at(&sc.root, &sc.root.join(".worktrees/lane"), false);
+        assert!(lane.contains("You are in the place lane (branch lane)"), "{lane}");
+
+        for stray in [outside.clone(), sc.root.join("inner-stray")] {
+            let t = instructions_at(&sc.root, &stray, false);
+            assert!(t.contains("is a worktree of") && t.contains("but not a place"), "{}: {t}", stray.display());
+            assert!(t.contains("git worktree move"), "{t}");
+            assert!(!t.contains("You are in (main)"), "a stray is not (main): {t}");
+        }
+
+        // A directory under `.worktrees/` that git does not register is listed
+        // as a place (`registered: false`) but is no working tree: it must not
+        // be told "this tree is yours".
+        let plain = instructions_at(&sc.root, &sc.root.join(".worktrees/plain-dir"), false);
+        assert!(plain.contains("plain-dir") && plain.contains("not a registered git worktree"), "{plain}");
+        assert!(!plain.contains("this tree is yours"), "{plain}");
+
+        // A run's cwd is the container, `.worktrees/`, which is no place.
+        let run = instructions_at(&sc.root, &sc.root.join(".worktrees"), true);
+        assert!(run.contains("You are an automation run for") && run.contains("(not in a place)"), "{run}");
+        assert!(!run.contains("You are in"), "{run}");
+
+        // Every role keeps the shared head first and the mutation tail last.
+        for t in [&main, &lane, &run] {
+            assert!(t.starts_with("Managed by worktrees:"), "{t}");
+            assert!(t.ends_with("destructive ones need confirm: true."), "{t}");
+        }
+    }
+
+    /// Decision (agent-guidance, 2026-09-30): the rule goes ONLY to repos that
+    /// are worktrees-managed. A user-scope server is launched in every repo a
+    /// session opens; telling an unrelated project "Managed by worktrees" and
+    /// "never switch branches in (main)" would be false there. The signal is a
+    /// registered place under `.worktrees/`, or a `.worktrees.toml`.
+    #[test]
+    fn only_a_managed_repo_is_told_the_rule() {
+        let sc = scratch("guidance-managed");
+        git_in(&sc.root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let bare = instructions_at(&sc.root, &sc.root, false);
+        assert!(bare.starts_with("Worktree management for the repository at "), "unmanaged keeps today's text: {bare}");
+        assert!(!bare.contains("Managed by worktrees") && !bare.contains("You are in"), "{bare}");
+
+        // A plain directory under .worktrees/ is not a place git knows: still unmanaged.
+        std::fs::create_dir_all(sc.root.join(".worktrees/scratch")).unwrap();
+        assert!(instructions_at(&sc.root, &sc.root, false).starts_with("Worktree management"));
+
+        std::fs::write(sc.root.join(".worktrees.toml"), "# per-project setup\n").unwrap();
+        let toml = instructions_at(&sc.root, &sc.root, false);
+        assert!(toml.starts_with("Managed by worktrees:"), ".worktrees.toml alone is enough: {toml}");
+        std::fs::remove_file(sc.root.join(".worktrees.toml")).unwrap();
+
+        git_in(&sc.root, &["worktree", "add", "-q", ".worktrees/lane", "-b", "lane"]);
+        let placed = instructions_at(&sc.root, &sc.root, false);
+        assert!(placed.starts_with("Managed by worktrees:"), "a registered place is enough: {placed}");
     }
 }

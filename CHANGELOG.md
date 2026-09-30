@@ -3,6 +3,25 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Agents are told to do their branch work in a place.** The worktrees MCP
+  server's instructions, the one text every connected session reads, used
+  to describe the tools and say nothing about the agent's own work. An
+  orchestrator in `(main)` would then `git checkout -b` there, or
+  `git worktree add` into a scratch directory, with the tools connected the
+  whole time. They now open with the rule: work in a place (`create_worktree`
+  or `worktrees new`), never `git worktree add`, never switch branches in
+  `(main)`. The rule fits in the first 250 characters, which is all Codex shows
+  when the tools are deferred. A second line says where the session is:
+  `(main)`, its own place, an automation run, or a worktree that is not a
+  place, with how to get it back into one. Only worktrees-managed repos (one
+  with a registered place under `.worktrees/`, or a `.worktrees.toml`) get
+  this; every other repo keeps the old text. Sessions pick it up in a new
+  conversation; a resumed Claude conversation replays the prompt it started
+  with.
+
 ## [0.34.1] - 2026-09-30
 
 ### Fixed
