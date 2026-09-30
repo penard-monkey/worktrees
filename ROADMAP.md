@@ -5,17 +5,6 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
-- **pi 0.99.1 ships MCP (`pi mcp`), so the pi proposal's §4.1 is stale.**
-  The proposal (researched on 0.87.1) says pi has no MCP in core and plans
-  phase 3's bus around CLI verbs plus a worktrees-owned skill or extension.
-  0.99.1's `--help` lists `pi mcp <command>` ("Check MCP servers, sign in to or
-  out of OAuth servers"). Before phase 3 is planned, re-research: where pi
-  reads its MCP config from (user vs project, and whether a repo can supply
-  servers — ADR 0001), and whether the user-scope `worktrees mcp` could serve
-  a pi lane directly the way it serves Claude and Codex. Phase 3's `send` to
-  pi and the Plan tab's paste into pi (both refused by name in phase 2) wait
-  on this. See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
-
 - **The pi app surfaces have never been seen in WKWebView.** The model picker
   (a `<select>` under the harness segment), the Switch agent sheet, the Launch
   anyway dialog and Settings → pi were driven only in headless Chromium
