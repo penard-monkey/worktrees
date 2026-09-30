@@ -11,6 +11,22 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   Codex and opencode all speak MCP, so it was dropped (pi-harness.md §4.6).
   Revisit only for a harness that has a shell but no MCP client.
 
+- **`worktrees mcp` bounds its WHOLE stdin at 8 MiB, not each line.**
+  `cmd_mcp` reads `stdin.lock().take(MAX_LINE)` once, so a long session that
+  sends 8 MiB in total gets a silent EOF — the server exits as if the client
+  hung up. The comment beside it says the intent was a per-line cap (against
+  a client that never sends a newline). Pre-existing; found in the #374
+  review. Bound each line instead (a `take` per `read_line`, or a capped
+  `read_until`). See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+
+- **Protect-ours is launch-time only.** The check that refuses `--approve`
+  to a place whose `.pi/mcp.json` defines `worktrees` runs when worktrees
+  launches pi. In a lane already launched with `--approve`, `/reload` makes
+  pi re-read the project's `mcp.json`, so a branch that later gains such a
+  file replaces the tools without a relaunch. Closing that needs pi's side
+  (an extension answering `project_trust`, or pi refusing a project entry
+  that shadows a user one); `docs/pi-manual-checks.md` §9 says so.
+
 - **The pi app surfaces have never been seen in WKWebView.** The model picker
   (a `<select>` under the harness segment), the Switch agent sheet, the Launch
   anyway dialog and Settings → pi (since phase 3 also its Worktrees tools

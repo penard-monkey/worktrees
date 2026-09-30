@@ -186,6 +186,9 @@ wt doctor --pi
       `worktrees` server launches with `--no-approve`, the launch prints the
       "WITHOUT --approve" warning, and pi does not start the repo's server
       (make its command `touch` a marker file).
+- [ ] Know the limit: that check runs at LAUNCH. In a lane already running
+      with `--approve`, a `.pi/mcp.json` that appears later is picked up by
+      pi's `/reload` (ROADMAP).
 
 ## 10. The worktrees tools in pi
 

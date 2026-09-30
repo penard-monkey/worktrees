@@ -122,8 +122,11 @@ for (const o of every) {
     && !(o.id === "mcp-server" && read("../src/McpPanel.tsx").includes(`data-focus="${o.to.focus}"`))
     // The pi category mounts PiPanel whole (`{cat === "pi" && <PiPanel`), and
     // PiPanel renders the section: both halves, or the link lands nowhere.
+    // …and PiMcpSection must PUT the prop on its section: a literal in
+    // PiPanel alone passes even if the component drops it on the floor.
     && !(o.id === "pi-mcp" && sheetSrc.includes(`{cat === "pi" && <PiPanel`)
-      && read("../src/PiPanel.tsx").includes(`data-focus="${o.to.focus}"`))) {
+      && read("../src/PiPanel.tsx").includes(`data-focus="${o.to.focus}"`)
+      && /<section[^>]*data-focus=\{focusId\}/.test(read("../src/PiMcpPanel.tsx")))) {
     fail(`${o.id}: the "${o.to.cat}" category's render carries no data-focus="${o.to.focus}" — the deep link opens the category and highlights nothing`);
   } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);

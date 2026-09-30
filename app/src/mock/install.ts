@@ -2592,11 +2592,16 @@ Phase 3: Frontend pane and mock harness
           node_floor: "22.19.0", problem: null,
         },
         trust: piTrust, allowed: [...piAllowed], repo_root: root, repo_allowed: !!root && piAllowed.has(root),
-        // `?pitrust=trusted|untrusted` stands in for pi's own trust.json.
+        // `?pitrust=trusted|untrusted` stands in for pi's own trust.json;
+        // `?pitrust=shadowed` for a .pi/mcp.json that defines `worktrees`
+        // (pi's file trusting the repo too, so the veto is visible).
         launch: root ? (() => {
-          const own = new URLSearchParams(location.search).get("pitrust");
+          const want = new URLSearchParams(location.search).get("pitrust");
+          const shadowed = want === "shadowed";
+          const own = shadowed ? "trusted" : want;
           const pi_entry = own ? { path: "/Users/demo/workspace", trusted: own === "trusted" } : null;
           const allowed = piAllowed.has(root);
+          if (shadowed) return { flag: "--no-approve", source: "shadowed", pi_entry, shadowed: true, would_approve: true };
           const [flag, source] = allowed ? ["--approve", "allowance"]
             : own === "trusted" ? ["--approve", "pi-trusted"]
             : own === "untrusted" ? ["--no-approve", "pi-untrusted"]

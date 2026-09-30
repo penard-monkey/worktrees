@@ -18,8 +18,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **`send` types into pi.** The attributed text is typed into the lane's
   prompt and confirmed: when pi is idle, by the message landing in its
   session; when pi is working, by it appearing in pi's `Steering:` queue,
-  which delivers it when the current step ends (the reply says `queued`). pi's
-  trust prompt is never typed into.
+  which delivers it when the current step ends (the reply says `queued`,
+  and warns that pi keeps that queue in memory, so a pi that exits first
+  loses it). pi's trust prompt is never typed into, and on a narrow pane a
+  queued line only counts once the sender's place name is visible, so two
+  senders are never mistaken for each other.
 - **Settings → pi → Worktrees tools** sets it up, repairs it or removes it
   (the Codex panel's shape), says which exposure pi uses, and reminds you
   that running sessions need `/reload`. The What's-new sheet and the gear dot
@@ -49,6 +52,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   another place.
 
 ### Fixed
+- **An MCP server no longer outlives the session that started it.** When a
+  Claude or Codex session exits in the middle of a `wait`, the server now
+  stops at once instead of blocking for the rest of its timeout; a closed
+  input counts as a cancel.
+- **A worktree re-created under a removed one's name starts its pi fresh.**
+  pi's sessions for the removed worktree stay in the same folder; resuming
+  (or "Switch agent → pi") used to reopen that dead conversation and skip the
+  new brief. Only sessions newer than the worktree count now.
+- **pi no longer cancels long tool calls at 60 seconds.** Creating, running
+  or removing now tells pi it is still working, as `wait` already did, so a
+  call that is completing on disk is not reported as failed.
 - **Copy path, Copy branch and every other "Copy …" no longer fail with
   `NotAllowedError` on macOS 27.** The browser clipboard only accepts a write
   made during a click, and macOS 27's WebKit forgets the click whenever the
