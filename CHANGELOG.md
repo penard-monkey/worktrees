@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.34.1] - 2026-09-30
 
 ### Fixed
 - **A pi lane now shows its dot in the app.** The nav's green (working),
