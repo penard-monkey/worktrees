@@ -133,4 +133,15 @@ export type PiStatus = {
   allowed: string[];
   repo_root: string | null;
   repo_allowed: boolean;
+  /** How a pi lane in this repo is trusted, and why (`trust::pi_launch_trust`). */
+  launch?: PiLaunchTrust | null;
+  pi_trust_path?: string;
+};
+
+export type PiLaunchTrust = {
+  flag: "--approve" | "--no-approve" | null;
+  source: "shadowed" | "allowance" | "pi-trusted" | "pi-untrusted" | "never" | "ask";
+  pi_entry: { path: string; trusted: boolean } | null;
+  shadowed: boolean;
+  would_approve: boolean;
 };

@@ -598,6 +598,12 @@ pub fn pi_state(turn: Option<&PiTurn>, screen: Option<PiScreen>) -> (State, Opti
     }
 }
 
+/// What pi's pane in `session` shows right now (`capture`): the Plan tab asks
+/// before pasting, because Enter on pi's trust modal trusts the repo.
+pub fn screen_of(session: &str) -> Option<PiScreen> {
+    capture(session)
+}
+
 /// Capture one pi pane: its current command, then its screen, in ONE `tmux`
 /// call. `None` when tmux could not answer.
 fn capture(session: &str) -> Option<PiScreen> {

@@ -11,6 +11,7 @@ import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import PiPanel from "./PiPanel";
+import type { PiMcpStatus } from "./PiMcpPanel";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { clampNav, clampRem, clampTerm, clampZoom, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
@@ -80,6 +81,9 @@ function agentSetupLabel(state: string | null): string {
     stale: "Needs repair",
     foreign: "Name in use",
     "cli-missing": "Worktrees CLI missing",
+    disabled: "Disabled in pi",
+    unreadable: "Config unreadable",
+    "pi-missing": "pi not installed",
     "not-applicable": "Unavailable",
   } as Record<string, string>)[state] ?? state;
 }
@@ -332,6 +336,9 @@ export function SettingsSheet({
   onCodexMcpChanged,
   codexMcpOfferPending,
   onSilenceCodexMcpOffer,
+  onPiMcpChanged,
+  piMcpOfferPending,
+  onSilencePiMcpOffer,
   userSkills,
   onUserSkillsChanged,
   skillsOfferPending,
@@ -369,6 +376,10 @@ export function SettingsSheet({
   onCodexMcpChanged: (s: CodexMcpStatus) => void;
   codexMcpOfferPending: boolean;
   onSilenceCodexMcpOffer: () => void;
+  /// pi's twins (offers.ts `pi-mcp`); Settings → pi's section probes for itself.
+  onPiMcpChanged: (s: PiMcpStatus) => void;
+  piMcpOfferPending: boolean;
+  onSilencePiMcpOffer: () => void;
   userSkills: UserSkill[] | null;
   onUserSkillsChanged: (s: UserSkill[]) => void;
   skillsOfferPending: boolean;
@@ -385,11 +396,15 @@ export function SettingsSheet({
   const [cat, setCat] = useState<CatId>("appearance");
   useEffect(() => { if (open) setCat(at?.cat ?? "appearance"); }, [open, at]);
   const [codexMcpStatus, setCodexMcpStatus] = useState<CodexMcpStatus | null>(null);
+  const [piMcpStatus, setPiMcpStatus] = useState<PiMcpStatus | null>(null);
   useEffect(() => {
     if (!open || cat !== "commands") return;
     let alive = true;
     invoke<CodexMcpStatus>("codex_mcp_status")
       .then((status) => { if (alive) setCodexMcpStatus(status); })
+      .catch((e) => { if (alive) onReport(String(e)); });
+    invoke<PiMcpStatus>("pi_mcp_status")
+      .then((status) => { if (alive) setPiMcpStatus(status); })
       .catch((e) => { if (alive) onReport(String(e)); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- probe on entry, not every App render
@@ -792,7 +807,9 @@ export function SettingsSheet({
             offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />
           </>}
 
-          {cat === "pi" && <PiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport} />}
+          {cat === "pi" && <PiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport}
+            onMcpStatus={(s) => { setPiMcpStatus(s); onPiMcpChanged(s); }}
+            mcpOfferPending={piMcpOfferPending} onSilenceMcpOffer={onSilencePiMcpOffer} />}
 
           {cat === "commands" && <>
           <section className="setting">
@@ -809,11 +826,12 @@ export function SettingsSheet({
           </section>
           <section className="setting">
             <label>Worktrees tools for agents</label>
-            <div className="hint">Both providers can be connected at the same time. Their MCP setup is independent of the default agent.</div>
-            <div className="hint">Claude: {agentSetupLabel(mcpStatus?.state ?? null)} · Codex: {agentSetupLabel(codexMcpStatus?.state ?? null)}</div>
+            <div className="hint">Every agent can be connected at the same time. Their MCP setup is independent of the default agent.</div>
+            <div className="hint">Claude: {agentSetupLabel(mcpStatus?.state ?? null)} · Codex: {agentSetupLabel(codexMcpStatus?.state ?? null)} · pi: {agentSetupLabel(piMcpStatus?.state ?? null)}</div>
             <div className="ver-actions">
               <button className="ctrl sm" onClick={() => setCat("claude")}>Configure Claude</button>
               <button className="ctrl sm" onClick={() => setCat("codex")}>Configure Codex</button>
+              <button className="ctrl sm" onClick={() => setCat("pi")}>Configure pi</button>
             </div>
           </section>
           <section className="setting">

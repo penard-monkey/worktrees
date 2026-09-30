@@ -85,11 +85,23 @@ if (ids({ userSkills: skills("linked", "conflict") }).includes("codex-skills")) 
 if (ids({ userSkills: null }).length !== 0 || ids({ userSkills: [] }).length !== 0) fail("no skills data must offer nothing");
 else ok("no skills data offers nothing");
 
+// ── 1c. the pi offer: same rule; without pi the state is `pi-missing` ──────
+const pi = (state, bin = "/Users/me/.local/bin/pi") => ({ state, pi_bin: bin, worktrees_bin: "/w",
+  entry: null, command: null, config_path: "/x/.pi/agent/mcp.json" });
+const PI = ["installed", "read-only", "disabled", "stale", "foreign", "unreadable", "absent", "cli-missing", "pi-missing"];
+const piOffering = PI.filter((st) => ids({ piMcp: pi(st) }).includes("pi-mcp"));
+if (piOffering.join(",") !== "absent") {
+  fail(`pi states that offer: [${piOffering}] — expected exactly [absent]. disabled/unreadable are problems for Settings → pi.`);
+} else ok("pi-mcp: only `absent` offers");
+if (ids({ piMcp: pi("absent", null) }).includes("pi-mcp")) fail("pi-mcp offered with no pi installed");
+else ok("pi-mcp needs pi present");
+if (ids({ piMcp: null }).length !== 0) fail("an unknown pi status must offer nothing");
+
 // ── 2. an offer's action is a DESTINATION, not a deed ──────────────────────
 // Every offer id, not just the first: a new offer whose deep link lands
 // nowhere is the same bug as the old one.
 const every = pendingOffers(
-  { mcp: status("absent"), codexMcp: codex("absent"), userSkills: skills("missing") }, {});
+  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing") }, {});
 const sheetSrc = read("../src/SettingsSheet.tsx");
 // The render of ONE category: from its `{cat === "x" && <>` to the next
 // category's. A data-focus found anywhere in src/ proves nothing about where
@@ -107,17 +119,21 @@ for (const o of every) {
   else if (!catSlice(o.to.cat).includes(`data-focus="${o.to.focus}"`)
     // mcp-server's section predates the call-site convention; section 2 below
     // pins it in McpPanel, which only the claude category mounts.
-    && !(o.id === "mcp-server" && read("../src/McpPanel.tsx").includes(`data-focus="${o.to.focus}"`))) {
+    && !(o.id === "mcp-server" && read("../src/McpPanel.tsx").includes(`data-focus="${o.to.focus}"`))
+    // The pi category mounts PiPanel whole (`{cat === "pi" && <PiPanel`), and
+    // PiPanel renders the section: both halves, or the link lands nowhere.
+    && !(o.id === "pi-mcp" && sheetSrc.includes(`{cat === "pi" && <PiPanel`)
+      && read("../src/PiPanel.tsx").includes(`data-focus="${o.to.focus}"`))) {
     fail(`${o.id}: the "${o.to.cat}" category's render carries no data-focus="${o.to.focus}" — the deep link opens the category and highlights nothing`);
   } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
   // dismissal, per offer
-  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), userSkills: skills("missing") },
+  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing") },
     dismissPatch(o, {})).some((x) => x.id === o.id)) fail(`${o.id}: dismissing it did not silence it`);
   else ok(`${o.id}: dismissal silences its own fingerprint (${JSON.stringify(o.fingerprint)})`);
 }
-if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,codex-skills") {
-  fail(`expected all three offers, got [${every.map((o) => o.id)}]`);
+if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills") {
+  fail(`expected all four offers, got [${every.map((o) => o.id)}]`);
 }
 // The skills fingerprint is the SET of unlinked skills: a new one is a new question.
 {
@@ -207,9 +223,12 @@ if (!feed) {
 // …and the CONTEXT: an offer whose input is never fed can never render. The two
 // Codex inputs must be the machine-level probes, not some project's status.
 const ctxCall = app.match(/pendingOffers\(\{([^}]*)\}/);
-if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1])) {
-  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp and userSkills must both reach it`);
-} else ok("pendingOffers is fed mcp + codexMcp + userSkills");
+if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1])) {
+  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp and userSkills must all reach it`);
+} else ok("pendingOffers is fed mcp + codexMcp + piMcp + userSkills");
+if (!/invoke<PiMcpStatus>\("pi_mcp_status"\)\.then\(setPiMcp\)/.test(app)) {
+  fail("App.tsx no longer probes pi_mcp_status straight into the offer input");
+} else ok("the pi offer input comes from a machine-level probe");
 if (!/invoke<CodexMcpStatus>\("codex_mcp_status"\)\.then\(setCodexMcp\)/.test(app)
   || !/invoke<UserSkill\[\]>\("agent_user_skills"\)\.then\(setUserSkills\)/.test(app)) {
   fail("App.tsx no longer probes codex_mcp_status / agent_user_skills straight into the offer inputs");
@@ -229,6 +248,11 @@ if (!/offerPending/.test(codexPanel) || !/onSilenceOffer/.test(codexPanel)) fail
 else ok("Settings → Codex (MCP) can end its suggestion on demand");
 if (!/function UserSkillsSection[\s\S]*offerPending[\s\S]*onSilenceOffer/.test(agentSrc)) fail("UserSkillsSection has no offerPending/onSilenceOffer");
 else ok("Settings → Codex (skills) can end its suggestion on demand");
+const piPanel = read("../src/PiMcpPanel.tsx");
+if (!/offerPending/.test(piPanel) || !/onSilenceOffer/.test(piPanel)) fail("PiMcpSection has no offerPending/onSilenceOffer");
+else ok("Settings → pi can end its suggestion on demand");
+if (!/piMcpOfferPending=\{!!piMcpOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the pi offer is pending");
+else ok("Settings is told whether the pi offer is pending");
 if (!/codexMcpOfferPending=\{!!codexMcpOffer\}/.test(app) || !/skillsOfferPending=\{!!skillsOffer\}/.test(app)) {
   fail("App.tsx does not tell Settings which Codex offers are pending");
 } else ok("Settings is told which Codex offers are pending");

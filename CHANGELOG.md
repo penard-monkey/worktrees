@@ -20,6 +20,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   session; when pi is working, by it appearing in pi's `Steering:` queue,
   which delivers it when the current step ends (the reply says `queued`). pi's
   trust prompt is never typed into.
+- **Settings → pi → Worktrees tools** sets it up, repairs it or removes it
+  (the Codex panel's shape), says which exposure pi uses, and reminds you
+  that running sessions need `/reload`. The What's-new sheet and the gear dot
+  suggest it once pi is installed and the tools are not, and "Stop suggesting
+  this" ends that. Settings → Commands now lists pi beside Claude and Codex.
+- **The Plan tab's "Generate plan" works in a pi lane.** It pastes into pi as
+  it does into Claude, unless pi is showing its trust prompt, which it
+  refuses and names, since Enter there trusts the repo.
 
 ### Changed
 - **pi's own trust decisions now count.** A place pi's `trust.json` trusts —
@@ -27,7 +35,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `--approve`; one pi explicitly distrusts launches with `--no-approve`. The
   file is read, never written. `worktrees trust pi` still allows a repo over
   pi's own distrust, and `doctor --pi` says which rule applied and which
-  entry matched.
+  entry matched, and so does Settings → pi, for the project in focus.
 - **A place that would replace the worktrees tools is never approved.** If a
   place's `.pi/mcp.json` defines its own `worktrees` server, pi launches there
   with `--no-approve` whatever else allows the repo, and the launch says why:

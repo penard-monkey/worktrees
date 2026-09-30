@@ -26,6 +26,7 @@ import {
 } from "./ProjectSheet";
 import type { AgentSetupStatus, UserSkill } from "./AgentSetup";
 import type { CodexMcpStatus } from "./CodexMcpPanel";
+import type { PiMcpStatus } from "./PiMcpPanel";
 import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTodos";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
@@ -3704,8 +3705,10 @@ function App() {
   // read from a project, so neither offer can grow a project precondition.
   const [codexMcp, setCodexMcp] = useState<CodexMcpStatus | null>(null);
   const [userSkills, setUserSkills] = useState<UserSkill[] | null>(null);
+  const [piMcp, setPiMcp] = useState<PiMcpStatus | null>(null);
   useEffect(() => {
     invoke<CodexMcpStatus>("codex_mcp_status").then(setCodexMcp).catch(() => setCodexMcp(null));
+    invoke<PiMcpStatus>("pi_mcp_status").then(setPiMcp).catch(() => setPiMcp(null));
     invoke<UserSkill[]>("agent_user_skills").then(setUserSkills).catch(() => setUserSkills(null));
   }, []);
 
@@ -3714,8 +3717,8 @@ function App() {
   // answer, which is how the Home card and the Settings panel came to disagree
   // about whether there was anything to say.
   const offers = useMemo(
-    () => pendingOffers({ mcp: mcpStatus, codexMcp, userSkills }, settings.offers_dismissed ?? {}),
-    [mcpStatus, codexMcp, userSkills, settings.offers_dismissed],
+    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, userSkills }, settings.offers_dismissed ?? {}),
+    [mcpStatus, codexMcp, piMcp, userSkills, settings.offers_dismissed],
   );
   const takeOffer = useCallback((o: Offer) => {
     setSettingsAt(o.to);
@@ -3733,6 +3736,7 @@ function App() {
   const mcpOffer = offers.find((o) => o.id === "mcp-server") ?? null;
   const codexMcpOffer = offers.find((o) => o.id === "codex-mcp") ?? null;
   const skillsOffer = offers.find((o) => o.id === "codex-skills") ?? null;
+  const piMcpOffer = offers.find((o) => o.id === "pi-mcp") ?? null;
 
   // The rail dot already means "something in Settings needs you" (an update).
   // An unacted offer is the same claim, so it lights the same dot rather than
@@ -7659,6 +7663,8 @@ function App() {
         mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)}
         onCodexMcpChanged={setCodexMcp}
         codexMcpOfferPending={!!codexMcpOffer} onSilenceCodexMcpOffer={() => codexMcpOffer && silenceOffer(codexMcpOffer)}
+        onPiMcpChanged={setPiMcp}
+        piMcpOfferPending={!!piMcpOffer} onSilencePiMcpOffer={() => piMcpOffer && silenceOffer(piMcpOffer)}
         userSkills={userSkills} onUserSkillsChanged={setUserSkills}
         skillsOfferPending={!!skillsOffer} onSilenceSkillsOffer={() => skillsOffer && silenceOffer(skillsOffer)} />
 
