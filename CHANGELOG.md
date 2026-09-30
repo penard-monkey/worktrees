@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [0.34.1] - 2026-09-30
+## [Unreleased]
 
 ### Changed
 - **Agents are told to do their branch work in a place.** The worktrees MCP
@@ -16,9 +16,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `(main)`. The rule fits in the first 250 characters, which is all Codex shows
   when the tools are deferred. A second line says where the session is:
   `(main)`, its own place, an automation run, or a worktree that is not a
-  place, with how to get it back into one. Sessions pick it up in a new
+  place, with how to get it back into one. Only worktrees-managed repos (one
+  with a registered place under `.worktrees/`, or a `.worktrees.toml`) get
+  this; every other repo keeps the old text. Sessions pick it up in a new
   conversation; a resumed Claude conversation replays the prompt it started
   with.
+
+## [0.34.1] - 2026-09-30
 
 ### Fixed
 - **A pi lane now shows its dot in the app.** The nav's green (working),

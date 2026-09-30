@@ -5,6 +5,14 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **A submodule checkout inside a lane misleads `Project::discover`.** From
+  inside one, `main_root` resolves to `.git/worktrees/<lane>/modules/…`
+  (pre-existing). Since agent-guidance phase 1 (#385), the MCP server started
+  there tells the agent a stray-worktree remedy (`git worktree move`) that
+  makes no sense for a submodule. The fix belongs in `discover`, not in the
+  instructions: resolve through `git rev-parse --show-superproject-working-tree`
+  first.
+
 - **Hand-test the wheel in the real app (#373).** It shipped on the check
   script, Rust tests and a throwaway-tmux probe; no one has scrolled a pane in
   the app. In `sandbox.sh --app`, on a pi lane and on a plain shell pane:

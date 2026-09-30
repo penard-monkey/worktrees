@@ -20,6 +20,14 @@
 #   - WORKTREES_AI_CMD=none, so create_worktree never starts a nested agent;
 #   - --strict-mcp-config, so your own MCP servers are not loaded;
 #   - a tool allowlist: file tools, git, worktrees, and the worktrees MCP tools.
+# $EVAL_ROOT is NOT the whole footprint: `claude -p` still writes each run's
+# transcript to ~/.claude/projects/<mangled repo path>/ and a project entry
+# for each throwaway repo into ~/.claude.json. Delete the transcripts by hand
+# if you want them gone; ~/.claude.json is claude's, and nothing here writes it.
+#
+# The template repo is a MANAGED one (it has one registered place,
+# .worktrees/other-work): the rule is sent only to managed repos, so an
+# unmanaged template would measure the neutral text in every arm.
 set -euo pipefail
 
 EVAL_ROOT="${EVAL_ROOT:-$HOME/.cache/worktrees/worktrees/agent-guidance-eval}"
@@ -111,6 +119,7 @@ run_one() {
   printf 'def greet(name):\n    return "Helo, " + name\n' > "$d/repo/greet.py"
   git -C "$d/repo" add -A
   git -C "$d/repo" -c user.email=eval@example.invalid -c user.name=eval commit -qm init
+  git -C "$d/repo" worktree add -q .worktrees/other-work -b other-work
   local env_json cmd args
   env_json="\"TMUX_TMPDIR\":\"$TMUX_DIR\",\"WORKTREES_AI_CMD\":\"none\",\"WORKTREES_PREFIX\":\"ev$2\""
   if [ -n "$instr" ]; then
@@ -126,7 +135,7 @@ run_one() {
       claude -p "$PROMPT" --mcp-config "$d/mcp.json" --strict-mcp-config --max-turns 30 \
       --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(worktrees:*),Bash(ls:*),Bash(cat:*),Bash(cd:*),mcp__worktrees__*" \
       --output-format stream-json --verbose < /dev/null > "$d/stream.jsonl" 2> "$d/stderr.txt" || true
-    { git worktree list; echo; git branch; } > "$d/state.txt" 2>&1
+    { git worktree list | grep -v '/.worktrees/other-work '; echo; git branch; } > "$d/state.txt" 2>&1
   )
 }
 

@@ -56,6 +56,25 @@ Taken on 2026-09-30, after the review:
   Settings,** not part of AI profiles. The after-update offer (§4.5) links
   there.
 
+Taken on 2026-09-30, reviewing phase 1 (#385):
+
+- **The rule goes only to worktrees-managed repos.** The server is installed
+  at user scope, so it runs in every repo a session opens. Telling an
+  unrelated project "Managed by worktrees … never switch branches in (main)"
+  would be false there.
+  - **The signal (`Server::managed`):** a `.worktrees.toml` at the main root,
+    or at least one **registered** place under `.worktrees/`. The first costs
+    one stat. The second is one `git worktree list`, which the role line
+    needs anyway. An automation run also counts, since runs are a worktrees
+    feature.
+  - **Not signals:** a plain directory under `.worktrees/`, and the app's
+    project list, which the CLI cannot read.
+  - Every other repo keeps today's neutral text, verbatim. Both sides are
+    tested.
+  - **Consequence:** a repo becomes "managed" at its first place. Before
+    that, and in a repo whose only extra worktree is a stray, the neutral
+    text is what a session sees.
+
 ---
 
 ## 0. The answer in one screen
@@ -217,6 +236,9 @@ allows it for the same reason.
   session gets the generic text: "This directory is a worktree of `<root>`
   but not a place. Move it under .worktrees/ with `git worktree move`, or
   create a place and continue there."
+
+**Only in managed repos** (Decisions, #385): an unmanaged repo keeps
+today's text, with no head and no role line.
 
 **Tail (unchanged in meaning):** "list_places shows every place; agents talk
 through report / messages / wait. Mutating tools are enabled; destructive ones
@@ -591,6 +613,26 @@ isolation as §7.1 and **no proxy**: each arm's server is a real binary.
 **[observed]**, Opus 5.5, Claude Code 2.1.285. The shorter head, which §7.1
 had not evaluated, holds at 5 of 5. The limits in §7.2 still apply.
 
+**Again on a managed template** (after the managed-only decision). The
+template gains one registered place, `.worktrees/other-work`. Otherwise
+arm B would, correctly, get the neutral text.
+
+| Arm | Server | Runs | Place via the tooling | `git worktree add` by hand | `checkout -b` in `(main)` | Mean cost |
+|---|---|---|---|---|---|---|
+| A2 | shipped v0.34.0 | 5 | **0** | 3 (all into `.worktrees/fix-typos`) | 2 | $0.22 |
+| B2 | this build | 5 | **5** | 0 | 0 | $0.28 |
+
+**[observed]**. With an existing place to copy, the baseline stopped moving
+`(main)` in 3 of the 5 runs, and instead hand-made a worktree under
+`.worktrees/` with `git worktree add`:
+- `ls` lists such a tree as a place;
+- it has no tmux session and no brief;
+- it was made past the rule the head now states.
+
+It is closer to the original miss's *shape* (raw `git worktree add`) than
+§7.1's baseline was, but not its invisibility (the original went to a scratch
+dir). The candidate text still produced 5 of 5 through the tooling.
+
 ---
 
 ## 8. Phased plan
@@ -609,6 +651,9 @@ had not evaluated, holds at 5 of 5. The limits in §7.2 still apply.
   removed.
 - ~~`main-off-default` diag code; `warnings` on `LsJson`; a `place_status`
   line~~: dropped by Q1. `ls --json` is unchanged.
+- The rule and role line are sent only to managed repos (`Server::managed`,
+  see Decisions). A plain directory under `.worktrees/` that git does not
+  register gets its own line and is not told "this tree is yours".
 - `scripts/agent-guidance-eval.sh`, committed and re-run: arm A on the
   shipped binary (`~/.local/bin/worktrees`, v0.34.0) and arm B on the
   release build, with no proxy (§7.4).
