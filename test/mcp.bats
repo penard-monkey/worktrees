@@ -563,6 +563,11 @@ print(p["agent_state"], a["provider"], a["state"], a["last_done"], a["session"])
   [ -n "$typed" ]
   [ -n "$enter" ]
   [ "$typed" -lt "$enter" ]
+  # Each write leaves copy-mode first, or a pane the user scrolled back in the
+  # app eats the keys: the leave is logged on the line right before each one.
+  local leave='tmux copy-mode -q -t %0'
+  [ "$(sed -n "$((typed - 1))p" "$TMUX_LOG")" = "$leave" ]
+  [ "$(sed -n "$((enter - 1))p" "$TMUX_LOG")" = "$leave" ]
   # The log copy is RAW, and filed already-read for the recipient.
   local store="$REPO/.git/worktrees-messages"
   grep -q '"text":"hi"' "$store"/*.json

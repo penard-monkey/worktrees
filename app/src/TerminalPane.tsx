@@ -83,6 +83,10 @@ type Transport = {
   write(data: number[]): void;
   resize(cols: number, rows: number): void;
   close(): void;
+  /** Scroll the backend's own history by `lines` (< 0 = up). Only tmux has one
+   *  to scroll; a dock shell's history is xterm's, so it leaves this out and
+   *  xterm keeps the wheel. See `wheelToTmux`. */
+  wheel?(lines: number): Promise<unknown>;
 };
 
 const tmuxTransport = (session: string): Transport => {
@@ -95,6 +99,7 @@ const tmuxTransport = (session: string): Transport => {
     write: (data) => { if (id != null) invoke("term_write", { id, data }); },
     resize: (cols, rows) => { if (id != null) invoke("term_resize", { id, cols, rows }); },
     close: () => { if (id != null) invoke("term_close", { id }); id = null; },
+    wheel: (lines) => (id != null ? invoke("term_wheel", { id, lines }) : Promise.resolve()),
   };
 };
 
@@ -170,6 +175,73 @@ const RESIZE_SETTLE_MS = 80;
  *  rather than quietly truncating again. */
 const TERM_SCROLLBACK = 5000;
 
+/** Does this wheel event belong to tmux rather than to xterm?
+ *
+ *  xterm is attached to a tmux CLIENT, and the client always draws on the
+ *  alternate screen — so xterm itself never has scrollback here. With no mouse
+ *  mode on, xterm does what every terminal does for an alternate screen and
+ *  turns each wheel notch into ↑/↓ keys. That is right for a program that owns
+ *  the whole screen (less, vim) and wrong for one on the pane's MAIN screen —
+ *  pi and a plain shell, whose history lives in tmux's scrollback: pi reads ↑
+ *  as editor history, zsh as history recall. So every such wheel goes to the
+ *  backend, which looks at the pane and scrolls tmux history, or sends the same
+ *  arrows xterm would have (`wheel_plan` in lib.rs).
+ *
+ *  A pane that asked for the mouse (claude) is left alone: tmux passes that
+ *  request through to xterm, which then reports the wheel as mouse events and
+ *  the program scrolls itself. xterm consults this handler on that path too, so
+ *  the mode check is what keeps it working: xterm 5.5 registers TWO wheel
+ *  listeners, and while the one that makes arrows returns early when wheel
+ *  reporting is on (`Terminal.ts:802`), the reporting one's `sendEvent` asks
+ *  this handler first (`case 'wheel'`, `Terminal.ts:642`) — a `false` here
+ *  would swallow claude's scroll. A normal buffer (the dock's owned
+ *  shells) has scrollback of its own and keeps xterm's default. */
+function wheelToTmux(mouseTrackingMode: string, bufferType: string): boolean {
+  return mouseTrackingMode === "none" && bufferType === "alternate";
+}
+
+/** Whole lines in a wheel event, carrying the fraction to the next one (a
+ *  trackpad sends many small pixel deltas). Mirrors xterm's own
+ *  `Viewport.getLinesScrolled`, so a notch moves tmux history as far as it
+ *  would have moved xterm's. */
+function wheelLines(acc: number, deltaY: number, deltaMode: number, cellHeight: number, rows: number) {
+  let amount = deltaY;
+  if (deltaMode === 0) amount /= cellHeight > 0 ? cellHeight : 1; // DOM_DELTA_PIXEL
+  else if (deltaMode === 2) amount *= rows;                        // DOM_DELTA_PAGE
+  amount += acc;
+  const lines = Math.trunc(amount);
+  return { lines, acc: amount - lines };
+}
+
+/** At most one wheel invoke in flight; what arrives meanwhile is summed into
+ *  the next. A trackpad fling is ~60 events a second and each flush is two tmux
+ *  spawns, so an invoke per event would queue for seconds after the fingers
+ *  stop — the view still scrolling long after the gesture ended. Up and down
+ *  in the same window cancel, as they should. */
+function wheelPump(send: (lines: number) => Promise<unknown>) {
+  let pending = 0;
+  let busy = false;
+  // A failure repeats for every flush of the gesture that hit it (a session
+  // that went away, a mode tmux cannot scroll), so it is logged once, until a
+  // flush succeeds again. A warning: the cost is one wheel that did nothing.
+  let warned = false;
+  const flush = () => {
+    if (busy || pending === 0) return;
+    const n = pending;
+    pending = 0;
+    busy = true;
+    send(n)
+      .then(() => { warned = false; })
+      .catch((e) => {
+        if (warned) return;
+        warned = true;
+        invoke("log_event", { level: "warn", msg: `terminal wheel: ${e}` }).catch(() => {});
+      })
+      .finally(() => { busy = false; flush(); });
+  };
+  return (lines: number) => { pending += lines; flush(); };
+}
+
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
 function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number, focusEnabled: boolean) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -237,6 +309,23 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
 
     const tx = makeTransport();
     txRef.current = tx;
+
+    // The wheel, for the panes whose history is tmux's (see `wheelToTmux`).
+    if (tx.wheel) {
+      const pump = wheelPump(tx.wheel);
+      let acc = 0;
+      term.attachCustomWheelEventHandler((e) => {
+        if (!wheelToTmux(term.modes.mouseTrackingMode, term.buffer.active.type)) return true;
+        e.preventDefault();
+        // The cell height from the GRID: `.xterm-screen` is exactly rows × cell,
+        // where the host also carries its content-box padding (termfit-check).
+        const grid = term.element?.querySelector<HTMLElement>(".xterm-screen")?.clientHeight || host.clientHeight;
+        const r = wheelLines(acc, e.deltaY, e.deltaMode, grid / Math.max(term.rows, 1), term.rows);
+        acc = r.acc;
+        if (r.lines !== 0) pump(r.lines);
+        return false;
+      });
+    }
 
     let settle: ReturnType<typeof setTimeout> | undefined;
     const applySize = () => {
