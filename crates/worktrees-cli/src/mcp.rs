@@ -186,8 +186,13 @@ impl Default for Inflight {
 }
 
 impl Inflight {
+    /// This request was cancelled — or the client is GONE: stdin reached EOF.
+    /// Claude and Codex do not signal a server's process group when a session
+    /// exits, so without the second half a 120s `wait` kept a server with no
+    /// client alive to the end of it.
     fn cancelled(&self) -> bool {
-        self.id.as_ref().is_some_and(|id| lock(&self.cancels).cancelled.contains(&id_key(id)))
+        let c = lock(&self.cancels);
+        c.closed || self.id.as_ref().is_some_and(|id| c.cancelled.contains(&id_key(id)))
     }
 }
 
@@ -202,6 +207,8 @@ const PROGRESS_EVERY_MS: u64 = 15_000;
 struct Cancels {
     pending: std::collections::HashSet<String>,
     cancelled: std::collections::HashSet<String>,
+    /// stdin ended: every in-flight call is moot.
+    closed: bool,
 }
 
 fn lock(c: &std::sync::Mutex<Cancels>) -> std::sync::MutexGuard<'_, Cancels> {
@@ -232,6 +239,42 @@ fn note_incoming(line: &str, cancels: &std::sync::Mutex<Cancels>) {
         }
         _ => {}
     }
+}
+
+/// Run `f` while a thread sends `notifications/progress` for `token` every
+/// `every_ms` — for tools that block without a loop of their own to pulse
+/// from. `progress` is a number that strictly grows (seconds, or one more
+/// than the last). The thread is stopped and JOINED before this returns, so
+/// no progress can follow the response it belongs to. No token: no thread.
+fn with_heartbeat<T>(
+    token: Option<serde_json::Value>,
+    every_ms: u64,
+    notify: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let Some(token) = token else { return f() };
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let beat = std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let mut last = 0u64;
+        while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+            stopped.recv_timeout(std::time::Duration::from_millis(every_ms.max(1)))
+        {
+            last = (t0.elapsed().as_secs()).max(last + 1);
+            notify(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": { "progressToken": token, "progress": last, "message": "still working" }
+                })
+                .to_string(),
+            );
+        }
+    });
+    let out = f();
+    drop(stop);
+    let _ = beat.join();
+    out
 }
 
 /// Progress for one blocking call: a notification at most every `every_ms`,
@@ -596,6 +639,7 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
                 return;
             }
         }
+        lock(&cancels).closed = true;
     });
     for line in rx {
         let line = match line {
@@ -755,7 +799,13 @@ impl Server {
             "ping" => Ok(serde_json::json!({})),
             "tools/list" => Ok(serde_json::json!({ "tools": self.tools() })),
             "tools/call" => {
-                let result = self.call(params).map_err(|e| (-32602, e));
+                // `wait` pulses on its own loop; everything else that runs
+                // long (a create that fetches, a run, a remove) gets a
+                // heartbeat, so a client with a hard request timeout (pi: 60s)
+                // does not cancel a call that is still completing on disk.
+                let beat = if params["name"].as_str() == Some("wait") { None } else { self.inflight.token.clone() };
+                let (notify, every) = (self.inflight.notify.clone(), self.inflight.progress_every_ms);
+                let result = with_heartbeat(beat, every, notify, || self.call(params)).map_err(|e| (-32602, e));
                 result.map(|mut result| {
                     // A current server cannot observe the client's cached
                     // schema. Results do refresh, even when definitions don't.
@@ -3229,6 +3279,71 @@ mod tests {
         let progress: Vec<u64> = got.iter().map(|v| v["params"]["progress"].as_u64().expect("a number")).collect();
         assert_eq!(progress, vec![15, 30, 45, 60]);
         assert!(got.iter().all(|v| v["method"] == "notifications/progress" && v["params"]["progressToken"] == 7));
+    }
+
+    /// A client that exits closes stdin: that is a cancel of whatever is in
+    /// flight, so a 120s `wait` does not outlive its session.
+    #[test]
+    fn stdin_closing_stops_a_wait() {
+        let sc = scratch("msg-wait-eof");
+        let _wt = repo_with_worktree(&sc);
+        let mut main = server_in(&sc.root, &sc.root, false);
+        let cancels = main.inflight.cancels.clone();
+        main.inflight.progress_every_ms = 1;
+        // The reader thread's last act, as the first sleep ends.
+        main.inflight.notify = std::sync::Arc::new(move |_l: &str| {
+            lock(&cancels).closed = true;
+            true
+        });
+        let line = r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"wait","arguments":{"until":"message","timeout_s":30},"_meta":{"progressToken":1}}}"#;
+        let t0 = std::time::Instant::now();
+        let _ = main.handle_line(line);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "stopped at the next step, not at 30s");
+    }
+
+    /// The heartbeat: numeric, strictly growing, only with a token, and none
+    /// after the call returns (the thread is joined first).
+    #[test]
+    fn a_heartbeat_pulses_while_a_call_runs_and_never_after() {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let sink = got.clone();
+        let notify: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> = std::sync::Arc::new(move |l: &str| {
+            sink.lock().unwrap().push(serde_json::from_str(l).unwrap());
+            true
+        });
+        let out = with_heartbeat(Some(serde_json::json!("t")), 5, notify.clone(), || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            7
+        });
+        assert_eq!(out, 7);
+        let n = got.lock().unwrap().len();
+        assert!(n >= 3, "{n} pulses in 60ms at 5ms");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(got.lock().unwrap().len(), n, "nothing after the call returned");
+        let p: Vec<u64> = got.lock().unwrap().iter().map(|v| v["params"]["progress"].as_u64().unwrap()).collect();
+        assert!(p.windows(2).all(|w| w[1] > w[0]), "{p:?}");
+        assert!(got.lock().unwrap().iter().all(|v| v["params"]["progressToken"] == "t"));
+        got.lock().unwrap().clear();
+        with_heartbeat(None, 1, notify, || std::thread::sleep(std::time::Duration::from_millis(20)));
+        assert!(got.lock().unwrap().is_empty(), "no token, no pulses");
+    }
+
+    /// Wired: a non-`wait` tool call that carries a token gets the heartbeat.
+    #[test]
+    fn a_long_tool_call_carries_the_heartbeat() {
+        let sc = scratch("msg-heartbeat");
+        let _wt = repo_with_worktree(&sc);
+        let mut main = server_in(&sc.root, &sc.root, false);
+        let got = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let sink = got.clone();
+        main.inflight.progress_every_ms = 1;
+        main.inflight.notify = std::sync::Arc::new(move |_l: &str| {
+            *sink.lock().unwrap() += 1;
+            true
+        });
+        let line = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_places","arguments":{},"_meta":{"progressToken":"lp"}}}"#;
+        assert!(main.handle_line(line).is_some());
+        assert!(*got.lock().unwrap() >= 1, "list_places shells out to git for well over 1ms");
     }
 
     /// `stop` is asked after each sleep, so a cancelled wait ends at the next

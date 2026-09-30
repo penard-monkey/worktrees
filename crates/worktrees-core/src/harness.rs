@@ -111,7 +111,7 @@ impl SendOutcome {
         }
         match self {
             Self::Submitted => "Typed into pi's prompt and confirmed: it is in pi's session as a user message. Ask it to report back, then wait until: message.".into(),
-            Self::Queued => "pi was working, so it queued this as a steering message; it is delivered when the current step ends (it shows as \"Steering:\" above pi's prompt until then). Ask it to report back, then wait until: message.".into(),
+            Self::Queued => "pi was working, so it queued this as a steering message; it is delivered when the current step ends (it shows as \"Steering:\" above pi's prompt until then). pi keeps that queue in memory: if pi exits or is closed before delivering it, the text is lost and is NOT in messages — check the lane before assuming it arrived. Ask it to report back, then wait until: message.".into(),
             Self::Modal => "pi showed its project-trust prompt while sending. No Enter was pressed into it (Enter there trusts the repo). The text may be sitting in its input; the user has to answer the prompt. The message copy is left unread; check the composer and inbox before resending.".into(),
             other => other.note(),
         }
@@ -460,10 +460,18 @@ impl Adapter for Pi {
         true
     }
 
-    /// Whatever session the place actually has — worktrees' own, or one the
-    /// user started by hand in the pane (`pi::current_session`).
-    fn session_present(&self, _project: &Project, cwd: &str) -> bool {
-        crate::pi::current_session(&crate::pi::session_dir(cwd), cwd).is_some()
+    /// A place worktrees has launched pi in, with a session of its own
+    /// (`pi::current_session`: the one it actually has — ours, or one started
+    /// by hand since — and none older than the place). Without a launch of
+    /// ours there is nothing to RESUME: the brief opener has not run, and the
+    /// CLI's `new` and the app's "Switch agent → pi" must both give it one.
+    fn session_present(&self, project: &Project, cwd: &str) -> bool {
+        let slug = if std::path::Path::new(cwd) == std::path::Path::new(&project.main_root) {
+            "(main)".to_string()
+        } else {
+            cwd.rsplit('/').next().unwrap_or(cwd).to_string()
+        };
+        pi_generation(project, &slug) > 0 && crate::pi::current_session(&crate::pi::session_dir(cwd), cwd).is_some()
     }
 
     /// Only with a file to reopen: `--session-id` for a session pi never wrote
@@ -545,10 +553,13 @@ impl Adapter for Pi {
         crate::pi::running_model(canonical, path)
     }
 
-    /// No generation recorded: `prepare` bumps it only once a launch is
-    /// actually going ahead, so a create whose launch was refused leaves 0.
+    /// Nothing of ours to resume here, so the brief opener has not run in THIS
+    /// place: no generation recorded (`prepare` bumps it only once a launch is
+    /// going ahead, so a refused create leaves 0), or none of the place's
+    /// sessions — which is also the case for a slug re-used after `rm`, whose
+    /// declared record keeps the dead lane's generation.
     fn never_launched(&self, p: &Project, slug: &str) -> bool {
-        pi_generation(p, slug) == 0
+        !self.session_present(p, &p.place_dir(slug))
     }
 
     fn activity(&self, scan: &Scan, canonical: &str, path: &str) -> Option<Activity> {

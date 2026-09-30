@@ -105,7 +105,9 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   dir="$(pi_cmd feat-x | sed -n "s/.*--session-dir '\([^']*\)'.*/\1/p")"
   mkdir -p "$dir"
   # What `/new` or a hand-restarted pi writes: a uuid session, same pinned dir.
-  printf '{"type":"session","version":3,"id":"01a0efd0-566d-7028-bbf8-2f78723dc57e","timestamp":"2026-09-30T00:56:43.373Z","cwd":"%s"}\n{"type":"message","id":"a","timestamp":"2026-09-30T00:56:44.000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n' "$wt" > "$dir/2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl"
+  # Stamped NOW: a session older than the place is not the place's own.
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%S).000Z"; sleep 1
+  printf '{"type":"session","version":3,"id":"01a0efd0-566d-7028-bbf8-2f78723dc57e","timestamp":"%s","cwd":"%s"}\n{"type":"message","id":"a","timestamp":"%s","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n' "$now" "$wt" "$now" > "$dir/2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl"
   tmux kill-session -t 'repo-feat-x~agent~pi'
   run_wt open feat-x --ai pi -r --no-attach --no-spare
   [ "$status" -eq 0 ]
@@ -143,4 +145,23 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   run_wt trust pi
   run_wt new feat-z --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
   [[ "$(pi_cmd feat-z)" == *" --approve --session-id "* ]]
+}
+
+@test "a place re-created under a removed one's slug starts fresh with its brief, never resuming the dead lane" {
+  run_wt new feat-x --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  local dir; dir="$(pi_cmd feat-x | sed -n "s/.*--session-dir '\([^']*\)'.*/\1/p")"
+  local wt; wt="$(cd "$REPO/.worktrees/feat-x" && pwd -P)"
+  mkdir -p "$dir"
+  # The dead lane's conversation, left in the pinned session dir.
+  printf '{"type":"session","version":3,"id":"dead-lane","timestamp":"2020-01-01T00:00:00.000Z","cwd":"%s"}\n{"type":"message","id":"a","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"old"}]}}\n' "$wt" > "$dir/2020-01-01T00-00-00-000Z_dead-lane.jsonl"
+  tmux kill-session -t 'repo-feat-x~agent~pi'
+  run_wt rm feat-x -y
+  run_wt new feat-x --no-tmux --no-spare --brief "do y"
+  [ "$status" -eq 0 ]
+  run_wt open feat-x --ai pi -r --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  local c; c="$(pi_cmd feat-x)"
+  [[ "$c" != *"dead-lane"* ]]
+  [[ "$c" == *"'Read .planning/brief.md and begin.'"* ]]
 }

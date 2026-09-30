@@ -135,8 +135,8 @@ pub struct PiSession {
 
 /// A session file's header — its `id` and `cwd` — from the first line. A
 /// header never changes, so it is read once per path.
-fn header(path: &Path) -> Option<(String, String)> {
-    type Headers = HashMap<PathBuf, Option<(String, String)>>;
+fn header(path: &Path) -> Option<(String, String, Option<i64>)> {
+    type Headers = HashMap<PathBuf, Option<(String, String, Option<i64>)>>;
     static HEADERS: Mutex<Option<Headers>> = Mutex::new(None);
     let mut guard = HEADERS.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(HashMap::new);
@@ -160,13 +160,14 @@ fn first_line(path: &Path) -> Option<String> {
     line.ends_with('\n').then_some(line)
 }
 
-/// `{"type":"session", "id", "cwd", …}` → (id, cwd).
-pub fn parse_header(line: &str) -> Option<(String, String)> {
+/// `{"type":"session", "id", "cwd", "timestamp", …}` → (id, cwd, created).
+pub fn parse_header(line: &str) -> Option<(String, String, Option<i64>)> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("type")?.as_str()? != "session" {
         return None;
     }
-    Some((v.get("id")?.as_str()?.to_string(), v.get("cwd")?.as_str()?.to_string()))
+    let created = v.get("timestamp").and_then(|t| t.as_str()).and_then(crate::sysclock::parse_iso8601);
+    Some((v.get("id")?.as_str()?.to_string(), v.get("cwd")?.as_str()?.to_string(), created))
 }
 
 fn same_dir(a: &str, b: &str) -> bool {
@@ -174,19 +175,38 @@ fn same_dir(a: &str, b: &str) -> bool {
     a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
 }
 
+/// When the place's directory was made — `None` where the filesystem cannot
+/// say. A worktree removed and re-created under the same slug is a NEW place
+/// in the same pinned session dir.
+fn place_born(cwd: &str) -> Option<i64> {
+    let t = std::fs::metadata(cwd).ok()?.created().ok()?;
+    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
+}
+
 /// The place's current session in `dir`: among the `*.jsonl` whose header
-/// `cwd` is `cwd`, the one whose newest entry is newest. The header check keeps
-/// out a place whose path mangles to the same dir name (`/a-b` and `/a/b`).
+/// `cwd` is `cwd` and that were created no earlier than the place itself, the
+/// one whose newest entry is newest. The header check keeps out a place whose
+/// path mangles to the same dir name (`/a-b` and `/a/b`); the birth check keeps
+/// out a REMOVED place's sessions when the slug is used again — resuming those
+/// would reopen a dead lane's conversation and skip the new brief.
 /// `None` when pi has written nothing for this place yet.
 pub fn current_session(dir: &Path, cwd: &str) -> Option<PiSession> {
+    current_session_since(dir, cwd, place_born(cwd))
+}
+
+pub fn current_session_since(dir: &Path, cwd: &str, born: Option<i64>) -> Option<PiSession> {
     std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
         .filter_map(|path| {
-            let (id, hcwd) = header(&path)?;
-            same_dir(&hcwd, cwd).then(|| {
+            let (id, hcwd, created) = header(&path)?;
+            let current = match (born, created) {
+                (Some(b), Some(c)) => c >= b,
+                _ => true,
+            };
+            (current && same_dir(&hcwd, cwd)).then(|| {
                 let last = tail_info(&path).last_at.unwrap_or_default();
                 (last, path.file_name().map(|n| n.to_os_string()), PiSession { path, id })
             })
@@ -461,9 +481,23 @@ fn starts(text: &str, prefix: &str) -> bool {
 /// and the prefix need only agree as far as the SHORTER goes, and at least
 /// far enough into the header to be ours.
 fn steering_is(line: &str, prefix: &str) -> bool {
-    const MIN: usize = 24;
     let shown = normalize(line.trim_end().trim_end_matches("...").trim_end_matches('…'));
-    shown.chars().count() >= MIN.min(prefix.chars().count()) && (shown.starts_with(prefix) || prefix.starts_with(&shown))
+    shown.chars().count() >= sender_floor(prefix) && (shown.starts_with(prefix) || prefix.starts_with(&shown))
+}
+
+/// How much of a queued line must be visible before it can be called ours:
+/// the attributed header through the SENDER's name and its closing quote
+/// (`[worktrees: message from place "feat"`), so a line cut inside the name
+/// can never match another place's send — `"ab` is a prefix of `"abc"`.
+/// Without that header, 24 characters; never more than the prefix itself.
+fn sender_floor(prefix: &str) -> usize {
+    const KEY: &str = "message from place \"";
+    let floor = prefix
+        .find(KEY)
+        .map(|i| i + KEY.len())
+        .and_then(|from| prefix[from..].find('"').map(|j| prefix[..from + j + 1].chars().count()))
+        .unwrap_or(24);
+    floor.min(prefix.chars().count())
 }
 
 /// User entries in the session file at `path` whose text starts with
@@ -732,6 +766,25 @@ mod tests {
         assert!(current_session(&session_scratch("empty", &[]), LANE).is_none());
     }
 
+    /// A place removed and re-created under the same slug shares the pinned
+    /// session dir with its dead predecessor: sessions older than the place are
+    /// not its own, and a resume must not reopen them.
+    #[test]
+    fn sessions_older_than_the_place_are_not_its_own() {
+        let d = session_scratch("born", &[]);
+        let cwd = d.join("place");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = cwd.to_string_lossy().to_string();
+        let file = |id: &str, ts: &str| {
+            format!("{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"{ts}\",\"cwd\":\"{cwd}\"}}\n{{\"type\":\"message\",\"timestamp\":\"{ts}\",\"message\":{{\"role\":\"user\",\"content\":\"x\"}}}}\n")
+        };
+        std::fs::write(d.join("old.jsonl"), file("dead-lane", "2020-01-01T00:00:00.000Z")).unwrap();
+        assert!(current_session(&d, &cwd).is_none(), "the dead lane's session is not this place's");
+        assert_eq!(current_session_since(&d, &cwd, None).map(|s| s.id), Some("dead-lane".into()), "unknown birth: no filter");
+        std::fs::write(d.join("new.jsonl"), file("live", "2099-01-01T00:00:00.000Z")).unwrap();
+        assert_eq!(current_session(&d, &cwd).map(|s| s.id), Some("live".into()));
+    }
+
     /// A hand-started pi that is mid-turn reads busy, which is what the dot
     /// failed to show: the restart file cut after its user message.
     #[test]
@@ -744,7 +797,11 @@ mod tests {
 
     #[test]
     fn a_header_is_the_session_line_only() {
-        assert_eq!(parse_header(r#"{"type":"session","version":3,"id":"a","cwd":"/x"}"#), Some(("a".into(), "/x".into())));
+        assert_eq!(parse_header(r#"{"type":"session","version":3,"id":"a","cwd":"/x"}"#), Some(("a".into(), "/x".into(), None)));
+        assert_eq!(
+            parse_header(r#"{"type":"session","id":"a","timestamp":"2026-09-30T00:56:43.373Z","cwd":"/x"}"#).and_then(|h| h.2),
+            crate::sysclock::parse_iso8601("2026-09-30T00:56:43Z")
+        );
         assert_eq!(parse_header(r#"{"type":"model_change","id":"a","cwd":"/x"}"#), None);
         assert_eq!(parse_header(r#"{"type":"session","id":"a"}"#), None);
     }
@@ -780,6 +837,12 @@ mod tests {
         assert!(steering_is("[worktrees: message from place \"(main)\"…", &second));
         assert!(!steering_is(&format!("{H} Something else entirely"), &second));
         assert!(!steering_is("[worktrees...", &second), "too short to be ours");
+        // Cut inside the sender's name: `"ab` is a prefix of `"abc"`, so a line
+        // shorter than the name's closing quote is never ours.
+        let from_ab = send_prefix("[worktrees: message from place \"ab\", not from the user] hi");
+        assert!(!steering_is("[worktrees: message from place \"ab...", &from_ab));
+        assert!(!steering_is("[worktrees: message from place \"abc\", not from…", &from_ab));
+        assert!(steering_is("[worktrees: message from place \"ab\", not…", &from_ab));
         // Wrapped input joins back into one line that still starts with ours.
         let c = read_composer(S_LONG).unwrap();
         assert!(starts(&c.input, &send_prefix(&format!("{H} please ignore this padding"))), "{c:?}");
