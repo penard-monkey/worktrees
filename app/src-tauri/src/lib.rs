@@ -347,14 +347,15 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             let primary_name = place.pointer("/tmux_session/name").and_then(|s| s.as_str()).unwrap_or(&canonical).to_string();
             let place_path = place.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string();
             let sessions = agent_sessions_for(agent_panes.as_ref(), &probes, &canonical, &primary_name, primary_up, &place_path);
-            // Watched only while codex itself runs in the session: the pane is
-            // `codex …; exec "$SHELL"`, so a codex that exited or was killed
-            // leaves the session up with a shell in it, and its rollout ending
-            // on `task_started` (nothing writes `turn_aborted` on a kill)
-            // would otherwise hold the place green indefinitely.
-            if let Some(codex) = sessions.iter().find(|s| s.id == provider::CODEX.id) {
-                let codex_running = codex.up && agent_panes.as_ref().is_some_and(|panes| panes.session_runs_program(&codex.name));
-                codex_watch_set(&place_path, codex_running.then_some(&codex.name), &codex.model);
+            // Watched only while the harness itself runs in the session: the
+            // pane is `<cli> …; exec "$SHELL"`, so an agent that exited or was
+            // killed leaves the session up with a shell in it, and a file
+            // ending mid-turn (nothing writes an abort on a kill) would
+            // otherwise hold the place green indefinitely. Every harness, not
+            // a named one: `watch_lane` is where each is wired.
+            for s in &sessions {
+                let running = s.up && agent_panes.as_ref().is_some_and(|panes| panes.session_runs_program(&s.name));
+                watch_lane(s.id, &place_path, running.then_some(&s.name), &s.model);
             }
             let tmux_up = sessions.iter().any(|s| s.up);
             // Profiles are claude's recipe, so only a live Claude can be stale.
@@ -1872,19 +1873,22 @@ fn codex_watch_set(cwd: &str, session: Option<&String>, model: &Option<String>) 
     }
 }
 
-/// One tick's read of every watched (live) codex session.
+/// One tick's read of every watched (live) session of ONE harness that has no
+/// probe file — codex, pi. Claude's dots come from its probes
+/// (`claude_activity`); every other harness answers in this shape
+/// (`harness_feed`), so the poll merges them without knowing which is which.
 #[derive(Default)]
-struct CodexTick {
+struct LaneTick {
     /// Some session's model differs from what the last snapshot showed.
     models_moved: bool,
-    /// Places whose codex is mid-turn — merged into `sessions:busy`, so the
-    /// nav's green dot needs no codex-specific path.
+    /// Places whose agent is mid-turn — merged into `sessions:busy`, so the
+    /// nav's green dot needs no harness-specific path.
     busy: Vec<String>,
-    /// Mid-turn places whose pane shows an approval or a question — moved out
-    /// of `busy` and into `sessions:busy`'s waiting set (the amber dot).
+    /// Places stopped on a person (codex: an approval or a question on its
+    /// pane; pi: the trust modal) — `sessions:busy`'s waiting set (amber).
     waiting: Vec<String>,
-    /// (place, epoch) of each session's newest FINISHED turn, dated by codex's
-    /// own `completed_at`. The caller stamps only what moved.
+    /// (place, epoch) of each session's newest FINISHED turn, dated by the
+    /// harness's own record of it. The caller stamps only what moved.
     done: Vec<(String, i64)>,
 }
 
@@ -1898,12 +1902,12 @@ struct CodexTick {
 /// (`findings.md`, 2026-09-26) — so those panes, and only those, are captured
 /// and read with `codex::waiting_on_screen`. `sessions` is the tick's tmux
 /// fingerprint, reused exactly as `scan_drafts` reuses it.
-fn codex_tick(sessions: &str) -> CodexTick {
+fn codex_tick(sessions: &str) -> LaneTick {
     let watched: Vec<(String, CodexWatched)> = {
         let guard = CODEX_WATCH.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|w| w.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
     };
-    let mut out = CodexTick::default();
+    let mut out = LaneTick::default();
     let mut turns: Vec<(String, Option<worktrees_core::codex::Turn>)> = Vec::new();
     let mut mid_turn: Vec<(String, String)> = Vec::new();
     for (cwd, w) in watched {
@@ -1939,39 +1943,199 @@ fn codex_tick(sessions: &str) -> CodexTick {
     out
 }
 
+/// Live pi lanes the tick watches, by place path: set by the snapshot (like
+/// `CODEX_WATCH`) while pi itself runs in the place's `~agent~pi` session.
+static PI_WATCH: Mutex<Option<HashMap<String, PiWatched>>> = Mutex::new(None);
+
+#[derive(Clone, Debug, PartialEq)]
+struct PiWatched {
+    session: String,
+    model: Option<String>,
+    /// The session file (path, length) the first tick found — `Some(None)`
+    /// when it found none — so a later tick can tell the file has MOVED.
+    first_file: Option<Option<(PathBuf, u64)>>,
+    /// Past startup: the file moved since the watch began, or a capture showed
+    /// pi's composer. Until then the file cannot rule out the trust modal (a
+    /// resumed session's file ends idle UNDER the modal), so the pane is read.
+    settled: bool,
+}
+
+/// Record what a snapshot showed for `cwd`'s pi lane: its tmux session while
+/// pi runs there, `None` when not (which stops the tick watching it). The
+/// startup memory survives a re-list of the same session and resets for a
+/// new one — a relaunch is a new startup, modal and all.
+fn pi_watch_set(cwd: &str, session: Option<&String>, model: &Option<String>) {
+    let mut guard = PI_WATCH.lock().unwrap_or_else(|e| e.into_inner());
+    let w = guard.get_or_insert_with(HashMap::new);
+    match session {
+        Some(session) => {
+            let keep = w.get(cwd).filter(|x| x.session == *session).cloned();
+            let (first_file, settled) = keep.map_or((None, false), |x| (x.first_file, x.settled));
+            w.insert(cwd.to_string(), PiWatched { session: session.clone(), model: model.clone(), first_file, settled });
+        }
+        None => {
+            w.remove(cwd);
+        }
+    }
+}
+
+/// One tick's read of every watched pi lane. The state is core's
+/// `pi::pi_state` — the same derivation `place_status` makes — fed the lane's
+/// session file and, only where the file cannot answer, one capture of its
+/// pane: while the lane is still starting (blank pane, or the trust modal:
+/// `waiting`) and while it has no turn on file at all. Every such pane goes
+/// in ONE chained `tmux` call; a settled lane with a turn costs a `read_dir`
+/// and a `stat`. What the dots then miss that `place_status` would see is a pi
+/// killed mid-turn, whose file ends busy forever — the snapshot stops
+/// watching it on the next re-list, exactly as for codex.
+fn pi_tick(sessions: &str) -> LaneTick {
+    let mut watched: HashMap<String, PiWatched> = {
+        let guard = PI_WATCH.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clone().unwrap_or_default()
+    };
+    let before = watched.clone();
+    let out = pi_tick_in(&mut watched, worktrees_core::pi::lane_file, |targets| {
+        worktrees_core::pi::pi_panes(sessions, targets)
+    });
+    // Write back only what this tick learned, and only for lanes the snapshot
+    // has not replaced or dropped in the meantime.
+    let mut guard = PI_WATCH.lock().unwrap_or_else(|e| e.into_inner());
+    let w = guard.get_or_insert_with(HashMap::new);
+    for (cwd, now) in watched {
+        if before.get(&cwd) == w.get(&cwd) {
+            w.insert(cwd, now);
+        }
+    }
+    out
+}
+
+/// `pi_tick`'s body over an explicit watch map, file reader and pane
+/// sampler, so a test drives it with a fixture file and a canned screen.
+fn pi_tick_in(
+    watched: &mut HashMap<String, PiWatched>,
+    file_of: impl Fn(&str) -> Option<worktrees_core::pi::LaneFile>,
+    panes_of: impl FnOnce(&[(String, String)]) -> Vec<(String, worktrees_core::pi::PiScreen, bool)>,
+) -> LaneTick {
+    let mut out = LaneTick::default();
+    let mut files: Vec<(String, Option<worktrees_core::pi::LaneFile>)> = Vec::new();
+    let mut targets: Vec<(String, String)> = Vec::new();
+    for (cwd, w) in watched.iter_mut() {
+        let file = file_of(cwd);
+        let at = file.as_ref().map(|f| (f.path.clone(), f.len));
+        match &w.first_file {
+            None => w.first_file = Some(at),
+            Some(first) if *first != at => w.settled = true,
+            _ => {}
+        }
+        let model = file.as_ref().and_then(|f| f.model.clone());
+        if model.is_some() && model != w.model {
+            w.model = model;
+            out.models_moved = true;
+        }
+        if !w.settled || file.as_ref().and_then(|f| f.turn.as_ref()).is_none() {
+            targets.push((cwd.clone(), w.session.clone()));
+        }
+        files.push((cwd.clone(), file));
+    }
+    let panes = if targets.is_empty() { Vec::new() } else { panes_of(&targets) };
+    for (cwd, file) in files {
+        let pane = panes.iter().find(|(c, ..)| *c == cwd);
+        if pane.is_some_and(|(_, _, prompt)| *prompt) {
+            if let Some(w) = watched.get_mut(&cwd) {
+                w.settled = true;
+            }
+        }
+        // ONE derivation (core's), the same `place_status` and `wait` use.
+        let turn = file.and_then(|f| f.turn);
+        let (state, done) = worktrees_core::pi::pi_state(turn.as_ref(), pane.map(|(_, s, _)| *s));
+        match state {
+            activity::State::Busy => out.busy.push(cwd.clone()),
+            activity::State::Waiting => out.waiting.push(cwd.clone()),
+            _ => {}
+        }
+        if let Some(at) = done {
+            out.done.push((cwd, at));
+        }
+    }
+    out
+}
+
+/// How the poll reads a harness's dots. There is deliberately no `_ => Lane`:
+/// a harness added to `provider::PROVIDERS` lands in `Unpolled` until someone
+/// wires it here, and `every_harness_feeds_the_dot_poll` fails until they do
+/// — pi shipped with no dot for exactly this want of an arm.
+enum Feed {
+    /// Claude: `claude_activity`, from its probe files.
+    Probes,
+    Lane(LaneTick),
+    Unpolled,
+}
+
+fn harness_feed(id: &str, sessions: &str) -> Feed {
+    match id {
+        "claude" => Feed::Probes,
+        "codex" => Feed::Lane(codex_tick(sessions)),
+        "pi" => Feed::Lane(pi_tick(sessions)),
+        _ => Feed::Unpolled,
+    }
+}
+
+/// The snapshot's half of the same wiring: record a live harness session for
+/// the tick to watch (`session` is `None` when that harness is not running in
+/// the place). `false` for a harness nothing watches — the drift test's other
+/// arm.
+fn watch_lane(id: &str, cwd: &str, session: Option<&String>, model: &Option<String>) -> bool {
+    match id {
+        "claude" => true, // probes are global; nothing to watch per place
+        "codex" => {
+            codex_watch_set(cwd, session, model);
+            true
+        }
+        "pi" => {
+            pi_watch_set(cwd, session, model);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// One tick's dot sets: what `sessions:busy` carries, and what the dwell
-/// counter sees. Codex is merged into the first two only — a codex turn is
-/// dated by its own `task_complete` (`codex_new_dones`), and an interrupted
-/// one (`turn_aborted`) is not work to announce; feeding it to
-/// `completion_edges` too would stamp every codex turn twice, and the second
-/// stamp would say an Esc was finished work.
+/// counter sees. Lane harnesses (codex, pi) are merged into the first two
+/// only — each dates its own finished turns (`LaneTick::done`, stamped via
+/// `new_dones`), and an interrupted one (codex `turn_aborted`, pi `aborted`)
+/// is not work to announce; feeding them to `completion_edges` too would stamp
+/// every turn twice, and the second stamp would say an Esc was finished work.
 struct Activity {
     busy: Vec<String>,
     waiting: Vec<String>,
     edges: Vec<String>,
 }
 
-/// Merge claude's and codex's sets for one tick, sorted and de-duplicated (two
-/// sessions in one dir push its cwd twice; the dwell counter would count it
-/// twice and let a blip through).
-fn merge_activity(claude_busy: Vec<String>, claude_waiting: Vec<String>, codex: &CodexTick) -> Activity {
+/// Merge claude's and every lane harness's sets for one tick, sorted and
+/// de-duplicated (two sessions in one dir push its cwd twice; the dwell
+/// counter would count it twice and let a blip through).
+fn merge_activity<'a>(
+    claude_busy: Vec<String>,
+    claude_waiting: Vec<String>,
+    lanes: impl IntoIterator<Item = &'a LaneTick> + Clone,
+) -> Activity {
     let norm = |mut v: Vec<String>| {
         v.sort_unstable();
         v.dedup();
         v
     };
     let edges = norm(claude_busy.clone());
-    let busy = norm(claude_busy.into_iter().chain(codex.busy.iter().cloned()).collect());
-    let waiting = norm(claude_waiting.into_iter().chain(codex.waiting.iter().cloned()).collect());
+    let busy = norm(claude_busy.into_iter().chain(lanes.clone().into_iter().flat_map(|l| l.busy.iter().cloned())).collect());
+    let waiting = norm(claude_waiting.into_iter().chain(lanes.into_iter().flat_map(|l| l.waiting.iter().cloned())).collect());
     Activity { busy, waiting, edges }
 }
 
-/// The codex completions not yet stamped: those whose epoch differs from the
+/// The lane completions not yet stamped: those whose epoch differs from the
 /// one last seen for that place. The store stamp is forward-only anyway, but
 /// reaching it costs a git spawn (`place_key_for`), so a turn that finished an
 /// hour ago must not be re-offered every 3s. Pure, for the test; the memory is
-/// the caller's.
-fn codex_new_dones(seen: &mut HashMap<String, i64>, done: &[(String, i64)]) -> Vec<(String, i64)> {
+/// the caller's (one per harness).
+fn new_dones(seen: &mut HashMap<String, i64>, done: &[(String, i64)]) -> Vec<(String, i64)> {
     let fresh: Vec<(String, i64)> = done.iter().filter(|(p, at)| seen.get(p) != Some(at)).cloned().collect();
     for (p, at) in &fresh {
         seen.insert(p.clone(), *at);
@@ -7704,9 +7868,9 @@ pub fn run() {
                 // Consecutive ticks each path has been busy — the dwell guard's
                 // memory, and the only state a completion edge needs.
                 let mut busy_ticks: HashMap<String, u32> = HashMap::new();
-                // The codex completion last stamped per place (see
-                // `codex_new_dones`).
-                let mut codex_done_seen: HashMap<String, i64> = HashMap::new();
+                // The lane completion last stamped per place, per harness (see
+                // `new_dones`).
+                let mut done_seen: HashMap<&'static str, HashMap<String, i64>> = HashMap::new();
                 // Dock-shell cwd sampling, every 5th tick (~15s). Slow on
                 // purpose: the exit hook is the accurate capture, this one only
                 // has to bound how much a crash or a force-quit can lose.
@@ -7846,16 +8010,25 @@ pub fn run() {
                         }
                     }
                     let (busy, waiting, models) = claude_activity();
+                    // Every harness without a probe file, read once each
+                    // (`harness_feed`: codex's rollouts, pi's session files).
+                    let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS
+                        .iter()
+                        .filter_map(|p| match harness_feed(p.id, &fp) {
+                            Feed::Lane(t) => Some((p.id, t)),
+                            Feed::Probes | Feed::Unpolled => None,
+                        })
+                        .collect();
                     // A live agent now names a different model (a first reply,
-                    // a `/model` switch, codex's next turn) → re-list, so the
-                    // agent label follows within a tick rather than on the 30s
-                    // safety tick. `None` first: the launch already listed.
-                    let codex = codex_tick(&fp);
-                    if codex.models_moved || last_models.as_ref().is_some_and(|m| *m != models) {
+                    // a `/model` switch, codex's or pi's next turn) → re-list,
+                    // so the agent label follows within a tick rather than on
+                    // the 30s safety tick. `None` first: the launch already listed.
+                    if lanes.iter().any(|(_, t)| t.models_moved) || last_models.as_ref().is_some_and(|m| *m != models) {
                         let _ = handle.emit("places:changed", ());
                     }
                     last_models = Some(models);
-                    let Activity { busy, waiting, edges } = merge_activity(busy, waiting, &codex);
+                    let Activity { busy, waiting, edges } =
+                        merge_activity(busy, waiting, lanes.iter().map(|(_, t)| t));
                     // Change-gated: emit only when EITHER set shifts, so an idle
                     // machine stays silent (the frontend just re-applies the last set).
                     if busy != last_busy || waiting != last_waiting {
@@ -7879,12 +8052,15 @@ pub fn run() {
                             }
                         }
                     }
-                    let fresh = codex_new_dones(&mut codex_done_seen, &codex.done);
+                    let fresh: Vec<(String, i64)> = lanes
+                        .iter()
+                        .flat_map(|(id, t)| new_dones(done_seen.entry(id).or_default(), &t.done))
+                        .collect();
                     if !fresh.is_empty() {
                         let roots = read_projects(&handle);
                         let now = sysclock::now_epoch();
                         for (path, at) in fresh {
-                            // Bounded by now: `completed_at` is codex's clock.
+                            // Bounded by now: the stamp is the agent's clock.
                             let epoch = at.min(now);
                             if stamp_worked(&roots, &path, epoch) {
                                 let _ = handle.emit("sessions:done", TaskDone { path, epoch });
@@ -8745,8 +8921,8 @@ mod tests {
     /// busy-exit, which an Esc also triggers.
     #[test]
     fn a_codex_turn_is_a_dot_but_never_a_completion_edge() {
-        let codex = CodexTick { busy: v(&["/codex"]), waiting: v(&["/asking"]), ..Default::default() };
-        let act = merge_activity(v(&["/claude", "/claude"]), vec![], &codex);
+        let codex = LaneTick { busy: v(&["/codex"]), waiting: v(&["/asking"]), ..Default::default() };
+        let act = merge_activity(v(&["/claude", "/claude"]), vec![], [&codex]);
         assert_eq!(act.busy, v(&["/claude", "/codex"]));
         assert_eq!(act.waiting, v(&["/asking"]));
         let mut t = HashMap::new();
@@ -8754,6 +8930,137 @@ mod tests {
         completion_edges(&mut t, &act.edges);
         assert!(!t.contains_key("/codex"), "codex reached the dwell counter: {t:?}");
         assert_eq!(t["/claude"], 2, "claude is counted once per tick, de-duplicated");
+    }
+
+    /// The miss this guards: pi joined `provider::PROVIDERS`, core's
+    /// `place_status` read it, and the app's dot poll never did — no dot, no
+    /// amber, no afterglow for any pi lane (v0.34.0). Both halves of the
+    /// wiring are checked: the tick reads the harness, and the snapshot hands
+    /// the tick its live sessions.
+    #[test]
+    fn every_harness_feeds_the_dot_poll() {
+        for p in worktrees_core::provider::PROVIDERS {
+            assert!(
+                !matches!(harness_feed(p.id, ""), Feed::Unpolled),
+                "{} is in PROVIDERS but the nav dot poll never reads it (`harness_feed`)",
+                p.id
+            );
+            assert!(
+                watch_lane(p.id, "/nonexistent/drift-check", None, &None),
+                "{} is in PROVIDERS but the snapshot never hands its sessions to the poll (`watch_lane`)",
+                p.id
+            );
+        }
+    }
+
+    const PI_G1: &str = include_str!(
+        "../../../crates/worktrees-core/tests/fixtures/pi-session/restart/2026-09-30T00-51-41-893Z_lane-abc123-g1.jsonl"
+    );
+    const PI_LANE: &str = "/tmp/wtfix/repo/.worktrees/lane";
+
+    fn pi_watch(session: &str) -> HashMap<String, PiWatched> {
+        HashMap::from([(
+            PI_LANE.to_string(),
+            PiWatched { session: session.into(), model: None, first_file: None, settled: false },
+        )])
+    }
+
+    /// A pi lane's dot, end to end through the tick: a real 0.99.1 session file
+    /// (cut to end on the user's message, i.e. mid-turn) is BUSY in the merged
+    /// set, a finished one is a completion dated by its own entry, and the pane
+    /// is captured only while the lane is starting.
+    #[test]
+    fn a_busy_pi_lane_lights_the_nav_dot_and_its_finish_is_stamped() {
+        use worktrees_core::pi::{lane_file_in, PiScreen};
+        let d = std::env::temp_dir().join(format!("wtapp-pi-tick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("2026-09-30T00-51-41-893Z_lane-abc123-g1.jsonl");
+        let mid: Vec<&str> = PI_G1.lines().collect();
+        std::fs::write(&f, mid[..mid.len() - 1].join("\n") + "\n").unwrap();
+        let file = |cwd: &str| lane_file_in(&d, cwd, None);
+
+        let mut w = pi_watch("lane~agent~pi");
+        // Tick 1: starting, so the pane is read — pi at its composer settles it.
+        let mut asked = Vec::new();
+        let t = pi_tick_in(&mut w, file, |targets| {
+            asked = targets.to_vec();
+            vec![(PI_LANE.to_string(), PiScreen::Working, true)]
+        });
+        assert_eq!(asked, vec![(PI_LANE.to_string(), "lane~agent~pi".to_string())]);
+        let act = merge_activity(vec![], vec![], [&t]);
+        assert_eq!(act.busy, vec![PI_LANE.to_string()], "a mid-turn pi lane is a green dot");
+        assert!(act.edges.is_empty(), "pi is dated by its own turns, never the dwell counter");
+        assert!(t.models_moved, "the first read names the model");
+        assert!(w[PI_LANE].settled);
+
+        // Tick 2: settled, and the file answers — no capture at all.
+        let t = pi_tick_in(&mut w, file, |_| panic!("a settled lane with a turn on file was captured"));
+        assert_eq!(t.busy, vec![PI_LANE.to_string()]);
+        assert!(!t.models_moved);
+
+        // The reply lands: not busy, and a completion at the reply's own time.
+        std::fs::write(&f, PI_G1).unwrap();
+        let t = pi_tick_in(&mut w, file, |_| panic!("captured"));
+        assert!(t.busy.is_empty() && t.waiting.is_empty());
+        let at = worktrees_core::sysclock::parse_iso8601("2026-09-30T00:52:19.068Z").unwrap();
+        assert_eq!(t.done, vec![(PI_LANE.to_string(), at)]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A RESUMED lane in `ask` mode: its file ends on a finished turn and the
+    /// trust modal sits on the pane. The file alone says idle; the dot must be
+    /// amber, and must stay read from the pane until pi gets past it.
+    #[test]
+    fn a_pi_trust_modal_is_an_amber_dot_until_the_composer_shows() {
+        use worktrees_core::pi::{lane_file_in, PiScreen};
+        let d = std::env::temp_dir().join(format!("wtapp-pi-modal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("2026-09-30T00-51-41-893Z_lane-abc123-g1.jsonl"), PI_G1).unwrap();
+        let file = |cwd: &str| lane_file_in(&d, cwd, None);
+        let mut w = pi_watch("lane~agent~pi");
+        for _ in 0..2 {
+            let t = pi_tick_in(&mut w, file, |_| vec![(PI_LANE.to_string(), PiScreen::TrustModal, false)]);
+            assert_eq!(t.waiting, vec![PI_LANE.to_string()], "the trust modal is pi's waiting");
+            assert!(t.busy.is_empty());
+            assert!(!w[PI_LANE].settled, "a modal is not the composer");
+        }
+        let t = pi_tick_in(&mut w, file, |_| vec![(PI_LANE.to_string(), PiScreen::Other, true)]);
+        assert!(t.waiting.is_empty());
+        assert!(w[PI_LANE].settled);
+        let _ = std::fs::remove_dir_all(&d);
+
+        // No file at all (pi still starting, opener not yet submitted): read
+        // the pane every tick, and a blank one is no dot.
+        let empty = std::env::temp_dir().join(format!("wtapp-pi-none-{}", std::process::id()));
+        let mut w = pi_watch("lane~agent~pi");
+        for _ in 0..2 {
+            let mut asked = false;
+            let t = pi_tick_in(&mut w, |c| lane_file_in(&empty, c, None), |_| {
+                asked = true;
+                vec![(PI_LANE.to_string(), PiScreen::Other, false)]
+            });
+            assert!(asked && t.busy.is_empty() && t.waiting.is_empty() && t.done.is_empty());
+        }
+    }
+
+    /// A re-list of the SAME live session keeps what the tick learned about
+    /// startup; a new session (a relaunch) starts over, modal and all.
+    #[test]
+    fn a_pi_relaunch_resets_the_startup_memory() {
+        // Its own key only: the map is process-global and shared with the
+        // drift test's `pi_tick`.
+        let cwd = "/nonexistent/pi-relaunch";
+        let s = "x~agent~pi".to_string();
+        pi_watch_set(cwd, Some(&s), &None);
+        PI_WATCH.lock().unwrap().as_mut().unwrap().get_mut(cwd).unwrap().settled = true;
+        pi_watch_set(cwd, Some(&s), &Some("m".into()));
+        assert!(PI_WATCH.lock().unwrap().as_ref().unwrap()[cwd].settled, "same session: kept");
+        pi_watch_set(cwd, Some(&"y~agent~pi".to_string()), &None);
+        assert!(!PI_WATCH.lock().unwrap().as_ref().unwrap()[cwd].settled, "new session: reset");
+        pi_watch_set(cwd, None, &None);
+        assert!(!PI_WATCH.lock().unwrap().as_ref().unwrap().contains_key(cwd));
     }
 
     // `codex_panes_split_the_chain_per_pane` moved to core with the parser
@@ -8767,10 +9074,10 @@ mod tests {
     fn a_codex_completion_is_stamped_once_per_turn() {
         let mut seen = HashMap::new();
         let d = |p: &str, at: i64| vec![(p.to_string(), at)];
-        assert_eq!(codex_new_dones(&mut seen, &d("/a", 100)), d("/a", 100));
-        assert!(codex_new_dones(&mut seen, &d("/a", 100)).is_empty());
-        assert_eq!(codex_new_dones(&mut seen, &d("/a", 160)), d("/a", 160));
-        assert_eq!(codex_new_dones(&mut seen, &d("/b", 100)), d("/b", 100), "places are independent");
+        assert_eq!(new_dones(&mut seen, &d("/a", 100)), d("/a", 100));
+        assert!(new_dones(&mut seen, &d("/a", 100)).is_empty());
+        assert_eq!(new_dones(&mut seen, &d("/a", 160)), d("/a", 160));
+        assert_eq!(new_dones(&mut seen, &d("/b", 100)), d("/b", 100), "places are independent");
     }
 
     /// The backfill's only judgement call: which history lines are WORK. Slash

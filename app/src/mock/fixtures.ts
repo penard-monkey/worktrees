@@ -165,6 +165,16 @@ function cdv(): ProjectView {
       declared: { last_opened_epoch: NOW - 3600 }, lifecycle_effective: "active",
     }),
     place(P, root, {
+      slug: "catalog-import", branch: "feat/catalog-import",
+      ahead: 1, tmux_session: { name: `${P}-catalog-import~agent~pi`, up: true },
+      // The pi place: its dots come from pi's session file (and, while it
+      // starts, its trust modal — the amber in install.ts's activity cycle).
+      // v0.34.0 shipped pi with no dot at all because nothing here had one.
+      agent_sessions: agentSessions(`${P}-catalog-import`, "pi", "lm-studio/qwen3.6-27b"),
+      claude_session_present: false, last_commit_subject: "csv importer skeleton",
+      declared: { last_opened_epoch: NOW - 1800 }, lifecycle_effective: "active",
+    }),
+    place(P, root, {
       slug: "kitchen-sink", branch: null, detached: true,
       dirty: true, dirty_files: 12, ahead: 3, behind: 4,
       // ADOPTED session: the name is not `<prefix>-<slug>`, so this tool did not

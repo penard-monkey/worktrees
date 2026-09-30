@@ -651,7 +651,66 @@ fn capture(session: &str) -> Option<PiScreen> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let (cmd, screen) = text.split_once('\n').unwrap_or((&text, ""));
-    Some(if tmux::is_shell_command(cmd.trim()) { PiScreen::Gone } else { read_screen(screen) })
+    Some(screen_from(cmd.trim(), screen))
+}
+
+/// One capture of a pi pane, read: its current command first (a shell means pi
+/// is gone — the pane is `pi …; exec "$SHELL"`), then the screen by position.
+pub fn screen_from(cmd: &str, screen: &str) -> PiScreen {
+    if tmux::is_shell_command(cmd) {
+        PiScreen::Gone
+    } else {
+        read_screen(screen)
+    }
+}
+
+/// Whether a capture shows pi at its composer — past startup, and past the
+/// trust modal if there was one. Measured on 0.99.1: before the modal the pane
+/// is BLANK (no rule at all), the modal is the first thing pi draws, and the
+/// composer appears only once it is answered — so a composer on screen means
+/// the screen has nothing left to say that the session file will not.
+pub fn at_composer(screen: PiScreen, text: &str) -> bool {
+    matches!(screen, PiScreen::Working | PiScreen::Other) && read_composer(text).is_some()
+}
+
+/// The nav tick's capture of many pi panes: ONE `tmux` call for all of them
+/// (`activity::capture_chain`), each read as (key, screen, at composer).
+pub fn pi_panes(sessions: &str, targets: &[(String, String)]) -> Vec<(String, PiScreen, bool)> {
+    activity::capture_chain(sessions, targets).into_iter().map(|(k, cmd, text)| pane_reading(k, &cmd, &text)).collect()
+}
+
+/// `pi_panes`'s parse, for the tests.
+pub fn pi_panes_in(text: &str, cwds: &[&str]) -> Vec<(String, PiScreen, bool)> {
+    activity::chain_blocks_in(text, cwds).into_iter().map(|(k, cmd, text)| pane_reading(k, &cmd, &text)).collect()
+}
+
+fn pane_reading(key: String, cmd: &str, text: &str) -> (String, PiScreen, bool) {
+    let screen = screen_from(cmd, text);
+    let prompt = at_composer(screen, text);
+    (key, screen, prompt)
+}
+
+/// What a place's current pi session file says, for a caller that polls it:
+/// which file (path + length, so "has it moved since" is a comparison), and
+/// its model and newest turn. Costs a `read_dir` and a `stat` per file; a
+/// file is re-read only once it has grown (`tail_info`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneFile {
+    pub path: PathBuf,
+    pub len: u64,
+    pub model: Option<String>,
+    pub turn: Option<PiTurn>,
+}
+
+pub fn lane_file(path: &str) -> Option<LaneFile> {
+    lane_file_in(&session_dir(path), path, place_born(path))
+}
+
+pub fn lane_file_in(dir: &Path, cwd: &str, born: Option<i64>) -> Option<LaneFile> {
+    let s = current_session_since(dir, cwd, born)?;
+    let len = std::fs::metadata(&s.path).ok()?.len();
+    let (model, turn) = session_tail(&s.path);
+    Some(LaneFile { path: s.path, len, model, turn })
 }
 
 /// The pi half of `place_activity` for one place: `None` unless the place's
@@ -1156,5 +1215,30 @@ mod tests {
         assert_eq!(pi_state(Some(&PiTurn::Busy), None), (State::Busy, None), "no capture leaves the file's answer");
         assert_eq!(pi_state(Some(&PiTurn::Aborted), Some(PiScreen::Other)), (State::Idle, None), "Esc is not finished work");
         assert_eq!(pi_state(Some(&PiTurn::Failed), Some(PiScreen::Other)), (State::Idle, None));
+    }
+
+    /// The nav tick's batched read (`pi_panes`): one chain, each pane read by
+    /// its own command and screen, and "at the composer" true only for pi's
+    /// own input box — never for the trust modal, whose frame is also two
+    /// rules, and never for the blank pane pi shows before the modal draws.
+    #[test]
+    fn a_batched_capture_reads_each_pi_pane_and_knows_the_composer() {
+        let working = include_str!("../tests/fixtures/pi-screen/0.99.1/working.txt");
+        let done = include_str!("../tests/fixtures/pi-screen/0.99.1/done.txt");
+        let trust = include_str!("../tests/fixtures/pi-screen/0.99.1/trust-modal.txt");
+        let text = format!(
+            "@@ 0 @@\nnode\n{working}@@ 1 @@\nnode\n{done}@@ 2 @@\nnode\n{trust}@@ 3 @@\nnode\n\n\n\n@@ 4 @@\nzsh\n{done}"
+        );
+        let got = pi_panes_in(&text, &["/w", "/d", "/t", "/blank", "/gone"]);
+        let want = vec![
+            ("/w".to_string(), PiScreen::Working, true),
+            ("/d".to_string(), PiScreen::Other, true),
+            ("/t".to_string(), PiScreen::TrustModal, false),
+            ("/blank".to_string(), PiScreen::Other, false),
+            ("/gone".to_string(), PiScreen::Gone, false),
+        ];
+        assert_eq!(got, want);
+        // A chain cut short answers for what it reached and nothing else.
+        assert_eq!(pi_panes_in(&format!("@@ 0 @@\nnode\n{done}"), &["/d", "/t"]).len(), 1);
     }
 }

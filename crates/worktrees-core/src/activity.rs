@@ -181,15 +181,15 @@ pub fn codex_tail(path: &Path) -> (Option<String>, Option<Turn>) {
     (m, t)
 }
 
-/// Capture the codex panes in `targets` (cwd, tmux session) in ONE `tmux`
-/// call: each pane's current command, then its screen. `sessions` is the live
-/// session list (newline-separated); targets missing from it are dropped first,
-/// because a dead target aborts the rest of the chain. A marker precedes each
-/// pane so a chain that dies part-way still attributes what it did print.
-/// `=name:` is the session's current window and active pane, which is codex
-/// unless the user split it — then the screen shows no codex footer and the
-/// place simply reads busy.
-pub fn codex_panes(sessions: &str, targets: &[(String, String)]) -> Vec<(String, CodexPane)> {
+/// Capture the panes in `targets` (key, tmux session) in ONE `tmux` call:
+/// each pane's current command, then its screen — (key, command, screen) per
+/// pane that answered. `sessions` is the live session list (newline-separated);
+/// targets missing from it are dropped first, because a dead target aborts the
+/// rest of the chain. A marker precedes each pane so a chain that dies part-way
+/// still attributes what it did print. `=name:` is the session's current window
+/// and active pane. Harness-neutral: codex and pi each read the screens their
+/// own way (`codex_panes`, `pi::pi_panes`).
+pub fn capture_chain(sessions: &str, targets: &[(String, String)]) -> Vec<(String, String, String)> {
     let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
     let targets: Vec<(&String, String)> = targets
         .iter()
@@ -213,16 +213,16 @@ pub fn codex_panes(sessions: &str, targets: &[(String, String)]) -> Vec<(String,
         return Vec::new();
     };
     let cwds: Vec<&str> = targets.iter().map(|(c, _)| c.as_str()).collect();
-    codex_panes_in(&String::from_utf8_lossy(&out.stdout), &cwds)
+    chain_blocks_in(&String::from_utf8_lossy(&out.stdout), &cwds)
 }
 
-/// Parse `codex_panes`'s chained output: per target `i`, the line `@@ i @@`,
-/// then the pane's current command, then its screen up to the next marker.
-/// A target with no marker in the output (the chain died before it) is left
-/// out — no answer, which `codex_state` reads as the rollout's busy.
-pub fn codex_panes_in(text: &str, cwds: &[&str]) -> Vec<(String, CodexPane)> {
+/// Parse `capture_chain`'s output: per target `i`, the line `@@ i @@`, then
+/// the pane's current command, then its screen up to the next marker. A target
+/// with no marker in the output (the chain died before it) is left out — no
+/// answer, which each harness's state function reads its own way.
+pub fn chain_blocks_in(text: &str, cwds: &[&str]) -> Vec<(String, String, String)> {
     let marks: Vec<String> = (0..cwds.len()).map(|i| format!("@@ {i} @@")).collect();
-    let mut panes = Vec::new();
+    let mut blocks = Vec::new();
     for (i, cwd) in cwds.iter().enumerate() {
         let Some(rest) = text.split(&format!("{}\n", marks[i])).nth(1) else { continue };
         // The next marker ends this pane's block (the last one runs to EOF).
@@ -231,16 +231,33 @@ pub fn codex_panes_in(text: &str, cwds: &[&str]) -> Vec<(String, CodexPane)> {
             None => rest,
         };
         let (cmd, screen) = block.split_once('\n').unwrap_or((block, ""));
-        let state = if tmux::is_shell_command(cmd.trim()) {
-            CodexPane::Gone
-        } else if codex::waiting_on_screen(screen) {
-            CodexPane::Waiting
-        } else {
-            CodexPane::Running
-        };
-        panes.push((cwd.to_string(), state));
+        blocks.push((cwd.to_string(), cmd.trim().to_string(), screen.to_string()));
     }
-    panes
+    blocks
+}
+
+/// Capture the codex panes in `targets` (cwd, tmux session) in one `tmux` call
+/// (`capture_chain`). `=name:` is codex unless the user split the window —
+/// then the screen shows no codex footer and the place simply reads busy.
+pub fn codex_panes(sessions: &str, targets: &[(String, String)]) -> Vec<(String, CodexPane)> {
+    capture_chain(sessions, targets).into_iter().map(|(cwd, cmd, screen)| (cwd, codex_pane(&cmd, &screen))).collect()
+}
+
+/// `codex_panes`'s parse, for the tests: `chain_blocks_in`, read as codex.
+/// A target the chain never reached is left out — no answer, which
+/// `codex_state` reads as the rollout's busy.
+pub fn codex_panes_in(text: &str, cwds: &[&str]) -> Vec<(String, CodexPane)> {
+    chain_blocks_in(text, cwds).into_iter().map(|(cwd, cmd, screen)| (cwd, codex_pane(&cmd, &screen))).collect()
+}
+
+fn codex_pane(cmd: &str, screen: &str) -> CodexPane {
+    if tmux::is_shell_command(cmd) {
+        CodexPane::Gone
+    } else if codex::waiting_on_screen(screen) {
+        CodexPane::Waiting
+    } else {
+        CodexPane::Running
+    }
 }
 
 /// The codex session name a place's managed Codex runs under: the `~agent~codex`

@@ -3033,8 +3033,9 @@ function emitEvent(event: string, payload: unknown) {
   metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
 };
 
-// simulated agent working state (Claude's probes + Codex's rollouts, merged
-// into one set by lib.rs; billing-refactor is the Codex place) — cycles the sessions:busy push (lib.rs poll
+// simulated agent working state (Claude's probes + Codex's rollouts + pi's
+// session files, merged into one set by lib.rs; billing-refactor is the Codex
+// place, catalog-import the pi one) — cycles the sessions:busy push (lib.rs poll
 // thread's event) so the busy (green blink) + waiting (amber static) dots and the
 // project rollup badge are exercisable in the harness. Payload is now { busy,
 // waiting } keyed by WORKTREE PATH (== place.path in fixtures.ts, which builds
@@ -3042,13 +3043,15 @@ function emitEvent(event: string, payload: unknown) {
 const CDV = "/Users/demo/workspace/casadelvalle/casa-del-valle-monorepo/.worktrees";
 const WT = "/Users/demo/workspace/worktrees/.worktrees";
 const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
-  // both states visible: one place working, another needs input
-  { busy: [`${CDV}/billing-refactor`], waiting: [`${WT}/feat-redesign`] },
+  // both states visible: one place working, another needs input; the pi lane
+  // is mid-turn (its session file ends on the user's message)
+  { busy: [`${CDV}/billing-refactor`, `${CDV}/catalog-import`], waiting: [`${WT}/feat-redesign`] },
   // working shifts; the Codex place parks on an approval (amber, from its
-  // pane — lib.rs `codex_waiting_panes`)
+  // pane — lib.rs `codex_waiting_panes`); pi's reply lands (an ember)
   { busy: [`${CDV}/messaging`], waiting: [`${CDV}/billing-refactor`] },
-  // approved: the Codex turn runs on, and a Claude session waits
-  { busy: [`${CDV}/billing-refactor`], waiting: [`${CDV}/kitchen-sink`] },
+  // approved: the Codex turn runs on, and a Claude session waits; the pi lane
+  // was relaunched and sits on pi's trust modal (lib.rs `pi_tick`)
+  { busy: [`${CDV}/billing-refactor`], waiting: [`${CDV}/kitchen-sink`, `${CDV}/catalog-import`] },
   // idle — no dots at all
   { busy: [], waiting: [] },
 ];
