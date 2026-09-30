@@ -127,6 +127,10 @@ pub fn worktree_session_excluding(wt: &str, ai_word: &str, exclude_under: Option
 /// sessions for many worktrees against this instead of shelling out per place.
 pub struct PaneList {
     panes: Vec<(String, String, String)>,
+    /// `(session, pane_pid)` per pane — what tells two launches under the
+    /// same session NAME apart (a close + open recreates `~agent~pi`).
+    /// Empty from `from_rows` and from a tmux that printed no fourth field.
+    pids: Vec<(String, String)>,
 }
 
 impl PaneList {
@@ -140,30 +144,39 @@ impl PaneList {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}",
+            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}",
         ])
         .ok()?;
         if !o.status.success() {
             return None;
         }
-        let panes = String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|line| {
-                let mut it = line.splitn(3, '\t');
-                (
-                    it.next().unwrap_or("").to_string(),
-                    it.next().unwrap_or("").to_string(),
-                    it.next().unwrap_or("").to_string(),
-                )
-            })
-            .collect();
-        Some(PaneList { panes })
+        let mut panes = Vec::new();
+        let mut pids = Vec::new();
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            let mut it = line.splitn(4, '\t');
+            let session = it.next().unwrap_or("").to_string();
+            let path = it.next().unwrap_or("").to_string();
+            let cmd = it.next().unwrap_or("").to_string();
+            if let Some(pid) = it.next().filter(|p| !p.is_empty()) {
+                pids.push((session.clone(), pid.to_string()));
+            }
+            panes.push((session, path, cmd));
+        }
+        Some(PaneList { panes, pids })
     }
 
     /// A snapshot from rows a caller already holds, as
     /// `(session, pane_current_path, pane_current_command)`.
     pub fn from_rows(panes: Vec<(String, String, String)>) -> PaneList {
-        PaneList { panes }
+        PaneList { panes, pids: Vec::new() }
+    }
+
+    /// Which LAUNCH of session `name` this is: its first pane's pid. A session
+    /// closed and reopened under the same name is a new process, so this is
+    /// what "the same session as last time" has to compare — the name alone
+    /// cannot tell a relaunch from a re-list.
+    pub fn session_launch(&self, name: &str) -> Option<&str> {
+        self.pids.iter().find(|(s, _)| s == name).map(|(_, p)| p.as_str())
     }
 
     /// Does a session named EXACTLY `name` exist, per this snapshot? The
@@ -826,6 +839,7 @@ mod tests {
     fn pl(rows: &[(&str, &str, &str)]) -> PaneList {
         PaneList {
             panes: rows.iter().map(|(s, p, c)| (s.to_string(), p.to_string(), c.to_string())).collect(),
+            pids: Vec::new(),
         }
     }
 

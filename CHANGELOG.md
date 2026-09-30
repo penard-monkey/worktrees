@@ -3,6 +3,19 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A pi lane now shows its dot in the app.** The nav's green (working),
+  amber (waiting on you — pi's trust prompt) and the afterglow once a turn
+  finishes all stayed dark for pi, although `place_status` already answered
+  correctly: the app's dot poll read only Claude and Codex. It now reads pi
+  the same way `place_status` does — from the lane's session file, looking at
+  the pane only while pi is starting up or has written nothing yet — and a
+  model switch in a pi lane updates its label within a tick. Every harness
+  the app knows now has to be wired into that poll or a test fails, so the
+  next one cannot ship without a dot the same way.
+
 ## [0.34.0] - 2026-09-30
 
 ### Added

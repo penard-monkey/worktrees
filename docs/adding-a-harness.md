@@ -54,9 +54,12 @@ The same derivation must reach **all four** readers. Keep them on one reader
 - [ ] **MCP `wait`** returns on the harness's turn end, and survives the
       harness's own MCP request timeout (pi cancels at 60s — progress
       notifications) and a cancel.
-- [ ] **The app's nav dot poll** (`app/src-tauri/src/lib.rs`: `claude_activity`,
-      `codex_tick`, `merge_activity`, `completion_edges`, emitting
-      `sessions:busy` / `sessions:done`). **This is the one pi missed.** Check
+- [ ] **The app's nav dot poll** (`app/src-tauri/src/lib.rs`: an arm in
+      `harness_feed` returning a `LaneTick` — `codex_tick` / `pi_tick` are the
+      precedents — and one in `watch_lane` so the snapshot hands the tick its
+      live sessions; `merge_activity`, `completion_edges` and `new_dones` then
+      emit `sessions:busy` / `sessions:done`). **This is the one pi missed.**
+      `every_harness_feeds_the_dot_poll` fails until both arms exist. Check
       in the RUNNING APP: a busy lane shows the busy dot, a lane waiting on you
       shows amber, a finished turn leaves the afterglow ring.
 - [ ] **Re-list triggers.** Anything the snapshot shows from agent state (the
