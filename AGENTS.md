@@ -35,6 +35,15 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   Codex activity for `place_status`/`wait` and the nav dots comes from ONE
   derivation, `worktrees_core::activity`.
 
+**Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
+by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
+MCP `place_status` said `busy` — and no nav dot at all: the app builds its dots
+in its own poll (`lib.rs`: `claude_activity` + `codex_tick` → `merge_activity`
+→ `sessions:busy`/`sessions:done`) and pi was never added to it. Three reviews
+passed it because every check exercised the core and none looked at what the
+running app draws. "Core reports it" is not "the user sees it"; the checklist
+is by surface, and the last item is one lane driven end to end in the real app.
+
 **`~/.claude.json` is claude's live state — READ it, never write it.** It is the
 user-scope `mcpServers` home (`mcpsetup.rs`), a few hundred KB of onboarding
 flags, caches and per-project history that every running session rewrites whole.
