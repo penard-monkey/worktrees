@@ -455,6 +455,17 @@ fn starts(text: &str, prefix: &str) -> bool {
     !prefix.is_empty() && normalize(text).starts_with(prefix)
 }
 
+/// Whether a `Steering:` line is (the start of) the text `prefix` begins.
+/// pi cuts a queued line to the pane's width and ends it with `...` — on an
+/// 80-column pane the attributed header alone nearly fills it — so the line
+/// and the prefix need only agree as far as the SHORTER goes, and at least
+/// far enough into the header to be ours.
+fn steering_is(line: &str, prefix: &str) -> bool {
+    const MIN: usize = 24;
+    let shown = normalize(line.trim_end().trim_end_matches("...").trim_end_matches('…'));
+    shown.chars().count() >= MIN.min(prefix.chars().count()) && (shown.starts_with(prefix) || prefix.starts_with(&shown))
+}
+
 /// User entries in the session file at `path` whose text starts with
 /// `prefix`. Read from the tail: a just-sent message is always in it.
 pub fn user_entries_starting(path: &Path, prefix: &str) -> usize {
@@ -486,8 +497,11 @@ pub fn user_entries_in(lines: &[String], prefix: &str) -> usize {
 }
 
 /// Press Enter on text already typed into pi's composer, and confirm it —
-/// `harness::submit_codex`'s loop with pi's receipts. Every Enter (retries
-/// included) needs a fresh screen whose composer holds OUR text, settled, and
+/// `harness::submit_codex`'s loop with pi's receipts. Settling watches the
+/// COMPOSER only: mid-turn the transcript streams and the border's spinner
+/// turns every frame, so a whole-screen comparison never settles and Enter is
+/// never pressed (found live — the fixtures are still frames). Every Enter
+/// (retries included) needs a fresh screen whose composer holds OUR text, settled, and
 /// no trust modal; a failed capture never authorizes a keypress or counts as
 /// a receipt. Receipts: the session file gained a user entry starting with
 /// `prefix` (`Submitted`), or the composer is empty and pi's steering queue
@@ -503,7 +517,11 @@ pub fn submit_pi(
 ) -> crate::harness::SendOutcome {
     use crate::harness::{SendOutcome, SEND_ENTER_TRIES, SEND_POLL_MS, SEND_STABLE_MS, SEND_TIMEOUT_MS, SEND_VERIFY_MS};
     let start = now();
-    let mut previous: Option<String> = None;
+    let mut previous: Option<String> = None; // the composer's input, not the screen
+    // Our lines already in pi's steering queue before we pressed Enter: an
+    // earlier send from the same place can still be waiting there, and must
+    // not be taken for this one's receipt.
+    let mut queued_before = 0;
     let mut stable_since = start;
     let mut tries = 0;
     let mut last_enter: Option<u64> = None;
@@ -522,12 +540,17 @@ pub fn submit_pi(
                     if entries() > baseline {
                         return SendOutcome::Submitted;
                     }
-                    if composer.as_ref().is_some_and(|c| c.input.is_empty() && c.steering.iter().any(|t| starts(t, prefix))) {
+                    if composer.as_ref().is_some_and(|c| {
+                        c.input.is_empty() && c.steering.iter().filter(|t| steering_is(t, prefix)).count() > queued_before
+                    }) {
                         return SendOutcome::Queued;
                     }
+                } else if let Some(c) = &composer {
+                    queued_before = c.steering.iter().filter(|t| steering_is(t, prefix)).count();
                 }
-                let ours = composer.as_ref().is_some_and(|c| starts(&c.input, prefix));
-                if !ours || previous.as_deref() != Some(screen.as_str()) {
+                let input = composer.map(|c| c.input);
+                let ours = input.as_deref().is_some_and(|i| starts(i, prefix));
+                if !ours || previous != input {
                     stable_since = time;
                 } else if time.saturating_sub(stable_since) >= SEND_STABLE_MS
                     && last_enter.is_none_or(|at| time.saturating_sub(at) >= SEND_VERIFY_MS)
@@ -542,7 +565,7 @@ pub fn submit_pi(
                     last_enter = Some(time);
                     stable_since = time;
                 }
-                previous = Some(screen);
+                previous = input;
             }
             None => {
                 previous = None;
@@ -745,7 +768,12 @@ mod tests {
         let c = read_composer(S_QUEUED).unwrap();
         assert!(c.input.is_empty() && c.busy);
         assert_eq!(c.steering.len(), 1);
-        assert!(starts(&c.steering[0], &second));
+        assert!(steering_is(&c.steering[0], &second));
+        // Cut to a narrow pane's width, it is still ours; another message is not.
+        assert!(steering_is(&format!("{H} After..."), &second));
+        assert!(steering_is("[worktrees: message from place \"(main)\"…", &second));
+        assert!(!steering_is(&format!("{H} Something else entirely"), &second));
+        assert!(!steering_is("[worktrees...", &second), "too short to be ours");
         // Wrapped input joins back into one line that still starts with ours.
         let c = read_composer(S_LONG).unwrap();
         assert!(starts(&c.input, &send_prefix(&format!("{H} please ignore this padding"))), "{c:?}");
@@ -790,6 +818,65 @@ mod tests {
             |ms| clock.set(clock.get() + ms),
         );
         (out, enters.get())
+    }
+
+    /// Mid-turn the screen never holds still — pi streams the answer and the
+    /// border's spinner turns — while the composer does. Settling must watch
+    /// the composer, or no Enter is ever pressed (seen live, fixed here).
+    #[test]
+    fn a_busy_send_settles_on_the_composer_while_the_screen_streams() {
+        use crate::harness::SendOutcome;
+        let clock = std::cell::Cell::new(0u64);
+        let enters = std::cell::Cell::new(0usize);
+        let frame = std::cell::Cell::new(0usize);
+        let spin = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let out = submit_pi(
+            &send_prefix(H),
+            0,
+            || {
+                frame.set(frame.get() + 1);
+                let base = if enters.get() == 0 { S_BUSY_TYPED } else { S_QUEUED };
+                // A new streamed line and a new spinner frame on every capture.
+                let s = base.replacen("── ⠋ Working", &format!("── {} Working", spin[frame.get() % 10]), 1)
+                    .replacen("── ⠦ Working", &format!("── {} Working", spin[frame.get() % 10]), 1);
+                Some(format!(" streamed line {}\n{s}", frame.get()))
+            },
+            || 0,
+            || {
+                enters.set(enters.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            |ms| clock.set(clock.get() + ms),
+        );
+        assert_eq!((out, enters.get()), (SendOutcome::Queued, 1));
+    }
+
+    /// On a narrow pane pi truncates the queued line; an earlier send from the
+    /// same place already queued is not this one's receipt.
+    #[test]
+    fn a_truncated_steering_line_counts_and_an_old_one_does_not() {
+        use crate::harness::SendOutcome;
+        let typed = format!("{H} After the numbers, reply STEERED.");
+        let narrow = |line: &str| S_QUEUED.lines().map(|l| if l.contains("Steering: ") { line.to_string() } else { l.to_string() }).collect::<Vec<_>>().join("\n");
+        let truncated = narrow(&format!(" Steering: {H} After..."));
+        let run = |before: String, after: String| {
+            let clock = std::cell::Cell::new(0u64);
+            let enters = std::cell::Cell::new(0usize);
+            let out = submit_pi(&send_prefix(&typed), 0, || Some(if enters.get() == 0 { before.clone() } else { after.clone() }), || 0,
+                || { enters.set(enters.get() + 1); Ok(()) }, || clock.get(), |ms| clock.set(clock.get() + ms));
+            (out, enters.get())
+        };
+        assert_eq!(run(S_BUSY_TYPED.to_string(), truncated.clone()), (SendOutcome::Queued, 1));
+        // The same line was ALREADY queued above our typed text: no new entry.
+        let typed_with_old = {
+            let mut l: Vec<String> = S_BUSY_TYPED.lines().map(str::to_string).collect();
+            let top = l.iter().rposition(|x| x.starts_with("── ")).unwrap();
+            l.insert(top, " ↳ Option+Up to edit all queued messages".into());
+            l.insert(top, format!(" Steering: {H} After..."));
+            l.join("\n")
+        };
+        assert_eq!(run(typed_with_old, truncated).0, SendOutcome::Unconfirmed);
     }
 
     #[test]
