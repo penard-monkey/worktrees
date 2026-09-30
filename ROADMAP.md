@@ -27,13 +27,26 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   Codex and opencode all speak MCP, so it was dropped (pi-harness.md §4.6).
   Revisit only for a harness that has a shell but no MCP client.
 
+- **The new `wait` progress and cancel are unverified with Claude Code and
+  Codex as the client.** Phase 3 made `wait` send `notifications/progress`
+  every 15s to a request carrying a `progressToken`, and stop on
+  `notifications/cancelled` or when stdin closes. That was measured live only
+  with pi as the client; Codex had no tokens during the lane. Still owed,
+  live:
+  - Does Claude Code send a `progressToken` on `tools/call`?
+  - Does it show or ignore the 15s pulses?
+  - Does pressing Esc during a `wait` really cancel it, so the server answers
+    nothing and takes the next call at once?
+  - The same for Codex.
+  See [the session](docs/sessions/2026-09-30-pi-phase3/summary.md).
+
 - **`worktrees mcp` bounds its WHOLE stdin at 8 MiB, not each line.**
   `cmd_mcp` reads `stdin.lock().take(MAX_LINE)` once, so a long session that
   sends 8 MiB in total gets a silent EOF — the server exits as if the client
   hung up. The comment beside it says the intent was a per-line cap (against
   a client that never sends a newline). Pre-existing; found in the #374
   review. Bound each line instead (a `take` per `read_line`, or a capped
-  `read_until`). See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+  `read_until`). See [the session](docs/sessions/2026-09-30-pi-phase3/summary.md).
 
 - **A copied or restored checkout hides its earlier pi sessions.** pi's
   sessions for a place count only if they are no older than the place's
@@ -41,8 +54,7 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   checkout copied with `cp -R` or restored from a backup gets a NEW birth
   time, so its real earlier sessions drop out: no dot for them, and
   `open -r` starts fresh. A marker of our own at creation (in the declared
-  store, cleared on `rm`) would tell the two apart. See the pi phase 3
-  follow-ups (#376).
+  store, cleared on `rm`) would tell the two apart. See [the session](docs/sessions/2026-09-30-pi-phase3/summary.md).
 
 - **Protect-ours is launch-time only.** The check that refuses `--approve`
   to a place whose `.pi/mcp.json` defines `worktrees` runs when worktrees
