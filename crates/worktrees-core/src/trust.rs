@@ -425,7 +425,7 @@ pub fn cmd_trust(p: &crate::Project, ui: &mut dyn crate::Ui, args: &[String]) ->
     match set_allowed(harness, &root, !revoke) {
         Ok(changed) => {
             let state = match (revoke, changed) {
-                (false, true) => "now allowed: pi lanes in this repo launch with --approve and load its .pi/ and .agents/skills (repo code runs inside pi).",
+                (false, true) => "now allowed: pi lanes in this repo launch with --approve and load its .pi/ and .agents/skills, and start its .pi/mcp.json servers — repo code runs with no prompt (a branch whose .pi/mcp.json defines `worktrees` is still refused).",
                 (false, false) => "already allowed.",
                 (true, true) => "no longer allowed: its next pi launch skips the repo's own resources.",
                 (true, false) => "was not allowed.",
