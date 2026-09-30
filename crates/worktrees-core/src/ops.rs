@@ -101,11 +101,11 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
         plain.place_flags = a.place_flags(wt);
         // `trust::pi_flag` already withheld `--approve`; this is the WHY, said
         // where the launch happens rather than discovered in the lane.
-        if a.provider().id == crate::provider::PI.id
-            && crate::trust::repo_root(wt).is_some_and(|r| crate::trust::is_allowed("pi", &r))
-            && crate::trust::pi_mcp_shadowed(wt)
-        {
-            ui.warn(&crate::trust::pi_shadow_warning(wt));
+        if a.provider().id == crate::provider::PI.id {
+            let t = crate::trust::pi_launch_trust(wt);
+            if t.shadowed && t.would_approve {
+                ui.warn(&crate::trust::pi_shadow_warning(wt));
+            }
         }
     }
     // Reads the same flag the PROBE side reads, so the two cannot get out of
@@ -1835,13 +1835,16 @@ fn pi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
     let allowed = repo.as_deref().is_some_and(|r| crate::trust::is_allowed("pi", r));
     let mode = crate::trust::pi_trust();
     let mcp = crate::pimcp::status();
-    let shadowed = crate::trust::pi_mcp_shadowed(&p.main_root);
-    let rc = if pf.problem.is_some() || (allowed && shadowed) { crate::diag::EXIT_FINDINGS } else { 0 };
+    let launch = crate::trust::pi_launch_trust(&p.main_root);
+    let shadowed = launch.shadowed;
+    let pi_trust_file = crate::trust::pi_trust_path();
+    let pi_trust_bad = std::fs::read_to_string(&pi_trust_file).ok().is_some_and(|t| crate::trust::parse_pi_trust(&t).is_err());
+    let rc = if pf.problem.is_some() || (launch.would_approve && shadowed) { crate::diag::EXIT_FINDINGS } else { 0 };
     if json {
         ui.plain(
             &serde_json::json!({
                 "preflight": pf,
-                "trust": { "mode": mode, "repo": repo, "allowed": allowed, "mcp_shadowed": shadowed },
+                "trust": { "mode": mode, "repo": repo, "allowed": allowed, "mcp_shadowed": shadowed, "launch": launch },
                 "mcp": mcp,
                 "models": models,
             })
@@ -1854,17 +1857,24 @@ fn pi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
     ui.info(&format!("pi    {}  {}", or_none(&pf.pi_path), or_none(&pf.pi_version)));
     let floor = pf.node_floor.as_deref().map(|f| format!(" (pi needs ≥ {f})")).unwrap_or_default();
     ui.info(&format!("node  {}  {}{floor}", or_none(&pf.node_path), or_none(&pf.node_version)));
-    let trust = if allowed {
-        "this repo is ALLOWED — pi lanes load its .pi/ and .agents/skills (--approve)".to_string()
-    } else {
-        format!("{} for this repo (worktrees trust pi to allow it)", if mode == crate::trust::PiTrust::Ask { "pi asks" } else { "--no-approve" })
+    let entry = launch.pi_entry.as_ref().map(|e| e.path.clone()).unwrap_or_default();
+    let trust = match launch.source {
+        "allowance" => "this repo is ALLOWED — pi lanes load its .pi/, .agents/skills and .pi/mcp.json servers (--approve)".to_string(),
+        "pi-trusted" => format!("pi's own trust.json trusts {entry} — pi lanes here launch with --approve"),
+        "pi-untrusted" => format!("pi's own trust.json distrusts {entry} — --no-approve (worktrees trust pi to allow it anyway)"),
+        "shadowed" => "--no-approve: .pi/mcp.json replaces the worktrees server (below)".to_string(),
+        "ask" => "pi asks for this repo (worktrees trust pi to allow it)".to_string(),
+        _ => "--no-approve for this repo (worktrees trust pi to allow it)".to_string(),
     };
     ui.info(&format!("trust {trust}"));
+    if pi_trust_bad {
+        ui.warn(&format!("{} does not parse — pi will refuse it too", pi_trust_file.display()));
+    }
     if shadowed {
         // Checked in the main checkout: `.pi/mcp.json` is per branch, so each
         // lane's own copy is checked again at its launch (`trust::pi_flag`).
         let line = crate::trust::pi_shadow_warning(&p.main_root);
-        if allowed { ui.warn(&line) } else { ui.info(&format!("note  {line}")) }
+        if launch.would_approve { ui.warn(&line) } else { ui.info(&format!("note  {line}")) }
     }
     let exposure = mcp.entry.as_ref().map(|e| format!(" · exposure {}", e.exposure.as_deref().unwrap_or("codemode (pi's default)"))).unwrap_or_default();
     ui.info(&format!("mcp   {}{exposure}  ({})", mcp.state, mcp.config_path));

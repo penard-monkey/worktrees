@@ -8,11 +8,17 @@
 //!
 //! - pi launches with `--no-approve` by default: project resources are skipped
 //!   for the run, while AGENTS.md/CLAUDE.md still load.
+//! - **pi's own trust counts** (decided 2026-09-29): a place pi's `trust.json`
+//!   trusts — its nearest entry, exactly as pi resolves it — launches with
+//!   `--approve`; one it explicitly distrusts gets `--no-approve`. READ only:
+//!   worktrees never writes that file (`pi_own_trust`).
 //! - `pi_project_trust = "ask"` (a user setting) passes neither flag, and pi
 //!   asks — the modal the activity reader reports as waiting.
 //! - A repo in the user's allowance, `[trust] pi = ["<repo root>", …]` in
-//!   `~/.config/worktrees/config.toml`, launches with `--approve`. That is the
-//!   ONLY case worktrees passes it.
+//!   `~/.config/worktrees/config.toml`, launches with `--approve` — even over
+//!   an explicit distrust in pi's file.
+//! - Over everything: a place whose `.pi/mcp.json` defines `worktrees` never
+//!   gets `--approve` (`pi_mcp_shadowed`).
 //!
 //! Only the user grants the allowance — `worktrees trust pi`, or Settings → pi.
 //! MCP and agents may READ it. `trust` joins `USER_ONLY_KEYS`, so a
@@ -110,29 +116,107 @@ pub fn is_allowed(harness: &str, repo_root: &str) -> bool {
     allowed(harness).iter().any(|r| r == repo_root)
 }
 
-/// pi's trust flag for a launch in `wt`, already a shell word: `--approve` for
-/// an allowed repo, `--no-approve` under `never`, nothing under `ask` — and
-/// `--no-approve` for an allowed repo whose place shadows the worktrees MCP
-/// server (`pi_mcp_shadowed`).
-pub fn pi_flag(wt: &str) -> Option<&'static str> {
-    let allowed = repo_root(wt).is_some_and(|r| is_allowed("pi", &r));
-    pi_flag_for(allowed, pi_trust(), allowed && pi_mcp_shadowed(wt))
+/// A trust decision in pi's own `trust.json`: the key that matched, and its
+/// value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PiOwnTrust {
+    pub path: String,
+    pub trusted: bool,
 }
 
-/// The decision, without the reads. A shadowing place under the allowance
-/// gets an explicit `--no-approve`, never "ask": pi's modal highlights Trust,
-/// and one Enter there would load exactly the server this refuses.
-pub fn pi_flag_for(allowed: bool, mode: PiTrust, shadowed: bool) -> Option<&'static str> {
-    if allowed && !shadowed {
-        return Some("--approve");
+/// How a pi launch in a place is trusted, and why — one answer for the launch,
+/// `doctor --pi` and Settings → pi.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PiLaunchTrust {
+    /// The shell word, or none (`ask`: pi's own modal decides).
+    pub flag: Option<&'static str>,
+    /// `shadowed` · `allowance` · `pi-trusted` · `pi-untrusted` · `never` · `ask`.
+    pub source: &'static str,
+    /// pi's own matching entry, whether or not it decided.
+    pub pi_entry: Option<PiOwnTrust>,
+    pub shadowed: bool,
+    /// Something would have granted `--approve` (the allowance or pi's trust).
+    /// With `shadowed`, that is the case to say out loud.
+    pub would_approve: bool,
+}
+
+/// The precedence, without the reads: protect-ours over everything, then the
+/// worktrees allowance, then pi's own nearest entry, then `pi_project_trust`.
+/// A shadowing place gets an explicit `--no-approve`, never "ask": pi's modal
+/// highlights Trust, and one Enter there would load exactly the server this
+/// refuses.
+pub fn pi_launch_trust_for(allowed: bool, mode: PiTrust, shadowed: bool, pi_entry: Option<PiOwnTrust>) -> PiLaunchTrust {
+    let pi_says = pi_entry.as_ref().map(|e| e.trusted);
+    let would_approve = allowed || pi_says == Some(true);
+    let (flag, source) = if shadowed {
+        (Some("--no-approve"), "shadowed")
+    } else if allowed {
+        (Some("--approve"), "allowance")
+    } else if pi_says == Some(true) {
+        (Some("--approve"), "pi-trusted")
+    } else if pi_says == Some(false) {
+        (Some("--no-approve"), "pi-untrusted")
+    } else {
+        match mode {
+            PiTrust::Never => (Some("--no-approve"), "never"),
+            PiTrust::Ask => (None, "ask"),
+        }
+    };
+    PiLaunchTrust { flag, source, pi_entry, shadowed, would_approve }
+}
+
+pub fn pi_launch_trust(wt: &str) -> PiLaunchTrust {
+    let allowed = repo_root(wt).is_some_and(|r| is_allowed("pi", &r));
+    pi_launch_trust_for(allowed, pi_trust(), pi_mcp_shadowed(wt), pi_own_trust(wt))
+}
+
+/// pi's trust flag for a launch in `wt`, already a shell word (`pi_launch_trust`).
+pub fn pi_flag(wt: &str) -> Option<&'static str> {
+    pi_launch_trust(wt).flag
+}
+
+/// pi's `trust.json`, in its agent dir. worktrees READS it and never writes it.
+pub fn pi_trust_path() -> PathBuf {
+    crate::pi::agent_dir().join("trust.json")
+}
+
+/// pi 0.99.1's `readTrustFile`: a BOM is stripped, the root must be an object,
+/// and every value must be `true`, `false` or `null` — anything else and pi
+/// refuses the whole file, so this does too.
+pub fn parse_pi_trust(text: &str) -> Result<BTreeMap<String, Option<bool>>, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let obj = v.as_object().ok_or("expected an object")?;
+    obj.iter()
+        .map(|(k, v)| match v {
+            serde_json::Value::Bool(b) => Ok((k.clone(), Some(*b))),
+            serde_json::Value::Null => Ok((k.clone(), None)),
+            _ => Err(format!("value for {k:?} must be true, false or null")),
+        })
+        .collect()
+}
+
+/// pi 0.99.1's `findNearestTrustEntry`: from the canonical cwd up to `/`, the
+/// first key whose value is `true` or `false`. Keys match as exact strings (pi
+/// writes realpaths); a `null` is no decision and the walk goes on.
+pub fn nearest_pi_trust(data: &BTreeMap<String, Option<bool>>, canonical_cwd: &Path) -> Option<PiOwnTrust> {
+    let mut dir = Some(canonical_cwd);
+    while let Some(d) = dir {
+        if let Some(Some(b)) = data.get(d.to_string_lossy().as_ref()) {
+            return Some(PiOwnTrust { path: d.to_string_lossy().into_owned(), trusted: *b });
+        }
+        dir = d.parent();
     }
-    if allowed {
-        return Some("--no-approve");
-    }
-    match mode {
-        PiTrust::Never => Some("--no-approve"),
-        PiTrust::Ask => None,
-    }
+    None
+}
+
+/// pi's own decision for `wt`, as pi would resolve it (`realpath`, falling
+/// back to the path as given, like its `canonicalizePath`). `None` when the
+/// file is missing, unreadable, or has no entry on the way up.
+pub fn pi_own_trust(wt: &str) -> Option<PiOwnTrust> {
+    let data = parse_pi_trust(&std::fs::read_to_string(pi_trust_path()).ok()?).ok()?;
+    let cwd = std::fs::canonicalize(wt).unwrap_or_else(|_| PathBuf::from(wt));
+    nearest_pi_trust(&data, &cwd)
 }
 
 /// The place's own `.pi/mcp.json`, which pi reads (for a trusted project)
@@ -398,17 +482,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// The allowance gives `--approve` — except to a place whose `.pi/mcp.json`
-    /// shadows the worktrees server, which gets an explicit `--no-approve`
-    /// (never "ask", whose modal highlights Trust).
+    /// Precedence (decided 2026-09-29): protect-ours over everything, then the
+    /// worktrees allowance, then pi's own entry, then `pi_project_trust`.
     #[test]
-    fn a_shadowing_place_loses_approve_even_under_the_allowance() {
-        assert_eq!(pi_flag_for(true, PiTrust::Never, false), Some("--approve"));
-        assert_eq!(pi_flag_for(true, PiTrust::Ask, false), Some("--approve"));
-        assert_eq!(pi_flag_for(true, PiTrust::Never, true), Some("--no-approve"));
-        assert_eq!(pi_flag_for(true, PiTrust::Ask, true), Some("--no-approve"));
-        assert_eq!(pi_flag_for(false, PiTrust::Never, false), Some("--no-approve"));
-        assert_eq!(pi_flag_for(false, PiTrust::Ask, false), None);
+    fn launch_trust_precedence() {
+        let t = |b| Some(PiOwnTrust { path: "/w".into(), trusted: b });
+        let f = |allowed, mode, shadowed, e: Option<PiOwnTrust>| {
+            let d = pi_launch_trust_for(allowed, mode, shadowed, e);
+            (d.flag, d.source)
+        };
+        use PiTrust::{Ask, Never};
+        assert_eq!(f(false, Never, false, None), (Some("--no-approve"), "never"));
+        assert_eq!(f(false, Ask, false, None), (None, "ask"));
+        assert_eq!(f(false, Never, false, t(true)), (Some("--approve"), "pi-trusted"));
+        assert_eq!(f(false, Ask, false, t(true)), (Some("--approve"), "pi-trusted"));
+        assert_eq!(f(false, Ask, false, t(false)), (Some("--no-approve"), "pi-untrusted"));
+        assert_eq!(f(true, Never, false, t(false)), (Some("--approve"), "allowance"), "the allowance still grants");
+        assert_eq!(f(true, Never, false, None), (Some("--approve"), "allowance"));
+        // Shadowing wins over every grant, and is never "ask".
+        for (allowed, e) in [(true, None), (false, t(true)), (true, t(true)), (false, None)] {
+            for mode in [Never, Ask] {
+                assert_eq!(f(allowed, mode, true, e.clone()), (Some("--no-approve"), "shadowed"));
+            }
+        }
+        assert!(pi_launch_trust_for(false, Never, true, t(true)).would_approve);
+        assert!(!pi_launch_trust_for(false, Never, true, t(false)).would_approve);
+    }
+
+    /// pi 0.99.1's `findNearestTrustEntry` and `readTrustFile`, case by case.
+    #[test]
+    fn pi_trust_resolves_as_pi_does() {
+        let data = parse_pi_trust("\u{feff}{\"/Users/me/workspace\": true, \"/Users/me/workspace/repo/.worktrees/x\": false, \"/Users/me/workspace/other\": null}").unwrap();
+        let at = |p: &str| nearest_pi_trust(&data, Path::new(p));
+        // An ancestor entry covers everything below it.
+        assert_eq!(at("/Users/me/workspace/repo/.worktrees/lane"), Some(PiOwnTrust { path: "/Users/me/workspace".into(), trusted: true }));
+        assert_eq!(at("/Users/me/workspace").map(|e| e.trusted), Some(true));
+        // The NEAREST decision wins, including a closer `false`.
+        assert_eq!(at("/Users/me/workspace/repo/.worktrees/x/sub"), Some(PiOwnTrust { path: "/Users/me/workspace/repo/.worktrees/x".into(), trusted: false }));
+        // `null` is no decision: the walk continues to the ancestor.
+        assert_eq!(at("/Users/me/workspace/other").map(|e| e.path), Some("/Users/me/workspace".into()));
+        // Outside every entry; and keys are exact strings, never prefixes.
+        assert_eq!(at("/Users/me/work"), None);
+        assert_eq!(at("/Users/me/workspace2/r"), None);
+        // `/` itself is a key pi would check.
+        let root = parse_pi_trust(r#"{"/": false}"#).unwrap();
+        assert_eq!(nearest_pi_trust(&root, Path::new("/a/b")).map(|e| e.trusted), Some(false));
+        // pi refuses the whole file on a bad value or shape; so do we.
+        assert!(parse_pi_trust(r#"{"/a": "yes"}"#).is_err());
+        assert!(parse_pi_trust("[]").is_err());
+        assert!(parse_pi_trust("{").is_err());
+        assert!(parse_pi_trust("{}").unwrap().is_empty());
     }
 
     #[test]

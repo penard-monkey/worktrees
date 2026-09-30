@@ -126,3 +126,21 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   [[ "$c" == *" --no-approve --session-id "* ]]
   [[ "$c" != *" --approve "* ]]
 }
+
+@test "a place pi's own trust.json trusts launches with --approve; an explicit distrust does not" {
+  local root; root="$(cd "$REPO" && pwd -P)"
+  printf '{"%s": true}\n' "$(dirname "$root")" > "$PI_CODING_AGENT_DIR/trust.json"
+  run_wt new feat-x --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  [[ "$(pi_cmd feat-x)" == *" --approve --session-id "* ]]
+  run_wt doctor --pi
+  [[ "$output" == *"pi's own trust.json trusts $(dirname "$root")"* ]]
+  # The nearest entry wins: a distrust on the repo itself.
+  printf '{"%s": true, "%s": false}\n' "$(dirname "$root")" "$root" > "$PI_CODING_AGENT_DIR/trust.json"
+  run_wt new feat-y --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [[ "$(pi_cmd feat-y)" == *" --no-approve --session-id "* ]]
+  # worktrees' own allowance still grants over pi's distrust.
+  run_wt trust pi
+  run_wt new feat-z --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [[ "$(pi_cmd feat-z)" == *" --approve --session-id "* ]]
+}
