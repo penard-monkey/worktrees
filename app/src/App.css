@@ -999,12 +999,6 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 4px var(--accent);
 }
-/* Purple when the only thing pending is an OFFER — the same hue as the band
-   that made it, and the app's existing word for claude. Geometry deliberately
-   unchanged: the dot already teaches "there is news on this square", and a
-   second size would be a second idea (the same reasoning `.usage-badge`
-   records two rules up). */
-.rail-icon.upd.upd-offer::after { background: var(--ai); box-shadow: 0 0 4px var(--ai); }
 .upd-tag {
   margin-left: var(--s2); padding: 1px var(--s2); border-radius: var(--r-sm);
   font-size: var(--fs-micro); font-weight: var(--fw-bold); text-transform: uppercase;
@@ -1379,6 +1373,30 @@ body.dragging .menu-catch { pointer-events: none; }
 @media (max-width: 520px) {
   .wn-offer { flex-wrap: wrap; }
   .wn-offer-acts { width: 100%; justify-content: flex-end; }
+}
+
+/* The dock rail's pending-offers button (App.tsx, `rail-offers`). The glyph
+   takes the band's `--ai` — it is an ICON, a fill-like mark, which is where
+   hue belongs here — while the count is words and so takes `--txt-hi` on an
+   `--ai` tint composited over the rail's own surface (never over
+   `transparent`: the badge overlaps the glyph's corner). 22%, measured: the
+   count is ≥ 4.5:1 in all six themes (tokyo-day and catppuccin-latte are the
+   floor; at 38% they were 3.8 and 3.6), since a lighter tint helps dark text
+   on a light rail and light text on a dark one alike. A real span, not a
+   pseudo-element, because it carries text; absolutely positioned, so it adds
+   nothing to the button's intrinsic size — the 32px square is fixed by
+   `.rail-icon`, which is what keeps WebKit's button sizing out of it. */
+.rail-offers { color: var(--ai); }
+.rail-offers:hover { color: var(--ai); }
+.rail-count {
+  position: absolute; right: 1px; bottom: 1px;
+  min-width: 13px; height: 13px; padding: 0 3px;
+  display: grid; place-items: center;
+  border-radius: var(--r-full);
+  background: color-mix(in srgb, var(--ai) 22%, var(--bg-abyss));
+  color: var(--txt-hi);
+  font-size: var(--fs-micro); font-weight: var(--fw-bold); line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 /* The deep link's landing mark. An OUTLINE, not a border or a background: it

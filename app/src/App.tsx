@@ -18,7 +18,7 @@ import { AutomationsPane } from "./AutomationsPane";
 import { FilesPane, FileView } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
 import { type McpStatus } from "./McpPanel";
-import { dismissPatch, pendingOffers, type Offer } from "./offers";
+import { dismissPatch, offersTitle, pendingOffers, type Offer } from "./offers";
 import type { CatId } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, remedies, reportFailed, StrayBanner,
@@ -662,9 +662,10 @@ function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceO
   version: string;
   notes: string;
   manual: boolean;
-  /// Pending offers, listed under the notes. Empty in the MANUAL view: that one
-  /// is opened from Settings, so the reader is already standing where the links
-  /// would send them.
+  /// Pending offers, pinned above the notes — in the MANUAL view too. That one
+  /// used to get none ("the reader is already in Settings"), which left no way
+  /// back to the band once one offer had been taken: taking closes these notes,
+  /// so the other rows went with them until the next release.
   offers: Offer[];
   onTakeOffer: (o: Offer) => void;
   onSilenceOffer: (o: Offer) => void;
@@ -721,10 +722,12 @@ function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceO
              this app (see tokens.css), which also keeps it distinct from
              `--accent`, the generic interactive hue.
 
-             It is NOT the only way to reach the offer, and must not be: this
-             modal appears once per version and never at all on a fresh
-             install, so Settings → Claude carries the same dismissal on
-             demand. */
+             It is NOT the only way to reach the offer, and must not be: the
+             automatic view appears once per version and never at all on a
+             fresh install. The dock rail's sparkles button reopens THIS band
+             for as long as anything is pending, Settings → Updates → Release
+             notes shows it too, and each destination panel carries the same
+             dismissal on demand. */
           <div className="wn-offers">
             {offers.length > 1 && (
               <div className="wn-offers-h">{offers.length} things to set up</div>
@@ -3712,8 +3715,8 @@ function App() {
     invoke<UserSkill[]>("agent_user_skills").then(setUserSkills).catch(() => setUserSkills(null));
   }, []);
 
-  // Offers: things set up nowhere, listed in the release notes and badged on
-  // the gear until taken or silenced. Derived — no surface computes its own
+  // Offers: things set up nowhere, listed in the release notes and counted by
+  // the dock rail's sparkles button until taken or silenced. Derived — no surface computes its own
   // answer, which is how the Home card and the Settings panel came to disagree
   // about whether there was anything to say.
   const offers = useMemo(
@@ -3738,24 +3741,14 @@ function App() {
   const skillsOffer = offers.find((o) => o.id === "codex-skills") ?? null;
   const piMcpOffer = offers.find((o) => o.id === "pi-mcp") ?? null;
 
-  // The rail dot already means "something in Settings needs you" (an update).
-  // An unacted offer is the same claim, so it lights the same dot rather than
-  // inventing a second indicator next to it.
-  const railAlert = updateAvail || offers.length > 0;
-  // An offer is not an update, and until now they painted the same dot: you
-  // could not tell "the CLI is behind" from "you never set the server up"
-  // without hovering a gear, which nobody does. Same 6px dot in the same place
-  // — a second shape would be a second idea — recoloured to the band's purple
-  // when an offer is the only thing pending. With an update ALSO pending the
-  // dot stays accent (the older meaning) and the tooltip names both.
-  const railOfferOnly = offers.length > 0 && !updateAvail;
-  const railTitle = updateAvail && offers.length > 0
-    ? "settings — update available · setup suggested"
-    : updateAvail
-      ? "settings — update available"
-      : offers.length > 0
-        ? "settings — setup suggested"
-        : "settings (⌘,)";
+  // The gear's dot means an UPDATE, and only that. Offers used to light it too
+  // (purple when they were the only thing pending), but a dot on the gear leads
+  // to Settings, which lists no offers — you landed on Appearance and hunted.
+  // They have their own button now, at the foot of the dock rail, with a count
+  // and a click that opens the list itself; two marks for one fact would be the
+  // "second competing badge" that button was designed not to be.
+  const railAlert = updateAvail;
+  const railTitle = updateAvail ? "settings — update available" : "settings (⌘,)";
   const recheckTmux = useCallback(async () => {
     try {
       const ok = await invoke<boolean>("tmux_check", { refresh: true });
@@ -5148,8 +5141,10 @@ function App() {
     closeCtx();
     revealItemInDir(path).catch((e) => fail(e));
   };
-  // Settings → "Release notes": the What's-new sheet again, with the FULL
-  // released history (every section ≤ the running version), on top of Settings.
+  // Settings → "Release notes" and the dock rail's offers button: the What's-new
+  // sheet again, with the FULL released history (every section ≤ the running
+  // version) and the pending-offers band pinned above it — on top of Settings
+  // when opened from there (`.stacked`), on its own from the rail.
   const showReleaseNotes = async () => {
     try {
       const ci = await invoke<{ version: string; changelog: string }>("get_changelog");
@@ -6751,7 +6746,7 @@ function App() {
             status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
-        <button className={"rail-icon" + (railAlert ? " upd" : "") + (railOfferOnly ? " upd-offer" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
+        <button className={"rail-icon" + (railAlert ? " upd" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── the sidebar ──
@@ -7544,6 +7539,22 @@ function App() {
             </button>
           );
         })}
+        {/* Pending setup offers — the way BACK to the release notes' band, and
+            the only mark offers make anywhere outside it. Gated on the offers
+            and nothing else (offers-check.mjs): no place, no project, no
+            screen, which is the v0.25.0 lesson. Foot of the dock rail because
+            that end is empty in every layout, and it is the window's
+            bottom-right corner unless Places is mirrored onto that side. */}
+        {offers.length > 0 && (
+          <>
+            <div className="rail-spacer" />
+            <button className="rail-icon rail-offers" data-track="offers" title={offersTitle(offers.length)}
+              onClick={() => showReleaseNotes()}>
+              <Icons.Sparkles size={17} />
+              <span className="rail-count">{offers.length}</span>
+            </button>
+          </>
+        )}
       </nav>
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only
@@ -7694,7 +7705,7 @@ function App() {
       {whatsNew && (
         <WhatsNewModal
           version={whatsNew.version} notes={whatsNew.notes} manual={!!whatsNew.manual}
-          offers={whatsNew.manual ? [] : offers}
+          offers={offers}
           onTakeOffer={(o) => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); takeOffer(o); }}
           onSilenceOffer={silenceOffer}
           onClose={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}

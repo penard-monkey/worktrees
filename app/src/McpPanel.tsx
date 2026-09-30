@@ -96,11 +96,11 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
   /** The project in focus, or "" — only used to check the local/project scopes. */
   repo: string;
   /** Is this still an un-taken, un-silenced offer (`offers.ts`)? If so this
-   *  panel must be able to END it, because the gear dot that sent you here is
-   *  lit by exactly that fact and this is the only surface reachable on demand.
-   *  The release-notes band carries the same button, but it appears once per
-   *  version and never at all on a fresh install — so without this, the most
-   *  common way to meet the offer is a permanent dot with no off switch. */
+   *  panel can END it, because it is where taking the offer lands you: the
+   *  band that sent you here closed on the way, and the dock rail's offers
+   *  button stays lit by exactly this fact until it is set up or silenced.
+   *  Same `silenceOffer` as the band's "Don't show again" — one behaviour,
+   *  offered where you are standing. */
   offerPending: boolean;
   onSilenceOffer: () => void;
   onChanged: (s: McpStatus) => void;
@@ -217,7 +217,7 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
         )}
         {/* Ends the SUGGESTION, not the feature: the panel stays exactly as it
             is, still says what is not set up and still offers to do it. All
-            this retires is the nudging — the band and the dot on the gear. */}
+            this retires is the nudging — the band and the rail's offers button. */}
         {offerPending && (
           <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>
         )}

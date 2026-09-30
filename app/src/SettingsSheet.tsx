@@ -701,12 +701,12 @@ export function SettingsSheet({
             >
               {c.label}
               {c.id === "updates" && actionable ? <span className="upd-tag">upd</span> : null}
-              {/* `stale` only, still. The rail's gear now carries the OFFER's
-                  dot (`upd-offer`), so badging this category too would say the
-                  same thing twice on one path — and the panel it points at can
-                  end the suggestion, which is what stops a standing dot being a
-                  chore. A BROKEN server is a different claim and earns the
-                  mark. */}
+              {/* `stale` only, still. An OFFER already has its mark — the dock
+                  rail's sparkles button, which opens the list — so badging this
+                  category too would say the same thing twice, and the panel it
+                  points at can end the suggestion, which is what stops a
+                  standing mark being a chore. A BROKEN server is a different
+                  claim and earns the mark. */}
               {c.id === "claude" && mcpStatus?.state === "stale" ? <span className="upd-tag warn">!</span> : null}
             </button>
           ))}

@@ -15,6 +15,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   model switch in a pi lane updates its label within a tick. Every harness
   the app knows now has to be wired into that poll or a test fails, so the
   next one cannot ship without a dot the same way.
+- **Setup suggestions no longer vanish once you take one.** Pressing
+  "Set up…" in What's new closed the sheet, and the other suggestions went
+  with it until the next release — Settings → Release notes deliberately
+  showed none. The release notes now always carry the suggestions still
+  pending, however you open them, and a sparkles button with a count sits at
+  the foot of the dock rail while any are left: it opens the same list,
+  where each keeps its "Don't show again", and it disappears once everything
+  is set up or silenced. The gear's dot goes back to meaning an update only.
 
 ## [0.34.0] - 2026-09-30
 

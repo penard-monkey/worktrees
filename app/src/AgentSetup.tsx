@@ -334,8 +334,8 @@ export function UserSkillsSection({ skills, onChanged, offerPending, onSilenceOf
           </button>
         )}
         {/* Ends the SUGGESTION, not the feature — same contract as the Claude
-            panel's: the band and the gear dot are the only surfaces that
-            appear once, so the section needs its own off switch. */}
+            panel's: taking the offer closed the band that sent you here, so
+            the section carries the same off switch where you land. */}
         {offerPending && <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>}
       </div>
       {linked && <div className="hint">{linked.length > 0 ? `Linked ${linked.join(", ")}.` : "Nothing needed linking."}</div>}
