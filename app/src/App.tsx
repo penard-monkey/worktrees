@@ -3715,8 +3715,8 @@ function App() {
     invoke<UserSkill[]>("agent_user_skills").then(setUserSkills).catch(() => setUserSkills(null));
   }, []);
 
-  // Offers: things set up nowhere, listed in the release notes and badged on
-  // the gear until taken or silenced. Derived — no surface computes its own
+  // Offers: things set up nowhere, listed in the release notes and counted by
+  // the dock rail's sparkles button until taken or silenced. Derived — no surface computes its own
   // answer, which is how the Home card and the Settings panel came to disagree
   // about whether there was anything to say.
   const offers = useMemo(

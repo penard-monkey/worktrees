@@ -20,7 +20,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   with it until the next release — Settings → Release notes deliberately
   showed none. The release notes now always carry the suggestions still
   pending, however you open them, and a sparkles button with a count sits at
-  the foot of the right-hand rail while any are left: it opens the same list,
+  the foot of the dock rail while any are left: it opens the same list,
   where each keeps its "Don't show again", and it disappears once everything
   is set up or silenced. The gear's dot goes back to meaning an update only.
 

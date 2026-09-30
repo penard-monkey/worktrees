@@ -1713,10 +1713,10 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   is fed App's startup probe, which runs with `repo: null`, and
   `mcpsetup::status` only consults the local and project scopes with a repo in
   hand. So a machine that registered the server per-project is covered and still
-  gets offered it — a purple gear dot and a release-notes band — until Settings
+  gets offered it — the dock rail's offers button and a release-notes band — until Settings
   → Claude re-probes with the repo and silently corrects the state. Inherited
   from the Home card, but that card sat on one screen behind a project
-  precondition and the dot is on every screen. Either re-probe with `sel?.repo`
+  precondition and the rail button is on every screen. Either re-probe with `sel?.repo`
   when a place is selected, or probe once with the first project root.
   _From: [2026-09-19 mcp-offer-surfaces](docs/sessions/2026-09-19-mcp-offer-surfaces/summary.md)_
 

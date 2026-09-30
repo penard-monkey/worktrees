@@ -102,7 +102,7 @@ export type OfferCtx = {
 //  consults those with a repo in hand). Such a machine is covered and will
 //  still be offered the server until Settings → Claude re-probes with the repo
 //  and corrects it. Inherited from the Home card, but it matters more now that
-//  the dot is on every screen rather than one.
+//  the dock rail's offers button is on every screen rather than one.
 export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>): Offer[] {
   const out: Offer[] = [];
   if (ctx.mcp?.state === "absent") {
