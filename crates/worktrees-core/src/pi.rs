@@ -401,6 +401,158 @@ pub fn border_is_busy(line: &str) -> bool {
     !stripped.chars().all(|c| c == '─' || c == ' ')
 }
 
+/// pi's composer, read by position (`read_screen`'s rule): the input between
+/// its top border and the bottom rule, whether that border carries a status,
+/// and the `Steering:` queue pi shows directly above it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Composer {
+    /// The input, wrapped lines joined with single spaces.
+    pub input: String,
+    pub busy: bool,
+    /// Queued steering messages, in screen order, without the `Steering: `.
+    pub steering: Vec<String>,
+}
+
+pub fn read_composer(screen: &str) -> Option<Composer> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let bottom = lines.iter().rposition(|l| is_rule(l))?;
+    let top = lines[..bottom].iter().rposition(|l| l.starts_with('─'))?;
+    let input = normalize(&lines[top + 1..bottom].join(" "));
+    // The queue sits right above the border, ANCHORED by pi's
+    // `↳ Option+Up to edit all queued messages` hint: the first non-blank line
+    // above the border must be that hint, and the `Steering: …` lines are the
+    // run directly above it. Without the hint there is no queue — so the
+    // conversation's last line, which also sits right above the border, can
+    // never be read as one even when it quotes "Steering:".
+    let mut steering = Vec::new();
+    let mut above = lines[..top].iter().rev().map(|l| l.trim()).skip_while(|t| t.is_empty());
+    if above.next().is_some_and(|t| t.starts_with('↳') && t.contains("queued")) {
+        for t in above {
+            match t.strip_prefix("Steering: ") {
+                Some(text) => steering.push(text.to_string()),
+                None => break,
+            }
+        }
+    }
+    steering.reverse();
+    Some(Composer { input, busy: border_is_busy(lines[top]), steering })
+}
+
+/// Whitespace collapsed: a wrapped composer and a trimmed JSONL entry both
+/// compare equal to what was typed.
+fn normalize(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What a `send` is recognised by: the start of the typed text — the
+/// attributed header and the first words — never its whole length, which a
+/// narrow pane truncates and pi trims.
+pub fn send_prefix(typed: &str) -> String {
+    normalize(typed).chars().take(80).collect()
+}
+
+fn starts(text: &str, prefix: &str) -> bool {
+    !prefix.is_empty() && normalize(text).starts_with(prefix)
+}
+
+/// User entries in the session file at `path` whose text starts with
+/// `prefix`. Read from the tail: a just-sent message is always in it.
+pub fn user_entries_starting(path: &Path, prefix: &str) -> usize {
+    let lines = activity::tail_lines_checked(path, activity::ROLLOUT_TAIL_BYTES).unwrap_or_default();
+    user_entries_in(&lines, prefix)
+}
+
+pub fn user_entries_in(lines: &[String], prefix: &str) -> usize {
+    lines
+        .iter()
+        .filter(|l| l.contains("\"user\""))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("message"))
+        .filter_map(|v| {
+            let m = v.get("message")?;
+            if m.get("role")?.as_str()? != "user" {
+                return None;
+            }
+            Some(match m.get("content")? {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(parts) => {
+                    parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("")
+                }
+                _ => String::new(),
+            })
+        })
+        .filter(|t| starts(t, prefix))
+        .count()
+}
+
+/// Press Enter on text already typed into pi's composer, and confirm it —
+/// `harness::submit_codex`'s loop with pi's receipts. Every Enter (retries
+/// included) needs a fresh screen whose composer holds OUR text, settled, and
+/// no trust modal; a failed capture never authorizes a keypress or counts as
+/// a receipt. Receipts: the session file gained a user entry starting with
+/// `prefix` (`Submitted`), or the composer is empty and pi's steering queue
+/// holds it (`Queued`). Seams keep it on virtual time in tests.
+pub fn submit_pi(
+    prefix: &str,
+    baseline: usize,
+    mut capture: impl FnMut() -> Option<String>,
+    mut entries: impl FnMut() -> usize,
+    mut enter: impl FnMut() -> Result<(), String>,
+    now: impl Fn() -> u64,
+    mut sleep: impl FnMut(u64),
+) -> crate::harness::SendOutcome {
+    use crate::harness::{SendOutcome, SEND_ENTER_TRIES, SEND_POLL_MS, SEND_STABLE_MS, SEND_TIMEOUT_MS, SEND_VERIFY_MS};
+    let start = now();
+    let mut previous: Option<String> = None;
+    let mut stable_since = start;
+    let mut tries = 0;
+    let mut last_enter: Option<u64> = None;
+    loop {
+        let time = now();
+        if time.saturating_sub(start) >= SEND_TIMEOUT_MS {
+            return SendOutcome::Unconfirmed;
+        }
+        match capture() {
+            Some(screen) => {
+                if read_screen(&screen) == PiScreen::TrustModal {
+                    return SendOutcome::Modal;
+                }
+                let composer = read_composer(&screen);
+                if tries > 0 {
+                    if entries() > baseline {
+                        return SendOutcome::Submitted;
+                    }
+                    if composer.as_ref().is_some_and(|c| c.input.is_empty() && c.steering.iter().any(|t| starts(t, prefix))) {
+                        return SendOutcome::Queued;
+                    }
+                }
+                let ours = composer.as_ref().is_some_and(|c| starts(&c.input, prefix));
+                if !ours || previous.as_deref() != Some(screen.as_str()) {
+                    stable_since = time;
+                } else if time.saturating_sub(stable_since) >= SEND_STABLE_MS
+                    && last_enter.is_none_or(|at| time.saturating_sub(at) >= SEND_VERIFY_MS)
+                {
+                    if tries == SEND_ENTER_TRIES {
+                        return SendOutcome::Unconfirmed;
+                    }
+                    if let Err(e) = enter() {
+                        return SendOutcome::EnterFailed(e);
+                    }
+                    tries += 1;
+                    last_enter = Some(time);
+                    stable_since = time;
+                }
+                previous = Some(screen);
+            }
+            None => {
+                previous = None;
+                stable_since = time;
+            }
+        }
+        sleep(SEND_POLL_MS);
+    }
+}
+
 /// A pi lane's state from its session file's newest turn and one capture of
 /// its pane. The screen answers first — it is the only witness of the gap
 /// before the first user message (no file yet) and of the trust modal — and
@@ -566,6 +718,107 @@ mod tests {
         assert_eq!(parse_header(r#"{"type":"session","version":3,"id":"a","cwd":"/x"}"#), Some(("a".into(), "/x".into())));
         assert_eq!(parse_header(r#"{"type":"model_change","id":"a","cwd":"/x"}"#), None);
         assert_eq!(parse_header(r#"{"type":"session","id":"a"}"#), None);
+    }
+
+    // ── send (fixtures/pi-send/0.99.1) ────────────────────────────────────
+    const S_EMPTY: &str = include_str!("../tests/fixtures/pi-send/0.99.1/idle-empty.txt");
+    const S_TYPED: &str = include_str!("../tests/fixtures/pi-send/0.99.1/idle-typed.txt");
+    const S_SUBMITTED: &str = include_str!("../tests/fixtures/pi-send/0.99.1/idle-submitted.txt");
+    const S_BUSY_TYPED: &str = include_str!("../tests/fixtures/pi-send/0.99.1/busy-typed.txt");
+    const S_QUEUED: &str = include_str!("../tests/fixtures/pi-send/0.99.1/busy-queued.txt");
+    const S_LONG: &str = include_str!("../tests/fixtures/pi-send/0.99.1/busy-typed-long.txt");
+    const S_TRUST: &str = include_str!("../tests/fixtures/pi-screen/0.99.1/trust-modal.txt");
+    const H: &str = "[worktrees: message from place \"(main)\", not from the user]";
+
+    #[test]
+    fn the_composer_is_read_by_position() {
+        let first = send_prefix(&format!("{H} Write the numbers 1 to 25, one per line, nothing else."));
+        let second = send_prefix(&format!("{H} After the numbers, reply STEERED."));
+        let c = read_composer(S_EMPTY).unwrap();
+        assert!(c.input.is_empty() && !c.busy && c.steering.is_empty());
+        let c = read_composer(S_TYPED).unwrap();
+        assert!(starts(&c.input, &first) && !c.busy);
+        let c = read_composer(S_SUBMITTED).unwrap();
+        assert!(c.input.is_empty() && c.busy && c.steering.is_empty(), "{c:?}");
+        let c = read_composer(S_BUSY_TYPED).unwrap();
+        assert!(starts(&c.input, &second) && c.busy, "{c:?}");
+        let c = read_composer(S_QUEUED).unwrap();
+        assert!(c.input.is_empty() && c.busy);
+        assert_eq!(c.steering.len(), 1);
+        assert!(starts(&c.steering[0], &second));
+        // Wrapped input joins back into one line that still starts with ours.
+        let c = read_composer(S_LONG).unwrap();
+        assert!(starts(&c.input, &send_prefix(&format!("{H} please ignore this padding"))), "{c:?}");
+        // The history above a composer can quote the queue; only the block
+        // directly on the border counts.
+        let quoted = S_SUBMITTED.replacen(H, &format!("Steering: {H}"), 1);
+        assert!(read_composer(&quoted).unwrap().steering.is_empty());
+    }
+
+    #[test]
+    fn user_entries_match_a_trimmed_prefix_in_either_content_shape() {
+        let p = send_prefix(&format!("{H} hello   there   "));
+        let lines = vec![
+            format!(r#"{{"type":"message","message":{{"role":"user","content":[{{"type":"text","text":"{} hello there"}}]}}}}"#, H.replace('"', "\\\"")),
+            format!(r#"{{"type":"message","message":{{"role":"user","content":"{} hello there"}}}}"#, H.replace('"', "\\\"")),
+            format!(r#"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"text","text":"{} hello there"}}]}}}}"#, H.replace('"', "\\\"")),
+            r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"something else"}]}}"#.to_string(),
+        ];
+        assert_eq!(user_entries_in(&lines, &p), 2);
+    }
+
+    /// Drives `submit_pi` on a virtual clock through a scripted pane: each
+    /// Enter advances to the next screen and may add a session entry.
+    fn drive(before: &[&str], after: &[&str], entry_on_enter: bool) -> (crate::harness::SendOutcome, usize) {
+        let clock = std::cell::Cell::new(0u64);
+        let enters = std::cell::Cell::new(0usize);
+        let prefix = send_prefix(&format!("{H} x"))[..H.len()].to_string();
+        let screen = |n: usize| -> Option<String> {
+            let seq = if n == 0 { before } else { after };
+            seq.get(0).map(|s| s.to_string())
+        };
+        let out = submit_pi(
+            &prefix,
+            0,
+            || screen(enters.get()),
+            || if entry_on_enter && enters.get() > 0 { 1 } else { 0 },
+            || {
+                enters.set(enters.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            |ms| clock.set(clock.get() + ms),
+        );
+        (out, enters.get())
+    }
+
+    #[test]
+    fn an_idle_send_is_submitted_when_the_session_file_has_it() {
+        use crate::harness::SendOutcome;
+        assert_eq!(drive(&[S_TYPED], &[S_SUBMITTED], true), (SendOutcome::Submitted, 1));
+        // The file lagging behind the screen is not a receipt by itself: an
+        // empty composer with no queue and no entry never confirms.
+        assert_eq!(drive(&[S_TYPED], &[S_SUBMITTED], false).0, SendOutcome::Unconfirmed);
+    }
+
+    #[test]
+    fn a_busy_send_is_queued_when_it_appears_as_steering() {
+        use crate::harness::SendOutcome;
+        assert_eq!(drive(&[S_BUSY_TYPED], &[S_QUEUED], false), (SendOutcome::Queued, 1));
+    }
+
+    #[test]
+    fn a_send_never_presses_enter_into_the_trust_modal_or_onto_other_text() {
+        use crate::harness::SendOutcome;
+        assert_eq!(drive(&[S_TRUST], &[S_TRUST], true), (SendOutcome::Modal, 0));
+        // Our text never showed up in the composer: no Enter at all.
+        assert_eq!(drive(&[S_EMPTY], &[S_EMPTY], true), (SendOutcome::Unconfirmed, 0));
+        // A lost Enter is retried, boundedly.
+        assert_eq!(drive(&[S_TYPED], &[S_TYPED], false), (SendOutcome::Unconfirmed, crate::harness::SEND_ENTER_TRIES));
+        // A pane that cannot be captured is never typed at.
+        let clock = std::cell::Cell::new(0u64);
+        let out = submit_pi(H, 0, || None, || 5, || panic!("no Enter without a screen"), || clock.get(), |ms| clock.set(clock.get() + ms));
+        assert_eq!(out, SendOutcome::Unconfirmed);
     }
 
     const TWO_TURNS: &str = include_str!("../tests/fixtures/pi-session/two-turns.jsonl");

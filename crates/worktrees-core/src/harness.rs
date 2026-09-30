@@ -89,15 +89,38 @@ pub enum Refusal {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SendOutcome {
     Submitted,
+    /// pi was mid-turn: the text left the composer and sits in pi's steering
+    /// queue, delivered when the current step ends. Consumed, not yet read.
+    Queued,
     Modal,
     Unconfirmed,
     EnterFailed(String),
 }
 
 impl SendOutcome {
+    /// The harness took the text: it is in the conversation or in its queue,
+    /// and a retry would deliver it twice.
+    pub fn confirmed(&self) -> bool {
+        matches!(self, Self::Submitted | Self::Queued)
+    }
+
+    /// `note`, in the words of the harness that was typed into.
+    pub fn note_for(&self, provider: &str) -> String {
+        if provider != crate::provider::PI.id {
+            return self.note();
+        }
+        match self {
+            Self::Submitted => "Typed into pi's prompt and confirmed: it is in pi's session as a user message. Ask it to report back, then wait until: message.".into(),
+            Self::Queued => "pi was working, so it queued this as a steering message; it is delivered when the current step ends (it shows as \"Steering:\" above pi's prompt until then). Ask it to report back, then wait until: message.".into(),
+            Self::Modal => "pi showed its project-trust prompt while sending. No Enter was pressed into it (Enter there trusts the repo). The text may be sitting in its input; the user has to answer the prompt. The message copy is left unread; check the composer and inbox before resending.".into(),
+            other => other.note(),
+        }
+    }
+
     pub fn note(&self) -> String {
         match self {
             Self::Submitted => "Typed into its prompt and confirmed submitted; Codex queues it if a turn is running. Ask it to report back, then wait until: message.".into(),
+            Self::Queued => "Typed while the agent was working and confirmed queued; it is delivered when the current step ends. Ask it to report back, then wait until: message.".into(),
             Self::Modal => "Codex opened an approval or a question while sending. No Enter was pressed into that prompt. The text may be sitting in its input; the user has to answer the prompt. Submission is not confirmed; the message copy is left unread if recorded. Submitting the composer later and reading messages can deliver the same instruction twice; check the composer and inbox before resending.".into(),
             Self::Unconfirmed => "Text was typed but submission could not be confirmed within the retry limit. It may still be in the composer. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates.".into(),
             Self::EnterFailed(e) => format!("Text was typed but Enter failed: {e}. Submission is not confirmed. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates."),
@@ -548,19 +571,49 @@ impl Adapter for Pi {
             .collect()
     }
 
-    /// Not yet: typing into pi and confirming it (from the JSONL user entry)
-    /// is phase 3. The trust modal is refused first and by name, because that
-    /// is the case where a stray Enter does damage.
+    /// Type into pi's composer and confirm it (pi-harness §4.5): idle →
+    /// a new user entry in the place's current session file that starts with
+    /// the attributed header; mid-turn → the composer clears and a `Steering:`
+    /// line with the header sits above it (the file only gets it at delivery).
+    /// The trust modal is refused first and by name: Enter there trusts the
+    /// repo. Literal keys only — no paste (it folds), no control keys (Ctrl-C
+    /// clears the composer, a second Ctrl-D exits pi).
     fn send(&self, req: &SendRequest) -> Delivery {
         if let Err(e) = may_type(self.provider().label, req.reading.state) {
             return Delivery::Refused(e);
         }
-        Delivery::Refused(
-            "send does not type into pi yet. Ask the user to relay it, or post it with report for \
-             when the place's agent can read messages."
-                .into(),
-        )
+        let session = self.provider().sidecar_name(req.canonical);
+        // pi runs as `node`, which `agent_pane` counts as an agent: in the
+        // place's own `~agent~pi` session, that pane is pi.
+        let Some(pane) = tmux::agent_pane(&session, req.path, req.exclude, self.provider().match_word) else {
+            return Delivery::Refused(format!(
+                "{session} has no pane running pi in {}; send only types into this project's own pi pane. \
+                 Use report instead.",
+                req.path
+            ));
+        };
+        let dir = crate::pi::session_dir(req.path);
+        let prefix = crate::pi::send_prefix(req.typed);
+        let entries = || {
+            crate::pi::current_session(&dir, req.path).map_or(0, |s| crate::pi::user_entries_starting(&s.path, &prefix))
+        };
+        let baseline = entries();
+        if let Err(e) = tmux::send_literal(&pane, req.typed) {
+            return Delivery::Refused(format!("could not type into {session}: {e}"));
+        }
+        let t0 = std::time::Instant::now();
+        let outcome = crate::pi::submit_pi(
+            &prefix,
+            baseline,
+            || tmux::capture(&pane),
+            entries,
+            || tmux::press_enter(&pane),
+            || t0.elapsed().as_millis() as u64,
+            |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+        );
+        Delivery::Typed { session, outcome }
     }
+
 }
 
 fn model_arg_value(model: String) -> Option<String> {

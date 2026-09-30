@@ -1906,12 +1906,14 @@ impl Server {
                     // consumed the input. A successful send-keys is not a receipt.
                     let dir = messages::dir(std::path::Path::new(&project.git_common));
                     let id = record_send(&dir, &me.slug, &slug, text, &outcome);
-                    let submitted = outcome == SendOutcome::Submitted;
+                    let submitted = outcome.confirmed();
+                    let note = outcome.note_for(a.provider().id);
                     return Ok(text_ok(
                         &serde_json::to_string_pretty(&serde_json::json!({
                             "delivered": submitted, "provider": a.provider().id, "session": session, "id": id, "typed": typed,
-                            "note": outcome.note(),
-                            "reason": if submitted { None } else { Some(outcome.note()) },
+                            "queued": outcome == SendOutcome::Queued,
+                            "note": note,
+                            "reason": if submitted { None } else { Some(note.clone()) },
                         }))
                         .unwrap_or_default(),
                     ));
@@ -2235,7 +2237,7 @@ fn record_send(
     outcome: &SendOutcome,
 ) -> Option<String> {
     let m = messages::post(dir, from, to, text, None, Some("send"), messages::now_ms()).ok()?;
-    if *outcome == SendOutcome::Submitted {
+    if outcome.confirmed() {
         let _ = messages::ack(dir, to, std::slice::from_ref(&m.id));
     }
     Some(m.id)
@@ -3406,6 +3408,7 @@ mod tests {
             SendOutcome::Modal,
             SendOutcome::EnterFailed("gone".into()),
             SendOutcome::Submitted,
+            SendOutcome::Queued,
         ]
         .iter()
         .enumerate()
@@ -3413,7 +3416,9 @@ mod tests {
             let dir = root.join(i.to_string());
             let id = record_send(&dir, "from", "to", "hello", outcome).unwrap();
             let unread = messages::unread(&dir, "to", None, messages::now_ms());
-            if *outcome == SendOutcome::Submitted {
+            // A queued send is consumed (pi holds it); an unread copy would
+            // invite the duplicate the note warns about.
+            if outcome.confirmed() {
                 assert!(unread.is_empty());
             } else {
                 assert_eq!(unread.len(), 1);
