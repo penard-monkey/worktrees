@@ -34,6 +34,18 @@
 // NOT offers: they live in `projectTodos.ts`, behind the project's header badge
 // and its "Repair / upgrade…" entry, because an offer about one repo would
 // otherwise stand in a list with no repo named.
+//
+// # Where they show: ONE list, two ways in
+//
+// The band in the release notes is the only place offers are listed, and it is
+// the same band whichever way the notes were opened — the automatic "What's
+// new" after an update, or Settings → Updates → Release notes. The way back to
+// it is the rail button at the bottom of the dock rail, which exists exactly
+// while `pendingOffers` is non-empty and opens those notes. Taking an offer
+// closes the notes to show its destination, so every entry point has to reopen
+// the band — the manual view used to pass no offers, and one "Set up…" made
+// the rest unreachable until the next release. A new offer needs no surface of
+// its own: return it from `pendingOffers` and both ways in list it.
 import type { McpStatus } from "./McpPanel";
 import type { CodexMcpStatus } from "./CodexMcpPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
@@ -162,4 +174,9 @@ export function dismissPatch(
   dismissed: Record<string, string>,
 ): Record<string, string> {
   return { ...dismissed, [o.id]: o.fingerprint };
+}
+
+/** The rail button's tooltip: how many, in the band's own words. */
+export function offersTitle(n: number): string {
+  return n === 1 ? "1 thing to set up — open" : `${n} things to set up — open`;
 }

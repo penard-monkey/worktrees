@@ -41,7 +41,7 @@ const ok = (m) => console.log(`ok   ${m}`);
 // carry a second answer to the rule this file exists to guard.
 const src = read("../src/offers.ts").replace(/^import type .*$|^import \{ type .*$/gm, "");
 const js = (await transformWithEsbuild(src, "offers-check.ts", { loader: "ts", format: "esm" })).code;
-const { pendingOffers, dismissPatch } = await import(
+const { pendingOffers, dismissPatch, offersTitle } = await import(
   `data:text/javascript;base64,${Buffer.from(js).toString("base64")}`
 );
 
@@ -204,7 +204,7 @@ if (offer) {
 
 // ── 4. the surface adds no preconditions (the actual v0.25.0 bug) ──────────
 // The release-notes list is the reach; it may be gated on the offers existing
-// and on the notes not being the manual view, and on nothing else.
+// and on nothing else — not even on which way the notes were opened.
 const app = read("../src/App.tsx");
 const row = app.match(/\{offers\.length > 0 && \(/);
 if (!row) {
@@ -217,11 +217,57 @@ if (!row) {
 const feed = app.match(/offers=\{([^}]*)\}/);
 if (!feed) {
   fail("App.tsx no longer passes an `offers=` prop to WhatsNewModal");
-} else if (feed[1].trim() !== "whatsNew.manual ? [] : offers") {
-  fail(`WhatsNewModal is fed \`offers={${feed[1].trim()}}\` — the only condition allowed on `
-     + "the feed is the manual-notes view. A screen or project gate here is the v0.25.0 bug "
-     + "moved one line up.");
-} else ok("the modal is fed every pending offer (bar the manual view)");
+} else if (feed[1].trim() !== "offers") {
+  fail(`WhatsNewModal is fed \`offers={${feed[1].trim()}}\` — every pending offer, in every view. `
+     + "The manual view once got `[]`, and since taking an offer closes the notes, one \"Set up…\" "
+     + "left the rest unreachable until the next release. A screen or project gate here is the "
+     + "v0.25.0 bug moved one line up.");
+} else ok("the modal is fed every pending offer, manual view included");
+// …and the modal must not re-add that condition INSIDE itself: `manual` may
+// retitle the header and nothing else.
+{
+  const at = app.indexOf("function WhatsNewModal(");
+  const body = at < 0 ? "" : app.slice(at, app.indexOf("\n}\n", at));
+  // Past the signature (`}) {` closes the props type), so the prop's own
+  // declaration does not count as a use.
+  const uses = body.slice(body.indexOf("}) {") + 4)
+    .split("\n").filter((l) => /\bmanual\b/.test(l) && !/^\s*(\/\/|\*)/.test(l));
+  if (!body) fail("App.tsx has no WhatsNewModal");
+  else if (uses.length !== 1 || !/manual \? "Release notes"/.test(uses[0])) {
+    fail(`WhatsNewModal reads \`manual\` beyond its header title: ${uses.map((l) => l.trim()).join(" | ")}`);
+  } else ok("inside the modal, `manual` only retitles the header");
+}
+
+// ── 4b. the way BACK: a rail button while anything is pending ──────────────
+// Taking an offer closes the notes, so something outside them must reopen the
+// band — on every screen, with or without a project, exactly while offers exist.
+{
+  const at = app.indexOf('<nav className="rail rail-right"');
+  const rail = at < 0 ? "" : app.slice(at, app.indexOf("</nav>", at));
+  if (!rail) fail("App.tsx has no dock rail (`rail rail-right`) to host the offers button");
+  else {
+    const gate = rail.match(/\{([^{}]*)&& \(\s*<>\s*<div className="rail-spacer" \/>\s*<button className="rail-icon rail-offers"/);
+    if (!gate) fail("the dock rail has no `rail-offers` button behind a spacer — nothing reopens the band once an offer is taken");
+    else if (gate[1].trim() !== "offers.length > 0") {
+      fail(`the offers button is gated on \`${gate[1].trim()}\` — offers alone, or it is the v0.25.0 bug on a new surface`);
+    } else ok("the dock rail's offers button is gated on offers alone");
+    const btn = rail.slice(rail.indexOf("rail-offers"));
+    if (!/onClick=\{\(\) => showReleaseNotes\(\)\}/.test(btn)) fail("the offers button does not open the release notes (the band)");
+    else ok("the offers button opens the notes, whose band lists every offer");
+    if (!/\{offers\.length\}/.test(btn)) fail("the offers button shows no count");
+    else ok("the offers button carries the count");
+  }
+  // One mark per fact: the gear's dot is the UPDATE's again.
+  const ra = app.match(/const railAlert = ([^;]*);/);
+  if (!ra) fail("App.tsx has no `railAlert`");
+  else if (/offer/i.test(ra[1])) fail(`railAlert = ${ra[1]} — offers have their own button; a second mark on the gear competes with it`);
+  else ok("the gear's dot no longer doubles as the offers mark");
+  if (/upd-offer/.test(app) || /upd-offer/.test(read("../src/App.css"))) fail("the purple gear dot (`upd-offer`) is still wired");
+  else ok("`upd-offer` is gone");
+}
+if (offersTitle(1) !== "1 thing to set up — open" || offersTitle(3) !== "3 things to set up — open") {
+  fail(`offersTitle: ${JSON.stringify([offersTitle(1), offersTitle(3)])}`);
+} else ok("offersTitle agrees in number");
 
 // …and the CONTEXT: an offer whose input is never fed can never render. The two
 // Codex inputs must be the machine-level probes, not some project's status.
@@ -237,8 +283,8 @@ if (!/invoke<CodexMcpStatus>\("codex_mcp_status"\)\.then\(setCodexMcp\)/.test(ap
   fail("App.tsx no longer probes codex_mcp_status / agent_user_skills straight into the offer inputs");
 } else ok("the Codex offer inputs come from machine-level probes");
 
-// The band is once-per-version and absent on a fresh install, so the panel must
-// carry a dismissal of its own or the gear dot has no off switch.
+// Taking an offer lands you on its panel with the band closed behind you, so
+// the panel carries the same dismissal where you are standing.
 const panel = read("../src/McpPanel.tsx");
 if (!/offerPending/.test(panel) || !/onSilenceOffer/.test(panel)) {
   fail("McpPanel has no offerPending/onSilenceOffer — Settings → Claude is the only "
