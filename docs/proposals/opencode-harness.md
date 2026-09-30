@@ -9,6 +9,8 @@ sibling of [pi as a third harness](pi-harness.html), written in parallel.
 It extends [Codex support](codex-support.html) and
 [Codex plan usage](codex-usage.html). It keeps the rule of one live provider
 per place.
+**Before building it, walk [Adding an agent harness](../adding-a-harness.html)** —
+the checklist written after pi shipped with no nav dot (v0.33.0).
 
 **The shared shape lives in the pi doc.** The two lanes agreed on one
 harness × model shape: the registry, `model_arg`, `ModelRef` /
