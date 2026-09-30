@@ -1609,6 +1609,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "term_write":
     case "term_resize":
     case "term_close":
+    case "term_wheel": // the mock banner has no history to scroll
       return null;
 
     // ── dock Files tab (virtual FS) + Terminal shells ──

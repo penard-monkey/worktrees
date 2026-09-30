@@ -83,6 +83,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   with a new id in the same place; the dot, the model label and `-r` now
   follow whichever session the place actually has, instead of only the one
   worktrees launched.
+- **The mouse wheel scrolls a pi pane (and a plain shell) instead of typing
+  ↑/↓ into it.** A program that draws on the pane's main screen without asking
+  for the mouse keeps its history in tmux, and the wheel used to reach it as
+  arrow keys — pi read them as editor history, a shell as history recall, and
+  earlier output was unreachable. The wheel now scrolls tmux's history; typing
+  returns to live output, and Esc leaves the history without reaching the
+  agent. Claude, which handles the mouse itself, and full-screen programs such
+  as `less` scroll exactly as before.
 
 ## [0.33.0] - 2026-09-29
 
