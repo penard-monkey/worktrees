@@ -309,9 +309,10 @@ fn live_model(id: &str, probes: &[worktrees_core::agent::ClaudeProbe], session: 
     match id {
         "claude" => claude_model(probes, session),
         "codex" => codex_model(cwd),
-        "pi" => session
-            .strip_suffix(provider::PI.sidecar_suffix)
-            .and_then(|canonical| worktrees_core::pi::running_model(canonical, cwd)),
+        // By the place's DIR, as codex and the tick read it — never through
+        // the session name, which a pi in the canonical session does not carry
+        // the sidecar suffix of (a mismatch there re-listed every 3s).
+        "pi" => worktrees_core::pi::running_model(session, cwd),
         _ => None,
     }
 }
@@ -355,7 +356,8 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             // a named one: `watch_lane` is where each is wired.
             for s in &sessions {
                 let running = s.up && agent_panes.as_ref().is_some_and(|panes| panes.session_runs_program(&s.name));
-                watch_lane(s.id, &place_path, running.then_some(&s.name), &s.model);
+                let launch = agent_panes.as_ref().and_then(|panes| panes.session_launch(&s.name));
+                watch_lane(s.id, &place_path, running.then_some(&s.name), launch, &s.model);
             }
             let tmux_up = sessions.iter().any(|s| s.up);
             // Profiles are claude's recipe, so only a live Claude can be stale.
@@ -1950,6 +1952,9 @@ static PI_WATCH: Mutex<Option<HashMap<String, PiWatched>>> = Mutex::new(None);
 #[derive(Clone, Debug, PartialEq)]
 struct PiWatched {
     session: String,
+    /// The launch the snapshot saw (`PaneList::session_launch`): a close +
+    /// open reuses the session NAME, and must start the startup read over.
+    launch: Option<String>,
     model: Option<String>,
     /// The session file (path, length) the first tick found — `Some(None)`
     /// when it found none — so a later tick can tell the file has MOVED.
@@ -1964,14 +1969,15 @@ struct PiWatched {
 /// pi runs there, `None` when not (which stops the tick watching it). The
 /// startup memory survives a re-list of the same session and resets for a
 /// new one — a relaunch is a new startup, modal and all.
-fn pi_watch_set(cwd: &str, session: Option<&String>, model: &Option<String>) {
+fn pi_watch_set(cwd: &str, session: Option<&String>, launch: Option<&str>, model: &Option<String>) {
     let mut guard = PI_WATCH.lock().unwrap_or_else(|e| e.into_inner());
     let w = guard.get_or_insert_with(HashMap::new);
     match session {
         Some(session) => {
-            let keep = w.get(cwd).filter(|x| x.session == *session).cloned();
+            let launch = launch.map(str::to_string);
+            let keep = w.get(cwd).filter(|x| x.session == *session && x.launch == launch).cloned();
             let (first_file, settled) = keep.map_or((None, false), |x| (x.first_file, x.settled));
-            w.insert(cwd.to_string(), PiWatched { session: session.clone(), model: model.clone(), first_file, settled });
+            w.insert(cwd.to_string(), PiWatched { session: session.clone(), launch, model: model.clone(), first_file, settled });
         }
         None => {
             w.remove(cwd);
@@ -2084,7 +2090,7 @@ fn harness_feed(id: &str, sessions: &str) -> Feed {
 /// the tick to watch (`session` is `None` when that harness is not running in
 /// the place). `false` for a harness nothing watches — the drift test's other
 /// arm.
-fn watch_lane(id: &str, cwd: &str, session: Option<&String>, model: &Option<String>) -> bool {
+fn watch_lane(id: &str, cwd: &str, session: Option<&String>, launch: Option<&str>, model: &Option<String>) -> bool {
     match id {
         "claude" => true, // probes are global; nothing to watch per place
         "codex" => {
@@ -2092,7 +2098,7 @@ fn watch_lane(id: &str, cwd: &str, session: Option<&String>, model: &Option<Stri
             true
         }
         "pi" => {
-            pi_watch_set(cwd, session, model);
+            pi_watch_set(cwd, session, launch, model);
             true
         }
         _ => false,
@@ -8946,7 +8952,7 @@ mod tests {
                 p.id
             );
             assert!(
-                watch_lane(p.id, "/nonexistent/drift-check", None, &None),
+                watch_lane(p.id, "/nonexistent/drift-check", None, None, &None),
                 "{} is in PROVIDERS but the snapshot never hands its sessions to the poll (`watch_lane`)",
                 p.id
             );
@@ -8961,7 +8967,7 @@ mod tests {
     fn pi_watch(session: &str) -> HashMap<String, PiWatched> {
         HashMap::from([(
             PI_LANE.to_string(),
-            PiWatched { session: session.into(), model: None, first_file: None, settled: false },
+            PiWatched { session: session.into(), launch: None, model: None, first_file: None, settled: false },
         )])
     }
 
@@ -9045,22 +9051,59 @@ mod tests {
         }
     }
 
-    /// A re-list of the SAME live session keeps what the tick learned about
-    /// startup; a new session (a relaunch) starts over, modal and all.
+    /// A re-list of the SAME live launch keeps what the tick learned about
+    /// startup; a new launch starts over, modal and all — including a close +
+    /// open, which recreates the SAME `~agent~pi` name: keyed on the name, a
+    /// resumed lane's trust modal (ask mode) was never captured and the place
+    /// stayed dark instead of amber.
     #[test]
     fn a_pi_relaunch_resets_the_startup_memory() {
         // Its own key only: the map is process-global and shared with the
         // drift test's `pi_tick`.
         let cwd = "/nonexistent/pi-relaunch";
         let s = "x~agent~pi".to_string();
-        pi_watch_set(cwd, Some(&s), &None);
-        PI_WATCH.lock().unwrap().as_mut().unwrap().get_mut(cwd).unwrap().settled = true;
-        pi_watch_set(cwd, Some(&s), &Some("m".into()));
-        assert!(PI_WATCH.lock().unwrap().as_ref().unwrap()[cwd].settled, "same session: kept");
-        pi_watch_set(cwd, Some(&"y~agent~pi".to_string()), &None);
-        assert!(!PI_WATCH.lock().unwrap().as_ref().unwrap()[cwd].settled, "new session: reset");
-        pi_watch_set(cwd, None, &None);
+        let settled = || PI_WATCH.lock().unwrap().as_ref().unwrap()[cwd].settled;
+        let settle = || PI_WATCH.lock().unwrap().as_mut().unwrap().get_mut(cwd).unwrap().settled = true;
+        pi_watch_set(cwd, Some(&s), Some("101"), &None);
+        settle();
+        pi_watch_set(cwd, Some(&s), Some("101"), &Some("m".into()));
+        assert!(settled(), "same launch: kept");
+        pi_watch_set(cwd, Some(&s), Some("202"), &None);
+        assert!(!settled(), "same name, new launch (close + open): reset");
+        settle();
+        pi_watch_set(cwd, Some(&"y~agent~pi".to_string()), Some("202"), &None);
+        assert!(!settled(), "new session: reset");
+        pi_watch_set(cwd, None, None, &None);
         assert!(!PI_WATCH.lock().unwrap().as_ref().unwrap().contains_key(cwd));
+    }
+
+    /// The snapshot's pi model is read by the place's DIR, like codex's — never
+    /// through the session name. Stripping `~agent~pi` from it gave `None` for
+    /// a pi running in the canonical session while the tick (by dir) read the
+    /// model: a mismatch every 3s, each one a `places:changed` and a git
+    /// fan-out over every project.
+    #[test]
+    fn the_snapshots_pi_model_does_not_depend_on_the_session_name() {
+        let root = std::env::temp_dir().join(format!("wtapp-pi-model-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let agent = root.join("agent");
+        let cwd = root.join("place");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = cwd.to_str().unwrap().to_string();
+        let dir = worktrees_core::pi::session_dir_in(&agent, &cwd);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026-09-30T00-51-41-893Z_lane-abc123-g1.jsonl"), PI_G1.replace(PI_LANE, &cwd).replace("2026-09-30T", "2099-09-30T")).unwrap();
+        // Dated after the place dir was made, or `current_session` rightly
+        // treats it as a removed place's leftover.
+        // Process-global, and read by nothing else in this crate's tests
+        // except for paths that do not exist.
+        std::env::set_var("PI_CODING_AGENT_DIR", &agent);
+        let canonical = live_model("pi", &[], "repo-place", &cwd);
+        let sidecar = live_model("pi", &[], "repo-place~agent~pi", &cwd);
+        std::env::remove_var("PI_CODING_AGENT_DIR");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(sidecar.as_deref(), Some("lm-studio/qwen/qwen3-coder-480b"));
+        assert_eq!(canonical, sidecar, "a pi in the canonical session names the same model");
     }
 
     // `codex_panes_split_the_chain_per_pane` moved to core with the parser

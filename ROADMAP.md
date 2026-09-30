@@ -84,6 +84,16 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   `open -r` starts fresh. A marker of our own at creation (in the declared
   store, cleared on `rm`) would tell the two apart. See [the session](docs/sessions/2026-09-30-pi-phase3/summary.md).
 
+- **A pi killed mid-turn and reopened reads busy until its next turn.** Its
+  session file ends on the user's message or a tool call, pi writes nothing
+  on a kill, and a resume (`open -r`) appends nothing until someone types. So
+  `pi::pi_state` reads `Busy` from the file: the place is green in both
+  `place_status` and the nav dot, although pi sits idle at its composer. This
+  is in core and predates the nav dot (#382). A composer on screen with an
+  idle border outranking a busy file, but only when the file has not grown
+  since the pane started, would close it without masking a real turn. Measure
+  what pi 0.99.1 shows after a resumed interrupted turn before choosing.
+
 - **Protect-ours is launch-time only.** The check that refuses `--approve`
   to a place whose `.pi/mcp.json` defines `worktrees` runs when worktrees
   launches pi. In a lane already launched with `--approve`, `/reload` makes
