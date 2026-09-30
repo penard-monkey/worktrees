@@ -5,6 +5,19 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Look at the offers button in the real app (#384).** It shipped on
+  `offers-check.mjs` and headless Chromium/WebKit against the mock; no one has
+  seen it in WKWebView. In `sandbox.sh --app` (with a throwaway `HOME` that has
+  no worktrees server, keeping the real `PATH` — see AGENTS.md, or no offer
+  appears):
+  - the count badge in tokyo-day and catppuccin-latte (≥ 4.5:1 computed from
+    the tokens, never seen);
+  - press "Set up…", install from the panel, and watch the count drop live
+    (every panel reports back through `on*Changed`, so it should);
+  - with Places mirrored, the button sits bottom-LEFT on the dock rail —
+    decide whether that is right.
+  See [the session](docs/sessions/2026-09-30-offers-reopen/summary.md).
+
 - **A submodule checkout inside a lane misleads `Project::discover`.** From
   inside one, `main_root` resolves to `.git/worktrees/<lane>/modules/…`
   (pre-existing). Since agent-guidance phase 1 (#385), the MCP server started
@@ -1727,6 +1740,9 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   precondition and the rail button is on every screen. Either re-probe with `sel?.repo`
   when a place is selected, or probe once with the first project root.
   _From: [2026-09-19 mcp-offer-surfaces](docs/sessions/2026-09-19-mcp-offer-surfaces/summary.md)_
+  Since #384 (v0.34.1) the false offer is also counted by the dock rail's
+  button until the user silences it
+  ([2026-09-30 offers-reopen](docs/sessions/2026-09-30-offers-reopen/summary.md)).
 
 - **`cli-missing` could become an offer now.** It is deliberately silent so it
   cannot raise a second banner competing with Settings → Updates, which already
