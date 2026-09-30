@@ -5,6 +5,22 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Hand-test Copy path in the real app while a session is printing.** #372
+  moved every "Copy …" to `copy_text` (pbcopy) because macOS 27's WebKit clears
+  a click's activation on every `evaluateJavaScript:`, and Tauri delivers each
+  event and terminal chunk that way. It was reproduced in a bare WKWebView and
+  covered by `clipboard-check.mjs` and a Rust test, but no one has clicked Copy
+  path in the app since. Check a non-ASCII path too. See
+  [the session](docs/sessions/2026-09-30-notallowed-error/summary.md).
+
+- **Decide whether the web clipboard path should come back once WebKit
+  321448@main ships.** That commit (2026-09-19) fixes the activation
+  regression, but it is not in macOS 27.0. The native path costs one `pbcopy`
+  spawn per copy and needs no user gesture. Until the fix is in the minimum
+  macOS the app supports, keep native first. Any other activation-gated API the
+  app adds (`window.open`, `showPicker`, fullscreen) has the same problem on
+  27.0.
+
 - **A CLI route onto the message bus, if a harness without MCP arrives.**
   The pi proposal's first draft planned `worktrees msg report|list|wait`
   (cwd-derived `from`) for pi, which then had no MCP. pi 0.99.1, Claude,
