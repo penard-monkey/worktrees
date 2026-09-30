@@ -5,6 +5,12 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **A CLI route onto the message bus, if a harness without MCP arrives.**
+  The pi proposal's first draft planned `worktrees msg report|list|wait`
+  (cwd-derived `from`) for pi, which then had no MCP. pi 0.99.1, Claude,
+  Codex and opencode all speak MCP, so it was dropped (pi-harness.md §4.6).
+  Revisit only for a harness that has a shell but no MCP client.
+
 - **The pi app surfaces have never been seen in WKWebView.** The model picker
   (a `<select>` under the harness segment), the Switch agent sheet, the Launch
   anyway dialog and Settings → pi were driven only in headless Chromium

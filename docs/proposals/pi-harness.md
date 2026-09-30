@@ -59,14 +59,32 @@ Taken on 2026-09-29, after the first draft:
   user setting can switch it to `ask`.
 - **Q3 follow-up, per-repo allowance: yes.** A repo the user has allowed
   launches with `--approve`, so its `.pi/` and `.agents/skills` load without
-  pi's prompt. The allowance is user-scoped and keyed by repo root. That is
-  the only case in which worktrees passes `--approve` (§8, item 5).
+  pi's prompt, and so do its `.pi/mcp.json` servers (§4.4). The allowance
+  is user-scoped and keyed by repo root. That is the only case in which
+  worktrees passes `--approve` (§8, item 5).
 - **Q5, unreachable host at launch: refuse, with "launch anyway".**
   - App: a "launch anyway" button.
   - CLI: `--force`.
   - MCP `create_worktree`: returns the reason and does not launch.
   - In every case the worktree and its brief are still created, so the lane
     can be launched later (§7).
+
+Taken on 2026-09-29, after the phase 3 research (§4, §12 questions 9–12):
+
+- **Q9, exposure: `direct`.** The install passes `--exposure direct`.
+- **Q10, install route: shell out to `pi mcp add`.** It installs at user
+  scope and never with `-l`. Worktrees never writes `mcp.json`, and detects
+  the install by reading it. There is no per-launch extension.
+- **Q11, allowance: warn, and PROTECT ours.**
+  - At launch, where `trust::pi_flag` picks `--approve`: if
+    `<place>/.pi/mcp.json` defines a `worktrees` server, that launch does
+    not get `--approve`, and worktrees says why.
+  - `doctor --pi` warns about the same thing, as a belt.
+  - The allowance's wording says two things:
+    - an allowed repo's `.pi/mcp.json` servers run with no prompt;
+    - `.pi/mcp.json` is per BRANCH while the allowance is per repo root,
+      so a fork's PR checked out as a worktree is covered by it.
+- **Q12, upstream `--timeout` on `pi mcp add`:** left open.
 
 ---
 
@@ -121,8 +139,8 @@ exec "${SHELL:-/bin/sh}" -ic 'pi --model lm-studio/qwen3.6-27b; exec $SHELL'
 | display name | `--name <n>` | Session display name only. It is **not** a messaging address (pi has no cross-session bus). |
 | trust | `--approve` / `--no-approve` | A per-run project-trust override (§8). |
 | offline startup | `--offline` / `PI_OFFLINE=1` | Skips startup network work, such as catalog refresh. |
-| extension / skill | `-e <path>`, `--skill <path>` | Load from an explicit path **without** writing pi's config (§4). |
-| system prompt | `--append-system-prompt <text\|file>` | Could carry worktrees' bus instructions (§4). |
+| extension / skill | `-e <path>`, `--skill <path>` | Load from an explicit path **without** writing pi's config. The bus plan that used them is superseded by MCP (§4.6). |
+| system prompt | `--append-system-prompt <text\|file>` | Could carry worktrees' bus instructions. Superseded by MCP (§4.6). |
 | config dir | `PI_CODING_AGENT_DIR` | Used by the probes to fake a dead host without touching `~/.pi`. |
 
 ### 1.3 Registry entry and session name
@@ -314,7 +332,8 @@ launches that fail.
   - `send(pane, text) -> Delivery`: delivery **and** its confirmation belong
     to the harness.
     - Codex confirms from the screen (#352).
-    - pi confirms from the JSONL user entry (§4.3).
+    - pi confirms from the JSONL user entry when idle and from the screen
+      (`Steering:` line) when busy (§4.5).
     - opencode's TUI, **started with `--port`**, serves `/session/status`,
       `/permission`, `/tui/append-prompt` + `/tui/submit-prompt` and SSE
       `/event` in-process. Without `--port` it listens on nothing, whatever
@@ -416,7 +435,7 @@ message assistant        stopReason stop
   **2ms** after the `assistant stop` it followed (`16:07:08.845` →
   `.847`). A sampler between the two writes sees "idle" for 2ms. That is
   harmless for a dot, but `wait` must not treat one idle sample as final
-  (§4.3).
+  (phase 2's two-quiet-samples rule in `mcp.rs`'s `wait`).
 - **Model label:** on every assistant message (`provider`, `model`), and in
   `model_change` entries. Per pi's docs, a `/model` switch writes
   `model_change` immediately **[source]**; I did not switch mid-session in
@@ -501,7 +520,7 @@ Codex, and most of that plan is dropped (§4.6). Unless marked otherwise, every
 **[observed]** below was run on 0.99.1 with the release build of this branch's
 `worktrees`. Runs used a throwaway `PI_CODING_AGENT_DIR`, a throwaway tmux
 server (`-L piphase3`) and a scratch repo with one place (`lane`). The model was
-`lm-studio/qwen/qwen3-coder-480b`, the one model David's pi declares today
+`lm-studio/qwen/qwen3-coder-480b`, the one model the user's pi declares today
 (§13.1).
 
 ### 4.1 How pi's MCP works on 0.99.1
@@ -554,7 +573,7 @@ Tools are named `mcp__<server>__<tool>`. The TUI renders them as
 **Recommendation:** install with **`--exposure direct`**. It is the only mode
 in which `report`/`messages`/`wait`/`place_status` sit next to `bash` with no
 indirection. It measured no dearer than the default. And it is the one choice
-the CLI lets us make without editing pi's file. **This is open question 9.**
+the CLI lets us make without editing pi's file. **Decided: `direct` (Q9).**
 
 **`pi mcp list` LAUNCHES every server** **[observed, and docs/cli.md says so]**
 
@@ -632,8 +651,13 @@ to `report`.
   whenever the request carried `_meta.progressToken`.
 - The server should also honour `notifications/cancelled` for the in-flight
   `wait` by returning early, so a cancelled call stops holding the loop.
-- The watcher thread already shares stdout with the loop (`mcp.rs:445`), so
-  the writer exists.
+- The writer exists: every stdout line already goes through `emit`, which
+  the watcher thread shares with the loop.
+- **The reader does not.** The stdio loop is single-threaded: it reads a
+  line, runs `handle_line` → the tool call → `wait` → `poll_until`, which
+  sleeps. A `notifications/cancelled` cannot be READ until `wait` returns.
+  Stage 2 needs a stdin reader thread feeding the loop through a channel,
+  or `wait` moved off the loop, before cancellation can work.
 - Claude and Codex gain the same protection. The 120 s cap stays, because
   it is also a cap on how long the loop is held.
 
@@ -698,8 +722,9 @@ This is `codexmcp.rs` again, as `pimcp.rs`.
 - **Doctor:** `doctor --pi` gains a line for the MCP state.
 - **Allowance interaction (§8 item 5), new:** an allowed repo's
   `.pi/mcp.json` can shadow `worktrees`. Status cannot see the repo from
-  the startup probe (the `ctx.mcp` caveat in `offers.ts`), but `doctor
-  --pi` in a repo can check for that name and warn.
+  the startup probe (the `ctx.mcp` caveat in `offers.ts`). Decided (Q11):
+  the launch protects ours (§4.4), and `doctor --pi` in a repo checks for
+  that name and warns.
 
 ### 4.4 What `--no-approve` and the allowance mean for repo MCP servers **[observed]**
 
@@ -728,15 +753,20 @@ What this means:
   2. The repo can REPLACE the worktrees server that lane talks to. A
      replacement can file messages with any `from`, because it is repo code
      running as the user, not our server.
-- **Proposed wording:** "Allowed: this repo's pi extensions, skills and MCP
-  servers run when a lane starts, including one that replaces the worktrees
-  tools."
-- `doctor --pi` should flag an allowed repo whose `.pi/mcp.json` defines
-  `worktrees`.
+- **Decided (Q11): warn, and protect ours.**
+  - At launch, where `trust::pi_flag` would choose `--approve`: if
+    `<place>/.pi/mcp.json` defines a `worktrees` server, that launch gets no
+    `--approve`, and worktrees says why.
+  - `doctor --pi` flags the same thing.
+  - **Wording:** "Allowed: this repo's pi extensions, skills and
+    `.pi/mcp.json` servers run with no prompt when a lane starts."
+  - It adds: `.pi/mcp.json` is per BRANCH while the allowance is per repo
+    root, so any branch checked out as a worktree is covered by it,
+    including a fork's PR.
 
 ### 4.5 `send` to a pi pane (re-verified on 0.99.1) **[observed]**
 
-§4.3 of the first draft still holds, with one correction to the confirmation
+The first draft's `send` section still holds, with one correction to the confirmation
 plan:
 
 | Probe | 0.99.1 result |
@@ -777,8 +807,8 @@ Consequences for the build:
   scope now speaks MCP: Claude, Codex, pi, and opencode (per its proposal
   §4.1). The verbs would be a second transport to the same log, with a
   second trust story (cwd-derived `from` in a shell the model controls),
-  for no harness that needs it. Park it in ROADMAP as "if a harness
-  without MCP arrives".
+  for no harness that needs it. It is parked in ROADMAP, for the day a
+  harness without MCP arrives.
 - **The `worktrees-bus` skill (`--skill`): DROP.** In direct mode the tool
   descriptions are the documentation. The server's `instructions` already
   reach codemode's description **[source]**.
@@ -789,8 +819,8 @@ Consequences for the build:
   need: phase 2 shipped without it, and ROADMAP tracks the startup-gap dot.
   One new use would justify it: an extension's `registerMcpServer` is the
   only way to give a lane the server WITHOUT touching `mcp.json`. That is
-  worth building only if users refuse the global install. **This is open
-  question 10.**
+  worth building only if users refuse the global install. **Decided: no
+  extension (Q10).**
 - **`send` to pi: BUILD**, per §4.5.
 
 Claude↔Claude keeps Claude's own messaging. pi↔anyone goes over the MCP message
@@ -812,8 +842,8 @@ log (`report` / `messages` / `wait`) and `send`, exactly as Codex does.
     (§2.1)
 - **Settings → Agents:** `default_agent` (harness + model), plus a **pi**
   category mirroring the Codex one: the resolved pi path and version, the
-  node the **pane** will use (§9), and per-backend readiness. No
-  "install MCP for pi" panel, because there is no MCP (§4).
+  node the **pane** will use (§9), and per-backend readiness. A
+  "Worktrees tools" block, the `CodexMcpPanel` shape (§4.3).
 - **The two-provider assumptions to unwind:** the union `"claude" | "codex"`
   is repeated in `App.tsx`, `settings.ts`, `SettingsSheet.tsx` and
   `planUsage.ts`. `requestOpenAgent` treats "from" as "the other one".
@@ -943,11 +973,13 @@ Proposal:
      (`worktrees trust pi [<repo>]` / `--revoke`). MCP `create_worktree`
      cannot grant it, and an orchestrating agent cannot either. MCP may
      *report* whether a repo is allowed.
-   - **What it lets run (measured on 0.99.1, §4.4):** the repo's
-     `.pi/mcp.json` stdio servers START at session start, with no dialog.
-     A project entry named `worktrees` REPLACES the user's, so the lane
-     talks to repo code instead of the bus. The allowance's wording has to
-     say both.
+   - **What it lets run (measured on 0.99.1, §4.4):**
+     - The repo's `.pi/mcp.json` stdio servers START at session start,
+       with no dialog.
+     - A project entry named `worktrees` would REPLACE the user's, so the
+       launch refuses `--approve` when one exists (decided, Q11).
+     - The file is per branch and the allowance per repo root, and the
+       wording says so.
    - **What it changes:** one flag. Worktrees still never writes pi's
      `trust.json`, so the allowance does not leak into `pi` runs outside
      worktrees, and revoking it takes effect at the next launch.
@@ -1163,7 +1195,7 @@ Two PRs: core/CLI/MCP, then app.
 - **`pimcp.rs`** (the `codexmcp.rs` shape):
   - status by READING `pi::agent_dir()/mcp.json`, never `pi mcp list`;
   - install via `pi mcp add worktrees --env WORKTREES_MCP_PROVIDER=pi
-    --exposure direct -- <bin> mcp [--mutations]`;
+    --exposure direct -- <bin> mcp [--mutations]` (Q9, Q10);
   - uninstall via `pi mcp remove worktrees`;
   - never `-l`, and never a write of ours.
   - CLI: `worktrees mcp --status|--install|--uninstall --ai pi`.
@@ -1180,7 +1212,41 @@ Two PRs: core/CLI/MCP, then app.
   - a "Worktrees tools" block in Settings → pi;
   - `pi_mcp_*` commands (in the mock too);
   - a `pi-mcp` offer (`absent` and pi installed);
-  - the allowance's wording names repo MCP servers (§4.4).
+  - the allowance's wording names repo MCP servers and the per-branch
+    caveat (§4.4).
+- **Build notes from the #371 review:**
+  - **a. Cancellation needs a reader thread.**
+    - A stdin reader thread feeds the loop through a channel, so
+      `notifications/cancelled` is seen mid-`wait`.
+    - `poll_until` checks a cancel flag, and its sleep becomes a
+      `recv_timeout`.
+    - Per the spec, no response is sent after a cancel.
+  - **b. Progress needs the token and the request id.**
+    - Plumb `params._meta.progressToken` and the request id into the call
+      and into `wait`. The call dispatch strips `params` down to
+      `arguments` today, so `wait` never sees `_meta`.
+    - Emit via `emit` with a NUMERIC `progress`, because pi's client
+      ignores a non-numeric one.
+    - Keep it injectable, so `poll_until`'s virtual-time test stays.
+  - **c. Invert the `CLAUDE_PROJECT_DIR` test in `cmd_mcp`.**
+    - It is trusted only when `WORKTREES_MCP_PROVIDER` is unset or
+      `claude`.
+    - Update the doc comments that describe it, and test it under
+      `ENV_LOCK`.
+    - Grep every reader of `WORKTREES_MCP_PROVIDER` first.
+  - **d. `pimcp.rs`.**
+    - JSON-parse `agent_dir()/mcp.json`.
+    - States: Codex's six, plus `disabled` and `pi-missing`.
+    - Expose the exposure mode.
+    - Dispatch `--ai pi` beside `--ai codex`.
+    - `pi mcp add` resolves `PI_CODING_AGENT_DIR` from ITS environment, so
+      pass it the same value `pi::agent_dir()` used, so that status and
+      install agree.
+  - **e. `send`.**
+    - Add `SendOutcome::Queued`.
+    - Remove pi's by-name `send` refusal and the Plan-tab paste refusal.
+    - Add the pi send fixtures.
+  - **f. The launch-time `.pi/mcp.json` `worktrees` check** (Q11).
 - **Docs:** `docs/pi-manual-checks.md` gains an MCP section: install, a
   `report` from a lane, `wait` past 60 s, a `send` idle and busy, `/reload`.
 - **Dropped from the first plan** (§4.6): the `worktrees msg` CLI verbs, the
@@ -1235,24 +1301,24 @@ Two PRs: core/CLI/MCP, then app.
    reachability-aware `auth check`; a first-prompt session flush? Each one
    removes a workaround in this plan.
 
-9. **Exposure mode (phase 3).** Install with `--exposure direct`, which
+9. **Answered (see Decisions): `direct`.** Original question: **Exposure mode (phase 3).** Install with `--exposure direct`, which
    gives native tool calls and measured no dearer than the default, or
    leave pi's default `codemode`, which respects the user's pi setup and
    needs the model to write a script? Both worked with the 480b coder. No
    weaker model was tried (§4.1).
-10. **A file-free route.** The global install writes one entry into
+10. **Answered (see Decisions): `pi mcp add`, no extension.** Original question: **A file-free route.** The global install writes one entry into
     `~/.pi/agent/mcp.json` through `pi mcp add`, the same trade as Claude and
     Codex. The only alternative is a worktrees-owned extension loaded with
     `-e` that calls `registerMcpServer` per lane: nothing is written to
     `~/.pi`, but our TypeScript runs in pi's process and pi's extension API
     becomes a compatibility surface. Recommendation: global install only,
     and revisit if someone objects to the entry.
-11. **Allowance wording (§4.4).** An allowed repo's `.pi/mcp.json` starts
+11. **Answered (see Decisions): warn, and refuse `--approve` for that launch.** Original question: **Allowance wording (§4.4).** An allowed repo's `.pi/mcp.json` starts
     its servers at launch and can replace the `worktrees` server. Is it
     enough to SAY so in Settings → pi and the launch confirmation, or should
     worktrees refuse `--approve` for a repo whose `.pi/mcp.json` defines
     `worktrees`?
-12. **Upstream ask, added.** `pi mcp add --timeout` (and `--tool-exposure`)
+12. **Still open.** **Upstream ask, added.** `pi mcp add --timeout` (and `--tool-exposure`)
     would let the install carry the right values without our server
     working around them. Not needed if `wait` sends progress.
 
