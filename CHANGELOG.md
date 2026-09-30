@@ -59,7 +59,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **A worktree re-created under a removed one's name starts its pi fresh.**
   pi's sessions for the removed worktree stay in the same folder; resuming
   (or "Switch agent → pi") used to reopen that dead conversation and skip the
-  new brief. Only sessions newer than the worktree count now.
+  new brief. Only sessions newer than the worktree count now, and only in a
+  place where worktrees has launched pi before — so a `pi` you started by hand
+  in a Claude lane is no longer resumed by "Switch agent → pi" or
+  `open --ai pi -r`: pi starts fresh there with the brief, which never ran.
 - **pi no longer cancels long tool calls at 60 seconds.** Creating, running
   or removing now tells pi it is still working, as `wait` already did, so a
   call that is completing on disk is not reported as failed.

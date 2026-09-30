@@ -19,6 +19,15 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   review. Bound each line instead (a `take` per `read_line`, or a capped
   `read_until`). See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
 
+- **A copied or restored checkout hides its earlier pi sessions.** pi's
+  sessions for a place count only if they are no older than the place's
+  directory (so a slug re-used after `rm` does not resume the dead lane). A
+  checkout copied with `cp -R` or restored from a backup gets a NEW birth
+  time, so its real earlier sessions drop out: no dot for them, and
+  `open -r` starts fresh. A marker of our own at creation (in the declared
+  store, cleared on `rm`) would tell the two apart. See the pi phase 3
+  follow-ups (#376).
+
 - **Protect-ours is launch-time only.** The check that refuses `--approve`
   to a place whose `.pi/mcp.json` defines `worktrees` runs when worktrees
   launches pi. In a lane already launched with `--approve`, `/reload` makes

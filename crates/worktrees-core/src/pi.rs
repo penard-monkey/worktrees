@@ -775,6 +775,12 @@ mod tests {
         let cwd = d.join("place");
         std::fs::create_dir_all(&cwd).unwrap();
         let cwd = cwd.to_string_lossy().to_string();
+        // overlayfs, some NFS: no birth time, so the filter cannot apply (and
+        // does not — `current_session` then keeps every session). Nothing to test.
+        if place_born(&cwd).is_none() {
+            eprintln!("skipped: this filesystem records no birth time");
+            return;
+        }
         let file = |id: &str, ts: &str| {
             format!("{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"{ts}\",\"cwd\":\"{cwd}\"}}\n{{\"type\":\"message\",\"timestamp\":\"{ts}\",\"message\":{{\"role\":\"user\",\"content\":\"x\"}}}}\n")
         };

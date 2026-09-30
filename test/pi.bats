@@ -106,7 +106,8 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   mkdir -p "$dir"
   # What `/new` or a hand-restarted pi writes: a uuid session, same pinned dir.
   # Stamped NOW: a session older than the place is not the place's own.
-  local now; now="$(date -u +%Y-%m-%dT%H:%M:%S).000Z"; sleep 1
+  # Same second as the place's birth is fine: the filter is `>=`.
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%S).000Z"
   printf '{"type":"session","version":3,"id":"01a0efd0-566d-7028-bbf8-2f78723dc57e","timestamp":"%s","cwd":"%s"}\n{"type":"message","id":"a","timestamp":"%s","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n' "$now" "$wt" "$now" > "$dir/2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl"
   tmux kill-session -t 'repo-feat-x~agent~pi'
   run_wt open feat-x --ai pi -r --no-attach --no-spare
@@ -150,6 +151,12 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
 @test "a place re-created under a removed one's slug starts fresh with its brief, never resuming the dead lane" {
   run_wt new feat-x --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
   [ "$status" -eq 0 ]
+  # The birth-time filter needs a filesystem that records one (not overlayfs,
+  # some NFS); without it every session counts and there is nothing to test.
+  # GNU first: BSD stat rejects -c, while GNU `stat -f` is filesystem status
+  # and would answer with something that is not a birth time.
+  local born; born="$(stat -c %W "$REPO/.worktrees/feat-x" 2>/dev/null || stat -f %B "$REPO/.worktrees/feat-x" 2>/dev/null)"
+  case "$born" in ''|*[!0-9]*|0) skip "no birth time on this filesystem" ;; esac
   local dir; dir="$(pi_cmd feat-x | sed -n "s/.*--session-dir '\([^']*\)'.*/\1/p")"
   local wt; wt="$(cd "$REPO/.worktrees/feat-x" && pwd -P)"
   mkdir -p "$dir"
