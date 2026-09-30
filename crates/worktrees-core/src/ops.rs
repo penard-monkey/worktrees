@@ -99,6 +99,14 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
     // not a profile setting.
     if let Some(a) = crate::harness::by_word(&plain.match_word) {
         plain.place_flags = a.place_flags(wt);
+        // `trust::pi_flag` already withheld `--approve`; this is the WHY, said
+        // where the launch happens rather than discovered in the lane.
+        if a.provider().id == crate::provider::PI.id
+            && crate::trust::repo_root(wt).is_some_and(|r| crate::trust::is_allowed("pi", &r))
+            && crate::trust::pi_mcp_shadowed(wt)
+        {
+            ui.warn(&crate::trust::pi_shadow_warning(wt));
+        }
     }
     // Reads the same flag the PROBE side reads, so the two cannot get out of
     // step — `claude_config_dir_for_repo` returns `~/.claude` while this is off.
@@ -1826,12 +1834,15 @@ fn pi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
     let repo = crate::trust::repo_root(&p.main_root);
     let allowed = repo.as_deref().is_some_and(|r| crate::trust::is_allowed("pi", r));
     let mode = crate::trust::pi_trust();
-    let rc = if pf.problem.is_some() { crate::diag::EXIT_FINDINGS } else { 0 };
+    let mcp = crate::pimcp::status();
+    let shadowed = crate::trust::pi_mcp_shadowed(&p.main_root);
+    let rc = if pf.problem.is_some() || (allowed && shadowed) { crate::diag::EXIT_FINDINGS } else { 0 };
     if json {
         ui.plain(
             &serde_json::json!({
                 "preflight": pf,
-                "trust": { "mode": mode, "repo": repo, "allowed": allowed },
+                "trust": { "mode": mode, "repo": repo, "allowed": allowed, "mcp_shadowed": shadowed },
+                "mcp": mcp,
                 "models": models,
             })
             .to_string(),
@@ -1849,6 +1860,19 @@ fn pi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
         format!("{} for this repo (worktrees trust pi to allow it)", if mode == crate::trust::PiTrust::Ask { "pi asks" } else { "--no-approve" })
     };
     ui.info(&format!("trust {trust}"));
+    if shadowed {
+        // Checked in the main checkout: `.pi/mcp.json` is per branch, so each
+        // lane's own copy is checked again at its launch (`trust::pi_flag`).
+        let line = crate::trust::pi_shadow_warning(&p.main_root);
+        if allowed { ui.warn(&line) } else { ui.info(&format!("note  {line}")) }
+    }
+    let exposure = mcp.entry.as_ref().map(|e| format!(" · exposure {}", e.exposure.as_deref().unwrap_or("codemode (pi's default)"))).unwrap_or_default();
+    ui.info(&format!("mcp   {}{exposure}  ({})", mcp.state, mcp.config_path));
+    if mcp.state == "absent" {
+        if let Some(c) = &mcp.command {
+            ui.info(&format!("      install with: worktrees mcp --install --ai pi   (runs: {c})"));
+        }
+    }
     if models.is_empty() {
         ui.info("models: none listed (pi --list-models printed nothing this build can read)");
     }

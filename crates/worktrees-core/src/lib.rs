@@ -30,6 +30,7 @@ pub mod messages;
 pub mod model;
 pub mod ops;
 pub mod pi;
+pub mod pimcp;
 pub mod pimodels;
 pub mod plan;
 pub mod proc;

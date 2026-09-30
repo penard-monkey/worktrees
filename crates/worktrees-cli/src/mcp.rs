@@ -40,14 +40,14 @@
 //! # Place↔place messaging
 //!
 //! `report` / `messages` / `wait` / `send` are how agents in different places
-//! of one project talk — Claude and Codex alike (`worktrees_core::messages`).
-//! Codex has no cross-session messaging of its own, so without these it can
-//! neither report back nor be waited on. Claude↔Claude still uses Claude's own
+//! of one project talk — Claude, Codex and pi alike (`worktrees_core::messages`).
+//! Codex and pi have no cross-session messaging of their own, so without these
+//! they can neither report back nor be waited on. Claude↔Claude still uses Claude's own
 //! `SendMessage`; this is the bus that works across providers.
 //!
 //! - **`from` is never taken from a tool argument.** It is the place this
 //!   server resolved itself to at startup (`CLAUDE_PROJECT_DIR` for Claude, the
-//!   cwd for Codex). That stops a model signing as another place through the
+//!   cwd for every other client — `trusts_claude_project_dir`). That stops a model signing as another place through the
 //!   protocol; it is not authentication — anything running as the same user
 //!   can write the log directly, so the trust boundary is the user account.
 //! - **`report`, `messages` and `wait` are in the read-only tier.** They touch
@@ -143,8 +143,8 @@ struct Server {
     /// from that and can never add, which is why it is a separate bool rather
     /// than a third value of `mutations`.
     in_run: bool,
-    /// The directory this server was launched for (`CLAUDE_PROJECT_DIR`, else
-    /// the cwd). The place it lies in is the CALLER's place — the `from` of
+    /// The directory this server was launched for (`CLAUDE_PROJECT_DIR` for a
+    /// Claude client, else the cwd — `trusts_claude_project_dir`). The place it lies in is the CALLER's place — the `from` of
     /// every message this server posts. Never taken from a tool argument.
     here: Option<std::path::PathBuf>,
     /// Set when `notifications/initialized` arrives. Shared with the watcher
@@ -216,8 +216,12 @@ pub fn setup_verb(args: &[String]) -> Option<&'static str> {
 /// it is what makes the local/project scopes checkable, and `None` is a normal
 /// answer here (the whole point of hoisting these above the git guard).
 pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
-    if args.windows(2).any(|w| w[0] == "--ai" && w[1] == "codex") || args.iter().any(|a| a == "--ai=codex") {
+    let ai = |name: &str| args.windows(2).any(|w| w[0] == "--ai" && w[1] == name) || args.iter().any(|a| *a == format!("--ai={name}"));
+    if ai("codex") {
         return cmd_codex_mcp_setup(verb, args);
+    }
+    if ai("pi") {
+        return cmd_pi_mcp_setup(verb, args);
     }
     if verb == "migrate" {
         eprintln!("MCP migration requires --migrate --ai codex.");
@@ -278,6 +282,55 @@ pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
                 }
                 Err(e) => {
                     eprintln!("{}", worktrees_core::render::error_line(&e));
+                    1
+                }
+            }
+        }
+        _ => 1,
+    }
+}
+
+/// `worktrees mcp --status|--install|--uninstall --ai pi` — `pimcp`, which reads
+/// pi's `mcp.json` and has `pi mcp add/remove` do every write.
+fn cmd_pi_mcp_setup(verb: &str, args: &[String]) -> i32 {
+    use worktrees_core::pimcp;
+    if verb == "migrate" {
+        eprintln!("--migrate copies Claude's servers into Codex; there is no pi migration.");
+        return 1;
+    }
+    let json = args.iter().any(|a| a == "--json");
+    let mutations = !args.iter().any(|a| a == "--read-only");
+    let report = |s: &pimcp::Status| {
+        if json {
+            println!("{}", serde_json::to_string(s).unwrap_or_default());
+            return;
+        }
+        let exposure = s.entry.as_ref().map(|e| format!(", exposure {}", e.exposure.as_deref().unwrap_or("codemode"))).unwrap_or_default();
+        println!("pi MCP: {}{exposure}", s.state);
+        if let Some(cmd) = &s.command {
+            println!("  install with: {cmd}");
+        }
+        println!("  config: {}", s.config_path);
+    };
+    match verb {
+        "status" => {
+            let s = pimcp::status();
+            report(&s);
+            i32::from(!matches!(s.state, "installed" | "read-only"))
+        }
+        "install" | "uninstall" => {
+            let r = if verb == "install" { pimcp::install(mutations) } else { pimcp::uninstall() };
+            match r {
+                Ok(o) => {
+                    print!("{}", o.output);
+                    report(&o.status);
+                    if o.ok && verb == "install" && !json {
+                        println!("  running pi sessions pick it up on /reload or their next launch");
+                    }
+                    i32::from(!o.ok)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
                     1
                 }
             }
@@ -377,7 +430,7 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
     let mutations = args.iter().any(|a| a == "--mutations");
     // Pin the project once, here. `CLAUDE_PROJECT_DIR` is what claude exports for
     // the session's root; fall back to the process cwd.
-    let root = (std::env::var("WORKTREES_MCP_PROVIDER").ok().as_deref() != Some("codex"))
+    let root = trusts_claude_project_dir(std::env::var("WORKTREES_MCP_PROVIDER").ok().as_deref())
         .then(|| std::env::var("CLAUDE_PROJECT_DIR").ok())
         .flatten()
         .filter(|s| !s.is_empty())
@@ -438,6 +491,18 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// Whether `CLAUDE_PROJECT_DIR` names this server's place. Only for a Claude
+/// client — or one that does not say, which is how Claude's install has always
+/// looked. Every other client says who it is (`--env WORKTREES_MCP_PROVIDER=…`
+/// in its install) and gets the cwd, which its harness sets to the place: a
+/// server inherits its client's WHOLE environment (pi's stdio transport spreads
+/// `process.env`), so a `CLAUDE_PROJECT_DIR` that leaked into a pi or Codex
+/// pane would otherwise pin a different project and sign messages from the
+/// wrong place. An allowlist, so a harness added later is safe by default.
+fn trusts_claude_project_dir(provider: Option<&str>) -> bool {
+    matches!(provider.map(str::trim), None | Some("") | Some("claude"))
 }
 
 /// The one way anything reaches stdout.
@@ -2990,6 +3055,19 @@ mod tests {
             assert_eq!(r["isError"], serde_json::json!(true), "{args}: {t}");
             assert!(t.contains(want), "{args}: {t}");
         }
+    }
+
+    /// `CLAUDE_PROJECT_DIR` is trusted for a Claude client (or one that does not
+    /// say) and for nobody else — an allowlist, so pi and anything later get
+    /// their cwd, the place their harness launched them in.
+    #[test]
+    fn only_a_claude_client_is_pinned_by_claude_project_dir() {
+        assert!(trusts_claude_project_dir(None));
+        assert!(trusts_claude_project_dir(Some("")));
+        assert!(trusts_claude_project_dir(Some("claude")));
+        assert!(!trusts_claude_project_dir(Some("codex")));
+        assert!(!trusts_claude_project_dir(Some("pi")));
+        assert!(!trusts_claude_project_dir(Some("opencode")));
     }
 
     /// `wait`'s loop on a virtual clock: it keeps looking every step, gives up

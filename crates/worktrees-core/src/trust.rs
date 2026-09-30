@@ -111,15 +111,66 @@ pub fn is_allowed(harness: &str, repo_root: &str) -> bool {
 }
 
 /// pi's trust flag for a launch in `wt`, already a shell word: `--approve` for
-/// an allowed repo, `--no-approve` under `never`, nothing under `ask`.
+/// an allowed repo, `--no-approve` under `never`, nothing under `ask` — and
+/// `--no-approve` for an allowed repo whose place shadows the worktrees MCP
+/// server (`pi_mcp_shadowed`).
 pub fn pi_flag(wt: &str) -> Option<&'static str> {
-    if repo_root(wt).is_some_and(|r| is_allowed("pi", &r)) {
+    let allowed = repo_root(wt).is_some_and(|r| is_allowed("pi", &r));
+    pi_flag_for(allowed, pi_trust(), allowed && pi_mcp_shadowed(wt))
+}
+
+/// The decision, without the reads. A shadowing place under the allowance
+/// gets an explicit `--no-approve`, never "ask": pi's modal highlights Trust,
+/// and one Enter there would load exactly the server this refuses.
+pub fn pi_flag_for(allowed: bool, mode: PiTrust, shadowed: bool) -> Option<&'static str> {
+    if allowed && !shadowed {
         return Some("--approve");
     }
-    match pi_trust() {
+    if allowed {
+        return Some("--no-approve");
+    }
+    match mode {
         PiTrust::Never => Some("--no-approve"),
         PiTrust::Ask => None,
     }
+}
+
+/// The place's own `.pi/mcp.json`, which pi reads (for a trusted project)
+/// from the session cwd itself — per BRANCH, where the allowance is per repo.
+pub fn pi_project_mcp(wt: &str) -> PathBuf {
+    Path::new(wt).join(".pi").join("mcp.json")
+}
+
+/// Whether `wt`'s `.pi/mcp.json` would replace the user's `worktrees` MCP
+/// server once trusted (pi-harness §4.4): a project entry REPLACES a user
+/// entry of the same name, disabled or not, so the lane would talk to repo
+/// code instead of the bus. A file that exists but does not parse counts as
+/// shadowing — refusing `--approve` for one launch is cheap, and a parser
+/// disagreement with pi must not be the thing that lets it through.
+pub fn pi_mcp_shadowed(wt: &str) -> bool {
+    match std::fs::read_to_string(pi_project_mcp(wt)) {
+        Ok(text) => mcp_json_defines(&text, crate::pimcp::SERVER_KEY),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// `mcpServers.<name>` exists in an `mcp.json` text; unparsable text counts.
+pub fn mcp_json_defines(text: &str, name: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) => v.get("mcpServers").and_then(|m| m.get(name)).is_some(),
+        Err(_) => true,
+    }
+}
+
+/// The sentence a launch and `doctor --pi` say when `pi_mcp_shadowed` holds.
+pub fn pi_shadow_warning(wt: &str) -> String {
+    format!(
+        "{} defines a `{}` MCP server, which would replace the worktrees tools in a trusted pi \
+         lane — so pi launches there WITHOUT --approve, and this branch's .pi/ resources are \
+         skipped. .pi/mcp.json is per branch; the allowance is per repo.",
+        pi_project_mcp(wt).display(),
+        crate::pimcp::SERVER_KEY
+    )
 }
 
 fn toml_string(s: &str) -> String {
@@ -345,6 +396,41 @@ mod tests {
         assert_eq!(allowed_in(&std::fs::read_to_string(&f).unwrap(), "pi"), vec!["/r/b".to_string()]);
         assert_eq!(set_allowed_at(&f, "pi", "/nope", false), Ok(false));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The allowance gives `--approve` — except to a place whose `.pi/mcp.json`
+    /// shadows the worktrees server, which gets an explicit `--no-approve`
+    /// (never "ask", whose modal highlights Trust).
+    #[test]
+    fn a_shadowing_place_loses_approve_even_under_the_allowance() {
+        assert_eq!(pi_flag_for(true, PiTrust::Never, false), Some("--approve"));
+        assert_eq!(pi_flag_for(true, PiTrust::Ask, false), Some("--approve"));
+        assert_eq!(pi_flag_for(true, PiTrust::Never, true), Some("--no-approve"));
+        assert_eq!(pi_flag_for(true, PiTrust::Ask, true), Some("--no-approve"));
+        assert_eq!(pi_flag_for(false, PiTrust::Never, false), Some("--no-approve"));
+        assert_eq!(pi_flag_for(false, PiTrust::Ask, false), None);
+    }
+
+    #[test]
+    fn shadow_detection_reads_the_server_name_and_fails_closed() {
+        assert!(mcp_json_defines(r#"{"mcpServers":{"worktrees":{"command":"sh"}}}"#, "worktrees"));
+        assert!(mcp_json_defines(r#"{"mcpServers":{"worktrees":{"command":"sh","enabled":false}}}"#, "worktrees"));
+        assert!(!mcp_json_defines(r#"{"mcpServers":{"other":{"command":"sh"}}}"#, "worktrees"));
+        assert!(!mcp_json_defines(r#"{"autoEnableCodemode":false}"#, "worktrees"));
+        assert!(mcp_json_defines("{ not json", "worktrees"), "unparsable counts as shadowing");
+
+        let dir = std::env::temp_dir().join(format!("wt-shadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".pi")).unwrap();
+        let wt = dir.to_string_lossy().to_string();
+        std::fs::remove_dir(dir.join(".pi")).unwrap();
+        assert!(!pi_mcp_shadowed(&wt), "no .pi/mcp.json: nothing to shadow");
+        std::fs::create_dir_all(dir.join(".pi")).unwrap();
+        std::fs::write(dir.join(".pi/mcp.json"), r#"{"mcpServers":{"worktrees":{"command":"sh"}}}"#).unwrap();
+        assert!(pi_mcp_shadowed(&wt));
+        std::fs::write(dir.join(".pi/mcp.json"), r#"{"mcpServers":{"lint":{"command":"sh"}}}"#).unwrap();
+        assert!(!pi_mcp_shadowed(&wt));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
