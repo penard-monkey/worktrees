@@ -32,11 +32,15 @@ const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =
 });
 // Comments may name the API (this rule's own explanations do); code may not.
 const code = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+// `clipboard` as a word, not `navigator.clipboard`: `navigator["clipboard"]` and
+// `const n = navigator; n.clipboard…` would both dodge the dotted form, and
+// the method names catch a destructured `{ writeText }`.
 const offenders = walk(src)
   .filter((f) => path.basename(f) !== "clipboard.ts")
-  .filter((f) => /navigator\.clipboard/.test(code(fs.readFileSync(f, "utf8"))))
-  .map((f) => path.relative(src, f));
-ok("no navigator.clipboard outside clipboard.ts", offenders.length === 0, `found in: ${offenders.join(", ")}`);
+  .map((f) => [f, code(fs.readFileSync(f, "utf8"))])
+  .filter(([, s]) => /["'.]clipboard\b|\b(writeText|readText)\b/.test(s))
+  .map(([f]) => path.relative(src, f));
+ok("no clipboard API use outside clipboard.ts", offenders.length === 0, `found in: ${offenders.join(", ")}`);
 
 // ── the helper: native first, web only as the fallback ──────────────────────
 const helperPath = here("../src/clipboard.ts");

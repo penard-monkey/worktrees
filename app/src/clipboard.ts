@@ -19,6 +19,13 @@ export async function copyToClipboard(text: string): Promise<void> {
     await invoke("copy_text", { text });
   } catch (native) {
     if (!navigator.clipboard) throw native;
-    await navigator.clipboard.writeText(text);
+    // Both failing on macOS means pbcopy failed AND the web API refused —
+    // usually with the very NotAllowedError this helper exists to avoid, so
+    // the backend's reason has to survive into the message.
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (web) {
+      throw new Error(`${String(native)}; web clipboard: ${String(web)}`);
+    }
   }
 }

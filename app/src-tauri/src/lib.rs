@@ -863,7 +863,7 @@ async fn drop_reference(
 async fn copy_text(text: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        tauri::async_runtime::spawn_blocking(move || {
+        let r = tauri::async_runtime::spawn_blocking(move || {
             use std::io::Write;
             let mut child = pbcopy_command().spawn().map_err(|e| format!("pbcopy: {e}"))?;
             // Take stdin so it is dropped (EOF) before the wait.
@@ -878,7 +878,14 @@ async fn copy_text(text: String) -> Result<(), String> {
             }
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        // Logged here as well as returned: the frontend then tries the web
+        // clipboard, and on macOS THAT refusal is the one the banner would show.
+        if let Err(e) = &r {
+            applog("warn", &format!("copy_text: {e}"));
+        }
+        r
     }
     // No native path elsewhere; the frontend falls back to the web API.
     #[cfg(not(target_os = "macos"))]
@@ -888,15 +895,19 @@ async fn copy_text(text: String) -> Result<(), String> {
     }
 }
 
-/// `pbcopy` reads its stdin in the LOCALE's encoding, and a GUI launch gets
-/// launchd's environment with no locale at all — so without `LC_CTYPE` a path
-/// like `año/✎` lands on the clipboard as `a√±o/‚úé` (measured). Absolute
-/// path for the same launchd reason as `fixup_gui_path`.
+/// `pbcopy` reads its stdin in the LOCALE's encoding: with none, a path like
+/// `año/✎` lands on the clipboard as `a√±o/‚úé` (measured). `fixup_gui_locale`
+/// already sets `LANG` at startup when no UTF-8 locale is present, so this is
+/// belt-and-braces — and it covers the case that check lets through: a UTF-8
+/// `LANG` beside a non-UTF-8 `LC_ALL` (say `C`, from `launchctl setenv`), which
+/// overrides both `LANG` and `LC_CTYPE`, hence the `env_remove`. Absolute path
+/// for the same launchd reason as `fixup_gui_path`.
 #[cfg(target_os = "macos")]
 fn pbcopy_command() -> std::process::Command {
     use std::process::{Command, Stdio};
     let mut c = Command::new("/usr/bin/pbcopy");
-    c.env("LC_CTYPE", "UTF-8")
+    c.env_remove("LC_ALL")
+        .env("LC_CTYPE", "UTF-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -7872,6 +7883,8 @@ mod tests {
             envs.contains(&(std::ffi::OsStr::new("LC_CTYPE"), Some(std::ffi::OsStr::new("UTF-8")))),
             "{envs:?}"
         );
+        // An inherited LC_ALL would override LC_CTYPE; `None` = removed.
+        assert!(envs.contains(&(std::ffi::OsStr::new("LC_ALL"), None)), "{envs:?}");
         assert_eq!(c.get_program(), "/usr/bin/pbcopy");
     }
 
