@@ -22,6 +22,7 @@
 // renders raw HTML as inert text.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { copyToClipboard } from "./clipboard";
 import { CtxMenu } from "./CtxMenu";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
@@ -997,8 +998,7 @@ export function AutomationsPane({
 
   const copyRun = useCallback(() => {
     if (!run) return;
-    if (!navigator.clipboard) { onError("clipboard unavailable"); return; }
-    navigator.clipboard.writeText(runAsMarkdown(run, nameOfAutomation(run.automation))).catch(onError);
+    copyToClipboard(runAsMarkdown(run, nameOfAutomation(run.automation))).catch(onError);
   }, [run, nameOfAutomation, onError]);
 
   // ── render ────────────────────────────────────────────────────────────────

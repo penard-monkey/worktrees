@@ -3,6 +3,7 @@ import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, type Harness } from "./harness";
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { copyToClipboard } from "./clipboard";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -5123,8 +5124,7 @@ function App() {
   const copyText = (text: string) => {
     closeCtx();
     closeMenu(); // also dismiss the topbar ⋯ popover (its "Copy path" routes here)
-    if (!navigator.clipboard) { fail("clipboard unavailable"); return; }
-    navigator.clipboard.writeText(text).catch(fail);
+    copyToClipboard(text).catch(fail);
   };
   /** Open a project (`place` null → the repo home) or a place (its branch's
    *  page when the branch is on origin, else the home) in the browser. Which

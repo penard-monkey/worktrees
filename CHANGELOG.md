@@ -3,6 +3,17 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Copy path, Copy branch and every other "Copy …" no longer fail with
+  `NotAllowedError` on macOS 27.** The browser clipboard only accepts a write
+  made during a click, and macOS 27's WebKit forgets the click whenever the
+  app delivers anything to the page — which, with a session printing output,
+  is several times a second. The copy was refused and the error banner showed
+  WebKit's raw "The request is not allowed by the user agent…". Copies now go
+  through the system clipboard directly, with non-ASCII paths kept intact.
+
 ## [0.33.0] - 2026-09-29
 
 ### Added
