@@ -103,7 +103,7 @@ export function issueCount(r: DoctorReport | null | undefined): number {
  * command here can conjure. Anything unknown — a code added to core after this
  * list — lands in `manual`, the one bucket that promises no button. */
 export function remedies(r: DoctorReport | null | undefined): Remedies {
-  const out: Remedies = { relink: 0, force: 0, provision: 0, manual: 0 };
+  const out: Remedies = { relink: 0, force: 0, provision: 0, stray: 0, manual: 0 };
   for (const f of r?.findings ?? []) {
     if (f.severity === "info") continue;
     switch (f.code) {
@@ -116,6 +116,10 @@ export function remedies(r: DoctorReport | null | undefined): Remedies {
       case "no-slot":
       case "missing-port":
         out.provision++; break;
+      // Named, not left to `default:`. Its remedy is a `git worktree move`, and
+      // the manual bucket this used to land in says "edit .worktrees.toml".
+      case "stray-worktree":
+        out.stray++; break;
       default:
         out.manual++;
     }
@@ -334,7 +338,9 @@ export function ProjectSheet({
   const todos = projectTodos(todoHealth, agent.status ?? agentStatus);
   const canRelink = !!cfg?.exists && !cfg?.error;
   const show = (section: Todo["section"]) => {
-    const sel = section === "health" ? '[data-section="health"]' : '[data-testid="agent-setup"]';
+    const sel = section === "health" ? '[data-section="health"]'
+      : section === "strays" ? '[data-section="strays"]'
+      : '[data-testid="agent-setup"]';
     bodyRef.current?.querySelector<HTMLElement>(sel)?.scrollIntoView({ block: "start", behavior: "smooth" });
   };
 
@@ -443,21 +449,36 @@ export function ProjectSheet({
                 </>
               )}
             </div>
+            {/* One home for the file's actions, and they are mutually
+                exclusive: Open when it exists, Write when it does not. Before
+                this, a project with no config offered ONLY a disabled Open —
+                the create action lived in "Suggested config", which renders
+                only when `qualifies`, so a repo with no credential files, no
+                ports and no compose could not get a config at all. That is the
+                exact repo the To-do sends here telling you to edit one. */}
             <div className="ver-actions">
-              <button className="ctrl sm" onClick={openConfig} disabled={!cfg?.exists}>Open .worktrees.toml</button>
+              {cfg?.exists ? (
+                <button className="ctrl sm" onClick={openConfig}>Open .worktrees.toml</button>
+              ) : (
+                <button className="ctrl sm" disabled={busy} data-testid="config-write"
+                  onClick={() => run("init", "init", "init_write", { repo: root })}>
+                  {running === "init" ? "Writing…" : "Write .worktrees.toml"}
+                </button>
+              )}
               <button className="ctrl sm" onClick={refresh} disabled={checking || busy}>
                 {checking ? "Checking…" : "Re-check"}
               </button>
             </div>
             <div className="hint">
               Committed project structure, shared with the CLI. Read-only here — edit the file.
+              {!cfg?.exists && " Writing one is safe: it starts as a documented template that changes no behaviour until you fill it in."}
             </div>
             {cfg?.error && <pre className="update-log">{cfg.error}</pre>}
             {cfg?.warnings.map((w, i) => <div className="hint" key={i}>! {w}</div>)}
           </section>
 
           {strays.length > 0 && (
-            <section className="setting">
+            <section className="setting" data-section="strays">
               <label>
                 Worktrees outside .worktrees/
                 <span className="upd-tag warn">{strays.length}</span>
@@ -624,10 +645,6 @@ export function ProjectSheet({
               <div className="ver-actions">
                 <button className="ctrl sm" onClick={() => setShowToml((v) => !v)}>
                   {showToml ? "Hide preview" : "Preview"}
-                </button>
-                <button className="ctrl sm" disabled={busy}
-                  onClick={() => run("init", "init", "init_write", { repo: root })}>
-                  {running === "init" ? "Writing…" : "Write .worktrees.toml"}
                 </button>
               </div>
               <div className="hint">
