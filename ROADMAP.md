@@ -5,6 +5,34 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Hand-test the wheel in the real app (#373).** It shipped on the check
+  script, Rust tests and a throwaway-tmux probe; no one has scrolled a pane in
+  the app. In `sandbox.sh --app`, on a pi lane and on a plain shell pane:
+  - wheel up and down, and back to the bottom;
+  - type while scrolled back; press Esc while scrolled back;
+  - scroll back, switch to another place, come back, and type (the seeded
+    flag);
+  - an MCP `send` into a pi pane you are scrolled back in (`copy-mode -q`
+    first);
+  - drop a worktree onto a Claude pane while it is scrolled back;
+  - check that Claude's own wheel is unchanged, and that the wheel in `C-b w`
+    moves the selection.
+  See [the session](docs/sessions/2026-09-30-pi-scroll/summary.md).
+
+- **The wheel scrolls the ACTIVE pane of a split session, not the pane under
+  the pointer.** With tmux `mouse off` there is no pointer-to-pane mapping;
+  `term_wheel` targets `=session:`. This only matters for sessions with split
+  panes, which the app creates only when a place config asks for pane 1.
+  Fixing it means a mouse-aware layer — see the next item.
+
+- **brethash's #357 (tmux `mouse on`) is still open as a possible later
+  layer.** #373 deliberately did not turn tmux's mouse on, because it moves
+  text selection from xterm into tmux copy-mode and off the `copy_text`
+  path. If #357 is picked up, re-check `term_wheel`'s routing: the outer
+  mouse mode would then always be on, every wheel would reach tmux as a mouse
+  event, and `term_wheel` would never run — tmux's own wheel bindings would
+  take over, including for pi.
+
 - **Hand-test Copy path in the real app while a session is printing.** #372
   moved every "Copy …" to `copy_text` (pbcopy) because macOS 27's WebKit clears
   a click's activation on every `evaluateJavaScript:`, and Tauri delivers each
