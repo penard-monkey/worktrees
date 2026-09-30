@@ -430,7 +430,22 @@ pub fn send_literal_args(pane: &str, text: &str) -> Vec<String> {
         Some(head) => format!("{head}\\;"),
         None => text.to_string(),
     };
-    ["send-keys", "-t", pane, "-l", "--"].iter().map(|s| s.to_string()).chain(std::iter::once(text)).collect()
+    leave_mode(pane)
+        .into_iter()
+        .chain(["send-keys", "-t", pane, "-l", "--"])
+        .map(|s| s.to_string())
+        .chain(std::iter::once(text))
+        .collect()
+}
+
+/// The head of every write into an agent's pane: leave copy-mode first. A pane
+/// the user scrolled back in the app sits in copy-mode, where `send-keys` input
+/// is eaten outright and a paste lands hidden behind the history being read
+/// (both measured on tmux 3.7c). `-q` exits 0 with no mode to leave, which
+/// matters because a `;` list stops at the first failing command. Part of the
+/// SAME invocation, so nothing can re-enter the mode in between.
+fn leave_mode(pane: &str) -> [&str; 5] {
+    ["copy-mode", "-q", "-t", pane, ";"]
 }
 
 fn run_ok(args: &[&str]) -> Result<(), String> {
@@ -456,7 +471,11 @@ pub fn send_literal(pane: &PaneId, text: &str) -> Result<(), String> {
 }
 
 pub fn press_enter(pane: &PaneId) -> Result<(), String> {
-    run_ok(&["send-keys", "-t", pane.as_str(), "Enter"])
+    run_ok(&press_enter_args(pane.as_str()))
+}
+
+fn press_enter_args(pane: &str) -> Vec<&str> {
+    leave_mode(pane).into_iter().chain(["send-keys", "-t", pane, "Enter"]).collect()
 }
 
 /// The visible screen of `pane`, or `None` when tmux cannot say.
@@ -568,7 +587,7 @@ fn paste_commands<'a>(buf: &'a str, pane: &'a PaneId, text: &'a str) -> [Vec<&'a
         // `-p` = bracketed paste IF the pane's program asked for mode 2004.
         // A `%id`, which is globally unique and cannot prefix-match another
         // session the way a NAME target can.
-        vec!["paste-buffer", "-b", buf, "-p", "-t", pane.as_str()],
+        leave_mode(pane.as_str()).into_iter().chain(["paste-buffer", "-b", buf, "-p", "-t", pane.as_str()]).collect(),
         vec!["delete-buffer", "-b", buf],
     ]
 }
@@ -606,6 +625,27 @@ mod paste_tests {
         for argv in [&set, &paste, &del] {
             assert!(!argv.contains(&"send-keys"), "send-keys can type into a confirmation dialog");
         }
+    }
+
+    /// A pane the user scrolled back in the app sits in copy-mode, which eats
+    /// `send-keys` input outright and leaves a paste hidden behind history
+    /// (both measured). Every write into an agent's pane leaves the mode first,
+    /// in the SAME tmux invocation so nothing can re-enter it in between, and
+    /// with `-q`, which exits 0 when there is no mode to leave — a `;` list
+    /// stops at the first failing command.
+    #[test]
+    fn a_send_leaves_copy_mode_first() {
+        let pane = PaneId("%7".into());
+        let leave = ["copy-mode", "-q", "-t", "%7", ";"];
+        let [_, paste, _] = paste_commands("buf1", &pane, "x");
+        assert_eq!(paste[..5], leave, "{paste:?}");
+        assert_eq!(paste[5], "paste-buffer");
+        let typed = send_literal_args("%7", "run the tests");
+        assert_eq!(typed[..5], leave, "{typed:?}");
+        assert_eq!(typed[5], "send-keys");
+        let enter = press_enter_args("%7");
+        assert_eq!(enter[..5], leave, "{enter:?}");
+        assert_eq!(enter[5..], ["send-keys", "-t", "%7", "Enter"]);
     }
 
     /// Pane 0 is NOT "the AI". `base-index 1` in a user's tmux.conf means there
@@ -778,7 +818,7 @@ mod tests {
     #[test]
     fn a_trailing_semicolon_is_escaped_for_tmux() {
         let a = send_literal_args("%3", "run the tests;");
-        assert_eq!(a, vec!["send-keys", "-t", "%3", "-l", "--", "run the tests\\;"]);
+        assert_eq!(a[a.len() - 6..], ["send-keys", "-t", "%3", "-l", "--", "run the tests\\;"]);
         assert_eq!(send_literal_args("%3", "a;b").last().unwrap(), "a;b", "only the TRAILING one is eaten");
         assert_eq!(send_literal_args("%3", "-x").last().unwrap(), "-x");
     }

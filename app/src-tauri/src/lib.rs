@@ -6899,8 +6899,32 @@ async fn term_open(
         }
     });
 
-    terms.0.lock().unwrap().insert(id, Term { master: pair.master, writer, child, stop, session, scrolled: None });
+    // A pane can already be reading history when we attach: scrolled back
+    // before a place switch (term_close detaches; copy-mode lives on in tmux),
+    // before the app quit, or from a bare `tmux attach`. Without the flag the
+    // first keystrokes here would be copy-mode commands — Space selects, Enter
+    // copies and leaves, the typed text is lost — so seed it from the pane.
+    let scrolled = tmux::tmux(&["display-message", "-p", "-t", &format!("={session}:"), "#{pane_id} #{pane_mode}"])
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| scrolled_at_attach(&String::from_utf8_lossy(&o.stdout)));
+    terms.0.lock().unwrap().insert(id, Term { master: pair.master, writer, child, stop, session, scrolled });
     Ok(id)
+}
+
+/// `#{pane_id} #{pane_mode}` → the pane, when it is in one of the two modes
+/// that hold a pane in history (and that `send-keys -X cancel` leaves).
+fn scrolled_at_attach(line: &str) -> Option<String> {
+    let mut f = line.split_whitespace();
+    let (pane, mode) = (f.next()?, f.next().unwrap_or(""));
+    (pane.starts_with('%') && is_history_mode(mode)).then(|| pane.to_string())
+}
+
+/// copy-mode, and view-mode (tmux's read-only copy-mode, e.g. `run-shell`
+/// output). The other modes — choose-tree, the buffer and client choosers —
+/// are menus, and neither scroll through history nor take `scroll-up`.
+fn is_history_mode(mode: &str) -> bool {
+    matches!(mode, "copy-mode" | "view-mode")
 }
 
 #[tauri::command]
@@ -6940,7 +6964,7 @@ async fn term_write(id: u32, data: Vec<u8>, terms: State<'_, Terminals>) -> Resu
 /// scrollback is tmux's, and only copy-mode can show it.
 #[derive(Debug, PartialEq, Eq)]
 enum Wheel {
-    /// Already in copy-mode: move through history.
+    /// Already in copy-mode (or view-mode): move through history.
     Scroll,
     /// Main screen, wheel up: enter copy-mode (`-e`, so scrolling back to the
     /// bottom leaves it) and move up.
@@ -6954,12 +6978,18 @@ enum Wheel {
     Nothing,
 }
 
-fn wheel_plan(in_mode: bool, alternate: bool, up: bool) -> Wheel {
-    match (in_mode, alternate, up) {
-        (true, _, _) => Wheel::Scroll,
-        (false, true, _) => Wheel::Keys,
-        (false, false, true) => Wheel::EnterAndScroll,
-        (false, false, false) => Wheel::Nothing,
+/// `mode` is `#{pane_mode}`, empty when the pane is in none. NOT
+/// `#{pane_in_mode}`: that is true for choose-tree (C-b w/s) as well, where
+/// `scroll-up` fails "not in a mode" — ↑/↓ is what moves a tree's selection,
+/// and it is what xterm sent there before.
+fn wheel_plan(mode: &str, alternate: bool, up: bool) -> Wheel {
+    if is_history_mode(mode) {
+        return Wheel::Scroll;
+    }
+    match (mode.is_empty(), alternate, up) {
+        (false, _, _) | (true, true, _) => Wheel::Keys,
+        (true, false, true) => Wheel::EnterAndScroll,
+        (true, false, false) => Wheel::Nothing,
     }
 }
 
@@ -6992,24 +7022,40 @@ async fn term_wheel(id: u32, lines: i32, terms: State<'_, Terminals>) -> Result<
     // `=name:` — EXACT session, its current window's active pane: the pane this
     // client is showing. A bare name prefix-matches (tmux.rs's `PaneId` note).
     let target = format!("={session}:");
-    let out = tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_id} #{pane_in_mode} #{alternate_on}"])
+    // pane_mode LAST: it is empty outside a mode, and whitespace-splitting an
+    // empty middle field would shift the others.
+    let out = tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_id} #{alternate_on} #{pane_mode}"])
         .map_err(|e| format!("tmux: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut f = text.split_whitespace();
-    let (Some(pane), Some(mode), Some(alt)) = (f.next(), f.next(), f.next()) else {
+    let (Some(pane), Some(alt)) = (f.next(), f.next()) else {
         return Err(format!("tmux: no pane for {session}"));
     };
-    let plan = wheel_plan(mode == "1", alt == "1", lines < 0);
+    let plan = wheel_plan(f.next().unwrap_or(""), alt == "1", lines < 0);
     let Some(args) = wheel_args(pane, &plan, lines) else { return Ok(()) };
-    if matches!(plan, Wheel::Scroll | Wheel::EnterAndScroll) {
-        // Set BEFORE entering copy-mode: a keystroke landing in between must
-        // find the flag and cancel, never type into copy-mode unannounced.
+    let history = matches!(plan, Wheel::Scroll | Wheel::EnterAndScroll);
+    let flag = |terms: &Terminals| {
         if let Some(t) = terms.0.lock().unwrap().get_mut(&id) {
             t.scrolled = Some(pane.to_string());
         }
+    };
+    // The flag is set on BOTH sides of the spawn. Before: a keystroke that
+    // lands while copy-mode is being entered must find it and cancel. After:
+    // that keystroke took the flag, and if its cancel ran before copy-mode was
+    // in, the pane would otherwise end up in history with no flag at all —
+    // every later key a copy-mode command. A flag left on a pane that is
+    // already live costs one failed `cancel`, nothing else.
+    if history {
+        flag(&terms);
     }
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    tmux::tmux(&args).map_err(|e| format!("tmux: {e}"))?;
+    let out = tmux::tmux(&args).map_err(|e| format!("tmux: {e}"))?;
+    if history {
+        flag(&terms);
+    }
+    if !out.status.success() {
+        return Err(format!("tmux: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
     Ok(())
 }
 
@@ -8038,15 +8084,20 @@ mod tests {
     #[test]
     fn wheel_scrolls_history_only_where_there_is_history() {
         // pi / a shell: main screen, not scrolled back
-        assert_eq!(wheel_plan(false, false, true), Wheel::EnterAndScroll);
-        assert_eq!(wheel_plan(false, false, false), Wheel::Nothing);
+        assert_eq!(wheel_plan("", false, true), Wheel::EnterAndScroll);
+        assert_eq!(wheel_plan("", false, false), Wheel::Nothing);
         // already reading history: both directions move through it
-        assert_eq!(wheel_plan(true, false, true), Wheel::Scroll);
-        assert_eq!(wheel_plan(true, false, false), Wheel::Scroll);
-        assert_eq!(wheel_plan(true, true, false), Wheel::Scroll);
+        assert_eq!(wheel_plan("copy-mode", false, true), Wheel::Scroll);
+        assert_eq!(wheel_plan("copy-mode", false, false), Wheel::Scroll);
+        assert_eq!(wheel_plan("copy-mode", true, false), Wheel::Scroll);
+        assert_eq!(wheel_plan("view-mode", false, true), Wheel::Scroll);
         // alternate screen, no mouse: arrows, as xterm always sent
-        assert_eq!(wheel_plan(false, true, true), Wheel::Keys);
-        assert_eq!(wheel_plan(false, true, false), Wheel::Keys);
+        assert_eq!(wheel_plan("", true, true), Wheel::Keys);
+        assert_eq!(wheel_plan("", true, false), Wheel::Keys);
+        // a MENU mode (C-b w / C-b s): ↑/↓ moves its selection; scroll-up
+        // would fail "not in a mode" there
+        assert_eq!(wheel_plan("tree-mode", false, true), Wheel::Keys);
+        assert_eq!(wheel_plan("buffer-mode", true, false), Wheel::Keys);
 
         let a = |plan, lines| wheel_args("%7", &plan, lines).map(|v| v.join(" "));
         assert_eq!(a(Wheel::EnterAndScroll, -3).as_deref(), Some("copy-mode -e -t %7 ; send-keys -X -N 3 -t %7 scroll-up"));
@@ -8054,6 +8105,18 @@ mod tests {
         assert_eq!(a(Wheel::Keys, -2).as_deref(), Some("send-keys -N 2 -t %7 Up"));
         assert_eq!(a(Wheel::Keys, 1).as_deref(), Some("send-keys -N 1 -t %7 Down"));
         assert_eq!(a(Wheel::Nothing, 4), None);
+    }
+
+    /// Attaching to a pane that is already reading history must arm the
+    /// cancel, or the first keys typed are copy-mode commands.
+    #[test]
+    fn attach_to_a_scrolled_back_pane_arms_the_cancel() {
+        assert_eq!(scrolled_at_attach("%12 copy-mode\n").as_deref(), Some("%12"));
+        assert_eq!(scrolled_at_attach("%12 view-mode\n").as_deref(), Some("%12"));
+        assert_eq!(scrolled_at_attach("%12 \n"), None, "live pane");
+        assert_eq!(scrolled_at_attach("%12\n"), None, "live pane, field trimmed");
+        assert_eq!(scrolled_at_attach("%12 tree-mode\n"), None, "a menu, not history");
+        assert_eq!(scrolled_at_attach(""), None, "no pane");
     }
 
     /// The snapshot's per-harness sessions, pinned against the two-provider

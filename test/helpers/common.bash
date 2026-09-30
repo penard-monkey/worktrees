@@ -184,6 +184,14 @@ EOF
 install_fake_tmux() {
   cat > "$SHIMS/tmux" <<'EOF'
 #!/usr/bin/env bash
+# `copy-mode -q -t <pane> ;` heads every write into an agent's pane
+# (tmux::leave_mode — a pane scrolled back in the app would eat the input):
+# log it as a call of its own, then handle the rest as if invoked alone.
+if [ "${1:-}" = copy-mode ] && [ "${2:-}" = -q ] && [ "${5:-}" = ";" ]; then
+  echo "tmux $1 $2 $3 $4" >> "$TMUX_LOG"
+  shift 5
+  exec "$0" "$@"
+fi
 echo "tmux $*" >> "$TMUX_LOG"
 all="$*"
 sub="${1:-}"; shift || true

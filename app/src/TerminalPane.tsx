@@ -190,7 +190,11 @@ const TERM_SCROLLBACK = 5000;
  *  A pane that asked for the mouse (claude) is left alone: tmux passes that
  *  request through to xterm, which then reports the wheel as mouse events and
  *  the program scrolls itself. xterm consults this handler on that path too, so
- *  the mode check is what keeps it working. A normal buffer (the dock's owned
+ *  the mode check is what keeps it working: xterm 5.5 registers TWO wheel
+ *  listeners, and while the one that makes arrows returns early when wheel
+ *  reporting is on (`Terminal.ts:802`), the reporting one's `sendEvent` asks
+ *  this handler first (`case 'wheel'`, `Terminal.ts:642`) — a `false` here
+ *  would swallow claude's scroll. A normal buffer (the dock's owned
  *  shells) has scrollback of its own and keeps xterm's default. */
 function wheelToTmux(mouseTrackingMode: string, bufferType: string): boolean {
   return mouseTrackingMode === "none" && bufferType === "alternate";
@@ -217,13 +221,22 @@ function wheelLines(acc: number, deltaY: number, deltaMode: number, cellHeight: 
 function wheelPump(send: (lines: number) => Promise<unknown>) {
   let pending = 0;
   let busy = false;
+  // A failure repeats for every flush of the gesture that hit it (a session
+  // that went away, a mode tmux cannot scroll), so it is logged once, until a
+  // flush succeeds again. A warning: the cost is one wheel that did nothing.
+  let warned = false;
   const flush = () => {
     if (busy || pending === 0) return;
     const n = pending;
     pending = 0;
     busy = true;
     send(n)
-      .catch((e) => invoke("log_event", { level: "error", msg: `terminal wheel: ${e}` }).catch(() => {}))
+      .then(() => { warned = false; })
+      .catch((e) => {
+        if (warned) return;
+        warned = true;
+        invoke("log_event", { level: "warn", msg: `terminal wheel: ${e}` }).catch(() => {});
+      })
       .finally(() => { busy = false; flush(); });
   };
   return (lines: number) => { pending += lines; flush(); };
@@ -304,7 +317,10 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       term.attachCustomWheelEventHandler((e) => {
         if (!wheelToTmux(term.modes.mouseTrackingMode, term.buffer.active.type)) return true;
         e.preventDefault();
-        const r = wheelLines(acc, e.deltaY, e.deltaMode, host.clientHeight / Math.max(term.rows, 1), term.rows);
+        // The cell height from the GRID: `.xterm-screen` is exactly rows × cell,
+        // where the host also carries its content-box padding (termfit-check).
+        const grid = term.element?.querySelector<HTMLElement>(".xterm-screen")?.clientHeight || host.clientHeight;
+        const r = wheelLines(acc, e.deltaY, e.deltaMode, grid / Math.max(term.rows, 1), term.rows);
         acc = r.acc;
         if (r.lines !== 0) pump(r.lines);
         return false;

@@ -76,7 +76,11 @@ const check = (cond, msg) => (cond ? ok(msg) : fail(msg));
 /** Mount useTerm with a stub xterm that records the wheel handler, and a
  *  transport whose `wheel` invokes the test resolves by hand. */
 function mount({ withWheel = true, invokes = null } = {}) {
-  const host = { clientWidth: 800, clientHeight: 400 }; // 20 rows → 20px cells
+  const logs = [];
+  // The host is content-box WITH padding (termfit-check's rule), so its
+  // clientHeight is taller than the grid: 20 rows of 20px = 400, host 440.
+  // Only `.xterm-screen` measures the grid itself.
+  const host = { clientWidth: 800, clientHeight: 440 };
   let term = null;
   const wheels = [];      // { lines, resolve }
   const written = [];     // what reached the pty as INPUT (tx.write)
@@ -84,7 +88,8 @@ function mount({ withWheel = true, invokes = null } = {}) {
   class TerminalStub {
     constructor(opts) {
       this.options = { ...opts }; this.unicode = { activeVersion: "" };
-      this.cols = 100; this.rows = 20; this.element = {};
+      this.cols = 100; this.rows = 20;
+      this.element = { querySelector: (sel) => (sel === ".xterm-screen" ? { clientHeight: 400 } : null) };
       this.modes = { mouseTrackingMode: "none" };
       this.buffer = { active: { type: "alternate" } };
       this.wheelHandler = null;
@@ -122,6 +127,7 @@ function mount({ withWheel = true, invokes = null } = {}) {
     Channel: class { constructor() { this.onmessage = null; } },
     invoke: (cmd, args) => {
       invokes?.push({ cmd, args });
+      logs.push({ cmd, args });
       return Promise.resolve(cmd === "term_open" ? 7 : null);
     },
     FindBar: () => null,
@@ -145,7 +151,7 @@ function mount({ withWheel = true, invokes = null } = {}) {
       write: (data) => written.push(new TextDecoder().decode(new Uint8Array(data))),
       resize() {}, close() {},
     };
-    if (withWheel) tx.wheel = (lines) => new Promise((resolve) => wheels.push({ lines, resolve }));
+    if (withWheel) tx.wheel = (lines) => new Promise((resolve, reject) => wheels.push({ lines, resolve, reject }));
     return tx;
   };
   const api = built.useTerm(transport, "s", 0, 0);
@@ -153,6 +159,7 @@ function mount({ withWheel = true, invokes = null } = {}) {
   const cleanups = effects.map(({ cb }) => cb()).filter((c) => typeof c === "function");
   return {
     built, term: () => term, wheels, written,
+    warnings: () => logs.filter((l) => l.cmd === "log_event"),
     dispose() { cleanups.forEach((c) => c()); globalThis.ResizeObserver = prevRO; },
   };
 }
@@ -230,6 +237,26 @@ function mount({ withWheel = true, invokes = null } = {}) {
     const b = w(a.acc, 30, 0, 20, 30);
     check(a.lines === 1 && b.lines === 2, "pixel fractions carry to the next event");
   }
+}
+
+// 6b. A failing tmux (a mode it cannot scroll, a session gone) is logged as a
+//     WARNING, once per burst — not an error per flush.
+{
+  const m = mount();
+  await tick();
+  for (let round = 0; round < 3; round++) {
+    m.term().wheel(-100);
+    m.wheels.at(-1)?.reject("tmux: not in a mode");
+    await tick(); await tick();
+  }
+  const w = m.warnings();
+  check(w.length === 1 && w[0].args.level === "warn", `three failed flushes → one warning (${JSON.stringify(w.map((l) => l.args.level))})`);
+  m.term().wheel(-100);
+  m.wheels.at(-1)?.resolve(); await tick(); await tick();
+  m.term().wheel(-100);
+  m.wheels.at(-1)?.reject("tmux: gone"); await tick(); await tick();
+  check(m.warnings().length === 2, "a success ends the burst: the next failure is reported again");
+  m.dispose();
 }
 
 // 7. The real transport sends what lib.rs expects.
