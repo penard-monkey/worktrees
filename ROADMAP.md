@@ -26,6 +26,20 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   instructions: resolve through `git rev-parse --show-superproject-working-tree`
   first.
 
+- **Hand-test the pi nav dot in the real app (#382, v0.34.1).** It shipped on
+  unit tests, a mock-harness run and a read-only check of a live lane's
+  derivation. No one has watched the running app. On one pi lane:
+  - the row goes green while pi works, and leaves the afterglow ring when the
+    turn finishes, but not after an Esc;
+  - `WORKTREES_PI_PROJECT_TRUST=ask`, close and reopen (same `~agent~pi`
+    name): the trust modal shows amber, and the dot clears once it is
+    answered;
+  - `/model` in the lane: the label follows within a tick;
+  - a pi in the CANONICAL session: `app.log` must not show a `places:changed`
+    re-list every 3s. That is the loop the review caught.
+
+  See [the session](docs/sessions/2026-09-30-pi-nav-dot/summary.md).
+
 - **Hand-test the wheel in the real app (#373).** It shipped on the check
   script, Rust tests and a throwaway-tmux probe; no one has scrolled a pane in
   the app. In `sandbox.sh --app`, on a pi lane and on a plain shell pane:
