@@ -5,7 +5,8 @@
 //! (docs/proposals/pi-harness.md §1.3, §3; fixtures in `tests/fixtures/pi-*`):
 //!
 //! - **Session file.** `--session-id <id>` creates or reopens EXACTLY
-//!   `<session dir>/<iso ts>_<id>.jsonl`; `--session-dir` wins over a repo's
+//!   `<session dir>/<iso ts>_<id>.jsonl` (reopening matches the HEADER's id, so
+//!   a uuid-named file reopens the same way); `--session-dir` wins over a repo's
 //!   `.pi/settings.json` `sessionDir`, which pi reads BEFORE trust is decided —
 //!   so worktrees always passes the dir it will read, and a repo cannot move it.
 //!   The default dir is `<agent dir>/sessions/--<cwd, leading / dropped, / \ :
@@ -19,6 +20,14 @@
 //!   and the only windows the file cannot see are pi's startup before the
 //!   opener is submitted and a trust modal holding it back. The screen covers
 //!   those (the composer border, and the modal).
+//! - **The place's session is the one the user actually has**, not the one
+//!   worktrees launched: `/new`, a hand restart after `/trust`, or a bare `pi`
+//!   typed into the pane all write a `<ts>_<uuid>.jsonl` into the same pinned
+//!   dir, and reading only the derived id made the dot vanish while pi worked
+//!   (v0.33.0). `current_session` takes, among the dir's files whose HEADER
+//!   `cwd` is the place, the one with the newest entry — by content, never by
+//!   mtime or the name's creation stamp (a resumed old session is the newest
+//!   by activity and the oldest by name).
 //! - **State keys on the newest MESSAGE entry**, never the last line (a
 //!   `usage`/`label`/`custom` entry arrives without a turn) and never the
 //!   file's mtime (the AGENTS.md transcript rule). A failed request is written
@@ -117,25 +126,73 @@ pub fn session_file(dir: &Path, id: &str) -> Option<PathBuf> {
         .max()
 }
 
-/// The newest-generation session file for the place whose ids share `stem`,
-/// and its generation. Used by the activity reader, which runs every tick over
-/// every live pi lane and so does not read the declared store: the highest
-/// generation on disk is the place's current session except in the window
-/// between a fresh launch and its first user message — pi's startup, or a
-/// trust modal holding the opener back — exactly when the screen, not the
-/// file, answers (`pi_state`).
-pub fn latest_session_file(dir: &Path, stem: &str) -> Option<(u32, PathBuf)> {
-    let marker = format!("_{stem}");
+/// A place's current pi session: its file and the id to `--session-id` it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiSession {
+    pub path: PathBuf,
+    pub id: String,
+}
+
+/// A session file's header — its `id` and `cwd` — from the first line. A
+/// header never changes, so it is read once per path.
+fn header(path: &Path) -> Option<(String, String)> {
+    type Headers = HashMap<PathBuf, Option<(String, String)>>;
+    static HEADERS: Mutex<Option<Headers>> = Mutex::new(None);
+    let mut guard = HEADERS.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if let Some(Some(h)) = cache.get(path) {
+        return Some(h.clone());
+    }
+    // A file pi has only just created may not hold its header line yet: never
+    // cache a miss (the Codex `session_meta` rule in AGENTS.md).
+    let h = parse_header(&first_line(path)?);
+    if h.is_some() {
+        cache.insert(path.to_path_buf(), h.clone());
+    }
+    h
+}
+
+fn first_line(path: &Path) -> Option<String> {
+    use std::io::{BufRead, Read};
+    let f = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    std::io::BufReader::new(f.take(64 * 1024)).read_line(&mut line).ok()?;
+    line.ends_with('\n').then_some(line)
+}
+
+/// `{"type":"session", "id", "cwd", …}` → (id, cwd).
+pub fn parse_header(line: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type")?.as_str()? != "session" {
+        return None;
+    }
+    Some((v.get("id")?.as_str()?.to_string(), v.get("cwd")?.as_str()?.to_string()))
+}
+
+fn same_dir(a: &str, b: &str) -> bool {
+    let (a, b) = (Path::new(a), Path::new(b));
+    a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// The place's current session in `dir`: among the `*.jsonl` whose header
+/// `cwd` is `cwd`, the one whose newest entry is newest. The header check keeps
+/// out a place whose path mangles to the same dir name (`/a-b` and `/a/b`).
+/// `None` when pi has written nothing for this place yet.
+pub fn current_session(dir: &Path, cwd: &str) -> Option<PiSession> {
     std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let rest = &name[name.find(&marker)? + marker.len()..];
-            let gen: u32 = rest.strip_suffix(".jsonl")?.parse().ok()?;
-            Some((gen, e.path()))
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|path| {
+            let (id, hcwd) = header(&path)?;
+            same_dir(&hcwd, cwd).then(|| {
+                let last = tail_info(&path).last_at.unwrap_or_default();
+                (last, path.file_name().map(|n| n.to_os_string()), PiSession { path, id })
+            })
         })
-        .max()
+        .max_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)))
+        .map(|(_, _, s)| s)
 }
 
 /// Where a pi session's newest turn stands, from its JSONL.
@@ -219,28 +276,56 @@ pub fn session_model(lines: &[String]) -> Option<String> {
     })
 }
 
-type TailCache = HashMap<PathBuf, (u64, Option<String>, Option<PiTurn>)>;
+/// What a session file's tail says: its model, its newest turn, and the
+/// timestamp of its newest entry (what `current_session` ranks by).
+#[derive(Debug, Clone, Default)]
+struct TailInfo {
+    model: Option<String>,
+    turn: Option<PiTurn>,
+    last_at: Option<String>,
+}
+
+type TailCache = HashMap<PathBuf, (u64, TailInfo)>;
 static PI_TAIL: Mutex<Option<TailCache>> = Mutex::new(None);
 
-/// `path`'s (model, turn), re-read only once the file has GROWN — the same
-/// shape and reason as `activity::codex_tail`.
-pub fn session_tail(path: &Path) -> (Option<String>, Option<PiTurn>) {
+/// The newest entry `timestamp` among `lines`. pi writes them all as
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ`, so the strings order as the instants do.
+pub fn session_last_at(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v.get("timestamp").and_then(|t| t.as_str()).map(str::to_string))
+        .max()
+}
+
+/// `path`'s tail, re-read only once the file has GROWN — the same shape and
+/// reason as `activity::codex_tail`.
+fn tail_info(path: &Path) -> TailInfo {
     let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
-        return (None, None);
+        return TailInfo::default();
     };
     let mut guard = PI_TAIL.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(HashMap::new);
-    if let Some((l, m, t)) = cache.get(path) {
+    if let Some((l, info)) = cache.get(path) {
         if *l == len {
-            return (m.clone(), t.clone());
+            return info.clone();
         }
     }
-    let (pm, pt) = cache.get(path).map(|(_, m, t)| (m.clone(), t.clone())).unwrap_or((None, None));
+    let prev = cache.get(path).map(|(_, i)| i.clone()).unwrap_or_default();
     let lines = activity::tail_lines_checked(path, activity::ROLLOUT_TAIL_BYTES).unwrap_or_default();
-    let m = session_model(&lines).or(pm);
-    let t = session_turn(&lines).or(pt);
-    cache.insert(path.to_path_buf(), (len, m.clone(), t.clone()));
-    (m, t)
+    let info = TailInfo {
+        model: session_model(&lines).or(prev.model),
+        turn: session_turn(&lines).or(prev.turn),
+        last_at: session_last_at(&lines).or(prev.last_at),
+    };
+    cache.insert(path.to_path_buf(), (len, info.clone()));
+    info
+}
+
+/// `path`'s (model, turn).
+pub fn session_tail(path: &Path) -> (Option<String>, Option<PiTurn>) {
+    let i = tail_info(path);
+    (i.model, i.turn)
 }
 
 /// What one capture of a pi pane shows.
@@ -362,15 +447,14 @@ pub fn pi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Optio
     if !panes.session_runs_program(&name) {
         return None;
     }
-    let turn = latest_session_file(&session_dir(path), &session_stem(canonical)).and_then(|(_, f)| session_tail(&f).1);
+    let turn = current_session(&session_dir(path), path).and_then(|s| session_tail(&s.path).1);
     let (state, last_done) = pi_state(turn.as_ref(), capture(&name));
     Some(Activity { provider: Some("pi"), state, last_done, session: Some(name) })
 }
 
 /// The model the place's current pi session is on, from its file.
-pub fn running_model(canonical: &str, path: &str) -> Option<String> {
-    let (_, f) = latest_session_file(&session_dir(path), &session_stem(canonical))?;
-    session_tail(&f).0
+pub fn running_model(_canonical: &str, path: &str) -> Option<String> {
+    session_tail(&current_session(&session_dir(path), path)?.path).0
 }
 
 #[cfg(test)]
@@ -409,23 +493,79 @@ mod tests {
     }
 
     #[test]
-    fn session_files_are_found_by_id_and_by_newest_generation() {
+    fn a_session_file_is_found_by_id() {
         let d = std::env::temp_dir().join(format!("wtpi-files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let stem = session_stem("p-feat");
-        for (ts, g) in [("2026-09-29T10-00-00-000Z", 2), ("2026-09-29T09-00-00-000Z", 10), ("2026-09-29T11-00-00-000Z", 9)] {
-            std::fs::write(d.join(format!("{ts}_{stem}{g}.jsonl")), "").unwrap();
-        }
-        // A near-miss stem (another place) and a non-numeric tail are ignored.
-        std::fs::write(d.join(format!("2026-09-29T12-00-00-000Z_{}99.jsonl", session_stem("p-other"))), "").unwrap();
-        std::fs::write(d.join(format!("2026-09-29T12-00-00-000Z_{stem}x.jsonl")), "").unwrap();
-        let (g, f) = latest_session_file(&d, &stem).unwrap();
-        assert_eq!(g, 10, "numeric, not lexical, and not by timestamp");
-        assert!(f.to_string_lossy().ends_with(&format!("{stem}10.jsonl")));
+        std::fs::write(d.join(format!("2026-09-29T10-00-00-000Z_{stem}2.jsonl")), "").unwrap();
         assert!(session_file(&d, &format!("{stem}2")).is_some());
         assert!(session_file(&d, &format!("{stem}3")).is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Real 0.99.1 files (fixtures/pi-session/restart, cwd rewritten, system
+    /// prompt elided): a launch with the derived id, then a HAND restart (no
+    /// `--session-id`, as after `/trust`), then `/new` in that pi, then the
+    /// `/new` session resumed by its uuid. The v0.33.0 reader keyed on the
+    /// derived id and saw only the first, so the dot vanished.
+    const G1: (&str, &str) = ("2026-09-30T00-51-41-893Z_lane-abc123-g1.jsonl", include_str!("../tests/fixtures/pi-session/restart/2026-09-30T00-51-41-893Z_lane-abc123-g1.jsonl"));
+    const RESTART: (&str, &str) = ("2026-09-30T00-56-39-504Z_01a0efd0-474f-7028-bbf8-2f7684397b16.jsonl", include_str!("../tests/fixtures/pi-session/restart/2026-09-30T00-56-39-504Z_01a0efd0-474f-7028-bbf8-2f7684397b16.jsonl"));
+    const NEW: (&str, &str) = ("2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl", include_str!("../tests/fixtures/pi-session/restart/2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl"));
+    const LANE: &str = "/tmp/wtfix/repo/.worktrees/lane";
+
+    fn session_scratch(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wtpi-cur-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for (name, body) in files {
+            std::fs::write(d.join(name), body).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn the_current_session_is_the_one_the_user_has_not_the_derived_id() {
+        let d = session_scratch("g1", &[G1]);
+        assert_eq!(current_session(&d, LANE).unwrap().id, "lane-abc123-g1", "the usual case");
+
+        let d = session_scratch("restart", &[G1, RESTART]);
+        let cur = current_session(&d, LANE).unwrap();
+        assert_eq!(cur.id, "01a0efd0-474f-7028-bbf8-2f7684397b16", "a hand-restarted pi");
+        assert!(matches!(session_tail(&cur.path).1, Some(PiTurn::Done { .. })));
+
+        // `/new`, then that session resumed: newest by CONTENT. Rename it so its
+        // creation stamp is the OLDEST — the name must not decide.
+        let old_name = NEW.0.replace("2026-09-30T00-56-43-373Z", "2026-09-30T00-00-00-000Z");
+        let d = session_scratch("new", &[G1, RESTART, (&old_name, NEW.1)]);
+        assert_eq!(current_session(&d, LANE).unwrap().id, "01a0efd0-566d-7028-bbf8-2f78723dc57e");
+
+        // A place whose path mangles to the same dir: its newer file is not ours.
+        let other = NEW.1.replace(LANE, "/tmp/wtfix/repo/.worktrees-lane").replace("2026-09-30T00:5", "2026-09-30T09:5");
+        let d = session_scratch("decoy", &[G1, ("2026-09-30T09-00-00-000Z_decoy.jsonl", &other)]);
+        assert_eq!(current_session(&d, LANE).unwrap().id, "lane-abc123-g1");
+
+        // A header-only file (pi mid-create), a non-jsonl, an empty dir.
+        let d = session_scratch("partial", &[G1, ("2026-09-30T10-00-00-000Z_x.jsonl", r#"{"type":"session","id":"x""#), ("notes.txt", "")]);
+        assert_eq!(current_session(&d, LANE).unwrap().id, "lane-abc123-g1");
+        assert!(current_session(&session_scratch("empty", &[]), LANE).is_none());
+    }
+
+    /// A hand-started pi that is mid-turn reads busy, which is what the dot
+    /// failed to show: the restart file cut after its user message.
+    #[test]
+    fn a_hand_started_pi_mid_turn_reads_busy() {
+        let cut: String = RESTART.1.lines().take(5).map(|l| format!("{l}\n")).collect();
+        let d = session_scratch("busy", &[G1, (RESTART.0, &cut)]);
+        let cur = current_session(&d, LANE).unwrap();
+        assert_eq!(session_tail(&cur.path).1, Some(PiTurn::Busy));
+    }
+
+    #[test]
+    fn a_header_is_the_session_line_only() {
+        assert_eq!(parse_header(r#"{"type":"session","version":3,"id":"a","cwd":"/x"}"#), Some(("a".into(), "/x".into())));
+        assert_eq!(parse_header(r#"{"type":"model_change","id":"a","cwd":"/x"}"#), None);
+        assert_eq!(parse_header(r#"{"type":"session","id":"a"}"#), None);
     }
 
     const TWO_TURNS: &str = include_str!("../tests/fixtures/pi-session/two-turns.jsonl");

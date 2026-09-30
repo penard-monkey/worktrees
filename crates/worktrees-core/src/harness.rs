@@ -384,15 +384,6 @@ impl Adapter for Codex {
     }
 }
 
-/// The slug of the place whose directory is `cwd`.
-fn place_slug(p: &Project, cwd: &str) -> String {
-    if std::path::Path::new(cwd) == std::path::Path::new(&p.main_root) {
-        "(main)".to_string()
-    } else {
-        cwd.rsplit('/').next().unwrap_or(cwd).to_string()
-    }
-}
-
 /// The place's current pi session generation (0: never launched).
 fn pi_generation(p: &Project, slug: &str) -> u32 {
     crate::store::read_lenient(&p.main_root).places.get(slug).and_then(|d| d.pi_session_gen).unwrap_or(0)
@@ -446,10 +437,10 @@ impl Adapter for Pi {
         true
     }
 
-    fn session_present(&self, project: &Project, cwd: &str) -> bool {
-        let slug = place_slug(project, cwd);
-        let gen = pi_generation(project, &slug);
-        gen > 0 && crate::pi::session_file(&crate::pi::session_dir(cwd), &crate::pi::session_id(&project.session_name(&slug), gen)).is_some()
+    /// Whatever session the place actually has — worktrees' own, or one the
+    /// user started by hand in the pane (`pi::current_session`).
+    fn session_present(&self, _project: &Project, cwd: &str) -> bool {
+        crate::pi::current_session(&crate::pi::session_dir(cwd), cwd).is_some()
     }
 
     /// Only with a file to reopen: `--session-id` for a session pi never wrote
@@ -510,8 +501,20 @@ impl Adapter for Pi {
             launch.model = model_arg_value(model);
             next.get()
         };
+        // A resume reopens the conversation the place actually has, by its
+        // header id — after a `/new` or a hand restart that is not the derived
+        // one, and resuming the derived id would reopen a stale session (or,
+        // with no file, create an empty one on pi's default model).
+        let id = if launch.resume {
+            crate::pi::current_session(&crate::pi::session_dir(wt), wt)
+                .map(|s| s.id)
+                .filter(|id| crate::pi::valid_session_id(id))
+                .unwrap_or_else(|| crate::pi::session_id(&canonical, gen))
+        } else {
+            crate::pi::session_id(&canonical, gen)
+        };
         launch.place_flags.push("--session-id".into());
-        launch.place_flags.push(shell_quote(&crate::pi::session_id(&canonical, gen)));
+        launch.place_flags.push(shell_quote(&id));
         Ok(())
     }
 
