@@ -5,6 +5,60 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **pi 0.99.1 ships MCP (`pi mcp`), so the pi proposal's §4.1 is stale.**
+  The proposal (researched on 0.87.1) says pi has no MCP in core and plans
+  phase 3's bus around CLI verbs plus a worktrees-owned skill or extension.
+  0.99.1's `--help` lists `pi mcp <command>` ("Check MCP servers, sign in to or
+  out of OAuth servers"). Before phase 3 is planned, re-research: where pi
+  reads its MCP config from (user vs project, and whether a repo can supply
+  servers — ADR 0001), and whether the user-scope `worktrees mcp` could serve
+  a pi lane directly the way it serves Claude and Codex. Phase 3's `send` to
+  pi and the Plan tab's paste into pi (both refused by name in phase 2) wait
+  on this. See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+
+- **The pi app surfaces have never been seen in WKWebView.** The model picker
+  (a `<select>` under the harness segment), the Switch agent sheet, the Launch
+  anyway dialog and Settings → pi were driven only in headless Chromium
+  against the mock. AGENTS.md records WebKit-only sizing gaps inside buttons
+  and flex rows that Chrome hides. One pass in the real app or the sandbox
+  (`app/scripts/sandbox.sh --app`, by PID only), with a pi lane on a local
+  model. The segmented control also capitalises labels, so pi shows as "Pi"
+  there; decide whether that is fine. See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+
+- **The pi model label after a mid-session `/model` has not been live-tested.**
+  `pi::session_model` takes the newest of the last assistant `provider/model`
+  and the last `model_change`, and pi writes `model_change` at the switch. That
+  is unit-tested but not checked live: only one model was ready on the test
+  machine, and the other configured provider is a paid one. It is section 3
+  of `docs/pi-manual-checks.md`. See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+
+- **The pi mark is a drawn π, not pi's logo.** `icons.tsx::PiMark` is a
+  hand-drawn path, because no logo was to hand; the other agents use their
+  brands (David's "logos over glyphs" call). Swap in pi's mark and re-balance
+  `.g-agent-pi`'s `--agent-mark` for equal ink, the way the spark and blossom
+  were measured. See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+
+- **A fresh pi lane's dot reads idle for its first second or two.** The
+  activity reader has no file until the opener lands as a user message, and
+  pi's border shows no status until the turn starts, so the first sample after
+  launch is idle (measured live: idle at 2s, then busy). MCP `wait` already
+  needs two quiet samples in a row for pi; the nav dot has no such rule. Either
+  treat a pi session younger than a few seconds with no file as busy, or accept
+  the blink. See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+
+- **Codex `-m` was never launched live.** `--model` for Codex maps to `-m`
+  and is unit-tested only (Codex was out of tokens that day). One real `open
+  --ai codex --model <id>` should confirm the flag's position (it rides in the
+  adapter's head words, before a `resume` subcommand, and is never passed on a
+  resume). See [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+
+- **Headless Chromium logs an xterm `dimensions` TypeError on a session swap.**
+  It comes from `Viewport.syncScrollArea` after a terminal is disposed, and
+  surfaced while driving pi↔Claude switches in the mock. It is probably the
+  same for Claude↔Codex and harmless in WKWebView, but unverified. Check once
+  in the real app; if real, guard the disposal order in `TerminalPane`. See
+  [the session](docs/sessions/2026-09-29-pi-phase2/summary.md).
+
 - **A long-lived `worktrees mcp` keeps serving a replaced binary, silently.**
   Each agent session starts its server once; after an install, every running
   session answers from old code. On 2026-09-27 ten servers were running, some
@@ -14,15 +68,10 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   worktrees vX; reconnect with /mcp") and flag it in `doctor`. See
   [the session](docs/sessions/2026-09-27-codex-live-testing/summary.md).
 
-- **`app/src/harness.ts` mirrors `provider::PROVIDERS` with no drift check.**
-  #364 replaced every frontend `"claude" | "codex"` union with one `Harness`
-  type + `HARNESSES`, but nothing fails when a registry row is added in Rust
-  and not in `harness.ts` (or the order differs — the first is the default and
-  wins ties on both sides). Same shape as `dnd-check.mjs`: parse the ids out of
-  `provider.rs` and compare. See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
-
 - **`running_model` is still an app-side match, not an adapter method.**
-  `lib.rs::live_model` dispatches `"claude"`/`"codex"` by id because Claude's
+  `harness::Adapter::running_model` now exists (Codex and pi implement it, and
+  `place_status` uses pi's), but `lib.rs::live_model` still dispatches
+  `"claude"`/`"codex"`/`"pi"` by id because Claude's
   reader caches transcript tails in the app and logs a failed read through
   `applog`; moving it into `harness::Adapter` would swallow that error (core
   cannot log). Move it once core has a log seam, or pass a logger in. See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
@@ -34,19 +83,6 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   visible in `ps` and tmux's command line. The harness that first needs one
   picks the channel (env file, `tmux set-environment`); the trait doc says so.
   See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
-
-- **Per-harness test id on the Switch item.** The ⋯ menu's
-  `data-testid="topbar-switch-provider"` is now emitted once per OTHER
-  harness — unique with two, duplicated with three. Make it
-  `topbar-switch-provider-${to}` (and update any harness script that selects
-  it) before a third harness ships. From the phase-1 review. See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
-
-- **No mock-harness visual pass was done for #364.** The Chrome DevTools
-  browser was held by another session and Playwright is not installed in that
-  worktree; the rendered strings are identical by construction
-  (`HARNESS_LABEL`), and tsc + all 22 checks passed. Worth one look at the
-  Open/Switch/new-worktree segment surfaces the next time someone has the mock
-  up. See [the session](docs/sessions/2026-09-29-harness-phase1/summary.md).
 
 - **Finish hand-checking window restore, then quiet its log.** A real
   full-screen restore is confirmed in `app.log`. Still unobserved: leaving full

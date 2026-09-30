@@ -154,6 +154,19 @@ appeared within seconds. Check `gh pr view <n> --json mergeStateStatus` (DIRTY)
 before debugging the workflow. Note `mergeStateStatus` also reads `UNKNOWN` for
 a few seconds after any push while GitHub recomputes it.
 
+**Run `app/scripts/*-check.mjs` from the REPO ROOT, as CI does.** From `app/`
+at least one (`plan-usage-check.mjs`) fails even on `main`, for a reason that
+has nothing to do with your change — and a failure that is "also on main" reads
+as pre-existing. One was called pre-existing that way while it was a real
+regression on the branch (#367). Compare against `main` from the same directory
+CI uses before calling anything pre-existing.
+
+**bats helpers run under macOS `/bin/bash` 3.2 on the macos runner.** A
+pattern-substitution REPLACEMENT keeps its quote characters there —
+`${c//"'\''"/"'"}` turns `'` into `"'"` — so a helper passes on a
+Homebrew bash 5 and fails in CI on one OS only. Use `sed` for quote surgery, and
+reproduce with a dir holding `bash -> /bin/bash` first on PATH for the bats run.
+
 **Killing a bats run writes a `not ok` into its log.** A `pkill` (or a branch
 switch under a running suite) fails the in-flight test inside `common_setup`
 and prints `bats warning: Executed N instead of expected 340 tests`. A later
