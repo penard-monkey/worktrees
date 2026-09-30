@@ -5,6 +5,7 @@ import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
+import { copyToClipboard } from "./clipboard";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -37,7 +38,7 @@ function ManualInstall({ tag, cliDir }: { tag: string; cliDir: string | null }) 
     { id: "both", label: "App + CLI (quit worktrees first)", cmd: `${script} | WORKTREES_INSTALL_VERSION=${tag}${dir} WORKTREES_INSTALL_APP=1 bash` },
   ];
   const copy = (id: string, cmd: string) =>
-    navigator.clipboard.writeText(cmd).then(() => { setCopied(id); setTimeout(() => setCopied(""), 2000); }).catch(() => {});
+    copyToClipboard(cmd).then(() => { setCopied(id); setTimeout(() => setCopied(""), 2000); }).catch(() => {});
   return (
     <details className="manual-install">
       <summary>Install {tag} manually</summary>
@@ -567,7 +568,7 @@ export function SettingsSheet({
         `ui_rem  : ${settings.ui_rem}px\n` +
         `app_zoom: ${Math.round(clampZoom(settings.app_zoom) * 100)}%\n` +
         `term    : ${settings.term_size}px\n`;
-      await navigator.clipboard.writeText(back + ui);
+      await copyToClipboard(back + ui);
       setDiagCopied(true);
       setTimeout(() => setDiagCopied(false), 2000);
     } catch (e) {

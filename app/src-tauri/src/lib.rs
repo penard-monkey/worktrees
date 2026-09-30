@@ -851,6 +851,58 @@ async fn drop_reference(
     Ok(token)
 }
 
+/// Every "Copy …" in the app (`clipboard.ts`). Native because the web API
+/// cannot be relied on here: `navigator.clipboard.writeText` needs the click's
+/// transient activation, and macOS 27's WebKit throws that away on EVERY
+/// `evaluateJavaScript:` — which is how Tauri delivers each `emit` and each
+/// small `Channel` message, terminal output included. With a session
+/// streaming, one lands between mousedown and click almost every time and the
+/// write rejects with a raw `NotAllowedError`. Not ours to fix upstream
+/// (WebKit 321448@main), and not a race a retry wins while output keeps coming.
+#[tauri::command]
+async fn copy_text(text: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            use std::io::Write;
+            let mut child = pbcopy_command().spawn().map_err(|e| format!("pbcopy: {e}"))?;
+            // Take stdin so it is dropped (EOF) before the wait.
+            let mut stdin = child.stdin.take().ok_or("pbcopy: no stdin")?;
+            stdin.write_all(text.as_bytes()).map_err(|e| format!("pbcopy: {e}"))?;
+            drop(stdin);
+            let out = child.wait_with_output().map_err(|e| format!("pbcopy: {e}"))?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(format!("pbcopy: {}", String::from_utf8_lossy(&out.stderr).trim()))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    // No native path elsewhere; the frontend falls back to the web API.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        Err("no native clipboard on this platform".into())
+    }
+}
+
+/// `pbcopy` reads its stdin in the LOCALE's encoding, and a GUI launch gets
+/// launchd's environment with no locale at all — so without `LC_CTYPE` a path
+/// like `año/✎` lands on the clipboard as `a√±o/‚úé` (measured). Absolute
+/// path for the same launchd reason as `fixup_gui_path`.
+#[cfg(target_os = "macos")]
+fn pbcopy_command() -> std::process::Command {
+    use std::process::{Command, Stdio};
+    let mut c = Command::new("/usr/bin/pbcopy");
+    c.env("LC_CTYPE", "UTF-8")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    c
+}
+
 /// Rename a place's LABEL. Empty clears it, which is how the UI goes back to
 /// showing the slug — see `Declared::title` for why this is a label and not a
 /// rename of the worktree.
@@ -7649,6 +7701,7 @@ pub fn run() {
             list_places,
             list_workspace,
             drop_reference,
+            copy_text,
             add_project,
             create_project,
             probe_dir,
@@ -7806,6 +7859,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GUI launch has no locale, and pbcopy without one mangles every
+    /// non-ASCII byte of a copied path. Asserted on the command rather than by
+    /// running it: a test must not overwrite the developer's clipboard.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pbcopy_is_told_its_input_is_utf8() {
+        let c = pbcopy_command();
+        let envs: Vec<_> = c.get_envs().collect();
+        assert!(
+            envs.contains(&(std::ffi::OsStr::new("LC_CTYPE"), Some(std::ffi::OsStr::new("UTF-8")))),
+            "{envs:?}"
+        );
+        assert_eq!(c.get_program(), "/usr/bin/pbcopy");
+    }
 
     /// The snapshot's per-harness sessions, pinned against the two-provider
     /// formula they replaced (kept here verbatim as the reference), across a

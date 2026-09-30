@@ -25,6 +25,7 @@
 // App() get a new identity every render and would drop tree expansion state.
 import { Component, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { copyToClipboard } from "./clipboard";
 // `openPath` is aliased: this module already has an `openPath` — the prop
 // naming the file the viewer has open — and the two would silently shadow each
 // other inside FilesPane (tsc catches it as "String has no call signatures",
@@ -1186,8 +1187,7 @@ export function FilesPane(props: FilesPaneProps) {
   // reach the banner, not the void.
   const copyText = (text: string) => {
     setCtx(null);
-    if (!navigator.clipboard) { onError("clipboard unavailable"); return; }
-    navigator.clipboard.writeText(text).catch(onError);
+    copyToClipboard(text).catch(onError);
   };
   const reveal = (path: string) => { setCtx(null); revealItemInDir(path).catch(onError); };
   const openIn = (path: string) => { setCtx(null); openInDefaultApp(path).catch(onError); };

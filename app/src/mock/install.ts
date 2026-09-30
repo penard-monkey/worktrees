@@ -1154,6 +1154,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       });
       return token;
     }
+    // Every "Copy …". The real one is pbcopy; here, record the text
+    // (`__mock.copies()`) so a harness run can assert what a click copied
+    // without touching the machine's clipboard.
+    case "copy_text":
+      mockCopies.push(String(args.text));
+      return null;
     // The Plan tab's "Generate plan". The real one pastes `ops::PLAN_PROMPT`
     // into the session's Claude pane; here, record which session it was asked
     // for (`__mock.planPrompts()`), and refuse a session that is not up the way
@@ -3058,6 +3064,8 @@ setTimeout(() => emitEvent("sessions:drafts", { drafts }), 500);
  *  which the harness has no way to observe. */
 type MockDrop = { repo: string; slug: string; intoSlug: string; intoSession: string; token: string };
 const mockDrops: MockDrop[] = [];
+/** Every `copy_text` this session recorded, oldest first. */
+const mockCopies: string[] = [];
 /** Every `plan_prompt` this session recorded — the session each "Generate
  *  plan" press would have pasted into. */
 const mockPlanPrompts: { session: string }[] = [];
@@ -3069,6 +3077,7 @@ const healthyConfigs: Record<string, MockCfg> = {};
   uiEvents: () => mockUiEvents.slice(),
   /** What the nav drag dropped into a session, newest last. */
   drops: () => mockDrops.slice(),
+  copies: () => mockCopies.slice(),
   /** What "Generate plan" pasted, and into which session, newest last. */
   planPrompts: () => mockPlanPrompts.slice(),
   /** Replace the unsent-prompt set and push it, exactly as the poll thread

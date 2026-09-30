@@ -14,6 +14,7 @@
 // mutating half, which is why "full" is the default the buttons offer.
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { copyToClipboard } from "./clipboard";
 import * as Icons from "./icons";
 
 /** Mirrors `mcpsetup::Entry`. */
@@ -145,9 +146,7 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
 
   const copy = () => {
     if (!status?.command) return;
-    if (!navigator.clipboard) { onReport("clipboard unavailable"); return; }
-    navigator.clipboard
-      .writeText(status.command)
+    copyToClipboard(status.command)
       .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1400); })
       .catch((e) => onReport(String(e)));
   };
