@@ -18,6 +18,16 @@ are all pinned by fixtures to one version:
 | `pi --list-models` table | 0.99.1 | `crates/worktrees-core/tests/fixtures/pi-models/` |
 | session JSONL (`message`, `context_edit` + `targetId`, `model_change`) | 0.99.1 live (`pi-session/0.99.1/`), 0.87.1 kept beside it | `…/fixtures/pi-session/` |
 | TUI screens (Working, Retrying, trust modal, done, Esc) | 0.99.1 live (`pi-screen/0.99.1/`), 0.87.1 kept beside it | `…/fixtures/pi-screen/` |
+| `send` screens (typed inline, submitted, `Steering:` queue) | 0.99.1 live | `…/fixtures/pi-send/0.99.1/` |
+| sessions after a hand restart and `/new` (uuid ids, header `cwd`) | 0.99.1 live | `…/fixtures/pi-session/restart/` |
+
+Sections 9–11 (phase 3): run on 2026-09-29, pi 0.99.1,
+`lm-studio/qwen/qwen3-coder-480b`, release binary, `TMUX_TMPDIR` scratch
+server, throwaway `PI_CODING_AGENT_DIR`. Section 10 passed in full. The
+first live runs of it found two `send` bugs that still-frame fixtures could
+not: settling on the whole screen, which streams mid-turn, and a `Steering:`
+line truncated to an 80-column pane. Sections 9 and 11 are covered by
+`test/pi.bats` plus the fixture capture, and were not run by hand.
 
 Last run: 2026-09-29, pi 0.99.1, `lm-studio/qwen3.6-27b`, through the release
 binary on a private tmux socket. Sections 1, 2, 4, 5, 6, 7 and 8 passed, and
@@ -120,6 +130,7 @@ wt trust pi --revoke
 - [ ] `~/.config/worktrees/config.toml` gained `[trust] pi = ["<repo root>"]`
       and nothing else changed in it. Revoking empties the list.
 - [ ] pi's own `~/.pi/agent/trust.json` is untouched (compare its mtime).
+      worktrees READS it (section 9) and never writes it.
 - [ ] A `.worktrees.toml` with `[trust]` is refused as a hard parse error.
 
 ## 6. Dead host
@@ -153,6 +164,63 @@ PATH=<a dir with node 22.13 first> SHELL=/bin/zsh worktrees doctor --pi
       shell's node is (the launcher puts it first).
 - [ ] Without it, a node below pi's `engines.node` is refused with the floor,
       the version and where it came from.
+
+## 9. pi's own trust, and protecting the worktrees server
+
+Use a throwaway `PI_CODING_AGENT_DIR` here: this section writes a
+`trust.json`, and the one under `~/.pi` is never written by hand.
+
+```sh
+export PI_CODING_AGENT_DIR=$S/agent        # a copy with models.json only
+printf '{"%s": true}\n' "$(cd $S && pwd -P)" > $PI_CODING_AGENT_DIR/trust.json
+wt close feat -y; wt open feat --ai pi --no-attach
+wt doctor --pi
+```
+
+- [ ] The command carries `--approve`, and `doctor --pi` says pi's own
+      `trust.json` trusts the entry it names.
+- [ ] Adding `"<repo root>": false` beside it (the nearest entry wins) gives
+      `--no-approve`; `wt trust pi` then gives `--approve` again (the
+      allowance grants over pi's distrust).
+- [ ] With the allowance on, a place whose `.pi/mcp.json` defines a
+      `worktrees` server launches with `--no-approve`, the launch prints the
+      "WITHOUT --approve" warning, and pi does not start the repo's server
+      (make its command `touch` a marker file).
+
+## 10. The worktrees tools in pi
+
+```sh
+wt mcp --install --ai pi     # with the throwaway PI_CODING_AGENT_DIR
+cat $PI_CODING_AGENT_DIR/mcp.json
+```
+
+- [ ] `mcp.json` holds exactly the `worktrees` entry: `--env
+      WORKTREES_MCP_PROVIDER=pi`, `"exposure": "direct"`, `mcp --mutations`.
+      `wt mcp --status --ai pi` says `installed, exposure direct` and starts
+      no server (`pi mcp list` would).
+- [ ] In a pi lane (a new one: running sessions need `/reload`), ask it to
+      `report` "hi": `messages` in `(main)` shows it `from` that place.
+- [ ] Ask the lane to call `wait` with `until: message, timeout_s: 90` (take
+      its unread messages first, or it answers at once): it returns
+      `{"event": "timeout", "waited_s": 90}` — not pi's `MCP request timed out
+      after 60000ms`.
+- [ ] MCP `send` from `(main)` while the lane is idle: `delivered: true`,
+      `queued: false`, and the lane answers it.
+- [ ] `send` a long task, then a second `send` while it runs: the second says
+      `queued: true`, shows as `Steering: …` above pi's prompt, and is
+      answered after the first.
+- [ ] `send` while the trust modal is up (section 4) is refused and types
+      nothing.
+
+## 11. A pi restarted by hand
+
+- [ ] In a lane, `/new` and send a message: the dot stays, and
+      `place_status` shows the lane busy then idle.
+- [ ] Exit pi (Ctrl-D on an empty prompt) and run a bare `pi` in the pane
+      shell: the dot follows the new session.
+- [ ] `wt close feat -y && wt open feat --ai pi -r --no-attach`: the command
+      carries `--session-id <that session's uuid>` and no `--model`, and pi
+      reopens that conversation.
 
 ## Afterwards
 

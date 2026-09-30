@@ -5,6 +5,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **pi joins the worktrees tools.** `worktrees mcp --install --ai pi` has pi
+  add the same server Claude and Codex use (`pi mcp add worktrees --env
+  WORKTREES_MCP_PROVIDER=pi --exposure direct -- worktrees mcp --mutations`,
+  user scope only — worktrees never writes pi's `mcp.json` itself), so a pi
+  lane can `report`, read `messages`, `wait`, and see `place_status` like any
+  other agent. `--status` reads pi's `mcp.json` rather than running
+  `pi mcp list`, which starts every server you have; `--uninstall` has pi
+  remove it; `doctor --pi` shows the state. Running pi sessions pick it up
+  on `/reload`.
+- **`send` types into pi.** The attributed text is typed into the lane's
+  prompt and confirmed: when pi is idle, by the message landing in its
+  session; when pi is working, by it appearing in pi's `Steering:` queue,
+  which delivers it when the current step ends (the reply says `queued`). pi's
+  trust prompt is never typed into.
+
+### Changed
+- **pi's own trust decisions now count.** A place pi's `trust.json` trusts —
+  its nearest entry, resolved exactly as pi resolves it — launches with
+  `--approve`; one pi explicitly distrusts launches with `--no-approve`. The
+  file is read, never written. `worktrees trust pi` still allows a repo over
+  pi's own distrust, and `doctor --pi` says which rule applied and which
+  entry matched.
+- **A place that would replace the worktrees tools is never approved.** If a
+  place's `.pi/mcp.json` defines its own `worktrees` server, pi launches there
+  with `--no-approve` whatever else allows the repo, and the launch says why:
+  a trusted project entry replaces yours, so the lane would talk to the
+  repo's code instead of the bus. `.pi/mcp.json` belongs to each branch, the
+  allowance to the whole repo — a fork's branch checked out as a worktree is
+  covered by it.
+- **The MCP server trusts `CLAUDE_PROJECT_DIR` only for Claude.** Every other
+  client signs its messages from the directory its agent was launched in, so
+  a stray `CLAUDE_PROJECT_DIR` in a pi or Codex pane cannot make it report as
+  another place.
+
 ### Fixed
 - **Copy path, Copy branch and every other "Copy …" no longer fail with
   `NotAllowedError` on macOS 27.** The browser clipboard only accepts a write
@@ -13,6 +48,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   is several times a second. The copy was refused and the error banner showed
   WebKit's raw "The request is not allowed by the user agent…". Copies now go
   through the system clipboard directly, with non-ASCII paths kept intact.
+- **`wait` no longer dies under pi after 60 seconds.** pi cancels any MCP call
+  that runs 60s without progress, and `wait` allows 120. It now sends
+  progress while it waits, and a call the client cancels stops at once
+  instead of holding the server until its own timeout. Claude and Codex get
+  the same.
+- **The pi dot no longer vanishes after pi is restarted by hand.** `/new`, a
+  restart after `/trust`, or a bare `pi` typed into the lane start a session
+  with a new id in the same place; the dot, the model label and `-r` now
+  follow whichever session the place actually has, instead of only the one
+  worktrees launched.
 
 ## [0.33.0] - 2026-09-29
 
