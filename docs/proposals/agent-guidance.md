@@ -43,9 +43,9 @@ Every claim is marked with its source:
 
 | Question | Short answer |
 |---|---|
-| Does a nudge work? | **Yes, decisively, on Claude.** The same task was given to an orchestrator in `(main)`. With today's MCP instructions, **0 of 5** runs created a place: all five ran `git checkout -b` in `(main)` and left it off the default branch. With the §3.1 text in the same channel, **5 of 5** did. A skill alone got **3 of 3**. A PreToolUse guard alone got **3 of 3**, but only after a denied command (§7) **[observed]**. |
+| Does a nudge work? | **Yes, on Claude, at n=5.** The same task was given to an orchestrator in `(main)`. With today's MCP instructions, **0 of 5** runs created a place: all five ran `git checkout -b` in `(main)` and left it off the default branch. With an earlier draft of the §3.1 text in the same channel, **5 of 5** did. A skill alone got **3 of 3**. A PreToolUse guard alone got **3 of 3**, but only after a denied command (§7) **[observed]**. |
 | The one channel that reaches every session | MCP `initialize` → `instructions`. It needs no setup and reaches hand-started sessions too. It is **not equally honoured**, though. Claude puts it in the system prompt verbatim. Codex turns it into the tool *namespace description*, cut to **250 chars** when the tools are deferred. pi shows it **only** inside `codemode`/`tool_search`, and worktrees installs pi with `--exposure direct`, so a pi lane **never sees it** (§2). |
-| What goes in it | About 650 chars, **rule first**. Place-aware: the server already knows which place it serves, so `(main)`, a lane and an automation run can each be told their role (§3.1). |
+| What goes in it | About 650 chars, **rule first**. Place-aware: the server already knows which place it serves, so `(main)`, a lane, an automation run and a stray worktree can each be told their role (§3.1). |
 | Where the how-to goes | A `worktrees` skill whose text ships inside the binary. Worktrees loads it **per launch, through flags it already controls**: Claude `--plugin-dir`, pi `--skill` + `--append-system-prompt`, Codex `-c developer_instructions` (with a caveat). Nothing is written into a repo, and no harness config file is touched (§4). |
 | Guards | The harness-agnostic guard is a **derived warning**: `(main)` off its default branch, or a stray worktree, surfaced in `list_places`/`place_status`/`doctor`/the app. Today `doctor` is silent on the first, and `list_places` reports the second only as a bare `strays` array **[observed]**. There is also a Claude **PreToolUse guard**, shipped in the same per-launch plugin. It is cheap and it works, but it covers Claude only (§5). |
 | Freshness | Claude records the system prompt **once per conversation and replays it on every resume until compaction** **[source]**. Updated guidance therefore reaches new conversations, not resumed ones. Version-stamp the text, and let the existing stale-binary warning say so (§6). |
@@ -82,8 +82,9 @@ Every claim is marked with its source:
   conversation's first request … every later request and resume sends the
   record as-is, even when a later launch passes different text, until the
   conversation is compacted." That the MCP section is part of that record is
-  **[inferred]**; it sits in the system prompt. AGENTS.md already records the
-  sibling behaviour: tool definitions survive a `/mcp` reconnect.
+  **[inferred]**; it sits in the system prompt. The sibling behaviour, tool definitions
+  that survive a `/mcp` reconnect, is what `stale.rs`'s own warning text
+  already tells agents.
 - **Skills**: `~/.claude/skills`, `.claude/skills`, and plugin-bundled
   `skills/`. Every skill's description is listed in context from the start,
   and the body loads when it is invoked **[observed]** (this session's own
@@ -107,7 +108,7 @@ Every claim is marked with its source:
   (tool search), the model sees a summary in a "Deferred tool namespaces"
   block. That summary is capped at **`MAX_NAMESPACE_DESCRIPTION_CHARS = 250`**
   **[source: `core/src/context/world_state/tools.rs`]**. Loaded directly, the
-  whole text rides on the namespace (cap 512 KiB) **[source: `handlers/mcp.rs`]**.
+  whole text rides on the namespace (cap 512 KiB) **[source: `core/src/tools/handlers/mcp.rs`]**.
   **Consequence: the first 250 characters must carry the rule on their own.**
 - `codex debug prompt-input` does not start MCP servers, so it could not show
   this. It is source-only, and not observed live **[observed: absent from the
@@ -129,7 +130,8 @@ Every claim is marked with its source:
 - **MCP `instructions` → the namespace description, which pi renders in only
   two places**: the `codemode` tool's description (`extensions/codemode/tool.js`)
   and the text `tool_search` matches against (`extensions/tool-search/tool.js`)
-  **[source]**. `pi-ai`'s providers send no namespace description with
+  **[source]**. pi's own docs say the same: "The server's `instructions`
+  describe its tools in the `codemode` description" (`docs/mcp.md:158`). `pi-ai`'s providers send no namespace description with
   directly exposed tools **[source]**. Worktrees installs pi's server with
   `--exposure direct` (`pimcp.rs`, pi-harness Q9). **So a pi lane never sees
   the instructions at all** **[inferred from source; not run]**.
@@ -150,7 +152,7 @@ Every claim is marked with its source:
 | Per-launch prompt append | `--append-system-prompt-file` | `-c developer_instructions` (overrides the user's) | `--append-system-prompt` | ✘ |
 | Per-launch skill | `--plugin-dir` | ✘ (discovered roots only) | `--skill` | ✘ |
 | User-scope skill dir | `~/.claude/skills` | `~/.agents/skills` | `~/.agents/skills` | ✔ |
-| Hook guard | ✔ PreToolUse (plugin) | — | extension (declined for pi, Q10) | via plugin only |
+| Hook guard | ✔ PreToolUse (plugin) | — | extension (declined for pi, pi-harness §4.6) | via plugin only |
 
 ---
 
@@ -162,37 +164,50 @@ Constraints:
 - **Rule first.** Codex may show only 250 characters.
 - **About 650 characters in total.** It sits in every session's prompt,
   including sessions that never touch a branch.
-- **Place-aware.** The server resolves its own place at startup (`mcp.rs`
-  field at l.146; `from` already depends on it), so it can state the role
-  instead of leaving the agent to guess.
+- **Place-aware.** The server resolves where it runs at startup
+  (`Server::here`; `from` already depends on it) and knows whether an
+  automation run holds it (`Server::in_run`, from `WORKTREES_RUN_ID`), so it
+  can state the role instead of leaving the agent to guess.
 
-**Draft (shared head, ≤ 250 chars):**
+**Draft (shared head, 244 chars by `wc -m`):**
 
-> This repository is managed by worktrees: every branch lives in its own PLACE
-> (a git worktree under .worktrees/ with its own tmux session). To work on a
-> branch, create a place with create_worktree (or `worktrees new <branch>`) and
-> work there — never `git worktree add`, and never switch branches in a
-> checkout you did not create.
+> Managed by worktrees: every branch lives in its own PLACE (a git worktree
+> under .worktrees/ plus a tmux session). Do branch work in a place:
+> create_worktree or `worktrees new <branch>`. Never `git worktree add`; never
+> switch branches in (main).
+
+It forbids switching branches in `(main)` only. A lane moving its own place
+between branches (parking on a `-next` base) is the paradigm, and §5.2's guard
+allows it for the same reason.
 
 **Role line (one of):**
 
-- **`(main)`**: "You are in (main) of `<root>`, the base checkout: keep it on
+- **`(main)`**: "This repository is `<root>`. You are in (main), the base checkout: keep it on
   the default branch. A place with an agent running belongs to that agent;
   hand work over with a brief instead of editing its tree."
-- **A lane** (any other place): "You are in the place `<slug>` (branch
-  `<branch>`); this tree is yours. Do not edit other places' trees; talk to
+- **A lane** (any other place): "This repository is `<root>`. You are in the
+  place `<slug>` (branch `<branch>`); this tree is yours. Do not edit other places' trees; talk to
   their agents with report / messages / wait."
-- **An automation run** (the server can tell from the run's env/brief;
-  mechanism TBD in phase 1): "You are an automation run in `<slug>`; do only
-  what the brief asks, and propose changes through its proposal output
-  rather than new places."
+- **An automation run** (`Server::in_run`). The run's cwd is
+  `<main root>/.worktrees/`, which is the container and not a place
+  (`automation.rs`), so there is no `<slug>` to name: "You are an automation
+  run for `<root>` (not in a place); do only what the brief asks and propose
+  changes through the run's proposal output, never new places."
+- **A stray**: a worktree of this repo that is not a place, which is where
+  the original miss worked. `caller_place()` errs there, so today such a
+  session gets the generic text: "This directory is a worktree of `<root>`
+  but not a place. Move it under .worktrees/ with `git worktree move`, or
+  create a place and continue there."
 
 **Tail (unchanged in meaning):** "list_places shows every place; agents talk
 through report / messages / wait. Mutating tools are enabled; destructive ones
 need confirm: true." (or the read-only variant). Outside a repo the text stays
 exactly as it is today.
 
-The eval ran the `(main)` variant verbatim (662 chars) and got 5 of 5 (§7).
+The eval ran an **earlier** `(main)` draft (662 chars; its head was 328
+chars and said "a checkout you did not create") and got 5 of 5 (§7). The
+head above is shorter and has not itself been evaluated. Phase 1 re-runs A/B
+against it.
 
 ### 3.2 Tier (b): the `worktrees` skill, loaded on demand
 
@@ -238,7 +253,8 @@ AGENTS.md wins on repo rules."
 |---|---|---|
 | Orchestrator in `(main)` | Nothing: no brief, no opener | Keep `(main)` on the default branch; branch work goes in a place, its own or a lane's. This is the gap that bit. |
 | Lane | Its brief | Its tree is its own; don't reach into siblings; how to report back. |
-| Automation run | Its brief, plus the run contract | Stay inside the brief; output goes through the run's proposal, not new places. |
+| Automation run | Its brief, plus the run contract | It is not in a place; stay inside the brief; output goes through the run's proposal, not new places. |
+| Session in a stray worktree | Nothing: `caller_place()` errs | It is outside the paradigm; move the tree under `.worktrees/` or continue in a place. This is the original miss's shape. |
 | Hand-started session in any place | Only what MCP `instructions` say | Which place it is in, and the rule. Tier (a) covers it on Claude; on Codex and pi it gets only a fragment, or nothing (§2.4). |
 
 ---
@@ -389,6 +405,21 @@ Proposal:
 This is cheap, harness-agnostic and read-only. It tells the next agent, and
 the human, that something is off.
 
+**What "default" means.** `Project::default_base()` is `main` or `master`
+by existence, else **`(main)`'s current HEAD**. In a `develop` or `trunk`
+repo, a wandering `(main)` therefore redefines "default", and the check can
+never fire. The check must read `refs/remotes/origin/HEAD` when present and
+fall back to `default_base()` only without it.
+
+**Why it matters beyond style.** `base_ref()` is what every place's ↑↓ and
+every new branch is measured from. A `(main)` left on a feature branch
+corrupts both: in a no-remote repo directly, and in any repo whose default
+is not `main`/`master`.
+
+**Where it goes.** One `warnings: Vec<String>` on `LsJson`
+(`model.rs`) reaches `ls --json`, MCP `list_places` and the app at once,
+with no per-surface code.
+
 **Caveat.** Some users deliberately work in `(main)` on feature branches. The
 warning should name the fix and be dismissible per repo; a declared flag in
 `.worktrees.places.json` would do. It must not refuse anything.
@@ -412,7 +443,7 @@ recovered into a place, and it cost about +3 turns and +$0.07 per run (§7).
   agent that already ignored §3.1.
 
 Codex has no comparable hook we would use, and a pi extension was already
-declined (pi-harness Q10). For those two, §5.1 is the guard.
+declined (pi-harness §4.6). For those two, §5.1 is the guard.
 
 ### 5.3 Not recommended
 
@@ -424,11 +455,19 @@ filesystem watcher (heavy, and §5.1 already derives the same fact on every
 
 ## 6. Freshness and visibility
 
-- **Version the text**: one trailing token, `(worktrees guidance v1)`. When
-  the text changes, the stale-binary warning (`stale.rs`), already appended to
-  tool results when the installed binary moves under a running server, adds
-  "agent guidance changed; start a new conversation to pick it up". It says
-  *new conversation*, not *reconnect*, because of the snapshot (§2.1).
+- **Version the text** with its own token, `(worktrees guidance v1)`,
+  embedded in the binary beside the text and bumped only when the text
+  changes. `stale.rs` today compares only binary versions. It gains a second
+  marker read the same way, so a binary change that leaves the guidance alone
+  says nothing new. When the guidance marker differs, the warning already
+  appended to tool results adds "agent guidance changed; start a new
+  conversation to pick it up". It says *new conversation*, not *reconnect*,
+  because of the snapshot (§2.1).
+- **Why not `--system-prompt-snapshot off`** for worktrees-launched Claude
+  sessions: it re-renders the prompt on every request, which gives up the
+  prompt cache that the recorded prompt keeps warm. That cost lands on every
+  turn of every lane, to pick up a text change that happens a few times a
+  year.
 - **Resumed sessions keep the old text until compaction** **[source]**. That
   is acceptable: resumed lanes are mid-task, and §5.1 still fires for them.
 - **Per-launch material is versioned by directory**
@@ -455,8 +494,11 @@ new branch. There is no git remote here, so do not push or open the PR; just
 leave the branch committed and tell me its name."*
 
 Setup:
-- `claude -p` from `(main)`: Opus 5.5, Claude Code 2.1.285, default settings,
-  the user's own global CLAUDE.md loaded as usual.
+- `claude -p` from `(main)`: Opus 5.5, Claude Code 2.1.285, default settings.
+  This machine has **no** global `~/.claude/CLAUDE.md` and no
+  `~/.claude/rules`. The user-scope skills and plugins were loaded as usual.
+  None of their descriptions mention places; the close-out skill's *body*
+  mentions `git worktree list`, but it was never invoked.
 - `--strict-mcp-config` with only a `worktrees` server behind a stdio proxy
   that rewrites `initialize.instructions`. Every arm used the proxy, so the
   text was the only variable.
@@ -470,7 +512,7 @@ The outcome was classified from the transcript and the repo state.
 | Arm | Instructions | Extra | Runs | Created a place | What happened otherwise | Mean cost |
 |---|---|---|---|---|---|---|
 | A | today's text | — | 5 | **0** | 5× `git checkout -b` in `(main)`; `(main)` left on the feature branch | $0.18 |
-| B | §3.1 `(main)` draft | — | 5 | **5** | 3× `create_worktree`, 2× `worktrees new`; `(main)` untouched | $0.23 |
+| B | earlier §3.1 `(main)` draft (§3.1 note) | — | 5 | **5** | 3× `create_worktree`, 2× `worktrees new`; `(main)` untouched | $0.23 |
 | C | today's text | skill via `--plugin-dir` | 3 | **3** | skill invoked every run, then `create_worktree` | $0.23 |
 | D | today's text | PreToolUse guard via `--plugin-dir` | 3 | **3** | each tried `checkout -b`, was denied once, recovered | $0.28 |
 
@@ -488,6 +530,12 @@ proxy, plugins, runner, classifier) are in the lane's scratch cache.
     `main`" may have pushed it to a scratch worktree **[inferred]**);
   - Codex or pi at all;
   - n large enough to separate B from C.
+- **The prompt primes the failure.** "Commit it on a new branch" invites
+  `git checkout -b` in place. A prompt that said only "open a PR" might fail
+  differently, or less often.
+- **Arm C is also a prompt-level nudge.** Skill descriptions are in context
+  from the start (§2.1), so C shows that a well-written description works. It
+  does not show that an on-demand body works where tier (a) would not.
 - The baseline failure shape (`checkout -b` in `(main)`) differs from the
   original miss (raw `git worktree add`). Both are "branch work outside a
   place", and §5.1 needs to detect both.
@@ -513,14 +561,15 @@ tokens and must never run in CI.
 
 **Phase 1: the floor (small; one PR).**
 - `mcp.rs` `initialize`: the §3.1 text, rule first, with role by own place.
-  The automation role waits until the run can be detected cleanly; until then
-  it gets the lane line.
-- Unit tests that pin the 250-char head: it contains `create_worktree` and
-  "never `git worktree add`".
-- `main-off-default` diag code, `ls --json` field and `place_status` line;
-  `warnings` lines in MCP `list_places`/`place_status`.
-- The eval script committed. Re-run A/B against the built binary, not the
-  proxy.
+  All four roles ship here, including automation (`Server::in_run`) and
+  stray (`caller_place()` erring).
+- Unit tests that pin the head at ≤ 250 chars (`chars().count()`), and that
+  the head contains `create_worktree` and "Never `git worktree add`".
+- `main-off-default` diag code (default read from `origin/HEAD` first, §5.1);
+  `warnings: Vec<String>` on `LsJson`, so `ls --json`, MCP `list_places` and
+  the app get it at once; a line in `place_status`.
+- The eval script committed. Re-run it with arm A on the shipped binary
+  (`~/.local/bin/worktrees`) and arm B on the release build, with no proxy.
 
 **Phase 2: per launch.**
 - Materialise `agent/<version>/` from binary constants.
@@ -536,7 +585,7 @@ tokens and must never run in CI.
 - `agent_guidance_status` (machine-level) in `lib.rs` and the mock harness;
   `offers-check.mjs` covers the new id.
 - Walk `docs/adding-a-harness.md`: every harness adapter gains a
-  "guidance" surface, and opencode inherits it.
+  "guidance" surface, which a future opencode adapter picks up.
 - Manual check in the real app: launch one lane per harness and confirm the
   agent can quote the rule.
 
@@ -544,7 +593,7 @@ tokens and must never run in CI.
 - Opt-in user-scope skill links, in the same panel. The offer's fingerprint
   now includes the unlinked harnesses, so a harness installed later asks again.
 - The `agent-setup status` guidance block and the Settings panel.
-- The version token wired into the stale warning.
+- The guidance version marker wired into the stale warning (§6).
 - The app flag for `main-off-default`.
 
 ---
@@ -556,6 +605,11 @@ tokens and must never run in CI.
    and work in `(main)`. Options:
    - state it as the default and have §5.1 accept a declared opt-out; or
    - soften it to "prefer a place" for repos with no other places.
+
+   The recommendation is the first option: Warn, never promoted by
+   `--strict`, with a declared opt-out. A wandering `(main)` is not only a
+   style problem, because `base_ref()` measures every place's ↑↓ and every
+   new branch from it (§5.1).
 2. **Guard default.** Should the Claude PreToolUse guard (§5.2) ship on by
    default in phase 2, or opt-in? The eval says it works. The cost is false
    positives from users who meant it.
@@ -563,9 +617,12 @@ tokens and must never run in CI.
    `~/.config/worktrees/agent-guidance.md`)? The recommendation is no for
    phase 1.
 4. **Codex `developer_instructions`.** Skip it when the user has their own
-   (the recommendation), or prepend ours to theirs? Prepending means
-   worktrees reading `~/.codex/config.toml` and its profile layering on every
-   launch.
+   (the recommendation), or prepend ours to theirs? Either way, worktrees has
+   to know whether the user has one. Re-implementing Codex's config layering
+   (profiles, `-c`, project config) would drift. Running `codex debug
+   prompt-input` at `doctor`/status time and caching whether a leading
+   developer message exists is lighter. It asks Codex itself and makes no
+   model call (§2.2).
 5. **pi exposure.** Instead of `--append-system-prompt`, should the pi install
    switch from `direct` to a mode where pi renders the instructions? That
    reverses pi-harness Q9. Per-launch append is the lighter fix.
