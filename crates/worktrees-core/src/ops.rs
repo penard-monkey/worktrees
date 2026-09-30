@@ -1868,7 +1868,7 @@ fn pi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
     };
     ui.info(&format!("trust {trust}"));
     if pi_trust_bad {
-        ui.warn(&format!("{} does not parse — pi will refuse it too", pi_trust_file.display()));
+        ui.warn(&format!("{} does not parse, so worktrees ignores it — and pi, whenever it reads it, refuses it", pi_trust_file.display()));
     }
     if shadowed {
         // Checked in the main checkout: `.pi/mcp.json` is per branch, so each
