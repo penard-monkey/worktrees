@@ -13,7 +13,8 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 
 - **The pi app surfaces have never been seen in WKWebView.** The model picker
   (a `<select>` under the harness segment), the Switch agent sheet, the Launch
-  anyway dialog and Settings → pi were driven only in headless Chromium
+  anyway dialog and Settings → pi (since phase 3 also its Worktrees tools
+  block and the "This repo:" trust line) were driven only in headless Chromium
   against the mock. AGENTS.md records WebKit-only sizing gaps inside buttons
   and flex rows that Chrome hides. One pass in the real app or the sandbox
   (`app/scripts/sandbox.sh --app`, by PID only), with a pi lane on a local

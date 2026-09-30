@@ -3034,6 +3034,23 @@ async fn codex_mcp_uninstall() -> Result<worktrees_core::codexmcp::Outcome, Stri
     worktrees_core::codexmcp::uninstall()
 }
 
+/// pi's twins of the three above (`pimcp`): status READS pi's mcp.json; the
+/// writes are `pi mcp add/remove`, never ours.
+#[tauri::command]
+async fn pi_mcp_status() -> Result<worktrees_core::pimcp::Status, String> {
+    Ok(worktrees_core::pimcp::status())
+}
+
+#[tauri::command]
+async fn pi_mcp_install(mutations: bool) -> Result<worktrees_core::pimcp::Outcome, String> {
+    worktrees_core::pimcp::install(mutations).inspect_err(|e| applog("error", &format!("pi_mcp_install: {e}")))
+}
+
+#[tauri::command]
+async fn pi_mcp_uninstall() -> Result<worktrees_core::pimcp::Outcome, String> {
+    worktrees_core::pimcp::uninstall().inspect_err(|e| applog("error", &format!("pi_mcp_uninstall: {e}")))
+}
+
 #[tauri::command]
 async fn codex_mcp_migration_plan() -> Result<Vec<worktrees_core::mcpmigrate::Row>, String> {
     let result = worktrees_core::mcpmigrate::migration_plan();
@@ -4327,6 +4344,11 @@ struct PiStatus {
     allowed: Vec<String>,
     repo_root: Option<String>,
     repo_allowed: bool,
+    /// How a pi lane in `repo`'s main checkout would be trusted, and why —
+    /// the same answer the launch and `doctor --pi` use.
+    launch: Option<worktrees_core::trust::PiLaunchTrust>,
+    /// pi's own trust.json, which worktrees reads and never writes.
+    pi_trust_path: String,
 }
 
 #[tauri::command]
@@ -4334,12 +4356,15 @@ async fn pi_status(repo: Option<String>) -> Result<PiStatus, String> {
     let repo_root = repo.as_deref().and_then(worktrees_core::trust::repo_root);
     let allowed = worktrees_core::trust::allowed("pi");
     let repo_allowed = repo_root.as_ref().is_some_and(|r| allowed.contains(r));
+    let launch = repo_root.as_deref().map(worktrees_core::trust::pi_launch_trust);
     Ok(PiStatus {
         preflight: worktrees_core::pimodels::preflight(),
         trust: worktrees_core::trust::pi_trust(),
         allowed,
         repo_root,
         repo_allowed,
+        launch,
+        pi_trust_path: worktrees_core::trust::pi_trust_path().to_string_lossy().into_owned(),
     })
 }
 
@@ -5211,11 +5236,19 @@ async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), St
     // honest error when no Claude is there rather than a paste onto a shell.
     let ai_word = provider.as_deref().unwrap_or(harness::default_adapter().provider().id);
     let Some(adapter) = harness::by_id(ai_word) else { return Err("unknown agent provider".into()) };
-    // Not into pi yet: its pane runs as `node`, which `ai_pane` cannot tell
-    // from any other program, and its only modal (project trust) takes input
-    // as an answer. Typing into pi — with a check for that modal — is phase 3.
+    // pi's only modal is project trust, whose highlighted answer is Trust: a
+    // paste is input, and the next Enter there trusts the repo. Look first; a
+    // capture that fails is not a clear screen either. (pi folds the paste to
+    // `[paste #1 N chars]` — harmless, the user still submits it.)
     if adapter.provider().id == provider::PI.id {
-        return Err("The plan prompt cannot be pasted into pi yet — ask it in pi's own prompt.".into());
+        match worktrees_core::pi::screen_of(&session) {
+            Some(worktrees_core::pi::PiScreen::TrustModal) => {
+                return Err("pi is asking whether to trust this project — answer that in pi first, then generate the plan.".into())
+            }
+            Some(worktrees_core::pi::PiScreen::Gone) => return Err(format!("pi is not running in {session}")),
+            None => return Err(format!("could not read pi's screen in {session}")),
+            _ => {}
+        }
     }
     tmux::paste_to_ai(&session, adapter.provider().match_word, ops::PLAN_PROMPT)?;
     applog("info", &format!("plan_prompt: pasted into {session}"));
@@ -7747,6 +7780,9 @@ pub fn run() {
             codex_mcp_install,
             codex_mcp_uninstall,
             codex_mcp_migration_plan,
+            pi_mcp_status,
+            pi_mcp_install,
+            pi_mcp_uninstall,
             codex_mcp_migrate,
             project_config_read,
             doctor,

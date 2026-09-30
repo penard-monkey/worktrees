@@ -87,6 +87,20 @@ let mockCodexMcp: Record<string, unknown> = {
   entry: null, command: `codex mcp add worktrees --env WORKTREES_MCP_PROVIDER=codex -- ${MOCK_WT_BIN} mcp --mutations`,
   config_path: "/Users/demo/.codex/config.toml",
 };
+// pi's twin: `?pimcp=` picks the state (default absent), so Settings → pi's
+// verdicts and the `pi-mcp` offer are reachable without a real pi.
+let mockPiMcp: Record<string, unknown> = (() => {
+  const state = new URLSearchParams(location.search).get("pimcp") ?? "absent";
+  const entry = ["installed", "read-only", "disabled", "stale"].includes(state)
+    ? { command: MOCK_WT_BIN, args: ["mcp", ...(state === "read-only" ? [] : ["--mutations"])], ours: true,
+        command_ok: state !== "stale", mutations: state !== "read-only", exposure: "direct", enabled: state !== "disabled" }
+    : null;
+  return {
+    state, pi_bin: state === "pi-missing" ? null : "/Users/demo/.local/bin/pi", worktrees_bin: MOCK_WT_BIN, entry,
+    command: `/Users/demo/.local/bin/pi mcp add worktrees --env WORKTREES_MCP_PROVIDER=pi --exposure direct -- ${MOCK_WT_BIN} mcp --mutations`,
+    config_path: "/Users/demo/.pi/agent/mcp.json",
+  };
+})();
 let mockMcp: Record<string, unknown> = (() => {
   const want = new URLSearchParams(location.search).get("mcp") ?? "absent";
   const entry = (args: string[], ok = true) => ({
@@ -2227,6 +2241,18 @@ Phase 3: Frontend pane and mock harness
         entry: { command: MOCK_WT_BIN, mutations } };
       return { ok: true, output: "Added Worktrees to Codex MCP\n", status: clone(mockCodexMcp) };
     }
+    case "pi_mcp_status":
+      return clone(mockPiMcp);
+    case "pi_mcp_install": {
+      if (mockPiMcp.state === "foreign" || mockPiMcp.state === "unreadable") throw `leaving pi's mcp.json untouched (${mockPiMcp.state})`;
+      const mutations = args.mutations !== false;
+      mockPiMcp = { ...mockPiMcp, state: mutations ? "installed" : "read-only",
+        entry: { command: MOCK_WT_BIN, args: ["mcp", ...(mutations ? ["--mutations"] : [])], ours: true, command_ok: true, mutations, exposure: "direct", enabled: true } };
+      return { ok: true, output: `Added global MCP server "worktrees" in /Users/demo/.pi/agent/mcp.json.\n`, status: clone(mockPiMcp) };
+    }
+    case "pi_mcp_uninstall":
+      mockPiMcp = { ...mockPiMcp, state: "absent", entry: null };
+      return { ok: true, output: `Removed MCP server "worktrees".\n`, status: clone(mockPiMcp) };
     case "codex_mcp_uninstall":
       mockCodexMcp = { ...mockCodexMcp, state: "absent", entry: null };
       return { ok: true, output: "Removed Worktrees from Codex MCP\n", status: clone(mockCodexMcp) };
@@ -2566,6 +2592,18 @@ Phase 3: Frontend pane and mock harness
           node_floor: "22.19.0", problem: null,
         },
         trust: piTrust, allowed: [...piAllowed], repo_root: root, repo_allowed: !!root && piAllowed.has(root),
+        // `?pitrust=trusted|untrusted` stands in for pi's own trust.json.
+        launch: root ? (() => {
+          const own = new URLSearchParams(location.search).get("pitrust");
+          const pi_entry = own ? { path: "/Users/demo/workspace", trusted: own === "trusted" } : null;
+          const allowed = piAllowed.has(root);
+          const [flag, source] = allowed ? ["--approve", "allowance"]
+            : own === "trusted" ? ["--approve", "pi-trusted"]
+            : own === "untrusted" ? ["--no-approve", "pi-untrusted"]
+            : piTrust === "ask" ? [null, "ask"] : ["--no-approve", "never"];
+          return { flag, source, pi_entry, shadowed: false, would_approve: allowed || own === "trusted" };
+        })() : null,
+        pi_trust_path: "/Users/demo/.pi/agent/trust.json",
       };
     }
     case "set_pi_trust": {
