@@ -49,6 +49,7 @@ Every claim is marked with its source:
 | Where the how-to goes | A `worktrees` skill whose text ships inside the binary. Worktrees loads it **per launch, through flags it already controls**: Claude `--plugin-dir`, pi `--skill` + `--append-system-prompt`, Codex `-c developer_instructions` (with a caveat). Nothing is written into a repo, and no harness config file is touched (§4). |
 | Guards | The harness-agnostic guard is a **derived warning**: `(main)` off its default branch, or a stray worktree, surfaced in `list_places`/`place_status`/`doctor`/the app. Today `doctor` is silent on the first, and `list_places` reports the second only as a bare `strays` array **[observed]**. There is also a Claude **PreToolUse guard**, shipped in the same per-launch plugin. It is cheap and it works, but it covers Claude only (§5). |
 | Freshness | Claude records the system prompt **once per conversation and replays it on every resume until compaction** **[source]**. Updated guidance therefore reaches new conversations, not resumed ones. Version-stamp the text, and let the existing stale-binary warning say so (§6). |
+| Surfacing | One more after-update offer in `offers.ts`, `agent-guidance`. It opens Settings → Agent guidance, looks only at machine-level state, and is dismissed by fingerprint like `codex-skills`. It ships with per-launch delivery (§4.5). |
 | Proof | A 16-run eval, $3.61 in total, with a script to keep (§7). |
 
 ---
@@ -295,6 +296,57 @@ offered, never done silently: those directories are shared with the user's own
 skills (the close-out skill lives there). Status reads the link, the same
 shape as `mcpsetup::status`.
 
+### 4.5 Surfacing it: an after-update offer
+
+A user has to learn that this exists at the moment they install or update the
+app. Otherwise per-launch delivery changes how their agents behave without
+telling them, and the opt-in links (§4.3) are never found. The app already has
+a channel for exactly this: `app/src/offers.ts`. Guidance joins it as one more
+row, beside `mcp-server` / `codex-mcp` / `pi-mcp` / `codex-skills`. A separate
+lane is making offers reopenable (Settings → What's new lists them, and a
+bottom-right indicator shows pending ones), so a row is all this needs.
+
+```ts
+{
+  id: "agent-guidance",
+  title: "Teach your agents to work in places",
+  body: "Agents worktrees launches now get the places rule and a worktrees skill. Choose the guard, and whether hand-started sessions get it too.",
+  cta: "Review…",
+  to: { cat: "guidance", focus: "agent-guidance" },
+  fingerprint: "v1:" + unlinked.join(","),  // guidance major version + the harnesses still unlinked
+}
+```
+
+Rules, taken from the ones `offers.ts` already states:
+
+- **The machine, never a repo.** Its input is a new machine-level Tauri
+  command, `agent_guidance_status`. It returns the guidance version, the
+  per-launch state per harness, the guard setting, and the §4.3 link state
+  for each installed harness. It must not come from a project's
+  `agent_setup_status`: an offer that needs a repo in hand is the v0.25.0
+  precondition bug.
+- **An offer, not a problem.** It fires only for `absent`, meaning an
+  installed harness whose link does not exist. A link that points somewhere
+  else (`foreign`), or at an old data dir (`stale`), is a problem. Problems
+  belong in the destination panel, where they cannot be silenced.
+- **Fingerprint and dismissal work like `codex-skills`.** Dismissal records
+  the set the user was shown. The offer asks again only when something **new**
+  appears: a harness installed later, or a **major** guidance version, which
+  is a real change in what agents are told. A text tweak inside a major
+  version, or a link added from Settings, stays quiet.
+- **The destination is where the choice lives.** `to` opens a Settings
+  panel, "Agent guidance", which is its own category because it covers three
+  harnesses (same reasoning as the `claude` category's comment). The panel
+  shows:
+  - what agents get (`worktrees guide`'s text);
+  - per-launch delivery per harness, including "Codex: skipped — you have
+    your own `developer_instructions`";
+  - the guard toggle (Q2);
+  - the §4.3 links, with link and unlink buttons.
+- **Guards in the repo.** The new id and its fingerprint are covered by
+  `offers-check.mjs`, feed and render both. The mock harness gains
+  `agent_guidance_status`: every command in `lib.rs` must be tracked there.
+
 ### 4.4 Not recommended
 
 - **Writing guidance into repos.** That means `agent-setup` committing a
@@ -477,13 +529,20 @@ tokens and must never run in CI.
 - Codex `-c developer_instructions`, guarded by a read of the user's resolved
   config.
 - `worktrees guide`.
+- The `agent-guidance` after-update offer (§4.5), and the Settings → Agent
+  guidance panel it opens: what agents get, per-launch state per harness, and
+  the guard toggle. It ships in the same release as per-launch delivery,
+  because that is the release that changes agent behaviour.
+- `agent_guidance_status` (machine-level) in `lib.rs` and the mock harness;
+  `offers-check.mjs` covers the new id.
 - Walk `docs/adding-a-harness.md`: every harness adapter gains a
   "guidance" surface, and opencode inherits it.
 - Manual check in the real app: launch one lane per harness and confirm the
   agent can quote the rule.
 
 **Phase 3: hand-started sessions and visibility.**
-- Opt-in user-scope skill links.
+- Opt-in user-scope skill links, in the same panel. The offer's fingerprint
+  now includes the unlinked harnesses, so a harness installed later asks again.
 - The `agent-setup status` guidance block and the Settings panel.
 - The version token wired into the stale warning.
 - The app flag for `main-off-default`.
@@ -515,6 +574,10 @@ tokens and must never run in CI.
    proposal?
 7. **Opt-in skill links (§4.3).** Worth the Settings surface, or is phase 2
    (worktrees-launched sessions) plus tier (a) enough in practice?
+
+8. **The offer's destination.** Should Agent guidance be a new Settings
+   category (proposed, §4.5), or a section inside AI profiles? Profiles are
+   per-profile and Claude-only, which is why the proposal keeps them apart.
 
 ---
 
