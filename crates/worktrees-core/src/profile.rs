@@ -480,6 +480,11 @@ pub struct AiLaunch {
     /// `launch_args` head, right after the executable (before a `resume`
     /// subcommand). Empty for claude.
     pub place_flags: Vec<String>,
+    /// Agent guidance (`guidance::delivery`): words that go right after the
+    /// executable's own head words, already shell-quoted. Empty unless the repo
+    /// is worktrees-managed and the harness takes guidance per launch. Filled
+    /// by `ops::ai_launch_for`, emitted by `launch_cmd` for every adapter.
+    pub guidance: Vec<String>,
     /// The model the user chose for THIS launch, validated
     /// (`choice::validate_model`). Emitted by the adapter through the
     /// registry's `model_arg`, on a fresh launch only — never on a resume, which
@@ -544,6 +549,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         match_word: base.match_word.clone(),
         opener: base.opener.clone(),
         place_flags: Vec::new(),
+        guidance: base.guidance.clone(),
         model: base.model.clone(),
         resume: base.resume,
         force: base.force,
@@ -613,6 +619,7 @@ impl AiLaunch {
             match_word: ai_word_of(ai_cmd),
             opener: None,
             place_flags: Vec::new(),
+            guidance: Vec::new(),
             model: None,
             resume: false,
             force: false,
@@ -683,7 +690,7 @@ impl AiLaunch {
         let args = adapter.launch_args(self, session);
         let split = self.cmd.find(char::is_whitespace).unwrap_or(self.cmd.len());
         let mut cmd = self.cmd[..split].to_string();
-        for w in &args.head {
+        for w in args.head.iter().chain(&self.guidance) {
             cmd.push(' ');
             cmd.push_str(w);
         }
@@ -1674,6 +1681,7 @@ mod tests {
             match_word: ai_word_of("claude"),
             opener: None,
             place_flags: Vec::new(),
+            guidance: Vec::new(),
             model: None,
             resume: false,
             force: false,
@@ -1707,6 +1715,7 @@ mod tests {
             match_word: "claude".into(),
             opener: None,
             place_flags: Vec::new(),
+            guidance: Vec::new(),
             model: None,
             resume: false,
             force: false,
@@ -1748,6 +1757,7 @@ mod tests {
             match_word: "claude".into(),
             opener: None,
             place_flags: Vec::new(),
+            guidance: Vec::new(),
             model: None,
             resume: false,
             force: false,
@@ -1793,6 +1803,7 @@ mod tests {
             match_word: "claude".into(),
             opener: None,
             place_flags: Vec::new(),
+            guidance: Vec::new(),
             model: None,
             resume: false,
             force: false,

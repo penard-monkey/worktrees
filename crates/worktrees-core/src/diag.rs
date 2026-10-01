@@ -179,6 +179,10 @@ pub enum Code {
     /// root) is in the message. `ls --json` carries the same list as `strays`,
     /// which is how the app flags it without running doctor.
     StrayWorktree,
+    /// Agent guidance was not delivered to a harness that is installed (today:
+    /// Codex, when the user set their own `developer_instructions`, or when it
+    /// could not tell). Info only — the user's own text winning is the design.
+    GuidanceSkipped,
     /// An invariant this tool is supposed to guarantee did not hold. ⚠ Not in
     /// §7's slug list either: it exists so an internal inconsistency is REPORTED
     /// rather than turned into a silent skip, which is the failure class the
@@ -286,6 +290,7 @@ mod tests {
         for (c, s) in [
             (Code::MissingSource, "missing-source"),
             (Code::StrayWorktree, "stray-worktree"),
+            (Code::GuidanceSkipped, "guidance-skipped"),
             (Code::NotLinked, "not-linked"),
             (Code::UnsafePath, "unsafe-path"),
             (Code::Shadowed, "shadowed"),

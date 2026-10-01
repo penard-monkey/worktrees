@@ -112,17 +112,8 @@ const LATEST: &str = "2025-11-25";
 
 const EXIT_NEEDS_CONFIRM: i32 = 3;
 
-/// The first thing every session in a MANAGED repo reads (agent-guidance
-/// proposal §3.1; `Server::managed` decides which repos are). It is the RULE,
-/// and it has to stand alone in 247 chars of one line: Codex turns server
-/// instructions into a tool-namespace description and, when the tools are
-/// deferred, shows only its first line cut to 250 chars, the last 3 of them its
-/// own "..." (`MAX_NAMESPACE_DESCRIPTION_CHARS`, 0.157–0.159). "(main)" and not "a checkout you did not create": a lane
-/// moving its OWN place between branches (parking on a `-next` base) is the
-/// paradigm, not a breach of it.
-const GUIDANCE_HEAD: &str = "Managed by worktrees: every branch lives in its own PLACE (a git worktree \
-under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new \
-<branch>`. Never `git worktree add`; never switch branches in (main).";
+/// The rule — one text, shared with the per-launch guidance (`guidance::HEAD`).
+use worktrees_core::guidance::HEAD as GUIDANCE_HEAD;
 
 /// Where this server runs, for the instructions' role line. Resolved from
 /// what the server already holds (`here`, `in_run`), never from a tool
@@ -1890,9 +1881,7 @@ impl Server {
     /// app's project list is not readable from here. An automation run
     /// implies management: runs are a worktrees feature.
     fn managed(&self, project: &Project) -> bool {
-        self.in_run
-            || std::path::Path::new(&project.main_root).join(".worktrees.toml").is_file()
-            || project.place_index().iter().any(|p| !p.is_main && p.registered)
+        self.in_run || worktrees_core::guidance::is_managed(project)
     }
 
     /// The role line's subject. A stray is checked BEFORE `caller_place`,
@@ -1902,17 +1891,14 @@ impl Server {
         if self.in_run {
             return Role::Automation;
         }
+        use worktrees_core::guidance::{where_is, Where};
         let Some(here) = self.here.as_ref() else { return Role::Unplaced };
-        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let here = canon(here);
-        if project.stray_worktrees().iter().any(|s| here.starts_with(canon(std::path::Path::new(&s.path)))) {
-            return Role::Stray;
-        }
-        match self.caller_place() {
-            Ok(p) if p.is_main => Role::Main,
-            Ok(p) if !p.registered => Role::Unregistered { slug: p.slug },
-            Ok(p) => Role::Lane { slug: p.slug, branch: p.branch },
-            Err(_) => Role::Unplaced,
+        match where_is(project, here) {
+            Where::Main => Role::Main,
+            Where::Lane { slug, branch } => Role::Lane { slug, branch },
+            Where::Unregistered { slug } => Role::Unregistered { slug },
+            Where::Stray => Role::Stray,
+            Where::Unplaced => Role::Unplaced,
         }
     }
 

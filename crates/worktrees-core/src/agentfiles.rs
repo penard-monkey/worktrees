@@ -448,7 +448,17 @@ pub fn fix_with(p: &crate::project::Project, gh_bin: &str) -> Result<FixOutcome,
     }
 
     // A private index seeded from the base tree: nothing any checkout uses.
-    let ix = std::env::temp_dir().join(format!("worktrees-agentfix-{}-{}.index", std::process::id(), crate::sysclock::now_epoch()));
+    // Unique per CALL, not per second: two fixes in one process inside the same
+    // second (the unit tests run them in parallel) shared one index file and
+    // wrote each other's objects into it — "invalid object … error building
+    // trees", intermittently.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ix = std::env::temp_dir().join(format!(
+        "worktrees-agentfix-{}-{}-{seq}.index",
+        std::process::id(),
+        crate::sysclock::now_epoch()
+    ));
     let result = (|| -> Result<String, String> {
         git_env(root, Some(&ix), &["read-tree", &report.reference], None)?;
         for c in &changes {
