@@ -71,10 +71,10 @@ jobs:
           grep -q "^version = \"$tag\"$" Cargo.toml \
             || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
       - uses: pnpm/action-setup@v6
-        with: { version: 11 }
+        with: { package_json_file: app/package.json }
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
       # ── the documentation viewer ──────────────────────────────────────────
