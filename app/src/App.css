@@ -980,6 +980,13 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   max-height: calc(100vh - 16px); overflow-y: auto; overscroll-behavior: contain;
 }
 .ctx-sep { height: 1px; margin: var(--s1) var(--s2); background: var(--line); }
+/* A PATH as the hint (the terminal's link menu): never uppercased — paths are
+   case-sensitive and `README.md` is not `readme.md` — and one line, ellipsised
+   from the box's max-width rather than wrapping a long path into three. */
+.pop-hint.path {
+  text-transform: none; letter-spacing: 0; font-family: var(--font-mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .ctx-life { display: flex; gap: 4px; padding: 0 var(--s2) var(--s2); }
 .ctx-life button {
   flex: 1; padding: 3px 0; font-size: var(--fs-meta); color: var(--txt);

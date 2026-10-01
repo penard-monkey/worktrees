@@ -70,8 +70,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the file in the dock's viewer at that line (opening the dock if it was
   closed). Only a path that exists as a file inside one of your projects gets
   a link; relative paths resolve against the dock shell's current directory,
-  then the place. A plain click still focuses, selects and goes to Claude as
-  before, and the ⌘-click is not passed to Claude.
+  then the place. Right-click a link for **Open in viewer**, **Reveal in
+  Finder**, **Copy path** and **Copy relative path**; a right-click anywhere
+  else is unchanged. A plain click still focuses, selects and goes to Claude
+  as before, and neither the ⌘-click nor the right-click on a link is passed
+  to Claude.
 - **The file viewer can open at a line.** A ⌘-clicked path, or an agent's
   `show_doc` with a `line`, shows the file's source with that line marked and
   scrolled into view, even for markdown or while the diff is on. Choosing

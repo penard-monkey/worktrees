@@ -145,6 +145,8 @@ function harness(lines, exists) {
   const listeners = [];
   const screen = {
     addEventListener: (type, fn, opts) => listeners.push({ type, fn, opts }),
+    // 80×24 cells of 10×10px, for `linkAt`'s own hit-test.
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 240 }),
     removeEventListener: () => {},
   };
   const host = { clientWidth: 800, clientHeight: 400, title: "" };
@@ -154,7 +156,7 @@ function harness(lines, exists) {
     constructor() {
       this.cols = 80; this.rows = 24; this.options = {};
       this.modes = { mouseTrackingMode: "none" };
-      this.buffer = { active: { type: "alternate", getLine: (y) => R[y] } };
+      this.buffer = { active: { type: "alternate", viewportY: 0, getLine: (y) => R[y] } };
       this.unicode = {};
       this.element = { querySelector: (sel) => (sel === ".xterm-screen" ? screen : null) };
     }
@@ -241,6 +243,55 @@ function harness(lines, exists) {
       const off = ev(true); down.fn(off);
       check(!off.stopped, "a ⌘-press with no link under the pointer is left alone");
       check(H.host.title === "", "leaving the link clears its hint");
+    }
+  }
+}
+
+// Right-click on a link: the app's own menu, and the press is the link's — a
+// mouse-mode program must not hear it. Off a link, nothing changes.
+{
+  const menus = [];
+  const H = harness(["  M src/real.ts:12:3"], { "src/real.ts": "/repo/src/real.ts" });
+  if (H.mod.termLinkProvider) {
+    const links = { root: "/repo", onOpen() {}, onMenu: (m) => menus.push(m) };
+    const term = new (H.env.Terminal)();
+    const prov = H.mod.termLinkProvider(term, { current: links }, H.host);
+    const [link] = await new Promise((r) => prov.provideLinks(1, (ls) => r(ls ?? [])));
+    const on = (type) => H.listeners.find((l) => l.type === type);
+    const ev = (o) => ({ metaKey: false, ctrlKey: false, button: 0, clientX: 40, clientY: 50, stopped: false, prevented: false,
+      stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; }, ...o });
+    check(!!on("contextmenu"), "a contextmenu listener is installed on .xterm-screen");
+    if (on("contextmenu") && link) {
+      const offDown = ev({ button: 2 }); on("mousedown").fn(offDown);
+      const offCtx = ev({ button: 2 }); on("contextmenu").fn(offCtx);
+      check(!offDown.stopped && !offCtx.stopped && !offCtx.prevented && menus.length === 0,
+        "a right-click OFF a link is untouched — it reaches xterm and the program, and opens no menu");
+      link.hover?.({}, link.text);
+      const down = ev({ button: 2 }); on("mousedown").fn(down);
+      check(down.stopped, "a right-press ON a link is stopped before xterm reports it to a mouse-mode program");
+      const cdown = ev({ button: 0, ctrlKey: true }); on("mousedown").fn(cdown);
+      check(cdown.stopped, "so is a macOS Ctrl-click on a link (it IS the right-click there)");
+      const ctx = ev({ button: 2, clientX: 41, clientY: 52 }); on("contextmenu").fn(ctx);
+      check(ctx.prevented && ctx.stopped, "the contextmenu on a link is the app's, not WebKit's");
+      check(menus.length === 1 && menus[0].path === "/repo/src/real.ts" && menus[0].line === 12 && menus[0].col === 3 && menus[0].x === 41 && menus[0].y === 52,
+        `the menu gets the resolved path, line:col and the pointer (${JSON.stringify(menus[0])})`);
+      let opened = 0;
+      links.onOpen = () => opened++;
+      link.activate({ metaKey: true, ctrlKey: false, button: 2 }, link.text);
+      check(opened === 0, "releasing a RIGHT button on a link never opens it, ⌘ held or not");
+
+      // No `hover` (xterm skips re-asking for the cell it saw last, even after
+      // a mouseleave): the provider finds the link under the event itself.
+      // Row 0 is "  M src/real.ts:12:3", the link spanning cols 4..19.
+      link.leave?.({}, link.text);
+      menus.length = 0;
+      const ctx2 = ev({ button: 2, clientX: 65, clientY: 5 }); on("contextmenu").fn(ctx2);
+      check(ctx2.prevented && menus.length === 1 && menus[0].path === "/repo/src/real.ts",
+        `with no hover, a right-click on the link still gets the app's menu (${JSON.stringify(menus)})`);
+      const ctx3 = ev({ button: 2, clientX: 15, clientY: 5 }); on("contextmenu").fn(ctx3);
+      check(!ctx3.prevented && menus.length === 1, "…and one beside it still does not");
+      const cmd = ev({ metaKey: true, clientX: 65, clientY: 5 }); on("mousedown").fn(cmd);
+      check(cmd.stopped && opened === 1, `with no hover, a ⌘-press on the link opens it here rather than being swallowed (${opened})`);
     }
   }
 }

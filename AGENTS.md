@@ -425,7 +425,15 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   reaches the parent, so claude gets no click report and no selection starts.
   The linkifier itself checks no modifier: `activate` runs on any click that
   presses and releases on the same link, so the provider must test the
-  modifier. `termlinks-check.mjs` pins both halves.
+  modifier — and the BUTTON: it fires on a right-button release too. The
+  right-press is stopped the same way (it is reported to claude like a left
+  one), and the menu answers `contextmenu` there. One more linkifier quirk:
+  it re-asks for links only when the pointer reaches a DIFFERENT cell than
+  the last one it saw, and keeps that cell across a `mouseleave`, so after a
+  menu covers the pane, the pointer can be back on a link with no `hover`
+  ever fired. The provider therefore hit-tests the event itself (`linkAt`)
+  rather than trusting hover state alone. `termlinks-check.mjs` pins all of
+  it.
 - **An xterm host is a RATCHET without `min-width: 0`.** `.term-host` is a row
   flex item, so its automatic minimum size is its min-content width — and xterm
   writes an explicit `width: <cols × cell>px` onto `.xterm-screen`, which makes

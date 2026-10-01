@@ -7,6 +7,10 @@ import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { FindBar, findColors } from "./Find";
 import { findPaths, hitRange, logicalLine } from "./termlinks";
+import { CtxMenu } from "./CtxMenu";
+import { copyToClipboard } from "./clipboard";
+import { relPath } from "./filekind";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
 
 // Two kinds of embedded terminal, one renderer.
@@ -253,7 +257,13 @@ export type TermLinks = {
   root: string;
   shell?: { repo: string; slug: string; index: number };
   onOpen: (path: string, line?: number, col?: number) => void;
+  /** Right-click on a link: the pane's own menu (`TermSurface` supplies it). */
+  onMenu?: (m: LinkMenu) => void;
+  onError?: (e: unknown) => void;
 };
+
+/** A right-clicked link: where the menu goes and what it is about. */
+export type LinkMenu = { x: number; y: number; path: string; line?: number; col?: number };
 
 /** How long an answer about one path is trusted. Short, because files appear
  *  (an agent writes one and prints its name in the same breath) and a shell's
@@ -266,12 +276,17 @@ const linkCache = new Map<string, { abs: string | null; at: number }>();
  *  use. NOT a plain click: in a terminal a click focuses, starts a selection,
  *  and in a mouse-mode program (claude) is the program's own input, so a plain
  *  click that also opened a file would hijack all three. */
-const isOpenGesture = (e: { metaKey: boolean; ctrlKey: boolean }) =>
-  /Mac|iPhone|iPad/.test(navigator.platform) ? e.metaKey : e.ctrlKey;
+const isMac = () => /Mac|iPhone|iPad/.test(navigator.platform);
+const isOpenGesture = (e: { metaKey: boolean; ctrlKey: boolean; button?: number }) =>
+  (e.button ?? 0) === 0 && (isMac() ? e.metaKey : e.ctrlKey);
+/** A press that will become a `contextmenu`: the right button, or — macOS
+ *  only — Ctrl with the left one. */
+const isMenuPress = (e: { button: number; ctrlKey: boolean }) =>
+  e.button === 2 || (isMac() && e.button === 0 && e.ctrlKey);
 
 const LINK_HINT = /Mac|iPhone|iPad/.test(navigator.platform)
-  ? "⌘-click to open in the file viewer"
-  : "Ctrl-click to open in the file viewer";
+  ? "⌘-click to open in the file viewer · right-click for more"
+  : "Ctrl-click to open in the file viewer · right-click for more";
 
 /** xterm link provider for file paths. `provideLinks` is asked per ROW as the
  *  mouse crosses it; the row's logical line (wrapped rows joined) is scanned
@@ -287,18 +302,70 @@ const LINK_HINT = /Mac|iPhone|iPad/.test(navigator.platform)
  *  it record the press it needs to activate on release. A plain press is never
  *  touched, so selection and claude's own mouse work exactly as before. */
 function termLinkProvider(term: Terminal, linksRef: { current: TermLinks | null }, host: HTMLElement) {
-  let hovered = false;
+  // The link under the pointer, as `hover`/`leave` report it. Null = none, and
+  // then nothing below touches an event.
+  let hovered: { path: string; line?: number; col?: number } | null = null;
   const screen = term.element?.querySelector<HTMLElement>(".xterm-screen") ?? null;
+  // A press that belongs to the link — ⌘ to open, right / Ctrl for the menu —
+  // stops here. A right-press is reported to a mouse-mode program just like a
+  // left one, so it needs the same treatment as the ⌘-press.
+  const scopeOf = (ctx: TermLinks) =>
+    `${ctx.root}\0${ctx.shell ? `${ctx.shell.repo}|${ctx.shell.slug}|${ctx.shell.index}` : ""}\0`;
+  /** The link under a mouse event, worked out HERE rather than taken from
+   *  `hover`. xterm's linkifier re-asks only when the pointer reaches a
+   *  DIFFERENT cell than the last one it saw, and it keeps that cell across a
+   *  `mouseleave` — so after a menu or a tooltip covers the pane and goes
+   *  away, the pointer can be back on the link with no `hover` ever fired
+   *  (right-click, Escape, right-click again without moving: WebKit's own menu
+   *  came up instead of ours). Synchronous, from the resolve cache only: a
+   *  path that was never resolved was never underlined either. */
+  const linkAt = (e: MouseEvent): typeof hovered => {
+    const ctx = linksRef.current;
+    if (!ctx || !screen || term.cols < 1 || term.rows < 1) return null;
+    const r = screen.getBoundingClientRect();
+    const x = Math.floor((e.clientX - r.left) / (r.width / term.cols));
+    const row = Math.floor((e.clientY - r.top) / (r.height / term.rows));
+    if (x < 0 || x >= term.cols || row < 0 || row >= term.rows) return null;
+    const buf = term.buffer.active;
+    const y = buf.viewportY + row;
+    const ll = logicalLine((ry) => buf.getLine(ry), y);
+    const scope = scopeOf(ctx);
+    for (const h of findPaths(ll.text)) {
+      const a = ll.cells[h.start], b = ll.cells[h.end - 1];
+      if (!a || !b) continue;
+      const inside = (y > a.y || (y === a.y && x >= a.x)) && (y < b.y || (y === b.y && x < b.x + b.w));
+      const abs = inside ? linkCache.get(scope + h.path)?.abs : null;
+      if (abs) return { path: abs, line: h.line, col: h.col };
+    }
+    return null;
+  };
   const onDown = (e: MouseEvent) => {
-    if (hovered && isOpenGesture(e)) {
+    if (!(isOpenGesture(e) || isMenuPress(e))) return;
+    const at = hovered ?? linkAt(e);
+    if (at) {
+      // Not hovered means xterm has no current link, so its `activate` will
+      // never run for this press: a ⌘-press found only by `linkAt` is opened
+      // here, or stopping it would swallow it.
+      if (!hovered && isOpenGesture(e)) linksRef.current?.onOpen(at.path, at.line, at.col);
       e.stopPropagation();
       e.preventDefault();
     }
   };
+  // The menu itself. Off a link this returns without touching the event, so
+  // WebKit's own menu (and whatever xterm does with it) is exactly as before.
+  const onMenu = (e: MouseEvent) => {
+    const ctx = linksRef.current;
+    const at = hovered ?? linkAt(e);
+    if (!at || !ctx?.onMenu) return;
+    e.preventDefault();
+    e.stopPropagation();
+    ctx.onMenu({ x: e.clientX, y: e.clientY, ...at });
+  };
   screen?.addEventListener("mousedown", onDown);
+  screen?.addEventListener("contextmenu", onMenu);
 
   const resolve = async (ctx: TermLinks, paths: string[]): Promise<Map<string, string | null>> => {
-    const scope = `${ctx.root}\0${ctx.shell ? `${ctx.shell.repo}|${ctx.shell.slug}|${ctx.shell.index}` : ""}\0`;
+    const scope = scopeOf(ctx);
     const now = performance.now();
     const out = new Map<string, string | null>();
     const ask: string[] = [];
@@ -355,8 +422,8 @@ function termLinkProvider(term: Terminal, linksRef: { current: TermLinks | null 
               if (!isOpenGesture(e)) return;
               linksRef.current?.onOpen(path, h.line, h.col);
             },
-            hover: () => { hovered = true; host.title = LINK_HINT; },
-            leave: () => { hovered = false; host.title = ""; },
+            hover: () => { hovered = { path, line: h.line, col: h.col }; host.title = LINK_HINT; },
+            leave: () => { hovered = null; host.title = ""; },
           });
         }
         callback(links.length ? links : undefined);
@@ -364,7 +431,8 @@ function termLinkProvider(term: Terminal, linksRef: { current: TermLinks | null 
     },
     dispose() {
       screen?.removeEventListener("mousedown", onDown);
-      hovered = false;
+      screen?.removeEventListener("contextmenu", onMenu);
+      hovered = null;
     },
   };
 }
@@ -710,7 +778,21 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnable
    *  can be dropped. */
   drop?: string;
 } & TermFindProps) {
-  const { hostRef, termRef, searchRef, epoch } = useTerm(makeTransport, tkey, termVersion, focusToken, focusEnabled, links);
+  // The right-click menu on a link. The provider only reports it; the menu is
+  // the app's shared `CtxMenu` (clamping, Escape through `useEscape`, and an
+  // outside click that lands on its own `.menu-catch`, never on the menu).
+  const [menu, setMenu] = useState<LinkMenu | null>(null);
+  const withMenu = links ? { ...links, onMenu: setMenu } : undefined;
+  const { hostRef, termRef, searchRef, epoch } = useTerm(makeTransport, tkey, termVersion, focusToken, focusEnabled, withMenu);
+  // Closing hands the keyboard back to the terminal: the menu took it, and a
+  // pane you have to click again before typing is a pane that ate a keystroke.
+  const closeMenu = useCallback(() => { setMenu(null); termRef.current?.focus(); }, [termRef]);
+  // Every verb closes FIRST and reports through `onError`: an opener invoke
+  // that a missing permission rejects does so silently (AGENTS.md).
+  const act = (f: () => Promise<unknown> | void) => {
+    closeMenu();
+    Promise.resolve().then(f).catch((e) => links?.onError?.(e));
+  };
   const [query, setQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [res, setRes] = useState({ index: 0, count: 0 });
@@ -803,6 +885,20 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnable
           focusToken={findToken} hint={TERM_HINT}
         />
       )}
+      {menu && links && (
+        <CtxMenu x={menu.x} y={menu.y} onClose={closeMenu}>
+          <div className="pop-hint path" title={menu.path}>{relPath(links.root, menu.path)}{menu.line ? `:${menu.line}${menu.col ? `:${menu.col}` : ""}` : ""}</div>
+          <button className="pop-item" onClick={() => act(() => links.onOpen(menu.path, menu.line, menu.col))}>Open in viewer</button>
+          <button className="pop-item" onClick={() => act(() => revealItemInDir(menu.path))}>Reveal in Finder</button>
+          <div className="ctx-sep" />
+          {/* Both, as the Files tree's menu offers: the absolute path is what
+              the link RESOLVED to (unambiguous anywhere you paste it), the
+              relative one is what you would type in this place. A path
+              outside the place root keeps its absolute form (`relPath`). */}
+          <button className="pop-item" onClick={() => act(() => copyToClipboard(menu.path))}>Copy path</button>
+          <button className="pop-item" onClick={() => act(() => copyToClipboard(relPath(links.root, menu.path)))}>Copy relative path</button>
+        </CtxMenu>
+      )}
     </div>
   );
 }
@@ -813,14 +909,16 @@ export type PaneLinkProps = {
   /** The place's directory — what a relative path in its output is relative to. */
   root?: string;
   onOpenPath?: (path: string, line?: number, col?: number) => void;
+  /** Where the link menu's failures go (a refused reveal, a failed copy). */
+  onError?: (e: unknown) => void;
 };
 
-export function TerminalPane({ session, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, root, onOpenPath, ...find }: {
+export function TerminalPane({ session, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, root, onOpenPath, onError, ...find }: {
   session: string; provider?: Harness; termVersion?: number; focusToken?: number; focusEnabled?: boolean;
 } & PaneLinkProps & TermFindProps) {
   // The tmux pane resolves against the place root: the agents that print paths
   // there (claude, codex, pi) run in it, and its shell starts there.
-  const links = root && onOpenPath ? { root, onOpen: onOpenPath } : undefined;
+  const links = root && onOpenPath ? { root, onOpen: onOpenPath, onError } : undefined;
   return (
     <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}
       termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider === "claude" ? "mention" : undefined}
@@ -828,10 +926,10 @@ export function TerminalPane({ session, provider = "claude", termVersion = 0, fo
   );
 }
 
-export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0, root, onOpenPath, ...find }: {
+export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0, root, onOpenPath, onError, ...find }: {
   repo: string; slug: string; index: number; termVersion?: number; focusToken?: number;
 } & PaneLinkProps & TermFindProps) {
-  const links = root && onOpenPath ? { root, shell: { repo, slug, index }, onOpen: onOpenPath } : undefined;
+  const links = root && onOpenPath ? { root, shell: { repo, slug, index }, onOpen: onOpenPath, onError } : undefined;
   return (
     <TermSurface makeTransport={() => shellTransport(repo, slug, index)}
       tkey={`${repo}|${slug}|${index}`}

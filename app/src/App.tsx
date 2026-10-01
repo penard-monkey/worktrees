@@ -1365,7 +1365,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
         ) : (
           <ShellPane key={repo + "|" + slug + ":" + active + ":" + restartToken} repo={repo} slug={slug}
             index={active} termVersion={termVersion} focusToken={focusToken}
-            root={root} onOpenPath={onOpenPath}
+            root={root} onOpenPath={onOpenPath} onError={onError}
             findOpen={findOpen} findToken={findToken} onFindClose={onFindClose} />
         )
       ) : (
@@ -7171,7 +7171,7 @@ function App() {
                         </div>
                         <TerminalPane key={selectedAgents![provider].name} provider={provider} session={selectedAgents![provider].name}
                           termVersion={termVersion} focusToken={termFocus} focusEnabled={provider === planProvider}
-                          root={selected.path} onOpenPath={openPathFromTerm}
+                          root={selected.path} onOpenPath={openPathFromTerm} onError={fail}
                           findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
                       </div>
                     ))}
