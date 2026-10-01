@@ -57,12 +57,16 @@ pub fn rules_text() -> String {
 // ── which repos ────────────────────────────────────────────────────────────
 
 /// Whether `p` is worktrees-managed, so the rule applies to it (decision,
-/// 2026-09-30). The cheapest signals visible from here: a `.worktrees.toml`
-/// at the main root (one stat), or a REGISTERED place under `.worktrees/`
-/// (one `git worktree list`). A plain directory there is not enough, and the
-/// app's project list is not readable from the CLI.
+/// 2026-09-30). The cheapest signals visible from here: the repo is in the
+/// user's project registry (`registry.rs`, one small file read), a
+/// `.worktrees.toml` at the main root (one stat), or a REGISTERED place under
+/// `.worktrees/` (one `git worktree list`). A plain directory there is not
+/// enough.
 pub fn is_managed(p: &Project) -> bool {
-    Path::new(&p.main_root).join(".worktrees.toml").is_file()
+    // A repo the user REGISTERED is managed — registering is the act that
+    // says so (cross-project §2.2). One small file read.
+    crate::registry::read_lenient().by_root(&p.main_root).is_some()
+        || Path::new(&p.main_root).join(".worktrees.toml").is_file()
         || p.place_index().iter().any(|pl| !pl.is_main && pl.registered)
 }
 

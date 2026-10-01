@@ -244,6 +244,13 @@ pub struct Profile {
     /// launch runs `--strict-mcp-config` and drops any user-scope server.
     #[serde(default)]
     pub worktrees_mcp_mutations: bool,
+    /// Narrow cross-project reach for sessions under this profile (`off` or
+    /// `read`). It can only NARROW the user's `cross_project` setting — the
+    /// server takes the lower of the two (`reach::Reach`) — so a client-work
+    /// profile can be kept to its own repo whatever the global switch says.
+    /// `None` leaves the user's setting alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktrees_mcp_cross_project: Option<String>,
 
     /// `--model`, when the profile pins one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -905,7 +912,13 @@ pub fn materialize_with(paths: &MatPaths, p: &Profile, worktree: &str, repo_root
     if p.worktrees_mcp {
         match paths.worktrees_bin.clone().filter(|b| b.is_absolute()) {
             Some(bin) => {
-                let args: Vec<&str> = if p.worktrees_mcp_mutations { vec!["mcp", "--mutations"] } else { vec!["mcp"] };
+                let mut args: Vec<&str> = if p.worktrees_mcp_mutations { vec!["mcp", "--mutations"] } else { vec!["mcp"] };
+                // Only a value the server understands is passed; anything else
+                // would be read there as `off` anyway (it fails closed), but a
+                // stanza should not carry noise into every launch.
+                if let Some(l) = p.worktrees_mcp_cross_project.as_deref().and_then(crate::reach::Level::parse) {
+                    args.extend(["--cross-project", l.as_str()]);
+                }
                 servers.insert(
                     "worktrees".to_string(),
                     serde_json::json!({
@@ -2205,6 +2218,16 @@ mod tests {
         // the mutating tools are opt-in — an orchestrator's profile needs them
         let pm = Profile { worktrees_mcp_mutations: true, ..p.clone() };
         let out = materialize_with(&paths, &pm, "/w", "/repo").unwrap();
+        let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
+        assert_eq!(mcp["mcpServers"]["worktrees"]["args"], serde_json::json!(["mcp", "--mutations"]));
+
+        // a profile may narrow cross-project reach; the server takes the lower
+        let pn = Profile { worktrees_mcp_cross_project: Some("off".into()), ..pm.clone() };
+        let out = materialize_with(&paths, &pn, "/w", "/repo").unwrap();
+        let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
+        assert_eq!(mcp["mcpServers"]["worktrees"]["args"], serde_json::json!(["mcp", "--mutations", "--cross-project", "off"]));
+        let pj = Profile { worktrees_mcp_cross_project: Some("junk".into()), ..pm.clone() };
+        let out = materialize_with(&paths, &pj, "/w", "/repo").unwrap();
         let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
         assert_eq!(mcp["mcpServers"]["worktrees"]["args"], serde_json::json!(["mcp", "--mutations"]));
 
