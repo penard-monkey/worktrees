@@ -54,6 +54,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `WORKTREES_AGENT_GUIDANCE=off`, or `"enabled": false` in the same file,
   turns per-launch delivery off.
 
+- **"Open ops.rs at 1022" lands on the line.** The MCP `show_doc` tool takes
+  an optional `line` (and `col`), and `worktrees show` takes `--line N` or the
+  `file:42:7` form compilers and agents print. Its description now covers any
+  file the user asks to open, see or look at, not only documents, and asks
+  agents to prefer it to printing the file while the user is in the app. A
+  relative path now means the file in the asking agent's own place, falling
+  back to the repository root. The `worktrees` skill says so too. An app
+  older than this opens the file at the top.
+
 ### Changed
 - **Both plan-usage readers moved into the engine.** Claude's and Codex's
   usage readers lived under `app/src-tauri`, where only the desktop app could

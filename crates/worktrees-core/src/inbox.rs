@@ -63,6 +63,62 @@ pub struct Request {
     /// The asking process. Carried for the app log — when two sessions ask at
     /// once, "which one" is the first question.
     pub pid: u32,
+    /// Where in the file, 1-based. Optional on the wire in BOTH directions: a
+    /// request from an older writer has neither key, and a request without a
+    /// line omits them rather than writing `null`, so the format is unchanged
+    /// for every ask that does not use them (`a_request_without_a_line_is_the_
+    /// old_wire_format`). An older app ignores keys it does not know and opens
+    /// the file at the top — the right degradation, not an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col: Option<u32>,
+}
+
+/// A position in a file, both halves optional. `col` without `line` means
+/// nothing and is refused rather than guessed at.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct At {
+    pub line: Option<u32>,
+    pub col: Option<u32>,
+}
+
+impl At {
+    fn check(self) -> Result<Self, String> {
+        if self.line == Some(0) {
+            return Err("line is 1-based; 0 is not a line".to_string());
+        }
+        if self.col == Some(0) {
+            return Err("col is 1-based; 0 is not a column".to_string());
+        }
+        if self.col.is_some() && self.line.is_none() {
+            return Err("col needs a line".to_string());
+        }
+        Ok(self)
+    }
+}
+
+/// Split `path:LINE[:COL]` — the form compilers, grep and agents print — into
+/// the path and the position. Only when the LITERAL path does not exist: a
+/// file may legitimately be called `notes:2`, and that file is what it names.
+pub fn split_suffix(arg: &str) -> (PathBuf, At) {
+    let whole = (PathBuf::from(arg), At::default());
+    if Path::new(arg).exists() {
+        return whole;
+    }
+    let num = |s: &str| (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u32>().ok()).flatten();
+    let mut parts = arg.rsplitn(3, ':');
+    let (last, mid, head) = (parts.next(), parts.next(), parts.next());
+    match (head, mid.and_then(num), last.and_then(num)) {
+        (Some(p), Some(l), Some(c)) if !p.is_empty() => (PathBuf::from(p), At { line: Some(l), col: Some(c) }),
+        _ => match arg.rsplit_once(':') {
+            Some((p, l)) if !p.is_empty() => match num(l) {
+                Some(l) => (PathBuf::from(p), At { line: Some(l), col: None }),
+                None => whole,
+            },
+            _ => whole,
+        },
+    }
 }
 
 /// `~/.cache/worktrees/inbox`. `None` only when `$HOME` is unset.
@@ -71,12 +127,13 @@ pub fn dir() -> Option<PathBuf> {
     Some(Path::new(&home).join(".cache/worktrees/inbox"))
 }
 
-/// Ask whoever is watching to open `path`.
+/// Ask whoever is watching to open `path`, optionally at a line.
 ///
 /// Canonicalises first, which also means the file must EXIST — asking for a
 /// document that is not there is a failure the session can report, rather than
 /// a silence the user has to interpret. Returns the file written, for the log.
-pub fn request(path: &Path, now: i64) -> Result<PathBuf, String> {
+pub fn request(path: &Path, at: At, now: i64) -> Result<PathBuf, String> {
+    let at = at.check()?;
     let canon = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !canon.is_file() {
         return Err(format!("not a file: {}", canon.display()));
@@ -84,7 +141,7 @@ pub fn request(path: &Path, now: i64) -> Result<PathBuf, String> {
     let dir = dir().ok_or_else(|| "HOME is not set".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let pid = std::process::id();
-    let req = Request { path: canon.to_string_lossy().to_string(), epoch: now, pid };
+    let req = Request { path: canon.to_string_lossy().to_string(), epoch: now, pid, line: at.line, col: at.col };
     let body = serde_json::to_string(&req).map_err(|e| e.to_string())?;
     // Temp + rename, so a reader mid-`read_dir` never parses a partial file.
     // Same directory, so the rename cannot cross a filesystem boundary.
@@ -135,7 +192,7 @@ pub fn drain(now: i64) -> Vec<Request> {
     out
 }
 
-/// `worktrees show <path>` — ask the app to open a document.
+/// `worktrees show <path> [--line N]` — ask the app to open a file, at a line.
 ///
 /// Refuses a path outside the project it was run in, for the same reason no MCP
 /// tool takes a repo path: the thing holding the request is a session that lives
@@ -144,14 +201,26 @@ pub fn drain(now: i64) -> Vec<Request> {
 /// word), but refusing at the asking end is what produces an error message
 /// instead of a silence.
 pub fn cmd_show(project: &crate::Project, ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
-    let Some(arg) = args.iter().find(|a| !a.starts_with('-')) else {
-        ui.error("usage: worktrees show <file>");
+    const USAGE: &str = "usage: worktrees show <file>[:line[:col]] [--line N] [--col N]";
+    let (arg, flags) = match parse_show_args(args) {
+        Ok(v) => v,
+        Err(e) => {
+            ui.error(&format!("{e}\n{USAGE}"));
+            return 1;
+        }
+    };
+    let Some(arg) = arg else {
+        ui.error(USAGE);
         return 1;
     };
-    let target = match std::fs::canonicalize(arg) {
+    // An explicit flag wins over a `:42` suffix; the suffix is only split off
+    // when the literal name does not exist (`split_suffix`).
+    let (path, suffix) = split_suffix(&arg);
+    let at = if flags.line.is_some() { flags } else { At { line: suffix.line, col: flags.col.or(suffix.col) } };
+    let target = match std::fs::canonicalize(&path) {
         Ok(t) => t,
         Err(e) => {
-            ui.error(&format!("{arg}: {e}"));
+            ui.error(&format!("{}: {e}", path.display()));
             return 1;
         }
     };
@@ -160,12 +229,17 @@ pub fn cmd_show(project: &crate::Project, ui: &mut dyn crate::ui::Ui, args: &[St
         ui.error(&format!("{} is outside {}", target.display(), root.display()));
         return 1;
     }
-    match request(&target, crate::sysclock::now_epoch()) {
+    match request(&target, at, crate::sysclock::now_epoch()) {
         Ok(_) => {
             // Deliberately not "opened": nothing here knows whether the app is
             // running, and claiming a result this process cannot observe is how
             // a silent failure gets reported as a success.
-            ui.info(&format!("asked the app to show {}", target.display()));
+            let pos = match (at.line, at.col) {
+                (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
+                (Some(l), None) => format!(" at line {l}"),
+                _ => String::new(),
+            };
+            ui.info(&format!("asked the app to show {}{pos}", target.display()));
             0
         }
         Err(e) => {
@@ -173,6 +247,34 @@ pub fn cmd_show(project: &crate::Project, ui: &mut dyn crate::ui::Ui, args: &[St
             1
         }
     }
+}
+
+/// `<file> [--line N] [--col N]`, flags in either `--line N` or `--line=N`
+/// form and on either side of the file.
+fn parse_show_args(args: &[String]) -> Result<(Option<String>, At), String> {
+    let mut file = None;
+    let mut at = At::default();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let (name, inline) = match a.split_once('=') {
+            Some((n, v)) if n.starts_with("--") => (n, Some(v.to_string())),
+            _ => (a.as_str(), None),
+        };
+        let slot = match name {
+            "--line" => &mut at.line,
+            "--col" | "--column" => &mut at.col,
+            _ if a.starts_with('-') => return Err(format!("unknown option {a}")),
+            _ => {
+                if file.replace(a.clone()).is_some() {
+                    return Err("one file at a time".to_string());
+                }
+                continue;
+            }
+        };
+        let v = inline.or_else(|| it.next().cloned()).ok_or_else(|| format!("{name} needs a number"))?;
+        *slot = Some(v.parse::<u32>().map_err(|_| format!("{name}: not a number: {v}"))?);
+    }
+    Ok((file, at))
 }
 
 #[cfg(test)]
@@ -209,7 +311,7 @@ mod tests {
         let _g = HOME_LOCK.lock().unwrap();
         let h = home("roundtrip");
         let f = doc(&h, "CLAUDE.md");
-        request(&f, 1000).unwrap();
+        request(&f, At::default(), 1000).unwrap();
         let got = drain(1005);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].path, std::fs::canonicalize(&f).unwrap().to_string_lossy());
@@ -227,7 +329,7 @@ mod tests {
         let _g = HOME_LOCK.lock().unwrap();
         let h = home("stale");
         let f = doc(&h, "old.md");
-        request(&f, 1000).unwrap();
+        request(&f, At::default(), 1000).unwrap();
         assert!(drain(1000 + MAX_AGE_SECS + 1).is_empty(), "expired request must not be served");
         assert!(
             std::fs::read_dir(dir().unwrap()).unwrap().next().is_none(),
@@ -241,18 +343,82 @@ mod tests {
         let h = home("two");
         let a = doc(&h, "a.md");
         let b = doc(&h, "b.md");
-        request(&a, 1000).unwrap();
-        request(&b, 1001).unwrap();
+        request(&a, At::default(), 1000).unwrap();
+        request(&b, At::default(), 1001).unwrap();
         let got = drain(1002);
         assert_eq!(got.len(), 2, "a drop directory must not make two asks collide");
         assert!(got[0].path.ends_with("a.md"), "oldest first, got {:?}", got[0].path);
+    }
+
+    /// A line (and column) rides along, so "open ops.rs at 1022" lands on the
+    /// line rather than at the top of a 3000-line file.
+    #[test]
+    fn a_line_and_column_round_trip() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let h = home("line");
+        let f = doc(&h, "ops.rs");
+        request(&f, At { line: Some(1022), col: Some(7) }, 1000).unwrap();
+        let got = drain(1001);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].line, got[0].col), (Some(1022), Some(7)));
+    }
+
+    /// Both directions across a version skew. An OLD writer's request has no
+    /// line and must still parse in a new app; a NEW request without one must
+    /// not grow `"line":null`, so an old app's parser — which ignores unknown
+    /// keys but would still be handed noise — sees exactly what it always did.
+    #[test]
+    fn a_request_without_a_line_is_the_old_wire_format() {
+        let old = r#"{"path":"/x/CLAUDE.md","epoch":1000,"pid":7}"#;
+        let r: Request = serde_json::from_str(old).expect("an old request must still parse");
+        assert_eq!((r.line, r.col), (None, None));
+        assert_eq!(serde_json::to_string(&r).unwrap(), old, "no line → byte-identical to the old format");
+    }
+
+    #[test]
+    fn a_zero_line_is_refused() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let h = home("zero");
+        let f = doc(&h, "a.rs");
+        let e = request(&f, At { line: Some(0), col: None }, 1000).expect_err("lines are 1-based");
+        assert!(e.contains("line"), "{e}");
+        let e = request(&f, At { line: None, col: Some(3) }, 1000).expect_err("a column needs a line");
+        assert!(e.contains("col"), "{e}");
+    }
+
+    /// `worktrees show src/foo.ts:42:7` — the form every compiler and agent
+    /// prints — is the same ask as `--line 42 --col 7`, but only when the
+    /// literal name does not exist (a file CAN be called `x:2`).
+    #[test]
+    fn a_path_line_suffix_is_split_only_when_the_literal_path_is_missing() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let h = home("suffix");
+        let f = doc(&h, "foo.ts");
+        let s = f.to_string_lossy().to_string();
+        assert_eq!(split_suffix(&format!("{s}:42")), (PathBuf::from(&s), At { line: Some(42), col: None }));
+        assert_eq!(split_suffix(&format!("{s}:42:7")), (PathBuf::from(&s), At { line: Some(42), col: Some(7) }));
+        let odd = doc(&h, "x:2");
+        let o = odd.to_string_lossy().to_string();
+        assert_eq!(split_suffix(&o), (odd.clone(), At::default()), "an existing file named x:2 is that file");
+        assert_eq!(split_suffix(&s), (f.clone(), At::default()));
+    }
+
+    #[test]
+    fn show_flags_parse_in_either_form_and_either_order() {
+        let v = |a: &[&str]| parse_show_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(v(&["f.rs", "--line", "4"]).unwrap(), (Some("f.rs".into()), At { line: Some(4), col: None }));
+        assert_eq!(v(&["--line=4", "--col=2", "f.rs"]).unwrap(), (Some("f.rs".into()), At { line: Some(4), col: Some(2) }));
+        assert!(v(&["f.rs", "--line"]).is_err(), "a flag with no value");
+        assert!(v(&["f.rs", "--line", "x"]).is_err(), "not a number");
+        assert!(v(&["f.rs", "--nope"]).is_err(), "unknown flag");
+        assert!(v(&["a", "b"]).is_err(), "two files");
     }
 
     #[test]
     fn a_missing_file_is_refused_at_the_asking_end() {
         let _g = HOME_LOCK.lock().unwrap();
         let h = home("missing");
-        let e = request(&h.0.join("nope.md"), 1000).expect_err("a file that is not there cannot be shown");
+        let e = request(&h.0.join("nope.md"), At::default(), 1000).expect_err("a file that is not there cannot be shown");
         assert!(e.contains("nope.md"), "the error must name the path: {e}");
     }
 
