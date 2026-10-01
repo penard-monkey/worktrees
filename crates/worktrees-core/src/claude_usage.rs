@@ -267,6 +267,33 @@ impl UsageLimit {
     pub fn severity(&self) -> &str { &self.severity }
     pub fn label(&self) -> &str { &self.label }
     pub fn resets_at(&self) -> Option<i64> { self.resets_at }
+
+    /// The model this bucket is scoped to, when it is one.
+    ///
+    /// `weekly_scoped` is the only kind that names a model, and for that kind
+    /// the LABEL is the model's display name — `parse_usage_limits` puts
+    /// `/scope/model/display_name` there. Load-bearing for the launch gate: a
+    /// weekly "Fable" bucket at 85% says nothing about a lane starting on
+    /// Opus, and grading it against one would refuse a launch that shares none
+    /// of the spent allowance (`quota::worst_window`).
+    pub fn scoped_model(&self) -> Option<&str> {
+        (self.kind == "weekly_scoped").then_some(self.label.as_str())
+    }
+}
+
+/// Constructors for tests in sibling modules (`harness`'s window mappings).
+#[cfg(test)]
+impl UsageLimit {
+    pub(crate) fn for_test(kind: &str, label: &str, percent: f64, severity: &str, resets_at: Option<i64>) -> Self {
+        Self { kind: kind.into(), label: label.into(), percent, severity: severity.into(), resets_at }
+    }
+}
+
+#[cfg(test)]
+impl UsageInfo {
+    pub(crate) fn for_test(limits: Vec<UsageLimit>) -> Self {
+        Self { source: "oauth".into(), fetched_at: 0, limits }
+    }
 }
 
 impl UsageInfo {

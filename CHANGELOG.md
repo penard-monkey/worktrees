@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **An agent is no longer started on a plan window that is nearly spent.**
+  Eight lanes were once opened in parallel on a Plus plan and the five-hour
+  window was gone in fifteen minutes; nothing in the tool had an opinion. Now
+  each harness asks its own provider how much of the window is left before a
+  session is created, and refuses the LAUNCH when the provider's own grade says
+  warning — naming the window, the percentage and when it resets. The worktree,
+  the branch and the brief are created either way, so the handoff survives the
+  wait and nothing is re-typed; `--force` (the app: **Launch anyway**; MCP:
+  `force: true`) launches regardless, and `worktrees open <slug> --force` is the
+  retry it prints. It fails open on every unknown, and `WORKTREES_USAGE_PROBE=off`
+  turns the reading off entirely. It is deliberately **not** a burst limiter:
+  lanes bill after their first turns, so a simultaneous fan-out is still
+  admitted — the gate stops the NEXT one.
+- **`create_worktree` takes `force`.** The same single override, for an agent
+  that has relayed the refusal and been asked by the user to go ahead. A refused
+  launch now answers MCP callers with the tool to retry with, rather than a CLI
+  flag they cannot run.
+
 ### Changed
 - **Both plan-usage readers moved into the engine.** Claude's and Codex's
   usage readers lived under `app/src-tauri`, where only the desktop app could

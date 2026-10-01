@@ -52,6 +52,32 @@ impl Info {
     pub fn limits(&self) -> &[Limit] { &self.limits }
 }
 
+/// Constructors for tests in sibling modules (`harness`'s window mappings).
+/// Private fields stay private in production: this type is serialised to the
+/// frontend and its shape is a contract.
+///
+/// `#[cfg(test)]` ABOVE the production code is deliberate and safe:
+/// `plan-usage-check.mjs` slices this file at `#[cfg(test)] mod tests`, not at
+/// the first marker it finds.
+#[cfg(test)]
+impl Limit {
+    pub(crate) fn for_test(bucket_label: &str, percent: f64, severity: &str, resets_at: Option<i64>) -> Self {
+        Self {
+            id: bucket_label.into(), bucket_id: bucket_label.into(),
+            bucket_label: bucket_label.into(), window_role: "primary".into(),
+            window_minutes: None, percent, severity: severity.into(), resets_at,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Info {
+    pub(crate) fn for_test(limits: Vec<Limit>) -> Self {
+        Self { provider: "codex", state: "ok", source: "app-server",
+               fetched_at: Some(0), retry_at: None, reason: None, limits }
+    }
+}
+
 impl Info {
     fn unavailable(state: &'static str, reason: &'static str) -> Self {
         Self {

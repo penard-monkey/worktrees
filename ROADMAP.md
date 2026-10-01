@@ -5,6 +5,28 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **A concurrency cap is the signal the quota gate cannot be.** The launch
+  gate (`quota`) reads the plan window, and a window is a LAGGING signal: lanes
+  bill after their first turns, so eight started inside a minute are all
+  admitted and the gate first speaks once the allowance is already spent. It
+  stops the next one, not the burst — which is the incident that prompted it.
+  The lag-free signal is how many lanes are busy on a provider RIGHT NOW, which
+  the tool already derives (`tmux::PaneList::agents_in`, `activity`). Wanted: a
+  user-settable cap per provider, plus a line in the agent-guidance instructions
+  ("at most N lanes per provider unless the user says otherwise"), since
+  #385 the MCP instructions actively tell an orchestrator to open a place per
+  piece of work. Two shared caches make the gate weaker still inside one
+  long-lived `worktrees mcp` process: `codex_usage::CACHE` and
+  `claude_usage::USAGE_CACHE` are 120s, so N parallel `create_worktree` calls
+  all read the same figure.
+
+- **`--ai auto`: pick the provider by headroom.** The data is now in core and
+  in one shape (`quota::Window`, `harness::Adapter::usage`), so "start this on
+  whichever installed agent has the most window left" is a small step from the
+  gate that refuses the spent one. Needs a tie-break rule and a say in what
+  happens when nothing can be measured (today: fail open, which would mean
+  "fall back to the configured command").
+
 - **Look at the offers button in the real app (#384).** It shipped on
   `offers-check.mjs` and headless Chromium/WebKit against the mock; no one has
   seen it in WKWebView. In `sandbox.sh --app` (with a throwaway `HOME` that has
