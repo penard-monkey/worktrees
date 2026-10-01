@@ -203,8 +203,9 @@ pub trait Adapter: Sync {
     /// Whether this harness has never STARTED a session in place `slug` — so
     /// a fresh `open` there is the first launch, and a brief waiting in the
     /// place has never been read. Only a harness whose first launch can be
-    /// refused after the brief was written (pi: a dead model host) needs to
-    /// know; the rest answer false and `open` stays as it was.
+    /// refused after the brief was written (pi: a dead model host; Claude and
+    /// Codex: a spent plan window) needs to know; the rest answer false and
+    /// `open` stays as it was.
     fn never_launched(&self, _p: &Project, _slug: &str) -> bool {
         false
     }
@@ -323,6 +324,12 @@ impl Adapter for Claude {
         crate::quota::gate(self, launch, crate::sysclock::now_epoch())
     }
 
+    /// A spent window refuses the launch AFTER `new --brief` wrote the brief,
+    /// so the `open` that follows is the first launch and must carry the
+    /// opener — pi's shape: no conversation of claude's for the place yet.
+    fn never_launched(&self, p: &Project, slug: &str) -> bool {
+        !self.session_present(p, &p.place_dir(slug))
+    }
 
     fn session_present(&self, project: &Project, cwd: &str) -> bool {
         project.claude_session_present(cwd)
@@ -398,6 +405,11 @@ impl Adapter for Codex {
 
     fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
         crate::quota::gate(self, launch, crate::sysclock::now_epoch())
+    }
+
+    /// As Claude's: a quota refusal leaves a brief nobody has read.
+    fn never_launched(&self, p: &Project, slug: &str) -> bool {
+        !self.session_present(p, &p.place_dir(slug))
     }
 
     fn session_present(&self, _project: &Project, cwd: &str) -> bool {

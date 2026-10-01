@@ -109,13 +109,74 @@ JSON
   tmux_session_exists repo-feat-badfix
 }
 
-@test "quota: open --force relaunches a place whose launch was refused" {
+OPENER="Read .planning/brief.md and begin."
+
+@test "quota: open --force relaunches a refused place WITH the brief's opener" {
   usage_fixture 92 warning
-  run_wt new feat-retry
+  run_wt new feat-retry --brief "do x"
   [ "$status" -eq 5 ]
-  [ -d "$REPO/.worktrees/feat-retry" ]
-  # The exact retry the refusal printed.
+  [ -f "$REPO/.worktrees/feat-retry/.planning/brief.md" ]
+  ! tmux_session_exists repo-feat-retry
+  # The exact retry the refusal printed. Without the opener claude starts
+  # BLANK and the brief the refusal promised would survive is never read.
   run_wt open feat-retry --force
   [ "$status" -eq 0 ]
   tmux_session_exists repo-feat-retry
+  [[ "$(tmux_pane0_cmd repo-feat-retry)" == *"claude --name"*"repo-feat-retry"*"$OPENER"* ]]
+}
+
+@test "quota: a plain open once the window has headroom also sends the opener" {
+  usage_fixture 92 warning
+  run_wt new feat-later --brief "do x"
+  [ "$status" -eq 5 ]
+  usage_fixture 40 normal
+  run_wt open feat-later
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd repo-feat-later)" == *"$OPENER"* ]]
+}
+
+@test "quota: an open where claude has ALREADY run sends no opener" {
+  # The other half: the opener is for a brief nobody has read. A place with a
+  # claude conversation on disk has had its launch, and re-sending would make
+  # every fresh open restart the task.
+  usage_fixture 40 normal
+  run_wt new feat-ran --brief "do x" --no-attach
+  [ "$status" -eq 0 ]
+  local d m
+  for d in "$REPO/.worktrees/feat-ran" "$(cd "$REPO/.worktrees/feat-ran" && pwd -P)"; do
+    m="$(printf '%s' "$d" | sed 's/[^A-Za-z0-9]/-/g')"
+    mkdir -p "$HOME/.claude/projects/$m" && : > "$HOME/.claude/projects/$m/s.jsonl"
+  done
+  run_wt close feat-ran
+  run_wt open feat-ran --no-attach
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd repo-feat-ran)" != *"$OPENER"* ]]
+}
+
+@test "quota: codex too — open --force after a refusal sends the opener" {
+  install_fake_cmd codex
+  cat > "$FIXTURE" <<JSON
+{"codex":[{"label":"5h","percent":91,"severity":"warning","resets_at":$(( $(date +%s) + 3600 ))}]}
+JSON
+  export WORKTREES_USAGE_PROBE="$FIXTURE"
+  run_wt new feat-cx --ai codex --brief "do x"
+  [ "$status" -eq 5 ]
+  run_wt open feat-cx --ai codex --force
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd 'repo-feat-cx~agent~codex')" == *"codex -c forced_login_method=chatgpt"*"$OPENER"* ]]
+}
+
+@test "quota: MCP create_worktree is refused, and force:true launches with the brief" {
+  usage_fixture 92 warning
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-q","brief":"do x"}}}' > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$REPO' && '$WT_BIN' mcp --mutations < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  [[ "$output" == *"92% of its 5h window"* ]]
+  [[ "$output" == *"force"* ]]
+  ! tmux_session_exists repo-agent-q
+  [ -f "$REPO/.worktrees/agent-q/.planning/brief.md" ]
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-q2","brief":"do y","force":true}}}' > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$REPO' && '$WT_BIN' mcp --mutations < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  [[ "$output" == *'"isError":false'* ]]
+  tmux_session_exists repo-agent-q2
+  [[ "$(tmux_pane0_cmd repo-agent-q2)" == *"$OPENER"* ]]
 }
