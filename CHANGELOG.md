@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **Both plan-usage readers moved into the engine.** Claude's and Codex's
+  usage readers lived under `app/src-tauri`, where only the desktop app could
+  reach them — so nothing in the CLI or in a `worktrees mcp` session could ask
+  how much of a provider's window was left. They are `worktrees_core`'s now
+  (`claude_usage`, `codex_usage`), with the app keeping only its two tauri
+  commands. No reading changes: same endpoints, same TTLs, same backoff, same
+  "missing data is not an error". The app's log is handed to the engine once
+  at startup through one installable sink rather than a static per reader, so
+  a reader added later cannot silently go unlogged.
+- **The Codex usage probe no longer runs in an app-private directory.**
+  `codex app-server` reads the Codex configuration of whatever directory it
+  starts in, so the probe has always run somewhere neutral — but that
+  somewhere was Tauri's `app_cache_dir()`, which the CLI cannot name without
+  hardcoding a bundle identifier. It is `~/.cache/worktrees/codex-usage` now,
+  identifier-free and shared by every caller. Still never the selected repo.
 - **Agents are told to do their branch work in a place.** The worktrees MCP
   server's instructions, the one text every connected session reads, used
   to describe the tools and say nothing about the agent's own work. An
