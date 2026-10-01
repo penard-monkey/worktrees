@@ -4,8 +4,8 @@ title: "Proposal — cross-project reach"
 
 # Proposal — let an agent reach places in other projects
 
-**Status:** research and proposal, 2026-10-01. Nothing here is built. A review
-precedes any build.
+**Status:** research and proposal, 2026-10-01, reviewed. The decisions below
+are folded into the text. Nothing here is built.
 
 **The problem.** A session can only see and address the places of its OWN
 project. The orchestrator in one repo's `(main)` cannot ask how a lane in
@@ -38,6 +38,34 @@ Every claim is marked with its source:
   behaviour as already recorded in this repo.
 - **[inferred]**: my reasoning, not measured.
 
+## Decisions
+
+Taken on 2026-10-01, after the review:
+
+- **Q2, default reach: OFF.** Read-only cross-project reach is opt-in. It is
+  offered after the update by an `offers.ts` card that deep-links to the
+  setting. Mutations stay a separate opt-in on top of it.
+- **Q3, private projects: a bare row.** Agents elsewhere see the project's
+  name only, with no places and no details. Addressing into one is refused
+  with a reason that names it.
+- **Q1, registry owner: core, at user level** (`~/.config/worktrees`). The
+  CLI, the MCP server and the app all read it. The app's `projects.json`
+  migrates into it by **union-merge**. Registering a project is the consent
+  act.
+- **Q5, drag and drop in P1: all three harnesses.** Claude, Codex and pi
+  panes all accept the plain-text cross-project address in P1.
+
+The review also changed three parts of the design:
+
+- **The project handle is the registry entry's `name`, not the session
+  prefix** (§3.2). The prefix can be set by the repo itself, so a handle
+  derived from it could be spoofed.
+- **A cross-project `reply_to` is validated against the sender's log**
+  (§4.2). Validating it against the log being written makes a round trip
+  impossible.
+- **Registry writes are read-modify-write under a lock** (§2.2). One writer
+  per file stops being true once the CLI writes the registry too.
+
 ---
 
 ## 0. The answer in one screen
@@ -45,14 +73,14 @@ Every claim is marked with its source:
 | Question | Short answer |
 |---|---|
 | Where does the restriction live? | In **one line of `cmd_mcp`**, and everything downstream of it. `Project::discover(&root)` pins one project at startup, and every tool resolves slugs, the message log, tmux names and the caller's own place against that one value (§1). It is **by design**, not by accident. The module note says *"No tool takes a repo path, so a model cannot walk the server into another checkout."* That sentence is the safety property this proposal has to keep in a new form, not delete. |
-| Where does the list of projects come from? | Today, only the app knows it: `projects.json` in the app's config dir, a JSON array of main roots. Core and the CLI never read it [source]. **Recommendation:** move ownership to core, as `~/.config/worktrees/projects.json` beside `profiles.json` and `skills.json`. The app reads and writes it through core, and migrates its own file once (§2). |
-| How is a foreign place named? | **`<project>:<slug>`.** `:` cannot appear in a git ref name, so it cannot appear in a slug, so a qualified name can never be mistaken for a local one. A bare slug keeps meaning "my project", byte for byte. `<project>` is the project's **session prefix**, the name that already prefixes its tmux sessions and its Claude `--name` (§3). |
+| Where does the list of projects come from? | Today, only the app knows it: `projects.json` in the app's config dir, a JSON array of main roots. Core and the CLI never read it [source]. **Decided:** core owns it, as `~/.config/worktrees/projects.json` beside `profiles.json` and `skills.json`. The CLI, the MCP server and the app read it. The app writes through core and union-merges its own file in once. Every write is read-modify-write under a lock. Registering a project is the consent act (§2). |
+| How is a foreign place named? | **`<project>:<slug>`.** `:` cannot appear in a branch name, so no slug worktrees creates contains one, and the resolver tries an exact local slug first anyway. A bare slug keeps meaning "my project", byte for byte. `<project>` is the **registry entry's `name`**, which is user tier and unique by construction. It is seeded from the session prefix at registration. It is never the prefix itself, which a cloned repo can set (§3). |
 | How do new abilities reach clients that cache tool schemas? | Through a **new tool** (`list_projects`) and **new values in existing string fields** (a qualified `slug`/`to`). No existing tool's schema changes in phases 1–2. Results teach the form, the same way `create_worktree` results already carry a capability line for clients with stale schemas (§3.3). |
-| Cross-project messages? | **Route to the recipient's own log.** `report alpha:x` writes into alpha's git common dir. `from` stays server-derived, qualified as `<my project>:<my slug>` whenever it crosses a project. `messages` and `wait` keep reading only the caller's own log, which is where its mail lands (§4). |
-| Safety default? | **Read-only reach is on for registered projects. Cross-project mutations are opt-in**, and `remove_worktree` never crosses a project. A **per-project `private` flag** takes a project out of reach in both directions. All of it is user-only config that a repo cannot set (§5). |
-| Drag and drop? | **The foreign-project drop stops being refused.** It types a plain-text **address**, `place alpha:lane-x`, instead of an `@worktrees:place://…` token. The address works for any server version that understands qualified slugs, and it fails loudly on one that does not. A token would fail silently: the client only resolves URIs that are in its cached resource list. The `@`-mention form follows later, once the server lists foreign places as resources (§6). |
+| Cross-project messages? | **Route to the recipient's own log.** `report alpha:x` writes into alpha's git common dir. `to` is stored bare there. `from` stays server-derived, qualified as `<registry name>:<my slug>` whenever it crosses a project. A cross-project `reply_to` is checked against the sender's own log. `messages` and `wait` keep reading only the caller's own log, which is where its mail lands (§4). |
+| Safety default? | **Reach is off until the user turns it on** (decided). An after-update offer links to the setting. **Read-only reach is the first opt-in, and mutations are a second one on top**, and `remove_worktree` never crosses a project. A **per-project `private` flag** takes a project out of reach in both directions, and it shows to agents elsewhere as a bare name. All of it is user-only config that a repo cannot set (§5). |
+| Drag and drop? | **The foreign-project drop stops being refused.** It types a plain-text **address**, `place alpha:lane-x`, instead of an `@worktrees:place://…` token, into Claude, Codex and pi panes alike (decided). The address works for any server version that understands qualified slugs, and it fails loudly on one that does not. A token would fail silently: the client only resolves URIs that are in its cached resource list. The `@`-mention form follows later, once the server lists foreign places as resources (§6). |
 | Cost? | A full `ls` over 9 projects and 101 places took **2.2 s** serially. `git worktree list` took **12–21 ms** per project [observed]. So the cross-project list is the **cheap index** (slug, branch, lifecycle) per project. The full state is fetched for **one** place, on demand (§7). |
-| Plan | P0 registry → P1 read-only reach + addressing + the drag-drop address → P2 cross-project messaging → P3 opt-in mutations → P4 foreign `@`-mentions (§8). |
+| Plan | P0 registry → P1a resolver + registry names → P1b Settings, private and the drag-drop address → P2 cross-project messaging → P3 opt-in mutations → P4 foreign `@`-mentions (§8). |
 
 ---
 
@@ -75,7 +103,7 @@ Every claim is marked with its source:
 | `initialize` instructions | The role line names `{root}`. `MESSAGE_NOTE` says *"another place of this project"*. | Wording. Both change with the feature (§9). |
 | `managed()` | Its comment says *"the app's project list is not readable from here"*. | A gap the registry closes (§2). |
 | `hub_copy_refusal` | Checked against the SERVER's own main root before any non-read-only tool. | Must be checked against the **target** project as well. A foreign target that is a hub copy is exactly as dangerous as a local one. |
-| `HIDDEN_IN_RUN` | `send` and `remove_worktree` vanish inside an automation run. | Design, and it stays. A run gets no cross-project reach at all (§5.1). |
+| `HIDDEN_IN_RUN` | Six tools vanish inside an automation run, among them `send` and `remove_worktree` (the other four are the automation tools themselves). | Design, and it stays. A run gets no cross-project reach at all (§5.1). |
 
 ### 1.2 Core **[source]**
 
@@ -154,25 +182,43 @@ half-works today.
 | **(c) Discover from live tmux sessions or git common dirs** | No list to maintain. | A project with no running session is invisible. It also turns "which repos exist" into a property of what is running right now, which is the wrong shape for a permission. |
 | **(d) Explicit project paths in tool arguments only** | No registry at all. | Breaks the "no tool takes a repo path" property outright. A model could aim the server at any directory on disk. **Rejected.** |
 
-### 2.2 Recommendation: (b), with the app as a client
+### 2.2 Decided: (b), with the app as a client
 
 - A new **`worktrees_core::registry`**: `read_lenient()`, `add(root)`,
-  `remove(root)`, `reorder(roots)`, and later `set_private(root, bool)`. It
-  writes with temp + rename, which is already the pattern in `messages` and
-  `inbox`. Each entry is `{root, private?}`. The array order stays the nav
-  order.
-- **Migration:** on first start with no core file, the app copies its own
-  `projects.json` into the core registry and from then on calls core.
-  It leaves the old file in place, so a downgrade still has a list.
-  **[inferred]** There is one writer per file at any moment, so the
-  `ui-state.json` lost-update hazard does not appear.
+  `remove(root)`, `reorder(roots)`, `rename(root, name)` and
+  `set_private(root, bool)`. Each entry is `{root, name, private?}`. The
+  array order stays the nav order.
+- **Every write is read-modify-write under a lock, then temp + rename.**
+  "One writer per file" stops being true the moment `worktrees projects add`
+  exists beside the app. The app's `reorder_projects` already treats its list
+  as a preference: `merge_project_order` drops roots the file no longer has
+  and keeps, appended, roots the frontend never saw **[source: `lib.rs`]**.
+  But it reads, merges and writes with no lock, so an `add` that lands in
+  between is lost. In core the lock covers the read **and** the write, for
+  add, remove, rename and set-private as well as reorder. The reorder rule
+  moves into core as is: order applies to present entries, unknown ones are
+  kept and appended. The app **re-reads after every write** and never holds
+  the list as truth.
+- **Migration is a union-merge** (decided). On every start until it is
+  marked done, the app merges its own `projects.json` into the core
+  registry. Core entries keep their place, app-only roots are appended in the
+  app's order, and duplicates are keyed by canonical root. The old file is
+  left in place, so a downgrade still has a list.
+- **Registering is the consent act** (decided). A project an agent can reach
+  is one the user added, through the app or `worktrees projects add`. Nothing
+  else adds to the registry.
 - **The registry is user-only.** No `.worktrees.toml` key may add a project
-  to it or mark one non-private. The same `USER_ONLY_KEYS` mechanism that
-  holds `trust` and `model` covers any config key this adds.
+  to it, rename one or mark one non-private. The same `USER_ONLY_KEYS`
+  mechanism that holds `trust` and `model` covers `cross_project`.
 - **`managed()`** gains the signal its comment says it lacks: a repo in the
   registry is managed.
-
-Open question Q1 asks whether to keep the app's file as the source instead.
+- **Nesting.** A registered root can lie inside another registered project's
+  tree, for example a repo checked out under another repo's ignored
+  directory. The caller's identity stays what it is today, the project
+  `Project::discover` finds at launch. The registry entry it is matched to is
+  the one whose root equals that project's canonical `main_root`, never the
+  nearest enclosing entry. `doctor` flags nested entries, because a person
+  reading the nav will not expect it.
 
 ---
 
@@ -195,29 +241,51 @@ Open question Q1 asks whether to keep the app's file as the source instead.
   local place, so an agent can copy an address from `list_projects` without
   knowing which project it is in.
 
-### 3.2 What `<project>` is
+### 3.2 What `<project>` is: the registry entry's `name`
 
-The project handle is the **session prefix** (`Project.prefix`):
+**Not the session prefix.** The first draft used `Project.prefix`. The review
+found that the prefix is **repo-supplied**. `resolve_prefix` reads
+`WORKTREES_PREFIX`, then a `.worktree-prefix` file (which can be committed),
+then `.worktrees.toml`'s `[project] prefix`, which is a REPO-tier key and not
+in `USER_ONLY_KEYS`. Only after those does it read the user config and the
+basename **[source: `project.rs` `resolve_prefix`, `projcfg.rs`]**. A cloned
+repo could set `prefix = "alpha"` and:
 
-- It is already the name a person reads in tmux and the name in front of
-  every Claude `--name`, so an address and a `ListAgents` row agree.
-- It is already user-controllable (`.worktree-prefix`, `prefix` in config),
-  which is the escape hatch when two repos collide.
+- make the real `alpha` ambiguous, so it cannot be addressed at all; and
+- if the handle were derived per caller from its own prefix, sign messages
+  `from: "alpha:(main)"`.
 
-**Collisions are refused, not guessed.** Two registered projects with the same
-prefix already share a tmux namespace today (§1.2). A qualified name that
-matches two projects is an error naming both roots and the fix (set a
-prefix). `list_projects` flags such a project as `ambiguous`, and the app can
-show the same thing. This is a pre-existing bug that cross-project reach
-only makes visible. It is worth a `doctor` code of its own whatever is decided
-here.
+So the handle is **the registry entry's `name`**:
+
+- **User tier.** Only the user writes the registry (§2.2).
+- **Seeded from the prefix at registration,** so the default still reads the
+  same as tmux and `ListAgents`. The prefix is read-only input here, never
+  the handle.
+- **Unique by construction.** `add` refuses a name already taken, or
+  suffixes it `name-2`. The app's add flow shows the result and lets the user
+  rename it. Two clones of the same repo get two names.
+- **The qualified `from` comes from the registry, not from the caller.** The
+  server takes its project's canonical `main_root`, finds the entry with
+  that root, and uses its `name`. A caller in an unregistered repo has no
+  cross-project identity and no reach.
+- **Names follow `safe_arg` plus `[A-Za-z0-9._-]`.** No `:` and no `/`, so a
+  name never splits an address and fits the P4 URI form.
+
+**The session-name gap stays visible.** `session_name` replaces `.` with `-`
+(`project.rs`), and `ListAgents` shows the mangled form. An entry named
+`my.app` is therefore addressed `my.app:lane` while its sessions read
+`my-app-lane`. `list_projects` returns each place's agent session names, so
+an agent never has to derive one from the other.
+
+**Prefix collisions remain a tmux bug.** Two repos with the same prefix
+already share a tmux namespace (§1.2). They no longer break addressing, but
+`doctor` gains a code for colliding prefixes among registered projects, and
+the app shows a badge on such a project.
 
 Rejected handles:
 - **A path.** It breaks the module note's property (§2.1 d).
-- **An opaque id.** Nobody can read it, and it would not match tmux or
-  `ListAgents`.
-- **The basename.** It is the prefix's default anyway. The prefix is the
-  same value with the override honoured.
+- **The prefix** (above).
+- **An opaque id.** Nobody can read it.
 
 ### 3.3 Frozen schemas
 
@@ -232,12 +300,15 @@ definitions don't"* [source]. So:
   re-lists. It can still use qualified slugs in the fields it already has,
   because those are free strings.
 - **The same capability-line mechanism advertises the form**, appended to
-  `list_places` and `place_status` results: *"Places in other projects are
-  addressed `<project>:<slug>`; list_projects lists them."*
+  `list_places` and `place_status` results **only when reach is not `off`**,
+  and **once per session**: the first such result carries it, later ones do
+  not. Text: *"Places in other projects are addressed `<project>:<slug>`;
+  list_projects lists them."* A line on every result would be noise in every
+  session that never leaves its repo.
 - **`list_places` stays local.** Its contract is "this repository", and a
   caller that iterates it to act on every place must not suddenly act on
-  other repos. Each entry gains a `project` field (additive), so an agent can
-  see which prefix it is in.
+  other repos. Each entry gains a `project` field (additive): the registry
+  name, or null in an unregistered repo.
 - **Phase 3 adds `project` to `create_worktree`.** That is a schema change.
   An old cached schema simply lacks the parameter, and a call without it
   keeps today's meaning. **[inferred]** No client is known to reject an
@@ -249,10 +320,12 @@ definitions don't"* [source]. So:
 ```json
 {
   "projects": [
-    { "project": "alpha", "root": "…/alpha", "this": true,
-      "places": [ { "slug": "(main)", "address": "alpha:(main)", "branch": "main", "lifecycle": null },
-                  { "slug": "lane-x", "address": "alpha:lane-x", "branch": "lane-x", "lifecycle": "saved" } ] },
-    { "project": "beta", "root": "…/beta", "places": [ … ] },
+    { "project": "alpha", "this": true,
+      "places": [ { "slug": "(main)", "address": "alpha:(main)", "branch": "main", "lifecycle": null,
+                    "sessions": ["alpha-(main)"] },
+                  { "slug": "lane-x", "address": "alpha:lane-x", "branch": "lane-x", "lifecycle": "saved",
+                    "sessions": ["alpha-lane-x"] } ] },
+    { "project": "beta", "places": [ … ] },
     { "project": "client", "private": true }
   ],
   "note": "Summary only. place_status <address> for one place's live state."
@@ -260,10 +333,15 @@ definitions don't"* [source]. So:
 ```
 
 - The **cheap index** only: `place_index()` plus the declared sidecar, which
-  is the same budget `resources/list` already keeps (§7).
-- A `private` project appears as **one row with no places**, so the agent can
-  tell the user why it cannot see it. Q3 asks whether it should be invisible
-  instead.
+  is the same budget `resources/list` already keeps (§7). `sessions` is what the
+  name that `session_name` gives, a pure function with no tmux call.
+- **No `root`, unless reach is `full`.** A root is a home-directory path.
+  Through a profile it can land in another model account's conversation, and
+  read-only reach has no use for it. With `full`, `show_doc` and
+  `create_worktree` need it, so it is returned.
+- A `private` project is **a bare row**: its name, `"private": true`, and
+  nothing else (decided). Addressing into it is refused with a reason that
+  names it: *"client is private"*.
 - A registered root that no longer exists is one row with `error`, as
   `list_workspace` already does for one dead repo.
 
@@ -283,24 +361,57 @@ recipient's repo log**:
   module note names, *"needs no `$HOME` — a sandboxed agent whose home is not
   the user's still reaches it."* It would also make every repo's mail one
   file set, so one project's 500-message cap evicts another's.
-- **Risk [inferred]:** a writer in a **sandbox** may be allowed its own git
-  common dir and nothing else. Codex's auto-review sandbox is the case the
-  module note cites. A cross-project `report` from such an agent could get
-  `EPERM` on the foreign log. P2 must measure this on Codex once tokens allow.
-  If it holds, the error has to say so plainly (*"your sandbox cannot write
-  to beta's log; ask the user or report to your (main)"*) rather than surface
-  a raw `os error 1`.
+- **Risk: whose sandbox.** The write is done by the **`worktrees mcp`
+  process**, not by the agent's shell. What matters is whether that process
+  runs inside the harness's sandbox.
+  - **Codex.** Its auto-review launch adds exactly one writable root, the
+    lane's own git common dir: `sandbox_workspace_write.writable_roots =
+    [<own git_common>]` **[source: `codex.rs` `permission_flags`]**. That
+    binds Codex's **shell tool**. Whether it also binds the MCP servers Codex
+    spawns is **not measured**. **[inferred]** They are started by Codex
+    itself, outside the per-command sandbox, so the write probably succeeds.
+    P2 measures it before shipping. An auto-review Codex lane in `beta`
+    reports to `alpha:(main)`; check that the server's write lands, and that
+    a shell `touch` into `alpha/.git` from the same lane is refused, so the
+    check is known to be able to fail. Codex had no tokens for this round.
+  - **Claude.** Claude's sandbox setting covers its Bash tool. worktrees
+    does not turn it on in any launch. A Claude whose user enabled it is in
+    scope for the same measurement, but not a blocker.
+  - **If a write is refused,** the error says so plainly (*"this session
+    cannot write to beta's message log (sandbox?); report to your own
+    (main) instead"*) rather than surfacing a raw `os error 1`.
 
 ### 4.2 `from` across a project boundary
 
 - `from` stays **derived, never an argument**. Today it is `caller_place().slug`.
 - **When the recipient is in another project**, the server writes
-  `from: "<my prefix>:<my slug>"`. Local messages keep the bare slug, so
+  `from: "<registry name>:<my slug>"`. The name comes from the registry entry
+  whose root is the caller's canonical `main_root` (§3.2), never from the
+  prefix and never from an argument. Local messages keep the bare slug, so
   nothing in an existing log changes meaning.
-- A reply needs no new rule. `report {to: <the from it received>}` is already
+- **`to` is stored bare in the recipient's log.** The file name's
+  `hex(to)` and the `.read/<hex(to)>/` markers keep working unchanged,
+  because the recipient reads its log by its own bare slug.
+- **`reply_to` is validated against the SENDER's log for a cross-project
+  post.** `messages::post` checks that `reply_to` names a message in the log
+  it is **writing** **[source: `messages.rs` `post`]**. For a cross-project
+  reply that is the recipient's log. But the message being answered sits in
+  the replier's own log, where it arrived. Checked as today, A→B→A fails
+  with *"reply_to names no message in the log"*. So `post` gains a
+  `reply_log: &Path` parameter, the caller's own log for a cross-project
+  post and the target log otherwise, and checks there. Checking somewhere is
+  better than recording it unchecked: the id is still a real message the
+  replier received, and a typo is still refused. The bats round trip
+  (P2) is the witness, and it must fail on the unchanged `post` first.
+- A reply then needs no other rule. `report {to: <the from it received>}` is
   a valid address, qualified or not.
 - `messages::post`'s `check_slug` accepts `:` already (only length and
-  control characters are checked) [source]. No storage change is needed.
+  control characters are checked) [source]. Nothing about storage changes.
+- **Own-place guards compare resolved pairs.** `report` refuses `to ==
+  me.slug` and `wait until: idle` refuses the caller's own place, both by
+  comparing **bare strings** today **[source: `mcp.rs`]**. A
+  self-qualified `alpha:(main)` from `alpha`'s `(main)` would pass both. Both
+  guards compare the resolved `(project root, slug)` pairs instead.
 - `MESSAGE_NOTE` gains: *"A `from` with a `project:` prefix came from another
   repository."* That is the honest framing for an agent that has to weigh it.
 - **Trust stays at the user account,** as the module note already says:
@@ -340,8 +451,8 @@ So after P1:
 
 | Capability | Default | Gate |
 |---|---|---|
-| `list_projects`, `place_status`/`wait idle` on a foreign place | **On** for registered, non-private projects | User setting `cross_project` (`off` / `read` / `full`; default `read`) |
-| `report` to a foreign place (P2) | On with `read` | It only appends to a log, which is the same tier it has locally (it is in the read-only tier today) |
+| `list_projects`, `place_status`/`wait idle` on a foreign place | **Off** until the user turns it on (decided) | User setting `cross_project` (`off` / `read` / `full`; **default `off`**). An after-update offer in `offers.ts` deep-links to it. |
+| `report` to a foreign place (P2) | With `read` | It only appends to a log, which is the same tier it has locally (it is in the read-only tier today) |
 | `send`, `create_worktree`, `close_session`, `set_note`/`set_pin`/`set_lifecycle` on a foreign place (P3) | **Off** | `cross_project = "full"` **and** the server's own `--mutations` |
 | `remove_worktree` on a foreign place | **Never** | Not offered at any setting. It is the one path that can destroy commits (`force` + `--branch`, AGENTS.md). Cross-project is exactly where an agent knows least about another repo's branches. |
 | Anything cross-project inside an automation run | **Never** | `in_run` narrows to the local project, the same way `HIDDEN_IN_RUN` narrows tools |
@@ -350,11 +461,13 @@ So after P1:
   own reach. The precedent is `--mutations`: *"enabling it is a profile
   decision the user makes once, not something a session can grant itself."*
   A profile may narrow the setting (`cross_project = "off"` for a
-  client-work profile), never widen it.
+  client-work profile), never widen it. **Profile narrowing ships in P1**,
+  with the setting itself.
 - **The setting is read at server start,** like `--mutations` and `in_run`.
-  A change reaches new sessions, not running ones. Settings must say so,
-  because AGENTS.md records that "an install upgrades nobody already
-  running".
+  A change reaches new sessions, not running ones. Settings shows
+  *"restart sessions to apply"* beside the control, as the MCP setup wizard
+  does for `--mutations`. AGENTS.md records why: the server a session holds
+  is the one it started with.
 
 ### 5.2 `private` projects
 
@@ -395,7 +508,11 @@ argv channel:
 Each of these is evaluated against the **target** project, never the caller's:
 the hub-copy refusal, `send`'s "sessions this project created" ownership rule,
 pi trust (for a P3 `create_worktree` with `provider: "pi"`), and the
-`.pi/mcp.json` shadow check. Each is a one-line change of which `Project` is
+`.pi/mcp.json` shadow check. **The hub-copy refusal reaches `report` in
+P2:** `report` and `messages` carry `readOnlyHint: false` **[source:
+`mcp.rs`]**, so the guard in `call` already applies to them. It must test
+the target's root for a cross-project `report`, because writing mail into a
+hub copy is lost on the next pull just as any other write is. Each is a one-line change of which `Project` is
 passed. Each needs its own test, because getting it wrong looks like working:
 the caller's project passes the check for a target that should fail it.
 
@@ -456,10 +573,25 @@ prevent.
 - **The address is built by core,** not the frontend. It goes in a
   `mention::address(project, slug)` beside `mention::mention`, for the same
   reason the token is: two producers of one string drift.
-- **The text form needs no MCP resource,** so it can reach **Codex and pi
-  panes too**. Today those panes get no drop target at all. Those panes can
-  only receive typed text, so this would go through `tmux::paste_to_ai` with
-  the provider. Whether to widen the drop target in P1 is Q5.
+- **The text form needs no MCP resource, so P1 takes it to Codex and pi
+  panes too** (decided). Today `TerminalPane` gives only Claude panes a drop
+  target. Three things change for the other two:
+  - `TerminalPane` sets the drop target for every harness, and `resolveDrop`
+    picks **token or address** per pane. A Claude pane with a same-project
+    place gets the token, as today. Everything else gets the address,
+    including a same-project drop into Codex or pi, which has no `@`-resource
+    either.
+  - `drop_reference` passes the pane's provider to `tmux::paste_to_ai`,
+    which already takes an `ai_word`. Its error text is hardcoded to "no
+    Claude running" and gets the provider's name instead.
+  - **The paste is bracketed** (`paste-buffer -p`) and never submits
+    **[source: `tmux.rs` `paste_to_ai`]**. That is what keeps a Claude
+    permission prompt from reading it as an answer. For Codex and pi the same
+    property is **not verified**. P1b refuses a drop into a Codex or pi pane
+    whose activity is `waiting` (an approval or question on screen, the same
+    reading `send` uses to refuse) until each composer is checked by hand.
+    The checks go into the existing `docs/pi-manual-checks.md` and its Codex
+    counterpart.
 - **When reach is off or the target is private,** the drop is still refused,
   with the reason: *"cross-project reach is off (Settings → Agents)"* or
   *"beta is private"*. Never with today's sentence, which will no longer be
@@ -493,11 +625,12 @@ reorder writes anything a session can see.
 - **Core:** `drop_reference` unit tests for the repo split. Same-named slugs
   in two repos with different `profile_id` stamps must resolve the
   **target's**. The test must be shown to fail on the unsplit code first.
-- **Real app, end to end** (the lesson of `docs/adding-a-harness.md`: "core
-  reports it" is not "the user sees it"). Use `sandbox.sh --app`, two scratch
+- **Real app, end to end** (AGENTS.md's rule that walking `docs/adding-a-harness.md` exists to
+  enforce: "Core reports it" is not "the user sees it"). Use `sandbox.sh --app`, two scratch
   projects, and a Claude in A. Drag B's lane onto A's pane, see the address
   arrive in the composer, send it, and watch the agent call `place_status` and
-  get B's state. Repeat with reach off and see the refusal notice.
+  get B's state. Repeat with a Codex pane and a pi pane in A, and with reach
+  off to see the refusal notice.
 
 ---
 
@@ -537,45 +670,72 @@ Consequences:
 
 ### P0 — the registry (no agent-visible change)
 
-- **Core:** `registry.rs` (read/add/remove/reorder, temp+rename, lenient
-  read), and `USER_ONLY_KEYS` for `cross_project`.
-- **App:** `read_projects`/`write_projects` go through core. A one-time
-  migration copies the app's file.
-- **CLI:** `worktrees projects [ls|add|rm]`, which runs outside a repo like
-  `mcp --status`.
-- **Tests:** core unit tests (migration, idempotent add, a missing root);
-  bats `projects` with two scratch repos; `cargo test -p app --lib` for the
+- **Core:** `registry.rs` (read/add/remove/reorder/rename/set-private;
+  read-modify-write under a lock, then temp + rename; lenient read;
+  `{root, name, private?}` entries with unique names seeded from the
+  prefix); `USER_ONLY_KEYS` for `cross_project`; a `doctor` code for nested
+  entries.
+- **App:** `read_projects`/`write_projects`/`reorder_projects` go through
+  core and re-read after every write. Union-merge migration of the app's
+  file.
+- **CLI:** `worktrees projects [ls|add|rm|rename]`, which runs outside a repo
+  like `mcp --status`.
+- **Tests:** core unit tests (union-merge keeps both sides; idempotent add;
+  a name collision suffixes or refuses; reorder keeps an entry the caller did
+  not know about; a missing root); a lock test where an `add` between a
+  reorder's read and write survives, shown to fail without the lock; bats
+  `projects` with two scratch repos; `cargo test -p app --lib` for the
   migration.
 - **Verified by:** the real app (sandbox) reorders and adds projects with the
   nav unchanged, and `worktrees projects ls` prints the same order.
 
-### P1 — read-only reach, addressing, the drag-drop address
+### P1a — resolver and addressing (no UI)
 
-- **mcp.rs:** a `Server.reach: Vec<Project>` resolver (registry minus
-  private, or empty when off, in a run, or private); `resolve(addr) ->
-  (Project, slug)`; `list_projects`; qualified `slug` in `place_status` and
-  `wait idle`; `project` field on `list_places` rows; capability line;
+- **mcp.rs:** a `Server.reach` resolver (the registry minus private
+  entries; empty when the setting or the profile says `off`, inside a run, in
+  an unregistered repo, or when the caller's own project is private);
+  `resolve(addr) -> (Project, slug)` keyed on registry names, exact local
+  slug first; `list_projects` (no `root` below `full`; private as a bare row);
+  qualified `slug` in `place_status` and `wait idle`; own-place guards on
+  resolved pairs; `known_slug` on `place_index()`; `project` field on
+  `list_places` rows; the once-per-session capability line; the
   instructions line (§9).
-- **Core:** `mention::address`; prefix-collision detection plus a `doctor`
-  code.
-- **App:** `drop_reference` split into `from_repo`/`into_repo`; foreign drop
-  resolves to the address; refusals with Settings/private hints; Settings →
-  Agents gets the `cross_project` select and per-project `private` toggles
-  (in the project sheet).
-- **Tests:** mcp unit tests (bare slug unchanged; qualified resolves;
-  collision refused; private invisible both ways; in-run refuses; reach `off`
-  refuses with a reason); bats with two scratch repos driving `worktrees mcp`
-  over stdio as §10 did; a `dnd` check script; the `drop_reference`
-  repo-split test.
-- **Verified by:** the §6.5 end-to-end run, plus `place_status` from A's
-  Claude on a busy lane in B showing the same `activity` as B's nav dot.
+- **Core:** `mention::address`; `cross_project` setting with profile
+  narrowing (decided for P1); the prefix-collision `doctor` code.
+- **Tests:** mcp unit tests (bare slug unchanged; qualified resolves; a
+  repo-set prefix cannot claim another project's name; private refused with
+  its name; in-run, `off` and profile-`off` refuse with a reason;
+  `alpha:(main)` from `alpha`'s `(main)` hits the own-place guard); bats with
+  two scratch repos driving `worktrees mcp` over stdio as §10 did.
+- **Verified by:** `place_status` from A's Claude on a busy lane in B showing
+  the same `activity` as B's nav dot, in the sandbox app.
+
+### P1b — Settings, private, and the drag-drop address
+
+- **App:** Settings → Agents gets the `cross_project` select with *"restart
+  sessions to apply"*; the project sheet gets the `private` toggle and the
+  rename; a collision badge on a project header whose prefix collides; an
+  `offers.ts` card for the new setting (decided), dismissed by fingerprint
+  like the others and guarded by `offers-check.mjs`.
+- **Drag and drop:** `drop_reference` split into `from_repo`/`into_repo`;
+  the drop target on every harness's pane; token or address chosen per pane;
+  refusals with Settings/private hints; Codex/pi `waiting` refused; mock
+  harness updated.
+- **Tests:** a `dnd` check script over the real `resolveDrop`; the
+  `drop_reference` repo-split test, shown to fail first; Codex and pi
+  composer checks by hand.
+- **Verified by:** the §6.5 end-to-end run, in all three harnesses.
 
 ### P2 — cross-project messaging
 
 - **mcp.rs:** `report` to a qualified `to` writes the target log with a
   qualified `from`; `wait until: message` accepts a qualified filter;
   `MESSAGE_NOTE` updated.
-- **Tests:** bats round trip A→B→A with `reply_to`; a message from A is
+- **mcp.rs/core:** `messages::post` checks a cross-project `reply_to`
+  against the sender's log (§4.2); `to` stored bare; the target's hub-copy
+  refusal applies to `report`.
+- **Tests:** bats round trip A→B→A with `reply_to`, shown to fail on the
+  unchanged `post` first; a message from A is
   invisible in A's own `messages`; a private target refuses; a sandbox-write
   failure gives the plain error (unit test with an unwritable dir).
 - **Verified by:** a Claude in A and a pi or Codex lane in B exchanging a
@@ -613,9 +773,9 @@ Consequences:
   look (the user names another repo, a dependency is being changed
   elsewhere), the address form, that `list_places` stays local, and that a
   qualified `from` is a colleague in another repo, not the user.
-- **App:** the Settings select and `private` toggles (P1); the drag-drop
-  changes (§6); a collision badge on a project header whose prefix collides
-  (P1). There is no message-log UI today and this proposal does not add one.
+- **App:** the Settings select, the `private` toggle and rename, the
+  after-update offer, the drag-drop changes (§6) and the collision badge, all
+  in P1b. There is no message-log UI today and this proposal does not add one.
 
 ---
 
@@ -638,26 +798,25 @@ Consequences:
 
 ## 11. Open questions
 
-1. **Registry owner.** Should core own `~/.config/worktrees/projects.json`
-   with the app as a client (recommended), or should core read the app's
-   file? The second avoids a migration, but leaves CLI-only users with no
-   list and ties core to the bundle identifier.
-2. **Default reach.** Should it be `read` (recommended: the app already shows
-   every project's places side by side, and reading is what an orchestrator
-   needs first), or `off` until turned on in Settings?
-3. **Private projects in `list_projects`.** Should one appear as a bare row
-   (recommended: the agent can tell the user why it cannot see it), or not
-   at all (the name itself may be sensitive)?
-4. **The project handle.** Is the session prefix the right handle
-   (recommended), knowing that a prefix collision makes a project
-   unaddressable until a prefix is set? Or should the handle be a registry
-   name the user can edit?
-5. **Drag-drop reach in P1.** Should the drop target widen to Codex and pi
-   panes in P1, since the text address works for them? Or stay Claude-only
-   until P4?
+1. **Registry owner.** Core-owned `~/.config/worktrees/projects.json`, or
+   core reading the app's file? **Decided:** core, at user level, read by
+   the CLI, the MCP server and the app. The app's file migrates in by
+   union-merge, and registering a project is the consent act.
+2. **Default reach.** `read` or `off`? **Decided:** `off`. Read-only reach is
+   an opt-in offered after the update by an `offers.ts` card, and mutations
+   are a second opt-in on top.
+3. **Private projects in `list_projects`.** A bare row, or invisible?
+   **Decided:** a bare row with the name only. Addressing into one is refused
+   with a reason that names it.
+4. **The project handle.** **Settled by the review:** the registry entry's
+   user-tier `name`, seeded from the prefix and unique by construction
+   (§3.2). The prefix is repo-supplied and could be spoofed.
+5. **Drag and drop in P1.** **Decided:** all three harnesses, Claude, Codex
+   and pi, get the plain-text address in P1.
 6. **`remove_worktree`.** "Never across projects" is the recommendation.
    Should `full` ever allow it with `confirm: true` plus the project name
-   typed out?
-7. **A profile narrowing reach.** Is a per-profile `cross_project` override
-   (narrow only) wanted in P1, or later, when a client-work profile asks for
-   it?
+   typed out? **Open.**
+7. **A profile narrowing reach.** **Settled by the review:** in P1 (P1a).
+8. **The Codex sandbox write (§4.1).** Does Codex's auto-review sandbox bind
+   the MCP server it spawns, or only its shell? **Open**, and measured in P2
+   before cross-project `report` ships.
