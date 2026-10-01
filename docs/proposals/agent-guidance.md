@@ -148,9 +148,14 @@ Taken on 2026-09-30, reviewing phase 1 (#385):
   **[source: `core/src/context/world_state/tools.rs`]**. Loaded directly, the
   whole text rides on the namespace (cap 512 KiB) **[source: `core/src/tools/handlers/mcp.rs`]**.
   **Consequence: the first 250 characters must carry the rule on their own.**
-- `codex debug prompt-input` does not start MCP servers, so it could not show
-  this. It is source-only, and not observed live **[observed: absent from the
-  rendered prompt]**.
+- `codex debug prompt-input` does not render the namespace descriptions, so
+  it could not show this; it is source-only. **Correction (phase 2 review):**
+  an earlier draft added that prompt-input "does not start MCP servers". That
+  claim came from the prompt text, not from the processes, and it is wrong.
+  prompt-input STARTS every configured MCP server: a marker server was
+  launched, ~1 s against ~0.12 s with none **[observed]**. Per server,
+  `-c mcp_servers.<name>.enabled=false` prevents it; `mcp_servers={}` does
+  not.
 - **`-c developer_instructions="…"` → the first `developer` message**, ahead of
   the skills block **[observed]**. Worktrees already passes per-launch `-c`
   (`harness.rs` `Codex::launch_args`). Caveat: `-c` *overrides* a key
@@ -669,10 +674,25 @@ dir). The candidate text still produced 5 of 5 through the tooling.
   not an app-memory override, because `create_worktree` launches from the
   CLI process an MCP client started, which an app override never reaches.
 - `AiLaunch.guidance` is filled in `ops::ai_launch_for` (managed repos only)
-  and emitted by `launch_cmd` after every adapter's head words. Codex's probe
-  runs per launch in the place (≈0.15 s), so a repo's own
-  `.codex/config.toml` counts. An unfamiliar first developer block means
-  "do not override".
+  and emitted by `launch_cmd` after every adapter's head words.
+- **The Codex probe runs only at a Codex launch, never anywhere else.**
+  - It starts Codex's MCP servers (see the §2.2 correction), so it switches
+    off every server it can see configured, and runs in the place.
+  - A repo's own `.codex/config.toml` counts only when Codex trusts the
+    project.
+  - The answer is cached in `$XDG_STATE_HOME/worktrees/codex-instructions.json`,
+    keyed on the modification times of `$CODEX_HOME/config.toml`, the place's
+    `.codex/config.toml`, and the Codex binary.
+  - Status, `guide --status`, `doctor` and the app report the last launch's
+    answer and never probe.
+  - An unfamiliar first developer block means "do not override".
+- The guard reads the settings on EVERY call, so the Settings toggle takes
+  effect on the next command, not the next launch. It also returns before any
+  repository lookup when the command names none of
+  `worktree`/`checkout`/`switch`.
+- The guard is delivered only when a `worktrees` CLI that HAS it is on PATH
+  (`guidance::guard_bin` asks it for `guide --rules`). An older CLI would
+  answer every Bash call with an error.
 - The guard is `worktrees guard pretooluse`, run by the plugin's hook. Any
   failure allows.
 - `worktrees guide [--status --json | --rules]`; doctor's `guidance-skipped`

@@ -15,12 +15,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   - pi gets `--skill` plus the rule through `--append-system-prompt`;
   - Codex gets the rule as `developer_instructions` — but only when you have
     not set your own. `-c` would replace yours, so worktrees asks Codex first
-    (`codex debug prompt-input`, no model call) and otherwise leaves it out.
-    `worktrees doctor` says so when it does.
+    (`codex debug prompt-input`, no model call), and otherwise leaves it out.
+    It asks only when Codex launches, with your MCP servers switched off for
+    the question, and remembers the answer until your Codex config changes.
+    `worktrees doctor` says when it was left out.
 - **An optional guard for Claude, off by default.** Switched on in
   `~/.config/worktrees/agent-guidance.json` (`"guard": true`), the same
   plugin adds a hook that refuses `git worktree add` anywhere and a new
-  branch in `(main)`, and says to use a place instead. A lane moving its own
+  branch in `(main)`, and says to use a place instead. Switching it off takes
+  effect on the very next command. A lane moving its own
   place to another branch is never refused.
 - **`worktrees guide`** prints what agents are told: the skill, `--rules` for
   the one-line rule, `--status [--json]` for what each installed agent gets.

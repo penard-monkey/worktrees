@@ -85,6 +85,14 @@ The same derivation must reach **all four** readers. Keep them on one reader
       modal guard.
 - [ ] Claude↔Claude uses Claude's own messaging; everything else goes over the
       MCP message log — say which applies.
+- [ ] **Agent guidance** (`guidance::delivery`): how the harness takes the
+      `worktrees` skill and the rule per launch — a plugin, a skill flag, a
+      prompt-append flag, or a config key that must not clobber the user's own
+      value. `delivery_knows_every_registered_harness` fails until it has
+      one. Check whether the harness shows MCP server `instructions` at all
+      (pi with `direct` exposure does not). SEE the skill loaded in a live
+      launch, and check what any detection step STARTS: `codex debug
+      prompt-input` starts every MCP server.
 
 ## 4. Security (ADR 0001)
 

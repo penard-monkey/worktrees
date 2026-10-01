@@ -44,12 +44,16 @@ agent_dir() { ls -d "$HOME"/.local/share/worktrees/agent/*/ | head -n1; }
   cat > "$SHIMS/codex" <<SH
 #!/usr/bin/env bash
 if [ "\$1 \$2" = "debug prompt-input" ]; then
+  echo "\$@" >> "$BATS_TEST_TMPDIR/probe.log"
   cat "$BATS_TEST_TMPDIR/prompt-input.json"; exit 0
 fi
 echo "\$@" >> "$BATS_TEST_TMPDIR/codex.log"
 SH
   chmod +x "$SHIMS/codex"
   echo '[{"type":"message","role":"developer","content":[{"type":"input_text","text":"<skills_instructions> x"}]}]' > "$BATS_TEST_TMPDIR/prompt-input.json"
+  # The probe STARTS Codex's MCP servers, so it switches off each one it can see.
+  mkdir -p "$HOME/.codex"
+  printf '[mcp_servers.worktrees]\ncommand = "worktrees"\n\n[mcp_servers."odd.name"]\ncommand = "x"\n' > "$HOME/.codex/config.toml"
   WORKTREES_AI_CMD=codex run_wt new feat-cx
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane0_cmd 'repo-feat-cx~agent~codex')" == *"-c "*"developer_instructions="*"Managed by worktrees:"* ]]
@@ -58,6 +62,11 @@ SH
   WORKTREES_AI_CMD=codex run_wt new feat-cy
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane0_cmd 'repo-feat-cy~agent~codex')" != *"developer_instructions"* ]]
+  grep -q 'mcp_servers.worktrees.enabled=false' "$BATS_TEST_TMPDIR/probe.log"
+  grep -q 'mcp_servers."odd.name".enabled=false' "$BATS_TEST_TMPDIR/probe.log"
+  probes="$(wc -l < "$BATS_TEST_TMPDIR/probe.log")"
+  [ "$probes" -eq 2 ]
+  # Status and doctor report the last launch's answer; they never probe.
   run_wt guide --status
   [[ "$output" == *"Codex"*"skipped: you set your own developer_instructions"* ]]
   run_wt doctor --json
@@ -66,10 +75,20 @@ SH
   # Turned off on purpose: nothing to report.
   WORKTREES_AGENT_GUIDANCE=off run_wt doctor --json
   [[ "$output" != *"guidance-skipped"* ]]
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/probe.log")" -eq "$probes" ]
+  # Reopening the same place reuses the cached answer while nothing changed.
+  run_wt close feat-cy
+  ! tmux_session_exists 'repo-feat-cy~agent~codex'
+  WORKTREES_AI_CMD=codex run_wt open feat-cy
+  [ "$status" -eq 0 ]
+  tmux_session_exists 'repo-feat-cy~agent~codex'
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/probe.log")" -eq "$probes" ]
 }
 
 @test "guidance: the guard refuses a new branch in (main) and a raw worktree add, nothing else" {
   run_wt new feat-x            # one place: the repo is managed
+  mkdir -p "$HOME/.config/worktrees"
+  echo '{"guard": true}' > "$HOME/.config/worktrees/agent-guidance.json"
   hook() { printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$1\"},\"cwd\":\"$2\"}" | "$WT_BIN" guard pretooluse; }
   run hook "git checkout -b fix" "$REPO"
   [ "$status" -eq 0 ]
@@ -80,6 +99,12 @@ SH
   [[ "$output" == *'"permissionDecision":"deny"'* ]]
   run hook "git status" "$REPO"
   [ -z "$output" ]
+  # The toggle is LIVE: the hook reads the settings on every call, so turning
+  # the guard off allows the very next command, with no relaunch.
+  echo '{"guard": false}' > "$HOME/.config/worktrees/agent-guidance.json"
+  run hook "git checkout -b fix" "$REPO"
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  echo '{"guard": true}' > "$HOME/.config/worktrees/agent-guidance.json"
   # Not a repository, or garbage on stdin: allow, silently, exit 0.
   run hook "git checkout -b fix" "$BATS_TEST_TMPDIR"
   [ "$status" -eq 0 ] && [ -z "$output" ]

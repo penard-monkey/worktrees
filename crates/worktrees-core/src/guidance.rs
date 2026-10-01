@@ -184,7 +184,19 @@ pub fn data_root() -> PathBuf {
 }
 
 pub fn materialize() -> Result<Materialized, String> {
-    materialize_in(&data_root(), crate::profile::worktrees_bin().as_deref())
+    materialize_in(&data_root(), guard_bin().as_deref())
+}
+
+/// The `worktrees` the guard's hook would run — only when it HAS the guard. An
+/// older CLI on PATH (the app links core in-process, so this is not the app)
+/// would answer every Bash call with an error; `guide --rules` exists exactly
+/// when `guard` does, and answers from any directory.
+pub fn guard_bin() -> Option<PathBuf> {
+    let bin = crate::profile::worktrees_bin()?;
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(["guide", "--rules"]);
+    let out = crate::proc::run_deadline(cmd, 5).ok()?;
+    (out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("Managed by worktrees:")).then_some(bin)
 }
 
 pub fn materialize_in(data_root: &Path, bin: Option<&Path>) -> Result<Materialized, String> {
@@ -285,18 +297,141 @@ pub fn codex_has_own_instructions(prompt_input: &str) -> Option<bool> {
     }
 }
 
-/// Run `codex debug prompt-input` in `dir` (it renders the prompt locally and
-/// makes no model call; ~0.15s) and read the answer. In the PLACE, so a
-/// repository's own `.codex/config.toml` counts too. Every failure is `None`.
+/// Run `codex debug prompt-input` in `dir` and read the answer. It renders the
+/// prompt locally and makes no model call — but it STARTS every configured MCP
+/// server (measured: a marker server was launched, ~1 s against ~0.12 s with
+/// none), so every server we can see configured is switched off for the probe
+/// (`-c mcp_servers.<name>.enabled=false`; `mcp_servers={}` does not work), and
+/// the probe runs only at a Codex LAUNCH, cached ([`codex_own_for_launch`]) —
+/// never from a status screen, `doctor`, or a poll. In the PLACE, so a repo's
+/// own `.codex/config.toml` counts when Codex trusts the project. Every failure
+/// is `None`.
 pub fn probe_codex(dir: &str) -> Option<bool> {
     let bin = crate::profile::codex_bin()?;
     let mut cmd = std::process::Command::new(bin);
     cmd.args(["debug", "prompt-input"]).current_dir(dir);
+    for name in codex_mcp_server_names(dir) {
+        cmd.arg("-c").arg(format!("mcp_servers.{}.enabled=false", toml_key(&name)));
+    }
     let out = crate::proc::run_deadline(cmd, 10).ok()?;
     if !out.status.success() {
         return None;
     }
     codex_has_own_instructions(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `$CODEX_HOME` (default `~/.codex`).
+fn codex_home() -> PathBuf {
+    std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex"))
+}
+
+/// The MCP server names in Codex's user config and the place's project config
+/// — READ only (the `~/.claude.json` rule applies to every harness's files).
+fn codex_mcp_server_names(dir: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for f in [codex_home().join("config.toml"), Path::new(dir).join(".codex/config.toml")] {
+        let Ok(text) = std::fs::read_to_string(&f) else { continue };
+        let Ok(v) = text.parse::<toml::Table>() else { continue };
+        if let Some(servers) = v.get("mcp_servers").and_then(|s| s.as_table()) {
+            names.extend(servers.keys().filter(|k| !names.contains(*k)).cloned().collect::<Vec<_>>());
+        }
+    }
+    names
+}
+
+/// A TOML dotted-key segment: bare when it can be, quoted otherwise.
+fn toml_key(k: &str) -> String {
+    if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        k.to_string()
+    } else {
+        format!("\"{}\"", k.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// What a cached Codex answer depended on: the place, and the modification
+/// times of everything the probe read that a user edits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexKey {
+    pub place: String,
+    pub codex_cfg: Option<i64>,
+    pub place_cfg: Option<i64>,
+    pub bin: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexEntry {
+    pub key: CodexKey,
+    pub own: Option<bool>,
+    pub at: i64,
+}
+
+fn mtime(p: &Path) -> Option<i64> {
+    let m = std::fs::metadata(p).ok()?.modified().ok()?;
+    m.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs() as i64)
+}
+
+fn codex_key(place: &str) -> CodexKey {
+    CodexKey {
+        place: place.to_string(),
+        codex_cfg: mtime(&codex_home().join("config.toml")),
+        place_cfg: mtime(&Path::new(place).join(".codex/config.toml")),
+        bin: crate::profile::codex_bin().as_deref().and_then(mtime),
+    }
+}
+
+/// The cached answer for exactly this key, or `None` when it must be probed.
+pub fn cached(entries: &[CodexEntry], key: &CodexKey) -> Option<Option<bool>> {
+    entries.iter().find(|e| &e.key == key).map(|e| e.own)
+}
+
+/// `entries` with `e` replacing whatever its place had.
+pub fn store(mut entries: Vec<CodexEntry>, e: CodexEntry) -> Vec<CodexEntry> {
+    entries.retain(|x| x.key.place != e.key.place);
+    entries.push(e);
+    entries
+}
+
+pub fn newest(entries: &[CodexEntry]) -> Option<&CodexEntry> {
+    entries.iter().max_by_key(|e| e.at)
+}
+
+/// `$XDG_STATE_HOME/worktrees/codex-instructions.json` — machine-generated,
+/// safely deletable.
+fn codex_cache_path() -> Option<PathBuf> {
+    crate::init::state_dir().map(|d| d.join("codex-instructions.json"))
+}
+
+pub fn codex_cache() -> Vec<CodexEntry> {
+    codex_cache_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// The answer a Codex launch in `place` acts on: cached while nothing it
+/// depended on has changed, probed (and stored) otherwise.
+pub fn codex_own_for_launch(place: &str) -> Option<bool> {
+    let key = codex_key(place);
+    let entries = codex_cache();
+    if let Some(own) = cached(&entries, &key) {
+        return own;
+    }
+    let own = probe_codex(place);
+    if let Some(path) = codex_cache_path() {
+        let next = store(entries, CodexEntry { key, own, at: crate::sysclock::now_epoch() });
+        if let (Some(dir), Ok(body)) = (path.parent(), serde_json::to_string_pretty(&next)) {
+            let _ = std::fs::create_dir_all(dir);
+            let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+            if std::fs::write(&tmp, body).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+    own
 }
 
 // ── what a launch gets ──────────────────────────────────────────────────────
@@ -312,6 +447,8 @@ pub enum Delivery {
     /// Not delivered, and why (Codex with the user's own instructions, an
     /// unreadable Codex, files that could not be written).
     Skipped { reason: String },
+    /// Codex, before any launch has asked it: decided at its next launch.
+    Unchecked,
 }
 
 /// The words for one launch of `harness` (`provider::*.id`). `codex_own` is
@@ -512,6 +649,10 @@ pub struct Status {
     /// [`VERSION`].
     pub version: u32,
     pub settings: Settings,
+    /// Whether the guard can be delivered: it needs a `worktrees` CLI that has
+    /// it ([`guard_bin`]). Asked for but unavailable, Claude gets the plain
+    /// plugin.
+    pub guard_available: bool,
     pub settings_path: String,
     /// The materialised directory, when it could be written.
     pub dir: Option<String>,
@@ -523,34 +664,34 @@ pub struct Status {
     pub rules: String,
 }
 
-/// The machine-level picture. `codex_dir` is where Codex's own config is
-/// probed from (a repo's `.codex/config.toml` counts there); `None` probes
-/// from the home directory, i.e. the user's config alone.
-pub fn status(codex_dir: Option<&str>) -> Status {
+/// The machine-level picture. It never probes Codex (that starts its MCP
+/// servers): Codex's line is the answer its most recent launch acted on, or
+/// [`Delivery::Unchecked`] before any.
+pub fn status() -> Status {
     let s = settings();
     let (m, error) = match materialize() {
         Ok(m) => (Some(m), None),
         Err(e) => (None, Some(e)),
     };
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let last = codex_cache();
     let harnesses = [crate::provider::CLAUDE, crate::provider::CODEX, crate::provider::PI]
         .into_iter()
         .map(|pv| {
             let installed = crate::harness::by_id(pv.id).is_some_and(|a| a.installed().is_ok());
             let delivery = match &m {
                 None => Delivery::Skipped { reason: error.clone().unwrap_or_default() },
-                Some(m) => {
-                    let own = (pv.id == crate::provider::CODEX.id && installed && s.enabled)
-                        .then(|| probe_codex(codex_dir.unwrap_or(&home)))
-                        .flatten();
-                    delivery(pv.id, m, &s, own)
-                }
+                Some(m) if pv.id == crate::provider::CODEX.id && s.enabled => match newest(&last) {
+                    None => Delivery::Unchecked,
+                    Some(e) => delivery(pv.id, m, &s, e.own),
+                },
+                Some(m) => delivery(pv.id, m, &s, None),
             };
             HarnessStatus { id: pv.id, label: pv.label, installed, delivery }
         })
         .collect();
     Status {
         version: VERSION,
+        guard_available: m.as_ref().is_some_and(|m| m.claude_guard_plugin.is_some()),
         settings: s,
         settings_path: settings_path().to_string_lossy().into_owned(),
         dir: m.map(|m| m.dir.to_string_lossy().into_owned()),
@@ -577,16 +718,16 @@ pub fn cmd_guide(args: &[String]) -> i32 {
         print!("{SKILL_MD}");
         return 0;
     }
-    let cwd = std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned());
-    let st = status(cwd.as_deref());
+    let st = status();
     if has("--json") {
         println!("{}", serde_json::to_string(&st).unwrap_or_default());
         return 0;
     }
     println!(
-        "Agent guidance: per-launch delivery {}, guard {} ({})",
+        "Agent guidance: per-launch delivery {}, guard {}{} ({})",
         if st.settings.enabled { "on" } else { "off" },
         if st.settings.guard { "on" } else { "off" },
+        if st.settings.guard && !st.guard_available { " but unavailable: no worktrees CLI with `guard` on PATH" } else { "" },
         st.settings_path
     );
     if let Some(e) = &st.error {
@@ -597,6 +738,7 @@ pub fn cmd_guide(args: &[String]) -> i32 {
             Delivery::On { flags } => format!("delivered ({})", flags.first().map(String::as_str).unwrap_or("")),
             Delivery::Off => "off".into(),
             Delivery::Skipped { reason } => format!("skipped: {reason}"),
+            Delivery::Unchecked => "decided at its next launch".into(),
         };
         println!("  {:<7} {}{}", h.label, what, if h.installed { "" } else { " (not installed)" });
     }
@@ -624,13 +766,29 @@ pub fn cmd_guard(args: &[String]) -> i32 {
 
 /// The hook's decision for one stdin payload, as the JSON to print.
 pub fn pretooluse(input: &str) -> Option<String> {
+    pretooluse_with(input, &settings(), &|d| Project::discover(d).ok())
+}
+
+/// [`pretooluse`] with its two inputs injected. The settings are read on EVERY
+/// call, so turning the guard off takes effect on the next command — the hook
+/// lives in the launched plugin, which only a relaunch would change, and the
+/// refusal tells the model the toggle exists. A command that names none of
+/// `worktree` / `checkout` / `switch` returns before any repository lookup:
+/// this runs on every Bash call.
+pub fn pretooluse_with(input: &str, s: &Settings, discover: &dyn Fn(&Path) -> Option<Project>) -> Option<String> {
+    if !s.guard {
+        return None;
+    }
     let v: serde_json::Value = serde_json::from_str(input).ok()?;
     if v["tool_name"] != "Bash" {
         return None;
     }
     let command = v["tool_input"]["command"].as_str()?;
+    if !["worktree", "checkout", "switch"].iter().any(|w| command.contains(w)) {
+        return None;
+    }
     let cwd = v["cwd"].as_str().map(PathBuf::from).or_else(|| std::env::current_dir().ok())?;
-    let p = Project::discover(&cwd).ok()?;
+    let p = discover(&cwd)?;
     if !is_managed(&p) {
         return None;
     }
@@ -818,6 +976,52 @@ mod tests {
         assert_eq!(delivery("claude", &no_guard, &guarded, None), Delivery::On { flags: vec!["--plugin-dir".into(), "'/d/claude'".into()] });
         // Anything else (a custom --ai tool) gets nothing.
         assert_eq!(delivery("aider", &m, &on, None), Delivery::Skipped { reason: "not a harness worktrees knows".into() });
+    }
+
+    #[test]
+    fn delivery_knows_every_registered_harness() {
+        // A new harness in provider::PROVIDERS must be given a guidance channel
+        // here (or a deliberate Skipped) — docs/adding-a-harness.md says so.
+        let m = fake_m();
+        for p in crate::provider::PROVIDERS {
+            assert_ne!(
+                delivery(p.id, &m, &Settings::default(), Some(false)),
+                Delivery::Skipped { reason: "not a harness worktrees knows".into() },
+                "{} has no agent-guidance channel",
+                p.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_codex_cache_answers_only_while_nothing_it_read_has_changed() {
+        let key = CodexKey { place: "/r/.worktrees/a".into(), codex_cfg: Some(10), place_cfg: None, bin: Some(5) };
+        let entries = vec![CodexEntry { key: key.clone(), own: Some(true), at: 100 }];
+        assert_eq!(cached(&entries, &key), Some(Some(true)));
+        let touched = CodexKey { codex_cfg: Some(11), ..key.clone() };
+        assert_eq!(cached(&entries, &touched), None, "an edited ~/.codex/config.toml must re-probe");
+        let repo_cfg = CodexKey { place_cfg: Some(1), ..key.clone() };
+        assert_eq!(cached(&entries, &repo_cfg), None, "a new .codex/config.toml in the place must re-probe");
+        let other = CodexKey { place: "/r".into(), ..key.clone() };
+        assert_eq!(cached(&entries, &other), None);
+        // Storing replaces the place's old entry rather than growing forever.
+        let next = store(entries, CodexEntry { key: touched.clone(), own: Some(false), at: 200 });
+        assert_eq!(next.len(), 1);
+        assert_eq!(cached(&next, &touched), Some(Some(false)));
+        assert_eq!(newest(&next).map(|e| e.own), Some(Some(false)));
+    }
+
+    #[test]
+    fn the_guard_is_live_and_cheap() {
+        // Off in settings: allowed, without ever looking at a repository —
+        // the toggle takes effect on the next command, not the next launch.
+        let input = r#"{"tool_name":"Bash","tool_input":{"command":"git worktree add x"},"cwd":"/nonexistent"}"#;
+        let off = Settings { enabled: true, guard: false };
+        assert_eq!(pretooluse_with(input, &off, &|_| panic!("discovered a repo with the guard off")), None);
+        // On, but a command that cannot be refused: no repository lookup either.
+        let on = Settings { enabled: true, guard: true };
+        let ls = r#"{"tool_name":"Bash","tool_input":{"command":"ls -la"},"cwd":"/nonexistent"}"#;
+        assert_eq!(pretooluse_with(ls, &on, &|_| panic!("discovered a repo for `ls`")), None);
     }
 
     #[test]

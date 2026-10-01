@@ -120,10 +120,10 @@ fn guidance_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile:
     };
     let id = adapter.provider().id;
     // Only Codex needs the probe, and it costs a subprocess — so only then.
-    let codex_own = (id == crate::provider::CODEX.id).then(|| guidance::probe_codex(wt)).flatten();
+    let codex_own = (id == crate::provider::CODEX.id).then(|| guidance::codex_own_for_launch(wt)).flatten();
     match guidance::delivery(id, &m, &s, codex_own) {
         Delivery::On { flags } => flags,
-        Delivery::Off | Delivery::Skipped { .. } => Vec::new(),
+        Delivery::Off | Delivery::Skipped { .. } | Delivery::Unchecked => Vec::new(),
     }
 }
 
@@ -1841,7 +1841,15 @@ fn guidance_findings(p: &Project) -> Vec<Finding> {
         return Vec::new();
     }
     let Ok(m) = guidance::materialize() else { return Vec::new() };
-    match guidance::delivery(crate::provider::CODEX.id, &m, &s, guidance::probe_codex(&p.main_root)) {
+    // Never a probe: doctor is swept by the app every few minutes, and the probe
+    // starts Codex's MCP servers. The answer this project's last Codex launch
+    // acted on, if there was one.
+    let root = Path::new(&p.main_root);
+    let cache = guidance::codex_cache();
+    let Some(last) = cache.iter().filter(|e| Path::new(&e.key.place).starts_with(root)).max_by_key(|e| e.at) else {
+        return Vec::new();
+    };
+    match guidance::delivery(crate::provider::CODEX.id, &m, &s, last.own) {
         Delivery::Skipped { reason } => vec![Finding::info(
             Code::GuidanceSkipped,
             format!("Codex launches get no agent guidance: {reason}. The worktrees MCP tools still describe places; `worktrees guide` prints the rest."),
@@ -2985,6 +2993,32 @@ fn hint_init(p: &Project, ui: &mut dyn Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Agent guidance is for worktrees-managed repos only (decision,
+    /// 2026-09-30). Every bats `new` makes its repo managed, so the unmanaged
+    /// side — `(main)` launched in a repo with no place and no
+    /// `.worktrees.toml` — is pinned here. It returns before any file is
+    /// materialised, so the developer's data dir is never touched.
+    #[test]
+    fn an_unmanaged_repo_gets_no_guidance_even_with_it_on() {
+        let base = std::env::temp_dir().join(format!("wt-ops-unmanaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "-C"]).arg(&base).args(args).status().unwrap().success());
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        let p = Project::discover(&base).expect("a repo");
+        assert!(!crate::guidance::is_managed(&p));
+        let mut ui = crate::ui::CaptureUi::default();
+        let launch = crate::profile::AiLaunch::plain("claude");
+        assert!(guidance_for(&p, &mut ui, &p.main_root, &launch).is_empty());
+        // …and the same repo with a `.worktrees.toml` IS managed.
+        std::fs::write(base.join(".worktrees.toml"), "# setup\n").unwrap();
+        assert!(crate::guidance::is_managed(&p));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// The prompt names no directory: the planning-with-files skill decides
     /// where its files live, and the reader resolves every layout it uses. The
