@@ -27,7 +27,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   place to another branch is never refused.
 - **Settings → Agent guidance.** A new section shows what agents are told,
   what each installed agent gets (or why Codex does not), and the two
-  switches: guidance at launch, and the Claude guard. After this update the
+  switches: guidance at launch, and the Claude guard (which needs a
+  worktrees CLI that has it on your PATH — the section says when it does not).
+  After this update the
   dock rail's offers button lists "Your agents now learn to work in places"
   and links there; it asks again only when the guidance itself changes.
 - **`worktrees guide`** prints what agents are told: the skill, `--rules` for

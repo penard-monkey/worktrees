@@ -102,7 +102,8 @@ let mockPiMcp: Record<string, unknown> = (() => {
   };
 })();
 // Agent guidance (`agent_guidance_status`): `?guidance=off` starts with
-// delivery off, `?guidance=codex-own` makes Codex the user-has-their-own case.
+// delivery off, `?guidance=codex-own` makes Codex the user-has-their-own case,
+// `unchecked` Codex before any launch, `noguard` no CLI that has the guard.
 let mockGuidanceSettings = { enabled: new URLSearchParams(location.search).get("guidance") !== "off", guard: false };
 function mockGuidance(): Record<string, unknown> {
   const mode = new URLSearchParams(location.search).get("guidance") ?? "";
@@ -112,12 +113,14 @@ function mockGuidance(): Record<string, unknown> {
   return {
     version: 1,
     settings: { ...mockGuidanceSettings },
+    guard_available: mode !== "noguard",
     settings_path: "/Users/demo/.config/worktrees/agent-guidance.json",
     dir, error: null,
     harnesses: [
       { id: "claude", label: "Claude", installed: true, ...d(["--plugin-dir", `'${dir}/${mockGuidanceSettings.guard ? "claude-guard" : "claude"}'`]) },
       { id: "codex", label: "Codex", installed: true,
-        ...(mode === "codex-own" && on ? { state: "skipped", reason: "you set your own developer_instructions, and -c would replace them" } : d(["-c", "'developer_instructions=\"…\"'"])) },
+        ...(mode === "codex-own" && on ? { state: "skipped", reason: "you set your own developer_instructions, and -c would replace them" }
+          : mode === "unchecked" && on ? { state: "unchecked" } : d(["-c", "'developer_instructions=\"…\"'"])) },
       { id: "pi", label: "pi", installed: true, ...d(["--skill", `'${dir}/skills/worktrees'`, "--append-system-prompt", `'${dir}/rules.md'`]) },
     ],
     skill: "---\nname: worktrees\ndescription: Use BEFORE any branch work in a repository managed by worktrees …\n---\n\n# Working in a worktrees-managed repository\n\n(the mock shows an excerpt; the app shows the skill the binary ships)\n",

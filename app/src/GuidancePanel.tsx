@@ -5,12 +5,18 @@ import { invoke } from "@tauri-apps/api/core";
 export type GuidanceDelivery =
   | { state: "on"; flags: string[] }
   | { state: "off" }
-  | { state: "skipped"; reason: string };
+  | { state: "skipped"; reason: string }
+  /** Codex before any launch has asked it — status never probes, because the
+   *  probe starts Codex's MCP servers. */
+  | { state: "unchecked" };
 export type GuidanceHarness = { id: string; label: string; installed: boolean } & GuidanceDelivery;
 export type GuidanceStatus = {
   /** Bumped when what agents are told changes enough to ask again (the offer's fingerprint). */
   version: number;
   settings: { enabled: boolean; guard: boolean };
+  /** A `worktrees` CLI that HAS the guard is on PATH. Without one, Claude gets
+   *  the plain plugin even with the guard switched on. */
+  guard_available: boolean;
   settings_path: string;
   dir: string | null;
   error: string | null;
@@ -28,6 +34,8 @@ function deliveryLine(h: GuidanceHarness): string {
       return "off";
     case "skipped":
       return `not given it: ${h.reason}`;
+    case "unchecked":
+      return "decided the next time Worktrees launches it (it checks for your own developer_instructions first)";
   }
 }
 
@@ -44,8 +52,8 @@ export function GuidanceSection({ status, onStatus, onReport, offerPending = fal
   "data-focus"?: string;
 }) {
   const [busy, setBusy] = useState(false);
-  // Re-read on open: the Codex half depends on Codex's own config, which can
-  // change between app start and now.
+  // Re-read on open: cheap (no Codex probe), and a Codex launch since app
+  // start may have settled Codex's line.
   useEffect(() => {
     invoke<GuidanceStatus>("agent_guidance_status").then(onStatus).catch((e) => onReport(`agent_guidance_status: ${String(e)}`));
   }, []);
@@ -66,7 +74,9 @@ export function GuidanceSection({ status, onStatus, onReport, offerPending = fal
         onChange={(e) => set({ enabled: e.currentTarget.checked })} />Give agents the guidance at launch</label>
       <label className="tier-toggle setting-check"><input type="checkbox" checked={status.settings.guard} disabled={busy || !status.settings.enabled}
         onChange={(e) => set({ guard: e.currentTarget.checked })} />Stop Claude from <code>git worktree add</code> and new branches in (main)</label>
-      <div className="hint">The guard refuses those two commands and tells Claude to use a place. An agent moving its own place to another branch is never refused. Off by default.</div>
+      <div className="hint">The guard refuses those two commands and tells Claude to use a place. An agent moving its own place to another branch is never refused. Switching it off applies to the next command. Off by default.</div>
+      {status.settings.guard && !status.guard_available && <div className="hint" data-testid="guard-unavailable">
+        The guard needs the Worktrees CLI, and none on your PATH has it (missing, or older than this app). Until you install or update it under Updates, Claude gets the skill without the guard.</div>}
       <div className="guidance-rows">
         {status.harnesses.map((h) => (
           <div className="hint" key={h.id} data-harness={h.id}><b>{h.label}:</b> {status.settings.enabled ? deliveryLine(h) : "off"}</div>

@@ -101,7 +101,7 @@ if (ids({ piMcp: null }).length !== 0) fail("an unknown pi status must offer not
 // now happening — review it". True only when delivery is on and some agent is
 // installed to get it; asks once per guidance VERSION, never per wording fix.
 const guidance = (enabled, installed, version = 1) => ({
-  version, settings: { enabled, guard: false }, settings_path: "", dir: null, error: null,
+  version, settings: { enabled, guard: false }, guard_available: true, settings_path: "", dir: null, error: null,
   harnesses: [{ id: "claude", label: "Claude", installed, state: enabled ? "on" : "off", flags: [] }],
   skill: "", rules: "",
 });

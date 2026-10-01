@@ -4469,11 +4469,13 @@ async fn agent_setup_fix(app: AppHandle, repo: String) -> Result<worktrees_core:
 /// project to exist. A directory scan of ~/.claude/skills, cheap enough to
 /// probe at startup.
 /// Settings → Agent guidance, and the `agent-guidance` offer's input. Machine
-/// level: the worktrees settings file and which agents are installed. Probing
-/// Codex's own config spawns `codex debug prompt-input`, hence the blocking pool.
+/// level: the worktrees settings file and which agents are installed. It never
+/// probes Codex (that starts Codex's MCP servers): Codex's line is the answer
+/// its last launch acted on. Blocking pool all the same — it materialises
+/// files and asks the worktrees CLI whether it has the guard.
 #[tauri::command]
 async fn agent_guidance_status() -> Result<worktrees_core::guidance::Status, String> {
-    tauri::async_runtime::spawn_blocking(|| worktrees_core::guidance::status(None))
+    tauri::async_runtime::spawn_blocking(|| worktrees_core::guidance::status())
         .await
         .map_err(|e| {
             applog("error", &format!("agent_guidance_status: {e}"));
@@ -4489,7 +4491,7 @@ async fn agent_guidance_status() -> Result<worktrees_core::guidance::Status, Str
 async fn set_agent_guidance(enabled: bool, guard: bool) -> Result<worktrees_core::guidance::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
         worktrees_core::guidance::save_settings(&worktrees_core::guidance::Settings { enabled, guard })?;
-        Ok(worktrees_core::guidance::status(None))
+        Ok(worktrees_core::guidance::status())
     })
     .await
     .map_err(|e| e.to_string())
