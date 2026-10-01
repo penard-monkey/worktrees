@@ -35,9 +35,11 @@ use serde::{Deserialize, Serialize};
 
 pub const FILE: &str = "projects.json";
 
-/// Serialise in-process writers before the flock: `flock` locks are held per
-/// open file description, so two threads of one process opening the lock file
-/// separately would otherwise each get their own.
+/// Belt and braces in front of the flock. Each `edit_at` opens the lock file
+/// itself, and separate `open()`s are separate open file descriptions, which
+/// DO contend under `flock` even inside one process — so the flock alone is
+/// the guarantee. The mutex only keeps the app's own threads from queueing on
+/// a syscall, and keeps this correct if a later edit ever shares one handle.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -76,6 +78,8 @@ impl Registry {
     }
 
     /// An entry by its name, or by its root — what `worktrees projects` takes.
+    /// A path key must already be resolved (`resolve_key`); this matches
+    /// literally.
     pub fn find(&self, key: &str) -> Option<&Entry> {
         self.projects.iter().find(|e| e.name == key).or_else(|| self.by_root(key))
     }
@@ -113,6 +117,10 @@ pub fn read_lenient_at(p: &Path) -> Registry {
 
 fn read_strict(p: &Path) -> Result<Registry, String> {
     match fs::read(p) {
+        // An EMPTY file is an empty registry, as `read_lenient` already reads
+        // it: a 0-byte file (a crash between create and write, or `: >` by
+        // hand) must not wedge every later write behind "not valid JSON".
+        Ok(b) if b.iter().all(u8::is_ascii_whitespace) => Ok(Registry::default()),
         Ok(b) => serde_json::from_slice(&b)
             .map_err(|e| format!("{} is not valid JSON ({e}) — not overwriting", p.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
@@ -158,6 +166,22 @@ pub fn edit_at<T>(p: &Path, f: impl FnOnce(&mut Registry) -> Result<T, String>) 
     }
     drop(lock);
     Ok(out)
+}
+
+/// A key as `find` should see it. A name has no `/`, so a key with one is a
+/// PATH, resolved the way `add` resolved it — to the canonical main root of the
+/// repo it is in, or, for a repo that is gone, to the canonical path, or else
+/// left as typed. So a symlinked path, a trailing `/` or a subdirectory names
+/// the same entry `add` made.
+pub fn resolve_key(key: &str) -> String {
+    if !key.contains('/') {
+        return key.to_string();
+    }
+    let p = Path::new(key);
+    if let Ok(proj) = crate::Project::discover(p) {
+        return proj.main_root;
+    }
+    fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| key.trim_end_matches('/').to_string())
 }
 
 // ── names ───────────────────────────────────────────────────────────────────
@@ -282,6 +306,8 @@ pub fn rename(key: &str, new: &str) -> Result<Entry, String> {
 
 pub fn rename_at(p: &Path, key: &str, new: &str) -> Result<Entry, String> {
     valid_name(new)?;
+    let key = resolve_key(key);
+    let key = key.as_str();
     edit_at(p, |reg| {
         let root = reg.find(key).map(|e| e.root.clone()).ok_or_else(|| format!("no registered project: {key}"))?;
         if reg.projects.iter().any(|e| e.name == new && e.root != root) {
@@ -298,12 +324,10 @@ pub fn set_private(key: &str, private: bool) -> Result<Entry, String> {
 }
 
 pub fn set_private_at(p: &Path, key: &str, private: bool) -> Result<Entry, String> {
+    let key = resolve_key(key);
     edit_at(p, |reg| {
-        let e = reg
-            .projects
-            .iter_mut()
-            .find(|e| e.name == key || e.root == key)
-            .ok_or_else(|| format!("no registered project: {key}"))?;
+        let root = reg.find(&key).map(|e| e.root.clone()).ok_or_else(|| format!("no registered project: {key}"))?;
+        let e = reg.projects.iter_mut().find(|e| e.root == root).expect("found above");
         e.private = private;
         Ok(e.clone())
     })
@@ -411,7 +435,7 @@ pub fn cmd_projects(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
                 ui.error("usage: worktrees projects rm <name|root>");
                 return 2;
             };
-            let Some(e) = read_lenient().find(key).cloned() else {
+            let Some(e) = read_lenient().find(&resolve_key(key)).cloned() else {
                 return fail(ui, format!("no registered project: {key}"));
             };
             match remove(&e.root) {
@@ -475,7 +499,9 @@ mod tests {
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
             ));
             fs::create_dir_all(&d).unwrap();
-            Tmp(d)
+            // Canonical, as every registered root is: `/var` is a link to
+            // `/private/var` on macOS, and `resolve_key` canonicalises.
+            Tmp(fs::canonicalize(&d).unwrap())
         }
         fn reg(&self) -> PathBuf {
             self.0.join("projects.json")
@@ -526,7 +552,9 @@ mod tests {
         // `WORKTREES_PREFIX` is global — honouring it would give every project
         // the same seed. `seed_name` never consults it, so no env poke needed
         // to prove that: the file wins over the basename, and nothing else
-        // enters. `.` survives (a name may hold it); case is lowered by the
+        // enters. The seed goes through the prefix sanitiser, exactly as the
+        // session name does: case is lowered and `.` becomes `-` (a name may
+        // hold `.`, but a seed never brings one). Lowered by the
         // prefix sanitiser, exactly as the session name is.
         assert_eq!(seed_name(&a), "shop-front");
     }
@@ -623,6 +651,31 @@ mod tests {
         fs::write(&bad, "{not json").unwrap();
         assert_eq!(import_list_at(&t.reg(), &bad).unwrap(), 0);
         assert!(!t.reg().exists(), "nothing changed, so nothing was written");
+    }
+
+    #[test]
+    fn an_empty_file_is_an_empty_registry_not_a_wedge() {
+        let t = Tmp::new("empty");
+        fs::write(t.reg(), "").unwrap();
+        let a = t.repo("a");
+        assert_eq!(add_at(&t.reg(), &a).unwrap().name, "a");
+        assert_eq!(read_lenient_at(&t.reg()).roots(), vec![a]);
+    }
+
+    #[test]
+    fn a_path_key_resolves_like_add() {
+        let t = Tmp::new("key");
+        let a = t.repo("alpha");
+        add_at(&t.reg(), &a).unwrap();
+        // Trailing slash, and a symlink to the same directory.
+        let link = t.0.join("via-link");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        for key in [format!("{a}/"), link.to_string_lossy().into_owned()] {
+            assert_eq!(set_private_at(&t.reg(), &key, true).unwrap().root, a, "{key}");
+        }
+        assert_eq!(rename_at(&t.reg(), &format!("{a}/"), "renamed").unwrap().name, "renamed");
+        // A bare name is never touched by resolution.
+        assert_eq!(resolve_key("renamed"), "renamed");
     }
 
     #[test]

@@ -115,3 +115,47 @@ make_twin() {
   run_wt doctor --json
   [ "$(echo "$output" | jq '[.findings[] | select(.code == "nested-project")] | length')" -eq 1 ]
 }
+
+# The flock is the guarantee across PROCESSES (the in-process mutex cannot
+# reach another process): thirty `projects add`s at once, each a full
+# read-modify-write, must all land with distinct names. Seen red with the
+# flock disabled.
+@test "thirty parallel adds lose nothing" {
+  local base="$BATS_TEST_TMPDIR/many"
+  for i in $(seq 1 20); do
+    mkdir -p "$base/r$i"
+    git -C "$base/r$i" init -q
+    git -C "$base/r$i" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  done
+  # Same basename everywhere would also race the NAME choice; make half collide.
+  for i in $(seq 1 10); do mkdir -p "$base/twin$i/app"; git -C "$base/twin$i/app" init -q
+    git -C "$base/twin$i/app" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init; done
+  { for i in $(seq 1 20); do echo "$base/r$i"; done
+    for i in $(seq 1 10); do echo "$base/twin$i/app"; done; } \
+    | xargs -P 30 -I{} "$WT_BIN" projects add {} > /dev/null 2>&1
+  run_wt -C "$BATS_TEST_TMPDIR" projects ls --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq '.projects | length')" -eq 30 ]
+  [ "$(echo "$output" | jq '[.projects[].name] | unique | length')" -eq 30 ]
+}
+
+@test "rm, rename and private accept a path the way add does" {
+  run_wt -C "$BATS_TEST_TMPDIR" projects add "$REPO"
+  mkdir -p "$REPO/sub"
+  ln -s "$REPO" "$BATS_TEST_TMPDIR/link"
+  run_wt -C "$BATS_TEST_TMPDIR" projects private "$REPO/" on
+  [ "$status" -eq 0 ]
+  run_wt -C "$BATS_TEST_TMPDIR" projects rename "$BATS_TEST_TMPDIR/link" viaLink
+  [ "$status" -eq 0 ]
+  run_wt -C "$BATS_TEST_TMPDIR" projects rm "$REPO/sub"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unregistered 'viaLink'"* ]]
+}
+
+@test "an empty projects.json does not wedge writes" {
+  mkdir -p "$(dirname "$(REG)")"
+  : > "$(REG)"
+  run_wt -C "$BATS_TEST_TMPDIR" projects add "$REPO"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"registered 'repo'"* ]]
+}
