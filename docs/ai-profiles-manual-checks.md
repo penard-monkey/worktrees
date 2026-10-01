@@ -29,7 +29,7 @@ zsh -lic 'which -a claude'   # >1 install on PATH is its own bug — the app
 | | |
 |---|---|
 | tmux sessions | Names are `<prefix>-<slug>`, derived from the repo — so a second build computes the **same name** and attaches to the session your open app is using. Closing it in one kills it in the other. |
-| App config | Both builds share the bundle id `net.casadelvalle.worktrees`, so both read and write the same `ui-state.json` and `projects.json`. Settings are one debounced blob: last writer wins. |
+| App config | Both builds share the bundle id `net.casadelvalle.worktrees`, so both read and write the same `ui-state.json`. Settings are one debounced blob: last writer wins. The project list is `~/.config/worktrees/projects.json`, shared by every build and the CLI (a sandbox gets its own through `XDG_CONFIG_HOME`). |
 | No single-instance guard | Two app instances will happily both run, and nothing on screen tells them apart. |
 
 ### The sandbox

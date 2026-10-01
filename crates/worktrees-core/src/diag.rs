@@ -179,6 +179,15 @@ pub enum Code {
     /// root) is in the message. `ls --json` carries the same list as `strays`,
     /// which is how the app flags it without running doctor.
     StrayWorktree,
+    /// This repo's registry entry lies inside another registered project's
+    /// tree, or another entry lies inside this one — a repo checked out under
+    /// another repo's ignored directory. Nothing is broken: a session's project
+    /// is still the one `Project::discover` finds where it was launched, and
+    /// the registry entry it is matched to is the one whose root EQUALS that
+    /// project's root, never the nearest enclosing one (cross-project §2.2).
+    /// Warn, because a person reading the nav does not expect one project to
+    /// contain another.
+    NestedProject,
     /// Agent guidance was not delivered to a harness that is installed (today:
     /// Codex, when the user set their own `developer_instructions`, or when it
     /// could not tell). Info only — the user's own text winning is the design.
@@ -290,6 +299,7 @@ mod tests {
         for (c, s) in [
             (Code::MissingSource, "missing-source"),
             (Code::StrayWorktree, "stray-worktree"),
+            (Code::NestedProject, "nested-project"),
             (Code::GuidanceSkipped, "guidance-skipped"),
             (Code::NotLinked, "not-linked"),
             (Code::UnsafePath, "unsafe-path"),

@@ -37,6 +37,7 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
+  worktrees projects [ls|add|rm|rename|private]  the registered projects (user-global, no repo needed)
   worktrees sync push|pull [name]       courier-sync this project to/from an SSD hub (rsync)
   worktrees sync status                 hub + project sync state (--json; no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
@@ -68,6 +69,11 @@ fn run() -> i32 {
         Some("skills") => {
             let mut ui = CliUi;
             return worktrees_core::skillstore::cmd_skills(&mut ui, args.get(1..).unwrap_or(&[]));
+        }
+        // The project registry is user-global too (`~/.config/worktrees`).
+        Some("projects") => {
+            let mut ui = CliUi;
+            return worktrees_core::registry::cmd_projects(&mut ui, args.get(1..).unwrap_or(&[]));
         }
         // Agent guidance: `guide` prints what agents are told and is about this
         // machine, not the cwd; `guard` is Claude's PreToolUse hook, which must
