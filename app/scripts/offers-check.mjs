@@ -97,11 +97,34 @@ if (ids({ piMcp: pi("absent", null) }).includes("pi-mcp")) fail("pi-mcp offered 
 else ok("pi-mcp needs pi present");
 if (ids({ piMcp: null }).length !== 0) fail("an unknown pi status must offer nothing");
 
+// agent-guidance (agent-guidance §4.5): not an `absent` install but "this is
+// now happening — review it". True only when delivery is on and some agent is
+// installed to get it; asks once per guidance VERSION, never per wording fix.
+const guidance = (enabled, installed, version = 1) => ({
+  version, settings: { enabled, guard: false }, settings_path: "", dir: null, error: null,
+  harnesses: [{ id: "claude", label: "Claude", installed, state: enabled ? "on" : "off", flags: [] }],
+  skill: "", rules: "",
+});
+if (!ids({ guidance: guidance(true, true) }).includes("agent-guidance")) fail("agent-guidance: not offered with delivery on and Claude installed");
+else ok("agent-guidance: offered when delivery is on and an agent is installed");
+if (ids({ guidance: guidance(false, true) }).length !== 0) fail("agent-guidance: offered while the user has delivery OFF");
+else ok("agent-guidance: silent with delivery off");
+if (ids({ guidance: guidance(true, false) }).length !== 0) fail("agent-guidance: offered with no agent installed");
+else ok("agent-guidance: silent with no agent installed");
+if (ids({ guidance: null }).length !== 0) fail("agent-guidance: an unknown status must offer nothing");
+{
+  const [g1] = pendingOffers({ mcp: null, guidance: guidance(true, true, 1) }, {});
+  const quiet = pendingOffers({ mcp: null, guidance: guidance(true, true, 1) }, dismissPatch(g1, {}));
+  const again = pendingOffers({ mcp: null, guidance: guidance(true, true, 2) }, dismissPatch(g1, {}));
+  if (quiet.length !== 0 || again.map((o) => o.id).join() !== "agent-guidance") fail("agent-guidance: a dismissal must hold for its version and lapse on the next");
+  else ok("agent-guidance: dismissed per guidance version");
+}
+
 // ── 2. an offer's action is a DESTINATION, not a deed ──────────────────────
 // Every offer id, not just the first: a new offer whose deep link lands
 // nowhere is the same bug as the old one.
 const every = pendingOffers(
-  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing") }, {});
+  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true) }, {});
 const sheetSrc = read("../src/SettingsSheet.tsx");
 // The render of ONE category: from its `{cat === "x" && <>` to the next
 // category's. A data-focus found anywhere in src/ proves nothing about where
@@ -131,12 +154,12 @@ for (const o of every) {
   } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
   // dismissal, per offer
-  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing") },
+  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true) },
     dismissPatch(o, {})).some((x) => x.id === o.id)) fail(`${o.id}: dismissing it did not silence it`);
   else ok(`${o.id}: dismissal silences its own fingerprint (${JSON.stringify(o.fingerprint)})`);
 }
-if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills") {
-  fail(`expected all four offers, got [${every.map((o) => o.id)}]`);
+if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills,agent-guidance") {
+  fail(`expected all five offers, got [${every.map((o) => o.id)}]`);
 }
 // The skills fingerprint is the SET of unlinked skills: a new one is a new question.
 {
@@ -272,9 +295,18 @@ if (offersTitle(1) !== "1 thing to set up — open" || offersTitle(3) !== "3 thi
 // …and the CONTEXT: an offer whose input is never fed can never render. The two
 // Codex inputs must be the machine-level probes, not some project's status.
 const ctxCall = app.match(/pendingOffers\(\{([^}]*)\}/);
-if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1])) {
-  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp and userSkills must all reach it`);
-} else ok("pendingOffers is fed mcp + codexMcp + piMcp + userSkills");
+if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1]) || !/\bguidance\b/.test(ctxCall[1])) {
+  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp, userSkills and guidance must all reach it`);
+} else ok("pendingOffers is fed mcp + codexMcp + piMcp + userSkills + guidance");
+if (!/invoke<GuidanceStatus>\("agent_guidance_status"\)\.then\(setGuidance\)/.test(app)) {
+  fail("App.tsx no longer probes agent_guidance_status straight into the offer input");
+} else ok("the agent-guidance offer input comes from a machine-level probe");
+{
+  const gp = read("../src/GuidancePanel.tsx");
+  if (!/offerPending/.test(gp) || !/onSilenceOffer/.test(gp) || !/<section[^>]*data-focus=\{focusId\}/.test(gp)) {
+    fail("GuidanceSection must carry offerPending/onSilenceOffer and put data-focus on its section");
+  } else ok("Settings → Agent guidance can end its suggestion on demand, and is a deep-link target");
+}
 if (!/invoke<PiMcpStatus>\("pi_mcp_status"\)\.then\(setPiMcp\)/.test(app)) {
   fail("App.tsx no longer probes pi_mcp_status straight into the offer input");
 } else ok("the pi offer input comes from a machine-level probe");

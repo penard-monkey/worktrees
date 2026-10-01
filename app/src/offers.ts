@@ -50,9 +50,10 @@ import type { McpStatus } from "./McpPanel";
 import type { CodexMcpStatus } from "./CodexMcpPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import type { UserSkill } from "./AgentSetup";
+import type { GuidanceStatus } from "./GuidancePanel";
 import type { CatId } from "./SettingsSheet";
 
-export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp";
+export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "agent-guidance";
 
 export type Offer = {
   id: OfferId;
@@ -85,6 +86,8 @@ export type OfferCtx = {
    *  some project's `agent_setup_status`: that would make the offer need a
    *  project, which is the v0.25.0 precondition bug again. */
   userSkills?: UserSkill[] | null;
+  /** `agent_guidance_status` — machine-level too (agent-guidance §4.5). */
+  guidance?: GuidanceStatus | null;
 };
 
 /** The pending offers, in the order they should be listed.
@@ -162,6 +165,23 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
       // question; the same set, or any subset of it, stays quiet (see above).
       // `conflict` skills are not in it — linking cannot help them.
       fingerprint: missing.join(","),
+    });
+  }
+  // Agent guidance (agent-guidance §4.5, decision Q8). Not an `absent` thing to
+  // install: per-launch delivery is ON by default, which changes what agents
+  // are told, so the offer is "this is now happening — review it, and choose
+  // the guard". It asks once per guidance VERSION (core's `guidance::VERSION`,
+  // bumped only for a change worth re-asking), never per wording fix, and only
+  // when it is true: delivery on, and at least one agent installed to get it.
+  const g = ctx.guidance;
+  if (g && g.settings.enabled && g.harnesses.some((h) => h.installed)) {
+    out.push({
+      id: "agent-guidance",
+      title: "Your agents now learn to work in places",
+      body: "Claude, Codex and pi get the worktrees skill and rule when Worktrees launches them. Review what they are told, and whether Claude may be stopped from branching in (main).",
+      cta: "Review…",
+      to: { cat: "guidance", focus: "agent-guidance" },
+      fingerprint: `v${g.version}`,
     });
   }
   return out.filter((o) => dismissed[o.id] !== o.fingerprint);

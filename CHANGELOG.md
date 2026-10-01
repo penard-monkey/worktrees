@@ -25,6 +25,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   branch in `(main)`, and says to use a place instead. Switching it off takes
   effect on the very next command. A lane moving its own
   place to another branch is never refused.
+- **Settings → Agent guidance.** A new section shows what agents are told,
+  what each installed agent gets (or why Codex does not), and the two
+  switches: guidance at launch, and the Claude guard. After this update the
+  dock rail's offers button lists "Your agents now learn to work in places"
+  and links there; it asks again only when the guidance itself changes.
 - **`worktrees guide`** prints what agents are told: the skill, `--rules` for
   the one-line rule, `--status [--json]` for what each installed agent gets.
   `WORKTREES_AGENT_GUIDANCE=off`, or `"enabled": false` in the same file,

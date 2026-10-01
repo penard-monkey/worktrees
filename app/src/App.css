@@ -992,6 +992,15 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 }
 .setting .hint { font-size: var(--fs-micro); color: var(--txt-mute); margin-top: 2px; }
 
+/* Settings → Agent guidance: the disclosure is a hint-sized line that opens,
+   not a heading — the browser's default <summary> is body-sized. */
+.guidance-text { margin-top: var(--s2); }
+.guidance-text > summary { font-size: var(--fs-micro); color: var(--txt-dim); cursor: pointer; }
+.guidance-text > summary:hover { color: var(--txt-hi); }
+.guidance-rows { margin-top: var(--s2); }
+/* `.update-log` breaks anywhere because it holds logs; this holds prose. */
+.guidance-text .update-log { word-break: normal; overflow-wrap: anywhere; }
+
 /* version / update section (Settings) + rail badge */
 .rail-icon.upd { position: relative; }
 .rail-icon.upd::after {

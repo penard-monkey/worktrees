@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
 import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
+import { GuidanceSection, type GuidanceStatus } from "./GuidancePanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
@@ -104,6 +105,9 @@ const CATS = [
   { id: "claude", label: "Claude" },
   { id: "codex", label: "Codex" },
   { id: "pi", label: "pi" },
+  // Its own category (decision Q8): it is about every agent, not one harness,
+  // and not about AI profiles, which are per-profile and Claude-only.
+  { id: "guidance", label: "Agent guidance" },
   { id: "behavior", label: "Behavior" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
@@ -343,6 +347,10 @@ export function SettingsSheet({
   onUserSkillsChanged,
   skillsOfferPending,
   onSilenceSkillsOffer,
+  guidance,
+  onGuidanceChanged,
+  guidanceOfferPending,
+  onSilenceGuidanceOffer,
 }: {
   open: boolean;
   /// Where the sheet was asked to open, when the caller had somewhere in mind —
@@ -384,6 +392,12 @@ export function SettingsSheet({
   onUserSkillsChanged: (s: UserSkill[]) => void;
   skillsOfferPending: boolean;
   onSilenceSkillsOffer: () => void;
+  /// Agent guidance (offers.ts `agent-guidance`): App's machine-level probe;
+  /// the section re-reads on open and reports back so the offer follows it.
+  guidance: GuidanceStatus | null;
+  onGuidanceChanged: (s: GuidanceStatus) => void;
+  guidanceOfferPending: boolean;
+  onSilenceGuidanceOffer: () => void;
 }) {
   // Selected category — local, deliberately NOT persisted: the sheet opens on
   // Appearance so "where was I" never depends on last session.
@@ -810,6 +824,11 @@ export function SettingsSheet({
           {cat === "pi" && <PiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport}
             onMcpStatus={(s) => { setPiMcpStatus(s); onPiMcpChanged(s); }}
             mcpOfferPending={piMcpOfferPending} onSilenceMcpOffer={onSilencePiMcpOffer} />}
+
+          {cat === "guidance" && <>
+          <GuidanceSection data-focus="agent-guidance" status={guidance} onStatus={onGuidanceChanged} onReport={onReport}
+            offerPending={guidanceOfferPending} onSilenceOffer={onSilenceGuidanceOffer} />
+          </>}
 
           {cat === "commands" && <>
           <section className="setting">
