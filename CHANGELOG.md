@@ -23,6 +23,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   that has relayed the refusal and been asked by the user to go ahead. A refused
   launch now answers MCP callers with the tool to retry with, rather than a CLI
   flag they cannot run.
+- **Lanes are launched knowing how to work in places.** In a worktrees-managed
+  repo, every Claude, pi and Codex launch now gets the places rule and a
+  `worktrees` skill (lanes, briefs, messaging, finishing, what never to
+  touch). The text ships inside the binary, and nothing is written to any
+  agent's own config:
+  - Claude loads it as a plugin (`--plugin-dir`);
+  - pi gets `--skill` plus the rule through `--append-system-prompt`;
+  - Codex gets the rule as `developer_instructions` — but only when you have
+    not set your own. `-c` would replace yours, so worktrees asks Codex first
+    (`codex debug prompt-input`, no model call), and otherwise leaves it out.
+    It asks only when Codex launches, with your MCP servers switched off for
+    the question, and remembers the answer until your Codex config changes.
+    `worktrees doctor` says when it was left out.
+- **An optional guard for Claude, off by default.** Switched on in
+  `~/.config/worktrees/agent-guidance.json` (`"guard": true`), the same
+  plugin adds a hook that refuses `git worktree add` anywhere and a new
+  branch in `(main)`, and says to use a place instead. Switching it off takes
+  effect on the very next command. A lane moving its own
+  place to another branch is never refused.
+- **Settings → Agent guidance.** A new section shows what agents are told,
+  what each installed agent gets (or why Codex does not), and the two
+  switches: guidance at launch, and the Claude guard (which needs a
+  worktrees CLI that has it on your PATH — the section says when it does not).
+  After this update the
+  dock rail's offers button lists "Your agents now learn to work in places"
+  and links there; it asks again only when the guidance itself changes.
+- **`worktrees guide`** prints what agents are told: the skill, `--rules` for
+  the one-line rule, `--status [--json]` for what each installed agent gets.
+  `WORKTREES_AGENT_GUIDANCE=off`, or `"enabled": false` in the same file,
+  turns per-launch delivery off.
 
 ### Changed
 - **Both plan-usage readers moved into the engine.** Claude's and Codex's

@@ -93,6 +93,41 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
 /// that `env` and `match_word` travel BESIDE the command instead of being parsed
 /// back out of it.
 pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
+    let mut launch = ai_launch_inner(p, ui, wt, ai_cmd);
+    launch.guidance = guidance_for(p, ui, wt, &launch);
+    launch
+}
+
+/// Agent guidance for one launch (agent-guidance §4.2): only in a
+/// worktrees-managed repo, only for a harness worktrees knows, and never on
+/// the fail-closed launch (its `cmd` is not the harness, so `launch_cmd` would
+/// not emit these anyway — this keeps the struct honest too).
+fn guidance_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile::AiLaunch) -> Vec<String> {
+    use crate::guidance::{self, Delivery};
+    let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
+        return Vec::new();
+    };
+    let s = guidance::settings();
+    if !s.enabled || !guidance::is_managed(p) {
+        return Vec::new();
+    }
+    let m = match guidance::materialize() {
+        Ok(m) => m,
+        Err(e) => {
+            ui.warn(&format!("agent guidance not delivered: {e}"));
+            return Vec::new();
+        }
+    };
+    let id = adapter.provider().id;
+    // Only Codex needs the probe, and it costs a subprocess — so only then.
+    let codex_own = (id == crate::provider::CODEX.id).then(|| guidance::codex_own_for_launch(wt)).flatten();
+    match guidance::delivery(id, &m, &s, codex_own) {
+        Delivery::On { flags } => flags,
+        Delivery::Off | Delivery::Skipped { .. } | Delivery::Unchecked => Vec::new(),
+    }
+}
+
+fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
     let mut plain = crate::profile::AiLaunch::plain(ai_cmd);
     // A harness's place-derived flags (Codex's permission mode) ride on EVERY
     // launch of it, profiled or not — profiles are claude-only, and these are
@@ -160,6 +195,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
                 match_word: plain.match_word,
                 opener: None,
                 place_flags: Vec::new(),
+                guidance: Vec::new(),
                 model: None,
                 resume: false,
                 force: false,
@@ -1796,6 +1832,32 @@ fn compose_down(p: &Project, ui: &mut dyn Ui, slug: &str, wt: &str) {
 /// non-transactional, "materialized" is not a state anything records, and a
 /// feature whose own failure mode is silent does not fix a silent-failure bug
 /// (§7). Exit: 0 clean · 1 usage/guard · 2 findings present.
+/// `guidance-skipped`: an installed harness that a launch here would not give
+/// the guidance to. Only Codex can be skipped today, and only on purpose.
+fn guidance_findings(p: &Project) -> Vec<Finding> {
+    use crate::guidance::{self, Delivery};
+    let s = guidance::settings();
+    if !s.enabled || !guidance::is_managed(p) || crate::harness::by_id(crate::provider::CODEX.id).is_none_or(|a| a.installed().is_err()) {
+        return Vec::new();
+    }
+    let Ok(m) = guidance::materialize() else { return Vec::new() };
+    // Never a probe: doctor is swept by the app every few minutes, and the probe
+    // starts Codex's MCP servers. The answer this project's last Codex launch
+    // acted on, if there was one.
+    let root = Path::new(&p.main_root);
+    let cache = guidance::codex_cache();
+    let Some(last) = cache.iter().filter(|e| Path::new(&e.key.place).starts_with(root)).max_by_key(|e| e.at) else {
+        return Vec::new();
+    };
+    match guidance::delivery(crate::provider::CODEX.id, &m, &s, last.own) {
+        Delivery::Skipped { reason } => vec![Finding::info(
+            Code::GuidanceSkipped,
+            format!("Codex launches get no agent guidance: {reason}. The worktrees MCP tools still describe places; `worktrees guide` prints the rest."),
+        )],
+        _ => Vec::new(),
+    }
+}
+
 pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let json = args.iter().any(|a| a == "--json") || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
     if args.iter().any(|a| a == "--pi") {
@@ -1976,6 +2038,13 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     } else {
         stray_findings(p)
     };
+    // Agent guidance a harness is NOT getting, said where someone looks for
+    // "why does my agent not know X". Machine-level, so whole-project runs only.
+    let guidance = if config_only || !names.is_empty() || hub_copy.is_some() {
+        Vec::new()
+    } else {
+        guidance_findings(p)
+    };
 
     let cfg = match load_project_config(p, ui) {
         Ok(c) => c,
@@ -1983,7 +2052,7 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     };
     let Some((cfg, mut findings)) = cfg else {
         // No config is a healthy repo, not a broken one.
-        let report = Report::new(hub_copy.into_iter().chain(skipped).chain(strays).collect());
+        let report = Report::new(hub_copy.into_iter().chain(skipped).chain(strays).chain(guidance).collect());
         if json {
             emit_report(ui, &report);
         } else if report.is_empty() {
@@ -2048,6 +2117,7 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
 
     findings.extend(strays);
+    findings.extend(guidance);
 
     if strict {
         // `--strict` is what lets a copy the source has moved past — or a
@@ -2923,6 +2993,32 @@ fn hint_init(p: &Project, ui: &mut dyn Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Agent guidance is for worktrees-managed repos only (decision,
+    /// 2026-09-30). Every bats `new` makes its repo managed, so the unmanaged
+    /// side — `(main)` launched in a repo with no place and no
+    /// `.worktrees.toml` — is pinned here. It returns before any file is
+    /// materialised, so the developer's data dir is never touched.
+    #[test]
+    fn an_unmanaged_repo_gets_no_guidance_even_with_it_on() {
+        let base = std::env::temp_dir().join(format!("wt-ops-unmanaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "-C"]).arg(&base).args(args).status().unwrap().success());
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        let p = Project::discover(&base).expect("a repo");
+        assert!(!crate::guidance::is_managed(&p));
+        let mut ui = crate::ui::CaptureUi::default();
+        let launch = crate::profile::AiLaunch::plain("claude");
+        assert!(guidance_for(&p, &mut ui, &p.main_root, &launch).is_empty());
+        // …and the same repo with a `.worktrees.toml` IS managed.
+        std::fs::write(base.join(".worktrees.toml"), "# setup\n").unwrap();
+        assert!(crate::guidance::is_managed(&p));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// The prompt names no directory: the planning-with-files skill decides
     /// where its files live, and the reader resolves every layout it uses. The

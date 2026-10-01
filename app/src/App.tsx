@@ -27,6 +27,7 @@ import {
 import type { AgentSetupStatus, UserSkill } from "./AgentSetup";
 import type { CodexMcpStatus } from "./CodexMcpPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
+import type { GuidanceStatus } from "./GuidancePanel";
 import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTodos";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
@@ -3709,10 +3710,14 @@ function App() {
   const [codexMcp, setCodexMcp] = useState<CodexMcpStatus | null>(null);
   const [userSkills, setUserSkills] = useState<UserSkill[] | null>(null);
   const [piMcp, setPiMcp] = useState<PiMcpStatus | null>(null);
+  // Agent guidance (agent-guidance §4.5): machine-level as well — it reads the
+  // worktrees settings file and which agents are installed, never a project.
+  const [guidance, setGuidance] = useState<GuidanceStatus | null>(null);
   useEffect(() => {
     invoke<CodexMcpStatus>("codex_mcp_status").then(setCodexMcp).catch(() => setCodexMcp(null));
     invoke<PiMcpStatus>("pi_mcp_status").then(setPiMcp).catch(() => setPiMcp(null));
     invoke<UserSkill[]>("agent_user_skills").then(setUserSkills).catch(() => setUserSkills(null));
+    invoke<GuidanceStatus>("agent_guidance_status").then(setGuidance).catch(() => setGuidance(null));
   }, []);
 
   // Offers: things set up nowhere, listed in the release notes and counted by
@@ -3720,8 +3725,8 @@ function App() {
   // answer, which is how the Home card and the Settings panel came to disagree
   // about whether there was anything to say.
   const offers = useMemo(
-    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, userSkills }, settings.offers_dismissed ?? {}),
-    [mcpStatus, codexMcp, piMcp, userSkills, settings.offers_dismissed],
+    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, userSkills, guidance }, settings.offers_dismissed ?? {}),
+    [mcpStatus, codexMcp, piMcp, userSkills, guidance, settings.offers_dismissed],
   );
   const takeOffer = useCallback((o: Offer) => {
     setSettingsAt(o.to);
@@ -3740,6 +3745,7 @@ function App() {
   const codexMcpOffer = offers.find((o) => o.id === "codex-mcp") ?? null;
   const skillsOffer = offers.find((o) => o.id === "codex-skills") ?? null;
   const piMcpOffer = offers.find((o) => o.id === "pi-mcp") ?? null;
+  const guidanceOffer = offers.find((o) => o.id === "agent-guidance") ?? null;
 
   // The gear's dot means an UPDATE, and only that. Offers used to light it too
   // (purple when they were the only thing pending), but a dot on the gear leads
@@ -7677,7 +7683,9 @@ function App() {
         onPiMcpChanged={setPiMcp}
         piMcpOfferPending={!!piMcpOffer} onSilencePiMcpOffer={() => piMcpOffer && silenceOffer(piMcpOffer)}
         userSkills={userSkills} onUserSkillsChanged={setUserSkills}
-        skillsOfferPending={!!skillsOffer} onSilenceSkillsOffer={() => skillsOffer && silenceOffer(skillsOffer)} />
+        skillsOfferPending={!!skillsOffer} onSilenceSkillsOffer={() => skillsOffer && silenceOffer(skillsOffer)}
+        guidance={guidance} onGuidanceChanged={setGuidance}
+        guidanceOfferPending={!!guidanceOffer} onSilenceGuidanceOffer={() => guidanceOffer && silenceOffer(guidanceOffer)} />
 
       {codexInstallPrompt && <CodexInstallDialog onClose={() => setCodexInstallPrompt(false)} onReport={(m) => setNotice(m)} />}
       {agentSwitch && <AgentSwitchSheet pending={agentSwitch} defaultModels={settings.default_models}

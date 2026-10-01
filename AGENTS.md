@@ -317,7 +317,14 @@ wins.
 A FRESH worktree needs two bootstraps first, and both fail confusingly:
 `git submodule update --init --recursive` (without it `make test` dies with a
 bare "No such file or directory" naming the bats binary, not the submodule),
-and `pnpm install` in `app/` under Node >= 22.13 (`nvm use 22.23.2`).
+and `pnpm install` in `app/` on the pinned toolchain: `nvm use` (reads
+`.nvmrc`, Node 22.23) then `corepack pnpm install` in `app/` (corepack reads
+`app/package.json`'s `packageManager`, pnpm 11.5.2). **Do not let corepack pick
+pnpm on its own**: unpinned, it took 12.8.1, whose native-binary layout corepack
+cannot run ("no `pnpm.cjs`"), and every fresh lane fell back to a cached 11.x by
+hand while CI ran 11 — local and CI on different majors. CI and release.yml read
+the SAME two pins (`node-version-file`, `package_json_file`); change them there,
+never in a workflow.
 
 **AI profiles have a manual gate too.** Everything claude-side (does the config
 swap apply, does session adoption still see `claude`, does auto-resume resume)

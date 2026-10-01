@@ -148,9 +148,14 @@ Taken on 2026-09-30, reviewing phase 1 (#385):
   **[source: `core/src/context/world_state/tools.rs`]**. Loaded directly, the
   whole text rides on the namespace (cap 512 KiB) **[source: `core/src/tools/handlers/mcp.rs`]**.
   **Consequence: the first 250 characters must carry the rule on their own.**
-- `codex debug prompt-input` does not start MCP servers, so it could not show
-  this. It is source-only, and not observed live **[observed: absent from the
-  rendered prompt]**.
+- `codex debug prompt-input` does not render the namespace descriptions, so
+  it could not show this; it is source-only. **Correction (phase 2 review):**
+  an earlier draft added that prompt-input "does not start MCP servers". That
+  claim came from the prompt text, not from the processes, and it is wrong.
+  prompt-input STARTS every configured MCP server: a marker server was
+  launched, ~1 s against ~0.12 s with none **[observed]**. Per server,
+  `-c mcp_servers.<name>.enabled=false` prevents it; `mcp_servers={}` does
+  not.
 - **`-c developer_instructions="…"` → the first `developer` message**, ahead of
   the skills block **[observed]**. Worktrees already passes per-launch `-c`
   (`harness.rs` `Codex::launch_args`). Caveat: `-c` *overrides* a key
@@ -658,7 +663,49 @@ dir). The candidate text still produced 5 of 5 through the tooling.
   shipped binary (`~/.local/bin/worktrees`, v0.34.0) and arm B on the
   release build, with no proxy (§7.4).
 
-**Phase 2: per launch.**
+**Phase 2: per launch.** Core and CLI built (`guidance.rs`); the app half
+(the offer, Settings → Agent guidance) follows in its own PR. As built:
+- The text is `guidance::HEAD` (shared with the MCP instructions),
+  `guidance/SKILL.md` and `rules_text()`, all compiled in. It is materialised
+  to `$XDG_DATA_HOME/worktrees/agent/<FNV-1a of the content>/`, written
+  beside that path and renamed into place.
+- Settings: `~/.config/worktrees/agent-guidance.json` (`enabled`, default
+  on; `guard`, default off), plus `$WORKTREES_AGENT_GUIDANCE`. A file and
+  not an app-memory override, because `create_worktree` launches from the
+  CLI process an MCP client started, which an app override never reaches.
+- `AiLaunch.guidance` is filled in `ops::ai_launch_for` (managed repos only)
+  and emitted by `launch_cmd` after every adapter's head words.
+- **The Codex probe runs only at a Codex launch, never anywhere else.**
+  - It starts Codex's MCP servers (see the §2.2 correction), so it switches
+    off every server it can see configured, and runs in the place.
+  - A repo's own `.codex/config.toml` counts only when Codex trusts the
+    project.
+  - The answer is cached in `$XDG_STATE_HOME/worktrees/codex-instructions.json`,
+    keyed on the modification times of `$CODEX_HOME/config.toml`, the place's
+    `.codex/config.toml`, and the Codex binary.
+  - Status, `guide --status`, `doctor` and the app report the last launch's
+    answer and never probe.
+  - An unfamiliar first developer block means "do not override".
+- The guard reads the settings on EVERY call, so the Settings toggle takes
+  effect on the next command, not the next launch. It also returns before any
+  repository lookup when the command names none of
+  `worktree`/`checkout`/`switch`.
+- The guard is delivered only when a `worktrees` CLI that HAS it is on PATH
+  (`guidance::guard_bin` asks it for `guide --rules`). An older CLI would
+  answer every Bash call with an error.
+- The guard is `worktrees guard pretooluse`, run by the plugin's hook. Any
+  failure allows.
+- `worktrees guide [--status --json | --rules]`; doctor's `guidance-skipped`
+  (Info).
+- Seen working, live [observed]:
+  - Claude 2.1.x: the plugin's skill listed as `worktrees:worktrees`, and the
+    hook refused `git checkout -b` in `(main)` with the guard's message;
+  - pi 0.99.1: `rules.md` under `[Context]` and `worktrees` under `[Skills]`
+    at startup, with no prompt sent;
+  - Codex 0.159.0: `codex debug prompt-input` with the emitted `-c` shows the
+    rule as the first developer text.
+
+The plan as written:
 - Materialise `agent/<version>/` from binary constants.
 - Claude `--plugin-dir` (skill, plus the guard behind a setting, **default off**, Q2).
 - pi `--skill` + `--append-system-prompt`.

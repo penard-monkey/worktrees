@@ -101,6 +101,32 @@ let mockPiMcp: Record<string, unknown> = (() => {
     config_path: "/Users/demo/.pi/agent/mcp.json",
   };
 })();
+// Agent guidance (`agent_guidance_status`): `?guidance=off` starts with
+// delivery off, `?guidance=codex-own` makes Codex the user-has-their-own case,
+// `unchecked` Codex before any launch, `noguard` no CLI that has the guard.
+let mockGuidanceSettings = { enabled: new URLSearchParams(location.search).get("guidance") !== "off", guard: false };
+function mockGuidance(): Record<string, unknown> {
+  const mode = new URLSearchParams(location.search).get("guidance") ?? "";
+  const on = mockGuidanceSettings.enabled;
+  const dir = "/Users/demo/.local/share/worktrees/agent/f05534dced979d78";
+  const d = (flags: string[]) => (on ? { state: "on", flags } : { state: "off" });
+  return {
+    version: 1,
+    settings: { ...mockGuidanceSettings },
+    guard_available: mode !== "noguard",
+    settings_path: "/Users/demo/.config/worktrees/agent-guidance.json",
+    dir, error: null,
+    harnesses: [
+      { id: "claude", label: "Claude", installed: true, ...d(["--plugin-dir", `'${dir}/${mockGuidanceSettings.guard ? "claude-guard" : "claude"}'`]) },
+      { id: "codex", label: "Codex", installed: true,
+        ...(mode === "codex-own" && on ? { state: "skipped", reason: "you set your own developer_instructions, and -c would replace them" }
+          : mode === "unchecked" && on ? { state: "unchecked" } : d(["-c", "'developer_instructions=\"…\"'"])) },
+      { id: "pi", label: "pi", installed: true, ...d(["--skill", `'${dir}/skills/worktrees'`, "--append-system-prompt", `'${dir}/rules.md'`]) },
+    ],
+    skill: "---\nname: worktrees\ndescription: Use BEFORE any branch work in a repository managed by worktrees …\n---\n\n# Working in a worktrees-managed repository\n\n(the mock shows an excerpt; the app shows the skill the binary ships)\n",
+    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
+  };
+}
 let mockMcp: Record<string, unknown> = (() => {
   const want = new URLSearchParams(location.search).get("mcp") ?? "absent";
   const entry = (args: string[], ok = true) => ({
@@ -2579,6 +2605,11 @@ Phase 3: Frontend pane and mock harness
         notes: ["Committed 3f9a1c2 on branch 'agent-instructions' (off origin/main).", `Opened ${url} — merge it to finish.`],
       };
     }
+    case "agent_guidance_status":
+      return mockGuidance();
+    case "set_agent_guidance":
+      mockGuidanceSettings = { enabled: args.enabled !== false, guard: args.guard === true };
+      return mockGuidance();
     case "agent_user_skills":
       return clone(mockUserSkills);
     case "agent_link_skills": {
