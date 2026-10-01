@@ -60,3 +60,12 @@ A place, its branch state, and its embedded terminal — with a dock that browse
 and renders the worktree's files.
 
 <img src="media/desktop-session.png" width="820" alt="worktrees desktop app — a place with its embedded terminal">
+
+The dock has five tabs: **Files** (the tree, changed files marked, with a
+Preview / Source / Diff viewer), **Terminal** (extra shells that keep their
+directory and scrollback), **Docs** (every markdown document in the place,
+including the agent's own planning files), **Plan** (what the place is for and
+how far along it is) and **Automations** (briefs Claude runs across the
+project).
+
+<img src="media/desktop-dock.gif" width="820" alt="The worktrees dock: browsing files, previewing a document, and the plan tab">
