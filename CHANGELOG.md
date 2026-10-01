@@ -54,6 +54,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `WORKTREES_AGENT_GUIDANCE=off`, or `"enabled": false` in the same file,
   turns per-launch delivery off.
 
+- **`worktrees projects`: the registered projects, from the command line.**
+  `ls` (`--json`), `add [<dir>]`, `rm`, `rename` and `private` work anywhere,
+  no repository needed. Each project has a NAME, unique among your projects
+  and seeded from the repo's own prefix (two clones of one repo become
+  `app` and `app-2`). Names and `private` are groundwork for agents reaching
+  places in other projects, which is not switched on yet. `worktrees doctor`
+  now warns when one registered project sits inside another.
+
 ### Changed
 - **Both plan-usage readers moved into the engine.** Claude's and Codex's
   usage readers lived under `app/src-tauri`, where only the desktop app could
@@ -85,6 +93,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   this; every other repo keeps the old text. Sessions pick it up in a new
   conversation; a resumed Claude conversation replays the prompt it started
   with.
+- **The project list moved to `~/.config/worktrees/projects.json`.** It
+  used to live in the app's own config folder, where only the app could read
+  it. The app merges its old list in on first launch and leaves the old file
+  alone, so a downgrade still has it. Every change to the list now happens
+  under a lock, so a project added from the CLI while you reorder the nav is
+  no longer lost.
 
 ## [0.34.1] - 2026-09-30
 

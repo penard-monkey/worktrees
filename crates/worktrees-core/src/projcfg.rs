@@ -60,6 +60,10 @@ const USER_ONLY_KEYS: &[&str] = &[
     "model",
     "trust",
     "pi_project_trust",
+    // Whether agents may reach places in OTHER registered projects
+    // (cross-project §5). A repo opting itself into reach, or out of being
+    // private, is the consent the registry exists to keep with the user.
+    "cross_project",
 ];
 
 // ── errors ───────────────────────────────────────────────────────────────────
@@ -1233,6 +1237,8 @@ mod tests {
             "pi_project_trust = \"ask\"\n",
             "[trust]\npi = [\"/repo\"]\n",
             "[model]\npi = \"x/y\"\n",
+            // Cross-project reach is the user's to grant (cross-project §5).
+            "cross_project = \"full\"\n",
         ] {
             let e = parse(t).unwrap_err();
             assert!(e.message.contains("may not be set by a project"), "{t}: {e}");
@@ -1240,6 +1246,8 @@ mod tests {
         }
         let e = parse("[project]\nmodel = \"x\"\n").unwrap_err();
         assert_eq!(e.line, Some(2), "{e}");
+        let e = parse("[project]\ncross_project = \"read\"\n").unwrap_err();
+        assert!(e.message.starts_with("cross_project may not be set by a project"), "{e}");
     }
 
     #[test]
