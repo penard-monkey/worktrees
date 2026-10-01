@@ -14,7 +14,22 @@ const limit = (role, minutes, percent, reset, bucket = "codex") => ({ id: `${buc
   bucket_label: bucket, window_role: role, window_minutes: minutes, percent, severity: "normal", resets_at: reset });
 const wire = { state: "ready", source: "app_server", fetched_at: 100, reason: null,
   limits: [limit("primary", 10080, 24, 110), limit("secondary", null, 21, 3000)] };
-const rust = fs.readFileSync(new URL("../src-tauri/src/codex_usage.rs", import.meta.url), "utf8").split("#[cfg(test)]")[0];
+// The reader lives in CORE, not under `app/src-tauri`: the CLI and MCP read
+// usage too, and nothing outside the app can reach `app/src-tauri`. This path
+// moving is what makes the check go red on a move rather than silently stop
+// mirroring anything — `readFileSync` throws, it does not return "".
+//
+// Slice off the tests MODULE, not every `#[cfg(test)]`. The file can carry
+// `#[cfg(test)] impl` fixture constructors ABOVE the production code, and
+// cutting at the first marker truncates this mirror to the file's first lines
+// — which happened to fail loudly, but a pattern that appeared in the head
+// would have passed just as silently. Same family as docsviewer-check's
+// first-match trap. Asserting the marker keeps a rename from quietly handing
+// the whole file, fixtures included, to the patterns below.
+const SRC = fs.readFileSync(new URL("../../crates/worktrees-core/src/codex_usage.rs", import.meta.url), "utf8");
+const TESTS_AT = SRC.search(/^#\[cfg\(test\)\]\s*\nmod tests\b/m);
+assert.notEqual(TESTS_AT, -1, "expected a `#[cfg(test)] mod tests` marker in codex_usage.rs");
+const rust = SRC.slice(0, TESTS_AT);
 test("Codex age ceiling mirrors the backend constant", () => {
   const definitions = [...rust.matchAll(/^const STALE: i64 = ([\d_]+);/gm)];
   assert.equal(definitions.length, 1, "expected exactly one backend STALE definition");

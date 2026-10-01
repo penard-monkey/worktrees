@@ -65,5 +65,10 @@ const out = "═══ Worktree for 'feat' ═══\nCreating new branch 'feat'
   "lm-dead's host http://h/v1 did not answer within 3s — pi was not started. The place is ready; to launch anyway: worktrees open feat --force";
 eq("the dialog shows the refusal, not the steps before it", refusalLine(out), "lm-dead's host http://h/v1 did not answer within 3s — pi was not started");
 eq("with no marker, the last line core wrote", refusalLine("a\nb\nsomething else."), "something else");
+// The quota gate's line has no "not started" and speaks to an agent caller;
+// the dialog keeps the reason and the alternative, drops the agent's instruction.
+eq("a spent window: reason kept, agent instruction dropped",
+  refusalLine("═══ Worktree for 'feat' ═══\nbrief: .planning/brief.md\nClaude is at 92% of its 5h window, resets in 1h — not starting another agent on it. Another agent is available here: Codex. Ask the user before overriding: this spends an allowance they are nearly out of. The place is ready; to launch anyway: worktrees open feat --force"),
+  "Claude is at 92% of its 5h window, resets in 1h — not starting another agent on it. Another agent is available here: Codex");
 
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }

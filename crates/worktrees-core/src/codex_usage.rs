@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TTL: u64 = 120;
 const STALE: i64 = 1800;
+
 const RESPONSE_CAP: u64 = 1024 * 1024;
 const ATTEMPT: Duration = Duration::from_secs(13);
 
@@ -35,6 +36,46 @@ pub struct Info {
     retry_at: Option<i64>,
     reason: Option<&'static str>,
     limits: Vec<Limit>,
+}
+
+/// Read-only accessors. The fields stay private — this type is serialised to
+/// the frontend and its shape is a contract — but `quota` has to read it now
+/// that the spawn path gates on it.
+impl Limit {
+    pub fn percent(&self) -> f64 { self.percent }
+    pub fn severity(&self) -> &str { &self.severity }
+    pub fn bucket_label(&self) -> &str { &self.bucket_label }
+    pub fn resets_at(&self) -> Option<i64> { self.resets_at }
+}
+
+impl Info {
+    pub fn limits(&self) -> &[Limit] { &self.limits }
+}
+
+/// Constructors for tests in sibling modules (`harness`'s window mappings).
+/// Private fields stay private in production: this type is serialised to the
+/// frontend and its shape is a contract.
+///
+/// `#[cfg(test)]` ABOVE the production code is deliberate and safe:
+/// `plan-usage-check.mjs` slices this file at `#[cfg(test)] mod tests`, not at
+/// the first marker it finds.
+#[cfg(test)]
+impl Limit {
+    pub(crate) fn for_test(bucket_label: &str, percent: f64, severity: &str, resets_at: Option<i64>) -> Self {
+        Self {
+            id: bucket_label.into(), bucket_id: bucket_label.into(),
+            bucket_label: bucket_label.into(), window_role: "primary".into(),
+            window_minutes: None, percent, severity: severity.into(), resets_at,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Info {
+    pub(crate) fn for_test(limits: Vec<Limit>) -> Self {
+        Self { provider: "codex", state: "ok", source: "app-server",
+               fetched_at: Some(0), retry_at: None, reason: None, limits }
+    }
 }
 
 impl Info {
@@ -463,6 +504,29 @@ fn executable() -> Option<PathBuf> {
         })
 }
 
+/// The neutral working directory a probe must run in.
+///
+/// NEVER the selected repository. `codex app-server` reads the Codex
+/// configuration of the directory it starts in, so probing from a place would
+/// let a cloned repo decide which account the usage bars describe — ADR 0001
+/// territory, and `docs/proposals/codex-usage.md` ("App-server lifecycle")
+/// requires a neutral dir for exactly that reason.
+///
+/// `~/.cache/worktrees/` rather than Tauri's `app_cache_dir()`, for `inbox`'s
+/// reason one level out: usage is read by the CLI and by every `worktrees mcp`
+/// process now, not only by the app, and `app_cache_dir()` is a Tauri API whose
+/// path means hardcoding a bundle identifier — which would address the
+/// INSTALLED app and never `sandbox.sh --app`. Identifier-free, derivable from
+/// `$HOME` on both sides, one directory for every caller.
+///
+/// `None` only when `$HOME` is unset. Callers treat that as "cannot probe",
+/// which is no data, which is allow — fail open, like every other unreadable
+/// source here.
+pub fn probe_cwd() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
+    Some(Path::new(&home).join(".cache/worktrees/codex-usage"))
+}
+
 pub fn read(cwd: PathBuf) -> Info {
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -522,7 +586,7 @@ fn read_cached(
     }
     let observation = fetch();
     if let Some(reason) = observation.info.reason {
-        super::applog(failure_level(reason), &format!("codex_usage: {reason}"));
+        crate::logsink::log(failure_level(reason), &format!("codex_usage: {reason}"));
     }
     cache.update(observation, epoch(), Instant::now())
 }

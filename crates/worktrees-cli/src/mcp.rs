@@ -1188,9 +1188,11 @@ impl Server {
                  its task: it is written to .planning/brief.md in the worktree and the chosen \
                  agent opens on it. `provider` defaults to the project's AI command. `model` picks \
                  the agent's model (pi: `<backend>/<id>`, required unless the user set a default); \
-                 an unknown or unusable pi model is refused with the ready ones named. If pi's \
-                 model host does not answer, the worktree and brief are still created and the \
-                 agent is NOT started (exit 5) — tell the user; only they can launch it anyway.",
+                 an unknown or unusable pi model is refused with the ready ones named. A launch \
+                 can be refused while the place still succeeds (exit 5): pi's model host does not \
+                 answer, or the agent's plan window is nearly spent. The worktree and the brief \
+                 are created either way and the agent is NOT started — relay the reason and let \
+                 the user decide; `force: true` overrides, and is theirs to ask for, not yours.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1199,7 +1201,8 @@ impl Server {
                         "provider": { "type": "string", "enum": worktrees_core::provider::ids(), "description": "Agent to start. Omit to use the project's AI command." },
                         "model": { "type": "string", "description": "The agent's model: pi takes `<backend>/<id>` (e.g. lm-studio/qwen3.6-27b), claude an alias or id, codex a model id. Letters, digits and . _ / : - only. Optional." },
                         "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; the chosen agent opens on it. Optional." },
-                        "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." }
+                        "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." },
+                        "force": { "type": "boolean", "description": "Launch anyway despite an advisory refusal (a spent plan window, an unreachable model host). Only after the user has been told the reason and asked for it. Default false." }
                     },
                     "required": ["branch"],
                     "additionalProperties": false
@@ -1581,6 +1584,13 @@ impl Server {
                 };
                 let raw_base = s("base");
                 let mut args = vec![branch, "--no-attach".to_string()];
+                // The one "proceed despite an advisory you have read" override,
+                // the same bool the CLI's `--force` and the app's "Launch
+                // anyway" set. Never a flag per reason: `Refusal` would grow a
+                // `kind` first (see `quota`).
+                if a.get("force").and_then(|v| v.as_bool()) == Some(true) {
+                    args.push("--force".to_string());
+                }
                 let mut harness = None;
                 match a.get("provider") {
                     None | Some(serde_json::Value::Null) => {}
@@ -2289,6 +2299,16 @@ impl Server {
         let body = ui.lines.join("\n");
         if rc == 0 {
             text_ok(if body.is_empty() { "ok" } else { &body })
+        } else if rc == worktrees_core::diag::EXIT_LAUNCH_REFUSED {
+            // The place and its brief EXIST; only the agent did not start. The
+            // CLI's own text names `worktrees open <slug> --force`, which an
+            // MCP caller cannot run — name the tool instead, and keep the
+            // decision with the user (the `remove_worktree` pattern).
+            text_err(&format!(
+                "{body}\n\nThe worktree and its brief were created; only the agent was not \
+                 started. Relay the reason to the user. Retry only if they ask, by calling \
+                 create_worktree again for the same branch with force: true."
+            ))
         } else if rc == EXIT_NEEDS_CONFIRM {
             text_err(&format!(
                 "{body}\n\nThis operation stopped to ask for confirmation. Relay the question to \

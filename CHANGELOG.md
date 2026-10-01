@@ -6,6 +6,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **An agent is no longer started on a plan window that is nearly spent.**
+  Eight lanes were once opened in parallel on a Plus plan and the five-hour
+  window was gone in fifteen minutes; nothing in the tool had an opinion. Now
+  each harness asks its own provider how much of the window is left before a
+  session is created, and refuses the LAUNCH when the provider's own grade says
+  warning — naming the window, the percentage and when it resets. The worktree,
+  the branch and the brief are created either way, so the handoff survives the
+  wait and nothing is re-typed; `--force` (the app: **Launch anyway**; MCP:
+  `force: true`) launches regardless, and `worktrees open <slug> --force` is the
+  retry it prints. It fails open on every unknown, and `WORKTREES_USAGE_PROBE=off`
+  switches the gate off (the app's usage meter keeps reading). It is deliberately **not** a burst limiter:
+  lanes bill after their first turns, so a simultaneous fan-out is still
+  admitted — the gate stops the NEXT one.
+- **`create_worktree` takes `force`.** The same single override, for an agent
+  that has relayed the refusal and been asked by the user to go ahead. A refused
+  launch now answers MCP callers with the tool to retry with, rather than a CLI
+  flag they cannot run.
 - **Lanes are launched knowing how to work in places.** In a worktrees-managed
   repo, every Claude, pi and Codex launch now gets the places rule and a
   `worktrees` skill (lanes, briefs, messaging, finishing, what never to
@@ -38,6 +55,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   turns per-launch delivery off.
 
 ### Changed
+- **Both plan-usage readers moved into the engine.** Claude's and Codex's
+  usage readers lived under `app/src-tauri`, where only the desktop app could
+  reach them — so nothing in the CLI or in a `worktrees mcp` session could ask
+  how much of a provider's window was left. They are `worktrees_core`'s now
+  (`claude_usage`, `codex_usage`), with the app keeping only its two tauri
+  commands. No reading changes: same endpoints, same TTLs, same backoff, same
+  "missing data is not an error". The app's log is handed to the engine once
+  at startup through one installable sink rather than a static per reader, so
+  a reader added later cannot silently go unlogged.
+- **The Codex usage probe no longer runs in an app-private directory.**
+  `codex app-server` reads the Codex configuration of whatever directory it
+  starts in, so the probe has always run somewhere neutral — but that
+  somewhere was Tauri's `app_cache_dir()`, which the CLI cannot name without
+  hardcoding a bundle identifier. It is `~/.cache/worktrees/codex-usage` now,
+  identifier-free and shared by every caller. Still never the selected repo.
 - **Agents are told to do their branch work in a place.** The worktrees MCP
   server's instructions, the one text every connected session reads, used
   to describe the tools and say nothing about the agent's own work. An

@@ -39,6 +39,14 @@ common_setup() {
   unset TMUX                      # don't inherit the developer's real tmux
   export BATS_TEST_TIMEOUT=120    # no single test may hang the suite (CI backstop)
   export WORKTREES_AI_CMD="fake-ai"
+  # The launch-time plan-usage gate (`quota`) must never run a REAL probe here.
+  # Claude's reader shells out to /usr/bin/security — an absolute path, so the
+  # PATH shims cannot intercept it — and then curl to api.anthropic.com, which
+  # would put the developer's own keychain and network on the path of every
+  # `new` in this suite. `off` means the harnesses report no windows at all,
+  # which is the fail-open answer; the tests that exercise the gate point this
+  # at a fixture instead (test/quota.bats).
+  export WORKTREES_USAGE_PROBE=off
   # XDG_STATE_HOME for the same reason as XDG_CONFIG_HOME: `init`'s once-only
   # hint marker lives under it, and a developer who exports it would have the
   # suite writing into (and reading back) their real state dir between runs.

@@ -157,10 +157,30 @@ Flags:
 
 | Command | Flags |
 |---|---|
-| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--no-spare` (single pane — no spare shell, and for `new` no auto-install) |
+| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--model <m>` (the agent's model for this launch) · `--force` (launch despite an advisory refusal — see below) · `--no-spare` (single pane — no spare shell, and for `new` no auto-install) |
 | `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` · `--brief <text>` (write the agent's task to `.planning/brief.md` and launch the selected agent on it) |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |
+
+**An agent is not started on a plan window that is nearly spent.** Before a
+session is created, the harness asks its own provider how much of the current
+window is left and refuses the LAUNCH when the provider's own grade says
+warning (Codex: 80%) — naming the window, the percentage and when it resets.
+The worktree, the branch and the brief are created either way: only the agent
+waits, so nothing has to be re-typed once the window rolls over. `--force`
+launches anyway (the app: **Launch anyway**; MCP: `force: true`), and
+`worktrees open <slug> --force` is the retry it prints.
+
+It fails open in every direction — no reading, an unreadable one, a provider
+with no allowance to report, or `--no-tmux` (no agent starts at all) and the
+launch simply proceeds. It is deliberately not a burst limiter: lanes bill
+after their first turns, so eight started at once are all admitted and the gate
+first speaks once the window is already spent. `WORKTREES_USAGE_PROBE=off`
+switches the gate off entirely (the app's usage meter keeps reading). The check
+costs a launch one reading of the provider's usage — usually cached, but on a
+network that hangs rather than fails it can hold a `new` for up to ~15s
+(Claude's GET) or ~13s (Codex's probe) before failing open; `--force` skips
+the reading altogether.
 
 Guards you'll be glad exist: dirty worktrees refuse to `switch`/`rm` (override
 with `--force`); a stale *unregistered* dir under `.worktrees/` is never treated

@@ -139,6 +139,20 @@ pub trait Adapter: Sync {
         Ok(())
     }
 
+    /// This harness account's usage windows, or `None` when it has none and
+    /// when none can be read. Never blocks longer than its reader's own
+    /// deadline, and `None` is the fail-open answer (`quota`).
+    ///
+    /// A harness OPTS IN by answering. pi has no allowance to read and simply
+    /// does not override this — which is the point: the gate that used to live
+    /// in `cmd_new` matched on a provider WORD, and a string table like that is
+    /// exactly the per-surface dispatch `docs/adding-a-harness.md` exists to
+    /// prevent. A harness added tomorrow is ungated until it says otherwise,
+    /// rather than silently falling into someone else's arm.
+    fn usage(&self) -> Option<Vec<crate::quota::Window>> {
+        None
+    }
+
     /// Flags derived from the PLACE at launch time (Codex's permission mode,
     /// which needs the worktree's git common dir). Carried on
     /// `AiLaunch::place_flags` and emitted by `launch_args`.
@@ -189,8 +203,9 @@ pub trait Adapter: Sync {
     /// Whether this harness has never STARTED a session in place `slug` — so
     /// a fresh `open` there is the first launch, and a brief waiting in the
     /// place has never been read. Only a harness whose first launch can be
-    /// refused after the brief was written (pi: a dead model host) needs to
-    /// know; the rest answer false and `open` stays as it was.
+    /// refused after the brief was written (pi: a dead model host; Claude and
+    /// Codex: a spent plan window) needs to know; the rest answer false and
+    /// `open` stays as it was.
     fn never_launched(&self, _p: &Project, _slug: &str) -> bool {
         false
     }
@@ -297,6 +312,25 @@ impl Adapter for Claude {
         "-r".into()
     }
 
+    fn usage(&self) -> Option<Vec<crate::quota::Window>> {
+        crate::quota::seam(self.provider().id, || {
+            windows_from_claude(&crate::claude_usage::read())
+        })
+    }
+
+    /// Nothing place-derived to resolve; the only thing that can refuse a
+    /// Claude launch is a spent window.
+    fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
+        crate::quota::gate(self, launch, crate::sysclock::now_epoch())
+    }
+
+    /// A spent window refuses the launch AFTER `new --brief` wrote the brief,
+    /// so the `open` that follows is the first launch and must carry the
+    /// opener — pi's shape: no conversation of claude's for the place yet.
+    fn never_launched(&self, p: &Project, slug: &str) -> bool {
+        !self.session_present(p, &p.place_dir(slug))
+    }
+
     fn session_present(&self, project: &Project, cwd: &str) -> bool {
         project.claude_session_present(cwd)
     }
@@ -356,6 +390,26 @@ impl Adapter for Codex {
 
     fn resume_arg(&self, _cwd: &str) -> String {
         "resume --last".into()
+    }
+
+    fn usage(&self) -> Option<Vec<crate::quota::Window>> {
+        crate::quota::seam(self.provider().id, || {
+            // The probe's neutral cwd, never the selected repo: `codex
+            // app-server` reads the Codex configuration of wherever it starts.
+            match crate::codex_usage::probe_cwd() {
+                Some(cwd) => windows_from_codex(&crate::codex_usage::read(cwd)),
+                None => Vec::new(),
+            }
+        })
+    }
+
+    fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
+        crate::quota::gate(self, launch, crate::sysclock::now_epoch())
+    }
+
+    /// As Claude's: a quota refusal leaves a brief nobody has read.
+    fn never_launched(&self, p: &Project, slug: &str) -> bool {
+        !self.session_present(p, &p.place_dir(slug))
     }
 
     fn session_present(&self, _project: &Project, cwd: &str) -> bool {
@@ -625,6 +679,40 @@ impl Adapter for Pi {
         Delivery::Typed { session, outcome }
     }
 
+}
+
+/// `claude_usage`'s rows as the shared shape.
+///
+/// Claude scopes some weekly buckets to a model (a "Fable" row). The reader
+/// does not separate that out, so the bucket's own label IS the model name for
+/// grading purposes — which is what keeps a Fable bucket from refusing an Opus
+/// lane (`quota::worst_window`).
+pub(crate) fn windows_from_claude(info: &crate::claude_usage::UsageInfo) -> Vec<crate::quota::Window> {
+    info.limits()
+        .iter()
+        .map(|l| crate::quota::Window {
+            label: l.label().to_string(),
+            percent: l.percent(),
+            severity: crate::quota::Severity::from_provider(l.severity()),
+            resets_at: l.resets_at(),
+            model: l.scoped_model().map(str::to_string),
+        })
+        .collect()
+}
+
+/// `codex_usage`'s rows as the shared shape. Codex's buckets are account-wide,
+/// never model-scoped, so `model` is always `None`.
+pub(crate) fn windows_from_codex(info: &crate::codex_usage::Info) -> Vec<crate::quota::Window> {
+    info.limits()
+        .iter()
+        .map(|l| crate::quota::Window {
+            label: l.bucket_label().to_string(),
+            percent: l.percent(),
+            severity: crate::quota::Severity::from_provider(l.severity()),
+            resets_at: l.resets_at(),
+            model: None,
+        })
+        .collect()
 }
 
 fn model_arg_value(model: String) -> Option<String> {
@@ -1022,5 +1110,55 @@ mod tests {
         let e = may_type("Codex", State::Waiting).unwrap_err();
         assert!(e.contains("Codex is waiting on you"), "{e}");
         assert!(may_type("Codex", State::None).is_err());
+    }
+
+    // ── usage windows ───────────────────────────────────────────────────────
+
+    #[test]
+    fn claude_rows_become_windows_and_only_scoped_ones_name_a_model() {
+        use crate::claude_usage::{UsageInfo, UsageLimit};
+        let info = UsageInfo::for_test(vec![
+            UsageLimit::for_test("session", "Session", 12.0, "normal", Some(100)),
+            UsageLimit::for_test("weekly_all", "Weekly", 59.0, "normal", None),
+            UsageLimit::for_test("weekly_scoped", "Fable", 85.0, "warning", Some(900)),
+        ]);
+        let ws = windows_from_claude(&info);
+        assert_eq!(ws.len(), 3);
+        assert_eq!(ws[0].model, None, "the 5h session window is not model-scoped");
+        assert_eq!(ws[1].model, None, "the all-models weekly is not model-scoped");
+        assert_eq!(
+            ws[2].model.as_deref(),
+            Some("Fable"),
+            "a weekly_scoped bucket's LABEL is the model it is scoped to"
+        );
+        assert_eq!(ws[2].severity, crate::quota::Severity::Elevated);
+        assert_eq!(ws[2].resets_at, Some(900));
+        assert_eq!(ws[0].severity, crate::quota::Severity::Normal);
+    }
+
+    #[test]
+    fn codex_rows_become_account_wide_windows() {
+        use crate::codex_usage::{Info, Limit};
+        let info = Info::for_test(vec![
+            Limit::for_test("5h", 82.0, "warning", Some(400)),
+            Limit::for_test("7d", 10.0, "normal", None),
+        ]);
+        let ws = windows_from_codex(&info);
+        assert_eq!(ws.len(), 2);
+        assert!(
+            ws.iter().all(|w| w.model.is_none()),
+            "Codex buckets are account-wide; a model scope here would wrongly spare a lane"
+        );
+        assert_eq!(ws[0].label, "5h");
+        assert_eq!(ws[0].percent, 82.0);
+        assert_eq!(ws[0].severity, crate::quota::Severity::Elevated);
+    }
+
+    #[test]
+    fn a_harness_with_no_allowance_to_read_answers_none() {
+        // pi does not override `usage`, and that default is the opt-in seam:
+        // a harness is ungated until it says otherwise, rather than falling
+        // into another harness's arm of a string table.
+        assert!(PI.usage().is_none(), "pi has no allowance to read");
     }
 }

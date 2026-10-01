@@ -166,9 +166,10 @@ function AgentSwitchSheet({ pending, defaultModels, onClose, onConfirm, onError 
   </div>;
 }
 
-/** A launch core refused because the model host did not answer
- *  (`diag::EXIT_LAUNCH_REFUSED`): the place exists, the agent does not. The
- *  user — and only the user — may launch anyway. */
+/** A launch core refused on an advisory (`diag::EXIT_LAUNCH_REFUSED`: pi's
+ *  model host did not answer, a Claude/Codex plan window is nearly spent): the
+ *  place exists, the agent does not. The user — and only the user — may launch
+ *  anyway. */
 type LaunchRefused = { repo: string; slug: string; provider: Harness; model: string; reason: string };
 
 /** The one line of an op's output that IS the refusal: `new` reports every
@@ -179,7 +180,9 @@ type LaunchRefused = { repo: string; slug: string; provider: Harness; model: str
 function refusalLine(output: string): string {
   const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
   const line = lines.find((l) => l.includes("not started")) ?? lines[lines.length - 1] ?? "";
-  return line.split(". The place is ready")[0].replace(/\.$/, "");
+  // "Ask the user before overriding" is core speaking to an AGENT caller; in
+  // this dialog the reader is the user, and the button is the asking.
+  return line.split(". The place is ready")[0].split(" Ask the user before overriding")[0].replace(/\.$/, "");
 }
 
 function LaunchRefusedDialog({ refused, onClose, onForce }: {
@@ -192,8 +195,8 @@ function LaunchRefusedDialog({ refused, onClose, onForce }: {
       <header className="sync-h"><b>{HARNESS_LABEL[refused.provider]} was not started</b></header>
       <div className="sync-body">
         <div data-testid="launch-refused-reason">{refused.reason}.</div>
-        <div className="sync-live">The worktree is ready. Launched anyway, {HARNESS_LABEL[refused.provider]} will
-          wait on {refused.model || "its model"} until the host answers or its retries run out.</div>
+        <div className="sync-live">The worktree and its brief are ready. Launch anyway starts
+          {" "}{HARNESS_LABEL[refused.provider]} now, despite the reason above.</div>
       </div>
       <footer className="sync-foot">
         <button className="ctrl" autoFocus onClick={onClose}>Not now</button>
@@ -293,7 +296,8 @@ const isBareArm = (k: string | null) =>
   !!k && (k.startsWith("hdr|") || k.startsWith("close|") || k.startsWith("closectx|"));
 /** core's `diag::EXIT_NEEDS_CONFIRM` — "I stopped to ask", never a failure. */
 const EXIT_NEEDS_CONFIRM = 4;
-/** `diag::EXIT_LAUNCH_REFUSED`: the model host did not answer; offer "Launch anyway". */
+/** `diag::EXIT_LAUNCH_REFUSED`: an advisory refused the launch (a dead model
+ *  host, a nearly spent plan window); offer "Launch anyway". */
 const EXIT_LAUNCH_REFUSED = 5;
 /** The "nothing collapsed" answer for a place with no `docs_collapsed` entry,
  *  which is most of them. One frozen array rather than a fresh `[]` per render:
@@ -5011,8 +5015,9 @@ function App() {
       noteRefusal(r, repo, p.slug, provider, model);
     })();
   };
-  /** Core refused to START the agent (its model host did not answer): the
-   *  place is fine, so ask whether to launch anyway rather than paint an error. */
+  /** Core refused to START the agent on an advisory (a dead model host, a
+   *  nearly spent plan window): the place is fine, so ask whether to launch
+   *  anyway rather than paint an error. */
   const noteRefusal = (r: CmdResult | null, repo: string, slug: string, provider: Harness, model: string) => {
     if (r?.code === EXIT_LAUNCH_REFUSED) setLaunchRefused({ repo, slug, provider, model, reason: refusalLine(r.output) });
   };
