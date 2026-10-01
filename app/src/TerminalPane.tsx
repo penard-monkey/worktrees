@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Harness } from "./harness";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { FindBar, findColors } from "./Find";
+import { findPaths, hitRange, logicalLine } from "./termlinks";
 import "@xterm/xterm/css/xterm.css";
 
 // Two kinds of embedded terminal, one renderer.
@@ -242,9 +243,140 @@ function wheelPump(send: (lines: number) => Promise<unknown>) {
   return (lines: number) => { pending += lines; flush(); };
 }
 
+// ── file-path links (⌘-click → the dock's file viewer) ──────────────────────
+
+/** What a pane needs to turn a path into a link: the directory a relative path
+ *  is relative to, and what to do with one. A dock shell also names itself, so
+ *  the backend can read its LIVE working directory — the user may have `cd`'d
+ *  since the tab opened, and `ls` prints names relative to wherever that is. */
+export type TermLinks = {
+  root: string;
+  shell?: { repo: string; slug: string; index: number };
+  onOpen: (path: string, line?: number, col?: number) => void;
+};
+
+/** How long an answer about one path is trusted. Short, because files appear
+ *  (an agent writes one and prints its name in the same breath) and a shell's
+ *  cwd moves; long enough that sweeping the mouse over a screen of output asks
+ *  the filesystem once per path rather than once per row crossed. */
+const LINK_TTL_MS = 10_000;
+const linkCache = new Map<string, { abs: string | null; at: number }>();
+
+/** ⌘ on macOS, Ctrl elsewhere — the gesture iTerm, Terminal and VS Code all
+ *  use. NOT a plain click: in a terminal a click focuses, starts a selection,
+ *  and in a mouse-mode program (claude) is the program's own input, so a plain
+ *  click that also opened a file would hijack all three. */
+const isOpenGesture = (e: { metaKey: boolean; ctrlKey: boolean }) =>
+  /Mac|iPhone|iPad/.test(navigator.platform) ? e.metaKey : e.ctrlKey;
+
+const LINK_HINT = /Mac|iPhone|iPad/.test(navigator.platform)
+  ? "⌘-click to open in the file viewer"
+  : "Ctrl-click to open in the file viewer";
+
+/** xterm link provider for file paths. `provideLinks` is asked per ROW as the
+ *  mouse crosses it; the row's logical line (wrapped rows joined) is scanned
+ *  by `findPaths`, and every candidate not already cached is resolved in ONE
+ *  `resolve_term_paths` call — a stat per path in the backend, no spawn. Only
+ *  the ones it answers with an absolute path become links.
+ *
+ *  The ⌘-press on a link is stopped at `.xterm-screen`. xterm's own mousedown
+ *  listeners live on the PARENT (`.xterm`): one reports the press to a program
+ *  that turned the mouse on (claude would see a click at that cell), the other
+ *  starts a text selection. The linkifier listens on `.xterm-screen` itself,
+ *  so stopping propagation there — in the target phase, after it — still lets
+ *  it record the press it needs to activate on release. A plain press is never
+ *  touched, so selection and claude's own mouse work exactly as before. */
+function termLinkProvider(term: Terminal, linksRef: { current: TermLinks | null }, host: HTMLElement) {
+  let hovered = false;
+  const screen = term.element?.querySelector<HTMLElement>(".xterm-screen") ?? null;
+  const onDown = (e: MouseEvent) => {
+    if (hovered && isOpenGesture(e)) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+  };
+  screen?.addEventListener("mousedown", onDown);
+
+  const resolve = async (ctx: TermLinks, paths: string[]): Promise<Map<string, string | null>> => {
+    const scope = `${ctx.root}\0${ctx.shell ? `${ctx.shell.repo}|${ctx.shell.slug}|${ctx.shell.index}` : ""}\0`;
+    const now = performance.now();
+    const out = new Map<string, string | null>();
+    const ask: string[] = [];
+    for (const p of new Set(paths)) {
+      const c = linkCache.get(scope + p);
+      if (c && now - c.at < LINK_TTL_MS) out.set(p, c.abs);
+      else ask.push(p);
+    }
+    if (ask.length) {
+      try {
+        const got = await invoke<(string | null)[]>("resolve_term_paths", { root: ctx.root, shell: ctx.shell ?? null, paths: ask });
+        ask.forEach((p, i) => {
+          const abs = got[i] ?? null;
+          linkCache.set(scope + p, { abs, at: now });
+          out.set(p, abs);
+        });
+      } catch (e) {
+        // No links is the safe failure; say so once per batch in the log
+        // rather than painting anything (CLAUDE.md: never swallow errors).
+        invoke("log_event", { level: "warn", msg: `terminal links: ${e}` }).catch(() => {});
+      }
+      // The cache only ever needs what is on screen; drop the stale tail so a
+      // long session does not accumulate every path it ever printed.
+      if (linkCache.size > 2000) for (const [k, v] of linkCache) if (now - v.at >= LINK_TTL_MS) linkCache.delete(k);
+    }
+    return out;
+  };
+
+  return {
+    provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void) {
+      const ctx = linksRef.current;
+      const buf = term.buffer.active;
+      const y = bufferLineNumber - 1;
+      if (!ctx) return callback(undefined);
+      const ll = logicalLine((ry) => buf.getLine(ry), y);
+      // Only the candidates that touch the hovered row: xterm asks per row,
+      // and the rest of a wrapped line is answered when the mouse gets there.
+      const hits = findPaths(ll.text).filter((h) => {
+        const a = ll.cells[h.start];
+        const b = ll.cells[h.end - 1];
+        return a && b && a.y <= y && b.y >= y;
+      });
+      if (!hits.length) return callback(undefined);
+      void resolve(ctx, hits.map((h) => h.path)).then((abs) => {
+        const links: ILink[] = [];
+        for (const h of hits) {
+          const path = abs.get(h.path);
+          if (!path) continue;
+          links.push({
+            range: hitRange(h, ll.cells),
+            text: ll.text.slice(h.start, h.end),
+            decorations: { pointerCursor: true, underline: true },
+            activate: (e: MouseEvent) => {
+              if (!isOpenGesture(e)) return;
+              linksRef.current?.onOpen(path, h.line, h.col);
+            },
+            hover: () => { hovered = true; host.title = LINK_HINT; },
+            leave: () => { hovered = false; host.title = ""; },
+          });
+        }
+        callback(links.length ? links : undefined);
+      });
+    },
+    dispose() {
+      screen?.removeEventListener("mousedown", onDown);
+      hovered = false;
+    },
+  };
+}
+
 /** The xterm instance + wiring. `key` re-creates everything when it changes. */
-function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number, focusEnabled: boolean) {
+function useTerm(makeTransport: () => Transport, key: string, termVersion: number, focusToken: number, focusEnabled: boolean, links?: TermLinks) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  // Read through a ref by the link provider, which lives as long as the xterm:
+  // `onOpen` is a new closure every render and the root can change under a
+  // mounted pane, and neither is a reason to rebuild the terminal.
+  const linksRef = useRef<TermLinks | null>(links ?? null);
+  linksRef.current = links ?? null;
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const txRef = useRef<Transport | null>(null);
@@ -300,6 +432,11 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
     // resultIndex -1 rather than lying about where you are.
     const search = new SearchAddon({ highlightLimit: 2000 });
     term.loadAddon(search);
+    // File-path links, for the panes that were given somewhere to send them.
+    // After open(): the provider hangs a listener on `.xterm-screen`, which
+    // does not exist before it.
+    const linkProv = linksRef.current ? termLinkProvider(term, linksRef, host) : null;
+    if (linkProv) term.registerLinkProvider(linkProv);
     const safeFit = () => { try { fit.fit(); } catch { /* renderer not measured yet */ } };
     safeFit();
     termRef.current = term;
@@ -486,7 +623,8 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       ro.disconnect();
       tx.close(); // detach, not kill — for either backend
       liveTerms.delete(term);
-      term.dispose(); // disposes the loaded addons with it
+      linkProv?.dispose();
+      term.dispose(); // disposes the loaded addons (and link providers) with it
       termRef.current = null;
       fitRef.current = null;
       searchRef.current = null;
@@ -562,15 +700,17 @@ export type TermFindProps = {
 
 /** The rendered pane: xterm plus its find bar. Both kinds of terminal share it,
  *  so find behaves identically in the main pane and in a dock shell tab. */
-function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnabled = true, drop, findOpen = false, findToken = 0, onFindClose }: {
+function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnabled = true, drop, links, findOpen = false, findToken = 0, onFindClose }: {
   makeTransport: () => Transport; tkey: string; termVersion: number; focusToken: number; focusEnabled?: boolean;
+  /** ⌘-clickable file paths, or absent for none (see `termLinkProvider`). */
+  links?: TermLinks;
   /** `data-drop` for the nav drag's hit-test, or absent. Passed IN rather than
    *  set here because this component is shared: every dock shell tab renders it
    *  too, and only the place's own tmux pane is somewhere a worktree reference
    *  can be dropped. */
   drop?: string;
 } & TermFindProps) {
-  const { hostRef, termRef, searchRef, epoch } = useTerm(makeTransport, tkey, termVersion, focusToken, focusEnabled);
+  const { hostRef, termRef, searchRef, epoch } = useTerm(makeTransport, tkey, termVersion, focusToken, focusEnabled, links);
   const [query, setQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [res, setRes] = useState({ index: 0, count: 0 });
@@ -667,21 +807,34 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnable
   );
 }
 
-export function TerminalPane({ session, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, ...find }: {
+/** Where a pane's paths resolve and what opening one does. Optional for both
+ *  panes: no `onOpenPath` means no links. */
+export type PaneLinkProps = {
+  /** The place's directory — what a relative path in its output is relative to. */
+  root?: string;
+  onOpenPath?: (path: string, line?: number, col?: number) => void;
+};
+
+export function TerminalPane({ session, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, root, onOpenPath, ...find }: {
   session: string; provider?: Harness; termVersion?: number; focusToken?: number; focusEnabled?: boolean;
-} & TermFindProps) {
+} & PaneLinkProps & TermFindProps) {
+  // The tmux pane resolves against the place root: the agents that print paths
+  // there (claude, codex, pi) run in it, and its shell starts there.
+  const links = root && onOpenPath ? { root, onOpen: onOpenPath } : undefined;
   return (
     <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}
-      termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider === "claude" ? "mention" : undefined} {...find} />
+      termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider === "claude" ? "mention" : undefined}
+      links={links} {...find} />
   );
 }
 
-export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0, ...find }: {
+export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0, root, onOpenPath, ...find }: {
   repo: string; slug: string; index: number; termVersion?: number; focusToken?: number;
-} & TermFindProps) {
+} & PaneLinkProps & TermFindProps) {
+  const links = root && onOpenPath ? { root, shell: { repo, slug, index }, onOpen: onOpenPath } : undefined;
   return (
     <TermSurface makeTransport={() => shellTransport(repo, slug, index)}
       tkey={`${repo}|${slug}|${index}`}
-      termVersion={termVersion} focusToken={focusToken} {...find} />
+      termVersion={termVersion} focusToken={focusToken} links={links} {...find} />
   );
 }

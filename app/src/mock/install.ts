@@ -111,7 +111,7 @@ function mockGuidance(): Record<string, unknown> {
   const dir = "/Users/demo/.local/share/worktrees/agent/f05534dced979d78";
   const d = (flags: string[]) => (on ? { state: "on", flags } : { state: "off" });
   return {
-    version: 1,
+    version: 2,
     settings: { ...mockGuidanceSettings },
     guard_available: mode !== "noguard",
     settings_path: "/Users/demo/.config/worktrees/agent-guidance.json",
@@ -1622,15 +1622,50 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
 
     case "term_open": {
       // best-effort: render a canned banner into the xterm via the Channel
+      // The middle lines are paths in the shapes agents print, so the
+      // ⌘-click links (`resolve_term_paths` below) are drivable here: three
+      // that exist in the fixture tree, one that does not, and a URL whose
+      // path part must not be mined for a candidate.
       const banner =
         "\x1b[38;5;110m worktrees \x1b[0m mock terminal — design harness\r\n" +
         "\x1b[90m(real tmux attach only in the Tauri app)\x1b[0m\r\n\r\n" +
+        "\x1b[1m⏺\x1b[0m Edited src/lib.rs:6:4 and src/App.tsx(3,1); see README.md line 2\r\n" +
+        "  not here: src/ghost.ts · https://github.com/acme/app/blob/main/src/App.tsx\r\n\r\n" +
         `\x1b[32m➜\x1b[0m  \x1b[36m${args.session}\x1b[0m $ \x1b[5m▌\x1b[0m\r\n`;
       const ch = args.onBytes;
       setTimeout(() => {
         try { ch?.onmessage?.(new TextEncoder().encode(banner).buffer); } catch { /* ignore */ }
       }, 40);
       return 1;
+    }
+    case "resolve_term_paths": {
+      // lib.rs's rules, against the fixture tree: relative to the place root
+      // (a dock shell's live cwd is the root here — the mock shell never
+      // moves), `~/` under the demo home, `a/`/`b/` diff prefixes as a
+      // fallback, and only a path that is a FILE answers. The real one also
+      // refuses anything outside the registered projects; nothing in the
+      // fixture is, so there is nothing to model.
+      const root = args.root as string;
+      const norm = (p: string) => {
+        const out: string[] = [];
+        for (const seg of p.split("/")) {
+          if (seg === "" || seg === ".") continue;
+          if (seg === "..") out.pop(); else out.push(seg);
+        }
+        return "/" + out.join("/");
+      };
+      const one = (raw: string) => {
+        const abs = raw.startsWith("/") ? raw : raw.startsWith("~/") ? `/Users/demo/${raw.slice(2)}` : `${root}/${raw}`;
+        return norm(abs);
+      };
+      const isFile = (p: string) => !!fsFile(p) && !fsChildren.has(p);
+      return (args.paths as string[]).map((raw) => {
+        const p = one(raw);
+        if (isFile(p)) return p;
+        const m = /^[ab]\/(.+)$/.exec(raw);
+        if (m && isFile(one(m[1]))) return one(m[1]);
+        return null;
+      });
     }
     case "term_write":
     case "term_resize":
@@ -3216,9 +3251,9 @@ const healthyConfigs: Record<string, MockCfg> = {};
    * that it arrives from ANOTHER PROCESS, so without this the frontend half of
    * the feature (select the place, then open the dock on the file, in that
    * order) could not be driven headlessly at all. */
-  showDoc(repo: string, slug: string, path: string) {
-    emitEvent("app:open-doc", { repo, slug, path });
-    return { repo, slug, path };
+  showDoc(repo: string, slug: string, path: string, line?: number, col?: number) {
+    emitEvent("app:open-doc", { repo, slug, path, line: line ?? null, col: col ?? null });
+    return { repo, slug, path, line, col };
   },
   breakConfig(root: string = CDV_ROOT, msg?: string) {
     const cfg = mockConfigs[root];

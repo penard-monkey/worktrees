@@ -32,7 +32,7 @@ import { copyToClipboard } from "./clipboard";
 // which reads like a typing problem rather than a collision).
 import { openPath as openInDefaultApp, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
-import { CodeBlock } from "./CodeView";
+import { CodeBlock, type CodeMark } from "./CodeView";
 import { CtxMenu } from "./CtxMenu";
 import { DiffView, type FileDiffDto } from "./DiffView";
 import { FindBar, useFileFind } from "./Find";
@@ -687,8 +687,17 @@ function SourceEditor({ text, wrap, onChange, onSave }: {
   );
 }
 
+/** A line the file was opened AT — owned by App, per place (`files_open_at`). */
+export type DockAt = CodeMark;
+
 export type FileViewProps = {
   path: string;
+  /** Opened at a line: the viewer shows the file's SOURCE with that line
+   *  marked and scrolled to, whatever view it was in — a line number is a
+   *  position in the source, and neither rendered markdown nor a diff has one.
+   *  Choosing a view (Preview / Source / Diff) dismisses it via `onAtClear`. */
+  at?: DockAt | null;
+  onAtClear?: () => void;
   /** bumps on places:changed and on the dock's Refresh → re-read from disk
    *  (nothing to lose: read-only). FilesPane re-lists the tree off the same
    *  token, so a new file appears without the user reselecting the place. */
@@ -722,7 +731,7 @@ export type FileViewProps = {
 
 export function FileView(props: FileViewProps) {
   const { path, reloadToken, onOpenEditor, onOpen, onError, wrap, onWrap, mdSource, onMdSource, mdZoom, onMdZoom, expanded, onExpand,
-    diff, onDiff, diffBase, onDiffBase, findOpen = false, findToken = 0, onFindClose } = props;
+    diff, onDiff, diffBase, onDiffBase, findOpen = false, findToken = 0, onFindClose, at = null, onAtClear } = props;
   const info = useMemo(() => fileInfo(path), [path]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [read, setRead] = useState<FileRead | null>(null);
@@ -743,7 +752,10 @@ export function FileView(props: FileViewProps) {
   // falls back to the file — silently, because the alternative is an error
   // banner every time you click a .png in a branch you are reviewing.
   const diffable = !isImage && info.kind !== "binary" && !read?.binary;
-  const showDiff = diff && diffable;
+  // A line asked for is shown in the source (see `at`), so it outranks the
+  // diff and the preview until the user picks one of those again.
+  const marking = !!at && diffable;
+  const showDiff = diff && diffable && !marking;
 
   useEffect(() => {
     if (isImage) { setRead(null); setLoading(false); return; }
@@ -832,7 +844,7 @@ export function FileView(props: FileViewProps) {
   // buffer is the first 1 MiB of the file, and saving it would silently DELETE
   // everything past the cap.
   const editable =
-    info.kind === "markdown" && mdSource && !showDiff &&
+    info.kind === "markdown" && mdSource && !showDiff && !marking &&
     !!read && !read.binary && !read.truncated;
   // ⌘F paints through the CSS Custom Highlight API, which cannot reach inside a
   // textarea. Rather than let the bar report "0" over a file full of matches,
@@ -909,6 +921,9 @@ export function FileView(props: FileViewProps) {
         : <ImageView path={path} mime={info.mime} onError={onError} />;
     }
     if (!read) return <div className="tree-note">could not read this file</div>;
+    // The DRAFT if there is one, like every other text view here: the line
+    // you were sent to is a line of what you are looking at.
+    if (marking) return <div className="scroll"><CodeBlock src={text} lang={info.lang} wrap={wrap} mark={at} /></div>;
     if (read.binary || info.kind === "binary")
       return (
         <div className="binview">
@@ -949,11 +964,13 @@ export function FileView(props: FileViewProps) {
   // keep: a wrapped row still lines up, because the row takes the height of its
   // tallest cell — where two independently scrolling panes would drift apart at
   // the first long line.
-  const showWrap = !isImage && info.kind !== "binary" && !(info.kind === "markdown" && !mdSource && !showDiff);
+  const showWrap = !isImage && info.kind !== "binary" && !(info.kind === "markdown" && !mdSource && !showDiff && !marking);
   // Zoom belongs to the RENDERED document only: the Source view is code, sized
   // by the terminal font like every other source file in this viewer, and the
   // diff is the same code twice.
-  const showZoom = info.kind === "markdown" && !mdSource && !showDiff;
+  const showZoom = info.kind === "markdown" && !mdSource && !showDiff && !marking;
+  /** Picking a view is what dismisses the marked line. */
+  const leaveMark = () => { if (marking) onAtClear?.(); };
 
   return (
     <div className="viewer">
@@ -969,6 +986,13 @@ export function FileView(props: FileViewProps) {
         {dirty && <span className="viewer-tag" title="Edited here and not written to disk yet">unsaved</span>}
         {saveErr && (
           <span className="viewer-tag err" title={saveErr}>save refused</span>
+        )}
+        {marking && at && (
+          // Neutral, and metadata: the band and the gutter already SAY which
+          // line, so in a narrow dock this goes before the file name does.
+          <span className="viewer-tag kind at" title={`Opened at line ${at.line}${at.col ? `, column ${at.col}` : ""}. Choose a view to dismiss the mark.`}>
+            {`L${at.line}${at.col ? `:${at.col}` : ""}`}
+          </span>
         )}
         {size ? <span className="viewer-size">{humanSize(size)}</span> : null}
         <span className="dock-spacer" />
@@ -990,19 +1014,19 @@ export function FileView(props: FileViewProps) {
         {showViewSeg && (
           <div className="seg" role="group" aria-label="View">
             {hasPreview && (
-              <button className={"seg-b" + (!mdSource && !showDiff ? " on" : "")}
-                onClick={() => { onMdSource(false); onDiff(false); }}>Preview</button>
+              <button className={"seg-b" + (!mdSource && !showDiff && !marking ? " on" : "")}
+                onClick={() => { onMdSource(false); onDiff(false); leaveMark(); }}>Preview</button>
             )}
             {/* `onMdSource` only where there IS a preview to turn off. On a .rs
                 file it would flip the GLOBAL markdown preference as a side
                 effect of leaving a diff, and the next README you opened would
                 come up as source for no reason you could trace. */}
-            <button className={"seg-b" + ((mdSource || !hasPreview) && !showDiff ? " on" : "")}
-              onClick={() => { if (hasPreview) onMdSource(true); onDiff(false); }}>Source</button>
+            <button className={"seg-b" + (((mdSource || !hasPreview) && !showDiff) || marking ? " on" : "")}
+              onClick={() => { if (hasPreview) onMdSource(true); onDiff(false); leaveMark(); }}>Source</button>
             {diffable && (
               <button className={"seg-b" + (showDiff ? " on" : "")}
                 title="Show what this branch changed in this file"
-                onClick={() => onDiff(true)}>Diff</button>
+                onClick={() => { onDiff(true); leaveMark(); }}>Diff</button>
             )}
           </div>
         )}
@@ -1087,7 +1111,7 @@ export function FileView(props: FileViewProps) {
       {findOpen && (
         <FindInFile bodyRef={bodyRef} token={findToken} onClose={onFindClose}
           editable={editable}
-          contentKey={`${path}|${reloadToken}|${wrap}|${mdSource}|${loading}|${showDiff}|${diffBase}|${dloading}|${text.length}`} />
+          contentKey={`${path}|${reloadToken}|${wrap}|${mdSource}|${loading}|${showDiff}|${diffBase}|${dloading}|${text.length}|${marking}`} />
       )}
       <div className="viewer-body" ref={bodyRef}>
         <ViewErrorBoundary resetKey={path}>{body}</ViewErrorBoundary>

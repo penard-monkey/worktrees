@@ -417,6 +417,15 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   `clearDecorations()` first or the matches keep the old theme's hex. Load the
   addon after `term.open(host)`, and route its calls through a guard: losing a
   search is survivable, losing the terminal is not.
+- **xterm's mouse REPORTING and its SELECTION both listen on `.xterm`; the
+  linkifier listens on `.xterm-screen`, its child.** So a gesture that should
+  belong to a link alone (the ⌘-click on a file path) is stopped at
+  `.xterm-screen` in the target phase, after the linkifier's own listener —
+  which still records the press it needs to activate on release — and never
+  reaches the parent, so claude gets no click report and no selection starts.
+  The linkifier itself checks no modifier: `activate` runs on any click that
+  presses and releases on the same link, so the provider must test the
+  modifier. `termlinks-check.mjs` pins both halves.
 - **An xterm host is a RATCHET without `min-width: 0`.** `.term-host` is a row
   flex item, so its automatic minimum size is its min-content width — and xterm
   writes an explicit `width: <cols × cell>px` onto `.xterm-screen`, which makes

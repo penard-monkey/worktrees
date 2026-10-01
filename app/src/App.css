@@ -1724,7 +1724,7 @@ body.dragging .menu-catch { pointer-events: none; }
 /* A narrow dock cannot hold every affordance: metadata goes first, then the
    kind chip. The CONTROLS never wrap or clip — they are the reason to look. */
 @container (max-width: 560px) {
-  .viewer-size { display: none; }
+  .viewer-size, .viewer-tag.at { display: none; }
 }
 @container (max-width: 460px) {
   .viewer-tag.kind { display: none; }
@@ -1830,6 +1830,23 @@ body.dragging .menu-catch { pointer-events: none; }
   white-space: pre; tab-size: 2; color: var(--txt); font: inherit;
 }
 .code.wrap .code-text { white-space: pre-wrap; word-break: break-word; }
+/* A marked line (CodeBlock's `mark`: a ⌘-clicked `file:42`, an agent's
+   `show_doc {line}`). The hue is a TINT plus a 2px edge, never text colour —
+   the accent is a fill token (see AGENTS.md on `--warn`/`--danger`). Laid OVER
+   the text and the sticky gutter, inert to the pointer, so selecting and
+   copying the line works exactly as it does unmarked. Positioned in px by the
+   component from the rendered text, which is why it needs a positioned box. */
+.code.marked { position: relative; }
+.code-mark {
+  position: absolute; left: 0; z-index: 1; pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.code-mark-col {
+  position: absolute; z-index: 1; pointer-events: none;
+  border-bottom: 2px solid var(--accent);
+}
+.code-gutter .on { color: var(--txt-hi); }
 
 /* The editable Source view (markdown only — see FilesPane.tsx). It has to be
    the SAME document the read-only renderer shows, and a textarea inherits none

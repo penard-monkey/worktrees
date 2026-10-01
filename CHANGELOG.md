@@ -63,6 +63,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   back to the repository root. The `worktrees` skill says so too. An app
   older than this opens the file at the top.
 
+- **⌘-click a file path in the terminal to open it.** Paths that agents and
+  shells print — `src/foo.ts:42:7`, `app/src/App.tsx`, `/abs/path`,
+  `~/notes.md`, `src/a.ts(42,7)`, `File "x.py", line 88` — are underlined on
+  hover in the place's terminal and in the dock's shells, and ⌘-click opens
+  the file in the dock's viewer at that line (opening the dock if it was
+  closed). Only a path that exists as a file inside one of your projects gets
+  a link; relative paths resolve against the dock shell's current directory,
+  then the place. A plain click still focuses, selects and goes to Claude as
+  before, and the ⌘-click is not passed to Claude.
+- **The file viewer can open at a line.** A ⌘-clicked path, or an agent's
+  `show_doc` with a `line`, shows the file's source with that line marked and
+  scrolled into view, even for markdown or while the diff is on. Choosing
+  Preview, Source or Diff dismisses the mark. Leaving the place and coming
+  back keeps it, like the open file.
+
 ### Changed
 - **Both plan-usage readers moved into the engine.** Claude's and Codex's
   usage readers lived under `app/src-tauri`, where only the desktop app could
