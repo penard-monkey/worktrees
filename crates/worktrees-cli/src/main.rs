@@ -32,6 +32,7 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees automations [ls|add|rm]     briefs Claude runs across this project
   worktrees automations run <slug>      run one now (0 clean, 2 findings, 1 failed)
   worktrees show <file>                 ask the worktrees app to open a document
+  worktrees guide [--status] [--json]   what agents are told about places (--rules: the one-line rule)
   worktrees agent-setup [status|fix|link-skills]  CLAUDE.md/AGENTS.md + skills for every agent (--json)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
@@ -68,6 +69,11 @@ fn run() -> i32 {
             let mut ui = CliUi;
             return worktrees_core::skillstore::cmd_skills(&mut ui, args.get(1..).unwrap_or(&[]));
         }
+        // Agent guidance: `guide` prints what agents are told and is about this
+        // machine, not the cwd; `guard` is Claude's PreToolUse hook, which must
+        // answer (allow) even where there is no repository at all.
+        Some("guide") => return worktrees_core::guidance::cmd_guide(args.get(1..).unwrap_or(&[])),
+        Some("guard") => return worktrees_core::guidance::cmd_guard(args.get(1..).unwrap_or(&[])),
         // Also ahead of the guards: a `pull` that ADOPTS a project, and a
         // hub-level `status`, both run on a machine that does not have the repo
         // yet — there is no git worktree to stand in.

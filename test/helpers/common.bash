@@ -61,6 +61,12 @@ common_setup() {
   # than $REPO. CODEX_HOME is where rollouts are read from (activity).
   unset WORKTREES_CLAUDE_CMD WORKTREES_AI_RESUME_ARG WORKTREES_PREFIX WORKTREES_NO_PROMPT XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME WORKTREES_PROFILE WORKTREES_SYNC_HUB CLAUDE_PROJECTS WORKTREES_STATUS_NOW CLAUDE_PROJECT_DIR WORKTREES_MCP_PROVIDER CODEX_HOME || true
 
+  # Per-launch agent guidance (guidance.rs) adds `--plugin-dir` / `--skill` /
+  # `-c developer_instructions` to every claude, pi and codex launch in a
+  # managed repo — i.e. every lane. The launch-line tests pin OTHER flags
+  # exactly, so the suite runs with it off; test/guidance.bats turns it on.
+  export WORKTREES_AGENT_GUIDANCE=off
+
   make_repo
 }
 

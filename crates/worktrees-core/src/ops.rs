@@ -93,6 +93,41 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
 /// that `env` and `match_word` travel BESIDE the command instead of being parsed
 /// back out of it.
 pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
+    let mut launch = ai_launch_inner(p, ui, wt, ai_cmd);
+    launch.guidance = guidance_for(p, ui, wt, &launch);
+    launch
+}
+
+/// Agent guidance for one launch (agent-guidance §4.2): only in a
+/// worktrees-managed repo, only for a harness worktrees knows, and never on
+/// the fail-closed launch (its `cmd` is not the harness, so `launch_cmd` would
+/// not emit these anyway — this keeps the struct honest too).
+fn guidance_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile::AiLaunch) -> Vec<String> {
+    use crate::guidance::{self, Delivery};
+    let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
+        return Vec::new();
+    };
+    let s = guidance::settings();
+    if !s.enabled || !guidance::is_managed(p) {
+        return Vec::new();
+    }
+    let m = match guidance::materialize() {
+        Ok(m) => m,
+        Err(e) => {
+            ui.warn(&format!("agent guidance not delivered: {e}"));
+            return Vec::new();
+        }
+    };
+    let id = adapter.provider().id;
+    // Only Codex needs the probe, and it costs a subprocess — so only then.
+    let codex_own = (id == crate::provider::CODEX.id).then(|| guidance::probe_codex(wt)).flatten();
+    match guidance::delivery(id, &m, &s, codex_own) {
+        Delivery::On { flags } => flags,
+        Delivery::Off | Delivery::Skipped { .. } => Vec::new(),
+    }
+}
+
+fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
     let mut plain = crate::profile::AiLaunch::plain(ai_cmd);
     // A harness's place-derived flags (Codex's permission mode) ride on EVERY
     // launch of it, profiled or not — profiles are claude-only, and these are
@@ -160,6 +195,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
                 match_word: plain.match_word,
                 opener: None,
                 place_flags: Vec::new(),
+                guidance: Vec::new(),
                 model: None,
                 resume: false,
                 force: false,
@@ -1796,6 +1832,24 @@ fn compose_down(p: &Project, ui: &mut dyn Ui, slug: &str, wt: &str) {
 /// non-transactional, "materialized" is not a state anything records, and a
 /// feature whose own failure mode is silent does not fix a silent-failure bug
 /// (§7). Exit: 0 clean · 1 usage/guard · 2 findings present.
+/// `guidance-skipped`: an installed harness that a launch here would not give
+/// the guidance to. Only Codex can be skipped today, and only on purpose.
+fn guidance_findings(p: &Project) -> Vec<Finding> {
+    use crate::guidance::{self, Delivery};
+    let s = guidance::settings();
+    if !s.enabled || !guidance::is_managed(p) || crate::harness::by_id(crate::provider::CODEX.id).is_none_or(|a| a.installed().is_err()) {
+        return Vec::new();
+    }
+    let Ok(m) = guidance::materialize() else { return Vec::new() };
+    match guidance::delivery(crate::provider::CODEX.id, &m, &s, guidance::probe_codex(&p.main_root)) {
+        Delivery::Skipped { reason } => vec![Finding::info(
+            Code::GuidanceSkipped,
+            format!("Codex launches get no agent guidance: {reason}. The worktrees MCP tools still describe places; `worktrees guide` prints the rest."),
+        )],
+        _ => Vec::new(),
+    }
+}
+
 pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let json = args.iter().any(|a| a == "--json") || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
     if args.iter().any(|a| a == "--pi") {
@@ -1976,6 +2030,13 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     } else {
         stray_findings(p)
     };
+    // Agent guidance a harness is NOT getting, said where someone looks for
+    // "why does my agent not know X". Machine-level, so whole-project runs only.
+    let guidance = if config_only || !names.is_empty() || hub_copy.is_some() {
+        Vec::new()
+    } else {
+        guidance_findings(p)
+    };
 
     let cfg = match load_project_config(p, ui) {
         Ok(c) => c,
@@ -1983,7 +2044,7 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     };
     let Some((cfg, mut findings)) = cfg else {
         // No config is a healthy repo, not a broken one.
-        let report = Report::new(hub_copy.into_iter().chain(skipped).chain(strays).collect());
+        let report = Report::new(hub_copy.into_iter().chain(skipped).chain(strays).chain(guidance).collect());
         if json {
             emit_report(ui, &report);
         } else if report.is_empty() {
@@ -2048,6 +2109,7 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
 
     findings.extend(strays);
+    findings.extend(guidance);
 
     if strict {
         // `--strict` is what lets a copy the source has moved past — or a

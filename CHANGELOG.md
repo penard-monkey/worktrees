@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **Lanes are launched knowing how to work in places.** In a worktrees-managed
+  repo, every Claude, pi and Codex launch now gets the places rule and a
+  `worktrees` skill (lanes, briefs, messaging, finishing, what never to
+  touch). The text ships inside the binary, and nothing is written to any
+  agent's own config:
+  - Claude loads it as a plugin (`--plugin-dir`);
+  - pi gets `--skill` plus the rule through `--append-system-prompt`;
+  - Codex gets the rule as `developer_instructions` — but only when you have
+    not set your own. `-c` would replace yours, so worktrees asks Codex first
+    (`codex debug prompt-input`, no model call) and otherwise leaves it out.
+    `worktrees doctor` says so when it does.
+- **An optional guard for Claude, off by default.** Switched on in
+  `~/.config/worktrees/agent-guidance.json` (`"guard": true`), the same
+  plugin adds a hook that refuses `git worktree add` anywhere and a new
+  branch in `(main)`, and says to use a place instead. A lane moving its own
+  place to another branch is never refused.
+- **`worktrees guide`** prints what agents are told: the skill, `--rules` for
+  the one-line rule, `--status [--json]` for what each installed agent gets.
+  `WORKTREES_AGENT_GUIDANCE=off`, or `"enabled": false` in the same file,
+  turns per-launch delivery off.
+
 ### Changed
 - **Agents are told to do their branch work in a place.** The worktrees MCP
   server's instructions, the one text every connected session reads, used

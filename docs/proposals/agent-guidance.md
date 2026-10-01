@@ -658,7 +658,34 @@ dir). The candidate text still produced 5 of 5 through the tooling.
   shipped binary (`~/.local/bin/worktrees`, v0.34.0) and arm B on the
   release build, with no proxy (§7.4).
 
-**Phase 2: per launch.**
+**Phase 2: per launch.** Core and CLI built (`guidance.rs`); the app half
+(the offer, Settings → Agent guidance) follows in its own PR. As built:
+- The text is `guidance::HEAD` (shared with the MCP instructions),
+  `guidance/SKILL.md` and `rules_text()`, all compiled in. It is materialised
+  to `$XDG_DATA_HOME/worktrees/agent/<FNV-1a of the content>/`, written
+  beside that path and renamed into place.
+- Settings: `~/.config/worktrees/agent-guidance.json` (`enabled`, default
+  on; `guard`, default off), plus `$WORKTREES_AGENT_GUIDANCE`. A file and
+  not an app-memory override, because `create_worktree` launches from the
+  CLI process an MCP client started, which an app override never reaches.
+- `AiLaunch.guidance` is filled in `ops::ai_launch_for` (managed repos only)
+  and emitted by `launch_cmd` after every adapter's head words. Codex's probe
+  runs per launch in the place (≈0.15 s), so a repo's own
+  `.codex/config.toml` counts. An unfamiliar first developer block means
+  "do not override".
+- The guard is `worktrees guard pretooluse`, run by the plugin's hook. Any
+  failure allows.
+- `worktrees guide [--status --json | --rules]`; doctor's `guidance-skipped`
+  (Info).
+- Seen working, live [observed]:
+  - Claude 2.1.x: the plugin's skill listed as `worktrees:worktrees`, and the
+    hook refused `git checkout -b` in `(main)` with the guard's message;
+  - pi 0.99.1: `rules.md` under `[Context]` and `worktrees` under `[Skills]`
+    at startup, with no prompt sent;
+  - Codex 0.159.0: `codex debug prompt-input` with the emitted `-c` shows the
+    rule as the first developer text.
+
+The plan as written:
 - Materialise `agent/<version>/` from binary constants.
 - Claude `--plugin-dir` (skill, plus the guard behind a setting, **default off**, Q2).
 - pi `--skill` + `--append-system-prompt`.
