@@ -109,6 +109,12 @@ pub struct Window {
     /// Not in the shape the review sketched, and load-bearing: without it a
     /// weekly "Fable 85%" refuses a lane launching on Opus, which shares none
     /// of that bucket.
+    ///
+    /// The converse is fail-open BY DESIGN: a lane launched with no model of
+    /// its own (`launch.model == None` — the harness's default, a profile's
+    /// `--model`, a resume) is never graded against a model-scoped bucket,
+    /// because which model it will actually run on is not known here. Only
+    /// the unscoped windows can refuse it.
     pub model: Option<String>,
 }
 
@@ -263,6 +269,14 @@ pub fn refusal(provider_label: &str, w: &Window, now: i64, others: &[&str]) -> S
 }
 
 /// Every other harness whose CLI is actually present, in registry order.
+///
+/// "Present" is each adapter's own `installed()`. Claude's is the default
+/// `Ok` even with no `claude` on PATH, and that is deliberate rather than an
+/// oversight to patch here: Claude is the default harness, and it is routinely
+/// reached through things a PATH lookup cannot see — the installer's shell
+/// alias under `~/.claude/local`, a profile's wrapper, `WORKTREES_CLAUDE_CMD`.
+/// A PATH check would drop it from the alternatives for exactly those users;
+/// naming it where it turns out absent costs one failed launch the user chose.
 pub fn other_harnesses(this: &'static crate::provider::Provider) -> Vec<&'static str> {
     crate::harness::ALL
         .iter()

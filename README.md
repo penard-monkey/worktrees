@@ -176,7 +176,11 @@ with no allowance to report, or `--no-tmux` (no agent starts at all) and the
 launch simply proceeds. It is deliberately not a burst limiter: lanes bill
 after their first turns, so eight started at once are all admitted and the gate
 first speaks once the window is already spent. `WORKTREES_USAGE_PROBE=off`
-turns the reading off entirely.
+switches the gate off entirely (the app's usage meter keeps reading). The check
+costs a launch one reading of the provider's usage — usually cached, but on a
+network that hangs rather than fails it can hold a `new` for up to ~15s
+(Claude's GET) or ~13s (Codex's probe) before failing open; `--force` skips
+the reading altogether.
 
 Guards you'll be glad exist: dirty worktrees refuse to `switch`/`rm` (override
 with `--force`); a stale *unregistered* dir under `.worktrees/` is never treated

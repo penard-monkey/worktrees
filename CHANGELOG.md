@@ -16,7 +16,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   wait and nothing is re-typed; `--force` (the app: **Launch anyway**; MCP:
   `force: true`) launches regardless, and `worktrees open <slug> --force` is the
   retry it prints. It fails open on every unknown, and `WORKTREES_USAGE_PROBE=off`
-  turns the reading off entirely. It is deliberately **not** a burst limiter:
+  switches the gate off (the app's usage meter keeps reading). It is deliberately **not** a burst limiter:
   lanes bill after their first turns, so a simultaneous fan-out is still
   admitted — the gate stops the NEXT one.
 - **`create_worktree` takes `force`.** The same single override, for an agent

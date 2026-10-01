@@ -1,10 +1,11 @@
 //! Claude plan usage — the reader, moved out of the app.
 //!
 //! It lived in `app/src-tauri` because the nav footer was its only consumer.
-//! The quota gate in `ops::cmd_new` is the second: to choose between providers
-//! by headroom, or to refuse a spawn onto a spent one, the SPAWN path has to
-//! read this — and the CLI can reach nothing under `app/src-tauri`. Same move,
-//! and the same reason, as `codex_usage`.
+//! The launch-time quota gate is the second: Claude's `Adapter::usage` reads
+//! this and `Adapter::prepare` refuses a launch onto a nearly spent window
+//! (`quota::gate`) — on every path that launches, the CLI's and MCP's
+//! in-process `ops` included, and none of them can reach anything under
+//! `app/src-tauri`. Same move, and the same reason, as `codex_usage`.
 //!
 //! Nothing about how it works changed: still `security` for the keychain token
 //! and `curl` for the GET (no HTTP crate, no second TLS stack), still the same
