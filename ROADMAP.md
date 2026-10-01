@@ -27,6 +27,37 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   happens when nothing can be measured (today: fail open, which would mean
   "fall back to the configured command").
 
+- **Hand-test agent guidance in the real app (#393, #394).** It was seen
+  working through the CLI (a live Claude `-p` with the plugin and guard, pi at
+  startup, Codex via `prompt-input`) and in headless WebKit against the mock,
+  but never in the running app. In `sandbox.sh --app`:
+  - launch one lane per harness (Claude, Codex, pi) from the app, and check
+    the pane's launch line carries the plugin / skill / rule;
+  - turn the guard on, then in a NEW Claude lane ask for `git checkout -b`
+    in `(main)` and see it refused; switch the guard off in Settings and
+    confirm the very next command is allowed (the toggle is read per call);
+  - resume a lane (`-r`) and launch one under an AI profile: both should
+    still get `--plugin-dir`;
+  - watch `ps` during app start, opening Settings → Agent guidance, and a
+    doctor sweep — no Codex MCP servers may start (the probe is launch-only,
+    because `codex debug prompt-input` starts every configured server);
+  - see the `agent-guidance` offer appear after an actual update, and stay
+    silenced after "Stop suggesting this".
+  See [the session](docs/sessions/2026-10-01-agent-guidance/summary.md).
+
+- **`codex_usage::tests::fake_cli_malformed_eof_buffer_cap_and_deadline_are_bounded`
+  is real-time and flaked once on Linux CI** (#394's first run; passed on
+  re-run). It gives a fake Python CLI a 300ms deadline and asserts the
+  `timeout` reason inside 4s. A loaded runner can blow either side. Same
+  cure as #389's heartbeat test: inject the clock rather than race it.
+
+- **Agent guidance phase 3** (`docs/proposals/agent-guidance.md` §4.3, §6):
+  opt-in links of the materialised skill into `~/.claude/skills/worktrees`
+  and `~/.agents/skills/worktrees` (Codex and pi) for sessions the user
+  starts by hand; wire `guidance::VERSION` into the stale-binary warning
+  ("start a new conversation"); sweep old `$XDG_DATA_HOME/worktrees/agent/<hash>/`
+  directories (never the one a running session uses).
+
 - **Look at the offers button in the real app (#384).** It shipped on
   `offers-check.mjs` and headless Chromium/WebKit against the mock; no one has
   seen it in WKWebView. In `sandbox.sh --app` (with a throwaway `HOME` that has
