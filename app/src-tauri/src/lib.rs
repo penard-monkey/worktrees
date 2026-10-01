@@ -4468,6 +4468,40 @@ async fn agent_setup_fix(app: AppHandle, repo: String) -> Result<worktrees_core:
 /// project's `agent_setup_status` would make a machine-wide suggestion need a
 /// project to exist. A directory scan of ~/.claude/skills, cheap enough to
 /// probe at startup.
+/// Settings → Agent guidance, and the `agent-guidance` offer's input. Machine
+/// level: the worktrees settings file and which agents are installed. It never
+/// probes Codex (that starts Codex's MCP servers): Codex's line is the answer
+/// its last launch acted on. Blocking pool all the same — it materialises
+/// files and asks the worktrees CLI whether it has the guard.
+#[tauri::command]
+async fn agent_guidance_status() -> Result<worktrees_core::guidance::Status, String> {
+    tauri::async_runtime::spawn_blocking(|| worktrees_core::guidance::status())
+        .await
+        .map_err(|e| {
+            applog("error", &format!("agent_guidance_status: {e}"));
+            e.to_string()
+        })
+}
+
+/// Write the two toggles to `~/.config/worktrees/agent-guidance.json` — a
+/// worktrees-owned file every launcher reads (the CLI and MCP-launched lanes
+/// too, which an in-process override would never reach) — and return the
+/// status as it now stands.
+#[tauri::command]
+async fn set_agent_guidance(enabled: bool, guard: bool) -> Result<worktrees_core::guidance::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        worktrees_core::guidance::save_settings(&worktrees_core::guidance::Settings { enabled, guard })?;
+        Ok(worktrees_core::guidance::status())
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r)
+    .map_err(|e: String| {
+        applog("error", &format!("set_agent_guidance: {e}"));
+        e
+    })
+}
+
 #[tauri::command]
 async fn agent_user_skills() -> Result<Vec<worktrees_core::agentfiles::UserSkill>, String> {
     Ok(worktrees_core::agentfiles::user_skills())
@@ -8144,6 +8178,8 @@ pub fn run() {
             agent_link_skills,
             agent_user_skills,
             set_codex_permissions,
+            agent_guidance_status,
+            set_agent_guidance,
             agent_models,
             pi_status,
             set_pi_trust,
