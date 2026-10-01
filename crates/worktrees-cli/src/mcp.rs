@@ -2940,16 +2940,12 @@ mod tests {
     #[test]
     fn show_doc_is_gated_and_cannot_leave_the_repository() {
         use serde_json::json;
-        let base = std::env::temp_dir().join(format!("wt-mcp-showdoc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let root = base.join("proj");
-        std::fs::create_dir_all(&root).unwrap();
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .arg(&root)
-            .status()
-            .expect("git init")
-            .success());
+        // On `scratch()` for its ENV_LOCK: this sets HOME and drains the
+        // process-global inbox, and so does the line test below — unlocked,
+        // the two could each read (or empty) the other's request.
+        let sc = scratch("showdoc");
+        let base = sc.base.clone();
+        let root = sc.root.clone();
         std::fs::write(root.join("CLAUDE.md"), "# notes").unwrap();
         let outside = base.join("elsewhere.md");
         std::fs::write(&outside, "# not ours").unwrap();
@@ -2993,7 +2989,6 @@ mod tests {
             .unwrap();
         assert_eq!(r["isError"], json!(true), "`..` must not be a way out");
 
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `listChanged: true` is a promise the watcher keeps; the test exists so

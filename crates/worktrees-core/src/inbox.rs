@@ -213,8 +213,11 @@ pub fn cmd_show(project: &crate::Project, ui: &mut dyn crate::ui::Ui, args: &[St
         ui.error(USAGE);
         return 1;
     };
-    // An explicit flag wins over a `:42` suffix; the suffix is only split off
-    // when the literal name does not exist (`split_suffix`).
+    // An explicit `--line` wins over a `:42` suffix WHOLESALE — the suffix's
+    // column goes with it, since a column means nothing on a different line
+    // (`--line 3 notes.rs:4:7` is line 3, no column). Without `--line`, the
+    // suffix's line is used and `--col` overrides its column. The suffix is
+    // only split off when the literal name does not exist (`split_suffix`).
     let (path, suffix) = split_suffix(&arg);
     let at = if flags.line.is_some() { flags } else { At { line: suffix.line, col: flags.col.or(suffix.col) } };
     let target = match std::fs::canonicalize(&path) {
