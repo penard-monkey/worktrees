@@ -232,6 +232,9 @@ struct Inflight {
     /// Where progress goes — `emit`, or a test's capture.
     notify: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
     progress_every_ms: u64,
+    /// The heartbeat's clock for one call, given `progress_every_ms` —
+    /// `real_beat`, or a test's virtual one (`with_heartbeat`).
+    beat: fn(u64) -> Beat,
 }
 
 impl Default for Inflight {
@@ -242,6 +245,7 @@ impl Default for Inflight {
             cancels: Default::default(),
             notify: std::sync::Arc::new(emit),
             progress_every_ms: PROGRESS_EVERY_MS,
+            beat: real_beat,
         }
     }
 }
@@ -302,26 +306,28 @@ fn note_incoming(line: &str, cancels: &std::sync::Mutex<Cancels>) {
     }
 }
 
-/// Run `f` while a thread sends `notifications/progress` for `token` every
-/// `every_ms` — for tools that block without a loop of their own to pulse
-/// from. `progress` is a number that strictly grows (seconds, or one more
+/// Run `f` while a thread sends `notifications/progress` for `token` on every
+/// beat `wait` reports — for tools that block without a loop of their own to
+/// pulse from. `progress` is a number that strictly grows (seconds, or one more
 /// than the last). The thread is stopped and JOINED before this returns, so
 /// no progress can follow the response it belongs to. No token: no thread.
+///
+/// `wait` is the beat thread's clock, injected the way `poll_until` takes its
+/// sleep so a test drives beats on virtual time: handed the stop channel, it
+/// answers `Some(seconds elapsed)` for a beat and `None` once `f` has returned
+/// (the channel disconnects). Production's is `real_beat`.
 fn with_heartbeat<T>(
     token: Option<serde_json::Value>,
-    every_ms: u64,
+    mut wait: Beat,
     notify: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
     f: impl FnOnce() -> T,
 ) -> T {
     let Some(token) = token else { return f() };
     let (stop, stopped) = std::sync::mpsc::channel::<()>();
     let beat = std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
         let mut last = 0u64;
-        while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-            stopped.recv_timeout(std::time::Duration::from_millis(every_ms.max(1)))
-        {
-            last = (t0.elapsed().as_secs()).max(last + 1);
+        while let Some(secs) = wait(&stopped) {
+            last = secs.max(last + 1);
             notify(
                 &serde_json::json!({
                     "jsonrpc": "2.0",
@@ -336,6 +342,22 @@ fn with_heartbeat<T>(
     drop(stop);
     let _ = beat.join();
     out
+}
+
+/// The heartbeat thread's clock — see `with_heartbeat`.
+type Beat = Box<dyn FnMut(&std::sync::mpsc::Receiver<()>) -> Option<u64> + Send>;
+
+/// A beat every `every_ms` of real time, counted from the beat thread's first
+/// look, until the call returns.
+fn real_beat(every_ms: u64) -> Beat {
+    let mut t0: Option<std::time::Instant> = None;
+    Box::new(move |stopped| {
+        let t0 = *t0.get_or_insert_with(std::time::Instant::now);
+        match stopped.recv_timeout(std::time::Duration::from_millis(every_ms.max(1))) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Some(t0.elapsed().as_secs()),
+            _ => None,
+        }
+    })
 }
 
 /// Progress for one blocking call: a notification at most every `every_ms`,
@@ -865,8 +887,8 @@ impl Server {
                 // heartbeat, so a client with a hard request timeout (pi: 60s)
                 // does not cancel a call that is still completing on disk.
                 let beat = if params["name"].as_str() == Some("wait") { None } else { self.inflight.token.clone() };
-                let (notify, every) = (self.inflight.notify.clone(), self.inflight.progress_every_ms);
-                let result = with_heartbeat(beat, every, notify, || self.call(params)).map_err(|e| (-32602, e));
+                let (notify, clock) = (self.inflight.notify.clone(), (self.inflight.beat)(self.inflight.progress_every_ms));
+                let result = with_heartbeat(beat, clock, notify, || self.call(params)).map_err(|e| (-32602, e));
                 result.map(|mut result| {
                     // A current server cannot observe the client's cached
                     // schema. Results do refresh, even when definitions don't.
@@ -3409,49 +3431,84 @@ mod tests {
         assert!(t0.elapsed() < std::time::Duration::from_secs(5), "stopped at the next step, not at 30s");
     }
 
-    /// The heartbeat: numeric, strictly growing, only with a token, and none
-    /// after the call returns (the thread is joined first).
+    /// The heartbeat, on a virtual clock: one pulse per beat, numeric and
+    /// strictly growing, carrying the token; a beat whose timer fires as the
+    /// call returns still lands BEFORE the return (the thread is joined first)
+    /// and nothing can follow it; no token, no thread.
     #[test]
     fn a_heartbeat_pulses_while_a_call_runs_and_never_after() {
         let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
-        let sink = got.clone();
+        let (sink, (ack, acked)) = (got.clone(), std::sync::mpsc::channel::<()>());
         let notify: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> = std::sync::Arc::new(move |l: &str| {
             sink.lock().unwrap().push(serde_json::from_str(l).unwrap());
+            let _ = ack.send(());
             true
         });
-        let out = with_heartbeat(Some(serde_json::json!("t")), 5, notify.clone(), || {
-            std::thread::sleep(std::time::Duration::from_millis(60));
+        let (tick, ticks) = std::sync::mpsc::channel::<u64>();
+        let mut late = true;
+        let clock: Beat = Box::new(move |stopped| {
+            if let Ok(secs) = ticks.recv() {
+                return Some(secs);
+            }
+            // `f` has returned — its sender went with it. One beat whose timer
+            // fired just as it did, and is slow to land: only the join can
+            // keep it ahead of the return.
+            let _ = stopped.recv();
+            std::mem::take(&mut late).then(|| {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                40
+            })
+        });
+        let out = with_heartbeat(Some(serde_json::json!("t")), clock, notify.clone(), move || {
+            for secs in [0, 0, 20, 20] {
+                tick.send(secs).unwrap();
+                acked.recv().expect("each beat pulses while the call runs");
+            }
             7
         });
         assert_eq!(out, 7);
-        let n = got.lock().unwrap().len();
-        assert!(n >= 3, "{n} pulses in 60ms at 5ms");
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        assert_eq!(got.lock().unwrap().len(), n, "nothing after the call returned");
-        let p: Vec<u64> = got.lock().unwrap().iter().map(|v| v["params"]["progress"].as_u64().unwrap()).collect();
-        assert!(p.windows(2).all(|w| w[1] > w[0]), "{p:?}");
-        assert!(got.lock().unwrap().iter().all(|v| v["params"]["progressToken"] == "t"));
+        let p: Vec<u64> = got.lock().unwrap().iter().map(|v| v["params"]["progress"].as_u64().expect("a number")).collect();
+        assert_eq!(p, vec![1, 2, 20, 21, 40], "seconds, or one more than the last");
+        assert!(got.lock().unwrap().iter().all(|v| v["method"] == "notifications/progress" && v["params"]["progressToken"] == "t"));
+        assert_eq!(std::sync::Arc::strong_count(&notify), 1, "the beat thread is gone: nothing can follow the reply");
+
         got.lock().unwrap().clear();
-        with_heartbeat(None, 1, notify, || std::thread::sleep(std::time::Duration::from_millis(20)));
+        let mut once = true;
+        let clock: Beat = Box::new(move |_| std::mem::take(&mut once).then_some(0));
+        with_heartbeat(None, clock, notify, || ());
         assert!(got.lock().unwrap().is_empty(), "no token, no pulses");
     }
 
-    /// Wired: a non-`wait` tool call that carries a token gets the heartbeat.
+    /// Wired: a non-`wait` tool call that carries a token gets the heartbeat —
+    /// on a clock that beats once and then waits for the call to return, so
+    /// the count is exact however long `list_places` takes.
     #[test]
     fn a_long_tool_call_carries_the_heartbeat() {
         let sc = scratch("msg-heartbeat");
         let _wt = repo_with_worktree(&sc);
         let mut main = server_in(&sc.root, &sc.root, false);
-        let got = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let sink = got.clone();
-        main.inflight.progress_every_ms = 1;
-        main.inflight.notify = std::sync::Arc::new(move |_l: &str| {
-            *sink.lock().unwrap() += 1;
+        main.inflight.notify = std::sync::Arc::new(move |l: &str| {
+            sink.lock().unwrap().push(serde_json::from_str(l).unwrap());
             true
         });
+        main.inflight.beat = |_every| {
+            let mut beats = 0;
+            Box::new(move |stopped| {
+                beats += 1;
+                if beats == 1 {
+                    return Some(0);
+                }
+                let _ = stopped.recv();
+                None
+            })
+        };
         let line = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_places","arguments":{},"_meta":{"progressToken":"lp"}}}"#;
         assert!(main.handle_line(line).is_some());
-        assert!(*got.lock().unwrap() >= 1, "list_places shells out to git for well over 1ms");
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["params"]["progressToken"], "lp");
     }
 
     /// `stop` is asked after each sleep, so a cancelled wait ends at the next
