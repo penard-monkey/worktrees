@@ -88,9 +88,13 @@ fn add_agent_status(v: &mut serde_json::Value, project: &Project, slug: &str, pa
             a.agents(&scan, path, reading)
         })
         .collect();
-    v["agent_state"] = agents.first().map_or_else(|| serde_json::json!("none"), |a| a["state"].clone());
+    // `wait`'s derivation (`activity::place_answer`), so the two can never
+    // disagree — an unclaimed program is `unknown` here exactly when `wait`
+    // keeps waiting on it.
+    let answer = activity::place_answer(readings.into_iter().map(|(_, x)| x), panes.as_ref(), &project.session_name(slug));
+    v["agent_state"] = agents.first().map_or_else(|| serde_json::json!(answer.state), |a| a["state"].clone());
     v["agents"] = serde_json::json!(agents);
-    v["activity"] = serde_json::to_value(activity::most_active(readings.into_iter().map(|(_, x)| x))).unwrap_or_default();
+    v["activity"] = serde_json::to_value(answer).unwrap_or_default();
 }
 
 /// Pick the protocol version to answer `initialize` with: echo what the client
@@ -3108,7 +3112,7 @@ fn safe_arg(v: &str, what: &str) -> Result<String, String> {
 /// lands as its own user entry ~2ms after the reply it follows — so a pi
 /// reading counts only when the sample before it was non-busy pi as well.
 fn settled(prev: Option<&activity::Activity>, cur: &activity::Activity) -> bool {
-    if cur.state == activity::State::Busy {
+    if cur.state == activity::State::Busy || cur.state == activity::State::Unknown {
         return false;
     }
     if cur.provider != Some(worktrees_core::provider::PI.id) {
@@ -3390,7 +3394,7 @@ mod tests {
     #[test]
     fn a_pi_wait_needs_two_quiet_samples() {
         use worktrees_core::activity::{Activity, State};
-        let a = |p: &'static str, s| Activity { provider: Some(p), state: s, last_done: None, session: None };
+        let a = |p: &'static str, s| Activity { provider: Some(p), state: s, last_done: None, session: None, reason: None };
         assert!(settled(None, &a("claude", State::Idle)));
         assert!(settled(None, &a("codex", State::Waiting)));
         assert!(!settled(None, &a("pi", State::Idle)), "one pi sample is not enough");
@@ -3399,6 +3403,8 @@ mod tests {
         assert!(settled(Some(&a("pi", State::Idle)), &a("pi", State::Waiting)), "a trust modal twice is waiting");
         assert!(!settled(Some(&a("pi", State::Idle)), &a("pi", State::Busy)));
         assert!(settled(None, &Activity::none()), "nothing running ends the wait");
+        assert!(!settled(None, &Activity::unknown("repo-feat", "node")), "something nobody reports on does not");
+        assert!(!settled(Some(&Activity::unknown("repo-feat", "node")), &Activity::unknown("repo-feat", "node")));
     }
 
     /// A model is data: the charset for every harness, and for pi the catalog

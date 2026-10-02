@@ -32,7 +32,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees automations [ls|add|rm]     briefs Claude runs across this project
   worktrees automations run <slug>      run one now (0 clean, 2 findings, 1 failed)
   worktrees show <file>[:line] [--line N]  ask the worktrees app to open a file (at a line)
-  worktrees guide [--status] [--json]   what agents are told about places (--rules: the one-line rule)
+  worktrees guide [--status] [--json]   what agents are told about places (--rules: the one-line rule;
+                                        --default: the shipped skill, ignoring your edit)
   worktrees agent-setup [status|fix|link-skills]  CLAUDE.md/AGENTS.md + skills for every agent (--json)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING

@@ -78,8 +78,10 @@ pub fn is_sidecar(name: &str) -> bool {
 /// cannot occur in a git ref, so no place's own session contains it.
 pub const SIDECAR_MARKER: &str = "~agent~";
 
-/// Which harness a pane in tmux session `session` is running, from its
-/// `pane_current_command`.
+/// Which harness a pane in tmux session `session` is running, from its program
+/// word (`tmux::Pane::program`: the `pane_current_command`, or for a `node`
+/// pane the harness its tty's foreground leader names). Pure: the snapshot
+/// already holds everything it needs.
 ///
 /// 1. An exact program word (`codex`, `claude`) names its harness.
 /// 2. A pane in a provider SIDECAR (`~agent~<id>`) belongs to that sidecar's

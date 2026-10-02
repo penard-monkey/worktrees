@@ -531,6 +531,7 @@ filesystem watcher (heavy, and §5.1 already derives the same fact on every
   - Settings shows the same block beside MCP setup.
 - **Override** (Q3): none in phase 1. The text is the tool's contract, and a
   user who disagrees has AI-profile rules and their own AGENTS.md.
+  *Superseded 2026-10-02: the skill is editable (§11).*
 
 ---
 
@@ -753,6 +754,7 @@ The plan as written:
 3. **Override.** Should a user be able to replace or extend tier (a) (a
    `~/.config/worktrees/agent-guidance.md`)? The recommendation is no for
    phase 1.
+   **Decided (2026-10-02):** the SKILL is editable, the rule is not — §11.
 4. **Codex `developer_instructions`.** Skip it when the user has their own
    (the recommendation), or prepend ours to theirs? Either way, worktrees has
    to know whether the user has one. Re-implementing Codex's config layering
@@ -796,3 +798,100 @@ The plan as written:
   Nothing was run.
 - **worktrees.** `list_places` over stdio and `doctor` against an arm-A repo
   (§5.1).
+
+---
+
+## 11. The user's own skill, and an update that changes the default (2026-10-02)
+
+Settings → Agent guidance → "What agents are told" was read-only. The skill in
+it is now editable; the rule is not.
+
+### 11.1 What is editable
+
+| Text | Editable | Why |
+| --- | --- | --- |
+| The skill (`SKILL.md`: Claude's plugin, pi's `--skill`) | **yes** | It is the how-to — the part a user has opinions about — and it is loaded on demand, so a longer or shorter one costs nothing until used. |
+| The rule (`HEAD`, and `rules_text()` built from it) | no | It is ALSO the MCP server's `initialize` instructions ("one text", §3.1), has to fit one line inside Codex's 247-char visible cut, and is what `guard_bin` recognises a guard-capable CLI by (`guide --rules` must start `Managed by worktrees:`). An edit could break all three silently. |
+
+An edit is checked before it is saved, and again whenever it is read: it must
+keep its frontmatter, `name: worktrees` (the rule tells agents to use "the
+worktrees skill"; Claude and pi load a skill by that name) and a
+`description:` (it is what makes an agent load it), and must carry no
+`<<<<<<< your edit` merge marker. A file that fails is never handed to an
+agent — they get the default, and Settings and `worktrees guide --status` say
+why.
+
+### 11.2 Storage
+
+`~/.config/worktrees/guidance/` — the user tier, beside `agent-guidance.json`.
+Never a repository (ADR 0001: a clone must not supply agent instructions this
+way), never `ui-state.json` (the frontend writes it whole).
+
+- `SKILL.md` — the user's text, plain markdown, editable in any editor.
+- `SKILL.base.json` — `{version, hash, text}` of the SHIPPED skill the edit was
+  based on. The text itself, not only a hash: the binary that later notices
+  the default moved no longer contains the old one, and "what changed in the
+  default since you forked it" needs both sides. A record whose hash does not
+  match its own text is not believed.
+
+"Modified" is exact: saving text equal to the default (give or take a
+trailing newline) deletes both files, so an edit can never be the default in
+disguise. The edit is written BEFORE its base and removed before it, so a crash
+between the two leaves a new edit on an old base, or an edit with no base —
+both stale, so the offer asks again. Base-first would leave the old edit on the
+new base, which reads as current and retires the offer with nothing chosen.
+The file's size is checked from its metadata before it is read.
+
+### 11.3 Who reads it
+
+Everything that read `SKILL_MD` reads `effective_skill()` (a usable edit, else
+the default): `materialize()` (Claude, pi; the content-hashed directory means
+an edit is a NEW directory, so a running session keeps the skill it launched
+with — the panel says so), `worktrees guide`, and the status the app shows.
+`worktrees guide --default` prints the shipped one. The MCP instructions and
+Codex's `developer_instructions` carry the rule, so they do not change.
+
+### 11.4 After an update
+
+`stale` = an edit exists and the shipped skill's hash differs from its base's.
+Hash, not `VERSION`: a user who forked the text has opted out of receiving
+wording fixes silently, so every change to the default is worth telling them
+about — and `VERSION` is bumped only for changes worth re-asking EVERYONE.
+
+- **Never edited:** the new default applies. Nothing is shown.
+- **Edited, default moved:** agents keep getting the user's text (nothing
+  changes under them without a choice). Settings shows a band "The default
+  skill changed in this update" with a diff and three ways out:
+  - *Keep mine* — saves the same text again, which re-bases it on the new
+    default (so the NEXT change asks again);
+  - *Use the new default* — removes the edit;
+  - *Merge into the editor…* — `git merge-file` replays the user's changes onto
+    the new default and puts the result, conflict markers and all, in the
+    editor. Nothing is saved until Save, and Save refuses a leftover marker.
+- The **`agent-guidance-changed` offer** (offers.ts) carries the user there
+  from the release notes and the dock rail's offers button. Its fingerprint is
+  the new default's hash: "Stop suggesting this" silences this update and the
+  next change to the default asks again. A choice retires it by making `stale`
+  false, which is how a choice is told apart from a dismissal. An UNUSABLE edit
+  is not an offer — it is a problem, shown in Settings, where it cannot be
+  silenced — and with delivery off there is nothing to offer.
+
+### 11.5 The diff
+
+`git diff --no-index --no-ext-diff --no-color --unified=1000000` over two
+scratch files — the same full-context shape `git diff` gives the Files tab, so
+the app renders it through the existing `DiffView` and `diff.ts` parser rather
+than a second renderer. Flags alone do NOT isolate it from the user's git
+setup: `--no-ext-diff` covers `diff.external` only, and an attributes file with
+`* diff=x` plus a `[diff "x"] textconv` rewrites every line shown (a failing
+textconv exits 128), `* -diff` turns it into "Binary files differ", and
+`merge.conflictStyle=diff3` adds a `|||||||` block to the merge. Both git
+commands (`git_isolated`) therefore run with `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM`, `GIT_ATTR_NOSYSTEM`, `HOME`/`XDG_CONFIG_HOME` pointed at
+the scratch dir (the DEFAULT attributes file needs no config to be read), and
+no inherited `GIT_DIR`/`GIT_WORK_TREE`/`-c` parameters. A diff that fails
+anyway says so in the box rather than sitting at "diffing…". Three views
+when the base is known — what the default changed (old default → new), yours vs
+the new default, what you changed (old default → yours) — and the one honest
+view when it is not.
+

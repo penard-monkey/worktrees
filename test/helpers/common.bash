@@ -21,6 +21,7 @@ common_setup() {
   export TMUX_LOG="$BATS_TEST_TMPDIR/tmux.log" TMUX_STATE="$BATS_TEST_TMPDIR/tmux-state"
   mkdir -p "$TMUX_STATE"; : > "$TMUX_LOG"
   install_fake_tmux
+  install_fake_ps
   install_fake_cmd fake-ai
   install_fake_cmd pnpm; install_fake_cmd npm; install_fake_cmd yarn; install_fake_cmd bun
   # Fake docker ALWAYS, not just in the [compose] tests: `rm` in a repo with a
@@ -193,8 +194,9 @@ EOF
 
 # Fake tmux: appends argv to $TMUX_LOG; session registry = files in $TMUX_STATE.
 # Covers exactly the tmux surface bin/worktrees uses. list-panes emits one row
-# per session: name<TAB>cwd<TAB>cmd, where cmd comes from an optional
-# $TMUX_STATE/<session>.cmd file (tests write it to simulate a running AI).
+# per session: name<TAB>cwd<TAB>cmd<TAB>pid<TAB>tty, where cmd comes from an
+# optional $TMUX_STATE/<session>.cmd file (tests write it to simulate a running
+# AI) and tty is /dev/tty-<session>.
 install_fake_tmux() {
   cat > "$SHIMS/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -282,7 +284,10 @@ case "$sub" in
       s="$(basename "$f")"
       c="$(sed -n 's/^cwd=//p' "$f" | head -n1)"
       cmd="bash"; [ -f "$TMUX_STATE/$s.cmd" ] && cmd="$(cat "$TMUX_STATE/$s.cmd")"
-      printf '%s\t%s\t%s\n' "$s" "$c" "$cmd"
+      # All five fields PaneList::fetch asks for. The tty is spelled the way
+      # tmux spells it (`/dev/…`, which ps does not) and named after the
+      # session, so a ps fixture can address a pane: `tty-<session>`.
+      printf '%s\t%s\t%s\t%s\t%s\n' "$s" "$c" "$cmd" "4242" "/dev/tty-$s"
     done ;;
   -V|*) : ;;
 esac
@@ -291,6 +296,21 @@ EOF
 }
 
 remove_fake_tmux() { rm -f "$SHIMS/tmux"; }
+
+# Fake ps ALWAYS: the binary asks `ps` for each tty's foreground process when a
+# `node` pane needs naming, and the developer's real process table must not
+# answer for a fake tmux. Every call is logged to $BATS_TEST_TMPDIR/ps.log (so
+# a test can assert there was NONE); the output is $BATS_TEST_TMPDIR/ps.out
+# when a test writes one — `tty pid tpgid comm` rows, ps's own spelling.
+install_fake_ps() {
+  cat > "$SHIMS/ps" <<'EOF'
+#!/usr/bin/env bash
+echo "ps $*" >> "$BATS_TEST_TMPDIR/ps.log"
+[ -f "$BATS_TEST_TMPDIR/ps.out" ] && cat "$BATS_TEST_TMPDIR/ps.out"
+exit 0
+EOF
+  chmod +x "$SHIMS/ps"
+}
 
 # Make the named commands UNFINDABLE, portably. Removing a shim is NOT enough:
 # $SHIMS is prepended to the real PATH, so `rm -f "$SHIMS/x"` just uncovers the

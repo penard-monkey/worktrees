@@ -117,6 +117,22 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   [[ "$c" != *"--model"* ]]
 }
 
+# A pi typed into the place's own pane writes the place's pi session file. Read
+# as Claude (tmux sees only `node`), `open --ai pi` started a SECOND pi in
+# `~agent~pi`, resuming that same file underneath the live one.
+@test "open --ai pi where pi already runs in the place's own session opens that one, never a second pi" {
+  run_wt new feat-h --no-tmux --no-spare
+  local wt; wt="$(cd "$REPO/.worktrees/feat-h" && pwd -P)"
+  printf 'cwd=%s\n' "$wt" > "$TMUX_STATE/repo-feat-h"
+  printf 'node' > "$TMUX_STATE/repo-feat-h.cmd"
+  printf 'tty-repo-feat-h  501   777 /bin/zsh\ntty-repo-feat-h  777   777 pi\n' > "$BATS_TEST_TMPDIR/ps.out"
+  run_wt open feat-h --ai pi --model lm-studio/qwen3.6-27b --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  ! tmux_session_exists 'repo-feat-h~agent~pi'
+  ! grep -q 'new-session' "$TMUX_LOG"
+  tmux_session_exists 'repo-feat-h'
+}
+
 @test "an allowed repo whose place defines a worktrees MCP server launches without --approve, and says why" {
   run_wt trust pi
   run_wt new feat-x --no-tmux --no-spare

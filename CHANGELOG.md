@@ -3,6 +3,55 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **You can edit the `worktrees` skill your agents are given.** Settings →
+  Agent guidance → What agents are told now has **Edit…**: your text is saved
+  to `~/.config/worktrees/guidance/SKILL.md` and every Claude and pi session
+  launched afterwards gets it (one already running keeps what it started
+  with). **Reset to default** goes back. The one-line rule stays fixed — it is
+  also the MCP server's instructions. A broken edit (no frontmatter, a lost
+  `name: worktrees`) is refused on save and, if made by hand, never handed to
+  an agent: they get the default and Settings says why.
+- **When an update changes the default skill you edited, you are told.**
+  "The default agent guidance changed" appears with the other suggestions, and
+  Settings shows the new default against the one you started from, against your
+  version, or your own changes — then **Keep mine**, **Use the new default**, or
+  **Merge into the editor…**, which replays your changes onto the new default
+  for you to check and save. Your agents keep your version until you choose. If
+  you never edited it, the new default simply applies.
+- `worktrees guide` prints the skill agents actually get; `worktrees guide
+  --default` prints the one this build ships, and `--status` says which.
+
+### Fixed
+- **pi typed into a place's own session is pi, not Claude.** tmux names only
+  the interpreter, `node`, and a `node` pane outside an agent sidecar was read
+  as Claude — so a pi started by hand in a place's pane had no nav dot,
+  `place_status` answered `none` mid-turn, `wait until: idle` returned at
+  once, `send` refused, and `open --ai pi` would have started a second pi on
+  the same place. The pane snapshot now asks `ps` for each such pane's
+  foreground process (pi names itself there): one call over just those
+  panes' ttys, and only when a pane needs it — never for a sidecar, whose
+  name already says whose it is. Every
+  reader takes the answer from that one snapshot, the same way Codex in a
+  place's own session always has been.
+- **`place_status` and `wait` say `unknown` rather than `none` when something
+  nobody reports on runs in a place's own session.** "No agent there" was a
+  guess, and an orchestrator acts on it. Both now come from one derivation:
+  `agent_state` and `activity.state` read `unknown`, `activity.reason` says
+  what is running and why it cannot be vouched for, and `wait until: idle`
+  keeps waiting until that program exits.
+  This applies to any program, not only an agent typed into a pane: a place
+  whose agent has exited while its own session still runs something else
+  (`vim`, `pnpm dev` in a split pane) used to answer `none`, and now answers
+  `unknown`. `wait until: idle` on it runs to its timeout instead of
+  returning at once.
+- **The agent guidance says to start an agent only through a launch**
+  (`create_worktree`, `worktrees new|open --ai`), never by typing one into a
+  place's pane — with what goes missing when you do — and what `unknown`
+  means. The app offers the updated guidance again.
+
 ## [0.35.0] - 2026-10-01
 
 ### Added
