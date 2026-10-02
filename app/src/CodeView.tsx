@@ -64,7 +64,19 @@ export function CodeBlock({ src, lang, gutter = true, wrap = false, className = 
   // line's characters answers that in both modes.
   useLayoutEffect(() => {
     const box = boxRef.current, code = textRef.current, band = bandRef.current, caret = colRef.current;
-    if (!box || !code || !band || !caret) return;
+    if (!box || !code || !band || !caret || !mark) return;
+    // Re-placed whenever the box RESIZES, not just when the mark changes: with
+    // wrap on, narrowing the dock re-wraps every line above the mark and moves
+    // it down, and a band placed once stays at the old y over the wrong text.
+    // Only the placement re-runs — the scroll is once per request (`seq`), or
+    // dragging the dock would keep yanking the view back to the line.
+    const ro = new ResizeObserver(() => place(box, code, band, caret));
+    ro.observe(box);
+    place(box, code, band, caret);
+    return () => ro.disconnect();
+  }, [mark, body, lines, wrap]);
+
+  function place(box: HTMLDivElement, code: HTMLElement, band: HTMLDivElement, caret: HTMLDivElement) {
     band.style.display = "none";
     caret.style.display = "none";
     if (!mark || mark.line > lines) return; // past the end: mark nothing, stay put
@@ -116,7 +128,7 @@ export function CodeBlock({ src, lang, gutter = true, wrap = false, className = 
       const x = origin.left + colLeft - sr.left;
       if (x < 0 || x > scroller.clientWidth - 40) scroller.scrollLeft += x - scroller.clientWidth / 3;
     }
-  }, [mark, body, lines, wrap]);
+  }
 
   return (
     <div ref={boxRef} className={`code ${wrap ? "wrap" : ""} ${mark ? "marked" : ""} ${className}`.trim()}>

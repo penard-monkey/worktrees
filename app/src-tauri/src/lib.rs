@@ -5414,19 +5414,50 @@ fn resolve_term_path(raw: &str, bases: &[PathBuf], home: Option<&Path>, roots: &
     })
 }
 
+/// The working directory of a tmux session's active pane, or `None`.
+///
+/// `=name:` is tmux's EXACT session match (a bare `-t name` prefix-matches, so
+/// `cdv-app` would answer for `cdv-app-x`). An unknown session prints an EMPTY
+/// line and still exits 0 — measured on a private `-L` server — so empty is
+/// read as "no answer" rather than trusted as a path.
+fn tmux_pane_cwd(session: &str) -> Option<PathBuf> {
+    if session.is_empty() || session.contains(['\0', '\n']) {
+        return None;
+    }
+    let target = format!("={session}:");
+    let out = worktrees_core::tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_current_path}"]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let cwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let p = PathBuf::from(cwd);
+    (p.is_absolute() && p.is_dir()).then_some(p)
+}
+
 /// Which of the paths a terminal printed are files the viewer can open — the
 /// answer behind ⌘-click links (`termLinkProvider` in TerminalPane.tsx). The
 /// frontend batches a row's candidates into one call and caches the answers,
-/// so this is a stat per path, never a spawn, and never once per mousemove.
+/// so this is a stat per path plus, for a tmux pane, ONE `display-message` per
+/// call — never a spawn per mousemove.
+///
+/// Relative paths resolve against where the program that printed them IS: a
+/// dock shell's live cwd, or the tmux pane's (`cd app && cargo test` prints
+/// `src/lib.rs`, which means `app/src/lib.rs` — against the place root it is
+/// either no link or, worse, the root's same-named file). The place root is
+/// the fallback after either.
 #[tauri::command]
 async fn resolve_term_paths(
     app: AppHandle,
     shells: State<'_, Shells>,
     root: String,
     shell: Option<ShellRef>,
+    session: Option<String>,
     paths: Vec<String>,
 ) -> Result<Vec<Option<String>>, String> {
     let mut bases = Vec::new();
+    if let Some(cwd) = session.as_deref().and_then(tmux_pane_cwd) {
+        bases.push(cwd);
+    }
     if let Some(sh) = shell {
         // Read live, not from `shell-cwds.json`: that file is a 15 s sample and
         // the user may have `cd`'d a moment ago. The pid is checked for life

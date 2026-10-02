@@ -256,6 +256,9 @@ function wheelPump(send: (lines: number) => Promise<unknown>) {
 export type TermLinks = {
   root: string;
   shell?: { repo: string; slug: string; index: number };
+  /** The tmux session a pane is attached to: its active pane's cwd is read
+   *  live, for the same reason as a dock shell's. */
+  session?: string;
   onOpen: (path: string, line?: number, col?: number) => void;
   /** Right-click on a link: the pane's own menu (`TermSurface` supplies it). */
   onMenu?: (m: LinkMenu) => void;
@@ -298,8 +301,10 @@ const LINK_HINT = /Mac|iPhone|iPad/.test(navigator.platform)
  *  listeners live on the PARENT (`.xterm`): one reports the press to a program
  *  that turned the mouse on (claude would see a click at that cell), the other
  *  starts a text selection. The linkifier listens on `.xterm-screen` itself,
- *  so stopping propagation there — in the target phase, after it — still lets
- *  it record the press it needs to activate on release. A plain press is never
+ *  and listeners on ONE element all run, in registration order, whatever any
+ *  of them does to propagation — so ours, added after it, can stop the press
+ *  from reaching `.xterm` while the linkifier still records the press it needs
+ *  to activate on release. A plain press is never
  *  touched, so selection and claude's own mouse work exactly as before. */
 function termLinkProvider(term: Terminal, linksRef: { current: TermLinks | null }, host: HTMLElement) {
   // The link under the pointer, as `hover`/`leave` report it. Null = none, and
@@ -310,7 +315,7 @@ function termLinkProvider(term: Terminal, linksRef: { current: TermLinks | null 
   // stops here. A right-press is reported to a mouse-mode program just like a
   // left one, so it needs the same treatment as the ⌘-press.
   const scopeOf = (ctx: TermLinks) =>
-    `${ctx.root}\0${ctx.shell ? `${ctx.shell.repo}|${ctx.shell.slug}|${ctx.shell.index}` : ""}\0`;
+    `${ctx.root}\0${ctx.shell ? `${ctx.shell.repo}|${ctx.shell.slug}|${ctx.shell.index}` : ctx.session ?? ""}\0`;
   /** The link under a mouse event, worked out HERE rather than taken from
    *  `hover`. xterm's linkifier re-asks only when the pointer reaches a
    *  DIFFERENT cell than the last one it saw, and it keeps that cell across a
@@ -376,7 +381,9 @@ function termLinkProvider(term: Terminal, linksRef: { current: TermLinks | null 
     }
     if (ask.length) {
       try {
-        const got = await invoke<(string | null)[]>("resolve_term_paths", { root: ctx.root, shell: ctx.shell ?? null, paths: ask });
+        const got = await invoke<(string | null)[]>("resolve_term_paths", {
+          root: ctx.root, shell: ctx.shell ?? null, session: ctx.session ?? null, paths: ask,
+        });
         ask.forEach((p, i) => {
           const abs = got[i] ?? null;
           linkCache.set(scope + p, { abs, at: now });
@@ -916,9 +923,9 @@ export type PaneLinkProps = {
 export function TerminalPane({ session, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, root, onOpenPath, onError, ...find }: {
   session: string; provider?: Harness; termVersion?: number; focusToken?: number; focusEnabled?: boolean;
 } & PaneLinkProps & TermFindProps) {
-  // The tmux pane resolves against the place root: the agents that print paths
-  // there (claude, codex, pi) run in it, and its shell starts there.
-  const links = root && onOpenPath ? { root, onOpen: onOpenPath, onError } : undefined;
+  // The tmux pane resolves against its active pane's LIVE cwd, then the place
+  // root (where claude, codex and pi start). The backend reads the cwd.
+  const links = root && onOpenPath ? { root, session, onOpen: onOpenPath, onError } : undefined;
   return (
     <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}
       termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider === "claude" ? "mention" : undefined}

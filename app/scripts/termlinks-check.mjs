@@ -253,7 +253,8 @@ function harness(lines, exists) {
   const menus = [];
   const H = harness(["  M src/real.ts:12:3"], { "src/real.ts": "/repo/src/real.ts" });
   if (H.mod.termLinkProvider) {
-    const links = { root: "/repo", onOpen() {}, onMenu: (m) => menus.push(m) };
+    let openedMenuCase = 0;
+    const links = { root: "/repo", session: "cdv-x", onOpen() { openedMenuCase++; }, onMenu: (m) => menus.push(m) };
     const term = new (H.env.Terminal)();
     const prov = H.mod.termLinkProvider(term, { current: links }, H.host);
     const [link] = await new Promise((r) => prov.provideLinks(1, (ls) => r(ls ?? [])));
@@ -261,6 +262,7 @@ function harness(lines, exists) {
     const ev = (o) => ({ metaKey: false, ctrlKey: false, button: 0, clientX: 40, clientY: 50, stopped: false, prevented: false,
       stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; }, ...o });
     check(!!on("contextmenu"), "a contextmenu listener is installed on .xterm-screen");
+    check(H.calls[0]?.session === "cdv-x", `a tmux pane's session reaches the resolver, for its live cwd (${JSON.stringify(H.calls[0])})`);
     if (on("contextmenu") && link) {
       const offDown = ev({ button: 2 }); on("mousedown").fn(offDown);
       const offCtx = ev({ button: 2 }); on("contextmenu").fn(offCtx);
@@ -269,6 +271,16 @@ function harness(lines, exists) {
       link.hover?.({}, link.text);
       const down = ev({ button: 2 }); on("mousedown").fn(down);
       check(down.stopped, "a right-press ON a link is stopped before xterm reports it to a mouse-mode program");
+      // ⌘ held on a RIGHT press is still the menu, never an open: xterm's
+      // linkifier activates on any button's release, so this is the case
+      // that would otherwise open the file underneath its own menu.
+      const before = menus.length;
+      const mdown = ev({ button: 2, metaKey: true }); on("mousedown").fn(mdown);
+      const mctx = ev({ button: 2, metaKey: true }); on("contextmenu").fn(mctx);
+      link.activate({ button: 2, metaKey: true, ctrlKey: false }, link.text);
+      check(mdown.stopped && mctx.prevented && menus.length === before + 1 && openedMenuCase === 0,
+        `⌘-RIGHT-click on a link opens the MENU and never the file (menus +${menus.length - before}, opened ${openedMenuCase})`);
+      menus.length = before;
       const cdown = ev({ button: 0, ctrlKey: true }); on("mousedown").fn(cdown);
       check(cdown.stopped, "so is a macOS Ctrl-click on a link (it IS the right-click there)");
       const ctx = ev({ button: 2, clientX: 41, clientY: 52 }); on("contextmenu").fn(ctx);

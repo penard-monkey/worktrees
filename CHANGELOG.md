@@ -69,8 +69,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   hover in the place's terminal and in the dock's shells, and ⌘-click opens
   the file in the dock's viewer at that line (opening the dock if it was
   closed). Only a path that exists as a file inside one of your projects gets
-  a link; relative paths resolve against the dock shell's current directory,
-  then the place. Right-click a link for **Open in viewer**, **Reveal in
+  a link; relative paths resolve against the directory the terminal is in
+  right now (after a `cd app`, `src/lib.rs` means `app/src/lib.rs`), then the
+  place. A name with no extension and at most one `/` (`Makefile`,
+  `bin/worktrees`) is not linked, so prose like `and/or` never is; `./Makefile`
+  or a deeper path is. Right-click a link for **Open in viewer**, **Reveal in
   Finder**, **Copy path** and **Copy relative path**; a right-click anywhere
   else is unchanged. A plain click still focuses, selects and goes to Claude
   as before, and neither the ⌘-click nor the right-click on a link is passed

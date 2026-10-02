@@ -420,9 +420,12 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
 - **xterm's mouse REPORTING and its SELECTION both listen on `.xterm`; the
   linkifier listens on `.xterm-screen`, its child.** So a gesture that should
   belong to a link alone (the ⌘-click on a file path) is stopped at
-  `.xterm-screen` in the target phase, after the linkifier's own listener —
-  which still records the press it needs to activate on release — and never
-  reaches the parent, so claude gets no click report and no selection starts.
+  `.xterm-screen` by a listener registered AFTER the linkifier's own. Both
+  fire on that element (bubble, in registration order, and `stopPropagation`
+  does not skip a sibling listener on the same element), so the linkifier
+  still records the press it needs to activate on release, while the press
+  never reaches the parent: claude gets no click report and no selection
+  starts. It is the ORDER that matters, not the phase.
   The linkifier itself checks no modifier: `activate` runs on any click that
   presses and releases on the same link, so the provider must test the
   modifier — and the BUTTON: it fires on a right-button release too. The
