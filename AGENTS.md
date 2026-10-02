@@ -44,6 +44,18 @@ passed it because every check exercised the core and none looked at what the
 running app draws. "Core reports it" is not "the user sees it"; the checklist
 is by surface, and the last item is one lane driven end to end in the real app.
 
+**A long-lived MCP server outlives a CLI upgrade, so "the new binary cannot be
+doing this" is not evidence.** The temporary `mcp-debug.log` kept growing for
+two days AFTER the release that deleted the apparatus merged, which reads
+exactly like a failed removal — 981 KB to 2.8 MB, with the installed CLI
+already two minors past it. It was not: `worktrees mcp` processes started
+before the upgrade were still running their old image, and the proof is in the
+file (no `start` line above the removing version, and last writers whose pids
+were long dead). Check the WRITERS a log names and the versions it records
+before doubting the deletion; a `start`-style line that stamps the running
+version is what makes that possible at all. Incidentally the same two zombie
+servers wrote ~1.85 MB in two days of pure sidecar churn.
+
 **`~/.claude.json` is claude's live state — READ it, never write it.** It is the
 user-scope `mcpServers` home (`mcpsetup.rs`), a few hundred KB of onboarding
 flags, caches and per-project history that every running session rewrites whole.
@@ -271,6 +283,20 @@ absent — and passed, because nothing had put a `brief.md` in it. It was shown 
 fail first, against the right code, for the wrong reason. Sibling of the
 "recovery test that hand-clears the blocker" note below: when a test reaches its
 assertion, ask what is NOT in the fixture as well as what was poked into it.
+
+**An assertion that describes the MECHANISM instead of the RULE encodes the bug
+as correct.** `the_watch_signal_moves_on_membership_and_not_on_work` ended by
+writing a content-free change to the declared sidecar (`{}` ->
+`{"places":{}}`) and asserting the watch signal moved — which passed only
+because the file's byte LENGTH moved, so it passed identically for a
+`last_worked_epoch` stamp, the very write that should be silent. The rule was
+"what the resource list SHOWS changed"; the assertion said "the file changed",
+and the suite stayed green for the life of the bug. Two tells, both cheap: the
+assertion names a file or a timestamp where the rule names a FIELD, and
+mutating the code the other way leaves it green. A signal like this needs a
+PAIR of directions (title/lifecycle must notify, clock fields must not), each
+confirmed red by breaking the fix the opposite way — too narrow is as wrong as
+too broad and does not look like it. Third sibling of the two notes above.
 
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
@@ -1099,6 +1125,19 @@ the skill reads; edit that file, not the skill. Short version: scratch →
 `docs/sessions/<date>-<slug>/` + a row in `docs/sessions/index.md`
 (committed), stragglers → `ROADMAP.md`, one squash-merged PR, then a fresh
 branch off origin/main.
+
+**A matching commit SUBJECT is not a merge check.** Squash-merge rewrites the
+SHA, so `git rev-list --count origin/main..<branch>` reports every merged side
+branch as unmerged and the tempting shortcut is to match subjects against
+main's log. That mis-cleared `bug-fixes-codesign-local-installs` as a merged
+leftover during one close-out: its subject fuzzily matched a DIFFERENT
+session's close-out commit, while the branch is in fact PR #124, closed not
+merged, deliberately parked and documented in ROADMAP. Prove content presence
+instead — `git cat-file -e origin/main:<path>` for the paths the branch
+touched, or diff the branch against main for them (main being strictly ahead
+is the signal that the work landed and was built on). A parked branch and a
+merged leftover look identical from the ref alone, and only one of them is
+safe to `-D`.
 
 **`gh pr merge` reports a failure it did not cause.** From a side worktree it
 dies with *fatal: 'main' is already used by worktree at …* — that is `gh`'s
