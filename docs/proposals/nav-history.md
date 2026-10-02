@@ -4,7 +4,7 @@ title: "Proposal — back / forward navigation history"
 
 # Proposal — back / forward through what the two panes showed
 
-**Status:** design, 2026-10-02, awaiting review. Nothing here is built.
+**Status:** design, 2026-10-02, approved the same day (see Decisions).
 
 **The ask.** Browser-style history over what the app shows: the place (or
 Home) on the left, and whatever the right side is on — dock tab, the file in
@@ -130,12 +130,15 @@ buttons 4/5 (back/forward).
 - **Reading mode** survives Back only if the entry is the same file; otherwise
   the existing rule (`setReading(false)` on file/place change) closes it.
 
-## Open questions for review
+## Decisions (David, 2026-10-02)
 
-1. Project sheet as an entry? Clicking a project row only folds it
-   (`toggleProject`); the sheet is a modal. I recommend **not** in v1.
-2. `dock_open` out of the location (recommended) vs in it (⌘J becomes an entry).
-3. 600 ms coalesce window — fine, or keep every nav-row arrow step?
+1. The Project sheet is **not** an entry in v1 — a project row click only folds it
+   (`toggleProject`), and the sheet is a modal.
+2. `dock_open` is **not** part of a location — ⌘J is layout.
+3. Coalesce window **600 ms**.
+4. Chords as proposed: ⌘[ / ⌘] always; ⌘← / ⌘→ except in text fields, with
+   `.xterm-helper-textarea` special-cased as NOT a text field; mouse buttons
+   4/5; all unbound while a modal is up.
 
 ## Build slices (after go)
 
