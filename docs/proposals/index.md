@@ -18,3 +18,4 @@ maintained documentation. Where a proposal and the code disagree, the code wins.
 | [opencode as a harness](opencode-harness.html) | opencode beside Claude and Codex: directory-keyed resume, its in-process API for send and activity, and a gate on repo-supplied plugins (shares pi's harness × model shape) |
 | [Agent guidance](agent-guidance.html) | teaching every agent — Claude, Codex, pi; orchestrator and lane — to do its own branch work in a place: which channel each harness honours, the text, per-launch delivery, guards, and an eval |
 | [Cross-project reach](cross-project.html) | letting an agent see, message and (opt-in) act on places in other projects — a core-owned project registry, `<project>:<slug>` addressing, routed messages, and drag and drop of a foreign place |
+| [Navigation history](nav-history.html) | back / forward (⌘[ ⌘], ⌘← ⌘→ outside text fields) through what the two panes showed — what a location is, what is noise, coalescing, gone targets |
