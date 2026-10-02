@@ -3532,6 +3532,12 @@ function App() {
     const remembered = settingsRef.current.files_open?.[key];
     if (!remembered) return; // no invoke at all for the common case
     const at = settingsRef.current.files_open_at?.[key];
+    // History is putting an entry back here, and the entry decides what the
+    // viewer shows — including nothing. Asked NOW, not in the `.then`: the
+    // parked entry is consumed in this same commit, long before the stat
+    // answers.
+    const parked = navPendingRef.current;
+    if (parked?.place && parked.place.repo === sel.repo && parked.place.slug === sel.slug) return;
     let alive = true;
     invoke<boolean>("file_readable", { path: remembered })
       .then((ok) => {
@@ -3542,6 +3548,7 @@ function App() {
         // restore landed last and replaced the file just asked for (seen in
         // the harness: a `showDoc` at reload + 1.2s showed DESIGN.md).
         if (!alive || !ok || dockFileRef.current) return;
+        navAmend.current = true; // the app reopened it, you did not: refine this visit
         setDockFile(remembered);
         // The marked line comes back with its file — it is part of what you
         // were looking at, the same as the dock's tab or width.
@@ -4448,6 +4455,7 @@ function App() {
   /** The viewer dismissed the mark (the user chose a view). Forgotten for the
    *  place too, or coming back would put it up again. */
   const clearDockAt = useCallback(() => {
+    navAmend.current = true; // dismissing a mark is not a navigation
     setDockAt(null);
     const cur = selRef.current;
     if (!cur) return;
@@ -6472,7 +6480,15 @@ function App() {
   const histRef = useRef(hist);
   // A place selected before its snapshot resolves (or after it was removed
   // elsewhere) is not somewhere to record yet — null skips the observation.
-  const navLoc: Loc | null = !sel ? { place: null } : selected ? { place: { repo: sel.repo, slug: sel.slug } } : null;
+  // The dock part is what it is ON, whether or not it is open: ⌘J is layout,
+  // not a place (docs/proposals/nav-history.md, decision 2).
+  const navLoc: Loc | null = !sel ? { place: null } : !selected ? null : {
+    place: { repo: sel.repo, slug: sel.slug },
+    dock: {
+      tab: eff.dock_tab,
+      ...(dockFile ? { file: { path: dockFile, line: dockAt?.line, col: dockAt?.col } } : {}),
+    },
+  };
   const navKey = navLoc ? locKey(navLoc) : null;
   const navLocRef = useRef(navLoc);
   navLocRef.current = navLoc;
@@ -6532,11 +6548,57 @@ function App() {
         if (now) commitHist((h) => recordNav(h, now, Date.now(), "amend"));
       }, 1500),
     };
-    setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
+    const cur = selRef.current;
+    const samePlace = loc.place ? cur?.repo === loc.place.repo && cur?.slug === loc.place.slug : !cur;
+    // A new object for the SAME place would re-run every effect keyed on `sel`.
+    if (!samePlace) setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
+    setNavPending(loc.place ? loc : null);
     setMenu(null);
     setCtx(null);
     setConfirmRm(null);
   }, [commitHist, endApplying]);
+  /** The dock half of an entry being put back, applied once the selection it
+   *  names has landed — the `pendingDoc` shape, for the same reason:
+   *  `updatePanels` and `openDockFile` write for `selRef.current`, which is
+   *  assigned during render, so calling them beside `setSel` would write the
+   *  place being left. Each part is written only where it DIFFERS from what is
+   *  showing, so nothing seeded is frozen into `place_panels`. */
+  const [navPending, setNavPending] = useState<Loc | null>(null);
+  const navPendingRef = useRef(navPending);
+  navPendingRef.current = navPending;
+  useEffect(() => {
+    const loc = navPending;
+    if (!loc?.place || !loc.dock) return;
+    if (sel?.repo !== loc.place.repo || sel?.slug !== loc.place.slug) return;
+    setNavPending(null);
+    const d = loc.dock;
+    let show = false; // the entry differs from the dock: open it, that is what Back is FOR
+    if (d.tab !== eff.dock_tab) show = true;
+    const want = d.file;
+    if (want && (want.path !== dockFile || want.line !== dockAt?.line)) {
+      show = true;
+      if (want.path === dockFile) {
+        openDockFile(want.path, { line: want.line, col: want.col });
+      } else {
+        // A file can be deleted, renamed or left behind by a branch switch
+        // between the visit and the Back — the restore's check, the restore's
+        // answer, plus a line saying why the viewer is empty.
+        invoke<boolean>("file_readable", { path: want.path })
+          .then((ok) => {
+            if (ok) openDockFile(want.path, { line: want.line, col: want.col });
+            else setNotice(`${want.path.slice(want.path.lastIndexOf("/") + 1)} no longer exists.`);
+          })
+          .catch(() => {});
+      }
+    } else if (!want && dockFile) {
+      // Back to "nothing open". Not `openDockFile`: clearing is not a choice of
+      // file, and the place's remembered file stays remembered.
+      setDockFile(null);
+      setDockAt(null);
+    }
+    if (show && (d.tab !== eff.dock_tab || !eff.dock_open)) updatePanels({ dock_tab: d.tab, dock_open: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navPending, sel]);
   const navStep = useCallback((dir: -1 | 1) => {
     const [i] = reachableNav(histRef.current, dir, navAlive);
     if (i !== undefined) navGo(i);
