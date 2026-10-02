@@ -577,6 +577,8 @@ print(a["provider"], a.get("session"), *[g["provider"] + "@" + str(g["tmux"]) fo
   [ "$(jq_out "$pick")" = "pi repo-feat-h pi@repo-feat-h" ]
   # One ps per pane snapshot, never one per question asked of it.
   [ "$(grep -c '^ps ' "$BATS_TEST_TMPDIR/ps.log")" -eq "$(grep -c 'list-panes -a' "$TMUX_LOG")" ]
+  # …and only over the ttys that want naming, as ps spells them.
+  [ "$(sort -u "$BATS_TEST_TMPDIR/ps.log")" = "ps -t tty-repo-feat-h -o tty=,pid=,tpgid=,comm=" ]
 }
 
 @test "send is a --mutations tool and refuses what it must not type" {

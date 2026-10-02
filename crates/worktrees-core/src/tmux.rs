@@ -221,21 +221,33 @@ fn foreground_wanted(pane: &Pane) -> bool {
 }
 
 /// Fill `fg` on the panes that want it, from ONE `ps` run — and none when no
-/// pane wants it. `ps` is a seam so the tests can count it.
-fn resolve_foreground(panes: &mut [Pane], ps: impl FnOnce() -> Option<String>) {
-    if !panes.iter().any(foreground_wanted) {
+/// pane wants it. `ps` is a seam so the tests can count it; it is handed the
+/// wanted ttys (normalised, sorted, once each).
+fn resolve_foreground(panes: &mut [Pane], ps: impl FnOnce(&[&str]) -> Option<String>) {
+    let mut ttys: Vec<&str> = panes.iter().filter(|p| foreground_wanted(p)).filter_map(|p| p.tty.as_deref()).collect();
+    if ttys.is_empty() {
         return;
     }
-    let Some(text) = ps() else { return };
+    ttys.sort_unstable();
+    ttys.dedup();
+    let Some(text) = ps(&ttys) else { return };
     let fg = parse_foreground(&text);
     for pane in panes.iter_mut().filter(|p| foreground_wanted(p)) {
         pane.fg = pane.tty.as_deref().and_then(|t| fg.get(t)).cloned();
     }
 }
 
-fn ps_foreground() -> Option<String> {
-    let o = Command::new("ps").args(["-A", "-o", "tty=,pid=,tpgid=,comm="]).output().ok()?;
-    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+/// `ps` over just the wanted ttys (`-t a,b`, which macOS and procps both
+/// take): ~9ms here against ~125ms for the whole table. But `-t` fails the
+/// WHOLE call — exit 1, no rows — when any listed tty is gone (macOS: "No such
+/// file or directory"), and a pane can close between `list-panes` and this.
+/// Then, and only then, one `ps -A`.
+fn ps_foreground(ttys: &[&str]) -> Option<String> {
+    let run = |sel: &[&str]| {
+        let o = Command::new("ps").args(sel).args(["-o", "tty=,pid=,tpgid=,comm="]).output().ok()?;
+        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    run(&["-t", &ttys.join(",")]).or_else(|| run(&["-A"]))
 }
 
 /// Snapshot of `list-panes -a` — every live pane, one `Pane` row each.
@@ -1219,20 +1231,32 @@ pts/5     3007   3007 npm exec x
         let run = |text: &str| {
             let mut panes = parse_pane_rows(text);
             let mut calls = 0;
-            resolve_foreground(&mut panes, || {
+            let mut asked = Vec::new();
+            resolve_foreground(&mut panes, |ttys| {
                 calls += 1;
+                asked = ttys.iter().map(|t| t.to_string()).collect();
                 Some(PS_MACOS.to_string())
             });
-            (calls, panes)
+            (calls, panes, asked)
         };
         assert_eq!(run("p\t/w\tzsh\t1\t/dev/ttys009\nq\t/w\t2.1.287\t2\t/dev/ttys000").0, 0, "no node pane, no ps");
         assert_eq!(run("p~agent~pi\t/w\tnode\t1\t/dev/ttys009").0, 0, "a sidecar names its harness");
         assert_eq!(run("p~term\t/w\tnode\t1\t/dev/ttys009").0, 0, "a dock shell is never an agent");
         assert_eq!(run("p\t/w\tnode\t1").0, 0, "no tty to look up");
-        let (calls, panes) = run("p\t/w\tnode\t1\t/dev/ttys009\nq\t/w\tnode\t2\t/dev/ttys000\nr\t/w\tzsh\t3\t/dev/ttys004");
+        let (calls, panes, asked) = run("p\t/w\tnode\t1\t/dev/ttys009\nq\t/w\tnode\t2\t/dev/ttys000\nr\t/w\tzsh\t3\t/dev/ttys004\ns~agent~pi\t/w\tnode\t4\t/dev/ttys005\nt\t/w\tnode\t5\t/dev/ttys009");
         assert_eq!(calls, 1, "one ps for every pane that wants one");
+        assert_eq!(asked, ["ttys000", "ttys009"], "only the wanted ttys, as ps spells them, once each");
         let fg: Vec<Option<&str>> = panes.iter().map(|p| p.fg.as_deref()).collect();
-        assert_eq!(fg, [Some("pi"), Some("claude"), None], "only the panes that wanted it");
+        assert_eq!(fg, [Some("pi"), Some("claude"), None, None, Some("pi")], "only the panes that wanted it");
+    }
+
+    /// The real `ps`: a tty that is gone fails `-t` outright (macOS: exit 1,
+    /// no rows), so the lookup must fall back to the whole table rather than
+    /// come back empty for every pane in the snapshot.
+    #[test]
+    fn a_vanished_tty_falls_back_to_the_whole_table() {
+        let rows = ps_foreground(&["ttys-gone-999"]).unwrap_or_default();
+        assert!(rows.lines().count() > 1, "fell back to ps -A: {rows:?}");
     }
 
     fn fg_pane(session: &str, path: &str, cmd: &str, fg: Option<&str>) -> Pane {

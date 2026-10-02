@@ -185,6 +185,14 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   - `/model` in the lane: the label follows within a tick;
   - a pi in the CANONICAL session: `app.log` must not show a `places:changed`
     re-list every 3s. That is the loop the review caught.
+  - **a pi TYPED into a place's own pane (#409):** the row's dot is pi's,
+    green while it works, and the place no longer reads as Claude. Only
+    `agent_sessions_for` is unit-tested for this; core, MCP and a live
+    throwaway-tmux probe were checked, the running app never was.
+
+  The Linux half of that detection (`ps -t pts/N`, foreground = pid ==
+  tpgid) is measured on procps-ng 4.0.4 in a container and covered by
+  fixtures; no real Linux desktop has run it.
 
   See [the session](docs/sessions/2026-09-30-pi-nav-dot/summary.md).
 
