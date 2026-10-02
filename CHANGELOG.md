@@ -133,8 +133,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   project, an unregistered one and a hub copy are refused by name, and
   `remove_worktree` never acts on another project's place. A brief written
   into another project opens with a provenance note saying which agent wrote
-  it, so the agent there does not take it for the user's own words. Marking a
-  project private stops running sessions from acting on it at once, not at
+  it, so the agent there does not take it for the user's own words; naming a
+  branch whose place already exists there reuses it and replaces its brief,
+  and the result says so. Marking a project private takes it out of every
+  running session's reach at once — reads, messages and actions — not at
   their next restart.
 - **Mention a place in another project with `@`.** With reach on, Claude's
   `@` menu lists your other projects' places as `<project>:<slug>`, and a

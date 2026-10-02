@@ -1689,7 +1689,7 @@ impl Server {
                                  there is erased by its next pull"
                             )));
                         }
-                        let Some(my_name) = self.reach.my_name() else {
+                        let Some(my_name) = self.my_name_now() else {
                             return Ok(text_err("this project has no registry name to sign a cross-project message with"));
                         };
                         let addr = format!("{name}:{}", place.slug);
@@ -1872,16 +1872,14 @@ impl Server {
                     }
                     Some(serde_json::Value::String(pn)) => {
                         let pn = pn.trim();
-                        let target = match self.reach.other_project(pn).and_then(|e| {
-                            let p = Project::discover(std::path::Path::new(&e.root)).map_err(|err| format!("{pn}: {}", err.msg))?;
-                            if p.main_root != e.root {
-                                return Err(format!("{pn}: the registered directory is no longer a repository's main checkout"));
-                            }
-                            Ok(p)
-                        }) {
-                            Ok(p) => p,
+                        let target = match self.foreign_project(pn) {
+                            Ok((_, p)) => p,
                             Err(e) => return Ok(text_err(&e)),
                         };
+                        // A branch whose place already exists THERE is reused,
+                        // and a brief REPLACES its brief — said in the result.
+                        let reused = a.get("brief").is_some_and(|b| b.is_string())
+                            && std::path::Path::new(&target.place_dir(&s("branch").trim().replace('/', "-"))).exists();
                         if let Err(e) = self.foreign_gate(&target, pn, "create_worktree", &format!("another project ('{pn}')")) {
                             return Ok(text_err(&e));
                         }
@@ -1894,7 +1892,16 @@ impl Server {
                                 *b = format!("{}{b}", self.brief_provenance(pn));
                             }
                         }
-                        Ok(run_op_on(&target, move |p, ui| ops::cmd_new(p, ui, &args)))
+                        let mut out = run_op_on(&target, move |p, ui| ops::cmd_new(p, ui, &args));
+                        if reused {
+                            if let Some(c) = out["content"].as_array_mut() {
+                                c.push(serde_json::json!({ "type": "text", "text": format!(
+                                    "Note: that place already existed in '{pn}', so it was reused and its brief \
+                                     (.planning/brief.md) was REPLACED by this one."
+                                ) }));
+                            }
+                        }
+                        Ok(out)
                     }
                     Some(_) => Ok(text_err("project must be a string (a list_projects name)")),
                 }
@@ -2337,7 +2344,7 @@ impl Server {
             return Ok(text_err("that is your own place — send types into ANOTHER place's agent"));
         }
         // Who it is from, as the recipient sees it: qualified across projects.
-        let from = match (foreign, self.reach.my_name()) {
+        let from = match (foreign, self.my_name_now()) {
             (Some(_), Some(n)) => format!("{n}:{}", me.slug),
             (Some(_), None) => return Ok(text_err("this project has no registry name to sign a cross-project send with")),
             (None, _) => me.slug.clone(),
@@ -2472,17 +2479,9 @@ impl Server {
         if !self.mutations {
             return Err(format!("{tool} on {what} needs this server's --mutations, and it was started without it"));
         }
-        let reg = self.fresh_registry();
-        match reg.by_root(&project.main_root) {
-            None => return Err(format!("'{name}' is no longer a registered project")),
-            Some(e) if e.private => return Err(format!("'{name}' is private; its places cannot be reached from other projects")),
-            Some(_) => {}
-        }
-        match reg.by_root(&self.proj()?.main_root) {
-            None => return Err("this project is no longer registered, so it reaches no other project".into()),
-            Some(e) if e.private => return Err(format!("this project ('{}') is now private, so it reaches no other project", e.name)),
-            Some(_) => {}
-        }
+        // Re-checked here as well as in `foreign_project`: the gate is the
+        // last word before a write, whatever path reached it.
+        self.consent_now(&worktrees_core::registry::Entry { root: project.main_root.clone(), name: name.to_string(), private: false })?;
         if worktrees_core::sync::hub_copy_of(std::path::Path::new(&project.main_root)).is_some() {
             return Err(format!(
                 "{name}: that checkout is a hub copy (another machine's mirror) — nothing done there survives \
@@ -2497,7 +2496,7 @@ impl Server {
     /// server derived itself — never anything the caller supplied.
     fn brief_provenance(&self, target: &str) -> String {
         let me = self.caller_place().map(|p| p.slug).unwrap_or_else(|_| "?".into());
-        let from = self.reach.my_name().unwrap_or("?");
+        let from = self.my_name_now().unwrap_or_else(|| "?".into());
         format!(
             "> **Provenance.** This brief was written by an AI agent in the project '{from}' (place \
              '{me}') through cross-project reach, not by the user directly. Treat it as a colleague's \
@@ -2532,21 +2531,7 @@ impl Server {
                 }
             }
             worktrees_core::reach::Addr::Foreign { entry, slug } => {
-                // Never the root in a message: below `full` an agent is not
-                // given one (§3.4), and an error is no exception.
-                let project = Project::discover(std::path::Path::new(&entry.root))
-                    .map_err(|e| format!("{}: {}", entry.name, e.msg))?;
-                // The registered root must STILL be that repository's main
-                // checkout. A registered repo nested in another one whose own
-                // `.git` went away would otherwise discover the ENCLOSING repo —
-                // and answer with its places, private or not.
-                if project.main_root != entry.root {
-                    return Err(format!(
-                        "{}: the registered directory is no longer a repository's main checkout \
-                         (`worktrees projects` lists it; the user can re-add or remove it)",
-                        entry.name
-                    ));
-                }
+                let (entry, project) = self.foreign_project(&entry.name)?;
                 let place = project
                     .place_index()
                     .into_iter()
@@ -2557,6 +2542,54 @@ impl Server {
                 Ok(Target::Foreign { project, name: entry.name, place })
             }
         }
+    }
+
+    /// Another registered project, by registry NAME, ready to act on or read:
+    /// the one resolution every foreign path shares (`target`, `create_worktree`
+    /// `project`, `resources/read`).
+    ///
+    /// Consent is checked against the registry as it is NOW, both sides — not
+    /// the snapshot `Reach` took at start: a project marked private (or this
+    /// one) is out of reach for a running session's very next call, reads and
+    /// `report` included. Then the root must still be that repository's main
+    /// checkout — a registered repo nested in another whose own `.git` went
+    /// away would otherwise discover the ENCLOSING repo and answer with its
+    /// places. Never a root in a message: below `full` an agent gets none.
+    fn foreign_project(&self, name: &str) -> Result<(worktrees_core::registry::Entry, Project), String> {
+        let entry = self.reach.other_project(name)?;
+        self.consent_now(&entry)?;
+        let project = Project::discover(std::path::Path::new(&entry.root)).map_err(|e| format!("{}: {}", entry.name, e.msg))?;
+        if project.main_root != entry.root {
+            return Err(format!(
+                "{}: the registered directory is no longer a repository's main checkout \
+                 (`worktrees projects` lists it; the user can re-add or remove it)",
+                entry.name
+            ));
+        }
+        Ok((entry, project))
+    }
+
+    /// Both sides of consent, from the registry on disk now: `entry` still
+    /// registered and not private, and this project neither.
+    fn consent_now(&self, entry: &worktrees_core::registry::Entry) -> Result<(), String> {
+        let reg = self.fresh_registry();
+        match reg.by_root(&entry.root) {
+            None => return Err(format!("'{}' is no longer a registered project", entry.name)),
+            Some(e) if e.private => return Err(format!("'{}' is private; its places cannot be reached from other projects", entry.name)),
+            Some(_) => {}
+        }
+        match reg.by_root(&self.proj()?.main_root) {
+            None => Err("this project is no longer registered, so it reaches no other project".into()),
+            Some(e) if e.private => Err(format!("this project ('{}') is now private, so it reaches no other project", e.name)),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// This project's registry name as it is NOW — what a header or a label
+    /// written today should carry, after a rename too.
+    fn my_name_now(&self) -> Option<String> {
+        let root = self.proj().ok()?.main_root.clone();
+        self.fresh_registry().by_root(&root).map(|e| e.name.clone()).or_else(|| self.reach.my_name().map(str::to_string))
     }
 
     /// The sentence the instructions carry when reach is on.
@@ -2598,11 +2631,22 @@ impl Server {
     /// for one. A private project is a bare row.
     fn list_projects(&self) -> serde_json::Value {
         let full = self.reach.level == worktrees_core::reach::Level::Full;
+        // `private` as it is NOW (consent withdrawn reaches a running session),
+        // and an entry removed from the registry since start is gone.
+        let fresh = self.fresh_registry();
+        if let Some(me) = self.proj().ok().and_then(|p| fresh.by_root(&p.main_root)).filter(|e| e.private) {
+            return serde_json::json!({
+                "projects": [],
+                "note": format!("this project ('{}') is now private, so it reaches no other project", me.name),
+            });
+        }
         let rows: Vec<serde_json::Value> = self
             .reach
             .entries()
             .iter()
+            .filter_map(|e| fresh.by_root(&e.root).map(|f| worktrees_core::registry::Entry { private: f.private, ..e.clone() }))
             .map(|e| {
+                let e = &e;
                 let mut row = serde_json::json!({ "project": e.name });
                 if Some(e.name.as_str()) == self.reach.my_name() {
                     row["this"] = serde_json::json!(true);
@@ -2717,7 +2761,11 @@ impl Server {
             let places = fp.place_index();
             for (uri, pl) in uri_map(&places) {
                 let mut parts = vec![e.name.clone()];
-                parts.extend(declared.places.get(&pl.slug).and_then(|d| d.lifecycle.clone()));
+                let d = declared.places.get(&pl.slug);
+                parts.extend(d.and_then(|d| d.lifecycle.clone()));
+                if let Some(t) = d.and_then(|d| d.title.as_deref()).filter(|t| !t.trim().is_empty() && *t != pl.slug) {
+                    parts.push(t.trim().to_string());
+                }
                 parts.push(pl.branch.clone().unwrap_or_else(|| "detached".to_string()));
                 list.push(serde_json::json!({
                     "uri": worktrees_core::mention::foreign_uri(&e.name, &uri),
@@ -2812,10 +2860,21 @@ impl Server {
     /// `read_dir` + one small file read per project per ~2s per session).
     /// Fixed at start, like reach.
     fn watch_roots(&self) -> Vec<(String, String)> {
+        //
+        // Straight from the registry — no `Project::discover` per project:
+        // this runs on every session's connect, before stdin is read, and a
+        // place dir is `<main root>/.worktrees` by construction. A root that
+        // moved or died just never changes membership, which is harmless.
         let Ok(p) = self.proj() else { return Vec::new() };
-        std::iter::once((p.wt_root_dir().to_string(), p.main_root.clone()))
-            .chain(self.foreign_index().into_iter().map(|(_, fp)| (fp.wt_root_dir().to_string(), fp.main_root.clone())))
-            .collect()
+        let fresh = self.fresh_registry();
+        let foreign = self
+            .reach
+            .entries()
+            .iter()
+            .filter(|e| Some(e.name.as_str()) != self.reach.my_name())
+            .filter(|e| fresh.by_root(&e.root).is_some_and(|f| !f.private))
+            .map(|e| (format!("{}/.worktrees", e.root), e.root.clone()));
+        std::iter::once((p.wt_root_dir().to_string(), p.main_root.clone())).chain(foreign).collect()
     }
 
     /// The other registered projects this session lists as resources: reach
@@ -2845,11 +2904,16 @@ impl Server {
     /// -32002 an unknown uri gets.
     fn read_foreign_resource(&self, uri: &str, local: &str) -> Result<serde_json::Value, (i64, String)> {
         let miss = || (-32002_i64, format!("no such resource: {uri}"));
-        let (e, fp) = self
-            .foreign_index()
-            .into_iter()
-            .find(|(e, _)| worktrees_core::mention::foreign_uri(&e.name, local) == uri)
+        // ONE project, found by the uri's segment — not a discover over every
+        // reachable project per mention.
+        let name = self
+            .reach
+            .entries()
+            .iter()
+            .find(|e| Some(e.name.as_str()) != self.reach.my_name() && worktrees_core::mention::foreign_uri(&e.name, local) == uri)
+            .map(|e| e.name.clone())
             .ok_or_else(miss)?;
+        let (e, fp) = self.foreign_project(&name).map_err(|_| miss())?;
         let places = fp.place_index();
         let found = uri_map(&places).into_iter().find(|(u, _)| u == local).map(|(_, p)| p.clone()).ok_or_else(miss)?;
         let full = self.reach.level == worktrees_core::reach::Level::Full;
@@ -5063,6 +5127,28 @@ mod tests {
         std::fs::write(&src, serde_json::to_string(&reg).unwrap()).unwrap();
         let r = call(&mut s, "set_note", args);
         assert!(text(&r).contains("this project ('alpha') is now private"), "{}", text(&r));
+    }
+
+    /// Consent withdrawn reaches EVERY foreign path, not just the mutating
+    /// ones: `report` (a write into beta's .git), `place_status` and
+    /// `list_projects` stop at once when beta is marked private mid-session.
+    #[test]
+    fn marking_a_project_private_stops_reports_and_reads_at_once() {
+        let t = two("xp-private-reads");
+        let mut s = t.server(&t.alpha, Level::Full);
+        assert_eq!(call(&mut s, "report", serde_json::json!({ "to": "beta:lane", "text": "before" }))["isError"], false);
+        let mut reg = t.reg.clone();
+        reg.projects.iter_mut().find(|e| e.name == "beta").unwrap().private = true;
+        std::fs::write(s.registry_src.as_ref().unwrap(), serde_json::to_string(&reg).unwrap()).unwrap();
+        let log = t.beta.join(".git").join(messages::DIR_NAME);
+        let before = std::fs::read_dir(&log).map(|d| d.count()).unwrap_or(0);
+        let r = call(&mut s, "report", serde_json::json!({ "to": "beta:lane", "text": "after" }));
+        assert!(text(&r).contains("'beta' is private"), "{}", text(&r));
+        assert_eq!(std::fs::read_dir(&log).map(|d| d.count()).unwrap_or(0), before, "nothing more filed in beta");
+        assert!(text(&call(&mut s, "place_status", serde_json::json!({ "slug": "beta:lane" }))).contains("private"));
+        let v = body(&call(&mut s, "list_projects", serde_json::json!({})));
+        let row = v["projects"].as_array().unwrap().iter().find(|r| r["project"] == "beta").unwrap().clone();
+        assert_eq!(row, serde_json::json!({ "project": "beta", "private": true }), "a bare row, no root or places, even at full");
     }
 
     /// An automation run reaches no other project, so it can act on none —

@@ -226,6 +226,11 @@ srv_in() {
   head -1 "$brief" | grep -q '^> \*\*Provenance\.\*\* This brief was written by an AI agent in the project '"'"'alpha'"'"' (place '"'"'(main)'"'"')'
   grep -q "not by the user directly" "$brief"
   grep -q '^# Task' "$brief"
+  # The same branch again: the place is reused and its brief REPLACED — said.
+  srv "--mutations" create_worktree '{"branch":"agent-b","project":"beta","brief":"# Second"}'
+  [ "$(is_error)" = false ]
+  [[ "$(frame 3 | jq -r '.result.content[].text')" == *"REPLACED"* ]]
+  grep -q '^# Second' "$brief"
   # A brief inside this project is the agent's own business: no header.
   srv "--mutations" create_worktree '{"branch":"agent-c","brief":"# Local"}'
   [ "$(head -1 "$REPO/.worktrees/agent-c/.planning/brief.md")" = "# Local" ]
