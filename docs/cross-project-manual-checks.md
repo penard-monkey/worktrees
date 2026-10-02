@@ -104,6 +104,20 @@ named reason ("could not file the message in beta's log … sandbox …").
 - [ ] Write both results, and the Codex version, into the proposal's §4.1
       and close Q8.
 
+## 4. Acting in another project (P3)
+
+Reach `full`, and a session whose server has `--mutations`.
+
+- [ ] A Claude in `alpha` calls `create_worktree` with `project: "beta"` and
+      a brief: the place appears under `beta` in the nav, its session is named
+      by `beta`'s prefix, and its agent opens on the brief.
+- [ ] `send` from `alpha` into a Codex lane in `beta` types the message,
+      labelled from `alpha:<slug>`; into a Claude lane it answers with the
+      session name to use with `SendMessage`.
+- [ ] `close_session beta:<slug>` ends that session; the worktree stays.
+- [ ] `remove_worktree beta:<slug>` is refused, with and without `confirm`.
+- [ ] At `read`, each of the above is refused and names the level.
+
 ## Afterwards
 
 ```sh

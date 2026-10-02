@@ -672,6 +672,10 @@ fn cmd_mcp_migrate(args: &[String]) -> i32 {
 }
 
 pub fn cmd_mcp(args: &[String]) -> i32 {
+    // stdout carries protocol only (module note) — and core passes git's own
+    // output through to stdout on success, which put "HEAD is now at …" in
+    // the middle of the JSON-RPC stream on every create_worktree.
+    worktrees_core::git::set_stdout_is_protocol();
     let mutations = args.iter().any(|a| a == "--mutations");
     // Pin the project once, here. `CLAUDE_PROJECT_DIR` is what claude exports for
     // the session's root; fall back to the process cwd.
@@ -1256,6 +1260,7 @@ impl Server {
                         "model": { "type": "string", "description": "The agent's model: pi takes `<backend>/<id>` (e.g. lm-studio/qwen3.6-27b), claude an alias or id, codex a model id. Letters, digits and . _ / : - only. Optional." },
                         "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; the chosen agent opens on it. Optional." },
                         "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." },
+                        "project": { "type": "string", "description": "Create it in ANOTHER registered project, by its list_projects name. Needs cross_project = \"full\". Omit for this project." },
                         "force": { "type": "boolean", "description": "Launch anyway despite an advisory refusal (a spent plan window, an unreachable model host). Only after the user has been told the reason and asked for it. Default false." }
                     },
                     "required": ["branch"],
@@ -1511,18 +1516,18 @@ impl Server {
             "list_projects" => Ok(text_ok(&serde_json::to_string_pretty(&self.list_projects()).unwrap_or_default())),
             "doctor" => Ok(self.run_op(|p, ui| ops::cmd_doctor(p, ui, &[]))),
             "set_note" => {
-                let slug = match self.known_slug(&s("slug")) {
-                    Ok(v) => v,
+                let (root, slug) = match self.mutable_target(&s("slug"), name) {
+                    Ok((p, sl, _)) => (p.main_root, sl),
                     Err(e) => return Ok(text_err(&e)),
                 };
                 let note = s("note");
-                self.meta(&slug, |d| {
+                self.meta_at(&root, &slug, |d| {
                     d.note = if note.is_empty() { None } else { Some(note.clone()) }
                 })
             }
             "set_pin" => {
-                let slug = match self.known_slug(&s("slug")) {
-                    Ok(v) => v,
+                let (root, slug) = match self.mutable_target(&s("slug"), name) {
+                    Ok((p, sl, _)) => (p.main_root, sl),
                     Err(e) => return Ok(text_err(&e)),
                 };
                 // Strict: a non-bool used to mean "unpin", so a typo silently did
@@ -1530,11 +1535,11 @@ impl Server {
                 let Some(pinned) = a.get("pinned").and_then(|v| v.as_bool()) else {
                     return Ok(text_err("pinned must be true or false"));
                 };
-                self.meta(&slug, |d| d.pinned = Some(pinned))
+                self.meta_at(&root, &slug, |d| d.pinned = Some(pinned))
             }
             "set_lifecycle" => {
-                let slug = match self.known_slug(&s("slug")) {
-                    Ok(v) => v,
+                let (root, slug) = match self.mutable_target(&s("slug"), name) {
+                    Ok((p, sl, _)) => (p.main_root, sl),
                     Err(e) => return Ok(text_err(&e)),
                 };
                 let life = s("lifecycle");
@@ -1544,7 +1549,7 @@ impl Server {
                 if !store::LIFECYCLE_LABELS.contains(&life.as_str()) {
                     return Ok(text_err(&format!("invalid lifecycle: {life}")));
                 }
-                self.meta(&slug, |d| d.lifecycle = Some(life.clone()))
+                self.meta_at(&root, &slug, |d| d.lifecycle = Some(life.clone()))
             }
             "show_doc" => {
                 let raw = s("path");
@@ -1599,7 +1604,17 @@ impl Server {
                 // first, so `../../elsewhere/x.md` is refused rather than
                 // resolved.
                 let root_c = std::fs::canonicalize(&root).unwrap_or(root);
-                if !canon.starts_with(&root_c) {
+                // …or under another registered project's checkout, at reach
+                // `full` (cross-project P3; `show_doc` is already in the
+                // --mutations tier). Private entries are not in `entries()`'s
+                // reach, so they never qualify.
+                let elsewhere = || {
+                    self.reach.level == worktrees_core::reach::Level::Full
+                        && self.reach.entries().iter().filter(|e| !e.private).any(|e| {
+                            std::fs::canonicalize(&e.root).is_ok_and(|r| canon.starts_with(&r))
+                        })
+                };
+                if !canon.starts_with(&root_c) && !elsewhere() {
                     return Ok(text_err(&format!("{} is outside this repository", canon.display())));
                 }
                 match worktrees_core::inbox::request(&canon, at, worktrees_core::sysclock::now_epoch()) {
@@ -1754,7 +1769,10 @@ impl Server {
                 ))
             }
             "wait" => self.wait(&a),
-            "send" => self.send(&s("slug"), &a),
+            "send" => match self.mutable_target(&s("slug"), name) {
+                Ok((project, slug, foreign)) => self.send(&project, &slug, foreign.as_deref(), &a),
+                Err(e) => Ok(text_err(&e)),
+            },
             "create_worktree" => {
                 let branch = match safe_arg(&s("branch"), "branch") {
                     Ok(v) => v,
@@ -1826,17 +1844,41 @@ impl Server {
                     }
                     Some(_) => return Ok(text_err("brief must be a string")),
                 }
-                Ok(self.run_op(move |p, ui| ops::cmd_new(p, ui, &args)))
+                // In another registered project (cross-project P3): named by
+                // its REGISTRY name, never a path; reach `full` + this
+                // server's --mutations; never a hub copy. The target's own
+                // config and the USER's AI command decide the launch — nothing
+                // from this repo picks it (ADR 0001).
+                match a.get("project") {
+                    None | Some(serde_json::Value::Null) => Ok(self.run_op(move |p, ui| ops::cmd_new(p, ui, &args))),
+                    Some(serde_json::Value::String(pn)) => match self.mutable_target(&format!("{}:(main)", pn.trim()), "create_worktree") {
+                        Ok((target, _, _)) => Ok(run_op_on(&target, move |p, ui| ops::cmd_new(p, ui, &args))),
+                        Err(e) => Ok(text_err(&e)),
+                    },
+                    Some(_) => Ok(text_err("project must be a string (a list_projects name)")),
+                }
             }
             "close_session" => {
-                let slug = match self.known_slug(&s("slug")) {
-                    Ok(v) => v,
+                let (project, slug) = match self.mutable_target(&s("slug"), name) {
+                    Ok((p, sl, _)) => (p, sl),
                     Err(e) => return Ok(text_err(&e)),
                 };
                 let args = vec![slug];
-                Ok(self.run_op(move |p, ui| ops::cmd_close(p, ui, &args)))
+                Ok(run_op_on(&project, move |p, ui| ops::cmd_close(p, ui, &args)))
             }
             "remove_worktree" => {
+                // NEVER across projects, at any reach level (cross-project
+                // §5.1, Q6): the one path here that can destroy commits, and
+                // another repository is where an agent knows least about the
+                // branches it would delete. Said before `confirm`, so no
+                // argument combination reaches it.
+                if let Ok(Target::Foreign { name: pn, place, .. }) = self.target(&s("slug")) {
+                    return Ok(text_err(&format!(
+                        "remove_worktree never acts on another project's place ({pn}:{}). Ask that project's \
+                         agent, or the user, to remove it there.",
+                        place.slug
+                    )));
+                }
                 if a.get("confirm").and_then(|v| v.as_bool()) != Some(true) {
                     // Stated as a refusal with the reason, not a silent no-op:
                     // the model has to be told what it failed to provide.
@@ -2240,19 +2282,26 @@ impl Server {
 
     /// `send` — type `text` into another place's Codex, or tell the caller how
     /// to reach a Claude. See the module note for why this is `--mutations`.
-    fn send(&self, slug: &str, a: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let project = self.proj()?;
+    ///
+    /// `project`/`slug` are the RESOLVED target (`mutable_target`): for a place
+    /// in another project, its session name, its ownership rule and its message
+    /// log are THAT project's, and the label says which project it came from.
+    fn send(&self, project: &Project, slug: &str, foreign: Option<&str>, a: &serde_json::Value) -> Result<serde_json::Value, String> {
         let me = match self.caller_place() {
             Ok(p) => p,
             Err(e) => return Ok(text_err(&e)),
         };
-        let slug = match self.known_slug(slug) {
-            Ok(v) => v,
-            Err(e) => return Ok(text_err(&e)),
-        };
-        if slug == me.slug {
+        let slug = slug.to_string();
+        if foreign.is_none() && slug == me.slug {
             return Ok(text_err("that is your own place — send types into ANOTHER place's agent"));
         }
+        // Who it is from, as the recipient sees it: qualified across projects.
+        let from = match (foreign, self.reach.my_name()) {
+            (Some(_), Some(n)) => format!("{n}:{}", me.slug),
+            (Some(_), None) => return Ok(text_err("this project has no registry name to sign a cross-project send with")),
+            (None, _) => me.slug.clone(),
+        };
+        let shown = foreign.map_or_else(|| slug.clone(), |n| format!("{n}:{slug}"));
         let text = a.get("text").and_then(|v| v.as_str()).unwrap_or("");
         if let Err(e) = send_text_ok(text) {
             return Ok(text_err(&e));
@@ -2265,7 +2314,7 @@ impl Server {
         let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
         let probes = agent::live_probes();
         let scan = harness::Scan { probes: &probes, panes: Some(&panes) };
-        let typed = attributed(&me.slug, text);
+        let typed = attributed(&from, text);
         // Every harness running here is asked in turn. One that takes typed
         // input answers for the place; one with its own bus (Claude) only
         // says where to send instead, and is heard only if nobody else was.
@@ -2289,7 +2338,7 @@ impl Server {
                     // Keep an unread fallback unless the harness confirmed it
                     // consumed the input. A successful send-keys is not a receipt.
                     let dir = messages::dir(std::path::Path::new(&project.git_common));
-                    let id = record_send(&dir, &me.slug, &slug, text, &outcome);
+                    let id = record_send(&dir, &from, &slug, text, &outcome);
                     let submitted = outcome.confirmed();
                     let note = outcome.note_for(a.provider().id);
                     return Ok(text_ok(
@@ -2305,7 +2354,7 @@ impl Server {
             }
         }
         if let Some(e) = elsewhere {
-            return Ok(text_err(&format!("{slug} {e}")));
+            return Ok(text_err(&format!("{shown} {e}")));
         }
         // Something is running there, but not in a session this project
         // created: adopted, or under another prefix. Not ours to type into.
@@ -2318,13 +2367,13 @@ impl Server {
             .find(|(n, _)| !owned.contains(n))
         {
             return Ok(text_err(&format!(
-                "{slug}'s {provider} runs in tmux session {name}, which this project did not create \
-                 (adopted, or another prefix). send only types into sessions this project owns; \
+                "{shown}'s {provider} runs in tmux session {name}, which its project did not create \
+                 (adopted, or another prefix). send only types into sessions that project owns; \
                  use report instead."
             )));
         }
         Ok(text_err(&format!(
-            "no agent is running in {slug}. Post with report and it is read when an agent starts there."
+            "no agent is running in {shown}. Post with report and it is read when an agent starts there."
         )))
     }
 
@@ -2346,6 +2395,38 @@ impl Server {
                 "{name}:{} is in another project; this tool works on this project's places only",
                 place.slug
             )),
+        }
+    }
+
+    /// The target of a MUTATING tool (cross-project §5.1): a place here, or a
+    /// place in another project — but only at reach `full` AND with this
+    /// server's `--mutations`, and never one in a hub copy (checked against
+    /// the TARGET, §5.4). Returns the target's project, its slug, and its
+    /// registry name when it is foreign. `tool` names the refusal.
+    fn mutable_target(&self, raw: &str, tool: &str) -> Result<(Project, String, Option<String>), String> {
+        match self.target(raw)? {
+            Target::Local(s) => Ok((Project::discover(std::path::Path::new(&self.proj()?.main_root)).map_err(|e| e.msg)?, s, None)),
+            Target::Foreign { project, name, place } => {
+                if self.reach.level != worktrees_core::reach::Level::Full {
+                    return Err(format!(
+                        "{tool} on another project's place ({name}:{}) needs cross_project = \"full\"; this session \
+                         has \"{}\", which reads and messages only",
+                        place.slug,
+                        self.reach.level.as_str()
+                    ));
+                }
+                if !self.mutations {
+                    return Err(format!(
+                        "{tool} on another project's place needs this server's --mutations, and it was started \
+                         without it"
+                    ));
+                }
+                if worktrees_core::sync::hub_copy_of(std::path::Path::new(&project.main_root)).is_some() {
+                    return Err(format!("{name}: that checkout is a hub copy (another machine's mirror) — nothing \
+                                        done there survives its next pull"));
+                }
+                Ok((project, place.slug, Some(name)))
+            }
         }
     }
 
@@ -2398,10 +2479,16 @@ impl Server {
         if !self.reach.on() {
             return String::new();
         }
+        let acts = if self.reach.level == worktrees_core::reach::Level::Full && self.mutations {
+            " With this server you may also act there — create_worktree (project), close_session, \
+             send, set_note/set_pin/set_lifecycle on a <project>:<slug> — but never remove_worktree."
+        } else {
+            ""
+        };
         format!(
             " Places in other registered projects are reachable as <project>:<slug> (list_projects; \
              this project is '{}'): read their status and message their agents with report; they \
-             belong to other repositories, so never edit their trees.",
+             belong to other repositories, so never edit their trees.{acts}",
             self.reach.my_name().unwrap_or_default()
         )
     }
@@ -2476,11 +2563,11 @@ impl Server {
         })
     }
 
-    fn meta<F: FnOnce(&mut store::Declared)>(&self, slug: &str, f: F) -> Result<serde_json::Value, String> {
+    fn meta_at<F: FnOnce(&mut store::Declared)>(&self, root: &str, slug: &str, f: F) -> Result<serde_json::Value, String> {
         if slug.is_empty() {
             return Ok(text_err("slug is required"));
         }
-        match store::edit(&self.proj()?.main_root, slug, f) {
+        match store::edit(root, slug, f) {
             Ok(()) => Ok(text_ok("ok")),
             Err(e) => Ok(text_err(&e)),
         }
@@ -2618,30 +2705,9 @@ impl Server {
     /// decline — that distinction is what keeps a guarded operation guarded.
     fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(&self, f: F) -> serde_json::Value {
         let Ok(project) = self.proj() else { return text_err(NO_PROJECT) };
-        let mut ui = CaptureUi::default();
-        let rc = f(project, &mut ui);
-        let body = ui.lines.join("\n");
-        if rc == 0 {
-            text_ok(if body.is_empty() { "ok" } else { &body })
-        } else if rc == worktrees_core::diag::EXIT_LAUNCH_REFUSED {
-            // The place and its brief EXIST; only the agent did not start. The
-            // CLI's own text names `worktrees open <slug> --force`, which an
-            // MCP caller cannot run — name the tool instead, and keep the
-            // decision with the user (the `remove_worktree` pattern).
-            text_err(&format!(
-                "{body}\n\nThe worktree and its brief were created; only the agent was not \
-                 started. Relay the reason to the user. Retry only if they ask, by calling \
-                 create_worktree again for the same branch with force: true."
-            ))
-        } else if rc == EXIT_NEEDS_CONFIRM {
-            text_err(&format!(
-                "{body}\n\nThis operation stopped to ask for confirmation. Relay the question to \
-                 the user and retry only with their answer."
-            ))
-        } else {
-            text_err(&format!("{body}\n(exit {rc})"))
-        }
+        run_op_on(project, f)
     }
+
 }
 
 /// What a `slug` argument resolved to (`Server::target`).
@@ -2718,6 +2784,34 @@ fn strip_paths(v: &mut serde_json::Value, roots: &[&str]) {
             }
         }
         _ => {}
+    }
+}
+
+/// `Server::run_op` against an explicit project — a mutation's TARGET, which
+/// may be another registered project (cross-project P3).
+fn run_op_on<F: FnOnce(&Project, &mut CaptureUi) -> i32>(project: &Project, f: F) -> serde_json::Value {
+    let mut ui = CaptureUi::default();
+    let rc = f(project, &mut ui);
+    let body = ui.lines.join("\n");
+    if rc == 0 {
+        text_ok(if body.is_empty() { "ok" } else { &body })
+    } else if rc == worktrees_core::diag::EXIT_LAUNCH_REFUSED {
+        // The place and its brief EXIST; only the agent did not start. The
+        // CLI's own text names `worktrees open <slug> --force`, which an
+        // MCP caller cannot run — name the tool instead, and keep the
+        // decision with the user (the `remove_worktree` pattern).
+        text_err(&format!(
+            "{body}\n\nThe worktree and its brief were created; only the agent was not \
+             started. Relay the reason to the user. Retry only if they ask, by calling \
+             create_worktree again for the same branch with force: true."
+        ))
+    } else if rc == EXIT_NEEDS_CONFIRM {
+        text_err(&format!(
+            "{body}\n\nThis operation stopped to ask for confirmation. Relay the question to \
+             the user and retry only with their answer."
+        ))
+    } else {
+        text_err(&format!("{body}\n(exit {rc})"))
     }
 }
 
@@ -4450,7 +4544,8 @@ mod tests {
             ("close_session", serde_json::json!({ "slug": "beta:lane" })),
         ] {
             let r = call(&mut s, tool, args);
-            assert!(text(&r).contains("in another project"), "{tool}: {}", text(&r));
+            // At `read` a mutation across projects is refused, naming the level (P3).
+            assert!(text(&r).contains("needs cross_project = \"full\""), "{tool}: {}", text(&r));
         }
         assert!(worktrees_core::store::read_lenient(&t.beta.to_string_lossy()).places.is_empty(), "nothing written into beta");
         let r = call(&mut s, "report", serde_json::json!({ "to": "alpha:lane", "text": "hi" }));
@@ -4657,5 +4752,132 @@ mod tests {
         // its checkout (§3.4) — measured leaking in review.
         let gc = std::fs::canonicalize(t.beta.join(".git")).unwrap();
         assert!(!e.contains(&*gc.to_string_lossy()) && !e.contains(&*t.beta.to_string_lossy()), "path leaked: {e}");
+    }
+
+    // ── cross-project mutations (proposal P3) ────────────────────────────────
+
+    fn server_with(t: &Two, here: &std::path::Path, user: Level, mutations: bool) -> Server {
+        let mut s = t.server(here, user);
+        s.mutations = mutations;
+        s
+    }
+
+    /// The §5.1 table, one refusal per gate: `read` reaches but does not act;
+    /// `full` without --mutations does not act; private is refused by name.
+    #[test]
+    fn a_foreign_mutation_needs_full_and_mutations() {
+        let t = two("xp-mut-gates");
+        let args = serde_json::json!({ "slug": "beta:lane", "note": "x" });
+        let mut s = server_with(&t, &t.alpha, Level::Read, true);
+        assert!(text(&call(&mut s, "set_note", args.clone())).contains("needs cross_project = \"full\""));
+        let mut s = server_with(&t, &t.alpha, Level::Full, false);
+        // set_note is a read-only-tier tool locally, so it is still listed;
+        // across projects it needs --mutations.
+        assert!(text(&call(&mut s, "set_note", args.clone())).contains("--mutations"), "full without --mutations");
+        let mut s = server_with(&t, &t.alpha, Level::Full, true);
+        assert!(text(&call(&mut s, "set_note", serde_json::json!({ "slug": "client:lane", "note": "x" }))).contains("'client' is private"));
+        assert!(worktrees_core::store::read_lenient(&t.beta.to_string_lossy()).places.is_empty(), "nothing written into beta");
+    }
+
+    #[test]
+    fn at_full_with_mutations_metadata_lands_in_the_target_project() {
+        let t = two("xp-mut-meta");
+        let mut s = server_with(&t, &t.alpha, Level::Full, true);
+        for (tool, args) in [
+            ("set_note", serde_json::json!({ "slug": "beta:lane", "note": "from alpha" })),
+            ("set_pin", serde_json::json!({ "slug": "beta:lane", "pinned": true })),
+            ("set_lifecycle", serde_json::json!({ "slug": "beta:lane", "lifecycle": "saved" })),
+        ] {
+            let r = call(&mut s, tool, args);
+            assert_eq!(r["isError"], false, "{tool}: {}", text(&r));
+        }
+        let beta = worktrees_core::store::read_lenient(&t.beta.to_string_lossy());
+        let d = beta.places.get("lane").expect("written into BETA's sidecar");
+        assert_eq!(d.note.as_deref(), Some("from alpha"));
+        assert_eq!(d.pinned, Some(true));
+        assert_eq!(d.lifecycle.as_deref(), Some("saved"));
+        assert!(worktrees_core::store::read_lenient(&t.alpha.to_string_lossy()).places.get("lane").is_none(), "not alpha's own lane");
+    }
+
+    /// Never, at any level, with or without confirm (Q6).
+    #[test]
+    fn remove_worktree_never_crosses_a_project() {
+        let t = two("xp-mut-rm");
+        let mut s = server_with(&t, &t.alpha, Level::Full, true);
+        for args in [
+            serde_json::json!({ "slug": "beta:lane", "confirm": true }),
+            serde_json::json!({ "slug": "beta:lane", "confirm": false }),
+        ] {
+            let r = call(&mut s, "remove_worktree", args);
+            assert!(text(&r).contains("never acts on another project's place"), "{}", text(&r));
+        }
+        assert!(t.beta.join(".worktrees/lane").is_dir(), "beta's lane is untouched");
+    }
+
+    #[test]
+    fn a_foreign_mutation_into_a_hub_copy_is_refused_without_a_path() {
+        let t = two("xp-mut-hub");
+        std::fs::write(
+            t.beta.parent().unwrap().join(worktrees_core::sync::MANIFEST),
+            "schema = 1\nname = \"beta\"\nlocal_root = \"/elsewhere/beta\"\nhost = \"othermac\"\n",
+        )
+        .unwrap();
+        let mut s = server_with(&t, &t.alpha, Level::Full, true);
+        let r = call(&mut s, "set_note", serde_json::json!({ "slug": "beta:lane", "note": "x" }));
+        assert!(text(&r).contains("hub copy") && !text(&r).contains("/elsewhere"), "{}", text(&r));
+        let r = call(&mut s, "create_worktree", serde_json::json!({ "branch": "x", "project": "beta" }));
+        assert!(text(&r).contains("hub copy"), "{}", text(&r));
+        assert!(!t.beta.join(".worktrees/x").exists());
+    }
+
+    /// `send` resolves the TARGET's session naming: with no agent running in
+    /// beta's lane, the refusal names the qualified place — it looked in beta,
+    /// not in alpha's lane of the same name.
+    #[test]
+    fn send_into_another_project_resolves_its_sessions() {
+        let t = two("xp-mut-send");
+        let lane = t.alpha.join(".worktrees/lane");
+        let mut s = server_with(&t, &lane, Level::Full, true);
+        let r = call(&mut s, "send", serde_json::json!({ "slug": "beta:lane", "text": "hello" }));
+        assert_eq!(r["isError"], true);
+        let e = text(&r);
+        // Without a tmux server there is nothing to resolve against; the
+        // gate (below) is still asserted.
+        if !e.contains("tmux is not available") {
+            assert!(e.contains("beta:lane") && !e.contains("your own place"), "{e}");
+        }
+        let mut s = server_with(&t, &lane, Level::Read, true);
+        assert!(text(&call(&mut s, "send", serde_json::json!({ "slug": "beta:lane", "text": "hello" }))).contains("needs cross_project"));
+    }
+
+    #[test]
+    fn create_worktree_project_is_gated_like_every_foreign_mutation() {
+        let t = two("xp-mut-create");
+        let mut s = server_with(&t, &t.alpha, Level::Read, true);
+        let r = call(&mut s, "create_worktree", serde_json::json!({ "branch": "x", "project": "beta" }));
+        assert!(text(&r).contains("needs cross_project = \"full\""), "{}", text(&r));
+        let mut s = server_with(&t, &t.alpha, Level::Full, true);
+        let r = call(&mut s, "create_worktree", serde_json::json!({ "branch": "x", "project": "client" }));
+        assert!(text(&r).contains("private"), "{}", text(&r));
+        let r = call(&mut s, "create_worktree", serde_json::json!({ "branch": "x", "project": "nobody" }));
+        assert!(text(&r).contains("no registered project"), "{}", text(&r));
+        let r = call(&mut s, "create_worktree", serde_json::json!({ "branch": "x", "project": 7 }));
+        assert!(text(&r).contains("project must be a string"), "{}", text(&r));
+        assert!(!t.beta.join(".worktrees/x").exists());
+        // The schema gained an OPTIONAL param; nothing became required.
+        let tools = s.tools();
+        let create = tools.iter().find(|t| t["name"] == "create_worktree").unwrap();
+        assert_eq!(create["inputSchema"]["properties"]["project"]["type"], "string");
+        assert_eq!(create["inputSchema"]["required"], serde_json::json!(["branch"]));
+    }
+
+    #[test]
+    fn the_instructions_say_what_full_with_mutations_allows() {
+        let t = two("xp-mut-instr");
+        let s = server_with(&t, &t.alpha, Level::Full, true);
+        let i = s.initialize(&serde_json::json!({}))["instructions"].as_str().unwrap().to_string();
+        assert!(i.contains("never remove_worktree"), "{i}");
+        let s = server_with(&t, &t.alpha, Level::Read, true);
+        assert!(!s.initialize(&serde_json::json!({}))["instructions"].as_str().unwrap().contains("create_worktree (project)"));
     }
 }

@@ -57,11 +57,32 @@ pub fn have_git() -> bool {
     Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Set once by a process whose STDOUT is a wire protocol (`worktrees mcp`:
+/// newline-delimited JSON-RPC). From then on git's own output — "HEAD is now
+/// at …", "branch 'x' set up to track …" — goes to STDERR instead, because a
+/// non-JSON line on stdout is a parse error for the client. The CLI never sets
+/// it, so a terminal sees exactly what it always did.
+static STDOUT_IS_PROTOCOL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_stdout_is_protocol() {
+    STDOUT_IS_PROTOCOL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn stdout_is_protocol() -> bool {
+    STDOUT_IS_PROTOCOL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Run `git -C cwd <args>` inheriting stdio (git's own messages reach the
 /// terminal, like the bash CLI's un-redirected mutating commands). Returns
-/// whether it exited 0.
+/// whether it exited 0. Under `set_stdout_is_protocol`, git's stdout is sent
+/// to stderr.
 pub fn git_status(cwd: &str, args: &[&str]) -> bool {
-    Command::new("git").arg("-C").arg(cwd).args(args).status().map(|s| s.success()).unwrap_or(false)
+    let mut c = Command::new("git");
+    c.arg("-C").arg(cwd).args(args);
+    if stdout_is_protocol() {
+        c.stdout(std::io::stderr());
+    }
+    c.status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// CAPTURED variant of `git_status` for callers that must surface git's own
@@ -81,9 +102,14 @@ pub fn git_status_captured(cwd: &str, args: &[&str]) -> std::result::Result<(), 
         Err(e) => return Err(e.to_string()),
     };
     if out.status.success() {
-        // Passthrough as raw bytes to preserve the exact terminal output.
-        let _ = std::io::stdout().write_all(&out.stdout);
-        let _ = std::io::stdout().flush();
+        // Passthrough as raw bytes to preserve the exact terminal output —
+        // to stderr when stdout is a protocol (`set_stdout_is_protocol`).
+        if stdout_is_protocol() {
+            let _ = std::io::stderr().write_all(&out.stdout);
+        } else {
+            let _ = std::io::stdout().write_all(&out.stdout);
+            let _ = std::io::stdout().flush();
+        }
         let _ = std::io::stderr().write_all(&out.stderr);
         let _ = std::io::stderr().flush();
         Ok(())
