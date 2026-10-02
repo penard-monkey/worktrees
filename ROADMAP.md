@@ -140,6 +140,29 @@ close-out ritual (global `/close-out` skill; this repo's settings in
     silenced after "Stop suggesting this".
   See [the session](docs/sessions/2026-10-01-agent-guidance/summary.md).
 
+- **Hand-test the editable agent skill in the real app (#411).** It was seen
+  only in headless WebKit against the mock. No sandbox pass has been done. In
+  `sandbox.sh --app`:
+  - Edit the skill in Settings → Agent guidance and save. Launch a Claude and
+    a pi lane, and check that their `--plugin-dir` / `--skill` directory holds
+    the edit, while a lane that was already running keeps its old directory.
+  - Write a broken `~/.config/worktrees/guidance/SKILL.md` by hand. The
+    "not being used" card should appear, and a new lane should get the
+    default.
+  - **After a real update** that changes the shipped `SKILL.md`, with an edit
+    in place, check that:
+    - the `agent-guidance-changed` offer appears in the release notes and on
+      the dock rail's button;
+    - its deep link lands on the band;
+    - the three compare views render in WKWebView;
+    - Merge into the editor → Save, Keep mine, and Use the new default each
+      retire the offer;
+    - "Stop suggesting this" holds until the NEXT change to the default.
+
+    To fake an update, edit `SKILL.base.json`'s text and hash to an older
+    default.
+  See [the session](docs/sessions/2026-10-02-guidance-editable/summary.md).
+
 - **`codex_usage::tests::fake_cli_malformed_eof_buffer_cap_and_deadline_are_bounded`
   is real-time and flaked once on Linux CI** (#394's first run; passed on
   re-run). It gives a fake Python CLI a 300ms deadline and asserts the
