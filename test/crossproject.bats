@@ -54,6 +54,27 @@ is_error() { frame 3 | jq -r '.result.isError'; }
   [ "$(result_text | jq -r .project)" = beta ]
   [ "$(result_text | jq -r .address)" = beta:lane ]
   [ "$(result_text | jq -r .branch)" = lane ]
+  # No absolute path below full: not `path`, not anywhere under beta's root.
+  [ "$(result_text | jq 'has("path")')" = false ]
+  [[ "$(result_text)" != *"$(cd "$BETA" && pwd -P)"* ]]
+  reach full
+  srv "" place_status '{"slug":"beta:lane"}'
+  [ "$(result_text | jq -r .path)" = "$(cd "$BETA" && pwd -P)/.worktrees/lane" ]
+}
+
+@test "a registered repo nested in a private one, its .git gone, never resolves into the outer one" {
+  reach full
+  run_wt -C "$BATS_TEST_TMPDIR" projects private beta on
+  local inner="$BETA/vendor/inner"
+  mkdir -p "$inner"
+  git init -q "$inner"
+  git -C "$inner" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  run_wt -C "$BATS_TEST_TMPDIR" projects add "$inner"
+  rm -rf "$inner/.git"
+  srv "" place_status '{"slug":"inner:lane"}'
+  [ "$(is_error)" = true ]
+  [[ "$(result_text)" == *"no longer a repository's main checkout"* ]]
+  [[ "$(result_text)" != *"$BETA"* ]]
 }
 
 @test "list_projects lists both, with addresses and no root below full" {

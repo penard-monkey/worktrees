@@ -67,7 +67,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   session's worktrees MCP server gains `list_projects` (every registered
   project's places, by name) and accepts `<project>:<slug>` in
   `place_status` and `wait` (until: idle), so an orchestrator in one repo can
-  see a lane in another. Projects are named by the registry
+  see a lane in another. Below `full`, nothing an agent gets about another
+  project carries a path. Projects are named by the registry
   (`worktrees projects`), never by anything a repo sets. Nothing writes
   across projects yet: `report`, `send` and the rest refuse a place in
   another project by name. A private project shows as its name only and

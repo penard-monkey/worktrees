@@ -139,6 +139,9 @@ impl Reach {
         if slug.is_empty() {
             return Err(format!("{raw}: an address is <project>:<slug>, and the slug is missing"));
         }
+        if name.is_empty() {
+            return Err(format!("{raw}: an address is <project>:<slug>, and the project name is empty"));
+        }
         // Self-qualification is always allowed — it is the caller's own
         // project, which needs no reach. Matched on the REGISTRY name.
         if self.my_name() == Some(name) {
@@ -153,10 +156,12 @@ impl Reach {
             [e] if e.private => Err(format!("'{name}' is private; its places cannot be reached from other projects")),
             [e] => Ok(Addr::Foreign { entry: (*e).clone(), slug: slug.to_string() }),
             // Names are unique by construction; two means a hand-edited file.
+            // Names only, never roots: one of them may be private, and an
+            // error is not an exception to §3.4.
             many => Err(format!(
-                "'{name}' is ambiguous: {} registered projects carry it ({}). Rename one with `worktrees projects rename`.",
-                many.len(),
-                many.iter().map(|e| e.root.as_str()).collect::<Vec<_>>().join(", ")
+                "'{name}' is ambiguous: {} registered projects carry it. The user renames one with \
+                 `worktrees projects rename`.",
+                many.len()
             )),
         }
     }
@@ -228,6 +233,7 @@ mod tests {
         assert!(r.parse("client:x").unwrap_err().contains("private"));
         assert!(r.parse("nobody:x").unwrap_err().contains("no registered project"));
         assert!(r.parse("beta:").unwrap_err().contains("slug is missing"));
+        assert!(r.parse(":lane").unwrap_err().contains("project name is empty"));
     }
 
     #[test]
@@ -241,7 +247,9 @@ mod tests {
         let mut g = reg();
         g.projects.push(Entry { root: "/w/beta2".into(), name: "beta".into(), private: false });
         let r = Reach::new(Inputs { main_root: "/w/alpha", user: Level::Read, flag: None, in_run: false, registry: g });
-        assert!(r.parse("beta:x").unwrap_err().contains("ambiguous"));
+        let e = r.parse("beta:x").unwrap_err();
+        assert!(e.contains("ambiguous"), "{e}");
+        assert!(!e.contains("/w/"), "no root in the message: {e}");
     }
 
     /// Identity is the registry's, so a repo that sets its own prefix to
