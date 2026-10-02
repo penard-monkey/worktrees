@@ -109,14 +109,52 @@ is_error() { frame 3 | jq -r '.result.isError'; }
   [ "$(is_error)" = true ]
 }
 
-@test "the repo cannot turn reach on, and writes never cross" {
+@test "the repo cannot turn reach on, and writes other than a message never cross" {
   write_project_config 'cross_project = "full"'
   srv "--mutations" place_status '{"slug":"beta:lane"}'
   [ "$(is_error)" = true ]
   reach read
-  srv "--mutations" report '{"to":"beta:lane","text":"hi"}'
+  srv "--mutations" set_note '{"slug":"beta:lane","note":"hi"}'
   [ "$(is_error)" = true ]
   [[ "$(result_text)" == *"another project"* ]]
+  [ ! -s "$BETA/.worktrees.places.json" ] || ! grep -q '"note"' "$BETA/.worktrees.places.json"
+}
+
+# srv_in <dir> "<extra>" <tool> '<json args>' — like srv, from any directory.
+srv_in() {
+  local dir="$1"; shift
+  local saved="$REPO"; REPO="$dir"; srv "$@"; REPO="$saved"
+}
+
+@test "a report round-trips A→B→A: filed in the recipient's log, from qualified, reply threaded" {
+  reach read
+  srv_in "$REPO" "" report '{"to":"beta:(main)","text":"which branch is the fix on?"}'
+  [ "$(is_error)" = false ]
+  [ "$(result_text | jq -r .from)" = 'alpha:(main)' ]
+  # In BETA's log: `to` is its own bare slug.
+  srv_in "$BETA" "" messages '{}'
+  [ "$(result_text | jq -r '.messages[0].from')" = 'alpha:(main)' ]
+  [ "$(result_text | jq -r '.messages[0].to')" = '(main)' ]
+  local qid; qid="$(result_text | jq -r '.messages[0].id')"
+  [ ! -d "$REPO/.git/worktrees-messages" ]
+  # beta answers to the `from` it received; the question sits in beta's log.
+  srv_in "$BETA" "" report "{\"to\":\"alpha:(main)\",\"text\":\"feat-x\",\"reply_to\":\"$qid\"}"
+  [ "$(is_error)" = false ]
+  srv_in "$REPO" "" wait '{"until":"message","slug":"beta:(main)","timeout_s":0}'
+  [ "$(result_text | jq -r .event)" = message ]
+  [ "$(result_text | jq -r '.messages[0].from')" = 'beta:(main)' ]
+  [ "$(result_text | jq -r '.messages[0].reply_to')" = "$qid" ]
+}
+
+@test "a cross-project report is refused by name while reach is off or the target is private" {
+  srv "" report '{"to":"beta:(main)","text":"hi"}'
+  [ "$(is_error)" = true ]
+  [[ "$(result_text)" == *cross_project* ]]
+  reach read
+  run_wt -C "$BATS_TEST_TMPDIR" projects private beta on
+  srv "" report '{"to":"beta:(main)","text":"hi"}'
+  [ "$(is_error)" = true ]
+  [[ "$(result_text)" == *private* ]]
   [ ! -d "$BETA/.git/worktrees-messages" ]
 }
 

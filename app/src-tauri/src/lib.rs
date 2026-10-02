@@ -1511,6 +1511,11 @@ fn claude_activity() -> (Vec<String>, Vec<String>, Vec<(i32, Option<String>)>) {
 struct ClaudeActivity {
     busy: Vec<String>,
     waiting: Vec<String>,
+    /// `waiting`, per harness id (`claude`, `codex`, `pi`). Additive: the dot
+    /// reads the merged set; the nav drag needs to know whether THE agent it
+    /// would paste into is the one stopped on a person (cross-project §6.3 —
+    /// `drop_reference` refuses per provider, and the chip should agree).
+    waiting_by: std::collections::BTreeMap<&'static str, Vec<String>>,
 }
 
 // ── the unsent prompt (nav ✎, ⌘K, Home) ─────────────────────────────────────
@@ -7853,6 +7858,7 @@ pub fn run() {
                 let mut last = worktrees_core::tmux::session_fingerprint();
                 let mut last_busy: Vec<String> = Vec::new();
                 let mut last_waiting: Vec<String> = Vec::new();
+                let mut last_waiting_by: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
                 let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
                 let mut ticks: u32 = 0;
                 // Auto-fetch scheduling. The pass runs INLINE on this thread (no
@@ -8024,16 +8030,26 @@ pub fn run() {
                         let _ = handle.emit("places:changed", ());
                     }
                     last_models = Some(models);
+                    let waiting_by: std::collections::BTreeMap<&'static str, Vec<String>> =
+                        std::iter::once((worktrees_core::provider::CLAUDE.id, waiting.clone()))
+                            .chain(lanes.iter().map(|(id, t)| (*id, t.waiting.clone())))
+                            .map(|(id, mut v)| {
+                                v.sort_unstable();
+                                v.dedup();
+                                (id, v)
+                            })
+                            .collect();
                     let Activity { busy, waiting, edges } =
                         merge_activity(busy, waiting, lanes.iter().map(|(_, t)| t));
                     // Change-gated: emit only when EITHER set shifts, so an idle
                     // machine stays silent (the frontend just re-applies the last set).
-                    if busy != last_busy || waiting != last_waiting {
+                    if busy != last_busy || waiting != last_waiting || waiting_by != last_waiting_by {
                         last_busy = busy.clone();
                         last_waiting = waiting.clone();
+                        last_waiting_by = waiting_by.clone();
                         let _ = handle.emit(
                             "sessions:busy",
-                            ClaudeActivity { busy: busy.clone(), waiting },
+                            ClaudeActivity { busy: busy.clone(), waiting, waiting_by },
                         );
                     }
                     // Completion edges, computed AFTER the busy emit so the dot's

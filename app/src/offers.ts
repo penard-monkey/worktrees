@@ -198,7 +198,7 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
     out.push({
       id: "cross-project",
       title: "Let agents see your other projects",
-      body: "An orchestrator in one repo can check on lanes in your other projects, read-only, addressed as project:place. Private projects stay out.",
+      body: "An orchestrator in one repo can check on lanes in your other projects and message their agents, addressed as project:place. Private projects stay out.",
       cta: "Review…",
       to: { cat: "guidance", focus: "cross-project" },
       fingerprint: "off",

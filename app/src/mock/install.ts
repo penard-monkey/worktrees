@@ -3177,13 +3177,24 @@ const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
   { busy: [], waiting: [] },
 ];
 const CODEX_PLACES = new Set([`${CDV}/billing-refactor`]);
+const PI_PLACES = new Set([`${CDV}/catalog-import`]);
+// `waiting_by` (lib.rs `ClaudeActivity`): the waiting set split by the harness
+// that is waiting, which is what the nav drag's refusal keys on.
+const withWaitingBy = (a: { busy: string[]; waiting: string[] }) => ({
+  ...a,
+  waiting_by: {
+    claude: a.waiting.filter((p) => !CODEX_PLACES.has(p) && !PI_PLACES.has(p)),
+    codex: a.waiting.filter((p) => CODEX_PLACES.has(p)),
+    pi: a.waiting.filter((p) => PI_PLACES.has(p)),
+  },
+});
 let actIdx = 0;
-setTimeout(() => emitEvent("sessions:busy", ACTIVITY_CYCLE[0]), 400);
+setTimeout(() => emitEvent("sessions:busy", withWaitingBy(ACTIVITY_CYCLE[0])), 400);
 setInterval(() => {
   const before = ACTIVITY_CYCLE[actIdx].busy;
   actIdx = (actIdx + 1) % ACTIVITY_CYCLE.length;
   const now = ACTIVITY_CYCLE[actIdx];
-  emitEvent("sessions:busy", now);
+  emitEvent("sessions:busy", withWaitingBy(now));
   // Mirror the backend contract (lib.rs poll thread): a path that LEAVES the
   // busy set finished a task, and gets its own `sessions:done` stamp right
   // after the busy emit. Without this the harness could never show the

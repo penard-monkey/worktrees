@@ -11,7 +11,7 @@ export type CrossProjectStatus = {
 
 const LEVELS: { id: CrossProjectStatus["level"]; label: string; hint: string }[] = [
   { id: "off", label: "Off", hint: "A session sees only its own project's places." },
-  { id: "read", label: "Read", hint: "A session can list your other projects' places and check on their agents (list_projects, place_status, wait). It cannot change anything there." },
+  { id: "read", label: "Read", hint: "A session can list your other projects' places, check on their agents (list_projects, place_status, wait) and message them (report). It cannot change anything in their trees." },
   { id: "full", label: "Full", hint: "As Read, and paths are included. Acting on other projects arrives in a later release; removing a worktree in another project is never allowed." },
 ];
 

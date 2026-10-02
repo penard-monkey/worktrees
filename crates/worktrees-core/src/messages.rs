@@ -159,6 +159,26 @@ pub fn post(
     via: Option<&str>,
     now_ms: i64,
 ) -> Result<Message, String> {
+    post_into(dir, dir, from, to, text, reply_to, via, now_ms)
+}
+
+/// `post`, with the log `reply_to` must name a message in given separately
+/// (cross-project §4.2). A message from ANOTHER repository is filed in the
+/// RECIPIENT's log, so the message it answers sits in the REPLIER's own log —
+/// where it arrived. Checked against the log being written, an A→B→A reply
+/// could never name what it answers. Same-project posts pass `dir` twice
+/// (`post`), which is exactly the old check.
+#[allow(clippy::too_many_arguments)]
+pub fn post_into(
+    dir: &Path,
+    reply_log: &Path,
+    from: &str,
+    to: &str,
+    text: &str,
+    reply_to: Option<&str>,
+    via: Option<&str>,
+    now_ms: i64,
+) -> Result<Message, String> {
     check_slug("from", from)?;
     check_slug("to", to)?;
     if text.trim().is_empty() {
@@ -174,8 +194,11 @@ pub fn post(
         return Err("text contains a NUL byte".into());
     }
     if let Some(r) = reply_to {
-        if !valid_id(r) || !entries(dir).iter().any(|(id, _, _)| id == r) {
-            return Err(format!("reply_to names no message in the log: {r}"));
+        if !valid_id(r) || !entries(reply_log).iter().any(|(id, _, _)| id == r) {
+            return Err(format!(
+                "reply_to names no message in the log: {r} (or names one you sent — a follow-up to your own \
+                 message cannot thread; leave reply_to out)"
+            ));
         }
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -334,6 +357,24 @@ mod tests {
     }
 
     const T0: i64 = 1_790_000_000_000;
+
+    /// A→B→A across two logs: B's reply is filed in A's log and names a
+    /// message that sits in B's own log. `post` would look for it in A's.
+    #[test]
+    fn a_cross_log_reply_is_checked_against_the_repliers_own_log() {
+        let (a, b) = (tmp("xa"), tmp("xb"));
+        // alpha's lane → beta's (main): filed in beta's log, `to` bare.
+        let q = post_into(&b.0, &a.0, "alpha:lane", "(main)", "which branch?", None, None, T0).unwrap();
+        assert_eq!(for_place(&b.0, "(main)", T0 + 1).len(), 1);
+        assert!(for_place(&a.0, "(main)", T0 + 1).is_empty());
+        // beta's (main) answers into alpha's log; the question is in BETA's.
+        let ans = post_into(&a.0, &b.0, "beta:(main)", "lane", "feat-x", Some(&q.id), None, T0 + 5).unwrap();
+        assert_eq!(ans.reply_to.as_deref(), Some(q.id.as_str()));
+        assert_eq!(for_place(&a.0, "lane", T0 + 6)[0].msg.from, "beta:(main)");
+        // The same reply checked the old way — against the log being written —
+        // cannot find what it answers.
+        assert!(post(&a.0, "beta:(main)", "lane", "feat-x", Some(&q.id), None, T0 + 7).unwrap_err().contains("reply_to names no message"));
+    }
 
     #[test]
     fn a_message_round_trips_to_its_recipient_only() {

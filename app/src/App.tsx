@@ -3764,6 +3764,14 @@ function App() {
   // registered projects. Machine-level — the offer's input, the Settings
   // section's state, and what the nav drag consults before a foreign drop.
   const [crossProject, setCrossProject] = useState<CrossProjectStatus | null>(null);
+  // Re-read when the SET of projects changes (added, removed, reordered in the
+  // app): the drag consults it for names and `private`, and a project added
+  // a moment ago must not read as unregistered.
+  const projectRoots = ws?.projects.map((p) => p.root).join("\n") ?? "";
+  useEffect(() => {
+    if (!projectRoots) return;
+    invoke<CrossProjectStatus>("cross_project_status").then(setCrossProject).catch(() => {});
+  }, [projectRoots]);
   useEffect(() => {
     invoke<CrossProjectStatus>("cross_project_status").then(setCrossProject).catch(() => setCrossProject(null));
     invoke<CodexMcpStatus>("codex_mcp_status").then(setCodexMcp).catch(() => setCodexMcp(null));
@@ -3866,10 +3874,18 @@ function App() {
   // state: no extra invokes.
   const [busyPaths, setBusyPaths] = useState<Set<string>>(new Set());
   const [waitingPaths, setWaitingPaths] = useState<Set<string>>(new Set());
+  // The same waiting set, per harness (`waiting_by`): the nav drag refuses a
+  // drop only when the agent it would paste INTO is the one stopped on a
+  // person, which is how `drop_reference` decides. Absent from an older
+  // backend's payload, in which case the merged set stands in.
+  const [waitingBy, setWaitingBy] = useState<Record<string, Set<string>> | null>(null);
   useEffect(() => {
-    const un = listen<{ busy: string[]; waiting: string[] }>("sessions:busy", (e) => {
+    const un = listen<{ busy: string[]; waiting: string[]; waiting_by?: Record<string, string[]> }>("sessions:busy", (e) => {
       setBusyPaths(new Set(e.payload.busy));
       setWaitingPaths(new Set(e.payload.waiting));
+      setWaitingBy(e.payload.waiting_by
+        ? Object.fromEntries(Object.entries(e.payload.waiting_by).map(([k, v]) => [k, new Set(v)]))
+        : null);
     });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, []);
@@ -5525,7 +5541,7 @@ function App() {
     // Dropping a place onto the TERMINAL is not a move at all — it types a
     // reference to that place into the Claude session running there.
     | { kind: "mention"; repo: string; slug: string; intoRepo: string; intoSlug: string; intoSession: string; name: string;
-        provider: Harness; foreign: boolean; token: boolean; label: string };
+        provider: Harness; foreign: boolean; token: boolean; label: string; intoName: string };
 
   const placeAt = (repo: string, slug: string) =>
     ws?.projects.find((v) => v.root === repo)?.snapshot?.places.find((p) => p.slug === slug) ?? null;
@@ -5581,7 +5597,10 @@ function App() {
       if (!sel) return null;
       const provider = (termEl.dataset.dropProvider ?? "claude") as Harness;
       const agent = selectedAgents?.[provider];
-      const pv = (root: string) => ws?.projects.find((v) => v.root === root);
+      // Names and `private` from `crossProject` — the registry as last read,
+      // refreshed by every Settings write — rather than `ws`, which only
+      // catches up on the next list_workspace.
+      const pv = (root: string) => crossProject?.projects.find((v) => v.root === root);
       // The plan is `dnd.ts::mentionPlan` — the frontend's half of core's
       // `reach::plan_drop`, checked against it by drop-check.mjs. Within one
       // project a Claude pane gets the `@`-mention; another project's place,
@@ -5592,7 +5611,7 @@ function App() {
         reach: crossProject ? crossProject.level : null,
         fromPrivate: !!pv(item.repo)?.private, intoPrivate: !!pv(sel.repo)?.private,
         fromRegistered: !!pv(item.repo)?.name, intoRegistered: !!pv(sel.repo)?.name,
-        waiting: !!selected && waitingPaths.has(selected.path),
+        waiting: !!selected && (waitingBy ? !!waitingBy[provider]?.has(selected.path) : waitingPaths.has(selected.path)),
       });
       if (!plan || !agent) return null;
       if (!plan.ok) return { kind: "reject", hint: plan.hint };
@@ -5603,7 +5622,9 @@ function App() {
         kind: "mention", repo: item.repo, slug: item.slug, intoRepo: sel.repo,
         intoSlug: sel.slug, intoSession: agent.name, name: nameOf(p),
         provider, foreign: plan.foreign, token: plan.token,
-        label: plan.foreign && from ? `${from}:${item.slug}` : item.slug,
+        // What will be PASTED (core's `mention::address`), not just the slug.
+        label: from ? `place ${from}:${item.slug}` : `place ${item.slug}`,
+        intoName: selected ? nameOf(selected) : sel.slug,
       };
     }
 
@@ -5670,7 +5691,7 @@ function App() {
         repo: target.repo, slug: target.slug, intoRepo: target.intoRepo,
         intoSlug: target.intoSlug, intoSession: target.intoSession, provider: target.provider,
       })
-        .then((token) => setNotice(`${token} \u2192 ${target.name}'s session`))
+        .then((token) => setNotice(`${token} \u2192 ${target.intoName}'s ${HARNESS_LABEL[target.provider]}`))
         .catch((e) => fail(e));
       return;
     }
@@ -7693,7 +7714,7 @@ function App() {
           {drag.target?.kind === "tier" && <span className="drag-why">→ {TIER_LABEL[drag.target.lands]}</span>}
           {drag.target?.kind === "mention" && <span className="drag-why">{drag.target.token
             ? "→ reference in this session"
-            : `→ address ${drag.target.label} in this session`}</span>}
+            : `→ types “${drag.target.label}” here`}</span>}
         </div>
       )}
 
