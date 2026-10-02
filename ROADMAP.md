@@ -747,6 +747,20 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   prefix is the only thing left holding it up.
   _From: [2026-09-18 claude-status-indicator](docs/sessions/2026-09-18-claude-status-indicator/summary.md)_
 
+- **`AGENTS.md` is not in `ci.yml`'s `paths-ignore`, and it is now the canonical
+  instructions file.** `CLAUDE.md` is listed — and `CLAUDE.md` is now three
+  lines ending in `@AGENTS.md`, so the skip covers the pointer and not the
+  1,100-line document every agent actually reads. Every prose-only edit to it
+  therefore runs the full suite on both OSes, and `.claude/close-out.md`'s
+  promise that an archive PR shows zero checks is false whenever the PR carries
+  an AGENTS.md learning, which is most of them. The fix is two lines (add
+  `'AGENTS.md'` to BOTH `paths-ignore` lists — the file's own comment says to
+  keep them identical), but it is a change to how CI gates every future docs PR,
+  so it wants a deliberate yes rather than riding along in a close-out. Deferred
+  for that reason, not forgotten. Note the skip applies only when EVERY changed
+  file matches, so this costs nothing on mixed docs+code PRs.
+  _From: [2026-10-02 mcp-watcher-signal](docs/sessions/2026-10-02-mcp-watcher-signal/summary.md)_
+
 - **The MCP resource surface is barely used, and its correctness is
   unproven.** The v0.27.0 debug log recorded 1,817 `resources/list` calls
   against **2** `resources/read` in 47 hours, and zero read errors — but with
