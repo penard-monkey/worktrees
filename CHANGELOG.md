@@ -31,8 +31,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `place_status` answered `none` mid-turn, `wait until: idle` returned at
   once, `send` refused, and `open --ai pi` would have started a second pi on
   the same place. The pane snapshot now asks `ps` for each such pane's
-  foreground process (pi names itself there): one call, and only when a pane
-  needs it — never for a sidecar, whose name already says whose it is. Every
+  foreground process (pi names itself there): one call over just those
+  panes' ttys, and only when a pane needs it — never for a sidecar, whose
+  name already says whose it is. Every
   reader takes the answer from that one snapshot, the same way Codex in a
   place's own session always has been.
 - **`place_status` and `wait` say `unknown` rather than `none` when something
@@ -41,6 +42,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `agent_state` and `activity.state` read `unknown`, `activity.reason` says
   what is running and why it cannot be vouched for, and `wait until: idle`
   keeps waiting until that program exits.
+  This applies to any program, not only an agent typed into a pane: a place
+  whose agent has exited while its own session still runs something else
+  (`vim`, `pnpm dev` in a split pane) used to answer `none`, and now answers
+  `unknown`. `wait until: idle` on it runs to its timeout instead of
+  returning at once.
 - **The agent guidance says to start an agent only through a launch**
   (`create_worktree`, `worktrees new|open --ai`), never by typing one into a
   place's pane — with what goes missing when you do — and what `unknown`
