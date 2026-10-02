@@ -25,17 +25,38 @@ tmux. The repository's own AGENTS.md / CLAUDE.md wins on repo-specific rules
 
 ## Handing work to another agent (a lane)
 
-- `create_worktree` with a `brief` writes `.planning/brief.md` in the new place
-  and starts an agent on it. The brief is the whole handover: goal,
-  deliverable, rules, and when to stop. It is never passed on a command line.
-- `provider` picks the agent (claude, codex, pi) and `model` its model.
+- Start a lane with MCP `create_worktree {branch, provider, model, brief}`,
+  or `worktrees new <branch> --ai <provider> [--model <model>] [--brief <text>]`
+  (`worktrees open <slug> --ai …` for a place that exists). `provider` picks
+  the agent (claude, codex, pi) and `model` its model; pi's is
+  `<host>/<id>`, for example `lm-studio/qwen3-coder-next`.
+- A `brief` is written to `.planning/brief.md` in the new place and the agent
+  is started on it. The brief is the whole handover: goal, deliverable, rules,
+  and when to stop. It is never passed on a command line.
 - A place with an agent running belongs to that agent. Do not edit its tree;
   talk to it.
+
+**Start an agent only that way. Never type an agent command into a place's
+pane, and never exit the agent worktrees started there to make room for
+another.** An agent typed into a pane:
+
+- has no record. Reopening the place starts the agent it was created with,
+  not yours, and none of the launch's checks ran (a model that exists, a
+  model host that answers, a plan window that is not spent).
+- runs without the places rule and this skill, which every launch hands its
+  agent.
+- is seen only while it is its pane's foreground program. pi suspended, or
+  started through a wrapper, reads as a program nobody reports on, and a
+  resume of that place (`worktrees open <slug> --ai pi -r`, the app's reopen)
+  opens the conversation it is still writing: two pi on one session file.
 
 ## Talking between places
 
 - `list_places` shows every place; `place_status <slug>` shows one, including
-  whether its agent is busy.
+  whether its agent is busy. `unknown` means something other than a shell
+  runs in the place's own session and no agent reports on it — typed there
+  by hand, most likely. Ask the user what it is; do not type into it, and do
+  not take it for idle (`wait` keeps waiting on it).
 - `report` posts a message from your place; `messages` reads yours; `wait`
   blocks until a place's agent goes idle or a message arrives.
 - Claude sessions also have their own messaging (`SendMessage` to the full

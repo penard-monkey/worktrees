@@ -51,6 +51,12 @@ pub enum State {
     Idle,
     /// No agent running in the place.
     None,
+    /// Something other than a shell runs in the place's own session and no
+    /// harness reports on it — a program typed into the pane by hand, or an
+    /// agent that has not started reporting yet. Not `none`: "nobody is
+    /// working there" would be a guess, and `wait until: idle` must not
+    /// answer on it (`Activity::reason` says why).
+    Unknown,
 }
 
 impl State {
@@ -59,7 +65,10 @@ impl State {
             State::Busy => 0,
             State::Waiting => 1,
             State::Idle => 2,
-            State::None => 3,
+            // Something running beats nothing running; any harness's own
+            // reading beats a program nobody reports on.
+            State::Unknown => 3,
+            State::None => 4,
         }
     }
 }
@@ -78,11 +87,30 @@ pub struct Activity {
     /// address with `SendMessage`, for Codex the tmux session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// Why the state is what it is, when the state alone would mislead —
+    /// only `unknown` carries one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl Activity {
     pub fn none() -> Activity {
-        Activity { provider: None, state: State::None, last_done: None, session: None }
+        Activity { provider: None, state: State::None, last_done: None, session: None, reason: None }
+    }
+
+    /// `program` runs in `session` and no harness reports on it.
+    pub fn unknown(session: &str, program: &str) -> Activity {
+        Activity {
+            provider: None,
+            state: State::Unknown,
+            last_done: None,
+            session: Some(session.to_string()),
+            reason: Some(format!(
+                "a program this place did not launch is running in {session} ({program}), and no agent \
+                 reports on it — it was typed into the pane, or an agent there has not started reporting. \
+                 Ask the user; never type into it."
+            )),
+        }
     }
 }
 
@@ -267,6 +295,14 @@ pub fn codex_session_for(panes: &tmux::PaneList, canonical: &str) -> String {
     crate::provider::CODEX.session_name(canonical, panes.canonical_provider(canonical).id, false)
 }
 
+/// The pi session name for a place, by the same rule: its `~agent~pi`
+/// sidecar, or the canonical session when pi is what runs there (a pi typed
+/// into the place's own pane — `PaneList::canonical_provider` names it from
+/// the tty's foreground leader, since tmux only sees `node`).
+pub fn pi_session_for(panes: &tmux::PaneList, canonical: &str) -> String {
+    crate::provider::PI.session_name(canonical, panes.canonical_provider(canonical).id, false)
+}
+
 /// The Codex half of `place_activity`, for one place: `None` unless the place's
 /// managed codex session is up AND running something other than a shell (the
 /// pane is `codex …; exec "$SHELL"`, so it outlives codex).
@@ -282,14 +318,14 @@ pub fn codex_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Op
         None
     };
     let (state, last_done) = codex_state(turn.as_ref(), pane);
-    Some(Activity { provider: Some("codex"), state, last_done, session: Some(name) })
+    Some(Activity { provider: Some("codex"), state, last_done, session: Some(name), reason: None })
 }
 
 /// The Claude half: the most active claude session whose cwd is `path`.
 pub fn claude_activity(probes: &[agent::ClaudeProbe], path: &str) -> Option<Activity> {
     let a = agent::agents_at(probes, path).into_iter().next()?;
     let session = a.name.clone().or_else(|| a.tmux.as_deref().and_then(agent::session_name).map(str::to_string));
-    Some(Activity { provider: Some("claude"), state: claude_state(&a.state), last_done: None, session })
+    Some(Activity { provider: Some("claude"), state: claude_state(&a.state), last_done: None, session, reason: None })
 }
 
 /// The most active of any number of readings (one per harness, in registry
@@ -303,13 +339,29 @@ pub fn most_active(readings: impl IntoIterator<Item = Activity>) -> Activity {
     .unwrap_or_else(Activity::none)
 }
 
+/// The ONE answer for a place from its harness readings — `place_status`'s
+/// `activity` and `wait`'s, never two derivations. The most active reading;
+/// or, when no harness reports at all while the place's own session runs a
+/// program, `unknown` rather than `none` — an orchestrator told "nobody is
+/// working there" acts on it.
+pub fn place_answer(readings: impl IntoIterator<Item = Activity>, panes: Option<&tmux::PaneList>, canonical: &str) -> Activity {
+    let mut readings = readings.into_iter().peekable();
+    if readings.peek().is_none() {
+        if let Some(program) = panes.and_then(|p| p.program_in(canonical)) {
+            return Activity::unknown(canonical, program);
+        }
+    }
+    most_active(readings)
+}
+
 /// What the agent in one place is doing — the answer `place_status` and
 /// `wait` give, and the same derivation the app's dots use.
 pub fn place_activity(project: &Project, slug: &str, path: &str) -> Activity {
     let probes = agent::live_probes();
     let panes = tmux::PaneList::fetch();
     let scan = crate::harness::Scan { probes: &probes, panes: panes.as_ref() };
-    most_active(crate::harness::place_activities(project, slug, path, &scan).into_iter().map(|(_, x)| x))
+    let readings = crate::harness::place_activities(project, slug, path, &scan);
+    place_answer(readings.into_iter().map(|(_, x)| x), panes.as_ref(), &project.session_name(slug))
 }
 
 #[cfg(test)]
@@ -343,7 +395,7 @@ mod tests {
 
     #[test]
     fn the_more_active_provider_answers() {
-        let a = |p, s| Activity { provider: Some(p), state: s, last_done: None, session: None };
+        let a = |p, s| Activity { provider: Some(p), state: s, last_done: None, session: None, reason: None };
         assert_eq!(most_active([a("claude", State::Idle), a("codex", State::Busy)]).provider, Some("codex"));
         assert_eq!(most_active([a("claude", State::Waiting), a("codex", State::Waiting)]).provider, Some("claude"));
         assert_eq!(most_active([a("codex", State::Idle)]).state, State::Idle);
@@ -355,6 +407,32 @@ mod tests {
         assert_eq!(most_active(three).provider, Some("third"));
         let v = serde_json::to_value(Activity::none()).unwrap();
         assert_eq!(v, serde_json::json!({ "provider": null, "state": "none", "last_done": null }));
+    }
+
+    /// No harness reports, but the place's own session runs a program: that
+    /// is `unknown`, with why — never `none`, which an orchestrator reads as
+    /// "nobody is working there" (pi typed into a Claude lane answered `none`
+    /// mid-turn, and `wait` returned at once). Any harness's reading wins, and
+    /// a session back at its shell is still `none`.
+    #[test]
+    fn an_unclaimed_program_in_the_place_session_is_unknown_not_none() {
+        let panes = |cmd: &str| tmux::PaneList::from_rows(vec![("repo-feat".into(), "/w/feat".into(), cmd.into())]);
+        let got = place_answer([], Some(&panes("vim")), "repo-feat");
+        assert_eq!(got.state, State::Unknown);
+        assert_eq!(got.provider, None);
+        assert_eq!(got.session.as_deref(), Some("repo-feat"));
+        let why = got.reason.as_deref().unwrap_or("");
+        assert!(why.contains("did not launch") && why.contains("(vim)"), "{why}");
+        let v = serde_json::to_value(&got).unwrap();
+        assert_eq!(v["state"], "unknown");
+        assert!(v["reason"].is_string(), "{v}");
+        assert_eq!(place_answer([], Some(&panes("zsh")), "repo-feat"), Activity::none(), "a shell is nobody");
+        assert_eq!(place_answer([], None, "repo-feat"), Activity::none(), "no tmux, nothing to see");
+        assert_eq!(place_answer([], Some(&panes("vim")), "repo-other"), Activity::none(), "another place's session");
+        let claude = Activity { provider: Some("claude"), state: State::Idle, last_done: None, session: None, reason: None };
+        assert_eq!(place_answer([claude.clone()], Some(&panes("vim")), "repo-feat"), claude, "a harness that reports wins");
+        // Ranked between the live states and nothing at all.
+        assert!(State::Idle.rank() < State::Unknown.rank() && State::Unknown.rank() < State::None.rank());
     }
 
     /// The chained capture, two panes: each block runs from its marker to the

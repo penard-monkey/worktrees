@@ -3,6 +3,30 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **pi typed into a place's own session is pi, not Claude.** tmux names only
+  the interpreter, `node`, and a `node` pane outside an agent sidecar was read
+  as Claude — so a pi started by hand in a place's pane had no nav dot,
+  `place_status` answered `none` mid-turn, `wait until: idle` returned at
+  once, `send` refused, and `open --ai pi` would have started a second pi on
+  the same place. The pane snapshot now asks `ps` for each such pane's
+  foreground process (pi names itself there): one call, and only when a pane
+  needs it — never for a sidecar, whose name already says whose it is. Every
+  reader takes the answer from that one snapshot, the same way Codex in a
+  place's own session always has been.
+- **`place_status` and `wait` say `unknown` rather than `none` when something
+  nobody reports on runs in a place's own session.** "No agent there" was a
+  guess, and an orchestrator acts on it. Both now come from one derivation:
+  `agent_state` and `activity.state` read `unknown`, `activity.reason` says
+  what is running and why it cannot be vouched for, and `wait until: idle`
+  keeps waiting until that program exits.
+- **The agent guidance says to start an agent only through a launch**
+  (`create_worktree`, `worktrees new|open --ai`), never by typing one into a
+  place's pane — with what goes missing when you do — and what `unknown`
+  means. The app offers the updated guidance again.
+
 ## [0.35.0] - 2026-10-01
 
 ### Added

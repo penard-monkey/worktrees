@@ -8436,6 +8436,19 @@ mod tests {
         let pi = rows(&[("p-feat~agent~pi", "node")]);
         let got = agent_sessions_for(Some(&pi), &[], c, c, false, "/nonexistent");
         assert!(got[2].up && !got[0].up && !got[1].up, "a node pane in pi's sidecar is pi, not Claude");
+        // pi typed into the place's OWN session: tmux says `node`, the tty's
+        // foreground leader says `pi`. The nav dot's lane is pi's, at the
+        // canonical name — before, Claude claimed it and pi_tick never watched.
+        let typed = tmux::PaneList::from_panes(vec![tmux::Pane {
+            session: c.to_string(),
+            path: "/w".to_string(),
+            cmd: "node".to_string(),
+            fg: Some("pi".to_string()),
+            ..tmux::Pane::default()
+        }]);
+        let got = agent_sessions_for(Some(&typed), &[], c, c, true, "/nonexistent");
+        let up: Vec<(&str, &str, bool)> = got.iter().map(|s| (s.id, s.name.as_str(), s.up)).collect();
+        assert_eq!(up, [("claude", c, false), ("codex", "p-feat~agent~codex", false), ("pi", c, true)]);
         let ids: Vec<&str> = agent_sessions_for(None, &[], c, c, false, "").iter().map(|s| s.id).collect();
         assert_eq!(ids, ["claude", "codex", "pi"], "one entry per harness, registry order");
     }

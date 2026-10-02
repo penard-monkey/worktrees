@@ -1,6 +1,7 @@
 //! Thin wrappers over the `tmux` CLI. Subprocess (there's no native lib), which
 //! also keeps the bats fake-tmux PATH shim intercepting the compiled binary.
 
+use std::collections::HashMap;
 use std::process::{Command, Output};
 
 /// Marker for dock scratch-shell SIDECAR sessions. The dock's Terminal tab can
@@ -121,16 +122,129 @@ pub fn worktree_session_excluding(wt: &str, ai_word: &str, exclude_under: Option
     PaneList::fetch()?.session_in(wt, ai_word, exclude_under)
 }
 
-/// Snapshot of `list-panes -a` — every live pane as
-/// `(session, pane_current_path, pane_current_command)`. Fetched ONCE per
-/// caller (one tmux shell-out) and reused: `ls`/`place_json` resolves adopted
-/// sessions for many worktrees against this instead of shelling out per place.
+/// One pane of a `list-panes -a` snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pane {
+    pub session: String,
+    /// `#{pane_current_path}`.
+    pub path: String,
+    /// `#{pane_current_command}`.
+    pub cmd: String,
+    /// `#{pane_pid}` — what tells two launches under the same session NAME
+    /// apart (a close + open recreates `~agent~pi`). `None` from a tmux row
+    /// that printed no fourth field.
+    pub pid: Option<String>,
+    /// `#{pane_tty}`, normalised to how `ps` spells it (`ttys009`, `pts/3`).
+    pub tty: Option<String>,
+    /// The program word of the tty's FOREGROUND process-group leader, from
+    /// `ps` — resolved only for a pane `foreground_wanted` picks, else `None`.
+    pub fg: Option<String>,
+}
+
+impl Pane {
+    /// The program word attribution keys on. tmux names a wrapper's
+    /// INTERPRETER: pi (and npm's codex) read as `node`, which by itself says
+    /// nothing about which harness it is. pi sets its process title, so the
+    /// tty's foreground leader names it (`ps` comm `pi`). The leader counts
+    /// only when it names a HARNESS: an `npx`-started Claude leads with `npm`,
+    /// and reading that would take the pane away from the `node` heuristic
+    /// that has always called it Claude. Everything else is the pane's own
+    /// command, as before.
+    pub fn program(&self) -> &str {
+        match &self.fg {
+            Some(fg) if is_wrapper(&self.cmd) && crate::provider::by_word(fg).is_some() => fg,
+            _ => self.cmd.rsplit('/').next().unwrap_or(&self.cmd),
+        }
+    }
+}
+
+/// `node`: what tmux shows for any program run through a JS wrapper.
+fn is_wrapper(cmd: &str) -> bool {
+    cmd.rsplit('/').next() == Some("node")
+}
+
+/// A tty as `ps` names it: tmux says `/dev/ttys009` (Linux `/dev/pts/3`), ps
+/// says `ttys009` (`pts/3`). Without this the two never meet.
+pub fn normalize_tty(tty: &str) -> &str {
+    tty.trim().strip_prefix("/dev/").unwrap_or(tty.trim())
+}
+
+/// `list-panes -a` rows (`session\tpath\tcmd[\tpid[\ttty]]`) as panes. A row
+/// with fewer fields is a tmux, or a test shim, that printed fewer: the
+/// missing ones are `None`, never an error.
+pub fn parse_pane_rows(text: &str) -> Vec<Pane> {
+    text.lines()
+        .map(|line| {
+            let mut it = line.splitn(5, '\t');
+            let mut field = || it.next().unwrap_or("").to_string();
+            let (session, path, cmd) = (field(), field(), field());
+            let some = |s: String| (!s.trim().is_empty()).then_some(s);
+            let pid = some(field());
+            let tty = some(field()).map(|t| normalize_tty(&t).to_string());
+            Pane { session, path, cmd, pid, tty, fg: None }
+        })
+        .collect()
+}
+
+/// `ps -A -o tty=,pid=,tpgid=,comm=` → each tty's foreground process-group
+/// leader (`pid == tpgid`), as a program word. `comm` is the last column and
+/// may hold spaces (`npm exec x`) or a path (`/bin/zsh`): the word is the
+/// basename of its first token. Ttys with no controlling terminal (`??`, `?`)
+/// never match a pane's, so they are not filtered here.
+pub fn parse_foreground(ps: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for line in ps.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(tty), Some(pid), Some(tpgid), Some(comm)) = (it.next(), it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        if pid != tpgid || pid.parse::<u32>().is_err() {
+            continue;
+        }
+        let word = comm.rsplit('/').next().unwrap_or(comm).trim_start_matches('-');
+        if !word.is_empty() {
+            out.insert(normalize_tty(tty).to_string(), word.to_string());
+        }
+    }
+    out
+}
+
+/// Whether `pane`'s foreground leader is worth a `ps`: a wrapper (`node`) in a
+/// session whose NAME does not already say what runs there. A provider
+/// sidecar names its harness (`for_pane` rule 2), and a dock shell is never an
+/// agent, so neither costs a spawn — the common case is no `ps` at all.
+fn foreground_wanted(pane: &Pane) -> bool {
+    pane.tty.is_some()
+        && is_wrapper(&pane.cmd)
+        && !crate::provider::is_sidecar(&pane.session)
+        && !is_shell_sidecar(&pane.session)
+}
+
+/// Fill `fg` on the panes that want it, from ONE `ps` run — and none when no
+/// pane wants it. `ps` is a seam so the tests can count it.
+fn resolve_foreground(panes: &mut [Pane], ps: impl FnOnce() -> Option<String>) {
+    if !panes.iter().any(foreground_wanted) {
+        return;
+    }
+    let Some(text) = ps() else { return };
+    let fg = parse_foreground(&text);
+    for pane in panes.iter_mut().filter(|p| foreground_wanted(p)) {
+        pane.fg = pane.tty.as_deref().and_then(|t| fg.get(t)).cloned();
+    }
+}
+
+fn ps_foreground() -> Option<String> {
+    let o = Command::new("ps").args(["-A", "-o", "tty=,pid=,tpgid=,comm="]).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Snapshot of `list-panes -a` — every live pane, one `Pane` row each.
+/// Fetched ONCE per caller (one tmux shell-out, plus one `ps` only when a
+/// `node` pane needs naming) and reused: `ls`/`place_json` resolves adopted
+/// sessions for many worktrees against this instead of shelling out per
+/// place, and every question asked of it afterwards is pure.
 pub struct PaneList {
-    panes: Vec<(String, String, String)>,
-    /// `(session, pane_pid)` per pane — what tells two launches under the
-    /// same session NAME apart (a close + open recreates `~agent~pi`).
-    /// Empty from `from_rows` and from a tmux that printed no fourth field.
-    pids: Vec<(String, String)>,
+    panes: Vec<Pane>,
 }
 
 impl PaneList {
@@ -144,31 +258,27 @@ impl PaneList {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}",
+            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}",
         ])
         .ok()?;
         if !o.status.success() {
             return None;
         }
-        let mut panes = Vec::new();
-        let mut pids = Vec::new();
-        for line in String::from_utf8_lossy(&o.stdout).lines() {
-            let mut it = line.splitn(4, '\t');
-            let session = it.next().unwrap_or("").to_string();
-            let path = it.next().unwrap_or("").to_string();
-            let cmd = it.next().unwrap_or("").to_string();
-            if let Some(pid) = it.next().filter(|p| !p.is_empty()) {
-                pids.push((session.clone(), pid.to_string()));
-            }
-            panes.push((session, path, cmd));
-        }
-        Some(PaneList { panes, pids })
+        let mut panes = parse_pane_rows(&String::from_utf8_lossy(&o.stdout));
+        resolve_foreground(&mut panes, ps_foreground);
+        Some(PaneList { panes })
     }
 
     /// A snapshot from rows a caller already holds, as
     /// `(session, pane_current_path, pane_current_command)`.
     pub fn from_rows(panes: Vec<(String, String, String)>) -> PaneList {
-        PaneList { panes, pids: Vec::new() }
+        PaneList::from_panes(panes.into_iter().map(|(session, path, cmd)| Pane { session, path, cmd, ..Pane::default() }).collect())
+    }
+
+    /// A snapshot from whole rows, foreground included — for a caller (a test)
+    /// that already knows what `ps` would have said.
+    pub fn from_panes(panes: Vec<Pane>) -> PaneList {
+        PaneList { panes }
     }
 
     /// Which LAUNCH of session `name` this is: its first pane's pid. A session
@@ -176,7 +286,7 @@ impl PaneList {
     /// what "the same session as last time" has to compare — the name alone
     /// cannot tell a relaunch from a re-list.
     pub fn session_launch(&self, name: &str) -> Option<&str> {
-        self.pids.iter().find(|(s, _)| s == name).map(|(_, p)| p.as_str())
+        self.panes.iter().filter(|p| p.session == name).find_map(|p| p.pid.as_deref())
     }
 
     /// Does a session named EXACTLY `name` exist, per this snapshot? The
@@ -184,7 +294,7 @@ impl PaneList {
     /// per place: every live session has at least one pane, so `list-panes -a`
     /// names them all and one shell-out replaces N `list-sessions` calls.
     pub fn has_session(&self, name: &str) -> bool {
-        self.panes.iter().any(|(s, _, _)| s == name)
+        self.panes.iter().any(|p| p.session == name)
     }
 
     /// Whether `name` exists and some pane in it is running something other
@@ -194,13 +304,22 @@ impl PaneList {
     /// bare shell in it. Keyed on "not a shell" rather than "is codex": an npm
     /// install runs codex under `node`, which must not read as exited.
     pub fn session_runs_program(&self, name: &str) -> bool {
-        self.panes.iter().any(|(s, _, cmd)| s == name && !is_shell_command(cmd))
+        self.program_in(name).is_some()
     }
 
-    /// Legacy canonical sessions default to Claude (including a bare shell).
+    /// The program word (`Pane::program`) of the first pane in `name` that is
+    /// running something other than a shell.
+    pub fn program_in(&self, name: &str) -> Option<&str> {
+        self.panes.iter().find(|p| p.session == name && !is_shell_command(&p.cmd)).map(Pane::program)
+    }
+
+    /// Which harness owns canonical session `name`: a non-default harness
+    /// whose program word a pane shows (`codex`, or `pi` named by its tty's
+    /// foreground leader), else Claude — legacy canonical sessions default to
+    /// Claude, including a bare shell.
     pub fn canonical_provider(&self, name: &str) -> &'static crate::provider::Provider {
         crate::provider::PROVIDERS.iter().filter(|p| !p.canonical_default)
-            .find(|p| self.panes.iter().any(|(s, _, cmd)| s == name && cmd.rsplit('/').next() == Some(p.match_word)))
+            .find(|p| self.panes.iter().any(|pane| pane.session == name && pane.program() == p.match_word))
             .unwrap_or(crate::provider::CLAUDE)
     }
 
@@ -210,10 +329,11 @@ impl PaneList {
     pub fn agents_in(&self, wt: &str, exclude_under: Option<&str>) -> Vec<(String, &'static str)> {
         let prefix = format!("{wt}/");
         let mut found = Vec::new();
-        for (session, path, cmd) in &self.panes {
+        for pane in &self.panes {
+            let (session, path) = (&pane.session, &pane.path);
             if is_shell_sidecar(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
             if exclude_under.is_some_and(|dir| path == dir || path.starts_with(&format!("{dir}/"))) { continue; }
-            let Some(provider) = crate::provider::for_pane(session, cmd) else { continue };
+            let Some(provider) = crate::provider::for_pane(session, pane.program()) else { continue };
             let provider = provider.id;
             if !found.iter().any(|(name, _)| name == session) {
                 found.push((session.clone(), provider));
@@ -232,7 +352,7 @@ impl PaneList {
         let mut best: Option<String> = None;
         let prefix = format!("{wt}/");
         let excl = exclude_under.map(|e| (e.to_string(), format!("{e}/")));
-        for (sess, path, cmd) in &self.panes {
+        for Pane { session: sess, path, cmd, .. } in &self.panes {
             if sess.is_empty() || !(path == wt || path.starts_with(&prefix)) {
                 continue;
             }
@@ -837,10 +957,7 @@ mod tests {
     }
 
     fn pl(rows: &[(&str, &str, &str)]) -> PaneList {
-        PaneList {
-            panes: rows.iter().map(|(s, p, c)| (s.to_string(), p.to_string(), c.to_string())).collect(),
-            pids: Vec::new(),
-        }
+        PaneList::from_rows(rows.iter().map(|(s, p, c)| (s.to_string(), p.to_string(), c.to_string())).collect())
     }
 
     /// A codex session is `codex …; exec "$SHELL"`: once codex dies the
@@ -1020,5 +1137,137 @@ mod tests {
         assert!(is_shell_sidecar("x~term"));
         assert!(is_shell_sidecar("x~term~9"));
         assert!(!is_shell_sidecar("x-terminal"));
+    }
+
+    /// What `ps -A -o tty=,pid=,tpgid=,comm=` printed on macOS, with pi typed
+    /// into a zsh on ttys009 (captured 2026-10-02): the shell's own row has
+    /// tpgid = pi's pid, a detached daemon has `??`, a comm can be a path or
+    /// carry spaces.
+    const PS_MACOS: &str = "\
+??           1     1 /sbin/launchd
+ttys009  84255 94379 /bin/zsh
+ttys009  94379 94379 pi
+ttys000  78177 84274 /bin/zsh
+ttys000  84274 84274 claude
+ttys000  84388 84274 npm exec chrome-devtools-mcp@latest
+ttys004  50001 50001 -zsh
+";
+    /// The same shape from procps on Linux: `pts/N`, `?` for no tty.
+    const PS_LINUX: &str = "\
+?            1     -1 systemd
+pts/3     2100   2240 bash
+pts/3     2240   2240 pi
+pts/5     3001   3007 bash
+pts/5     3007   3007 npm exec x
+";
+
+    #[test]
+    fn the_foreground_leader_is_read_from_both_platforms_ps() {
+        let mac = parse_foreground(PS_MACOS);
+        assert_eq!(mac.get("ttys009").map(String::as_str), Some("pi"), "the shell under pi is not the leader");
+        assert_eq!(mac.get("ttys000").map(String::as_str), Some("claude"));
+        assert_eq!(mac.get("ttys004").map(String::as_str), Some("zsh"), "a login shell's dash is not part of the word");
+        let linux = parse_foreground(PS_LINUX);
+        assert_eq!(linux.get("pts/3").map(String::as_str), Some("pi"));
+        assert_eq!(linux.get("pts/5").map(String::as_str), Some("npm"), "a comm with spaces is its first word");
+        assert!(parse_foreground("").is_empty());
+        assert!(parse_foreground("ttys1 x x pi\nttys2 7\n").is_empty(), "a malformed row names nothing");
+    }
+
+    /// tmux spells a tty `/dev/ttys009`, ps `ttys009` — the first cut of this
+    /// compared them raw, and a live pi stayed Claude.
+    #[test]
+    fn a_tty_is_compared_the_way_ps_spells_it() {
+        assert_eq!(normalize_tty("/dev/ttys009"), "ttys009");
+        assert_eq!(normalize_tty("/dev/pts/3"), "pts/3");
+        assert_eq!(normalize_tty("ttys009"), "ttys009");
+        let rows = parse_pane_rows("s\t/w\tnode\t9\t/dev/ttys009");
+        assert_eq!(rows[0].tty.as_deref(), Some("ttys009"));
+        assert_eq!(rows[0].tty.as_deref().and_then(|t| parse_foreground(PS_MACOS).get(t).cloned()).as_deref(), Some("pi"));
+    }
+
+    #[test]
+    fn pane_rows_parse_with_three_four_or_five_fields() {
+        let rows = parse_pane_rows("a\t/w/a\tzsh\nb\t/w/b\tnode\t42\nc\t/w/c\tnode\t43\t/dev/pts/7\nd\t/w/d\tvim\t\t\n");
+        let pane = |session: &str, path: &str, cmd: &str, pid: Option<&str>, tty: Option<&str>| Pane {
+            session: session.into(),
+            path: path.into(),
+            cmd: cmd.into(),
+            pid: pid.map(Into::into),
+            tty: tty.map(Into::into),
+            fg: None,
+        };
+        assert_eq!(
+            rows,
+            vec![
+                pane("a", "/w/a", "zsh", None, None),
+                pane("b", "/w/b", "node", Some("42"), None),
+                pane("c", "/w/c", "node", Some("43"), Some("pts/7")),
+                pane("d", "/w/d", "vim", None, None),
+            ]
+        );
+        let list = PaneList::from_panes(rows);
+        assert_eq!(list.session_launch("b"), Some("42"));
+        assert_eq!(list.session_launch("a"), None);
+    }
+
+    /// One `ps` per snapshot, and only when a `node` pane outside a sidecar
+    /// needs naming — a sidecar's name already says whose it is, and the app
+    /// fetches a snapshot every 3s.
+    #[test]
+    fn ps_runs_once_and_only_for_a_node_pane_a_name_does_not_explain() {
+        let run = |text: &str| {
+            let mut panes = parse_pane_rows(text);
+            let mut calls = 0;
+            resolve_foreground(&mut panes, || {
+                calls += 1;
+                Some(PS_MACOS.to_string())
+            });
+            (calls, panes)
+        };
+        assert_eq!(run("p\t/w\tzsh\t1\t/dev/ttys009\nq\t/w\t2.1.287\t2\t/dev/ttys000").0, 0, "no node pane, no ps");
+        assert_eq!(run("p~agent~pi\t/w\tnode\t1\t/dev/ttys009").0, 0, "a sidecar names its harness");
+        assert_eq!(run("p~term\t/w\tnode\t1\t/dev/ttys009").0, 0, "a dock shell is never an agent");
+        assert_eq!(run("p\t/w\tnode\t1").0, 0, "no tty to look up");
+        let (calls, panes) = run("p\t/w\tnode\t1\t/dev/ttys009\nq\t/w\tnode\t2\t/dev/ttys000\nr\t/w\tzsh\t3\t/dev/ttys004");
+        assert_eq!(calls, 1, "one ps for every pane that wants one");
+        let fg: Vec<Option<&str>> = panes.iter().map(|p| p.fg.as_deref()).collect();
+        assert_eq!(fg, [Some("pi"), Some("claude"), None], "only the panes that wanted it");
+    }
+
+    fn fg_pane(session: &str, path: &str, cmd: &str, fg: Option<&str>) -> Pane {
+        Pane { session: session.into(), path: path.into(), cmd: cmd.into(), fg: fg.map(Into::into), ..Pane::default() }
+    }
+
+    /// pi typed into a place's own session: tmux says `node`, the tty's
+    /// foreground leader says `pi`. Before, the `node` heuristic handed it to
+    /// Claude, and every reader (dots, place_status, wait, send, `open --ai
+    /// pi`) looked for it in a `~agent~pi` that does not exist.
+    #[test]
+    fn a_node_pane_whose_foreground_is_pi_is_pi() {
+        let list = PaneList::from_panes(vec![fg_pane("repo-feat", "/w/feat", "node", Some("pi"))]);
+        assert_eq!(list.canonical_provider("repo-feat").id, "pi");
+        assert_eq!(list.agents_in("/w/feat", None), vec![("repo-feat".to_string(), "pi")]);
+        assert_eq!(list.program_in("repo-feat"), Some("pi"));
+        assert_eq!(crate::activity::pi_session_for(&list, "repo-feat"), "repo-feat");
+        assert_eq!(crate::activity::codex_session_for(&list, "repo-feat"), "repo-feat~agent~codex");
+        // Unresolved (no ps answer) — the old reading, unchanged.
+        let list = PaneList::from_panes(vec![fg_pane("repo-feat", "/w/feat", "node", None)]);
+        assert_eq!(list.canonical_provider("repo-feat").id, "claude");
+        assert_eq!(list.agents_in("/w/feat", None), vec![("repo-feat".to_string(), "claude")]);
+        assert_eq!(crate::activity::pi_session_for(&list, "repo-feat"), "repo-feat~agent~pi");
+    }
+
+    /// A leader that names no harness leaves the pane to the old heuristic:
+    /// an npx-started Claude leads with `npm`, and must not stop being Claude.
+    /// And a leader only counts on a wrapper pane — tmux's own word wins
+    /// everywhere else.
+    #[test]
+    fn a_foreground_leader_counts_only_when_it_names_a_harness_on_a_wrapper() {
+        let list = PaneList::from_panes(vec![fg_pane("s", "/w", "node", Some("npm"))]);
+        assert_eq!(list.agents_in("/w", None), vec![("s".to_string(), "claude")]);
+        assert_eq!(list.program_in("s"), Some("node"));
+        let list = PaneList::from_panes(vec![fg_pane("s", "/w", "codex", Some("pi"))]);
+        assert_eq!(list.canonical_provider("s").id, "codex");
     }
 }
