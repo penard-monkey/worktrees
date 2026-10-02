@@ -2237,6 +2237,13 @@ body.dragging .menu-catch { pointer-events: none; }
 
 /* Home (empty state): logo + open button, then the resume list */
 .briefing { margin: auto; width: min(560px, 82%); padding: var(--s6) 0; }
+/* Back / forward (‹ ›). Leads the topbar; on Home, which has no topbar, it
+   sits where the topbar's would. Each is a plain icon button — no flex on the
+   <button> itself (WebKit sizes those on its own rules); the group is the flex
+   box. */
+.navhist { display: inline-flex; align-items: center; gap: 1px; flex: none; }
+.navhist .icon-btn { padding: 2px 4px; }
+.navhist-home { position: absolute; top: var(--s2); left: var(--s3); z-index: 1; }
 .home-hero { display: flex; align-items: center; gap: var(--s4); margin-bottom: var(--s5); }
 .home-logo { width: 72px; height: 72px; border-radius: 16px; flex: none; }
 .home-id h1 { font-size: 1.6rem; font-weight: var(--fw-bold); color: var(--txt-hi); margin: 0 0 2px; }

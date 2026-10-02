@@ -33,6 +33,7 @@ import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTo
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
+import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
 import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
@@ -424,6 +425,48 @@ const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
  *  tmux session and "Copy path" are all still slug-derived — so anywhere this
  *  is rendered the slug must stay reachable rather than be replaced outright. */
 const nameOf = (p: { slug: string; declared?: Declared }) => p.declared?.title?.trim() || p.slug;
+
+/** Is this keydown's target a field where ⌘← / ⌘→ mean line start / end?
+ *  Text inputs, textareas, selects and contenteditable — but NOT xterm's focus
+ *  sink, which is a `<textarea>` too: xterm sends no bytes for ⌘← / ⌘→
+ *  (`Keyboard.ts`: `if (ev.metaKey) break;`), so in a terminal they do nothing
+ *  today and history may have them. */
+const isTextField = (t: EventTarget | null) =>
+  t instanceof Element && !t.classList.contains("xterm-helper-textarea")
+  && !!t.closest('textarea, select, [contenteditable]:not([contenteditable="false"]), input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="range"]):not([type="color"]):not([type="file"])');
+/** Which way a keydown moves through navigation history, if it is a history
+ *  chord at all. ⌘[ / ⌘] everywhere (Safari, Finder, Xcode), matched on the
+ *  key with the PHYSICAL key as fallback — a layout that puts `[` behind ⌥
+ *  still has a BracketLeft. ⌘← / ⌘→ only outside a text field. */
+const navChordDir = (e: KeyboardEvent): -1 | 1 | undefined => {
+  if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return undefined;
+  if (e.key === "[" || e.code === "BracketLeft") return -1;
+  if (e.key === "]" || e.code === "BracketRight") return 1;
+  if (isTextField(e.target)) return undefined;
+  if (e.key === "ArrowLeft") return -1;
+  if (e.key === "ArrowRight") return 1;
+  return undefined;
+};
+
+/** ‹ › — back / forward through what the panes showed. Module scope: a
+ *  component defined inside App would remount every render. The tooltip names
+ *  where each one goes. */
+function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep }: {
+  canBack: boolean; canForward: boolean; backTitle: string; forwardTitle: string; onStep: (dir: -1 | 1) => void;
+}) {
+  return (
+    <span className="navhist" role="group" aria-label="Navigation history">
+      <button className="icon-btn" data-testid="nav-back" data-track="nav.back" disabled={!canBack}
+        title={backTitle} aria-label={backTitle} onClick={() => onStep(-1)}>
+        <Icons.ChevronLeft size={15} />
+      </button>
+      <button className="icon-btn" data-testid="nav-forward" data-track="nav.forward" disabled={!canForward}
+        title={forwardTitle} aria-label={forwardTitle} onClick={() => onStep(1)}>
+        <Icons.ChevronRight size={15} />
+      </button>
+    </span>
+  );
+}
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
 /** Worth a look. `behind` counts only for `(main)`, where the base ref IS
  *  origin/main and ↓ means "pull" — on a worktree it only says the base moved
@@ -6066,6 +6109,8 @@ function App() {
   const focusPlaces = useCallback(() => { revealNav(true); }, [revealNav]);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
+  // The history step, for the chord handler below (stable effect, live function).
+  const navStepRef = useRef<(dir: -1 | 1) => void>(() => {});
   const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface });
   const filesTabOpen = eff.dock_open && eff.dock_tab === "files";
   keyRef.current = {
@@ -6222,6 +6267,16 @@ function App() {
         // `setSettings` and refs, so every copy of it behaves identically. Do not
         // reuse that reasoning for a value read out of a render closure.
         if (next !== cur) updateSettings({ app_zoom: next });
+        return;
+      }
+      // ⌘[ / ⌘] — and ⌘← / ⌘→ outside a text field — back / forward through
+      // navigation history. Above the meta-only gate because repeat is
+      // allowed (hold to walk back), and below the modal guard, so under a
+      // dialog the chord is unbound rather than moving what is behind it.
+      const navDir = navChordDir(e);
+      if (navDir !== undefined) {
+        e.preventDefault();
+        navStepRef.current(navDir);
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
@@ -6399,6 +6454,124 @@ function App() {
     if (sel) return; // user already clicked — don't override their choice
     if (restoreTarget) setSel({ repo: restoreTarget.pv.root, slug: restoreTarget.p.slug });
   }, [ws, settings.restore_last, restoreTarget, sel]);
+
+  // ── navigation history: ‹ › and ⌘[ ⌘] / ⌘← ⌘→ ─────────────────────────────
+  // OBSERVED, not instrumented: the location is derived from the state that
+  // decides what the panes show, and every change is handed to the rules in
+  // navHistory.ts — so a way of navigating added later is recorded without
+  // anyone remembering to. Default is a PUSH; the app's own moves (the launch
+  // restore below) AMEND. A missed system path costs an extra entry, a missed
+  // user path would have been a silent hole. docs/proposals/nav-history.md.
+  //
+  // Declared BELOW the launch restore on purpose: effects run in declaration
+  // order, so by the time this one runs in the commit where `ws` first lands,
+  // `restoredOnce` is already set. Home is recorded in that commit and the
+  // restored place lands a render later, well inside COALESCE_MS, so it
+  // REPLACES Home as entry 0 — launching is not a navigation you go back from.
+  const [hist, setHist] = useState<NavHistory>(emptyHistory);
+  const histRef = useRef(hist);
+  // A place selected before its snapshot resolves (or after it was removed
+  // elsewhere) is not somewhere to record yet — null skips the observation.
+  const navLoc: Loc | null = !sel ? { place: null } : selected ? { place: { repo: sel.repo, slug: sel.slug } } : null;
+  const navKey = navLoc ? locKey(navLoc) : null;
+  const navLocRef = useRef(navLoc);
+  navLocRef.current = navLoc;
+  const commitHist = useCallback((f: (h: NavHistory) => NavHistory) => {
+    const next = f(histRef.current);
+    if (next === histRef.current) return;
+    histRef.current = next;
+    setHist(next);
+  }, []);
+  /** Can history land here? A place removed (here or by an agent) is skipped,
+   *  not shown as a dead end. Read through a ref: the chord handler is stable. */
+  const wsNavRef = useRef(ws);
+  wsNavRef.current = ws;
+  const navAlive = useCallback((l: Loc) => !l.place
+    || !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug), []);
+  /** History is putting a location back. Observations are ignored until the
+   *  panes show it (or 1.5 s pass — then whatever DID land amends the entry,
+   *  so a target that could only be reached partly is recorded as it was). A
+   *  pointer press hands control back early: you are navigating again. */
+  const navApplying = useRef<{ key: string; timer: number } | null>(null);
+  const endApplying = useCallback(() => {
+    if (navApplying.current) window.clearTimeout(navApplying.current.timer);
+    navApplying.current = null;
+  }, []);
+  /** Set by a path where the APP moves the panes on its own, just before it
+   *  does: the next observed change amends the current entry instead of
+   *  pushing one. */
+  const navAmend = useRef(false);
+  useEffect(() => {
+    if (!restoredOnce.current || !navLoc) return;
+    const ap = navApplying.current;
+    if (ap) {
+      if (ap.key === navKey) endApplying();
+      return;
+    }
+    const mode = navAmend.current ? "amend" : "push";
+    navAmend.current = false;
+    commitHist((h) => recordNav(h, navLoc, Date.now(), mode));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navKey, !!ws]);
+  useEffect(() => {
+    const take = () => endApplying();
+    window.addEventListener("pointerdown", take, true);
+    return () => window.removeEventListener("pointerdown", take, true);
+  }, [endApplying]);
+  const navGo = useCallback((i: number) => {
+    const loc = histRef.current.entries[i];
+    if (!loc || i === histRef.current.index) return;
+    commitHist((h) => goToNav(h, i));
+    endApplying();
+    const key = locKey(loc);
+    navApplying.current = {
+      key,
+      timer: window.setTimeout(() => {
+        navApplying.current = null;
+        const now = navLocRef.current;
+        if (now) commitHist((h) => recordNav(h, now, Date.now(), "amend"));
+      }, 1500),
+    };
+    setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
+    setMenu(null);
+    setCtx(null);
+    setConfirmRm(null);
+  }, [commitHist, endApplying]);
+  const navStep = useCallback((dir: -1 | 1) => {
+    const [i] = reachableNav(histRef.current, dir, navAlive);
+    if (i !== undefined) navGo(i);
+  }, [navAlive, navGo]);
+  navStepRef.current = navStep;
+  // Mouse buttons 4 / 5 (back / forward), the same step. On release, like a
+  // browser; unbound under a dialog like the chords.
+  useEffect(() => {
+    const onUp = (e: MouseEvent) => {
+      if (e.button !== 3 && e.button !== 4) return;
+      e.preventDefault();
+      if (modalOpen()) return;
+      navStepRef.current(e.button === 3 ? -1 : 1);
+    };
+    window.addEventListener("mouseup", onUp);
+    return () => window.removeEventListener("mouseup", onUp);
+  }, []);
+  const navTitle = (dir: -1 | 1) => {
+    const [i] = reachableNav(hist, dir, navAlive);
+    if (i === undefined) return dir < 0 ? "Back" : "Forward";
+    const to = labelNav(hist.entries[i], (repo, slug) => {
+      const pl = ws?.projects.find((p) => p.root === repo)?.snapshot?.places.find((x) => x.slug === slug);
+      return pl ? nameOf(pl) : slug;
+    });
+    return `${dir < 0 ? "Back" : "Forward"} to ${to} (${dir < 0 ? "⌘[" : "⌘]"})`;
+  };
+  const navButtons = (
+    <NavButtons
+      canBack={canStepNav(hist, -1, navAlive)}
+      canForward={canStepNav(hist, 1, navAlive)}
+      backTitle={navTitle(-1)}
+      forwardTitle={navTitle(1)}
+      onStep={navStep}
+    />
+  );
 
   // ── nav resizer (drag the nav's INNER edge — the one facing the terminal) ──
   // Both resizers clamp against the LIVE viewport, so a drag can never push the
@@ -6975,6 +7148,7 @@ function App() {
         {selected && sel && (
           <>
             <header className="topbar">
+              {navButtons}
               <div className="identity">
                 {renaming ? (
                   <TitleEditor
@@ -7316,6 +7490,9 @@ function App() {
               </>
             ) : (
               <div className="briefing">
+                {/* Home has no topbar, so the pair sits at the top of the view —
+                    the same buttons, the same place on screen. */}
+                <div className="navhist-home">{navButtons}</div>
                 <div className="home-hero">
                   <img className="home-logo" src={logoUrl} alt="worktrees logo" />
                   <div className="home-id">

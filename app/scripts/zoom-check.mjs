@@ -75,6 +75,10 @@ const zFrom = appLines.findIndex((l, i) => i > gTo && l.includes("if (dir !== un
 // The direction tables + `zoomDir` live at module scope; take them verbatim too,
 // so a layout face added there is a face this check actually exercises.
 const dirTables = fs.readFileSync(APP, "utf8").match(/const ZOOM_BY_KEY[\s\S]*?\nconst zoomDir = [^\n]*\n/);
+// The navigation-history chord (⌘[ ⌘] / ⌘← ⌘→) sits in the same slice, between
+// the zoom block and the meta-only gate, so its module-scope predicate comes in
+// verbatim too — a stub would be a second answer to "which keys are Back".
+const navChord = fs.readFileSync(APP, "utf8").match(/\nconst isTextField = [\s\S]*?\nconst navChordDir = [\s\S]*?\n};\n/);
 if (gFrom < 0 || gTo < 0 || zFrom < 0 || !(from >= 0 && from < gFrom)) {
   fail("App.tsx: the modal chord guard is gone — every app chord fires behind a dialog again");
   console.error("\nzoom-check: 1 failure(s)");
@@ -83,7 +87,7 @@ if (gFrom < 0 || gTo < 0 || zFrom < 0 || !(from >= 0 && from < gFrom)) {
 // The predicate is DOM-based on purpose; a state mirror would drift silently.
 if (!/const modalOpen = \(\) => !!document\.querySelector\("\.modal-scrim, \.scrim"\);/.test(fs.readFileSync(APP, "utf8")))
   fail("App.tsx: modalOpen no longer asks the DOM for `.modal-scrim, .scrim` — a dialog added later would go unguarded");
-if (from < 0 || to < 0 || !dirTables) {
+if (from < 0 || to < 0 || !dirTables || !navChord) {
   fail("App.tsx: the ⌘/⌘⌥ zoom block's markers are gone — the chord is unchecked");
   console.error("\nzoom-check: 1 failure(s)");
   process.exit(1);
@@ -112,11 +116,21 @@ const load = async (src, name) => {
   return import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
 };
 const S = await load(settingsSrc, "settings.ts");
+// isTextField asks `instanceof Element`; under node there is no DOM, and a
+// plain object target is exactly "not a text field".
+globalThis.Element ??= class {};
+class FakeEl extends globalThis.Element {
+  constructor(sel) { super(); this.sel = sel; this.classList = { contains: (c) => sel === "." + c }; }
+  // xterm's focus sink IS a <textarea>, so `closest` matches it like any other
+  // — only its class keeps it out, which is the thing being asserted.
+  closest() { return this.sel === "input" || this.sel.endsWith("textarea") ? this : null; }
+}
 const handlerSrc = `
 ${dirTables[0]}
+${navChord[0]}
 export function build(env: any) {
   const { keyRef, updatePanels, updateSettings, clampMdZoom, stepMdZoom, clampZoom, stepZoom, DEFAULTS,
-          modalOpen, onlySettingsOpen } = env;
+          modalOpen, onlySettingsOpen, navStepRef } = env;
   return (e: any) => {
 ${BLOCK}
     return "fellthrough";
@@ -125,7 +139,7 @@ ${BLOCK}
 const { build } = await load(handlerSrc, "zoom-chord.ts");
 
 const keyRef = { current: {} };
-let panels = [], sets = [];
+let panels = [], sets = [], navSteps = [];
 // The DOM the guard asks about, reduced to the two answers it can give.
 let dom = { modal: false, settingsAlone: false };
 const onKey = build({
@@ -133,18 +147,19 @@ const onKey = build({
   modalOpen: () => dom.modal, onlySettingsOpen: () => dom.settingsAlone,
   clampMdZoom: S.clampMdZoom, stepMdZoom: S.stepMdZoom, clampZoom: S.clampZoom, stepZoom: S.stepZoom,
   updatePanels: (p) => panels.push(p), updateSettings: (p) => sets.push(p),
+  navStepRef: { current: (d) => navSteps.push(d) },
 });
 
 /** Press `key` with the given modifiers against `state`; report what happened. */
 function press(key, { alt = false, meta = true, ctrl = false, code = "", shift = false,
-                     modal = false, settingsAlone = false } = {}, state = {}) {
-  panels = []; sets = [];
+                     modal = false, settingsAlone = false, target = null } = {}, state = {}) {
+  panels = []; sets = []; navSteps = [];
   dom = { modal, settingsAlone };
   keyRef.current = { mdPreview: false, mdZoom: 100, appZoom: 1, switchOpen: false, settingsOpen: false, ...state };
   let prevented = false;
-  const through = onKey({ key, code, metaKey: meta, ctrlKey: ctrl, altKey: alt, shiftKey: shift, repeat: false,
+  const through = onKey({ key, code, metaKey: meta, ctrlKey: ctrl, altKey: alt, shiftKey: shift, repeat: false, target,
                           preventDefault: () => { prevented = true; } });
-  return { prevented, sets, panels, through: through === "fellthrough", kr: keyRef.current };
+  return { prevented, sets, panels, navSteps, through: through === "fellthrough", kr: keyRef.current };
 }
 const eq = (got, want, what) => { if (JSON.stringify(got) !== JSON.stringify(want)) fail(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); };
 
@@ -207,6 +222,22 @@ const ctrl = press("+", { meta: false, ctrl: true, code: "Equal" });
 eq([ctrl.sets, ctrl.prevented, ctrl.through], [[], false, true], "ctrl+ falls through, unhandled");
 const other = press("k", { code: "KeyK" });
 eq([other.sets, other.prevented, other.through], [[], false, true], "⌘K falls through to its own handler");
+
+// ── navigation history chords, in the same handler ─────────────────────────
+const nav = (k, o = {}) => { const r = press(k, o); return [r.navSteps, r.prevented, r.sets]; };
+eq(nav("[", { code: "BracketLeft" }), [[-1], true, []], "⌘[ steps back");
+eq(nav("]", { code: "BracketRight" }), [[1], true, []], "⌘] steps forward");
+eq(nav("“", { code: "BracketLeft" }), [[-1], true, []], "⌘[ on a layout where the key is not `[` still steps back (physical key)");
+eq(nav("ArrowLeft"), [[-1], true, []], "⌘← steps back outside a text field");
+eq(nav("ArrowRight"), [[1], true, []], "⌘→ steps forward outside a text field");
+eq(nav("ArrowLeft", { target: new FakeEl("textarea") }), [[], false, []], "⌘← in a textarea is line start, not Back");
+eq(nav("ArrowLeft", { target: new FakeEl("input") }), [[], false, []], "⌘← in an input is line start, not Back");
+eq(nav("ArrowLeft", { target: new FakeEl(".xterm-helper-textarea") }), [[-1], true, []], "⌘← in the terminal (xterm sends nothing for it) steps back");
+eq(nav("[", { code: "BracketLeft", target: new FakeEl("textarea") }), [[-1], true, []], "⌘[ steps back even from a text field");
+eq(nav("[", { code: "BracketLeft", modal: true }), [[], false, []], "⌘[ behind a dialog is unbound, not swallowed");
+eq(nav("ArrowLeft", { shift: true }), [[], false, []], "⌘⇧← (select to line start) is not Back");
+eq(nav("ArrowLeft", { alt: true }), [[], false, []], "⌘⌥← is not Back");
+eq(nav("=", { code: "Equal" }), [[], true, [{ app_zoom: 1.1 }]], "⌘= is still zoom, never history");
 
 // ── the wiring the chord hangs off ─────────────────────────────────────────
 // Everything above can pass with the feature entirely disconnected: delete the
