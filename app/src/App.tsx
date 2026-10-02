@@ -15,7 +15,7 @@ import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
 import { AutomationsPane } from "./AutomationsPane";
-import { FilesPane, FileView } from "./FilesPane";
+import { FilesPane, FileView, type DockAt } from "./FilesPane";
 import { SettingsSheet } from "./SettingsSheet";
 import { type McpStatus } from "./McpPanel";
 import { dismissPatch, offersTitle, pendingOffers, type Offer } from "./offers";
@@ -265,6 +265,18 @@ type Place = {
  *  commit rather than letting `new_place` fail on an invalid object name. */
 /** A worktree git registers outside `.worktrees/` — `model::Stray`. */
 type Stray = { path: string; branch: string | null; slug: string };
+/** `app:open-doc` — a session's `show_doc` / `worktrees show`, validated by the
+ *  backend's inbox drain. `line`/`col` are absent from an older CLI's ask. */
+type OpenDocEvent = { repo: string; slug: string; path: string; line?: number | null; col?: number | null };
+/** A per-place record with `key` set to `v`, or removed when `v` is null —
+ *  never written as `null`, because absence is what every reader means by
+ *  "nothing here". */
+function withEntry<T>(rec: Record<string, T>, key: string, v: T | null): Record<string, T> {
+  if (v != null) return { ...rec, [key]: v };
+  if (!(key in rec)) return rec;
+  const { [key]: _gone, ...rest } = rec;
+  return rest;
+}
 type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean; strays?: Stray[] };
 type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
 type Workspace = { projects: ProjectView[] };
@@ -1129,8 +1141,10 @@ function TermTabRename({ initial, onCommit, onCancel }: {
   );
 }
 
-function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, hydratedTick, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError, findOpen, findToken, onFindClose }: {
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, hydratedTick, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError, root, onOpenPath, findOpen, findToken, onFindClose }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
+  /** ⌘-clickable paths in the shells (see `TermLinks`). */
+  root: string; onOpenPath: (path: string, line?: number, col?: number) => void;
   /** Bumped once, when persisted settings land — see the restore below. */
   hydratedTick: number;
   names: Record<number, string>; onRename: (index: number, name: string | null) => void;
@@ -1351,6 +1365,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
         ) : (
           <ShellPane key={repo + "|" + slug + ":" + active + ":" + restartToken} repo={repo} slug={slug}
             index={active} termVersion={termVersion} focusToken={focusToken}
+            root={root} onOpenPath={onOpenPath} onError={onError}
             findOpen={findOpen} findToken={findToken} onFindClose={onFindClose} />
         )
       ) : (
@@ -3431,11 +3446,20 @@ function App() {
   // right dock: which file the Files tab is viewing (null = none). Reset per
   // place, then restored from `files_open` by the effect below the reset.
   const [dockFile, setDockFile] = useState<string | null>(null);
+  // …and the line it was opened AT, if any (a ⌘-clicked `ops.rs:1022`, an
+  // agent's `show_doc {line}`). `seq` makes a second click on the same line a
+  // NEW request — the viewer re-scrolls to it even if you scrolled away.
+  const [dockAt, setDockAt] = useState<DockAt | null>(null);
+  const dockAtSeq = useRef(0);
+  // What the viewer shows RIGHT NOW, for the async restore below: it must not
+  // land on top of a file opened while it was in flight.
+  const dockFileRef = useRef(dockFile);
+  dockFileRef.current = dockFile;
   // Reading mode (⌘⇧E): the open file takes over the main pane. Closed by a
   // place switch or by the file going away — an overlay with nothing under it
   // would hide the terminal for no reason.
   const [reading, setReading] = useState(false);
-  useEffect(() => { setDockFile(null); setReading(false); setRenaming(false); }, [sel?.repo, sel?.slug]);
+  useEffect(() => { setDockFile(null); setDockAt(null); setReading(false); setRenaming(false); }, [sel?.repo, sel?.slug]);
   /** Reopen whatever this place was last viewing (`files_open`).
    *
    *  SEPARATE from the reset above, and deliberately so: the reset must stay
@@ -3456,11 +3480,25 @@ function App() {
    *  answer lands last and reopens ITS file over the one you are now in. */
   useEffect(() => {
     if (!sel) return;
-    const remembered = settingsRef.current.files_open?.[placeKey(sel.repo, sel.slug)];
+    const key = placeKey(sel.repo, sel.slug);
+    const remembered = settingsRef.current.files_open?.[key];
     if (!remembered) return; // no invoke at all for the common case
+    const at = settingsRef.current.files_open_at?.[key];
     let alive = true;
     invoke<boolean>("file_readable", { path: remembered })
-      .then((ok) => { if (alive && ok) setDockFile(remembered); })
+      .then((ok) => {
+        // `dockFileRef`: something was opened while `file_readable` was in
+        // flight — an agent's `show_doc` or a ⌘-click in the first second
+        // after launch, before hydration's re-run of this effect resolved —
+        // and an explicit open outranks a remembered one. Without it the
+        // restore landed last and replaced the file just asked for (seen in
+        // the harness: a `showDoc` at reload + 1.2s showed DESIGN.md).
+        if (!alive || !ok || dockFileRef.current) return;
+        setDockFile(remembered);
+        // The marked line comes back with its file — it is part of what you
+        // were looking at, the same as the dock's tab or width.
+        setDockAt(at ? { line: at.line, col: at.col, seq: ++dockAtSeq.current } : null);
+      })
       .catch(() => { /* a restore is best-effort — never a banner */ });
     return () => { alive = false; };
   }, [sel?.repo, sel?.slug, hydratedTick]);
@@ -4321,15 +4359,37 @@ function App() {
    *  act (nothing closes the viewer but leaving), so "null" never has to mean
    *  "forget this place's file" and the reset cannot race the restore into
    *  deleting the very entry it is about to read. */
-  const openDockFile = useCallback((path: string) => {
+  const openDockFile = useCallback((path: string, at?: { line?: number; col?: number }) => {
     setDockFile(path);
+    // A file opened without a line (a tree row, a markdown link) CLEARS the
+    // mark: the line belonged to the previous ask, not to this file.
+    const line = at?.line;
+    setDockAt(line ? { line, col: at?.col, seq: ++dockAtSeq.current } : null);
     const cur = selRef.current;
     if (!cur) return;
     const key = placeKey(cur.repo, cur.slug);
     // Functional: the record must be read as it is at WRITE time, not as it was
     // when this closure was made — the same rule `manual_order`'s splice follows.
-    updateSettings((prev) => ({ files_open: { ...prev.files_open, [key]: path } }));
+    updateSettings((prev) => ({
+      files_open: { ...prev.files_open, [key]: path },
+      files_open_at: withEntry(prev.files_open_at ?? {}, key, line ? { line, ...(at?.col ? { col: at.col } : {}) } : null),
+    }));
   }, [updateSettings]);
+  /** The viewer dismissed the mark (the user chose a view). Forgotten for the
+   *  place too, or coming back would put it up again. */
+  const clearDockAt = useCallback(() => {
+    setDockAt(null);
+    const cur = selRef.current;
+    if (!cur) return;
+    const key = placeKey(cur.repo, cur.slug);
+    updateSettings((prev) => (prev.files_open_at?.[key] ? { files_open_at: withEntry(prev.files_open_at, key, null) } : {}));
+  }, [updateSettings]);
+  /** ⌘-click on a path in any terminal of the selected place: the Files tab,
+   *  opened if it was not, on that file at that line. */
+  const openPathFromTerm = useCallback((path: string, line?: number, col?: number) => {
+    openDockFile(path, { line, col });
+    updatePanels({ dock_tab: "files", dock_open: true });
+  }, [openDockFile, updatePanels]);
 
   // ── "show me this document", from a Claude session ────────────────────────
   // `worktrees show` / the MCP `show_doc` tool drop a request in
@@ -4343,9 +4403,9 @@ function App() {
   // the same handler as `setSel` would store the dock state against the place
   // you are leaving, not the one being opened. The request is parked until the
   // selection it names has actually landed.
-  const [pendingDoc, setPendingDoc] = useState<{ repo: string; slug: string; path: string } | null>(null);
+  const [pendingDoc, setPendingDoc] = useState<OpenDocEvent | null>(null);
   useEffect(() => {
-    const un = listen<{ repo: string; slug: string; path: string }>("app:open-doc", (e) => {
+    const un = listen<OpenDocEvent>("app:open-doc", (e) => {
       setSel({ repo: e.payload.repo, slug: e.payload.slug });
       setPendingDoc(e.payload);
     });
@@ -4362,7 +4422,7 @@ function App() {
     // `selRef.current` is correct by here: this effect is exactly the wait for
     // the selection to land, which is why the request was parked in the first
     // place.
-    openDockFile(pendingDoc.path);
+    openDockFile(pendingDoc.path, { line: pendingDoc.line ?? undefined, col: pendingDoc.col ?? undefined });
     updatePanels({ dock_tab: "files", dock_open: true });
     setPendingDoc(null);
   }, [pendingDoc, sel, updatePanels, openDockFile]);
@@ -4374,8 +4434,8 @@ function App() {
    *  years ago would still be carrying a dock width. */
   const dropPanels = useCallback((
     shouldDrop: (key: string) => boolean,
-    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs" | "docs_collapsed" | "files_open")[] =
-      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs", "docs_collapsed", "files_open"],
+    fields: readonly ("place_panels" | "term_tab_names" | "term_tab_active" | "term_tabs" | "docs_collapsed" | "files_open" | "files_open_at")[] =
+      ["place_panels", "term_tab_names", "term_tab_active", "term_tabs", "docs_collapsed", "files_open", "files_open_at"],
   ) => {
     setSettings((prev) => {
       // The default sweeps EVERY per-place map, not just the panels: they are
@@ -7111,6 +7171,7 @@ function App() {
                         </div>
                         <TerminalPane key={selectedAgents![provider].name} provider={provider} session={selectedAgents![provider].name}
                           termVersion={termVersion} focusToken={termFocus} focusEnabled={provider === planProvider}
+                          root={selected.path} onOpenPath={openPathFromTerm} onError={fail}
                           findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
                       </div>
                     ))}
@@ -7444,6 +7505,8 @@ function App() {
                   <FilesPane
                     root={selected.path}
                     openPath={dockFile}
+                    at={dockAt}
+                    onAtClear={clearDockAt}
                     dockW={fit.dockW}
                     layout={settings.files_layout}
                     splitPct={settings.files_split_pct}
@@ -7483,6 +7546,7 @@ function App() {
                     activeTab={(settings.term_tab_active ?? {})[sel.repo + "|" + sel.slug] ?? null}
                     onActiveTab={(index) => setTermTab(sel.repo, sel.slug, index)}
                     onError={fail}
+                    root={selected.path} onOpenPath={openPathFromTerm}
                     findOpen={findOn === "dock"} findToken={findToken} onFindClose={closeFind} />
                 )}
               </div>
@@ -7502,6 +7566,8 @@ function App() {
               <FileView
                 key={dockFile}
                 path={dockFile}
+                at={dockAt}
+                onAtClear={clearDockAt}
                 reloadToken={placesToken}
                 onOpen={openDockFile}
                 onOpenEditor={editIn}

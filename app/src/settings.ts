@@ -289,6 +289,15 @@ export type Settings = {
   // NOT a `| null` and never written empty: absence IS "no file open", and a
   // key whose value is "" would be a path the viewer would try to read.
   files_open: Record<string, string>;
+  // Where in that file, when it was opened AT a line — a ⌘-clicked
+  // `src/ops.rs:1022` in the terminal, or an agent's `show_doc {line}`. Its own
+  // record beside `files_open`, keyed the same way and for the same reason (a
+  // line in one place's file means nothing in another's, so no global seed).
+  // ABSENT means "no line": opening a file any other way deletes the entry,
+  // and so does choosing a view in the viewer, which is what dismisses the
+  // marked line. A line past the end of the file is harmless — the viewer marks
+  // nothing and stays at the top.
+  files_open_at: Record<string, { line: number; col?: number }>;
   // Per-place panel state, keyed `repo|slug` (the same scheme as
   // `term_tab_names`). An entry here means "this place has been SET UP"; its
   // absence means the dock has never been opened there, and such a place starts
@@ -421,6 +430,7 @@ export const DEFAULTS: Settings = {
   term_tab_active: {},
   docs_collapsed: {},
   files_open: {},
+  files_open_at: {},
   place_panels: {},
   editor_cmd: "code",
   terminal_cmd: "",
@@ -676,6 +686,9 @@ export async function loadSettings(): Promise<Settings> {
     if (!CODEX_PERMISSIONS.includes(s.codex_permissions)) s.codex_permissions = "auto-review";
     if (!PI_PROJECT_TRUST.includes(s.pi_project_trust)) s.pi_project_trust = "never";
     // A hand-edited model string must still be data before it can reach argv.
+    // Read into a scroll position and a row index, so it must be numbers.
+    s.files_open_at = Object.fromEntries(Object.entries(s.files_open_at && typeof s.files_open_at === "object" ? s.files_open_at : {})
+      .filter(([, v]) => !!v && Number.isInteger(v.line) && v.line >= 1 && (v.col == null || (Number.isInteger(v.col) && v.col >= 1))));
     s.default_models = Object.fromEntries(Object.entries(s.default_models && typeof s.default_models === "object" ? s.default_models : {})
       .filter(([h, m]) => isHarness(h) && typeof m === "string" && /^[A-Za-z0-9._/:-]{1,200}$/.test(m) && !m.startsWith("-")));
     if (migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0)) saveSettings(s);

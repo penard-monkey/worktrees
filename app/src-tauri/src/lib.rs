@@ -1638,6 +1638,10 @@ struct OpenDoc {
     repo: String,
     slug: String,
     path: String,
+    /// Where in the file (1-based), when the asker said. Absent from an older
+    /// CLI's request, and then the viewer opens at the top.
+    line: Option<u32>,
+    col: Option<u32>,
 }
 
 /// Serve whatever a session has dropped in `~/.cache/worktrees/inbox`.
@@ -1674,7 +1678,7 @@ fn drain_inbox(app: &AppHandle) {
             continue;
         };
         applog("info", &format!("inbox: open {} in {repo}:{slug} (pid {})", r.path, r.pid));
-        let _ = app.emit("app:open-doc", OpenDoc { repo, slug, path: r.path });
+        let _ = app.emit("app:open-doc", OpenDoc { repo, slug, path: r.path, line: r.line, col: r.col });
         // Front and centre — "let me see X" means show it to me NOW. A window
         // that loads the document behind the terminal the request was typed in
         // is a feature you have to go looking for.
@@ -5355,6 +5359,120 @@ async fn file_readable(app: AppHandle, path: String) -> Result<bool, String> {
     Ok(guard_under_projects(&app, &path).map(|f| f.is_file()).unwrap_or(false))
 }
 
+/// The dock shell a terminal link came from, so its LIVE cwd can be read.
+#[derive(Deserialize)]
+struct ShellRef {
+    repo: String,
+    slug: String,
+    index: u32,
+}
+
+/// The most candidates one `resolve_term_paths` will look at. A row of output
+/// holds a handful; this only bounds a pathological one.
+const TERM_PATHS_MAX: usize = 64;
+
+/// One path as printed in a terminal → the absolute file it names, or `None`.
+///
+/// A link exists only for what the viewer could actually open: a REGULAR FILE,
+/// after canonicalising (so `..` and symlinks are judged by where they land),
+/// inside a registered project — `guard_under_projects`' own question, asked of
+/// a path that is not a command argument. Everything else is no link at all,
+/// not a link to Finder: the viewer cannot read it, and terminal text is the
+/// one input here that no user chose, so it does not get to name arbitrary
+/// files for the app to act on.
+///
+/// Relative paths try each base in order (the dock shell's live cwd, then the
+/// place root); `~/` is the home dir; and `a/x`/`b/x` — git diff's prefixes —
+/// fall back to `x` when the literal path is not a file.
+fn resolve_term_path(raw: &str, bases: &[PathBuf], home: Option<&Path>, roots: &[PathBuf]) -> Option<String> {
+    if raw.is_empty() || raw.len() > 4096 || raw.contains('\0') {
+        return None;
+    }
+    let hit = |p: PathBuf| -> Option<String> {
+        let c = std::fs::canonicalize(&p).ok()?;
+        (c.is_file() && under_roots(roots, &c)).then(|| c.to_string_lossy().into_owned())
+    };
+    let tries = |rel: &str| -> Option<String> {
+        if let Some(rest) = rel.strip_prefix("~/") {
+            return hit(home?.join(rest));
+        }
+        if Path::new(rel).is_absolute() {
+            return hit(PathBuf::from(rel));
+        }
+        bases.iter().find_map(|b| hit(b.join(rel)))
+    };
+    tries(raw).or_else(|| {
+        let rest = raw.strip_prefix("a/").or_else(|| raw.strip_prefix("b/"))?;
+        tries(rest)
+    })
+}
+
+/// The working directory of a tmux session's active pane, or `None`.
+///
+/// `=name:` is tmux's EXACT session match (a bare `-t name` prefix-matches, so
+/// `cdv-app` would answer for `cdv-app-x`). An unknown session prints an EMPTY
+/// line and still exits 0 — measured on a private `-L` server — so empty is
+/// read as "no answer" rather than trusted as a path.
+fn tmux_pane_cwd(session: &str) -> Option<PathBuf> {
+    if session.is_empty() || session.contains(['\0', '\n']) {
+        return None;
+    }
+    let target = format!("={session}:");
+    let out = worktrees_core::tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_current_path}"]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let cwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let p = PathBuf::from(cwd);
+    (p.is_absolute() && p.is_dir()).then_some(p)
+}
+
+/// Which of the paths a terminal printed are files the viewer can open — the
+/// answer behind ⌘-click links (`termLinkProvider` in TerminalPane.tsx). The
+/// frontend batches a row's candidates into one call and caches the answers,
+/// so this is a stat per path plus, for a tmux pane, ONE `display-message` per
+/// call — never a spawn per mousemove.
+///
+/// Relative paths resolve against where the program that printed them IS: a
+/// dock shell's live cwd, or the tmux pane's (`cd app && cargo test` prints
+/// `src/lib.rs`, which means `app/src/lib.rs` — against the place root it is
+/// either no link or, worse, the root's same-named file). The place root is
+/// the fallback after either.
+#[tauri::command]
+async fn resolve_term_paths(
+    app: AppHandle,
+    shells: State<'_, Shells>,
+    root: String,
+    shell: Option<ShellRef>,
+    session: Option<String>,
+    paths: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
+    let mut bases = Vec::new();
+    if let Some(cwd) = session.as_deref().and_then(tmux_pane_cwd) {
+        bases.push(cwd);
+    }
+    if let Some(sh) = shell {
+        // Read live, not from `shell-cwds.json`: that file is a 15 s sample and
+        // the user may have `cd`'d a moment ago. The pid is checked for life
+        // first (see `live_pid` — a reaped pid can belong to a stranger).
+        let pid = {
+            let mut map = shells.0.lock().unwrap();
+            map.get_mut(&(sh.repo, sh.slug, sh.index)).and_then(|s| live_pid(&mut *s.child))
+        };
+        if let Some(cwd) = pid.and_then(proc_cwd) {
+            bases.push(cwd);
+        }
+    }
+    bases.push(PathBuf::from(&root));
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let roots = project_roots(&app);
+    Ok(paths
+        .iter()
+        .take(TERM_PATHS_MAX)
+        .map(|p| resolve_term_path(p, &bases, home.as_deref(), &roots))
+        .collect())
+}
+
 /// Raw bytes as base64 — the viewer builds a `data:` URI from it to show an
 /// image inline. Same path guard as every other FS command. The cap is smaller
 /// than `read_file`'s (base64 inflates 4/3, and this crosses the IPC bridge as
@@ -7925,6 +8043,7 @@ pub fn run() {
             file_diff,
             read_file,
             file_readable,
+            resolve_term_paths,
             list_docs,
             place_plan,
             plan_prompt,
@@ -8001,6 +8120,44 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// The rules behind a terminal link: a FILE, inside a registered project,
+    /// found from the first base that has it; `~/` and git's `a/`/`b/`.
+    #[test]
+    fn a_terminal_path_is_a_link_only_to_a_file_the_viewer_can_open() {
+        use super::resolve_term_path as r;
+        let base = std::env::temp_dir().join(format!("wt-termpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let proj = base.join("proj");
+        let sub = proj.join("app");
+        std::fs::create_dir_all(sub.join("src")).unwrap();
+        std::fs::write(proj.join("README.md"), "x").unwrap();
+        std::fs::write(sub.join("src/a.ts"), "x").unwrap();
+        std::fs::write(proj.join("only-root.md"), "x").unwrap();
+        std::fs::write(base.join("outside.md"), "x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(base.join("outside.md"), proj.join("sneaky.md")).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        let roots = vec![std::fs::canonicalize(&proj).unwrap()];
+        let bases = vec![sub.clone(), proj.clone()];
+        let home = Some(proj.as_path());
+
+        assert_eq!(r("src/a.ts", &bases, home, &roots), Some(canon(&sub.join("src/a.ts"))), "first base (a shell's cwd)");
+        assert_eq!(r("only-root.md", &bases, home, &roots), Some(canon(&proj.join("only-root.md"))), "falls back to the place root");
+        assert_eq!(r("../README.md", &bases, home, &roots), Some(canon(&proj.join("README.md"))));
+        assert_eq!(r(&proj.join("README.md").to_string_lossy(), &bases, home, &roots), Some(canon(&proj.join("README.md"))));
+        assert_eq!(r("~/README.md", &bases, home, &roots), Some(canon(&proj.join("README.md"))), "~/ is HOME");
+        assert_eq!(r("b/src/a.ts", &bases, home, &roots), Some(canon(&sub.join("src/a.ts"))), "git diff's b/ prefix");
+        assert_eq!(r("src", &bases, home, &roots), None, "a directory is not a link");
+        assert_eq!(r("and/or", &bases, home, &roots), None, "nothing there");
+        assert_eq!(r("../outside.md", &bases, home, &roots), None, "outside every project");
+        assert_eq!(r(&base.join("outside.md").to_string_lossy(), &bases, home, &roots), None);
+        #[cfg(unix)]
+        assert_eq!(r("sneaky.md", &bases, home, &roots), None, "a symlink is judged by where it LANDS");
+        assert_eq!(r("", &bases, home, &roots), None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
 
     /// A GUI launch has no locale, and pbcopy without one mangles every

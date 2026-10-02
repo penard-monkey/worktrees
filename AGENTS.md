@@ -426,6 +426,26 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   `clearDecorations()` first or the matches keep the old theme's hex. Load the
   addon after `term.open(host)`, and route its calls through a guard: losing a
   search is survivable, losing the terminal is not.
+- **xterm's mouse REPORTING and its SELECTION both listen on `.xterm`; the
+  linkifier listens on `.xterm-screen`, its child.** So a gesture that should
+  belong to a link alone (the ⌘-click on a file path) is stopped at
+  `.xterm-screen` by a listener registered AFTER the linkifier's own. Both
+  fire on that element (bubble, in registration order, and `stopPropagation`
+  does not skip a sibling listener on the same element), so the linkifier
+  still records the press it needs to activate on release, while the press
+  never reaches the parent: claude gets no click report and no selection
+  starts. It is the ORDER that matters, not the phase.
+  The linkifier itself checks no modifier: `activate` runs on any click that
+  presses and releases on the same link, so the provider must test the
+  modifier — and the BUTTON: it fires on a right-button release too. The
+  right-press is stopped the same way (it is reported to claude like a left
+  one), and the menu answers `contextmenu` there. One more linkifier quirk:
+  it re-asks for links only when the pointer reaches a DIFFERENT cell than
+  the last one it saw, and keeps that cell across a `mouseleave`, so after a
+  menu covers the pane, the pointer can be back on a link with no `hover`
+  ever fired. The provider therefore hit-tests the event itself (`linkAt`)
+  rather than trusting hover state alone. `termlinks-check.mjs` pins all of
+  it.
 - **An xterm host is a RATCHET without `min-width: 0`.** `.term-host` is a row
   flex item, so its automatic minimum size is its min-content width — and xterm
   writes an explicit `width: <cols × cell>px` onto `.xterm-screen`, which makes
