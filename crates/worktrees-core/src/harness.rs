@@ -257,11 +257,12 @@ pub const CLAUDE: &Claude = &Claude;
 pub const CODEX: &Codex = &Codex;
 pub const PI: &Pi = &Pi;
 
-/// Every adapter, in registry order (`provider::PROVIDERS`). A new harness is
-/// a row there and an entry here; `registry_and_adapters_line_up` pins it.
-/// Codex's flag for its inline TUI (see `Codex::launch_args`).
+/// Codex's flag for its inline TUI (see `Codex::launch_args`). Needs
+/// codex-cli >= 0.81.0; an older one rejects it and the lane falls to the shell.
 const CODEX_INLINE: &str = "--no-alt-screen";
 
+/// Every adapter, in registry order (`provider::PROVIDERS`). A new harness is
+/// a row there and an entry here; `registry_and_adapters_line_up` pins it.
 pub const ALL: &[&dyn Adapter] = &[CLAUDE, CODEX, PI];
 
 /// `<model_arg> '<model>'` for a fresh launch that names one; nothing on a
@@ -887,14 +888,20 @@ mod tests {
     /// whose own command already says so does not get the flag twice.
     #[test]
     fn codex_runs_inline_on_launch_and_resume() {
-        let once = |cmd: &str| cmd.matches("--no-alt-screen").count();
+        // Whole words: twice is a hard clap error (exit 2, "cannot be used
+        // multiple times"), so the guard is load-bearing — and it must match
+        // the WORD, or a value merely containing it suppresses the flag.
+        let once = |cmd: &str| cmd.split_whitespace().filter(|w| *w == "--no-alt-screen").count();
         let fresh = AiLaunch::plain("codex").launch_cmd("p-feat");
         assert_eq!(once(&fresh), 1, "{fresh}");
         let mut resumed = AiLaunch::plain("codex resume --last");
         resumed.resume = true;
         let r = resumed.launch_cmd("p-feat");
         assert_eq!(once(&r), 1, "{r}");
-        assert!(r.find("--no-alt-screen") < r.find(" resume --last"), "before the subcommand: {r}");
+        let (flag, sub) = (r.find("--no-alt-screen").unwrap(), r.find(" resume --last").unwrap());
+        assert!(flag < sub, "before the subcommand: {r}");
+        let lookalike = AiLaunch::plain("codex -c x=--no-alt-screen-ish").launch_cmd("p-feat");
+        assert_eq!(once(&lookalike), 1, "{lookalike}");
         for own in ["codex --no-alt-screen", "codex --no-alt-screen resume --last"] {
             let c = AiLaunch::plain(own).launch_cmd("p-feat");
             assert_eq!(once(&c), 1, "{c}");

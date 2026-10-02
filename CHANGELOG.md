@@ -14,6 +14,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   scrolls pi, and a resize re-flows it without duplicating anything. An AI
   command that already passes the flag does not get it twice. A Codex lane
   that is already running keeps the old behaviour until it is relaunched.
+  Needs codex-cli 0.81.0 or later, the first release with the flag.
 
 ## [0.36.0] - 2026-10-02
 
