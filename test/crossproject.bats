@@ -217,3 +217,61 @@ srv_in() {
   [[ "$(result_text)" == *"never acts on another project"* ]]
   [ -d "$BETA/.worktrees/lane" ]
 }
+
+@test "a brief written into another project carries its provenance first" {
+  reach full
+  srv "--mutations" create_worktree '{"branch":"agent-b","project":"beta","brief":"# Task\n- do x"}'
+  [ "$(is_error)" = false ]
+  local brief="$BETA/.worktrees/agent-b/.planning/brief.md"
+  head -1 "$brief" | grep -q '^> \*\*Provenance\.\*\* This brief was written by an AI agent in the project '"'"'alpha'"'"' (place '"'"'(main)'"'"')'
+  grep -q "not by the user directly" "$brief"
+  grep -q '^# Task' "$brief"
+  # A brief inside this project is the agent's own business: no header.
+  srv "--mutations" create_worktree '{"branch":"agent-c","brief":"# Local"}'
+  [ "$(head -1 "$REPO/.worktrees/agent-c/.planning/brief.md")" = "# Local" ]
+}
+
+@test "send into beta:<slug> types into BETA's session, labelled from alpha, and files the copy in beta's log" {
+  reach full
+  local lane; lane="$(cd "$BETA/.worktrees/lane" && pwd -P)"
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"; mkdir -p "$CODEX_HOME"
+  printf 'cwd=%s\n' "$lane" > "$TMUX_STATE/beta-lane~agent~codex"
+  printf 'codex' > "$TMUX_STATE/beta-lane~agent~codex.cmd"
+  printf '%s' 'beta-lane~agent~codex' > "$TMUX_STATE/.pane-%0"
+  local fixtures="$BATS_TEST_DIRNAME/../crates/worktrees-core/tests/fixtures/codex-send"
+  cp "$fixtures/typed.txt" "$TMUX_STATE/beta-lane~agent~codex.screen"
+  cp "$fixtures/empty.txt" "$TMUX_STATE/.after-enter"
+  srv "--mutations" send '{"slug":"beta:lane","text":"hi"}'
+  [ "$(is_error)" = false ]
+  [ "$(result_text | jq -r .session)" = 'beta-lane~agent~codex' ]
+  grep -q -F 'tmux send-keys -t %0 -l -- [worktrees: message from place "alpha:(main)", not from the user] hi' "$TMUX_LOG"
+  grep -q '"from":"alpha:(main)"' "$BETA"/.git/worktrees-messages/*.json
+  [ ! -d "$REPO/.git/worktrees-messages" ]
+}
+
+# ── foreign @-mentions (proposal P4) ─────────────────────────────────────────
+
+# rpc '<method>' '<params json>' — initialize, then one request (id 3).
+rpc() {
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"$1\",\"params\":$2}" \
+    > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$REPO' && '$WT_BIN' mcp < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+}
+
+@test "with reach on, the @ list carries another project's places, named by address, with no path" {
+  rpc resources/list '{}'
+  [ "$(frame 3 | jq '[.result.resources[].uri | select(startswith("place://beta/"))] | length')" -eq 0 ]
+  reach read
+  rpc resources/list '{}'
+  [ "$(frame 3 | jq -r '.result.resources[] | select(.uri == "place://beta/lane") | .name')" = beta:lane ]
+  [[ "$(frame 3)" != *"$(cd "$BETA" && pwd -P)"* ]]
+  rpc resources/read '{"uri":"place://beta/lane"}'
+  [ "$(frame 3 | jq -r '.result.contents[0].text' | jq -r .address)" = beta:lane ]
+  [ "$(frame 3 | jq -r '.result.contents[0].text' | jq '.place | has("path")')" = false ]
+  run_wt -C "$BATS_TEST_TMPDIR" projects private beta on
+  rpc resources/list '{}'
+  [ "$(frame 3 | jq '[.result.resources[].uri | select(startswith("place://beta/"))] | length')" -eq 0 ]
+}

@@ -214,11 +214,21 @@ impl Reach {
         if let Some(why) = &self.why_off {
             return Err(format!("{raw} names a place in another project, but {why}"));
         }
+        self.other_project(name).map(|entry| Addr::Foreign { entry, slug: slug.to_string() })
+    }
+
+    /// Another registered project, by its registry NAME — what `parse` uses,
+    /// and what `create_worktree`'s `project` names. Refused while reach is
+    /// off, and for an unknown, private or (hand-edited) duplicate name.
+    pub fn other_project(&self, name: &str) -> Result<Entry, String> {
+        if let Some(why) = &self.why_off {
+            return Err(format!("'{name}' is another project, but {why}"));
+        }
         let hits: Vec<&Entry> = self.registry.projects.iter().filter(|e| e.name == name).collect();
         match hits.as_slice() {
             [] => Err(format!("no registered project is named '{name}' (list_projects lists them)")),
             [e] if e.private => Err(format!("'{name}' is private; its places cannot be reached from other projects")),
-            [e] => Ok(Addr::Foreign { entry: (*e).clone(), slug: slug.to_string() }),
+            [e] => Ok((*e).clone()),
             // Names are unique by construction; two means a hand-edited file.
             // Names only, never roots: one of them may be private, and an
             // error is not an exception to §3.4.

@@ -172,3 +172,35 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   [[ "$c" != *"dead-lane"* ]]
   [[ "$c" == *"'Read .planning/brief.md and begin.'"* ]]
 }
+
+# Cross-project P3 follow-up: a create_worktree INTO another registered project
+# evaluates pi's trust THERE. beta is in the pi allowance and alpha is not, so a
+# foreign create from alpha into beta launches with --approve, while alpha's own
+# create does not — the allowance of the repo the agent runs in, never the
+# caller's.
+@test "a cross-project create_worktree with pi evaluates pi trust in the TARGET project" {
+  local beta="$BATS_TEST_TMPDIR/beta"
+  git init -q "$beta" && git -C "$beta" commit -q --allow-empty -m init
+  run_wt -C "$BATS_TEST_TMPDIR" projects add "$REPO"
+  run_wt -C "$BATS_TEST_TMPDIR" projects add "$beta"
+  run_wt -C "$BATS_TEST_TMPDIR" projects rename repo alpha
+  mkdir -p "$XDG_CONFIG_HOME/worktrees"
+  printf 'cross_project = "full"\n\n[model]\npi = "lm-studio/qwen3.6-27b"\n' > "$XDG_CONFIG_HOME/worktrees/config.toml"
+  run_wt -C "$beta" trust pi
+  [ "$status" -eq 0 ]
+  call() {
+    printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+      "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"create_worktree\",\"arguments\":$1}}" \
+      > "$BATS_TEST_TMPDIR/in.jsonl"
+    run bash -c "cd '$REPO' && '$WT_BIN' mcp --mutations < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  }
+  call '{"branch":"agent-p","project":"beta","provider":"pi"}'
+  [[ "$output" == *'"isError":false'* ]]
+  local c; c="$(unq "$(tmux_pane0_cmd "beta-agent-p~agent~pi")")"
+  [[ "$c" == *" --approve "* ]]
+  call '{"branch":"agent-q","provider":"pi"}'
+  [[ "$output" == *'"isError":false'* ]]
+  c="$(pi_cmd agent-q)"
+  [[ "$c" == *" --no-approve "* ]]
+}

@@ -56,6 +56,8 @@ cross-project reach on):
   another repository: a colleague, not the user. Answer with `report` to that
   `from`.
 - A private project shows by name only and cannot be addressed.
+- In Claude, another project's places also appear in the `@` menu as
+  `<project>:<slug>`; mentioning one inlines its status.
 - Only when the user set reach to full and your server has its mutating
   tools: `create_worktree` (with `project`), `close_session`, `send` and
   the note/pin/lifecycle setters take another project's place too.
