@@ -20,8 +20,8 @@ Every piece of state that decides what the panes show, mapped in `App.tsx`:
 | `sel` `{repo, slug}` / `null` = Home | `App.tsx:3251` | **yes** — the spine |
 | `eff.dock_tab` (files/terminal/docs/plan/automations) | `place_panels` via `panelsFor`, `:3430` | **yes** |
 | `dockFile` + `dockAt.line/col` | `:3453`, `:3457`; all opens go through `openDockFile` `:4389` | **yes** (only when tab = files) |
-| active dock shell | `TerminalTabs`' local `active` (`:1163`), mirrored to `term_tab_active` | **yes** (only when tab = terminal) |
-| main-pane agent | `activeProvider` → `planProvider` (`:4610`); one cell is shown | **yes** |
+| active dock shell | `TerminalTabs`' local `active` (`:1163`), reported up by `onFront` (restore and fallbacks included; `term_tab_active` is only written by picks) | **yes** (only when tab = terminal) |
+| main-pane agent | `activeProvider` → `planProvider` (`:4610`); one cell is shown | **no** — dropped while building: a place runs ONE live agent (a second is closed by the reconcile at `:4644`), so a switch replaces the session and there is nothing to go back to |
 | `eff.dock_open` (⌘J) | `place_panels` | **no** — layout, like ⌘B. Applying an entry opens the dock only if the entry's dock content differs from what is there |
 | reading mode (⌘⇧E), find bar, md zoom, diff mode, layout, scroll | various | **no** — view modes, not places |
 | Docs / Plan / Automations inner selection | inside their panes | **no** (v1) — anything they open lands in Files, which IS recorded |
@@ -30,7 +30,6 @@ Every piece of state that decides what the panes show, mapped in `App.tsx`:
 ```ts
 type Loc = {
   place: { repo: string; slug: string } | null;           // null = Home
-  agent?: Harness;
   dock?: { tab: DockTab; file?: { path: string; line?: number; col?: number }; shell?: number };
 };
 ```
@@ -147,6 +146,6 @@ buttons 4/5 (back/forward).
    red-first.
 2. Observer + Home/place capture + buttons + chords + mouse buttons.
 3. Dock tab + file/line capture and apply (parked apply, restore stand-down).
-4. Shells (`TerminalTabs` gets a `goto` token) + agent.
+4. Shells (`TerminalTabs` gets a `goto` token and reports its front tab).
 5. Gone targets (prune, notice) + right-click list.
 6. Harness in Chromium and headless WebKit, CHANGELOG, gates, PR.

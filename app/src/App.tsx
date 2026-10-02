@@ -1189,7 +1189,7 @@ function TermTabRename({ initial, onCommit, onCancel }: {
   );
 }
 
-function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, hydratedTick, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError, root, onOpenPath, findOpen, findToken, onFindClose }: {
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, hydratedTick, names, onRename, tabs, onTabs, activeTab, onActiveTab, goto, onFront, onError, root, onOpenPath, findOpen, findToken, onFindClose }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
   /** ⌘-clickable paths in the shells (see `TermLinks`). */
   root: string; onOpenPath: (path: string, line?: number, col?: number) => void;
@@ -1198,6 +1198,13 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   names: Record<number, string>; onRename: (index: number, name: string | null) => void;
   tabs: number[]; onTabs: (ids: number[]) => void;
   activeTab: number | null; onActiveTab: (index: number | null) => void;
+  /** Navigation history putting a tab back in front. `seq` makes a repeat a new
+   *  request. A tab that is gone is not resurrected: the front tab stays. */
+  goto?: { id: number; seq: number } | null;
+  /** The tab actually in front, every time it changes — restore and fallback
+   *  included, which `onActiveTab` deliberately is not. What history records.
+   *  `undefined` = not known yet (restoring, or unmounted); `null` = no tab. */
+  onFront?: (repo: string, slug: string, id: number | null | undefined) => void;
   onError: (e: unknown) => void;
   /** ⌘F goes to whichever shell tab is showing — only that one is mounted */
   findOpen?: boolean; findToken?: number; onFindClose?: () => void;
@@ -1248,6 +1255,21 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     onActiveTabRef.current(id);
   }, []);
   const restoringRef = useRef(true);
+  const onFrontRef = useRef(onFront);
+  onFrontRef.current = onFront;
+  const front = ids === null ? undefined : active;
+  useEffect(() => {
+    onFrontRef.current?.(repo, slug, front);
+    // Unmounting (the dock left the Terminal tab) makes it unknown again, or the
+    // next mount's first render would read the old front as already restored.
+    return () => onFrontRef.current?.(repo, slug, undefined);
+  }, [repo, slug, front]);
+  // While the restore is in flight there is nothing to pick from — it reads
+  // `activeTab`, which history has already written, so it lands there itself.
+  useEffect(() => {
+    if (!goto || restoringRef.current) return;
+    if (idsRef.current.includes(goto.id)) pick(goto.id);
+  }, [goto?.seq, pick]);
   // names is read by the restore, which must NOT re-run on every rename
   const namesRef = useRef(names);
   namesRef.current = names;
@@ -6476,17 +6498,26 @@ function App() {
   // `restoredOnce` is already set. Home is recorded in that commit and the
   // restored place lands a render later, well inside COALESCE_MS, so it
   // REPLACES Home as entry 0 — launching is not a navigation you go back from.
+  // The dock shell actually in front, reported by the tab strip (see `onFront`).
+  const [termFront, setTermFront] = useState<{ key: string; id: number | null | undefined } | null>(null);
+  const onTermFront = useCallback((repo: string, slug: string, id: number | null | undefined) => setTermFront({ key: placeKey(repo, slug), id }), []);
   const [hist, setHist] = useState<NavHistory>(emptyHistory);
   const histRef = useRef(hist);
   // A place selected before its snapshot resolves (or after it was removed
   // elsewhere) is not somewhere to record yet — null skips the observation.
   // The dock part is what it is ON, whether or not it is open: ⌘J is layout,
   // not a place (docs/proposals/nav-history.md, decision 2).
-  const navLoc: Loc | null = !sel ? { place: null } : !selected ? null : {
+  const frontHere = sel && termFront?.key === placeKey(sel.repo, sel.slug) ? termFront.id : undefined;
+  // On the Terminal tab with the strip still restoring, the front shell is not
+  // known yet — not "none", so the observation waits rather than recording a
+  // location that was never on screen.
+  const navLoc: Loc | null = !sel ? { place: null } : !selected ? null : eff.dock_tab === "terminal" && frontHere === undefined ? null : {
     place: { repo: sel.repo, slug: sel.slug },
     dock: {
       tab: eff.dock_tab,
       ...(dockFile ? { file: { path: dockFile, line: dockAt?.line, col: dockAt?.col } } : {}),
+      // The shell actually in front (see `frontHere`).
+      ...(frontHere != null ? { shell: frontHere } : {}),
     },
   };
   const navKey = navLoc ? locKey(navLoc) : null;
@@ -6564,6 +6595,8 @@ function App() {
    *  place being left. Each part is written only where it DIFFERS from what is
    *  showing, so nothing seeded is frozen into `place_panels`. */
   const [navPending, setNavPending] = useState<Loc | null>(null);
+  const [navShellGoto, setNavShellGoto] = useState<{ id: number; seq: number } | null>(null);
+  const navShellSeq = useRef(0);
   const navPendingRef = useRef(navPending);
   navPendingRef.current = navPending;
   useEffect(() => {
@@ -6595,6 +6628,14 @@ function App() {
       // file, and the place's remembered file stays remembered.
       setDockFile(null);
       setDockAt(null);
+    }
+    if (d.tab === "terminal" && d.shell != null && (d.tab !== eff.dock_tab || d.shell !== frontHere)) {
+      show = true;
+      // Written first, so a tab strip that MOUNTS for this (the dock was on
+      // another tab) restores straight onto it; the token covers one that is
+      // already on screen.
+      setTermTab(sel.repo, sel.slug, d.shell);
+      setNavShellGoto({ id: d.shell, seq: ++navShellSeq.current });
     }
     if (show && (d.tab !== eff.dock_tab || !eff.dock_open)) updatePanels({ dock_tab: d.tab, dock_open: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -7832,6 +7873,8 @@ function App() {
                     onTabs={(ids) => setTermTabs(sel.repo, sel.slug, ids)}
                     activeTab={(settings.term_tab_active ?? {})[sel.repo + "|" + sel.slug] ?? null}
                     onActiveTab={(index) => setTermTab(sel.repo, sel.slug, index)}
+                    goto={navShellGoto}
+                    onFront={onTermFront}
                     onError={fail}
                     root={selected.path} onOpenPath={openPathFromTerm}
                     findOpen={findOn === "dock"} findToken={findToken} onFindClose={closeFind} />
