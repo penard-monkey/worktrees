@@ -5,6 +5,38 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The quota refusal has never fired against a REAL spent window.** Every
+  proof of it (`test/quota.bats`, the reviews' fixture runs) goes through the
+  `WORKTREES_USAGE_PROBE` fixture seam. The live mappings
+  (`windows_from_claude`, `windows_from_codex`) and the provider's own
+  `warning` grade have not been seen to refuse anything. Next time a window
+  really is at 80%+, run `worktrees new x --brief …` and check the message,
+  exit 5 and `open x --force`. See
+  [the session](docs/sessions/2026-10-01-quota-gate-pr358/summary.md).
+
+- **A slug re-used after `rm` counts as launched for Claude and Codex.** Their
+  `never_launched` (#358) is `!session_present`, which reads transcripts BY
+  PATH, and the old lane's transcripts outlive `rm`. So a refused `--brief`
+  launch in a re-used slug reopens WITHOUT the opener. pi avoids this with
+  its generation counter in declared state; Claude and Codex have no
+  equivalent. The fix shape is a per-place "launched" mark, or transcripts
+  newer than the place's creation.
+
+- **A first launch in a place with an OLD brief now starts on that brief.**
+  Since #358, any fresh `open` of Claude or Codex in a place where they have
+  never run sends the opener whenever `.planning/brief.md` exists. That is
+  right after a refusal. It is questionable as a handover: switching a place
+  to another agent re-runs a brief that may be finished or stale. Decide
+  whether a brief should carry "read" state, or whether the opener should be
+  limited to a refusal's retry.
+
+- **The gate can stall an offline `new` for ~15s (Claude) or ~13s (Codex).**
+  A shorter gate deadline was deferred in #358. The readers' cache and
+  backoff are shared with the app's meter, and a gate-side timeout thread
+  could orphan `codex app-server` when the CLI exits. The README documents
+  the stall. A real fix needs a deadline parameter threaded into both
+  readers, one that does not write a timeout into the shared backoff.
+
 - **A concurrency cap is the signal the quota gate cannot be.** The launch
   gate (`quota`) reads the plan window, and a window is a LAGGING signal: lanes
   bill after their first turns, so eight started inside a minute are all
