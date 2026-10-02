@@ -1196,7 +1196,9 @@ async fn new_place(
     args.push("--no-attach".into());
     // Single-pane like `open_place` below: Claude gets the full width and the
     // scratch shell lives in the dock's Terminal tab (which is also where deps
-    // get installed — `--no-spare` suppresses the auto-install pane).
+    // get installed — no spare pane means no auto-install). Single pane is the
+    // CLI's default too now; `--no-spare` stays explicit so the app's layout
+    // never rides on that default again.
     args.push("--no-spare".into());
     let mut r = run_op(&format!("new {branch_log}"), &repo, |p, ui| ops::cmd_new(p, ui, &args))?;
     if r.ok {

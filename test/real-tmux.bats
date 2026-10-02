@@ -19,11 +19,21 @@ teardown() {
 }
 
 # bats test_tags=real-tmux
-@test "real tmux: new --no-attach creates a session with 2 panes" {
+@test "real tmux: new --no-attach creates a single-pane session" {
   command -v tmux >/dev/null || skip "no real tmux"
   run_wt new feat-x --no-install --no-attach
   [ "$status" -eq 0 ]
   tmux has-session -t repo-feat-x
+  run tmux list-panes -t repo-feat-x -F '#{pane_id}'
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+}
+
+# bats test_tags=real-tmux
+@test "real tmux: new --spare --no-attach creates a session with 2 panes" {
+  command -v tmux >/dev/null || skip "no real tmux"
+  run_wt new feat-x --spare --no-install --no-attach
+  [ "$status" -eq 0 ]
   run tmux list-panes -t repo-feat-x -F '#{pane_id}'
   [ "$status" -eq 0 ]
   [ "${#lines[@]}" -eq 2 ]

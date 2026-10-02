@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **`worktrees new` and `worktrees open` open a single pane by default.** The
+  agent gets the whole width; there is no spare shell beside it unless you ask
+  with the new `--spare` flag. That pane is also where `new` ran your
+  dependency install, so without `--spare` the detected command (`pnpm
+  install`, …) is printed as a `then:` hint instead of being run — pass
+  `--spare` to get the old split and auto-install back. `--no-spare` is still
+  accepted and now matches the default; given together, the last of the two
+  wins. The app and MCP `create_worktree` were already single-pane, and
+  `create_worktree`'s `spare: true` still splits. The `worktrees` skill now
+  tells agents to start a lane from the CLI with `--no-attach`.
+
 ### Fixed
 - **The wheel scrolls a Codex lane.** Codex 0.15x draws its TUI on the
   terminal's alternate screen and never asks for the mouse, so tmux kept no
