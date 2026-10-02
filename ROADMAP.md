@@ -271,6 +271,31 @@ close-out ritual (global `/close-out` skill; this repo's settings in
     moves the selection.
   See [the session](docs/sessions/2026-09-30-pi-scroll/summary.md).
 
+- **Hand-test the Codex wheel in the real app (#422).** It shipped on unit
+  tests and a throwaway-tmux probe. Lanes that are already running keep the
+  alternate screen, so relaunch a Codex lane first. Then:
+  - scroll back after a long reply, and type to return to live output;
+  - resize the window and the dock while scrolled back and while live, and
+    check that the transcript is not duplicated in history;
+  - trigger an approval prompt, check the amber dot, and answer it;
+  - send into a Codex lane you are scrolled back in.
+  See [the session](docs/sessions/2026-10-02-codex-scroll/summary.md).
+
+- **Does `--no-alt-screen` beat a user's `tui.alternate_screen` config?**
+  Unverified. If a user's `~/.codex/config.toml` forces the alternate screen,
+  and the config wins over the CLI flag, their Codex lanes still cannot be
+  scrolled. Measure it with a per-launch `-c tui.alternate_screen=…` on a
+  throwaway tmux server (never by editing `~/.codex`). If the config wins,
+  `Codex::launch_args` needs the matching `-c` as well. See
+  [the session](docs/sessions/2026-10-02-codex-scroll/summary.md).
+
+- **David: remove the stray Codex trust entry.** The codex-scroll probe
+  answered Codex's "Trust this folder?" prompt by accident, and Codex wrote
+  `[projects."/Users/davidpena/.cache/worktrees/worktrees/codex-scroll/repo"]
+  trust_level = "trusted"` into `~/.codex/config.toml` (around line 48).
+  Agents may not write that file, so delete the two lines by hand. See
+  [the session](docs/sessions/2026-10-02-codex-scroll/summary.md).
+
 - **The wheel scrolls the ACTIVE pane of a split session, not the pane under
   the pointer.** With tmux `mouse off` there is no pointer-to-pane mapping;
   `term_wheel` targets `=session:`. This only matters for sessions with split
