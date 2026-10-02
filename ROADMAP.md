@@ -5,6 +5,16 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Cross-project: the drag still types an address for a foreign place.**
+  P4 lists other projects' places in the `@` menu, but the app cannot tell
+  which `worktrees mcp` version a given session holds, and a `place://…`
+  token typed into an older server resolves to nothing, silently. Switch the
+  drag to the token once the server's version is visible to the app (e.g.
+  written beside the session's probe). Also: the `slug` descriptions in the
+  MCP tool schemas still say "Place slug" — mention `<project>:<slug>` at the
+  next deliberate schema change (descriptions are cached by some clients, so
+  results carry the form today). See `docs/proposals/cross-project.md` §6.3.
+
 - **Cross-project reach: what the proposal's P1b deferred.** A badge on a
   project header whose session prefix collides with another registered
   project's (doctor already reports `prefix-collision`, and the project's

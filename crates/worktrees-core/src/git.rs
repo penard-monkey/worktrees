@@ -54,7 +54,20 @@ pub fn has_commits(cwd: &str) -> bool {
 }
 
 pub fn have_git() -> bool {
-    Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    // A YES is remembered for the process: `Project::discover` asks every
+    // time — once per registered project on a cross-project listing (#407
+    // review) — and git does not vanish under a running command. A NO is
+    // never remembered: the app asks before `fixup_gui_path()` can have run,
+    // and a cached false would outlive the PATH that fixes it.
+    static HAVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if HAVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let ok = Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    if ok {
+        HAVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    ok
 }
 
 /// Set once by a process whose STDOUT is a wire protocol (`worktrees mcp`:

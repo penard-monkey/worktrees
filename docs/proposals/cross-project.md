@@ -622,6 +622,15 @@ admits `/`, per the charset quoted on `safe_uri_part`), and the app can switch t
 tell the session's server is new enough. One way: the server writes its
 version beside its probe, and the app reads it. Until then, the address stays.
 
+*As built (P4):* the `@` menu lists other projects' places
+(`place://<project>/<slug>`, named `<project>:<slug>`), `resources/read`
+answers for them with paths withheld below `full`, and the list watcher covers
+reachable projects. The drag still types the ADDRESS for a foreign place: the
+app has no way yet to see which server version a given session holds, and a
+token typed into an older server resolves to nothing, silently — exactly what
+§6.2 refuses. Typing `@` in a session on a current server is the way to the
+inline mention meanwhile (ROADMAP).
+
 ### 6.4 What does not change
 
 The **tier-zone** refusal (*"a worktree belongs to its project"*) is correct
