@@ -529,6 +529,56 @@ print(p["agent_state"], a["provider"], a["state"], a["last_done"], a["session"])
   [[ "$output" == *'\"event\": \"timeout\"'* ]]
 }
 
+# A program in a place's OWN session that no harness reports on — here vim,
+# typed into the pane. Before, place_status said `none` and wait returned at
+# once: an orchestrator was told nobody was working there.
+@test "an unclaimed program in a place's own session is unknown to place_status and wait alike" {
+  run_wt new feat-u --no-tmux
+  printf 'cwd=%s\n' "$REPO/.worktrees/feat-u" > "$TMUX_STATE/repo-feat-u"
+  printf 'vim' > "$TMUX_STATE/repo-feat-u.cmd"
+  local pick='
+import sys, json
+frames = [json.loads(l) for l in sys.stdin.read().splitlines() if l.strip()]
+p = json.loads(frames[-1]["result"]["content"][0]["text"])
+a = p.get("activity") or {}
+print(p.get("agent_state", p.get("event")), a["state"], a["provider"], a.get("session"), "did not launch" in a.get("reason", ""))'
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"feat-u"}}}'
+  [ "$(jq_out "$pick")" = "unknown unknown None repo-feat-u True" ]
+  # The same derivation answers wait: it keeps waiting rather than calling it done.
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wait","arguments":{"until":"idle","slug":"feat-u","timeout_s":1}}}'
+  [ "$(jq_out "$pick")" = "timeout unknown None repo-feat-u True" ]
+  # vim is not `node`: naming it cost no ps.
+  [ ! -e "$BATS_TEST_TMPDIR/ps.log" ]
+  # Back at its shell, nobody is there — and wait says so at once.
+  printf 'zsh' > "$TMUX_STATE/repo-feat-u.cmd"
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wait","arguments":{"until":"idle","slug":"feat-u","timeout_s":5}}}'
+  [ "$(jq_out "$pick")" = "none none None None False" ]
+}
+
+# pi typed by hand into a place's own session: tmux reports `node`, and only
+# the tty's foreground process-group leader says `pi`. The shim's tty is
+# /dev/tty-<session>; ps spells it without the /dev/.
+@test "pi typed into a place's own session is pi to place_status, named by its tty's foreground" {
+  run_wt new feat-h --no-tmux
+  printf 'cwd=%s\n' "$REPO/.worktrees/feat-h" > "$TMUX_STATE/repo-feat-h"
+  printf 'node' > "$TMUX_STATE/repo-feat-h.cmd"
+  local q='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"feat-h"}}}'
+  local pick='
+import sys, json
+frames = [json.loads(l) for l in sys.stdin.read().splitlines() if l.strip()]
+p = json.loads(frames[-1]["result"]["content"][0]["text"])
+a = p["activity"]
+print(a["provider"], a.get("session"), *[g["provider"] + "@" + str(g["tmux"]) for g in p["agents"]])'
+  # ps names nothing here: a bare `node` nobody reports on.
+  mcp_in "$REPO" "" "$q"
+  [ "$(jq_out "$pick")" = "None repo-feat-h" ]
+  printf '??           1     1 /sbin/launchd\ntty-repo-feat-h  501   777 /bin/zsh\ntty-repo-feat-h  777   777 pi\n' > "$BATS_TEST_TMPDIR/ps.out"
+  mcp_in "$REPO" "" "$q"
+  [ "$(jq_out "$pick")" = "pi repo-feat-h pi@repo-feat-h" ]
+  # One ps per pane snapshot, never one per question asked of it.
+  [ "$(grep -c '^ps ' "$BATS_TEST_TMPDIR/ps.log")" -eq "$(grep -c 'list-panes -a' "$TMUX_LOG")" ]
+}
+
 @test "send is a --mutations tool and refuses what it must not type" {
   run_wt new feat-s --no-tmux
   local wt="$REPO/.worktrees/feat-s"

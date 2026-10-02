@@ -714,8 +714,10 @@ pub fn lane_file_in(dir: &Path, cwd: &str, born: Option<i64>) -> Option<LaneFile
 }
 
 /// The pi half of `place_activity` for one place: `None` unless the place's
-/// `~agent~pi` session is up and running something other than a shell (the
-/// pane is `pi …; exec "$SHELL"`, so it outlives pi, and pi runs as `node`).
+/// pi session (`activity::pi_session_for`: the `~agent~pi` sidecar, or the
+/// canonical session when pi runs there) is up and running something other
+/// than a shell (the pane is `pi …; exec "$SHELL"`, so it outlives pi, and pi
+/// runs as `node`).
 pub fn pi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Option<Activity> {
     let name = crate::activity::pi_session_for(panes, canonical);
     if !panes.session_runs_program(&name) {
@@ -723,7 +725,7 @@ pub fn pi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Optio
     }
     let turn = current_session(&session_dir(path), path).and_then(|s| session_tail(&s.path).1);
     let (state, last_done) = pi_state(turn.as_ref(), capture(&name));
-    Some(Activity { provider: Some("pi"), state, last_done, session: Some(name) })
+    Some(Activity { provider: Some("pi"), state, last_done, session: Some(name), reason: None })
 }
 
 /// The model the place's current pi session is on, from its file.

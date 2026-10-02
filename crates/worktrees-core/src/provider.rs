@@ -78,8 +78,10 @@ pub fn is_sidecar(name: &str) -> bool {
 /// cannot occur in a git ref, so no place's own session contains it.
 pub const SIDECAR_MARKER: &str = "~agent~";
 
-/// Which harness a pane in tmux session `session` is running, from its
-/// `pane_current_command`.
+/// Which harness a pane in tmux session `session` is running, from its program
+/// word (`tmux::Pane::program`: the `pane_current_command`, or for a `node`
+/// pane the harness its tty's foreground leader names). Pure: the snapshot
+/// already holds everything it needs.
 ///
 /// 1. An exact program word (`codex`, `claude`) names its harness.
 /// 2. A pane in a provider SIDECAR (`~agent~<id>`) belongs to that sidecar's
@@ -97,31 +99,6 @@ pub fn for_pane(session: &str, command: &str) -> Option<&'static Provider> {
     let wrapper = PROVIDERS.iter().find(|p| p.canonical_default && crate::tmux::is_ai_command(command, p.match_word));
     if session.contains(SIDECAR_MARKER) {
         return wrapper.and(PROVIDERS.iter().find(|p| session.contains(p.sidecar_suffix)));
-    }
-    // For a `node` pane in a canonical session (no sidecar marker), check if
-    // it's actually pi by resolving the tty foreground process. This is a lazy
-    // resolution: we don't have access to PaneList here, so we only do it for
-    // the most common case where pi runs as `node` in a canonical session.
-    if command == "node" && !session.contains(SIDECAR_MARKER) {
-        // Try to resolve the tty for this session by fetching panes
-        if let Some(panes) = crate::tmux::PaneList::fetch() {
-            for (sess, _, cmd) in &panes.panes {
-                if sess == session && cmd == "node" {
-                    let tty_map = panes.resolve_tty_foreground();
-                    for (s, tty) in &panes.ttys {
-                        if s == session {
-                            if let Some(comm) = tty_map.get(tty) {
-                                // macOS pi reports as "pi", not "node"
-                                if comm == "pi" {
-                                    return Some(PI);
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
     }
     wrapper
 }

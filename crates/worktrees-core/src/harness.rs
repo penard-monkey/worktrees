@@ -623,7 +623,8 @@ impl Adapter for Pi {
     fn agents(&self, _scan: &Scan, path: &str, reading: Option<&Activity>) -> Vec<serde_json::Value> {
         reading
             .map(|x| {
-                let canonical = x.session.as_deref().and_then(|s| s.strip_suffix(self.provider().sidecar_suffix)).unwrap_or("");
+                let session = x.session.as_deref().unwrap_or("");
+                let canonical = session.strip_suffix(self.provider().sidecar_suffix).unwrap_or(session);
                 serde_json::json!({
                     "provider": self.provider().id,
                     "state": x.state,
@@ -647,11 +648,10 @@ impl Adapter for Pi {
         if let Err(e) = may_type(self.provider().label, req.reading.state) {
             return Delivery::Refused(e);
         }
-        // Use the same session resolution as Codex: in a canonical session
-        // where pi runs as `node`, find it by the tty foreground process.
+        // Codex's rule: the sidecar, or the canonical session when pi is what
+        // runs there. pi runs as `node`, which `agent_pane` counts as an
+        // agent: in the session pi was found in, that pane is pi.
         let session = crate::activity::pi_session_for(req.panes, req.canonical);
-        // pi runs as `node`, which `agent_pane` counts as an agent: in the
-        // place's own session (sidecar or canonical), that pane is pi.
         let Some(pane) = tmux::agent_pane(&session, req.path, req.exclude, self.provider().match_word) else {
             return Delivery::Refused(format!(
                 "{session} has no pane running pi in {}; send only types into this project's own pi pane. \
@@ -799,8 +799,9 @@ pub(crate) fn submit_codex(
 /// and not stopped on someone: `Waiting` means a modal is up and would take the
 /// keys as its answer — Codex's approval ("Yes, proceed" is highlighted), pi's
 /// project-trust prompt (**Trust** is highlighted, so one Enter lets the repo
-/// run its own extensions inside pi) — and `None` means the harness has exited
-/// and the pane is a shell.
+/// run its own extensions inside pi) — `None` means the harness has exited
+/// and the pane is a shell, and `Unknown` that nobody can say what the pane
+/// is running, so keys could land anywhere.
 pub(crate) fn may_type(label: &str, state: State) -> Result<(), String> {
     match state {
         State::Busy | State::Idle => Ok(()),
@@ -808,7 +809,11 @@ pub(crate) fn may_type(label: &str, state: State) -> Result<(), String> {
             "{label} is waiting on you (an approval, a question or a trust prompt) — typing would \
              answer it. Answer it, or wait until: idle first."
         )),
-        State::None | State::Unknown => Err(format!("{label} is not running there (its pane is back at a shell). Use report.")),
+        State::None => Err(format!("{label} is not running there (its pane is back at a shell). Use report.")),
+        State::Unknown => Err(format!(
+            "what runs there is not a {label} this place launched (a program typed into its pane), \
+             and send types only into an agent it launched. Use report."
+        )),
     }
 }
 
