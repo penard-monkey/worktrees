@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.35.0] - 2026-10-01
 
 ### Added
 - **An agent is no longer started on a plan window that is nearly spent.**
