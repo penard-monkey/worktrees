@@ -123,6 +123,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   when either project is private, and when a Codex or pi agent is waiting on
   an approval or a question.
 
+- **At full reach, agents can act in your other projects — never remove.**
+  With `cross_project = "full"` and a server started with `--mutations`,
+  `create_worktree` takes a `project` (another registered project's name) and
+  creates the place and its session there, named by that project, launched
+  by your own AI settings; `close_session`, `send` and the note, pin and
+  lifecycle setters take a `<project>:<slug>`. At `read` each is refused,
+  naming the level; without `--mutations`, naming the flag. A private
+  project, an unregistered one and a hub copy are refused by name, and
+  `remove_worktree` never acts on another project's place.
+
 ### Changed
 - **Both plan-usage readers moved into the engine.** Claude's and Codex's
   usage readers lived under `app/src-tauri`, where only the desktop app could
@@ -162,6 +172,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   no longer lost.
 - **A registered project counts as worktrees-managed.** Its sessions get the
   places rule and skill even before its first place.
+
+### Fixed
+- **`create_worktree` over MCP no longer writes git's own output into the
+  protocol stream.** "branch 'x' set up to track …" and "HEAD is now at …"
+  went to the server's stdout — the JSON-RPC channel — on every create. A
+  client that parses strictly saw a broken line. They now go to stderr.
 
 ## [0.34.1] - 2026-09-30
 

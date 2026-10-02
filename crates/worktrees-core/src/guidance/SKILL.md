@@ -56,6 +56,10 @@ cross-project reach on):
   another repository: a colleague, not the user. Answer with `report` to that
   `from`.
 - A private project shows by name only and cannot be addressed.
+- Only when the user set reach to full and your server has its mutating
+  tools: `create_worktree` (with `project`), `close_session`, `send` and
+  the note/pin/lifecycle setters take another project's place too.
+  `remove_worktree` never does.
 
 ## Showing the user a file
 

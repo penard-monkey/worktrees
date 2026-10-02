@@ -164,3 +164,56 @@ srv_in() {
   grep -q '^Managed by worktrees' "$BATS_TEST_TMPDIR/instr"
   [ "$(result_text | jq -r '.places[0].project')" = alpha ]
 }
+
+# ── cross-project mutations (proposal P3): reach `full` AND --mutations ──────
+
+@test "a foreign mutation needs full AND --mutations; then it lands in the target's sidecar" {
+  reach read
+  srv "--mutations" set_note '{"slug":"beta:lane","note":"from alpha"}'
+  [ "$(is_error)" = true ]
+  [[ "$(result_text)" == *'cross_project = "full"'* ]]
+  reach full
+  srv "" set_note '{"slug":"beta:lane","note":"from alpha"}'
+  [ "$(is_error)" = true ]
+  [[ "$(result_text)" == *--mutations* ]]
+  [ ! -e "$BETA/.worktrees.places.json" ] || ! grep -q 'from alpha' "$BETA/.worktrees.places.json"
+  srv "--mutations" set_note '{"slug":"beta:lane","note":"from alpha"}'
+  [ "$(is_error)" = false ]
+  grep -q 'from alpha' "$BETA/.worktrees.places.json"
+  [ ! -e "$REPO/.worktrees.places.json" ] || ! grep -q 'from alpha' "$REPO/.worktrees.places.json"
+}
+
+@test "create_worktree project: creates in the TARGET project, its session named by that project; close_session ends it" {
+  reach full
+  srv "--mutations" create_worktree '{"branch":"agent-x","project":"beta"}'
+  [ "$(is_error)" = false ]
+  [ -d "$BETA/.worktrees/agent-x" ]
+  [ ! -d "$REPO/.worktrees/agent-x" ]
+  tmux_session_exists beta-agent-x
+  srv "--mutations" close_session '{"slug":"beta:agent-x"}'
+  [ "$(is_error)" = false ]
+  ! tmux_session_exists beta-agent-x
+  [ -d "$BETA/.worktrees/agent-x" ]
+}
+
+@test "create_worktree project is refused at read, for a private project, and for an unknown one" {
+  reach read
+  srv "--mutations" create_worktree '{"branch":"agent-y","project":"beta"}'
+  [ "$(is_error)" = true ]
+  reach full
+  run_wt -C "$BATS_TEST_TMPDIR" projects private beta on
+  srv "--mutations" create_worktree '{"branch":"agent-y","project":"beta"}'
+  [ "$(is_error)" = true ]
+  [[ "$(result_text)" == *private* ]]
+  srv "--mutations" create_worktree '{"branch":"agent-y","project":"nobody"}'
+  [ "$(is_error)" = true ]
+  [ ! -d "$BETA/.worktrees/agent-y" ]
+}
+
+@test "remove_worktree never acts on another project's place, even at full with confirm" {
+  reach full
+  srv "--mutations" remove_worktree '{"slug":"beta:lane","confirm":true}'
+  [ "$(is_error)" = true ]
+  [[ "$(result_text)" == *"never acts on another project"* ]]
+  [ -d "$BETA/.worktrees/lane" ]
+}

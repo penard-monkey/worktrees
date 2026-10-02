@@ -659,3 +659,17 @@ for r in results:
   [ ! -d "$store/.read" ] || [ "$(find "$store/.read" -type f | wc -l | tr -d ' ')" = 0 ]
   [ "$(grep -c 'send-keys -t %0 Enter' "$TMUX_LOG")" = 3 ]
 }
+
+@test "create_worktree keeps stdout pure JSON-RPC: git's own output never reaches the protocol stream" {
+  # Core passes git's success output through ("branch 'x' set up to track …",
+  # "HEAD is now at …"). On the CLI that is the terminal; in `worktrees mcp`
+  # stdout IS the protocol, and one non-JSON line is a parse error for the
+  # client. Every line must parse.
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-pure"}}}'
+  [ -d "$REPO/.worktrees/agent-pure" ]
+  printf '%s\n' "$output" > "$BATS_TEST_TMPDIR/out.jsonl"
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    printf '%s' "$line" | python3 -c 'import sys, json; json.loads(sys.stdin.read())' || { echo "not JSON: $line"; return 1; }
+  done < "$BATS_TEST_TMPDIR/out.jsonl"
+}
