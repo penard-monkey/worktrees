@@ -23,6 +23,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   you never edited it, the new default simply applies.
 - `worktrees guide` prints the skill agents actually get; `worktrees guide
   --default` prints the one this build ships, and `--status` says which.
+- **The app now checks for a new release every hour, not just at launch.**
+  An app left open for a week used to hear nothing of a release made on day
+  two. It checks hourly while the window is visible (a check that comes due
+  while it is hidden waits, and runs the moment you come back), retries sooner
+  and then backs off when it cannot reach GitHub (5, 10, 20, 40 minutes, then
+  hourly), and never runs two checks at once. A check that cannot reach GitHub
+  keeps the last release it saw, so the gear's dot does not blink out while you
+  are offline. Settings → Updates → **Check for updates automatically** turns
+  it off; the manual check is unchanged.
+- **A bubble beside the gear says when a release is out.** It points at the
+  gear (bottom-left, or bottom-right with Places mirrored), names the release
+  and the app/CLI versions you are on, and offers **Update…** (opens Settings →
+  Updates) and **What's new** (the release page). It shows once per version:
+  closing it, pressing Update…, or opening Settings → Updates any other way
+  retires it for that release, and a newer release brings it back. The dot
+  on the gear stays until you update, and it is the only mark on the gear.
+  The bubble is not a dialog, so Escape still goes to the terminal, and it does
+  not take focus. A CLI that is not installed lights the dot but is not news,
+  so it gets no bubble.
 - **Back and forward, like a browser.** ‹ › at the start of the place
   header (top-left on Home) walk back through what you were looking at: the
   place, the dock's tab, the file open in it and the line a ⌘-click or an
@@ -30,10 +49,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   work everywhere. ⌘← / ⌘→ do the same, the terminal included (they did
   nothing there before), except in a text field, where they still move to the
   start / end of the line. Mouse buttons 4 / 5 work, and right-clicking ‹ or
-  › lists where each one goes. A place that has been removed is skipped; a file that
-  is gone lands you on that place's Files tab with a note saying so. Opening
-  or closing the dock (⌘J) is not a step, and quick clicks within 0.6 s count
-  as one.
+  › lists where each one goes. A place that has been removed is skipped; a
+  file that is gone lands you on that place's Files tab with a note saying so.
+  Opening or closing the dock (⌘J) is not a step, and quick clicks within
+  0.6 s count as one.
 
 ### Fixed
 - **pi typed into a place's own session is pi, not Claude.** tmux names only

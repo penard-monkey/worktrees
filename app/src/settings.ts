@@ -322,7 +322,10 @@ export type Settings = {
   // (`set_pi_trust`) like `codex_permissions`. Mirrors `worktrees_core::trust::PiTrust`.
   pi_project_trust: PiProjectTrust;
   ai_auto_resume: boolean; // single-click Enter resumes the selected provider when possible
-  update_auto_check: boolean; // check for updates ~3s after launch (manual check always works)
+  update_auto_check: boolean; // poll for releases hourly while visible (manual check always works)
+  // The release tag whose update bubble was closed ("" = none). Per VERSION, so
+  // a newer release asks again; the gear's dot is not affected (updatepoll.ts).
+  update_dismissed: string;
   fetch_interval_min: number; // background `git fetch origin` cadence (0 = off, else 5 | 15 | 60)
   // ── what a dock shell tab keeps between runs ────────────────────────────
   // Both are FLAT globals, deliberately not `place_panels` keys: they are how
@@ -440,6 +443,7 @@ export const DEFAULTS: Settings = {
   pi_project_trust: "never",
   ai_auto_resume: true,
   update_auto_check: true,
+  update_dismissed: "",
   fetch_interval_min: 0,
   term_persist_scrollback: true,
   term_per_tab_history: true,

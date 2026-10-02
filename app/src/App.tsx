@@ -16,9 +16,11 @@ import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
 import { AutomationsPane } from "./AutomationsPane";
 import { FilesPane, FileView, type DockAt } from "./FilesPane";
-import { SettingsSheet } from "./SettingsSheet";
+import { RELEASES_URL, SettingsSheet } from "./SettingsSheet";
 import { type McpStatus } from "./McpPanel";
 import { dismissPatch, offersTitle, pendingOffers, type Offer } from "./offers";
+import { bubbleTag, browserPollEnv, startUpdatePoll } from "./updatepoll";
+import { UpdateBubble } from "./UpdateBubble";
 import type { CatId } from "./SettingsSheet";
 import {
   driftedSlugs, InitBanner, issueCount, ProjectSheet, remedies, reportFailed, StrayBanner,
@@ -3898,6 +3900,20 @@ function App() {
   // "second competing badge" that button was designed not to be.
   const railAlert = updateAvail;
   const railTitle = updateAvail ? "settings — update available" : "settings (⌘,)";
+  // The bubble announces a release ONCE per tag (updatepoll.ts::bubbleTag); the
+  // dot above stays until you update. Showing Settings → Updates by any route
+  // (opened at it, or clicked to inside the sheet) counts as having seen it — the bubble's own "Update…" goes there, and a
+  // bubble re-appearing when you close the sheet you opened to read the same
+  // news would be the nag this is built not to be.
+  const [gearEl, setGearEl] = useState<HTMLButtonElement | null>(null);
+  const [bubbleLift, setBubbleLift] = useState<number | null>(null);
+  const bubble = bubbleTag({ latest: upd?.latest, newer: appStale || cliStale, dismissed: settings.update_dismissed || undefined });
+  const dismissBubble = useCallback((tag: string) => {
+    updateSettings({ update_dismissed: tag });
+  }, []);
+  const onSettingsCat = useCallback((c: CatId) => {
+    if (c === "updates" && bubble) dismissBubble(bubble);
+  }, [bubble, dismissBubble]);
   const recheckTmux = useCallback(async () => {
     try {
       const ok = await invoke<boolean>("tmux_check", { refresh: true });
@@ -4283,19 +4299,31 @@ function App() {
     };
   }, []);
 
-  // update check: once shortly after launch (delayed off the startup path);
-  // manual re-check from Settings. Offline → latest stays null, no nagging.
-  const checkUpdate = useCallback(async () => {
-    try { setUpd(await invoke<UpdateInfo>("check_update")); } catch { /* offline */ }
+  // update check: polled hourly while visible (updatepoll.ts owns the
+  // schedule); manual re-check from Settings. Resolves true when the release
+  // feed answered, which is what the poll's backoff keys on.
+  //
+  // `keepLatest` is the POLL's: a background check that cannot reach GitHub
+  // keeps the last tag it saw, so an hour offline does not blink the gear's dot
+  // (and the bubble) out and back. The manual check replaces it — Settings says
+  // "couldn't reach the release feed" from a null `latest`, and that has to stay
+  // true of the check you just pressed.
+  const checkUpdate = useCallback(async (keepLatest = false) => {
+    try {
+      const u = await invoke<UpdateInfo>("check_update");
+      setUpd((prev) => (keepLatest && !u.latest && prev?.latest ? { ...u, latest: prev.latest } : u));
+      return !!u.latest;
+    } catch {
+      return false;
+    }
   }, []);
-  // Gate on the setting AND keep it in the deps: a timer scheduled pre-hydration
-  // (under DEFAULTS, update_auto_check=true) is CANCELLED by this effect's cleanup
-  // when hydration lands with the toggle off — re-running the flag INSIDE the
-  // callback would already have fired. Manual "Check for updates" is unaffected.
+  // Gate on the setting AND keep it in the deps: a poll started pre-hydration
+  // (under DEFAULTS, update_auto_check=true) is STOPPED by this effect's cleanup
+  // when hydration lands with the toggle off — its first check is 3s out, so
+  // nothing has fired yet. Manual "Check for updates" is unaffected.
   useEffect(() => {
     if (!settings.update_auto_check) return;
-    const t = setTimeout(checkUpdate, 3000);
-    return () => clearTimeout(t);
+    return startUpdatePoll(() => checkUpdate(true), browserPollEnv());
   }, [checkUpdate, settings.update_auto_check]);
 
   // Push the auto-fetch cadence to the backend watcher (which owns the pass loop
@@ -7159,7 +7187,7 @@ function App() {
             status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
-        <button className={"rail-icon" + (railAlert ? " upd" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
+        <button ref={setGearEl} className={"rail-icon" + (railAlert ? " upd" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
       </nav>
 
       {/* ── the sidebar ──
@@ -7988,7 +8016,7 @@ function App() {
           same coordinates the undo banner sat exactly on top of the note it
           was supposed to accompany. Undo first in DOM = above on screen. */}
       {(err || notice || undo) && (
-        <div className="float-stack">
+        <div className="float-stack" style={bubbleLift !== null ? { bottom: bubbleLift } : undefined}>
           {/* One click back from a slip of the wrist — a drag rewrites declared
               state, and the row it moves can land in a collapsed group or a
               hidden tier, i.e. out of sight of the gesture that moved it. */}
@@ -8094,7 +8122,7 @@ function App() {
         updateSettings(patch);
         if (patch.default_provider === "codex") void ensureCodexCli("codex");
       }} onClose={() => setSettingsAt(null)}
-        update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate}
+        update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate} onCatShown={onSettingsCat}
         onShowNotes={showReleaseNotes} onReset={onReset}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
         mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
@@ -8430,6 +8458,15 @@ function App() {
     {/* The window-wide host: under rail, sidebar, terminal and dock alike, so it
         survives ⌘B and is the only placement that is also there on Home. No
         `info`, no row — an empty 26px band would be worse than no band. */}
+    {bubble && !settingsOpen && (
+      <UpdateBubble
+        tag={bubble} appVersion={upd?.app_version} cliVersion={upd?.cli_version}
+        appStale={appStale} cliStale={cliStale} anchor={gearEl} side={mirrored ? "right" : "left"}
+        onUpdate={() => openSettings({ cat: "updates" })}
+        onNotes={() => { openUrl(`${RELEASES_URL}/tag/${bubble}`).catch(fail); }}
+        onDismiss={() => dismissBubble(bubble)} onLift={setBubbleLift}
+      />
+    )}
     {((settings.usage_place === "strip" && usage.info) || statusChipHost === "strip") && (
       <div className="usage-strip">
         {settings.usage_place === "strip" && usage.info && (

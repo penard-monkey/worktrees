@@ -71,7 +71,16 @@ function reconcile(pl: Place) {
 }
 
 let dialogCount = 0;
-let mockCliVersion: string | null = "0.1.0"; // bumped by update_cli
+// Release-check knobs. The DEFAULT is up to date, so no harness session (or
+// README recording) grows an update bubble 3s in unless it asked for one:
+//   ?latest=v9.9.9   the release feed's tag (app + CLI both behind it)
+//   ?cli=0.1.0       the installed CLI (`none` = not installed)
+//   ?offline         the feed is unreachable (latest: null), as `curl` failing
+// and `__mock.release("v9.9.10")` / `__mock.release(null)` to publish (or go
+// offline) MID-SESSION, which is what the hourly poll exists to notice.
+const mockReleaseQ = new URLSearchParams(location.search);
+let mockLatest: string | null = mockReleaseQ.has("offline") ? null : (mockReleaseQ.get("latest") ?? "v0.2.1");
+let mockCliVersion: string | null = mockReleaseQ.get("cli") === "none" ? null : (mockReleaseQ.get("cli") ?? "0.2.1"); // bumped by update_cli
 // Claude MCP wiring, stateful so the install transition is drivable: the Home
 // card must actually GO AWAY when the button works, and Settings must flip to
 // the connected verdict, neither of which a constant can exercise.
@@ -2322,10 +2331,11 @@ Phase 3: Frontend pane and mock harness
         app_version: "0.2.1",
         cli_version: mockCliVersion,
         cli_path: mockCliVersion ? "/Users/demo/.local/bin/worktrees" : null,
-        latest: "v0.2.1",
+        latest: mockLatest,
       };
     case "list_releases":
       return [
+        ...(mockLatest && mockLatest !== "v0.2.1" ? [{ tag: mockLatest, published: "2026-10-02" }] : []),
         { tag: "v0.2.1", published: "2026-07-26" },
         { tag: "v0.2.0", published: "2026-07-25" },
         { tag: "v0.1.0", published: "2026-07-20" },
@@ -3408,6 +3418,12 @@ const healthyConfigs: Record<string, MockCfg> = {};
     mockSyncLive = on;
     return mockSyncLive;
   },
+  /** The release feed's answer from now on (null = unreachable). The app
+   *  notices on its next scheduled check, not at once — as the real one would. */
+  release(tag: string | null) {
+    mockLatest = tag;
+    return mockLatest;
+  },
   fixConfig(root: string = CDV_ROOT) {
     if (!healthyConfigs[root]) return null;
     mockConfigs[root] = clone(healthyConfigs[root]);
@@ -3416,4 +3432,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/finishTask/syncFail/syncLive/uiEvents)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/finishTask/syncFail/syncLive/release/uiEvents)");

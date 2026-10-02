@@ -1040,6 +1040,54 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 4px var(--accent);
 }
+/* The update bubble (UpdateBubble.tsx): fixed beside the gear, its tail at the
+   gear's centre (`--tail-y`, from the bubble's bottom, set by the component).
+   Below every popover/menu-catch (40+) and modal, above the nav overlay (30).
+   Hue lives in the DOT only — the same 6px accent dot the gear wears, so the
+   two read as one fact; words take --txt-hi/--txt (accent is a fill). Not
+   --txt-dim: on --bg-panel it is 3.6:1 in tokyo-day and 3.8:1 in nord, and
+   the second line carries the versions you are deciding on. */
+.upd-bubble {
+  position: fixed; z-index: 35; width: 264px; max-width: calc(100vw - var(--rail-w) - 2 * var(--s4));
+  padding: var(--s2) var(--s3) var(--s3);
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+  animation: pop var(--dur-slow) var(--ease);
+  transform-origin: left bottom;
+}
+.upd-bubble.right { transform-origin: right bottom; }
+/* The tail: a square on the bubble's edge, rotated, wearing the bubble's own
+   fill and its two outer borders, so the seam disappears into the box. */
+.upd-bubble::before {
+  content: ""; position: absolute; width: 9px; height: 9px;
+  bottom: calc(var(--tail-y, 16px) - 5px);
+  background: var(--bg-panel);
+  border-left: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+.upd-bubble.left::before { left: -6px; transform: rotate(45deg); }
+.upd-bubble.right::before { right: -6px; transform: rotate(-135deg); }
+.upd-bubble-head { display: flex; align-items: center; gap: var(--s2); min-height: 22px; }
+.upd-bubble-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--accent); box-shadow: 0 0 4px var(--accent);
+}
+.upd-bubble-title {
+  flex: 1; min-width: 0; font-size: var(--fs-label); font-weight: var(--fw-bold); color: var(--txt-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.upd-bubble-x {
+  flex: none; display: grid; place-items: center; width: 22px; height: 22px; margin-right: -6px;
+  background: transparent; border: 0; border-radius: var(--r-sm); color: var(--txt-mute);
+}
+.upd-bubble-x:hover { color: var(--txt-hi); background: var(--bg-elev); }
+.upd-bubble-body { margin: 2px 0 0 14px; font-size: var(--fs-meta); color: var(--txt); }
+.upd-bubble-actions { display: flex; align-items: center; gap: var(--s3); margin: var(--s2) 0 0 14px; }
+.upd-bubble-link {
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
+  background: transparent; border: 0; padding: 0;
+  font-size: var(--fs-meta); color: var(--txt);
+}
+.upd-bubble-link:hover { color: var(--txt-hi); text-decoration: underline; }
 .upd-tag {
   margin-left: var(--s2); padding: 1px var(--s2); border-radius: var(--r-sm);
   font-size: var(--fs-micro); font-weight: var(--fw-bold); text-transform: uppercase;
