@@ -257,6 +257,10 @@ pub const CLAUDE: &Claude = &Claude;
 pub const CODEX: &Codex = &Codex;
 pub const PI: &Pi = &Pi;
 
+/// Codex's flag for its inline TUI (see `Codex::launch_args`). Needs
+/// codex-cli >= 0.81.0; an older one rejects it and the lane falls to the shell.
+const CODEX_INLINE: &str = "--no-alt-screen";
+
 /// Every adapter, in registry order (`provider::PROVIDERS`). A new harness is
 /// a row there and an entry here; `registry_and_adapters_line_up` pins it.
 pub const ALL: &[&dyn Adapter] = &[CLAUDE, CODEX, PI];
@@ -383,6 +387,14 @@ impl Adapter for Codex {
             "-c".to_string(),
             shell_quote(crate::profile::CODEX_DOC_FALLBACK),
         ];
+        // Inline, not on the alternate screen: 0.15x's alt-screen TUI never
+        // asks for the mouse and leaves tmux no history, so the app's wheel had
+        // nothing to scroll. Inline output lands in tmux history (the pi path),
+        // a resize re-emits the transcript rather than duplicating it, and the
+        // modals still end on their footer (fixtures `codex-inline/`, 0.159.0).
+        if !launch.cmd.split_whitespace().any(|w| w == CODEX_INLINE) {
+            head.push(CODEX_INLINE.to_string());
+        }
         head.extend(launch.place_flags.iter().cloned());
         head.extend(model_words(self.provider(), launch));
         LaunchArgs { head, tail: Vec::new() }
@@ -871,6 +883,32 @@ mod tests {
         assert_eq!(PI.provider().name_arg, None, "pi's --name is a label, not an address");
     }
 
+    /// Codex is launched inline, fresh and resumed alike, so its transcript
+    /// lands in tmux history where the app's wheel can scroll it — and a user
+    /// whose own command already says so does not get the flag twice.
+    #[test]
+    fn codex_runs_inline_on_launch_and_resume() {
+        // Whole words: twice is a hard clap error (exit 2, "cannot be used
+        // multiple times"), so the guard is load-bearing — and it must match
+        // the WORD, or a value merely containing it suppresses the flag.
+        let once = |cmd: &str| cmd.split_whitespace().filter(|w| *w == "--no-alt-screen").count();
+        let fresh = AiLaunch::plain("codex").launch_cmd("p-feat");
+        assert_eq!(once(&fresh), 1, "{fresh}");
+        let mut resumed = AiLaunch::plain("codex resume --last");
+        resumed.resume = true;
+        let r = resumed.launch_cmd("p-feat");
+        assert_eq!(once(&r), 1, "{r}");
+        let (flag, sub) = (r.find("--no-alt-screen").unwrap(), r.find(" resume --last").unwrap());
+        assert!(flag < sub, "before the subcommand: {r}");
+        let lookalike = AiLaunch::plain("codex -c x=--no-alt-screen-ish").launch_cmd("p-feat");
+        assert_eq!(once(&lookalike), 1, "{lookalike}");
+        for own in ["codex --no-alt-screen", "codex --no-alt-screen resume --last"] {
+            let c = AiLaunch::plain(own).launch_cmd("p-feat");
+            assert_eq!(once(&c), 1, "{c}");
+        }
+        assert!(!AiLaunch::plain("claude").launch_cmd("p").contains("--no-alt-screen"));
+    }
+
     /// `--model` reaches claude and codex through their registry `model_arg`,
     /// only when chosen and never on a resume — and with none chosen their
     /// launch is byte-identical to before.
@@ -907,7 +945,7 @@ mod tests {
         let a = CODEX.launch_args(&codex, "p-feat");
         assert!(a.tail.is_empty(), "codex takes no --name");
         assert_eq!(&a.head[..2], &["-c".to_string(), "forced_login_method=chatgpt".to_string()]);
-        assert_eq!(&a.head[4..], &["--sandbox".to_string(), "workspace-write".to_string()]);
+        assert_eq!(&a.head[4..], &["--no-alt-screen".to_string(), "--sandbox".to_string(), "workspace-write".to_string()]);
         assert!(ALL.iter().all(|a| a.launch_env(&plain).is_empty()), "no harness needs launch env yet");
         assert_eq!(default_adapter().provider().id, "claude", "pi is never the default");
     }

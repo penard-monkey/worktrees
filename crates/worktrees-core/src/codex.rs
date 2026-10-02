@@ -716,6 +716,25 @@ mod tests {
         assert!(!waiting_on_screen(&quoted));
     }
 
+    /// Launched inline (`--no-alt-screen`), the TUI draws on the main screen
+    /// and its transcript scrolls into tmux history, but `capture-pane -p` is
+    /// still the visible screen: a live modal still ends on its footer, and a
+    /// cancelled one leaves the composer back at the bottom. Real 0.159.0
+    /// captures, approval and plan-mode question.
+    #[test]
+    fn an_inline_codex_still_shows_its_modal_footer() {
+        for (modal, gone) in [
+            (include_str!("../tests/fixtures/codex-inline/approval.txt"),
+             include_str!("../tests/fixtures/codex-inline/approval-cancelled.txt")),
+            (include_str!("../tests/fixtures/codex-inline/question.txt"),
+             include_str!("../tests/fixtures/codex-inline/question-cancelled.txt")),
+        ] {
+            assert!(waiting_on_screen(modal), "{modal}");
+            assert!(!waiting_on_screen(gone), "{gone}");
+            assert_eq!(composer_on_screen(gone), Some(Composer::Empty), "{gone}");
+        }
+    }
+
     /// A narrow pane wraps the footer onto two lines; the join finds it. A
     /// wrapped footer with the composer back under it is history, not a modal.
     #[test]

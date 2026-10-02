@@ -1744,9 +1744,10 @@ mod tests {
         let keep = "exec \"${SHELL:-/bin/sh}\"";
         // The name rides after everything the launch already carried…
         assert_eq!(AiLaunch::plain("claude").launch_cmd("proj-feat"), "claude --name 'proj-feat'");
-        // Codex: sign-in, the CLAUDE.md fallback, then the permission flags —
-        // all before a `resume` subcommand, which would otherwise own them.
-        let fb = r#"-c 'project_doc_fallback_filenames=["CLAUDE.md"]'"#;
+        // Codex: sign-in, the CLAUDE.md fallback, inline mode, then the
+        // permission flags — all before a `resume` subcommand, which would
+        // otherwise own them.
+        let fb = r#"-c 'project_doc_fallback_filenames=["CLAUDE.md"]' --no-alt-screen"#;
         assert_eq!(AiLaunch::plain("codex").launch_cmd("proj-feat"), format!("codex -c forced_login_method=chatgpt {fb}"));
         let mut resumed = AiLaunch::plain("codex resume --last");
         resumed.place_flags = vec!["--approve-for-me".into()];

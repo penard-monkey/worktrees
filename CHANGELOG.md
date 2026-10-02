@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **The wheel scrolls a Codex lane.** Codex 0.15x draws its TUI on the
+  terminal's alternate screen and never asks for the mouse, so tmux kept no
+  history and the wheel could only send ↑/↓, which Codex reads as prompt
+  history. Codex is now launched with `--no-alt-screen`, fresh and resumed:
+  its transcript lands in tmux history and the wheel scrolls it the way it
+  scrolls pi, and a resize re-flows it without duplicating anything. An AI
+  command that already passes the flag does not get it twice. A Codex lane
+  that is already running keeps the old behaviour until it is relaunched.
+  Needs codex-cli 0.81.0 or later, the first release with the flag.
+
 ## [0.36.0] - 2026-10-02
 
 ### Added
