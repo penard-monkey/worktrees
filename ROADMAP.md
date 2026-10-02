@@ -5,23 +5,51 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Cross-project reach: the real-app and token checks are owed.** Every
+  check in `docs/cross-project-manual-checks.md` is open:
+  - reach as an agent sees it, including `place_status` against the other
+    project's nav dot;
+  - the Codex and pi composer drops — what a bracketed paste does there,
+    above all during an approval. The app refuses a drop into a waiting
+    Codex/pi pane until that is measured;
+  - a live Claude↔pi cross-project `report` and reply;
+  - **Q8:** whether Codex's auto-review sandbox binds the `worktrees mcp`
+    server it spawns, or only its shell. Needs Codex tokens;
+  - `create_worktree` into another project from a live Claude, its lane
+    opening on the provenance header;
+  - `@<project>:` in a live Claude session.
+
+  Also never seen in a built app: P0's first-launch merge of the app's old
+  `projects.json` into the registry. See
+  [the session](docs/sessions/2026-10-01-cross-project/summary.md).
+
 - **Cross-project: the drag still types an address for a foreign place.**
-  P4 lists other projects' places in the `@` menu, but the app cannot tell
+  P4 lists other projects' places in the `@` menu. But the app cannot tell
   which `worktrees mcp` version a given session holds, and a `place://…`
   token typed into an older server resolves to nothing, silently. Switch the
-  drag to the token once the server's version is visible to the app (e.g.
-  written beside the session's probe). Also: the `slug` descriptions in the
-  MCP tool schemas still say "Place slug" — mention `<project>:<slug>` at the
-  next deliberate schema change (descriptions are cached by some clients, so
-  results carry the form today). See `docs/proposals/cross-project.md` §6.3.
+  drag to the token once the server's version is visible to the app, e.g.
+  written beside the session's probe.
 
-- **Cross-project reach: what the proposal's P1b deferred.** A badge on a
-  project header whose session prefix collides with another registered
-  project's (doctor already reports `prefix-collision`, and the project's
-  To do list counts it, but the nav says nothing), and rename/private
-  controls in the project sheet (today: Settings → Agent guidance → Other
-  projects for `private`, `worktrees projects rename` for the name). See
-  `docs/proposals/cross-project.md` §8 and §9.
+  Also: the `slug` descriptions in the MCP tool schemas still say "Place
+  slug". Mention `<project>:<slug>` at the next deliberate schema change;
+  some clients cache descriptions, so results carry the form today. See
+  `docs/proposals/cross-project.md` §6.3.
+
+- **Cross-project reach: what the proposal's P1b deferred.**
+  - A badge on a project header whose session prefix collides with another
+    registered project's. Doctor already reports `prefix-collision` and the
+    project's To do list counts it, but the nav says nothing.
+  - Rename and private controls in the project sheet. Today `private` lives
+    in Settings → Agent guidance → Other projects, and renaming is
+    `worktrees projects rename`.
+
+  See `docs/proposals/cross-project.md` §8 and §9.
+
+- **Cross-project messages: no per-sender share of a log.** A project at
+  `read` can fill another project's message log, and the `MAX_COUNT` prune
+  drops the oldest messages whoever sent them. That is the same power a local
+  agent has, but now across a boundary. A per-`from` share is the fix if it
+  ever matters. See the proposal's §4.1 "Known limits".
 
 - **Hand-test terminal file links and the line viewer in the real app
   (#399, #400).** Every check ran against the mock in Chromium and headless
