@@ -108,6 +108,23 @@ jq_out() { printf '%s' "$output" | python3 -c "$1"; }
   [[ "$output" == *0* ]]
 }
 
+# The CLI twin, through the real binary: `file:LINE` is the form every
+# compiler and agent prints, and it must queue the LINE, not a missing file.
+@test "worktrees show splits path:line and queues the position" {
+  printf 'a\nb\nc\n' > "$REPO/notes.txt"
+  run bash -c "cd '$REPO' && '$WT_BIN' show notes.txt:2"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"at line 2"* ]]
+  run bash -c "cat '$HOME'/.cache/worktrees/inbox/*.json"
+  [[ "$output" == *'"line":2'* ]]
+  [[ "$output" == *notes.txt\"* ]]
+
+  rm -f "$HOME"/.cache/worktrees/inbox/*.json
+  run bash -c "cd '$REPO' && '$WT_BIN' show notes.txt --line 0"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"1-based"* ]]
+}
+
 @test "with --mutations the destructive tool appears but still needs confirm" {
   mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"remove_worktree","arguments":{"slug":"x"}}}'
   [[ "$output" == *'"isError":true'* ]]

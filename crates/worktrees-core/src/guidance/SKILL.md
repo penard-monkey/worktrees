@@ -42,6 +42,13 @@ tmux. The repository's own AGENTS.md / CLAUDE.md wins on repo-specific rules
   tmux session name). `send` types into a Codex or pi pane; check the pane is
   not mid-input before typing into it.
 
+## Showing the user a file
+
+- When the user asks to open, see or look at a file (or a line of one), use
+  MCP `show_doc {path, line}` or `worktrees show <file>:<line>`: it opens in
+  the worktrees app's file viewer at that line. Print the file only when they
+  ask for its text.
+
 ## Finishing
 
 - Commit, push and open the pull request from the place, not from `(main)`.

@@ -1224,18 +1224,31 @@ impl Server {
             ));
             t.push(tool(
                 "show_doc",
-                "Open a file from THIS repository in the worktrees desktop app and bring the \
-                 app to the front. Use it whenever the user asks to see, look at, open or be \
-                 shown a document — \"show me CLAUDE.md\", \"let me see the plan\", \"open the \
-                 ADR\" — instead of, or as well as, printing the file. Markdown is rendered. \
-                 Takes a path relative to the repository root, or an absolute path inside it. \
-                 Does nothing to the file and nothing to git.",
+                "Open a file from THIS repository in the worktrees desktop app's file viewer, \
+                 scrolled to `line` when given, and bring the app to the front. Use it whenever \
+                 the user asks to open, see, look at or be shown a file — \"open ops.rs at 1022\", \
+                 \"show me CLAUDE.md\", \"let me see the plan\" — and prefer it to printing the \
+                 file when they are using the worktrees app. Any text file: source, config or \
+                 docs (markdown is rendered, or shown as source when a line is given). A relative \
+                 path resolves in your own place's working tree first, then the repository root; \
+                 an absolute path must be inside the repository. Does nothing to the file and \
+                 nothing to git.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Repo-relative (CLAUDE.md, docs/adr/0001.md) or an absolute path inside this repository."
+                            "description": "Relative to your place (src/ops.rs, CLAUDE.md), or an absolute path inside this repository."
+                        },
+                        "line": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "1-based line to scroll to and mark. Omit to open at the top."
+                        },
+                        "col": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "1-based column on that line. Needs `line`."
                         }
                     },
                     "required": ["path"],
@@ -1464,15 +1477,43 @@ impl Server {
                 if raw.trim().is_empty() {
                     return Ok(text_err("path is required"));
                 }
+                // 1-based, optional, and lenient about TYPE only: a model that
+                // sends `"12"` meant 12, and refusing it would cost a retry for
+                // nothing. Anything that is not a positive integer is refused —
+                // a guessed line is worse than the top of the file.
+                let num = |k: &str| -> Result<Option<u32>, String> {
+                    match a.get(k) {
+                        None | Some(serde_json::Value::Null) => Ok(None),
+                        Some(v) => v
+                            .as_u64()
+                            .or_else(|| v.as_str().and_then(|t| t.trim().parse::<u64>().ok()))
+                            .filter(|n| *n >= 1)
+                            .and_then(|n| u32::try_from(n).ok())
+                            .map(Some)
+                            .ok_or_else(|| format!("{k} must be a positive integer (1-based), got {v}")),
+                    }
+                };
+                let at = match (num("line"), num("col")) {
+                    (Ok(line), Ok(col)) => worktrees_core::inbox::At { line, col },
+                    (Err(e), _) | (_, Err(e)) => return Ok(text_err(&e)),
+                };
                 let root = std::path::PathBuf::from(&self.proj()?.main_root);
-                // Relative resolves against the REPO ROOT, not the process cwd.
-                // The server's cwd is wherever claude was launched, which is
-                // normally a worktree and occasionally a subdirectory of one —
-                // so "CLAUDE.md" would mean different files on different days.
+                // Relative resolves against the CALLER'S PLACE first, then the
+                // repo root — never the process cwd, which can be a
+                // subdirectory, so "CLAUDE.md" would mean different files on
+                // different days. The place first because a lane asking for
+                // `src/ops.rs` means the copy in ITS tree, the one it has been
+                // editing; (main)'s would be the file as it was before the
+                // lane's work. The root is the fallback for a path the place
+                // does not have (an untracked file in the main checkout).
                 let want = if std::path::Path::new(&raw).is_absolute() {
                     std::path::PathBuf::from(&raw)
                 } else {
-                    root.join(&raw)
+                    self.caller_place()
+                        .ok()
+                        .map(|p| std::path::Path::new(&p.path).join(&raw))
+                        .filter(|p| p.exists())
+                        .unwrap_or_else(|| root.join(&raw))
                 };
                 let canon = match std::fs::canonicalize(&want) {
                     Ok(c) => c,
@@ -1487,16 +1528,23 @@ impl Server {
                 if !canon.starts_with(&root_c) {
                     return Ok(text_err(&format!("{} is outside this repository", canon.display())));
                 }
-                match worktrees_core::inbox::request(&canon, worktrees_core::sysclock::now_epoch()) {
+                match worktrees_core::inbox::request(&canon, at, worktrees_core::sysclock::now_epoch()) {
                     // Says what it DID, not what it hopes happened: this process
                     // cannot see whether the app is running, and a model told
                     // "opened" would report that to the user as fact.
-                    Ok(_) => Ok(text_ok(&format!(
-                        "asked the worktrees app to show {}. If the app is not running, nothing \
-                         happens and the request expires after {}s.",
-                        canon.display(),
-                        worktrees_core::inbox::MAX_AGE_SECS
-                    ))),
+                    Ok(_) => {
+                        let pos = match (at.line, at.col) {
+                            (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
+                            (Some(l), None) => format!(" at line {l}"),
+                            _ => String::new(),
+                        };
+                        Ok(text_ok(&format!(
+                            "asked the worktrees app to show {}{pos} in its file viewer. If the app is \
+                             not running, nothing happens and the request expires after {}s.",
+                            canon.display(),
+                            worktrees_core::inbox::MAX_AGE_SECS
+                        )))
+                    }
                     Err(e) => Ok(text_err(&e)),
                 }
             }
@@ -2892,16 +2940,12 @@ mod tests {
     #[test]
     fn show_doc_is_gated_and_cannot_leave_the_repository() {
         use serde_json::json;
-        let base = std::env::temp_dir().join(format!("wt-mcp-showdoc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let root = base.join("proj");
-        std::fs::create_dir_all(&root).unwrap();
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .arg(&root)
-            .status()
-            .expect("git init")
-            .success());
+        // On `scratch()` for its ENV_LOCK: this sets HOME and drains the
+        // process-global inbox, and so does the line test below — unlocked,
+        // the two could each read (or empty) the other's request.
+        let sc = scratch("showdoc");
+        let base = sc.base.clone();
+        let root = sc.root.clone();
         std::fs::write(root.join("CLAUDE.md"), "# notes").unwrap();
         let outside = base.join("elsewhere.md");
         std::fs::write(&outside, "# not ours").unwrap();
@@ -2945,7 +2989,6 @@ mod tests {
             .unwrap();
         assert_eq!(r["isError"], json!(true), "`..` must not be a way out");
 
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `listChanged: true` is a promise the watcher keeps; the test exists so
@@ -3251,6 +3294,56 @@ mod tests {
             .unwrap();
         assert_eq!(r["isError"], serde_json::json!(true));
         assert!(r["content"][0]["text"].as_str().unwrap().contains("no such automation"));
+    }
+
+    /// `show_doc` with a position, from a LANE. A relative path means the
+    /// file in the caller's own working tree — the one it has been editing and
+    /// is talking about — and falls back to the repository root only when the
+    /// place has no such file. The line rides through to the inbox.
+    #[test]
+    fn show_doc_takes_a_line_and_resolves_against_the_callers_place() {
+        use serde_json::json;
+        let sc = scratch("showdoc-line");
+        let wt = repo_with_worktree(&sc);
+        let home = sc.base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        std::fs::write(sc.root.join("only-in-main.md"), "# main").unwrap();
+        let mut server = server_in(&sc.root, &wt, true);
+        let drain = || worktrees_core::inbox::drain(worktrees_core::sysclock::now_epoch());
+
+        let r = server
+            .call(&json!({ "name": "show_doc", "arguments": { "path": "README.md", "line": 3, "col": 2 } }))
+            .unwrap();
+        assert_eq!(r["isError"], json!(false), "{}", r["content"][0]["text"]);
+        let got = drain();
+        assert_eq!(got.len(), 1);
+        assert_eq!(std::path::Path::new(&got[0].path), wt.join("README.md"), "the LANE's copy, not (main)'s");
+        assert_eq!((got[0].line, got[0].col), (Some(3), Some(2)));
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("line 3"), "the result says where");
+
+        // Models send numbers as strings often enough to accept the obvious one.
+        let r = server
+            .call(&json!({ "name": "show_doc", "arguments": { "path": "README.md", "line": "12" } }))
+            .unwrap();
+        assert_eq!(r["isError"], json!(false), "{}", r["content"][0]["text"]);
+        assert_eq!(drain()[0].line, Some(12));
+
+        // Not in the lane → the repository root, as before.
+        let r = server.call(&json!({ "name": "show_doc", "arguments": { "path": "only-in-main.md" } })).unwrap();
+        assert_eq!(r["isError"], json!(false), "{}", r["content"][0]["text"]);
+        let got = drain();
+        assert!(got[0].path.ends_with("proj/only-in-main.md"), "{}", got[0].path);
+        assert_eq!(got[0].line, None, "no line asked → none sent");
+
+        // Lines are 1-based; a bad one is refused and nothing is queued.
+        for bad in [json!(0), json!("x"), json!(-4)] {
+            let r = server
+                .call(&json!({ "name": "show_doc", "arguments": { "path": "README.md", "line": bad } }))
+                .unwrap();
+            assert_eq!(r["isError"], json!(true), "line {bad} must be refused");
+        }
+        assert!(drain().is_empty());
     }
 
     // ── place↔place messaging ───────────────────────────────────────────────
