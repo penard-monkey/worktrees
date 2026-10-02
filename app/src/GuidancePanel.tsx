@@ -68,13 +68,20 @@ function GuidanceDiff({ from, to, fromLabel, toLabel, onReport }: {
   from: string; to: string; fromLabel: string; toLabel: string; onReport: (t: string) => void;
 }) {
   const [patch, setPatch] = useState<string | null>(null);
+  // A failed diff says so in the box: left at "diffing…" it reads as slow,
+  // forever, rather than broken.
+  const [err, setErr] = useState<string | null>(null);
   const seq = useRef(0);
   useEffect(() => {
     const n = ++seq.current;
     const t = setTimeout(() => {
       invoke<string>("agent_guidance_diff", { old: from, new: to })
-        .then((p) => { if (n === seq.current) setPatch(p); })
-        .catch((e) => onReport(`agent_guidance_diff: ${String(e)}`));
+        .then((p) => { if (n === seq.current) { setPatch(p); setErr(null); } })
+        .catch((e) => {
+          if (n !== seq.current) return;
+          setErr(String(e));
+          onReport(`agent_guidance_diff: ${String(e)}`);
+        });
     }, 200);
     return () => clearTimeout(t);
   }, [from, to]);
@@ -82,7 +89,8 @@ function GuidanceDiff({ from, to, fromLabel, toLabel, onReport }: {
     : { against: "base", base_label: fromLabel, patch, untracked: false, binary: false, truncated: false };
   return <div className="guidance-diff" data-testid="guidance-diff">
     <div className="guidance-diff-head"><span className="del">− {fromLabel}</span><span className="add">+ {toLabel}</span></div>
-    {!dto ? <div className="tree-note">diffing…</div> : <DiffView diff={dto} content="" lang="" wrap />}
+    {err ? <div className="tree-note err-note" role="alert">Could not compare: {err}</div>
+      : !dto ? <div className="tree-note">diffing…</div> : <DiffView diff={dto} content="" lang="" wrap />}
   </div>;
 }
 

@@ -231,8 +231,9 @@ pub fn validate_skill(text: &str) -> Result<(), String> {
     let body = text.strip_prefix("---\n").ok_or("it must start with a `---` frontmatter line")?;
     let end = body.find("\n---").ok_or("its frontmatter has no closing `---` line")?;
     let front = &body[..end];
-    if !front.lines().any(|l| l.trim_end() == "name: worktrees") {
-        return Err("its frontmatter must keep `name: worktrees`".into());
+    let names: Vec<&str> = front.lines().filter(|l| l.starts_with("name:")).collect();
+    if names.len() != 1 || names[0].trim_end() != "name: worktrees" {
+        return Err("its frontmatter must keep `name: worktrees`, once".into());
     }
     if !front.lines().any(|l| l.strip_prefix("description:").is_some_and(|d| !d.trim().is_empty())) {
         return Err("its frontmatter needs a `description:` (it is what makes an agent load the skill)".into());
@@ -247,12 +248,20 @@ pub fn validate_skill(text: &str) -> Result<(), String> {
 
 /// The edit in `dir`, judged against `shipped`. `None` when there is none.
 pub fn read_edit_in(dir: &Path, shipped: &str) -> Option<SkillEdit> {
+    let unread = |why: String| Some(SkillEdit { text: String::new(), base: None, stale: true, invalid: Some(why) });
+    // Size first: this runs on every launch, and a huge file dropped there
+    // must not be read whole just to be refused.
+    match std::fs::metadata(dir.join(EDIT_FILE)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Ok(m) if m.len() > EDIT_MAX as u64 => {
+            return unread(format!("it is {} KB; the limit is {} KB", m.len() / 1024, EDIT_MAX / 1024))
+        }
+        _ => {}
+    }
     let bytes = match std::fs::read(dir.join(EDIT_FILE)) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            return Some(SkillEdit { text: String::new(), base: None, stale: true, invalid: Some(format!("it could not be read: {e}")) })
-        }
+        Err(e) => return unread(format!("it could not be read: {e}")),
     };
     let (text, mut invalid) = match String::from_utf8(bytes) {
         Ok(t) => (t, None),
@@ -309,8 +318,12 @@ pub fn save_edit_in(dir: &Path, shipped: &str, text: Option<&str>) -> Result<(),
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let base = Base { version: VERSION, hash: text_hash(shipped), text: shipped.to_string() };
     let base = serde_json::to_string_pretty(&base).map_err(|e| e.to_string())? + "\n";
-    write_atomic(&dir.join(BASE_FILE), &base)?;
-    write_atomic(&dir.join(EDIT_FILE), &text)
+    // The edit before its base, always: a failure between the two leaves a
+    // new edit on an old base (stale — asks again) or, on a first save, an
+    // edit with no base (stale too). Base-first would leave the OLD edit on
+    // the NEW base, which reads as current and retires the offer unchosen.
+    write_atomic(&dir.join(EDIT_FILE), &text)?;
+    write_atomic(&dir.join(BASE_FILE), &base)
 }
 
 pub fn save_edit(text: Option<&str>) -> Result<(), String> {
@@ -331,13 +344,44 @@ impl Scratch {
     fn new(files: &[(&str, &str)]) -> Result<Scratch, String> {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let dir = std::env::temp_dir().join(format!("wt-guidance-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        // `create_dir`, not `_all`: the directory must be one this call made,
+        // never a path someone left in the shared temp dir.
+        std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let s = Scratch(dir);
         for (name, body) in files {
             std::fs::write(s.0.join(name), body).map_err(|e| format!("{name}: {e}"))?;
         }
         Ok(s)
     }
+}
+
+/// git in `dir` with none of the user's git configuration: no global or
+/// system config, no global or system attributes. Flags alone are not enough —
+/// `--no-ext-diff` covers `diff.external` only, while an attributes file with
+/// `* diff=x` plus a `[diff "x"] textconv` rewrites every line the panel shows
+/// (and a failing textconv exits 128), `* -diff` turns the compare into
+/// "Binary files differ", and `merge.conflictStyle` changes the markers the
+/// merge hands the editor. `HOME`/`XDG_CONFIG_HOME` point at the scratch dir
+/// because the DEFAULT attributes file (`$XDG_CONFIG_HOME/git/attributes`) is
+/// read with no config at all; `GIT_DIR`/`GIT_WORK_TREE` are dropped so an
+/// inherited repository cannot be consulted either. `inherited` is the
+/// environment it would otherwise have come from — the test seam.
+fn git_isolated(dir: &Path, inherited: &[(&str, &Path)]) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(dir);
+    for (k, v) in inherited {
+        cmd.env(k, v);
+    }
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT");
+    cmd
 }
 
 impl Drop for Scratch {
@@ -352,9 +396,16 @@ impl Drop for Scratch {
 /// through an external tool or force colour, and either would hand the parser
 /// something that is not a patch.
 pub fn diff_texts(old: &str, new: &str) -> Result<String, String> {
+    diff_texts_env(old, new, &[])
+}
+
+/// [`diff_texts`] under an `inherited` environment — the test seam for a
+/// hostile user git config (see [`git_isolated`]).
+fn diff_texts_env(old: &str, new: &str, inherited: &[(&str, &Path)]) -> Result<String, String> {
     let s = Scratch::new(&[("old", old), ("new", new)])?;
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["diff", "--no-index", "--no-ext-diff", "--no-color", "--unified=1000000", "--", "old", "new"]).current_dir(&s.0);
+    let mut cmd = git_isolated(&s.0, inherited);
+    cmd.args(["diff", "--no-index", "--no-ext-diff", "--no-color", "--unified=1000000", "--", "old", "new"])
+        ;
     let out = crate::proc::run_deadline(cmd, 10).map_err(|e| format!("git diff: {e}"))?;
     match out.status.code() {
         Some(0) => Ok(String::new()),
@@ -374,10 +425,14 @@ pub struct Merged {
 }
 
 pub fn merge_texts(yours: &str, base: &str, new: &str) -> Result<Merged, String> {
+    merge_texts_env(yours, base, new, &[])
+}
+
+fn merge_texts_env(yours: &str, base: &str, new: &str, inherited: &[(&str, &Path)]) -> Result<Merged, String> {
     let s = Scratch::new(&[("yours", yours), ("base", base), ("new", new)])?;
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = git_isolated(&s.0, inherited);
     cmd.args(["merge-file", "-p", "-L", "your edit", "-L", "the default you edited", "-L", "the new default", "yours", "base", "new"])
-        .current_dir(&s.0);
+        ;
     let out = crate::proc::run_deadline(cmd, 10).map_err(|e| format!("git merge-file: {e}"))?;
     // The exit status is the number of conflicts (capped at 127); anything
     // above that, or a signal, is git failing.
@@ -1231,6 +1286,21 @@ mod tests {
     }
 
     #[test]
+    fn a_save_that_dies_halfway_still_asks() {
+        // Edit saved against OLD; the binary now ships NEW, so it is stale.
+        // "Merge → Save" then fails writing the EDIT (here: its temp path is
+        // taken). The base must not have moved ahead of it, or the old text
+        // would read as current and the offer would retire without a choice.
+        let dir = tmp("halfway");
+        save_edit_in(&dir, OLD, Some(&OLD.replace("One.", "Uno."))).unwrap();
+        std::fs::create_dir_all(dir.join(format!("SKILL.tmp-{}", std::process::id())).join("x")).unwrap();
+        assert!(save_edit_in(&dir, NEW, Some(&NEW.replace("One.", "Uno."))).is_err());
+        let e = read_edit_in(&dir, NEW).unwrap();
+        assert!(e.stale, "a failed save must leave the edit stale: {e:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn saving_the_default_or_nothing_is_a_reset() {
         let dir = tmp("reset");
         save_edit_in(&dir, OLD, Some(&OLD.replace("Two.", "2."))).unwrap();
@@ -1254,6 +1324,7 @@ mod tests {
             ("no frontmatter at all\n", "frontmatter"),
             ("---\nname: other\ndescription: x\n---\nbody\n", "name: worktrees"),
             ("---\nname: worktrees\n---\nbody\n", "description"),
+            ("---\nname: worktrees\nname: other\ndescription: x\n---\nbody\n", "once"),
             ("---\nname: worktrees\ndescription: x\nbody, never closed\n", "closing"),
         ] {
             std::fs::write(dir.join(EDIT_FILE), body).unwrap();
@@ -1264,6 +1335,10 @@ mod tests {
             // And it is never SAVED in the first place.
             assert!(save_edit_in(&dir, NEW, Some(body)).is_err(), "{body:?}");
         }
+        // Oversized: refused from its metadata, before it is read.
+        std::fs::write(dir.join(EDIT_FILE), vec![b'a'; EDIT_MAX + 1]).unwrap();
+        let e = read_edit_in(&dir, NEW).unwrap();
+        assert!(e.invalid.as_deref().is_some_and(|w| w.contains("limit")) && e.text.is_empty(), "{e:?}");
         std::fs::write(dir.join(EDIT_FILE), [0xff, 0xfe, b'x']).unwrap();
         assert!(read_edit_in(&dir, NEW).unwrap().invalid.is_some());
         assert_eq!(effective_skill_in(&dir, NEW), NEW);
@@ -1292,6 +1367,34 @@ mod tests {
     fn the_shipped_skill_is_a_valid_edit() {
         // The editor starts from the default; it must pass its own check.
         validate_skill(SKILL_MD).unwrap();
+    }
+
+    #[test]
+    fn a_hostile_user_git_config_reaches_neither_the_diff_nor_the_merge() {
+        // The user's git config and attributes can textconv a "diff", mark
+        // every path binary, or restyle conflicts; none of it may reach a
+        // compare of two texts that are not in any repository.
+        let home = tmp("hostile-home");
+        std::fs::create_dir_all(home.join(".config/git")).unwrap();
+        std::fs::write(home.join("attrs"), "* diff=evil\n").unwrap();
+        std::fs::write(
+            home.join(".gitconfig"),
+            format!(
+                "[core]\n\tattributesFile = {}\n[diff \"evil\"]\n\ttextconv = sed s/^/CONVERTED:/\n[merge]\n\tconflictStyle = diff3\n",
+                home.join("attrs").display()
+            ),
+        )
+        .unwrap();
+        // The DEFAULT attributes file needs no config at all.
+        std::fs::write(home.join(".config/git/attributes"), "* -diff\n").unwrap();
+        let env: &[(&str, &Path)] = &[("HOME", &home), ("XDG_CONFIG_HOME", &home.join(".config"))];
+        let patch = diff_texts_env(OLD, NEW, env).unwrap();
+        assert!(patch.contains("\n-Two.\n+Two, improved.\n"), "{patch}");
+        assert!(!patch.contains("CONVERTED") && !patch.contains("Binary"), "{patch}");
+        let clash = OLD.replace("Two.", "Two, mine.");
+        let m = merge_texts_env(&clash, OLD, NEW, env).unwrap();
+        assert!(!m.text.contains("|||||||"), "the user's conflictStyle leaked: {}", m.text);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

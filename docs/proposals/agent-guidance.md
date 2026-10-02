@@ -836,9 +836,11 @@ way), never `ui-state.json` (the frontend writes it whole).
 
 "Modified" is exact: saving text equal to the default (give or take a
 trailing newline) deletes both files, so an edit can never be the default in
-disguise. The edit is written after its base and removed before it, so a crash
-between the two leaves an edit with no base — which reads as stale, never as
-current.
+disguise. The edit is written BEFORE its base and removed before it, so a crash
+between the two leaves a new edit on an old base, or an edit with no base —
+both stale, so the offer asks again. Base-first would leave the old edit on the
+new base, which reads as current and retires the offer with nothing chosen.
+The file's size is checked from its metadata before it is read.
 
 ### 11.3 Who reads it
 
@@ -879,8 +881,16 @@ about — and `VERSION` is bumped only for changes worth re-asking EVERYONE.
 `git diff --no-index --no-ext-diff --no-color --unified=1000000` over two
 scratch files — the same full-context shape `git diff` gives the Files tab, so
 the app renders it through the existing `DiffView` and `diff.ts` parser rather
-than a second renderer. `--no-ext-diff`/`--no-color` because a user's git
-config could otherwise route the diff through a tool or colour it. Three views
+than a second renderer. Flags alone do NOT isolate it from the user's git
+setup: `--no-ext-diff` covers `diff.external` only, and an attributes file with
+`* diff=x` plus a `[diff "x"] textconv` rewrites every line shown (a failing
+textconv exits 128), `* -diff` turns it into "Binary files differ", and
+`merge.conflictStyle=diff3` adds a `|||||||` block to the merge. Both git
+commands (`git_isolated`) therefore run with `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM`, `GIT_ATTR_NOSYSTEM`, `HOME`/`XDG_CONFIG_HOME` pointed at
+the scratch dir (the DEFAULT attributes file needs no config to be read), and
+no inherited `GIT_DIR`/`GIT_WORK_TREE`/`-c` parameters. A diff that fails
+anyway says so in the box rather than sitting at "diffing…". Three views
 when the base is known — what the default changed (old default → new), yours vs
 the new default, what you changed (old default → yours) — and the one honest
 view when it is not.
