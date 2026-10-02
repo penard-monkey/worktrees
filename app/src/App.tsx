@@ -35,6 +35,7 @@ import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTo
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
+import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
 import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
@@ -426,6 +427,57 @@ const basename = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
  *  tmux session and "Copy path" are all still slug-derived — so anywhere this
  *  is rendered the slug must stay reachable rather than be replaced outright. */
 const nameOf = (p: { slug: string; declared?: Declared }) => p.declared?.title?.trim() || p.slug;
+
+/** Is this keydown's target a field where ⌘← / ⌘→ mean line start / end?
+ *  Text inputs, textareas, selects and contenteditable — but NOT xterm's focus
+ *  sink, which is a `<textarea>` too: xterm sends no bytes for ⌘← / ⌘→
+ *  (`Keyboard.ts`: `if (ev.metaKey) break;`), so in a terminal they do nothing
+ *  today and history may have them. */
+const isTextField = (t: EventTarget | null) =>
+  t instanceof Element && !t.classList.contains("xterm-helper-textarea")
+  && !!t.closest('textarea, select, [contenteditable]:not([contenteditable="false"]), input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="range"]):not([type="color"]):not([type="file"])');
+/** How many entries the ‹ / › right-click list offers. */
+const NAV_MENU_MAX = 12;
+/** Which way a keydown moves through navigation history, if it is a history
+ *  chord at all. ⌘[ / ⌘] everywhere (Safari, Finder, Xcode), matched on the
+ *  key with the PHYSICAL key as fallback — a layout that puts `[` behind ⌥
+ *  still has a BracketLeft. ⌘← / ⌘→ only outside a text field. */
+const navChordDir = (e: KeyboardEvent): -1 | 1 | undefined => {
+  if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return undefined;
+  if (e.key === "[" || e.code === "BracketLeft") return -1;
+  if (e.key === "]" || e.code === "BracketRight") return 1;
+  if (isTextField(e.target)) return undefined;
+  if (e.key === "ArrowLeft") return -1;
+  if (e.key === "ArrowRight") return 1;
+  return undefined;
+};
+
+/** ‹ › — back / forward through what the panes showed. Module scope: a
+ *  component defined inside App would remount every render. The tooltip names
+ *  where each one goes. */
+function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onList }: {
+  canBack: boolean; canForward: boolean; backTitle: string; forwardTitle: string; onStep: (dir: -1 | 1) => void;
+  /** Right-click: the entries that way, to jump more than one step. */
+  onList: (dir: -1 | 1, x: number, y: number) => void;
+}) {
+  const list = (dir: -1 | 1) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    const r = e.currentTarget.getBoundingClientRect();
+    onList(dir, r.left, r.bottom + 4);
+  };
+  return (
+    <span className="navhist" role="group" aria-label="Navigation history">
+      <button className="icon-btn" data-testid="nav-back" data-track="nav.back" disabled={!canBack}
+        title={backTitle} aria-label={backTitle} onClick={() => onStep(-1)} onContextMenu={list(-1)}>
+        <Icons.ChevronLeft size={15} />
+      </button>
+      <button className="icon-btn" data-testid="nav-forward" data-track="nav.forward" disabled={!canForward}
+        title={forwardTitle} aria-label={forwardTitle} onClick={() => onStep(1)} onContextMenu={list(1)}>
+        <Icons.ChevronRight size={15} />
+      </button>
+    </span>
+  );
+}
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
 /** Worth a look. `behind` counts only for `(main)`, where the base ref IS
  *  origin/main and ↓ means "pull" — on a worktree it only says the base moved
@@ -1148,7 +1200,7 @@ function TermTabRename({ initial, onCommit, onCancel }: {
   );
 }
 
-function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, hydratedTick, names, onRename, tabs, onTabs, activeTab, onActiveTab, onError, root, onOpenPath, findOpen, findToken, onFindClose }: {
+function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, hydratedTick, names, onRename, tabs, onTabs, activeTab, onActiveTab, goto, onFront, onError, root, onOpenPath, findOpen, findToken, onFindClose }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
   /** ⌘-clickable paths in the shells (see `TermLinks`). */
   root: string; onOpenPath: (path: string, line?: number, col?: number) => void;
@@ -1157,6 +1209,13 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
   names: Record<number, string>; onRename: (index: number, name: string | null) => void;
   tabs: number[]; onTabs: (ids: number[]) => void;
   activeTab: number | null; onActiveTab: (index: number | null) => void;
+  /** Navigation history putting a tab back in front. `seq` makes a repeat a new
+   *  request. A tab that is gone is not resurrected: the front tab stays. */
+  goto?: { id: number; seq: number } | null;
+  /** The tab actually in front, every time it changes — restore and fallback
+   *  included, which `onActiveTab` deliberately is not. What history records.
+   *  `undefined` = not known yet (restoring, or unmounted); `null` = no tab. */
+  onFront?: (repo: string, slug: string, id: number | null | undefined) => void;
   onError: (e: unknown) => void;
   /** ⌘F goes to whichever shell tab is showing — only that one is mounted */
   findOpen?: boolean; findToken?: number; onFindClose?: () => void;
@@ -1207,6 +1266,21 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     onActiveTabRef.current(id);
   }, []);
   const restoringRef = useRef(true);
+  const onFrontRef = useRef(onFront);
+  onFrontRef.current = onFront;
+  const front = ids === null ? undefined : active;
+  useEffect(() => {
+    onFrontRef.current?.(repo, slug, front);
+    // Unmounting (the dock left the Terminal tab) makes it unknown again, or the
+    // next mount's first render would read the old front as already restored.
+    return () => onFrontRef.current?.(repo, slug, undefined);
+  }, [repo, slug, front]);
+  // While the restore is in flight there is nothing to pick from — it reads
+  // `activeTab`, which history has already written, so it lands there itself.
+  useEffect(() => {
+    if (!goto || restoringRef.current) return;
+    if (idsRef.current.includes(goto.id)) pick(goto.id);
+  }, [goto?.seq, pick]);
   // names is read by the restore, which must NOT re-run on every rename
   const namesRef = useRef(names);
   namesRef.current = names;
@@ -3491,6 +3565,12 @@ function App() {
     const remembered = settingsRef.current.files_open?.[key];
     if (!remembered) return; // no invoke at all for the common case
     const at = settingsRef.current.files_open_at?.[key];
+    // History is putting an entry back here, and the entry decides what the
+    // viewer shows — including nothing. Asked NOW, not in the `.then`: the
+    // parked entry is consumed in this same commit, long before the stat
+    // answers.
+    const parked = navPendingRef.current;
+    if (parked?.place && parked.place.repo === sel.repo && parked.place.slug === sel.slug) return;
     let alive = true;
     invoke<boolean>("file_readable", { path: remembered })
       .then((ok) => {
@@ -3501,6 +3581,7 @@ function App() {
         // restore landed last and replaced the file just asked for (seen in
         // the harness: a `showDoc` at reload + 1.2s showed DESIGN.md).
         if (!alive || !ok || dockFileRef.current) return;
+        navAmend.current = true; // the app reopened it, you did not: refine this visit
         setDockFile(remembered);
         // The marked line comes back with its file — it is part of what you
         // were looking at, the same as the dock's tab or width.
@@ -4434,6 +4515,7 @@ function App() {
   /** The viewer dismissed the mark (the user chose a view). Forgotten for the
    *  place too, or coming back would put it up again. */
   const clearDockAt = useCallback(() => {
+    navAmend.current = true; // dismissing a mark is not a navigation
     setDockAt(null);
     const cur = selRef.current;
     if (!cur) return;
@@ -5016,6 +5098,9 @@ function App() {
       // fresh "+" tab after re-add land on a surviving index, inheriting a cwd
       // it never visited.
       dropPanels((k) => k.startsWith(root + "|"), ["place_panels"]);
+      // Untracked: its places are nowhere to go back to (`navAlive` would skip
+      // them anyway — this is so the history stops carrying them).
+      commitHist((h) => pruneNav(h, (l) => l.place?.repo === root));
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
@@ -5370,6 +5455,7 @@ function App() {
       const r = await runCmd("remove_place", { repo, slug, delBranch, force });
       if (r?.ok) {
         dropPanels((k) => k === placeKey(repo, slug));
+        commitHist((h) => pruneNav(h, (l) => l.place?.repo === repo && l.place.slug === slug));
         if (sel?.repo === repo && sel?.slug === slug) setSel(null);
         setRm(null);
       } else {
@@ -6095,6 +6181,8 @@ function App() {
   const focusPlaces = useCallback(() => { revealNav(true); }, [revealNav]);
   // ⌘-digit / ⌘E read live state (selection, editor cmd) — hold it in a ref so
   // the keydown listener stays stable (registered once, no per-render churn).
+  // The history step, for the chord handler below (stable effect, live function).
+  const navStepRef = useRef<(dir: -1 | 1) => void>(() => {});
   const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface });
   const filesTabOpen = eff.dock_open && eff.dock_tab === "files";
   keyRef.current = {
@@ -6251,6 +6339,16 @@ function App() {
         // `setSettings` and refs, so every copy of it behaves identically. Do not
         // reuse that reasoning for a value read out of a render closure.
         if (next !== cur) updateSettings({ app_zoom: next });
+        return;
+      }
+      // ⌘[ / ⌘] — and ⌘← / ⌘→ outside a text field — back / forward through
+      // navigation history. Above the meta-only gate because repeat is
+      // allowed (hold to walk back), and below the modal guard, so under a
+      // dialog the chord is unbound rather than moving what is behind it.
+      const navDir = navChordDir(e);
+      if (navDir !== undefined) {
+        e.preventDefault();
+        navStepRef.current(navDir);
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.repeat || e.shiftKey || e.altKey) return;
@@ -6428,6 +6526,243 @@ function App() {
     if (sel) return; // user already clicked — don't override their choice
     if (restoreTarget) setSel({ repo: restoreTarget.pv.root, slug: restoreTarget.p.slug });
   }, [ws, settings.restore_last, restoreTarget, sel]);
+
+  // ── navigation history: ‹ › and ⌘[ ⌘] / ⌘← ⌘→ ─────────────────────────────
+  // OBSERVED, not instrumented: the location is derived from the state that
+  // decides what the panes show, and every change is handed to the rules in
+  // navHistory.ts — so a way of navigating added later is recorded without
+  // anyone remembering to. Default is a PUSH; the app's own moves (the launch
+  // restore below) AMEND. A missed system path costs an extra entry, a missed
+  // user path would have been a silent hole. docs/proposals/nav-history.md.
+  //
+  // Declared BELOW the launch restore on purpose: effects run in declaration
+  // order, so by the time this one runs in the commit where `ws` first lands,
+  // `restoredOnce` is already set. Home is recorded in that commit and the
+  // restored place lands a render later, well inside COALESCE_MS, so it
+  // REPLACES Home as entry 0 — launching is not a navigation you go back from.
+  // The dock shell actually in front, reported by the tab strip (see `onFront`).
+  const [termFront, setTermFront] = useState<{ key: string; id: number | null | undefined } | null>(null);
+  /** The front tab each place's strip last actually SHOWED. Outlives the strip
+   *  (an unmount reports `undefined`), so a closed dock can name the shell the
+   *  strip will come back on even where nothing was ever picked — the restore
+   *  does not write `term_tab_active`. */
+  const navSeenFront = useRef<Record<string, number>>({});
+  const onTermFront = useCallback((repo: string, slug: string, id: number | null | undefined) => {
+    const key = placeKey(repo, slug);
+    if (id === null) delete navSeenFront.current[key];
+    else if (id !== undefined) navSeenFront.current[key] = id;
+    setTermFront({ key, id });
+  }, []);
+  const [hist, setHist] = useState<NavHistory>(emptyHistory);
+  const histRef = useRef(hist);
+  // A place selected before its snapshot resolves (or after it was removed
+  // elsewhere) is not somewhere to record yet — null skips the observation.
+  // The dock part is what it is ON, whether or not it is open: ⌘J is layout,
+  // not a place (docs/proposals/nav-history.md, decision 2).
+  const frontHere = sel && termFront?.key === placeKey(sel.repo, sel.slug) ? termFront.id : undefined;
+  // Is there a tab strip on screen to report a front shell? Only the open dock
+  // on its Terminal tab mounts one (the `<aside className="dock">` condition).
+  const stripUp = dockShown && eff.dock_tab === "terminal";
+  // With the strip up but still restoring, the front shell is not known yet —
+  // not "none" — so the observation waits rather than recording a location
+  // that was never on screen. With NO strip there is nothing to wait for: the
+  // shell is the one the strip will restore onto when it mounts (the one it
+  // last showed, else the remembered tab), so ⌘J lands on the same location
+  // rather than a new one. Waiting there instead left the place unrecorded — and,
+  // since the dock state seeds every place visited next, all of those too.
+  const shellHere = stripUp ? frontHere
+    : sel ? navSeenFront.current[placeKey(sel.repo, sel.slug)] ?? settings.term_tab_active?.[placeKey(sel.repo, sel.slug)] : undefined;
+  const navLoc: Loc | null = !sel ? { place: null } : !selected ? null : stripUp && frontHere === undefined ? null : {
+    place: { repo: sel.repo, slug: sel.slug },
+    dock: {
+      tab: eff.dock_tab,
+      ...(dockFile ? { file: { path: dockFile, line: dockAt?.line, col: dockAt?.col } } : {}),
+      // The shell in front (see `shellHere`).
+      ...(shellHere != null ? { shell: shellHere } : {}),
+    },
+  };
+  const navKey = navLoc ? locKey(navLoc) : null;
+  const navLocRef = useRef(navLoc);
+  navLocRef.current = navLoc;
+  const commitHist = useCallback((f: (h: NavHistory) => NavHistory) => {
+    const next = f(histRef.current);
+    if (next === histRef.current) return;
+    histRef.current = next;
+    setHist(next);
+  }, []);
+  /** Can history land here? A place removed (here or by an agent) is skipped,
+   *  not shown as a dead end. Read through a ref: the chord handler is stable. */
+  const wsNavRef = useRef(ws);
+  wsNavRef.current = ws;
+  const navAlive = useCallback((l: Loc) => !l.place
+    || !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug), []);
+  /** History is putting a location back. Observations are ignored until the
+   *  panes show it (or 1.5 s pass — then whatever DID land amends the entry,
+   *  so a target that could only be reached partly is recorded as it was). A
+   *  pointer press hands control back early: you are navigating again. */
+  const navApplying = useRef<{ key: string; place: string | null; timer: number } | null>(null);
+  const endApplying = useCallback(() => {
+    if (navApplying.current) window.clearTimeout(navApplying.current.timer);
+    navApplying.current = null;
+  }, []);
+  /** Set by a path where the APP moves the panes on its own, just before it
+   *  does: the next observed change amends the current entry instead of
+   *  pushing one. */
+  const navAmend = useRef(false);
+  useEffect(() => {
+    if (!restoredOnce.current || !navLoc) return;
+    const ap = navApplying.current;
+    if (ap) {
+      if (ap.key === navKey) { endApplying(); return; }
+      // A selection history did not ask for — ⌘K, ⌘1, Enter in the filter, an
+      // agent's show_doc — is a visit of your own, not the apply landing: hand
+      // control back and record it. (A pointer press already does this.)
+      if ((navLoc.place ? locKey({ place: navLoc.place }) : null) === ap.place) return;
+      endApplying();
+    }
+    const mode = navAmend.current ? "amend" : "push";
+    navAmend.current = false;
+    commitHist((h) => recordNav(h, navLoc, Date.now(), mode));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navKey, !!ws]);
+  useEffect(() => {
+    const take = () => endApplying();
+    window.addEventListener("pointerdown", take, true);
+    return () => window.removeEventListener("pointerdown", take, true);
+  }, [endApplying]);
+  const navGo = useCallback((i: number) => {
+    const loc = histRef.current.entries[i];
+    if (!loc || i === histRef.current.index) return;
+    commitHist((h) => goToNav(h, i));
+    endApplying();
+    navApplyGen.current++; // any answer still out belongs to the entry being left
+    setNavMenu(null);
+    const key = locKey(loc);
+    navApplying.current = {
+      key,
+      place: loc.place ? locKey({ place: loc.place }) : null,
+      timer: window.setTimeout(() => {
+        navApplying.current = null;
+        const now = navLocRef.current;
+        if (now) commitHist((h) => recordNav(h, now, Date.now(), "amend"));
+      }, 1500),
+    };
+    const cur = selRef.current;
+    const samePlace = loc.place ? cur?.repo === loc.place.repo && cur?.slug === loc.place.slug : !cur;
+    // A new object for the SAME place would re-run every effect keyed on `sel`.
+    if (!samePlace) setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
+    setNavPending(loc.place ? loc : null);
+    setMenu(null);
+    setCtx(null);
+    setConfirmRm(null);
+  }, [commitHist, endApplying]);
+  /** The dock half of an entry being put back, applied once the selection it
+   *  names has landed — the `pendingDoc` shape, for the same reason:
+   *  `updatePanels` and `openDockFile` write for `selRef.current`, which is
+   *  assigned during render, so calling them beside `setSel` would write the
+   *  place being left. Each part is written only where it DIFFERS from what is
+   *  showing, so nothing seeded is frozen into `place_panels`. */
+  const [navPending, setNavPending] = useState<Loc | null>(null);
+  const [navShellGoto, setNavShellGoto] = useState<{ id: number; seq: number } | null>(null);
+  const navShellSeq = useRef(0);
+  /** Bumped by every apply and every history step — see `current` below. */
+  const navApplyGen = useRef(0);
+  const navPendingRef = useRef(navPending);
+  navPendingRef.current = navPending;
+  useEffect(() => {
+    const loc = navPending;
+    if (!loc?.place || !loc.dock) return;
+    if (sel?.repo !== loc.place.repo || sel?.slug !== loc.place.slug) return;
+    setNavPending(null);
+    // This apply's ticket. The file check below is asynchronous, and by the
+    // time it answers history may have moved on — to another place (⌘[ ⌘[
+    // faster than a stat) or to another entry in this one. An answer for an
+    // entry that is no longer the one being shown is dropped, or it opens one
+    // place's file inside another and the observer records that as a visit.
+    // Same race, same answer, as the `files_open` restore's `alive`.
+    const gen = ++navApplyGen.current;
+    const current = () => gen === navApplyGen.current
+      && selRef.current?.repo === loc.place!.repo && selRef.current?.slug === loc.place!.slug;
+    const d = loc.dock;
+    let show = false; // the entry differs from the dock: open it, that is what Back is FOR
+    if (d.tab !== eff.dock_tab) show = true;
+    const want = d.file;
+    if (want && (want.path !== dockFile || want.line !== dockAt?.line)) {
+      show = true;
+      if (want.path === dockFile) {
+        openDockFile(want.path, { line: want.line, col: want.col });
+      } else {
+        // A file can be deleted, renamed or left behind by a branch switch
+        // between the visit and the Back — the restore's check, the restore's
+        // answer, plus a line saying why the viewer is empty.
+        invoke<boolean>("file_readable", { path: want.path })
+          .then((ok) => {
+            if (!current()) return;
+            if (ok) openDockFile(want.path, { line: want.line, col: want.col });
+            else setNotice(`${want.path.slice(want.path.lastIndexOf("/") + 1)} no longer exists.`);
+          })
+          .catch(() => {});
+      }
+    } else if (!want && dockFile) {
+      // Back to "nothing open". Not `openDockFile`: clearing is not a choice of
+      // file, and the place's remembered file stays remembered.
+      setDockFile(null);
+      setDockAt(null);
+    }
+    if (d.tab === "terminal" && d.shell != null && (d.tab !== eff.dock_tab || d.shell !== frontHere)) {
+      show = true;
+      // Written first, so a tab strip that MOUNTS for this (the dock was on
+      // another tab) restores straight onto it; the token covers one that is
+      // already on screen.
+      setTermTab(sel.repo, sel.slug, d.shell);
+      setNavShellGoto({ id: d.shell, seq: ++navShellSeq.current });
+    }
+    if (show && (d.tab !== eff.dock_tab || !eff.dock_open)) updatePanels({ dock_tab: d.tab, dock_open: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navPending, sel]);
+  const navStep = useCallback((dir: -1 | 1) => {
+    const [i] = reachableNav(histRef.current, dir, navAlive);
+    if (i !== undefined) navGo(i);
+  }, [navAlive, navGo]);
+  navStepRef.current = navStep;
+  // Mouse buttons 4 / 5 (back / forward), the same step. On release, like a
+  // browser; unbound under a dialog like the chords.
+  useEffect(() => {
+    const onUp = (e: MouseEvent) => {
+      if (e.button !== 3 && e.button !== 4) return;
+      e.preventDefault();
+      if (modalOpen()) return;
+      navStepRef.current(e.button === 3 ? -1 : 1);
+    };
+    window.addEventListener("mouseup", onUp);
+    return () => window.removeEventListener("mouseup", onUp);
+  }, []);
+  const navName = (repo: string, slug: string) => {
+    const pl = ws?.projects.find((p) => p.root === repo)?.snapshot?.places.find((x) => x.slug === slug);
+    return pl ? nameOf(pl) : slug;
+  };
+  const navTitle = (dir: -1 | 1) => {
+    const [i] = reachableNav(hist, dir, navAlive);
+    if (i === undefined) return dir < 0 ? "Back" : "Forward";
+    return `${dir < 0 ? "Back" : "Forward"} to ${labelNav(hist.entries[i], navName)} (${dir < 0 ? "⌘[" : "⌘]"})`;
+  };
+  // Right-click on ‹ / ›: up to NAV_MENU_MAX entries that way, nearest first.
+  // Disabled buttons fire no contextmenu in WebKit, and an empty list is not
+  // offered either.
+  const [navMenu, setNavMenu] = useState<{ dir: -1 | 1; x: number; y: number } | null>(null);
+  const openNavMenu = useCallback((dir: -1 | 1, x: number, y: number) => {
+    if (reachableNav(histRef.current, dir, navAlive).length) setNavMenu({ dir, x, y });
+  }, [navAlive]);
+  const navButtons = (
+    <NavButtons
+      canBack={canStepNav(hist, -1, navAlive)}
+      canForward={canStepNav(hist, 1, navAlive)}
+      backTitle={navTitle(-1)}
+      forwardTitle={navTitle(1)}
+      onStep={navStep}
+      onList={openNavMenu}
+    />
+  );
 
   // ── nav resizer (drag the nav's INNER edge — the one facing the terminal) ──
   // Both resizers clamp against the LIVE viewport, so a drag can never push the
@@ -7004,6 +7339,7 @@ function App() {
         {selected && sel && (
           <>
             <header className="topbar">
+              {navButtons}
               <div className="identity">
                 {renaming ? (
                   <TitleEditor
@@ -7345,6 +7681,9 @@ function App() {
               </>
             ) : (
               <div className="briefing">
+                {/* Home has no topbar, so the pair sits at the top of the view —
+                    the same buttons, the same place on screen. */}
+                <div className="navhist-home">{navButtons}</div>
                 <div className="home-hero">
                   <img className="home-logo" src={logoUrl} alt="worktrees logo" />
                   <div className="home-id">
@@ -7622,6 +7961,8 @@ function App() {
                     onTabs={(ids) => setTermTabs(sel.repo, sel.slug, ids)}
                     activeTab={(settings.term_tab_active ?? {})[sel.repo + "|" + sel.slug] ?? null}
                     onActiveTab={(index) => setTermTab(sel.repo, sel.slug, index)}
+                    goto={navShellGoto}
+                    onFront={onTermFront}
                     onError={fail}
                     root={selected.path} onOpenPath={openPathFromTerm}
                     findOpen={findOn === "dock"} findToken={findToken} onFindClose={closeFind} />
@@ -7956,6 +8297,18 @@ function App() {
       )}
       {menu && <div className="menu-catch" onClick={closeMenu} />}
 
+      {/* ── right-click: ‹ / › history list ── */}
+      {navMenu && (
+        <CtxMenu x={navMenu.x} y={navMenu.y} onClose={() => setNavMenu(null)}>
+          <div className="pop-hint">{navMenu.dir < 0 ? "back" : "forward"}</div>
+          {reachableNav(hist, navMenu.dir, navAlive).slice(0, NAV_MENU_MAX).map((i) => (
+            <button key={i} className="pop-item" data-testid="nav-menu-item"
+              onClick={() => { setNavMenu(null); navGo(i); }}>
+              {labelNav(hist.entries[i], navName)}
+            </button>
+          ))}
+        </CtxMenu>
+      )}
       {/* ── right-click: place ── */}
       {ctx?.kind === "place" && ctxPlace && (
         <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>

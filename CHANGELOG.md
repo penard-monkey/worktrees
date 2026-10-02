@@ -42,6 +42,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   The bubble is not a dialog, so Escape still goes to the terminal, and it does
   not take focus. A CLI that is not installed lights the dot but is not news,
   so it gets no bubble.
+- **Back and forward, like a browser.** ‹ › at the start of the place
+  header (top-left on Home) walk back through what you were looking at: the
+  place, the dock's tab, the file open in it and the line a ⌘-click or an
+  agent's `show_doc` put you on, and which shell tab was in front. ⌘[ / ⌘]
+  work everywhere. ⌘← / ⌘→ do the same, the terminal included (they did
+  nothing there before), except in a text field, where they still move to the
+  start / end of the line. Mouse buttons 4 / 5 work, and right-clicking ‹ or
+  › lists where each one goes. A place that has been removed is skipped; a
+  file that is gone lands you on that place's Files tab with a note saying so.
+  Opening or closing the dock (⌘J) is not a step, and quick clicks within
+  0.6 s count as one.
 
 ### Fixed
 - **pi typed into a place's own session is pi, not Claude.** tmux names only
