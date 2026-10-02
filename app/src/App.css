@@ -1007,6 +1007,31 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .guidance-rows { margin-top: var(--s2); }
 /* `.update-log` breaks anywhere because it holds logs; this holds prose. */
 .guidance-text .update-log { word-break: normal; overflow-wrap: anywhere; }
+/* The editable skill (GuidancePanel.tsx). The "default changed" band is a
+   raised card with an amber BAR, never amber words (hue is a fill here). The
+   diff reuses the Files tab's DiffView; the sheet is narrower than
+   DIFF_SIDE_AT, so it renders unified, and wraps because this is prose. */
+.guidance-changed {
+  margin-top: var(--s3); padding: var(--s3);
+  background: var(--bg-panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+  border-radius: var(--r-sm);
+}
+.guidance-changed-title { font-size: var(--fs-label); font-weight: var(--fw-med); color: var(--txt-hi); }
+.guidance-modes { margin-top: var(--s2); }
+.guidance-diff {
+  margin-top: var(--s2); max-height: 22rem; display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden;
+}
+.guidance-diff .diff-scroll { flex: 1; min-height: 0; }
+.guidance-diff .diff-grid { font-size: var(--fs-micro); }
+.guidance-diff-head {
+  display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); padding: var(--s1) var(--s2);
+  font-size: var(--fs-micro); color: var(--txt-dim); background: var(--bg-panel); border-bottom: 1px solid var(--line);
+}
+.guidance-skill-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; }
+.guidance-skill-head .ver-actions { margin-top: var(--s2); }
+.guidance-editor textarea { margin-top: var(--s2); font-size: var(--fs-micro); }
+.guidance-err { color: var(--txt-hi); }
 
 /* version / update section (Settings) + rail badge */
 .rail-icon.upd { position: relative; }

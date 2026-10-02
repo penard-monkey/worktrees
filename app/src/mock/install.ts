@@ -120,6 +120,48 @@ const withNames = (w: Workspace): Workspace =>
 // Agent guidance (`agent_guidance_status`): `?guidance=off` starts with
 // delivery off, `?guidance=codex-own` makes Codex the user-has-their-own case,
 // `unchecked` Codex before any launch, `noguard` no CLI that has the guard.
+// The editable skill: `?skill=edited` (an edit based on this default),
+// `stale` (based on an older default — the update case, and the
+// `agent-guidance-changed` offer), `nobase` (an edit whose base record is
+// lost), `invalid` (an edit agents do not get). The default is an excerpt.
+const MOCK_SKILL_OLD = "---\nname: worktrees\ndescription: Use BEFORE any branch work in a repository managed by worktrees.\n---\n\n# Working in a worktrees-managed repository\n\nA **place** is a git worktree under `.worktrees/<slug>` with its own tmux session.\n\n## Handing work to another agent\n\nWrite a brief, then create the place.\n\n## Finishing\n\nOpen a PR from the place.\n";
+const MOCK_SKILL_DEFAULT = MOCK_SKILL_OLD
+  .replace("Write a brief, then create the place.", "Write the brief to `.planning/brief.md`, then create the place with `--ai claude`.")
+  .replace("## Finishing", "## Across projects\n\nAddress a place in another project as `project:slug`.\n\n## Finishing");
+const mockHash = (t: string) => { let h = 0; for (const c of t) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h.toString(16).padStart(16, "0"); };
+type MockSkillEdit = { text: string; base: { version: number; hash: string; text: string } | null; stale: boolean; invalid: string | null };
+let mockSkillEdit: MockSkillEdit | null = (() => {
+  const mode = new URLSearchParams(location.search).get("skill") ?? "";
+  const mine = (from: string) => from.replace("Open a PR from the place.", "Open a PR from the place. Never merge it yourself.");
+  if (mode === "edited") return { text: mine(MOCK_SKILL_DEFAULT), base: { version: 3, hash: mockHash(MOCK_SKILL_DEFAULT), text: MOCK_SKILL_DEFAULT }, stale: false, invalid: null };
+  if (mode === "stale") return { text: mine(MOCK_SKILL_OLD), base: { version: 2, hash: mockHash(MOCK_SKILL_OLD), text: MOCK_SKILL_OLD }, stale: true, invalid: null };
+  if (mode === "nobase") return { text: mine(MOCK_SKILL_OLD), base: null, stale: true, invalid: null };
+  if (mode === "invalid") return { text: "# no frontmatter\n", base: null, stale: true, invalid: "it must start with a `---` frontmatter line" };
+  return null;
+})();
+/** `git diff --no-index -U<huge>` for the mock: an LCS line diff printed as
+ *  one full-context hunk, which is all `parseUnifiedDiff` needs. */
+function mockUnifiedDiff(a: string, b: string): string {
+  if (a === b) return "";
+  const x = a.replace(/\n$/, "").split("\n"), y = b.replace(/\n$/, "").split("\n");
+  const L = Array.from({ length: x.length + 1 }, () => new Array<number>(y.length + 1).fill(0));
+  for (let i = x.length - 1; i >= 0; i--) for (let j = y.length - 1; j >= 0; j--)
+    L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out: string[] = [];
+  let i = 0, j = 0;
+  while (i < x.length || j < y.length) {
+    if (i < x.length && j < y.length && x[i] === y[j]) { out.push(` ${x[i++]}`); j++; }
+    else if (j < y.length && (i >= x.length || L[i][j + 1] >= L[i + 1][j])) out.push(`+${y[j++]}`);
+    else out.push(`-${x[i++]}`);
+  }
+  return `--- a/old\n+++ b/new\n@@ -1,${x.length} +1,${y.length} @@\n${out.join("\n")}\n`;
+}
+function mockSaveSkill(text: string | null) {
+  if (text === null || text.trimEnd() === MOCK_SKILL_DEFAULT.trimEnd()) { mockSkillEdit = null; return; }
+  if (!text.startsWith("---\n")) throw "not saved: it must start with a `---` frontmatter line";
+  if (/^<<<<<<< your edit/m.test(text)) throw "not saved: it still has merge conflict markers (`<<<<<<< your edit`) — keep one side of each";
+  mockSkillEdit = { text, base: { version: 3, hash: mockHash(MOCK_SKILL_DEFAULT), text: MOCK_SKILL_DEFAULT }, stale: false, invalid: null };
+}
 let mockGuidanceSettings = { enabled: new URLSearchParams(location.search).get("guidance") !== "off", guard: false };
 function mockGuidance(): Record<string, unknown> {
   const mode = new URLSearchParams(location.search).get("guidance") ?? "";
@@ -139,7 +181,11 @@ function mockGuidance(): Record<string, unknown> {
           : mode === "unchecked" && on ? { state: "unchecked" } : d(["-c", "'developer_instructions=\"…\"'"])) },
       { id: "pi", label: "pi", installed: true, ...d(["--skill", `'${dir}/skills/worktrees'`, "--append-system-prompt", `'${dir}/rules.md'`]) },
     ],
-    skill: "---\nname: worktrees\ndescription: Use BEFORE any branch work in a repository managed by worktrees …\n---\n\n# Working in a worktrees-managed repository\n\n(the mock shows an excerpt; the app shows the skill the binary ships)\n",
+    skill: mockSkillEdit && !mockSkillEdit.invalid ? mockSkillEdit.text : MOCK_SKILL_DEFAULT,
+    skill_default: MOCK_SKILL_DEFAULT,
+    skill_hash: mockHash(MOCK_SKILL_DEFAULT),
+    skill_edit: mockSkillEdit,
+    edit_path: "/Users/demo/.config/worktrees/guidance/SKILL.md",
     rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
   };
 }
@@ -2689,6 +2735,18 @@ Phase 3: Frontend pane and mock harness
     case "set_agent_guidance":
       mockGuidanceSettings = { enabled: args.enabled !== false, guard: args.guard === true };
       return mockGuidance();
+    case "set_agent_guidance_skill":
+      mockSaveSkill((args.text as string | null | undefined) ?? null);
+      return mockGuidance();
+    case "agent_guidance_diff":
+      return mockUnifiedDiff(String(args.old ?? ""), String(args.new ?? ""));
+    case "agent_guidance_merge": {
+      // `git merge-file` is not here: the user's one change replayed onto the
+      // new default, which is what the real merge gives for the `stale` fixture.
+      if (!mockSkillEdit?.base) throw "there is no edited skill to merge";
+      const merged = MOCK_SKILL_DEFAULT.replace("Open a PR from the place.", "Open a PR from the place. Never merge it yourself.");
+      return { text: merged, conflicts: 0 };
+    }
     case "agent_user_skills":
       return clone(mockUserSkills);
     case "agent_link_skills": {

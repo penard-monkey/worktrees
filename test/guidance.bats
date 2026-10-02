@@ -129,3 +129,32 @@ SH
   run_wt guide --bogus
   [ "$status" -eq 1 ]
 }
+
+@test "guidance: an edited skill is what guide prints and lanes get; --default is the shipped one" {
+  mkdir -p "$HOME/.config/worktrees/guidance"
+  run_wt -C "$BATS_TEST_TMPDIR" guide --default
+  shipped="$output"
+  printf -- '---\nname: worktrees\ndescription: My own words.\n---\n\nEDITED BODY\n' > "$HOME/.config/worktrees/guidance/SKILL.md"
+  run_wt -C "$BATS_TEST_TMPDIR" guide
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"EDITED BODY"* ]]
+  run_wt -C "$BATS_TEST_TMPDIR" guide --default
+  [ "$output" = "$shipped" ]
+  # No base record: the edit is used, and the status says nobody knows what it forked.
+  run_wt -C "$BATS_TEST_TMPDIR" guide --status
+  [[ "$output" == *"skill:  your edit ("*"based on is unknown"* ]]
+  run_wt -C "$BATS_TEST_TMPDIR" guide --status --json
+  [[ "$output" == *'"skill_edit":{"text":"---\nname: worktrees'*'"stale":true'* ]]
+  WORKTREES_AI_CMD=claude run_wt new feat-edit
+  [ "$status" -eq 0 ]
+  # The lane's --plugin-dir is the directory holding the edit.
+  plugin="$(tmux_pane0_cmd repo-feat-edit | grep -o "$HOME/.local/share/worktrees/agent/[0-9a-f]*/claude")"
+  grep -q 'EDITED BODY' "$plugin/skills/worktrees/SKILL.md"
+
+  # A broken edit is never handed to an agent: guide falls back and says why.
+  printf 'no frontmatter\n' > "$HOME/.config/worktrees/guidance/SKILL.md"
+  run_wt -C "$BATS_TEST_TMPDIR" guide
+  [ "$output" = "$shipped" ]
+  run_wt -C "$BATS_TEST_TMPDIR" guide --status
+  [[ "$output" == *"skill:  the default — your edit at "*"is not used: it must start with"* ]]
+}

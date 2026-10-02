@@ -352,6 +352,8 @@ export function SettingsSheet({
   onGuidanceChanged,
   guidanceOfferPending,
   onSilenceGuidanceOffer,
+  guidanceChangeOfferPending,
+  onSilenceGuidanceChangeOffer,
   crossProject,
   onCrossProjectChanged,
   crossProjectOfferPending,
@@ -403,6 +405,9 @@ export function SettingsSheet({
   onGuidanceChanged: (s: GuidanceStatus) => void;
   guidanceOfferPending: boolean;
   onSilenceGuidanceOffer: () => void;
+  /// `agent-guidance-changed`: the user's edited skill and a default that moved.
+  guidanceChangeOfferPending: boolean;
+  onSilenceGuidanceChangeOffer: () => void;
   /// Cross-project reach (offers.ts `cross-project`): App's machine-level
   /// probe; the section re-reads on open and reports back.
   crossProject: CrossProjectStatus | null;
@@ -838,7 +843,8 @@ export function SettingsSheet({
 
           {cat === "guidance" && <>
           <GuidanceSection data-focus="agent-guidance" status={guidance} onStatus={onGuidanceChanged} onReport={onReport}
-            offerPending={guidanceOfferPending} onSilenceOffer={onSilenceGuidanceOffer} />
+            offerPending={guidanceOfferPending} onSilenceOffer={onSilenceGuidanceOffer}
+            changeOfferPending={guidanceChangeOfferPending} onSilenceChangeOffer={onSilenceGuidanceChangeOffer} />
           <CrossProjectSection data-focus="cross-project" status={crossProject} onStatus={onCrossProjectChanged} onReport={onReport}
             offerPending={crossProjectOfferPending} onSilenceOffer={onSilenceCrossProjectOffer} />
           </>}

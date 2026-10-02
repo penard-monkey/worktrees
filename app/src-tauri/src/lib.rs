@@ -4340,6 +4340,54 @@ async fn set_agent_guidance(enabled: bool, guard: bool) -> Result<worktrees_core
     })
 }
 
+/// Save the user's own text for the worktrees skill (`text`), or go back to the
+/// default (`None`). Written to `~/.config/worktrees/guidance/` with a record
+/// of the shipped default it was based on — the CLI and MCP-launched lanes read
+/// the same file — and the status returned as it now stands. Saving the edit
+/// you already have re-bases it on this build's default ("keep mine").
+#[tauri::command]
+async fn set_agent_guidance_skill(text: Option<String>) -> Result<worktrees_core::guidance::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        worktrees_core::guidance::save_edit(text.as_deref())?;
+        Ok(worktrees_core::guidance::status())
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r)
+    .map_err(|e: String| {
+        applog("error", &format!("set_agent_guidance_skill: {e}"));
+        e
+    })
+}
+
+/// `old` → `new` as a full-context unified diff, for the agent-guidance compare
+/// view (it renders through the Files tab's `DiffView`). Empty = identical.
+#[tauri::command]
+async fn agent_guidance_diff(old: String, new: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || worktrees_core::guidance::diff_texts(&old, &new))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r)
+        .map_err(|e| {
+            applog("error", &format!("agent_guidance_diff: {e}"));
+            e
+        })
+}
+
+/// The user's edited skill merged onto this build's default (`git merge-file`),
+/// for the editor to start from. Never saved by itself.
+#[tauri::command]
+async fn agent_guidance_merge() -> Result<worktrees_core::guidance::Merged, String> {
+    tauri::async_runtime::spawn_blocking(worktrees_core::guidance::merge_edit)
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r)
+        .map_err(|e| {
+            applog("error", &format!("agent_guidance_merge: {e}"));
+            e
+        })
+}
+
 #[tauri::command]
 async fn agent_user_skills() -> Result<Vec<worktrees_core::agentfiles::UserSkill>, String> {
     Ok(worktrees_core::agentfiles::user_skills())
@@ -8156,6 +8204,9 @@ pub fn run() {
             set_codex_permissions,
             agent_guidance_status,
             set_agent_guidance,
+            set_agent_guidance_skill,
+            agent_guidance_diff,
+            agent_guidance_merge,
             agent_models,
             pi_status,
             set_pi_trust,
