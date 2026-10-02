@@ -54,7 +54,7 @@ import type { GuidanceStatus } from "./GuidancePanel";
 import type { CrossProjectStatus } from "./CrossProjectPanel";
 import type { CatId } from "./SettingsSheet";
 
-export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "agent-guidance" | "cross-project";
+export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "agent-guidance" | "agent-guidance-changed" | "cross-project";
 
 export type Offer = {
   id: OfferId;
@@ -185,6 +185,27 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
       cta: "Review…",
       to: { cat: "guidance", focus: "agent-guidance" },
       fingerprint: `v${g.version}`,
+    });
+  }
+  // The user EDITED the skill and an update changed the default under it
+  // (agent-guidance §11). A user who never edited gets the new default
+  // silently, so this exists only for a fork: `stale` is core's verdict that
+  // the shipped text differs from the one the edit was based on. Fingerprint =
+  // the NEW default's hash, so "stop suggesting" silences this update and the
+  // next change asks again — and Keep mine / Use the new default retire it by
+  // making `stale` false, which is how a choice is told from a dismissal. An
+  // UNUSABLE edit is not here: that is a problem, shown in Settings where it
+  // cannot be silenced (the rule at the top of `pendingOffers`). Nor is one
+  // with delivery off — no agent is getting either text.
+  const ed = g?.skill_edit;
+  if (g && g.settings.enabled && ed && ed.stale && !ed.invalid) {
+    out.push({
+      id: "agent-guidance-changed",
+      title: "The default agent guidance changed",
+      body: "You edited the worktrees skill, and this update changed the default you started from. Your agents still get your version — compare the two and choose.",
+      cta: "Compare…",
+      to: { cat: "guidance", focus: "agent-guidance-changed" },
+      fingerprint: g.skill_hash,
     });
   }
   // Cross-project reach (cross-project P1b, decided 2026-10-01: off by

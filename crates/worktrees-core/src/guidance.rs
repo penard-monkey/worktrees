@@ -163,6 +163,293 @@ pub fn save_settings(s: &Settings) -> Result<(), String> {
     std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+// ── the user's edit of the skill ────────────────────────────────────────────
+
+/// Where the user's own copy of the skill lives:
+/// `~/.config/worktrees/guidance/` — the user tier, beside the settings file.
+/// Never a repository (ADR 0001: a clone must not supply agent instructions
+/// this way) and never `ui-state.json` (the frontend writes that whole).
+///
+/// Two files. `SKILL.md` is the user's text, plain markdown so it can be
+/// edited in any editor. `SKILL.base.json` is the SHIPPED text that edit was
+/// based on — the text itself, not only its hash, because the binary that
+/// later notices the default moved no longer contains the old one, and the
+/// three-way compare ("what changed in the default since you forked it") needs
+/// it. Only the skill is editable: [`HEAD`] is also the MCP server's
+/// instructions, must stay one line inside Codex's 247-char cut, and is what
+/// [`guard_bin`] recognises a guard-capable CLI by.
+pub fn edit_dir() -> PathBuf {
+    crate::profile::config_root_pub().join("guidance")
+}
+
+const EDIT_FILE: &str = "SKILL.md";
+const BASE_FILE: &str = "SKILL.base.json";
+/// Far above any real skill (the shipped one is ~10 KB); a paste of something
+/// else is refused rather than handed to every agent.
+const EDIT_MAX: usize = 256 * 1024;
+
+/// The shipped text an edit was based on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Base {
+    /// [`VERSION`] when the edit was saved.
+    pub version: u32,
+    /// [`text_hash`] of `text`. Checked on read: a record whose hash does not
+    /// match its own text is treated as missing.
+    pub hash: String,
+    pub text: String,
+}
+
+/// The user's edit, as it stands on disk.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SkillEdit {
+    /// What the file holds, even when it is unusable (so it can be fixed).
+    pub text: String,
+    /// The default it was based on; `None` when that record is missing or
+    /// damaged, which counts as stale — nobody can say it is current.
+    pub base: Option<Base>,
+    /// The shipped skill has changed since this edit was based on it: the
+    /// user should compare before agents keep getting their older fork.
+    pub stale: bool,
+    /// Why agents get the default instead of this text, when they do.
+    pub invalid: Option<String>,
+}
+
+/// A content hash for change detection — [`fnv1a`], hex. Not a security
+/// boundary: it answers "did the default change", nothing more.
+pub fn text_hash(text: &str) -> String {
+    format!("{:016x}", fnv1a(&[(String::new(), text.to_string())]))
+}
+
+/// Whether `text` can stand in for the skill: frontmatter naming it
+/// `worktrees` (the rule tells agents to use "the worktrees skill", and
+/// Claude/pi load a skill by its frontmatter) with a description, which is
+/// what makes an agent load it at all.
+pub fn validate_skill(text: &str) -> Result<(), String> {
+    if text.len() > EDIT_MAX {
+        return Err(format!("it is {} KB; the limit is {} KB", text.len() / 1024, EDIT_MAX / 1024));
+    }
+    let body = text.strip_prefix("---\n").ok_or("it must start with a `---` frontmatter line")?;
+    let end = body.find("\n---").ok_or("its frontmatter has no closing `---` line")?;
+    let front = &body[..end];
+    let names: Vec<&str> = front.lines().filter(|l| l.starts_with("name:")).collect();
+    if names.len() != 1 || names[0].trim_end() != "name: worktrees" {
+        return Err("its frontmatter must keep `name: worktrees`, once".into());
+    }
+    if !front.lines().any(|l| l.strip_prefix("description:").is_some_and(|d| !d.trim().is_empty())) {
+        return Err("its frontmatter needs a `description:` (it is what makes an agent load the skill)".into());
+    }
+    // [`merge_texts`]' own markers: a merge saved with a conflict still in it
+    // would hand every agent both versions and a row of `<<<<<<<`.
+    if text.lines().any(|l| l.starts_with("<<<<<<< your edit") || l.starts_with(">>>>>>> the new default")) {
+        return Err("it still has merge conflict markers (`<<<<<<< your edit`) — keep one side of each".into());
+    }
+    Ok(())
+}
+
+/// The edit in `dir`, judged against `shipped`. `None` when there is none.
+pub fn read_edit_in(dir: &Path, shipped: &str) -> Option<SkillEdit> {
+    let unread = |why: String| Some(SkillEdit { text: String::new(), base: None, stale: true, invalid: Some(why) });
+    // Size first: this runs on every launch, and a huge file dropped there
+    // must not be read whole just to be refused.
+    match std::fs::metadata(dir.join(EDIT_FILE)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Ok(m) if m.len() > EDIT_MAX as u64 => {
+            return unread(format!("it is {} KB; the limit is {} KB", m.len() / 1024, EDIT_MAX / 1024))
+        }
+        _ => {}
+    }
+    let bytes = match std::fs::read(dir.join(EDIT_FILE)) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return unread(format!("it could not be read: {e}")),
+    };
+    let (text, mut invalid) = match String::from_utf8(bytes) {
+        Ok(t) => (t, None),
+        Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), Some("it is not UTF-8 text".to_string())),
+    };
+    if invalid.is_none() {
+        invalid = validate_skill(&text).err();
+    }
+    let base = std::fs::read_to_string(dir.join(BASE_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Base>(&t).ok())
+        .filter(|b| b.hash == text_hash(&b.text));
+    let stale = base.as_ref().is_none_or(|b| b.hash != text_hash(shipped));
+    Some(SkillEdit { text, base, stale, invalid })
+}
+
+pub fn read_edit() -> Option<SkillEdit> {
+    read_edit_in(&edit_dir(), SKILL_MD)
+}
+
+/// What agents get as the skill: a usable edit, else the shipped text.
+pub fn effective_skill_in(dir: &Path, shipped: &str) -> String {
+    match read_edit_in(dir, shipped) {
+        Some(e) if e.invalid.is_none() => e.text,
+        _ => shipped.to_string(),
+    }
+}
+
+pub fn effective_skill() -> String {
+    effective_skill_in(&edit_dir(), SKILL_MD)
+}
+
+/// Save `text` as the user's skill, based on `shipped` as of [`VERSION`] — or,
+/// with `None` or a text equal to `shipped`, go back to the default (both
+/// files removed, so "edited" can never mean "identical to the default").
+/// Saving the edit you already have is how "keep mine" after an update
+/// re-bases it on the new default.
+pub fn save_edit_in(dir: &Path, shipped: &str, text: Option<&str>) -> Result<(), String> {
+    let remove = |name: &str| match std::fs::remove_file(dir.join(name)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", dir.join(name).display())),
+        _ => Ok(()),
+    };
+    let text = match text {
+        Some(t) if t.trim_end() != shipped.trim_end() => t,
+        // The edit goes first: an edit without its base reads as stale, never
+        // as current, so a failure between the two cannot hide an update.
+        _ => return remove(EDIT_FILE).and_then(|()| remove(BASE_FILE)),
+    };
+    validate_skill(text).map_err(|e| format!("not saved: {e}"))?;
+    let mut text = text.to_string();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let base = Base { version: VERSION, hash: text_hash(shipped), text: shipped.to_string() };
+    let base = serde_json::to_string_pretty(&base).map_err(|e| e.to_string())? + "\n";
+    // The edit before its base, always: a failure between the two leaves a
+    // new edit on an old base (stale — asks again) or, on a first save, an
+    // edit with no base (stale too). Base-first would leave the OLD edit on
+    // the NEW base, which reads as current and retires the offer unchosen.
+    write_atomic(&dir.join(EDIT_FILE), &text)?;
+    write_atomic(&dir.join(BASE_FILE), &base)
+}
+
+pub fn save_edit(text: Option<&str>) -> Result<(), String> {
+    save_edit_in(&edit_dir(), SKILL_MD, text)
+}
+
+fn write_atomic(path: &Path, body: &str) -> Result<(), String> {
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, body).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A scratch directory holding `files`, removed on drop — for the two git
+/// commands below, which compare FILES.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(files: &[(&str, &str)]) -> Result<Scratch, String> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("wt-guidance-{}-{nanos}", std::process::id()));
+        // `create_dir`, not `_all`: the directory must be one this call made,
+        // never a path someone left in the shared temp dir.
+        std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let s = Scratch(dir);
+        for (name, body) in files {
+            std::fs::write(s.0.join(name), body).map_err(|e| format!("{name}: {e}"))?;
+        }
+        Ok(s)
+    }
+}
+
+/// git in `dir` with none of the user's git configuration: no global or
+/// system config, no global or system attributes. Flags alone are not enough —
+/// `--no-ext-diff` covers `diff.external` only, while an attributes file with
+/// `* diff=x` plus a `[diff "x"] textconv` rewrites every line the panel shows
+/// (and a failing textconv exits 128), `* -diff` turns the compare into
+/// "Binary files differ", and `merge.conflictStyle` changes the markers the
+/// merge hands the editor. `HOME`/`XDG_CONFIG_HOME` point at the scratch dir
+/// because the DEFAULT attributes file (`$XDG_CONFIG_HOME/git/attributes`) is
+/// read with no config at all; `GIT_DIR`/`GIT_WORK_TREE` are dropped so an
+/// inherited repository cannot be consulted either. `inherited` is the
+/// environment it would otherwise have come from — the test seam.
+fn git_isolated(dir: &Path, inherited: &[(&str, &Path)]) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(dir);
+    for (k, v) in inherited {
+        cmd.env(k, v);
+    }
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT");
+    cmd
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `old` → `new` as git's unified diff at full context — the shape the app's
+/// diff viewer already parses (`diff.ts`). Empty when they are the same.
+/// `--no-ext-diff`/`--no-color`, because a user's git config can route `diff`
+/// through an external tool or force colour, and either would hand the parser
+/// something that is not a patch.
+pub fn diff_texts(old: &str, new: &str) -> Result<String, String> {
+    diff_texts_env(old, new, &[])
+}
+
+/// [`diff_texts`] under an `inherited` environment — the test seam for a
+/// hostile user git config (see [`git_isolated`]).
+fn diff_texts_env(old: &str, new: &str, inherited: &[(&str, &Path)]) -> Result<String, String> {
+    let s = Scratch::new(&[("old", old), ("new", new)])?;
+    let mut cmd = git_isolated(&s.0, inherited);
+    cmd.args(["diff", "--no-index", "--no-ext-diff", "--no-color", "--unified=1000000", "--", "old", "new"])
+        ;
+    let out = crate::proc::run_deadline(cmd, 10).map_err(|e| format!("git diff: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(String::new()),
+        Some(1) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        _ => Err(format!("git diff: {}", String::from_utf8_lossy(&out.stderr).trim())),
+    }
+}
+
+/// A three-way merge of the user's edit with the new default, from the default
+/// it was based on (`git merge-file`): the edit's changes replayed onto the new
+/// text, with conflict markers where both changed the same lines. A STARTING
+/// POINT for the editor, never saved by itself.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Merged {
+    pub text: String,
+    pub conflicts: u32,
+}
+
+pub fn merge_texts(yours: &str, base: &str, new: &str) -> Result<Merged, String> {
+    merge_texts_env(yours, base, new, &[])
+}
+
+fn merge_texts_env(yours: &str, base: &str, new: &str, inherited: &[(&str, &Path)]) -> Result<Merged, String> {
+    let s = Scratch::new(&[("yours", yours), ("base", base), ("new", new)])?;
+    let mut cmd = git_isolated(&s.0, inherited);
+    cmd.args(["merge-file", "-p", "-L", "your edit", "-L", "the default you edited", "-L", "the new default", "yours", "base", "new"])
+        ;
+    let out = crate::proc::run_deadline(cmd, 10).map_err(|e| format!("git merge-file: {e}"))?;
+    // The exit status is the number of conflicts (capped at 127); anything
+    // above that, or a signal, is git failing.
+    match out.status.code() {
+        Some(n @ 0..=127) => Ok(Merged { text: String::from_utf8_lossy(&out.stdout).into_owned(), conflicts: n as u32 }),
+        _ => Err(format!("git merge-file: {}", String::from_utf8_lossy(&out.stderr).trim())),
+    }
+}
+
+/// [`merge_texts`] for the edit on disk. An error when there is nothing to
+/// merge: no edit, or no record of what it was based on.
+pub fn merge_edit() -> Result<Merged, String> {
+    let e = read_edit().ok_or("there is no edited skill to merge")?;
+    let b = e.base.ok_or("the record of which default your edit was based on is missing, so there is no three-way merge")?;
+    merge_texts(&e.text, &b.text, SKILL_MD)
+}
+
 // ── per-launch files ────────────────────────────────────────────────────────
 
 /// The materialised per-launch files, in one directory named by a hash of
@@ -189,8 +476,11 @@ pub fn data_root() -> PathBuf {
     store.parent().map(Path::to_path_buf).unwrap_or(store)
 }
 
+/// The per-launch files for the skill agents get now ([`effective_skill`]):
+/// an edit is a new directory, so a session already running keeps the text it
+/// launched with.
 pub fn materialize() -> Result<Materialized, String> {
-    materialize_in(&data_root(), guard_bin().as_deref())
+    materialize_in(&data_root(), guard_bin().as_deref(), &effective_skill())
 }
 
 /// The `worktrees` the guard's hook would run — only when it HAS the guard. An
@@ -205,7 +495,7 @@ pub fn guard_bin() -> Option<PathBuf> {
     (out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("Managed by worktrees:")).then_some(bin)
 }
 
-pub fn materialize_in(data_root: &Path, bin: Option<&Path>) -> Result<Materialized, String> {
+pub fn materialize_in(data_root: &Path, bin: Option<&Path>, skill: &str) -> Result<Materialized, String> {
     let plugin_json = serde_json::to_string_pretty(&serde_json::json!({
         "name": "worktrees",
         "description": "How to work in a worktrees-managed repository: places, lanes, briefs, messaging.",
@@ -213,10 +503,10 @@ pub fn materialize_in(data_root: &Path, bin: Option<&Path>) -> Result<Materializ
     }))
     .map_err(|e| e.to_string())?;
     let mut files: Vec<(String, String)> = vec![
-        ("skills/worktrees/SKILL.md".into(), SKILL_MD.into()),
+        ("skills/worktrees/SKILL.md".into(), skill.into()),
         ("rules.md".into(), format!("{}\n", rules_text())),
         ("claude/.claude-plugin/plugin.json".into(), plugin_json.clone()),
-        ("claude/skills/worktrees/SKILL.md".into(), SKILL_MD.into()),
+        ("claude/skills/worktrees/SKILL.md".into(), skill.into()),
     ];
     if let Some(bin) = bin {
         let command = format!("{} guard pretooluse", crate::profile::shell_quote(&bin.to_string_lossy()));
@@ -225,7 +515,7 @@ pub fn materialize_in(data_root: &Path, bin: Option<&Path>) -> Result<Materializ
         }))
         .map_err(|e| e.to_string())?;
         files.push(("claude-guard/.claude-plugin/plugin.json".into(), plugin_json));
-        files.push(("claude-guard/skills/worktrees/SKILL.md".into(), SKILL_MD.into()));
+        files.push(("claude-guard/skills/worktrees/SKILL.md".into(), skill.into()));
         files.push(("claude-guard/hooks/hooks.json".into(), hooks));
     }
     let dir = data_root.join("agent").join(format!("{:016x}", fnv1a(&files)));
@@ -664,8 +954,17 @@ pub struct Status {
     pub dir: Option<String>,
     pub error: Option<String>,
     pub harnesses: Vec<HarnessStatus>,
-    /// What every per-launch Claude session gets as its skill, verbatim.
-    pub skill: &'static str,
+    /// What every per-launch session gets as its skill, verbatim: the user's
+    /// edit when there is a usable one, else the default.
+    pub skill: String,
+    /// The skill this build ships.
+    pub skill_default: &'static str,
+    /// [`text_hash`] of `skill_default` — what an edit's base is compared
+    /// with, and the app's `agent-guidance-changed` offer fingerprint.
+    pub skill_hash: String,
+    /// The user's edit, when there is one ([`read_edit`]).
+    pub skill_edit: Option<SkillEdit>,
+    pub edit_path: String,
     /// What pi and Codex get as their rule, verbatim.
     pub rules: String,
 }
@@ -703,25 +1002,35 @@ pub fn status() -> Status {
         dir: m.map(|m| m.dir.to_string_lossy().into_owned()),
         error,
         harnesses,
-        skill: SKILL_MD,
+        skill: effective_skill(),
+        skill_default: SKILL_MD,
+        skill_hash: text_hash(SKILL_MD),
+        skill_edit: read_edit(),
+        edit_path: edit_dir().join(EDIT_FILE).to_string_lossy().into_owned(),
         rules: rules_text(),
     }
 }
 
-/// `worktrees guide [--status [--json]] [--rules]` — what agents are told.
-/// Works anywhere: none of it is a question about the cwd's repository.
+/// `worktrees guide [--status [--json]] [--rules] [--default]` — what agents
+/// are told: the skill they get (the user's edit when there is a usable one),
+/// `--default` the one this build ships. Works anywhere: none of it is a
+/// question about the cwd's repository.
 pub fn cmd_guide(args: &[String]) -> i32 {
     let has = |f: &str| args.iter().any(|a| a == f);
-    if let Some(bad) = args.iter().find(|a| !["--status", "--json", "--rules"].contains(&a.as_str())) {
-        eprintln!("worktrees guide: unknown argument '{bad}' (expected --status, --json, --rules)");
+    if let Some(bad) = args.iter().find(|a| !["--status", "--json", "--rules", "--default"].contains(&a.as_str())) {
+        eprintln!("worktrees guide: unknown argument '{bad}' (expected --status, --json, --rules, --default)");
         return 1;
     }
     if has("--rules") {
         println!("{}", rules_text());
         return 0;
     }
-    if !has("--status") {
+    if has("--default") {
         print!("{SKILL_MD}");
+        return 0;
+    }
+    if !has("--status") {
+        print!("{}", effective_skill());
         return 0;
     }
     let st = status();
@@ -739,6 +1048,7 @@ pub fn cmd_guide(args: &[String]) -> i32 {
     if let Some(e) = &st.error {
         println!("  files could not be written: {e}");
     }
+    println!("  skill:  {}", skill_line(st.skill_edit.as_ref(), &st.edit_path));
     for h in &st.harnesses {
         let what = match &h.delivery {
             Delivery::On { flags } => format!("delivered ({})", flags.first().map(String::as_str).unwrap_or("")),
@@ -749,6 +1059,22 @@ pub fn cmd_guide(args: &[String]) -> i32 {
         println!("  {:<7} {}{}", h.label, what, if h.installed { "" } else { " (not installed)" });
     }
     0
+}
+
+/// The status screen's one line about whose skill agents get.
+fn skill_line(edit: Option<&SkillEdit>, path: &str) -> String {
+    match edit {
+        None => "the default".into(),
+        Some(SkillEdit { invalid: Some(why), .. }) => format!("the default — your edit at {path} is not used: {why}"),
+        Some(SkillEdit { stale: true, base: Some(b), .. }) => format!(
+            "your edit ({path}); the default has changed since you edited v{} — compare in Settings → Agent guidance, or `worktrees guide --default`",
+            b.version
+        ),
+        Some(SkillEdit { stale: true, .. }) => {
+            format!("your edit ({path}); which default it was based on is unknown — compare with `worktrees guide --default`")
+        }
+        Some(_) => format!("your edit ({path})"),
+    }
 }
 
 /// `worktrees guard pretooluse` — the Claude PreToolUse hook (§5.2). Reads
@@ -892,7 +1218,7 @@ mod tests {
     #[test]
     fn materialising_writes_a_content_named_dir_once() {
         let root = tmp("mat");
-        let m = materialize_in(&root, Some(Path::new("/opt/wt bin/worktrees"))).expect("materialised");
+        let m = materialize_in(&root, Some(Path::new("/opt/wt bin/worktrees")), SKILL_MD).expect("materialised");
         assert!(m.dir.starts_with(root.join("agent")), "{}", m.dir.display());
         assert_eq!(std::fs::read_to_string(m.skill.join("SKILL.md")).unwrap(), SKILL_MD);
         assert_eq!(std::fs::read_to_string(&m.rules).unwrap().trim_end(), rules_text());
@@ -909,12 +1235,186 @@ mod tests {
         assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "Bash");
 
         // Same content, same directory; a different hook binary, another one.
-        assert_eq!(materialize_in(&root, Some(Path::new("/opt/wt bin/worktrees"))).unwrap(), m);
-        let other = materialize_in(&root, Some(Path::new("/elsewhere/worktrees"))).unwrap();
+        assert_eq!(materialize_in(&root, Some(Path::new("/opt/wt bin/worktrees")), SKILL_MD).unwrap(), m);
+        let other = materialize_in(&root, Some(Path::new("/elsewhere/worktrees")), SKILL_MD).unwrap();
         assert_ne!(other.dir, m.dir);
         // No binary: no guard variant, and the rest unchanged in shape.
-        assert!(materialize_in(&root, None).unwrap().claude_guard_plugin.is_none());
+        assert!(materialize_in(&root, None, SKILL_MD).unwrap().claude_guard_plugin.is_none());
+        // An edited skill is a new directory — a running session's plugin
+        // keeps the text it launched with — and every copy carries the edit.
+        let edited = SKILL_MD.replace("# Working in", "# Edited: working in");
+        let e = materialize_in(&root, Some(Path::new("/opt/wt bin/worktrees")), &edited).unwrap();
+        assert_ne!(e.dir, m.dir);
+        for f in [e.skill.join("SKILL.md"), e.claude_plugin.join("skills/worktrees/SKILL.md"), e.claude_guard_plugin.unwrap().join("skills/worktrees/SKILL.md")] {
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), edited, "{}", f.display());
+        }
+        assert_eq!(std::fs::read_to_string(m.skill.join("SKILL.md")).unwrap(), SKILL_MD, "the old directory is untouched");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    const OLD: &str = "---\nname: worktrees\ndescription: Use it.\n---\n\n# Places\n\nOne.\nTwo.\nThree.\n";
+    const NEW: &str = "---\nname: worktrees\ndescription: Use it.\n---\n\n# Places\n\nOne.\nTwo, improved.\nThree.\n";
+
+    #[test]
+    fn no_edit_means_the_shipped_skill() {
+        let dir = tmp("noedit");
+        assert_eq!(read_edit_in(&dir, NEW), None);
+        assert_eq!(effective_skill_in(&dir, NEW), NEW);
+    }
+
+    #[test]
+    fn an_edit_wins_and_records_the_default_it_was_based_on() {
+        let dir = tmp("edit");
+        let mine = OLD.replace("One.", "One, my way.");
+        save_edit_in(&dir, OLD, Some(&mine)).unwrap();
+        assert_eq!(effective_skill_in(&dir, OLD), mine);
+        let e = read_edit_in(&dir, OLD).unwrap();
+        assert_eq!(e.base, Some(Base { version: VERSION, hash: text_hash(OLD), text: OLD.into() }));
+        assert!(!e.stale && e.invalid.is_none(), "{e:?}");
+        // The binary updates and ships NEW: still the user's text, now stale,
+        // with the OLD default kept for the three-way compare.
+        let e = read_edit_in(&dir, NEW).unwrap();
+        assert!(e.stale, "a changed default must be noticed");
+        assert_eq!(e.base.unwrap().text, OLD);
+        assert_eq!(effective_skill_in(&dir, NEW), mine, "agents keep the user's text until they choose");
+        // "Keep mine": saving the same text again re-bases it on the new default.
+        save_edit_in(&dir, NEW, Some(&mine)).unwrap();
+        let e = read_edit_in(&dir, NEW).unwrap();
+        assert!(!e.stale);
+        assert_eq!(e.base.unwrap().hash, text_hash(NEW));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_that_dies_halfway_still_asks() {
+        // Edit saved against OLD; the binary now ships NEW, so it is stale.
+        // "Merge → Save" then fails writing the EDIT (here: its temp path is
+        // taken). The base must not have moved ahead of it, or the old text
+        // would read as current and the offer would retire without a choice.
+        let dir = tmp("halfway");
+        save_edit_in(&dir, OLD, Some(&OLD.replace("One.", "Uno."))).unwrap();
+        std::fs::create_dir_all(dir.join(format!("SKILL.tmp-{}", std::process::id())).join("x")).unwrap();
+        assert!(save_edit_in(&dir, NEW, Some(&NEW.replace("One.", "Uno."))).is_err());
+        let e = read_edit_in(&dir, NEW).unwrap();
+        assert!(e.stale, "a failed save must leave the edit stale: {e:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_the_default_or_nothing_is_a_reset() {
+        let dir = tmp("reset");
+        save_edit_in(&dir, OLD, Some(&OLD.replace("Two.", "2."))).unwrap();
+        save_edit_in(&dir, OLD, None).unwrap();
+        assert_eq!(read_edit_in(&dir, OLD), None);
+        assert!(!dir.join(BASE_FILE).exists(), "a reset leaves no base behind");
+        save_edit_in(&dir, OLD, Some(&OLD.replace("Two.", "2."))).unwrap();
+        // The default itself, give or take a trailing newline, is not an edit.
+        save_edit_in(&dir, OLD, Some(OLD.trim_end())).unwrap();
+        assert_eq!(read_edit_in(&dir, OLD), None, "an edit identical to the default must not read as modified");
+        // Resetting with nothing there is fine.
+        save_edit_in(&dir, OLD, None).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unusable_edit_falls_back_to_the_default_and_says_why() {
+        let dir = tmp("bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (body, why) in [
+            ("no frontmatter at all\n", "frontmatter"),
+            ("---\nname: other\ndescription: x\n---\nbody\n", "name: worktrees"),
+            ("---\nname: worktrees\n---\nbody\n", "description"),
+            ("---\nname: worktrees\nname: other\ndescription: x\n---\nbody\n", "once"),
+            ("---\nname: worktrees\ndescription: x\nbody, never closed\n", "closing"),
+        ] {
+            std::fs::write(dir.join(EDIT_FILE), body).unwrap();
+            let e = read_edit_in(&dir, NEW).unwrap();
+            assert!(e.invalid.as_deref().is_some_and(|w| w.contains(why)), "{body:?}: {e:?}");
+            assert_eq!(e.text, body, "the broken text is still shown, so it can be fixed");
+            assert_eq!(effective_skill_in(&dir, NEW), NEW, "{body:?}");
+            // And it is never SAVED in the first place.
+            assert!(save_edit_in(&dir, NEW, Some(body)).is_err(), "{body:?}");
+        }
+        // Oversized: refused from its metadata, before it is read.
+        std::fs::write(dir.join(EDIT_FILE), vec![b'a'; EDIT_MAX + 1]).unwrap();
+        let e = read_edit_in(&dir, NEW).unwrap();
+        assert!(e.invalid.as_deref().is_some_and(|w| w.contains("limit")) && e.text.is_empty(), "{e:?}");
+        std::fs::write(dir.join(EDIT_FILE), [0xff, 0xfe, b'x']).unwrap();
+        assert!(read_edit_in(&dir, NEW).unwrap().invalid.is_some());
+        assert_eq!(effective_skill_in(&dir, NEW), NEW);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_damaged_base_reads_as_stale() {
+        let dir = tmp("nobase");
+        let mine = NEW.replace("One.", "Uno.");
+        save_edit_in(&dir, NEW, Some(&mine)).unwrap();
+        std::fs::remove_file(dir.join(BASE_FILE)).unwrap();
+        let e = read_edit_in(&dir, NEW).unwrap();
+        assert!(e.stale && e.base.is_none() && e.invalid.is_none(), "{e:?}");
+        assert_eq!(effective_skill_in(&dir, NEW), mine, "a lost base does not discard the edit");
+        // A record whose hash does not match its own text is not believed.
+        let forged = Base { version: VERSION, hash: text_hash(NEW), text: OLD.into() };
+        std::fs::write(dir.join(BASE_FILE), serde_json::to_string(&forged).unwrap()).unwrap();
+        assert!(read_edit_in(&dir, NEW).unwrap().base.is_none());
+        std::fs::write(dir.join(BASE_FILE), "{not json").unwrap();
+        assert!(read_edit_in(&dir, NEW).unwrap().stale);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_shipped_skill_is_a_valid_edit() {
+        // The editor starts from the default; it must pass its own check.
+        validate_skill(SKILL_MD).unwrap();
+    }
+
+    #[test]
+    fn a_hostile_user_git_config_reaches_neither_the_diff_nor_the_merge() {
+        // The user's git config and attributes can textconv a "diff", mark
+        // every path binary, or restyle conflicts; none of it may reach a
+        // compare of two texts that are not in any repository.
+        let home = tmp("hostile-home");
+        std::fs::create_dir_all(home.join(".config/git")).unwrap();
+        std::fs::write(home.join("attrs"), "* diff=evil\n").unwrap();
+        std::fs::write(
+            home.join(".gitconfig"),
+            format!(
+                "[core]\n\tattributesFile = {}\n[diff \"evil\"]\n\ttextconv = sed s/^/CONVERTED:/\n[merge]\n\tconflictStyle = diff3\n",
+                home.join("attrs").display()
+            ),
+        )
+        .unwrap();
+        // The DEFAULT attributes file needs no config at all.
+        std::fs::write(home.join(".config/git/attributes"), "* -diff\n").unwrap();
+        let env: &[(&str, &Path)] = &[("HOME", &home), ("XDG_CONFIG_HOME", &home.join(".config"))];
+        let patch = diff_texts_env(OLD, NEW, env).unwrap();
+        assert!(patch.contains("\n-Two.\n+Two, improved.\n"), "{patch}");
+        assert!(!patch.contains("CONVERTED") && !patch.contains("Binary"), "{patch}");
+        let clash = OLD.replace("Two.", "Two, mine.");
+        let m = merge_texts_env(&clash, OLD, NEW, env).unwrap();
+        assert!(!m.text.contains("|||||||"), "the user's conflictStyle leaked: {}", m.text);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn diff_and_merge_go_through_git() {
+        assert_eq!(diff_texts(OLD, OLD).unwrap(), "");
+        let patch = diff_texts(OLD, NEW).unwrap();
+        assert!(patch.contains("\n-Two.\n+Two, improved.\n"), "{patch}");
+        // Full context: every line of both sides is in the patch.
+        assert!(patch.contains("\n # Places\n") && patch.contains("\n Three.\n"), "{patch}");
+        // The user's change and the default's change touch different lines.
+        let mine = OLD.replace("Use it.", "Use it well.");
+        let m = merge_texts(&mine, OLD, NEW).unwrap();
+        assert_eq!(m, Merged { text: NEW.replace("Use it.", "Use it well."), conflicts: 0 });
+        // Both changed the same line: markers, counted.
+        let clash = OLD.replace("Two.", "Two, mine.");
+        let m = merge_texts(&clash, OLD, NEW).unwrap();
+        assert_eq!(m.conflicts, 1);
+        assert!(m.text.contains("<<<<<<< your edit") && m.text.contains(">>>>>>> the new default"), "{}", m.text);
+        // A merge with a conflict left in it is not a skill.
+        assert!(validate_skill(&m.text).is_err_and(|e| e.contains("conflict")), "{}", m.text);
     }
 
     /// Shapes observed with `codex debug prompt-input` on 0.159.0, trimmed to

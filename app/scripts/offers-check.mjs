@@ -100,11 +100,12 @@ if (ids({ piMcp: null }).length !== 0) fail("an unknown pi status must offer not
 // agent-guidance (agent-guidance §4.5): not an `absent` install but "this is
 // now happening — review it". True only when delivery is on and some agent is
 // installed to get it; asks once per guidance VERSION, never per wording fix.
-const guidance = (enabled, installed, version = 1) => ({
+const guidance = (enabled, installed, version = 1, skill_edit = null, skill_hash = "h1") => ({
   version, settings: { enabled, guard: false }, guard_available: true, settings_path: "", dir: null, error: null,
   harnesses: [{ id: "claude", label: "Claude", installed, state: enabled ? "on" : "off", flags: [] }],
-  skill: "", rules: "",
+  skill: "", skill_default: "", skill_hash, skill_edit, edit_path: "", rules: "",
 });
+const edited = (stale, invalid = null, base = { version: 2, hash: "h0", text: "old" }) => ({ text: "mine", base, stale, invalid });
 if (!ids({ guidance: guidance(true, true) }).includes("agent-guidance")) fail("agent-guidance: not offered with delivery on and Claude installed");
 else ok("agent-guidance: offered when delivery is on and an agent is installed");
 if (ids({ guidance: guidance(false, true) }).length !== 0) fail("agent-guidance: offered while the user has delivery OFF");
@@ -118,6 +119,34 @@ if (ids({ guidance: null }).length !== 0) fail("agent-guidance: an unknown statu
   const again = pendingOffers({ mcp: null, guidance: guidance(true, true, 2) }, dismissPatch(g1, {}));
   if (quiet.length !== 0 || again.map((o) => o.id).join() !== "agent-guidance") fail("agent-guidance: a dismissal must hold for its version and lapse on the next");
   else ok("agent-guidance: dismissed per guidance version");
+}
+
+// agent-guidance-changed (agent-guidance §11): the user EDITED the skill and the
+// shipped default moved under it. Never for a user who did not edit (they get
+// the new default silently), never for an edit that is current, never for an
+// UNUSABLE edit (a problem, shown in Settings, not silenceable), and never with
+// delivery off. Fingerprint = the new default's hash: dismissing silences THIS
+// update, and the next change to the default asks again.
+{
+  const changed = (g, d = {}) => pendingOffers({ mcp: null, guidance: g }, d).filter((o) => o.id === "agent-guidance-changed");
+  const dismissedOld = { "agent-guidance": "v1" };
+  if (changed(guidance(true, true, 1, null), dismissedOld).length) fail("agent-guidance-changed: offered to a user who never edited the skill");
+  else ok("agent-guidance-changed: silent with no edit (the new default just applies)");
+  if (changed(guidance(true, true, 1, edited(false)), dismissedOld).length) fail("agent-guidance-changed: offered for an edit based on the current default");
+  else ok("agent-guidance-changed: silent while the edit is current");
+  if (changed(guidance(true, true, 1, edited(true)), dismissedOld).length !== 1) fail("agent-guidance-changed: not offered for an edit whose default moved");
+  else ok("agent-guidance-changed: offered when the default moved under an edit");
+  if (changed(guidance(true, true, 1, edited(true, null, null)), dismissedOld).length !== 1) fail("agent-guidance-changed: an edit with no base record must count as changed");
+  else ok("agent-guidance-changed: a lost base record still asks");
+  if (changed(guidance(true, true, 1, edited(true, "it must start with a `---` frontmatter line")), dismissedOld).length) fail("agent-guidance-changed: an UNUSABLE edit is a problem for Settings, not an offer");
+  else ok("agent-guidance-changed: silent for an unusable edit");
+  if (changed(guidance(false, true, 1, edited(true)), dismissedOld).length) fail("agent-guidance-changed: offered with delivery off");
+  else ok("agent-guidance-changed: silent with delivery off");
+  const [c1] = changed(guidance(true, true, 1, edited(true), "h1"));
+  const quiet = changed(guidance(true, true, 1, edited(true), "h1"), dismissPatch(c1, {}));
+  const again = changed(guidance(true, true, 1, edited(true), "h2"), dismissPatch(c1, {}));
+  if (c1?.fingerprint !== "h1" || quiet.length !== 0 || again.length !== 1) fail("agent-guidance-changed: a dismissal must hold for this default and lapse when it changes again");
+  else ok("agent-guidance-changed: dismissed per shipped default (its hash)");
 }
 
 // cross-project (cross-project P1b, decided: reach OFF by default and OFFERED).
@@ -142,7 +171,7 @@ if (ids({ crossProject: null }).length !== 0) fail("cross-project: an unknown st
 // Every offer id, not just the first: a new offer whose deep link lands
 // nowhere is the same bug as the old one.
 const every = pendingOffers(
-  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true), crossProject: xp("off") }, {});
+  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off") }, {});
 const sheetSrc = read("../src/SettingsSheet.tsx");
 // The render of ONE category: from its `{cat === "x" && <>` to the next
 // category's. A data-focus found anywhere in src/ proves nothing about where
@@ -167,17 +196,22 @@ for (const o of every) {
     // PiPanel alone passes even if the component drops it on the floor.
     && !(o.id === "pi-mcp" && sheetSrc.includes(`{cat === "pi" && <PiPanel`)
       && read("../src/PiPanel.tsx").includes(`data-focus="${o.to.focus}"`)
-      && /<section[^>]*data-focus=\{focusId\}/.test(read("../src/PiMcpPanel.tsx")))) {
+      && /<section[^>]*data-focus=\{focusId\}/.test(read("../src/PiMcpPanel.tsx")))
+    // The guidance category mounts GuidanceSection, whose "default changed"
+    // band carries this target — rendered for exactly the state that offers it.
+    && !(o.id === "agent-guidance-changed" && catSlice("guidance").includes("<GuidanceSection")
+      && /<div className="guidance-changed" data-focus="agent-guidance-changed"/.test(read("../src/GuidancePanel.tsx"))
+      && /\{usable && edit\.stale && <SkillChanged/.test(read("../src/GuidancePanel.tsx")))) {
     fail(`${o.id}: the "${o.to.cat}" category's render carries no data-focus="${o.to.focus}" — the deep link opens the category and highlights nothing`);
   } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
   // dismissal, per offer
-  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true), crossProject: xp("off") },
+  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off") },
     dismissPatch(o, {})).some((x) => x.id === o.id)) fail(`${o.id}: dismissing it did not silence it`);
   else ok(`${o.id}: dismissal silences its own fingerprint (${JSON.stringify(o.fingerprint)})`);
 }
-if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills,agent-guidance,cross-project") {
-  fail(`expected all six offers, got [${every.map((o) => o.id)}]`);
+if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills,agent-guidance,agent-guidance-changed,cross-project") {
+  fail(`expected all seven offers, got [${every.map((o) => o.id)}]`);
 }
 // The skills fingerprint is the SET of unlinked skills: a new one is a new question.
 {
@@ -335,6 +369,10 @@ if (!/invoke<GuidanceStatus>\("agent_guidance_status"\)\.then\(setGuidance\)/.te
   if (!/offerPending/.test(gp) || !/onSilenceOffer/.test(gp) || !/<section[^>]*data-focus=\{focusId\}/.test(gp)) {
     fail("GuidanceSection must carry offerPending/onSilenceOffer and put data-focus on its section");
   } else ok("Settings → Agent guidance can end its suggestion on demand, and is a deep-link target");
+  if (!/changeOfferPending/.test(gp) || !/onSilenceOffer=\{onSilenceChangeOffer\}/.test(gp)) fail("the \"default changed\" band must be able to end its own suggestion");
+  else ok("the \"default changed\" band can end its suggestion on demand");
+  if (!/guidanceChangeOfferPending=\{!!guidanceChangeOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the agent-guidance-changed offer is pending");
+  else ok("Settings is told whether the agent-guidance-changed offer is pending");
 }
 if (!/invoke<PiMcpStatus>\("pi_mcp_status"\)\.then\(setPiMcp\)/.test(app)) {
   fail("App.tsx no longer probes pi_mcp_status straight into the offer input");

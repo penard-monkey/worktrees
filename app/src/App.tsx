@@ -3806,6 +3806,7 @@ function App() {
   const skillsOffer = offers.find((o) => o.id === "codex-skills") ?? null;
   const piMcpOffer = offers.find((o) => o.id === "pi-mcp") ?? null;
   const guidanceOffer = offers.find((o) => o.id === "agent-guidance") ?? null;
+  const guidanceChangeOffer = offers.find((o) => o.id === "agent-guidance-changed") ?? null;
   const crossProjectOffer = offers.find((o) => o.id === "cross-project") ?? null;
 
   // The gear's dot means an UPDATE, and only that. Offers used to light it too
@@ -7807,6 +7808,7 @@ function App() {
         skillsOfferPending={!!skillsOffer} onSilenceSkillsOffer={() => skillsOffer && silenceOffer(skillsOffer)}
         guidance={guidance} onGuidanceChanged={setGuidance}
         guidanceOfferPending={!!guidanceOffer} onSilenceGuidanceOffer={() => guidanceOffer && silenceOffer(guidanceOffer)}
+        guidanceChangeOfferPending={!!guidanceChangeOffer} onSilenceGuidanceChangeOffer={() => guidanceChangeOffer && silenceOffer(guidanceChangeOffer)}
         crossProject={crossProject} onCrossProjectChanged={setCrossProject}
         crossProjectOfferPending={!!crossProjectOffer} onSilenceCrossProjectOffer={() => crossProjectOffer && silenceOffer(crossProjectOffer)} />
 

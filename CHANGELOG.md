@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **You can edit the `worktrees` skill your agents are given.** Settings →
+  Agent guidance → What agents are told now has **Edit…**: your text is saved
+  to `~/.config/worktrees/guidance/SKILL.md` and every Claude and pi session
+  launched afterwards gets it (one already running keeps what it started
+  with). **Reset to default** goes back. The one-line rule stays fixed — it is
+  also the MCP server's instructions. A broken edit (no frontmatter, a lost
+  `name: worktrees`) is refused on save and, if made by hand, never handed to
+  an agent: they get the default and Settings says why.
+- **When an update changes the default skill you edited, you are told.**
+  "The default agent guidance changed" appears with the other suggestions, and
+  Settings shows the new default against the one you started from, against your
+  version, or your own changes — then **Keep mine**, **Use the new default**, or
+  **Merge into the editor…**, which replays your changes onto the new default
+  for you to check and save. Your agents keep your version until you choose. If
+  you never edited it, the new default simply applies.
+- `worktrees guide` prints the skill agents actually get; `worktrees guide
+  --default` prints the one this build ships, and `--status` says which.
+
 ### Fixed
 - **pi typed into a place's own session is pi, not Claude.** tmux names only
   the interpreter, `node`, and a `node` pane outside an agent sidecar was read
