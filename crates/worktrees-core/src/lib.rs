@@ -44,6 +44,7 @@ pub mod projcfg;
 pub mod project;
 pub mod provision;
 pub mod quota;
+pub mod registry;
 pub mod render;
 pub mod runs;
 pub mod skillstore;

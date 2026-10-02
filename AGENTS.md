@@ -182,6 +182,15 @@ and prints `bats warning: Executed N instead of expected 340 tests`. A later
 grep of that log reads as a real regression. Check the plan line and the count
 before believing a single failure in a log you did not watch finish.
 
+**A throwaway tmux server needs `-L` (or `-S`) on EVERY command — `TMUX_TMPDIR`
+is not isolation inside a lane.** Every lane runs in a tmux pane, so `$TMUX` is
+set, and a bare `tmux …` talks to the server `$TMUX` names: the user's REAL one.
+`TMUX_TMPDIR` only picks the socket directory when `$TMUX` is unset. On
+2026-10-01 a lane probed with `export TMUX_TMPDIR=$T; tmux new-session …; …;
+tmux kill-server` and killed the user's whole tmux server — every session, every
+agent. Use `tmux -L <unique-name> …` on every call (including `kill-server`), or
+`env -u TMUX tmux -S "$T/sock" …`; never a bare `tmux kill-server` anywhere.
+
 **A throwaway git script needs a guard, because `git -C ""` means HERE.** A
 probe let a repo path come back empty and aimed `branch -M main` and
 `push origin main` at the live worktree; git refused both (the worktree guard on

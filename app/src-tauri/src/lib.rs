@@ -447,22 +447,38 @@ struct Workspace {
     projects: Vec<ProjectView>,
 }
 
+/// The app's OWN project list, from before core owned it — only ever READ now,
+/// as the source of the one-way union-merge into the registry.
 fn projects_file(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("projects.json"))
 }
-fn read_projects(app: &AppHandle) -> Vec<String> {
-    projects_file(app)
-        .ok()
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
-        .unwrap_or_default()
+
+/// Merge the app's old `projects.json` into core's registry, once per process
+/// (cross-project §2.2). Core keeps what the file held at the last merge, so
+/// this re-adds nothing removed since and still carries across a project a
+/// downgraded app added. Logged, never fatal: an unreadable old file merges
+/// nothing and the registry is still the list.
+fn import_app_projects(app: &AppHandle) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(src) = projects_file(app) else { return };
+        match worktrees_core::registry::import_list(&src) {
+            Ok(0) => {}
+            Ok(n) => applog("info", &format!("registry: merged {n} project(s) from {}", src.display())),
+            Err(e) => applog("warn", &format!("registry: could not merge {}: {e}", src.display())),
+        }
+    });
 }
-fn write_projects(app: &AppHandle, list: &[String]) -> Result<(), String> {
-    let p = projects_file(app)?;
-    let json = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
-    std::fs::write(p, json).map_err(|e| e.to_string())
+
+/// Registered project roots, in nav order — core's registry
+/// (`~/.config/worktrees/projects.json`), shared with the CLI and the MCP
+/// server. Read fresh every time: another writer (`worktrees projects add`)
+/// may have changed it since the last call, and a list held here would write
+/// that change away.
+fn read_projects(app: &AppHandle) -> Vec<String> {
+    import_app_projects(app);
+    worktrees_core::registry::read_lenient().roots()
 }
 
 /// Every tracked project with its snapshot (or an error if it's gone/broken —
@@ -499,12 +515,8 @@ async fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
 #[tauri::command]
 async fn add_project(app: AppHandle, dir: String) -> Result<Workspace, String> {
     let project = Project::discover(Path::new(&dir)).map_err(|e| e.msg)?;
-    let root = project.main_root.clone();
-    let mut roots = read_projects(&app);
-    if !roots.contains(&root) {
-        roots.push(root);
-        write_projects(&app, &roots)?;
-    }
+    import_app_projects(&app);
+    worktrees_core::registry::add(&project.main_root)?;
     list_workspace(app).await
 }
 
@@ -710,39 +722,20 @@ fn first_commit(dir: &str) -> Result<(), String> {
 
 #[tauri::command]
 async fn remove_project(app: AppHandle, root: String) -> Result<Workspace, String> {
-    let mut roots = read_projects(&app);
-    roots.retain(|r| r != &root);
-    write_projects(&app, &roots)?;
+    import_app_projects(&app);
+    worktrees_core::registry::remove(&root)?;
     list_workspace(app).await
 }
 
-/// Re-order the workspace's projects (nav drag). `projects.json` IS the order —
-/// there is no separate order field — so this rewrites the file.
-///
-/// The frontend's list is a snapshot that can be stale by the time the drop
-/// lands (another window added a project, a `remove_project` raced it), so the
-/// incoming list is treated as a PREFERENCE, not the truth: roots the file no
-/// longer has are dropped, and roots the frontend never saw are kept, appended
-/// in their existing order. A drag can reorder the workspace; it must not be
-/// able to delete from it.
-fn merge_project_order(current: &[String], want: Vec<String>) -> Vec<String> {
-    let known: std::collections::HashSet<&String> = current.iter().collect();
-    let mut seen = std::collections::HashSet::new();
-    let mut next: Vec<String> = want
-        .into_iter()
-        .filter(|r| known.contains(r) && seen.insert(r.clone()))
-        .collect();
-    next.extend(current.iter().filter(|r| !seen.contains(*r)).cloned());
-    next
-}
-
+/// Re-order the workspace's projects (nav drag). The registry's order IS the
+/// nav order. The frontend's list is a snapshot that can be stale by the time
+/// the drop lands, so core treats it as a PREFERENCE, under its lock: roots it
+/// no longer has are ignored and roots the dragger never saw are kept,
+/// appended (`registry::reorder`). A drag can reorder; it cannot delete.
 #[tauri::command]
 async fn reorder_projects(app: AppHandle, roots: Vec<String>) -> Result<Workspace, String> {
-    let current = read_projects(&app);
-    let next = merge_project_order(&current, roots);
-    if next != current {
-        write_projects(&app, &next)?;
-    }
+    import_app_projects(&app);
+    worktrees_core::registry::reorder(&roots)?;
     list_workspace(app).await
 }
 
@@ -8531,39 +8524,6 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A nav drag sends the order it can SEE. The file is the truth, and the
-    /// window that dragged may be looking at a stale copy of it — so the merge
-    /// has to be lossless in both directions: nothing invented, nothing lost.
-    #[test]
-    fn reordering_projects_can_never_add_or_drop_one() {
-        let current = v(&["/a", "/b", "/c"]);
-        assert_eq!(
-            merge_project_order(&current, v(&["/c", "/a", "/b"])),
-            v(&["/c", "/a", "/b"]),
-            "a plain permutation applies verbatim",
-        );
-        assert_eq!(
-            merge_project_order(&current, v(&["/c", "/gone", "/a"])),
-            v(&["/c", "/a", "/b"]),
-            "a root the file no longer has is dropped, not written back",
-        );
-        assert_eq!(
-            merge_project_order(&current, v(&["/c"])),
-            v(&["/c", "/a", "/b"]),
-            "roots the dragger never saw keep their order, appended",
-        );
-        assert_eq!(
-            merge_project_order(&current, v(&["/b", "/b", "/a"])),
-            v(&["/b", "/a", "/c"]),
-            "a repeated root is taken once, at its first position",
-        );
-        assert_eq!(
-            merge_project_order(&current, vec![]),
-            current,
-            "an empty request is a no-op, not a wipe",
-        );
     }
 
     /// A cut patch must end on a line boundary. Half a line of source is

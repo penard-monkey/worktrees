@@ -2037,7 +2037,9 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let strays = if config_only || !names.is_empty() || hub_copy.is_some() {
         Vec::new()
     } else {
-        stray_findings(p)
+        let mut v = stray_findings(p);
+        v.extend(nested_findings(&p.main_root, &crate::registry::read_lenient()));
+        v
     };
     // Agent guidance a harness is NOT getting, said where someone looks for
     // "why does my agent not know X". Machine-level, so whole-project runs only.
@@ -2151,6 +2153,26 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
     report.exit_code()
+}
+
+/// One warning per registry entry nested inside, or containing, this
+/// project's own entry (`Code::NestedProject`). A repo the user never
+/// registered has no entry and gets nothing.
+fn nested_findings(main_root: &str, reg: &crate::registry::Registry) -> Vec<Finding> {
+    reg.nested()
+        .into_iter()
+        .filter(|(inner, outer)| inner.root == main_root || outer.root == main_root)
+        .map(|(inner, outer)| {
+            Finding::warn(
+                Code::NestedProject,
+                format!(
+                    "registered project '{}' ({}) lies inside registered project '{}' ({}). Each \
+                     session still belongs to the repo it was started in; this is only unusual.",
+                    inner.name, inner.root, outer.name, outer.root
+                ),
+            )
+        })
+        .collect()
 }
 
 /// One warning per registered worktree outside `.worktrees/`, carrying the
@@ -2993,6 +3015,24 @@ fn hint_init(p: &Project, ui: &mut dyn Ui) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_projects_are_flagged_from_both_sides_only() {
+        use crate::registry::{Entry, Registry};
+        let e = |root: &str, name: &str| Entry { root: root.into(), name: name.into(), private: false };
+        let reg = Registry {
+            projects: vec![e("/w/outer", "outer"), e("/w/outer/vendor/inner", "inner"), e("/w/other", "other")],
+            ..Default::default()
+        };
+        for root in ["/w/outer", "/w/outer/vendor/inner"] {
+            let f = super::nested_findings(root, &reg);
+            assert_eq!(f.len(), 1, "{root}");
+            assert_eq!(f[0].code, crate::diag::Code::NestedProject);
+            assert!(f[0].message.contains("'inner'") && f[0].message.contains("'outer'"), "{}", f[0].message);
+        }
+        assert!(super::nested_findings("/w/other", &reg).is_empty());
+        assert!(super::nested_findings("/w/unregistered", &reg).is_empty());
+    }
+
     use super::*;
 
     /// Agent guidance is for worktrees-managed repos only (decision,
