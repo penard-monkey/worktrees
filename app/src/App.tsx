@@ -35,7 +35,7 @@ import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTo
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
-import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
+import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
 import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
@@ -436,12 +436,12 @@ const nameOf = (p: { slug: string; declared?: Declared }) => p.declared?.title?.
 const isTextField = (t: EventTarget | null) =>
   t instanceof Element && !t.classList.contains("xterm-helper-textarea")
   && !!t.closest('textarea, select, [contenteditable]:not([contenteditable="false"]), input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="range"]):not([type="color"]):not([type="file"])');
+/** How many entries the ‹ / › right-click list offers. */
+const NAV_MENU_MAX = 12;
 /** Which way a keydown moves through navigation history, if it is a history
  *  chord at all. ⌘[ / ⌘] everywhere (Safari, Finder, Xcode), matched on the
  *  key with the PHYSICAL key as fallback — a layout that puts `[` behind ⌥
  *  still has a BracketLeft. ⌘← / ⌘→ only outside a text field. */
-/** How many entries the ‹ / › right-click list offers. */
-const NAV_MENU_MAX = 12;
 const navChordDir = (e: KeyboardEvent): -1 | 1 | undefined => {
   if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return undefined;
   if (e.key === "[" || e.code === "BracketLeft") return -1;
@@ -5098,6 +5098,9 @@ function App() {
       // fresh "+" tab after re-add land on a surviving index, inheriting a cwd
       // it never visited.
       dropPanels((k) => k.startsWith(root + "|"), ["place_panels"]);
+      // Untracked: its places are nowhere to go back to (`navAlive` would skip
+      // them anyway — this is so the history stops carrying them).
+      commitHist((h) => pruneNav(h, (l) => l.place?.repo === root));
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
@@ -5452,6 +5455,7 @@ function App() {
       const r = await runCmd("remove_place", { repo, slug, delBranch, force });
       if (r?.ok) {
         dropPanels((k) => k === placeKey(repo, slug));
+        commitHist((h) => pruneNav(h, (l) => l.place?.repo === repo && l.place.slug === slug));
         if (sel?.repo === repo && sel?.slug === slug) setSel(null);
         setRm(null);
       } else {
@@ -6538,7 +6542,17 @@ function App() {
   // REPLACES Home as entry 0 — launching is not a navigation you go back from.
   // The dock shell actually in front, reported by the tab strip (see `onFront`).
   const [termFront, setTermFront] = useState<{ key: string; id: number | null | undefined } | null>(null);
-  const onTermFront = useCallback((repo: string, slug: string, id: number | null | undefined) => setTermFront({ key: placeKey(repo, slug), id }), []);
+  /** The front tab each place's strip last actually SHOWED. Outlives the strip
+   *  (an unmount reports `undefined`), so a closed dock can name the shell the
+   *  strip will come back on even where nothing was ever picked — the restore
+   *  does not write `term_tab_active`. */
+  const navSeenFront = useRef<Record<string, number>>({});
+  const onTermFront = useCallback((repo: string, slug: string, id: number | null | undefined) => {
+    const key = placeKey(repo, slug);
+    if (id === null) delete navSeenFront.current[key];
+    else if (id !== undefined) navSeenFront.current[key] = id;
+    setTermFront({ key, id });
+  }, []);
   const [hist, setHist] = useState<NavHistory>(emptyHistory);
   const histRef = useRef(hist);
   // A place selected before its snapshot resolves (or after it was removed
@@ -6546,16 +6560,25 @@ function App() {
   // The dock part is what it is ON, whether or not it is open: ⌘J is layout,
   // not a place (docs/proposals/nav-history.md, decision 2).
   const frontHere = sel && termFront?.key === placeKey(sel.repo, sel.slug) ? termFront.id : undefined;
-  // On the Terminal tab with the strip still restoring, the front shell is not
-  // known yet — not "none", so the observation waits rather than recording a
-  // location that was never on screen.
-  const navLoc: Loc | null = !sel ? { place: null } : !selected ? null : eff.dock_tab === "terminal" && frontHere === undefined ? null : {
+  // Is there a tab strip on screen to report a front shell? Only the open dock
+  // on its Terminal tab mounts one (the `<aside className="dock">` condition).
+  const stripUp = dockShown && eff.dock_tab === "terminal";
+  // With the strip up but still restoring, the front shell is not known yet —
+  // not "none" — so the observation waits rather than recording a location
+  // that was never on screen. With NO strip there is nothing to wait for: the
+  // shell is the one the strip will restore onto when it mounts (the one it
+  // last showed, else the remembered tab), so ⌘J lands on the same location
+  // rather than a new one. Waiting there instead left the place unrecorded — and,
+  // since the dock state seeds every place visited next, all of those too.
+  const shellHere = stripUp ? frontHere
+    : sel ? navSeenFront.current[placeKey(sel.repo, sel.slug)] ?? settings.term_tab_active?.[placeKey(sel.repo, sel.slug)] : undefined;
+  const navLoc: Loc | null = !sel ? { place: null } : !selected ? null : stripUp && frontHere === undefined ? null : {
     place: { repo: sel.repo, slug: sel.slug },
     dock: {
       tab: eff.dock_tab,
       ...(dockFile ? { file: { path: dockFile, line: dockAt?.line, col: dockAt?.col } } : {}),
-      // The shell actually in front (see `frontHere`).
-      ...(frontHere != null ? { shell: frontHere } : {}),
+      // The shell in front (see `shellHere`).
+      ...(shellHere != null ? { shell: shellHere } : {}),
     },
   };
   const navKey = navLoc ? locKey(navLoc) : null;
@@ -6577,7 +6600,7 @@ function App() {
    *  panes show it (or 1.5 s pass — then whatever DID land amends the entry,
    *  so a target that could only be reached partly is recorded as it was). A
    *  pointer press hands control back early: you are navigating again. */
-  const navApplying = useRef<{ key: string; timer: number } | null>(null);
+  const navApplying = useRef<{ key: string; place: string | null; timer: number } | null>(null);
   const endApplying = useCallback(() => {
     if (navApplying.current) window.clearTimeout(navApplying.current.timer);
     navApplying.current = null;
@@ -6590,8 +6613,12 @@ function App() {
     if (!restoredOnce.current || !navLoc) return;
     const ap = navApplying.current;
     if (ap) {
-      if (ap.key === navKey) endApplying();
-      return;
+      if (ap.key === navKey) { endApplying(); return; }
+      // A selection history did not ask for — ⌘K, ⌘1, Enter in the filter, an
+      // agent's show_doc — is a visit of your own, not the apply landing: hand
+      // control back and record it. (A pointer press already does this.)
+      if ((navLoc.place ? locKey({ place: navLoc.place }) : null) === ap.place) return;
+      endApplying();
     }
     const mode = navAmend.current ? "amend" : "push";
     navAmend.current = false;
@@ -6608,9 +6635,12 @@ function App() {
     if (!loc || i === histRef.current.index) return;
     commitHist((h) => goToNav(h, i));
     endApplying();
+    navApplyGen.current++; // any answer still out belongs to the entry being left
+    setNavMenu(null);
     const key = locKey(loc);
     navApplying.current = {
       key,
+      place: loc.place ? locKey({ place: loc.place }) : null,
       timer: window.setTimeout(() => {
         navApplying.current = null;
         const now = navLocRef.current;
@@ -6635,6 +6665,8 @@ function App() {
   const [navPending, setNavPending] = useState<Loc | null>(null);
   const [navShellGoto, setNavShellGoto] = useState<{ id: number; seq: number } | null>(null);
   const navShellSeq = useRef(0);
+  /** Bumped by every apply and every history step — see `current` below. */
+  const navApplyGen = useRef(0);
   const navPendingRef = useRef(navPending);
   navPendingRef.current = navPending;
   useEffect(() => {
@@ -6642,6 +6674,15 @@ function App() {
     if (!loc?.place || !loc.dock) return;
     if (sel?.repo !== loc.place.repo || sel?.slug !== loc.place.slug) return;
     setNavPending(null);
+    // This apply's ticket. The file check below is asynchronous, and by the
+    // time it answers history may have moved on — to another place (⌘[ ⌘[
+    // faster than a stat) or to another entry in this one. An answer for an
+    // entry that is no longer the one being shown is dropped, or it opens one
+    // place's file inside another and the observer records that as a visit.
+    // Same race, same answer, as the `files_open` restore's `alive`.
+    const gen = ++navApplyGen.current;
+    const current = () => gen === navApplyGen.current
+      && selRef.current?.repo === loc.place!.repo && selRef.current?.slug === loc.place!.slug;
     const d = loc.dock;
     let show = false; // the entry differs from the dock: open it, that is what Back is FOR
     if (d.tab !== eff.dock_tab) show = true;
@@ -6656,6 +6697,7 @@ function App() {
         // answer, plus a line saying why the viewer is empty.
         invoke<boolean>("file_readable", { path: want.path })
           .then((ok) => {
+            if (!current()) return;
             if (ok) openDockFile(want.path, { line: want.line, col: want.col });
             else setNotice(`${want.path.slice(want.path.lastIndexOf("/") + 1)} no longer exists.`);
           })
