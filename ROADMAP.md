@@ -163,6 +163,28 @@ close-out ritual (global `/close-out` skill; this repo's settings in
     default.
   See [the session](docs/sessions/2026-10-02-guidance-editable/summary.md).
 
+- **Update bubble (#413): review follow-ups, and the real-app pass is owed.**
+  - **z-index.** `.upd-bubble` is 35, above the hover-reveal nav overlay
+    (30), so a revealed Places overlay slides UNDER the bubble. Decide which
+    wins: hide the bubble while the overlay is up, or drop it below 30.
+  - **The hourly check runs `cli_binary()` every time.** That is a
+    login-shell `which` plus `--version` across several candidate paths, now
+    once an hour rather than once a launch. Cache it, or split the CLI probe
+    out of `check_update` so the poll fetches only the release tag.
+  - **Optional: Esc dismisses the bubble when focus is INSIDE it.** It
+    deliberately has no `useEscape`, which would take Esc from the terminal
+    while it is up, but a focus-scoped handler would not.
+  - **Never run in the real app.** Only the mock harness and
+    `app/scripts/update-bubble-browser.mjs` (Chromium + WebKit) have run it.
+    David still has to confirm two design calls: the bubble follows the gear
+    to the right when Places is mirrored, and the dot is `--accent` (orange
+    in gruvbox, Frost in nord) rather than a fixed blue.
+  - **The gear dot is 2.4:1 on tokyo-day's rail.** It predates #413;
+    `--accent` is low in tokyo-day app-wide, so a fix is a theme-token
+    change.
+
+  See [the session](docs/sessions/2026-10-02-update-notify/summary.md).
+
 - **`codex_usage::tests::fake_cli_malformed_eof_buffer_cap_and_deadline_are_bounded`
   is real-time and flaked once on Linux CI** (#394's first run; passed on
   re-run). It gives a fake Python CLI a 300ms deadline and asserts the
