@@ -185,6 +185,22 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 
   See [the session](docs/sessions/2026-10-02-update-notify/summary.md).
 
+- **Navigation history (#416): two things only the real app can settle.**
+  - **Mouse side buttons in WKWebView.** Back/forward on buttons 4 / 5
+    listens for `mouseup` with `button` 3 / 4 (`App.tsx`, beside `navStep`).
+    Only synthetic events have been seen. Check with a real mouse that
+    WKWebView delivers them at all, and that it does not also run a webview
+    back/forward of its own (the page has no history, but confirm nothing
+    reloads).
+  - **The Home arrows sit under the hover-reveal Places overlay.**
+    `.navhist-home` is absolutely positioned at the top left of `.main`. With
+    the sidebar unpinned and revealed as an overlay, the overlay covers it,
+    so ‹ › on Home cannot be reached while Places is showing. Move the pair
+    clear of the overlay (or into the Home row) and hit-test it with
+    `elementFromPoint` with the overlay up.
+
+  See [the session](docs/sessions/2026-10-02-nav-history/summary.md).
+
 - **`codex_usage::tests::fake_cli_malformed_eof_buffer_cap_and_deadline_are_bounded`
   is real-time and flaked once on Linux CI** (#394's first run; passed on
   re-run). It gives a fake Python CLI a 300ms deadline and asserts the
