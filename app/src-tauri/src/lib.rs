@@ -441,6 +441,9 @@ struct ProjectView {
     ok: bool,
     error: Option<String>,
     snapshot: Option<serde_json::Value>,
+    /// The registry's name for it — what an agent elsewhere addresses it by.
+    name: Option<String>,
+    private: bool,
 }
 #[derive(Serialize)]
 struct Workspace {
@@ -490,6 +493,7 @@ async fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
     // itself runs up to 16 concurrent git calls (place_json_par), so cap
     // projects-in-flight to keep the product (~4×16 processes) sane.
     let roots = read_projects(&app);
+    let reg = worktrees_core::registry::read_lenient();
     let mut projects: Vec<ProjectView> = Vec::with_capacity(roots.len());
     for chunk in roots.chunks(4) {
         let batch: Vec<ProjectView> = std::thread::scope(|s| {
@@ -497,9 +501,13 @@ async fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
                 .iter()
                 .cloned()
                 .map(|root| {
-                    s.spawn(move || match snapshot(&root) {
-                        Ok(sn) => ProjectView { root, ok: true, error: None, snapshot: Some(sn) },
-                        Err(e) => ProjectView { root, ok: false, error: Some(e), snapshot: None },
+                    let entry = reg.by_root(&root).cloned();
+                    s.spawn(move || {
+                        let (name, private) = entry.map_or((None, false), |e| (Some(e.name), e.private));
+                        match snapshot(&root) {
+                            Ok(sn) => ProjectView { root, ok: true, error: None, snapshot: Some(sn), name, private },
+                            Err(e) => ProjectView { root, ok: false, error: Some(e), snapshot: None, name, private },
+                        }
                     })
                 })
                 .collect();
@@ -811,14 +819,26 @@ async fn set_note(repo: String, slug: String, note: String) -> Result<(), String
     })
 }
 
-/// Drop a reference to one place into ANOTHER place's Claude session.
+/// Drop a reference to one place into ANOTHER place's agent session.
 ///
-/// The nav drag's landing. What arrives is the same `@worktrees:place://…`
-/// token the `@` menu completes, built in Rust from `worktrees_core::mention`
-/// so there is exactly one implementation of it — the client matches a mention
-/// against its cached resource list by exact string equality, so a frontend
-/// copy that drifted by a character would reference the wrong place silently
-/// rather than erroring.
+/// The nav drag's landing. Within one project, into a Claude pane, it is the
+/// same `@worktrees:place://…` token the `@` menu completes, built in Rust from
+/// `worktrees_core::mention` so there is exactly one implementation of it — the
+/// client matches a mention against its cached resource list by exact string
+/// equality, so a frontend copy that drifted by a character would reference the
+/// wrong place silently rather than erroring.
+///
+/// Anything else — a place from ANOTHER project, or any place into a Codex or
+/// pi pane — is a plain-text address (`place <project>:<slug>`,
+/// `mention::address`), decided by `reach::plan_drop` (cross-project §6.3). A
+/// token there would need the session's server to list that resource, which it
+/// does not, and would resolve to nothing silently.
+///
+/// `repo` is the DRAGGED place's project and `into_repo` the receiving
+/// session's: the session's server name is looked up from the receiving
+/// place's profile stamp, which lives in ITS project's sidecar. (Reading it
+/// from the dragged project's sidecar was right only while the two were always
+/// the same repo.)
 ///
 /// `into_session` rather than a slug because the receiving place may be on an
 /// ADOPTED session whose name is not the canonical one; the frontend already
@@ -827,27 +847,123 @@ async fn set_note(repo: String, slug: String, note: String) -> Result<(), String
 async fn drop_reference(
     repo: String,
     slug: String,
+    into_repo: String,
     into_slug: String,
     into_session: String,
+    provider: Option<String>,
 ) -> Result<String, String> {
+    let provider = provider.unwrap_or_else(|| worktrees_core::provider::CLAUDE.id.to_string());
+    let prov = worktrees_core::provider::by_id(&provider).ok_or_else(|| format!("unknown agent: {provider}"))?;
     let project = Project::discover(std::path::Path::new(&repo)).map_err(|e| e.msg)?;
+    let into = Project::discover(std::path::Path::new(&into_repo)).map_err(|e| e.msg)?;
     let places = project.place_index();
-    let uri = mention::uri_for(&places, &slug)
-        .ok_or_else(|| format!("no such place: {slug}"))?;
-    // `mcpsetup::claude_json_path()` rather than hand-building it from $HOME:
-    // that module owns where claude's config lives.
-    let server = mention::server_name_for(&repo, &into_slug, &mcpsetup::claude_json_path())?;
-    let token = mention::mention(&server, &uri);
+    if !places.iter().any(|p| p.slug == slug) {
+        return Err(format!("no such place: {slug}"));
+    }
+    let plan = worktrees_core::reach::plan_drop(
+        &worktrees_core::registry::read_lenient(),
+        worktrees_core::reach::user_level(),
+        &project.main_root,
+        &slug,
+        &into.main_root,
+        prov.id,
+    )?;
+    let text = match plan {
+        // `mcpsetup::claude_json_path()` rather than hand-building it from
+        // $HOME: that module owns where claude's config lives.
+        worktrees_core::reach::Drop::Token => drop_token(&places, &slug, &into.main_root, &into_slug, &mcpsetup::claude_json_path())?,
+        worktrees_core::reach::Drop::Address(a) => {
+            // Codex and pi: refuse while the agent is on an approval or a
+            // question. A Claude permission prompt ignores a BRACKETED paste
+            // (tmux::paste_to_ai); that is not verified for Codex's or pi's
+            // composer, so a paste there could read as the answer.
+            if prov.id != worktrees_core::provider::CLAUDE.id {
+                let probes = worktrees_core::agent::live_probes();
+                let panes = tmux::PaneList::fetch();
+                let scan = worktrees_core::harness::Scan { probes: &probes, panes: panes.as_ref() };
+                let path = into.place_dir(&into_slug);
+                let waiting = worktrees_core::harness::place_activities(&into, &into_slug, &path, &scan)
+                    .into_iter()
+                    .any(|(a, r)| a.provider().id == prov.id && r.state == worktrees_core::activity::State::Waiting);
+                if waiting {
+                    return Err(format!(
+                        "{}'s {} is waiting on an approval or a question — drop it again once it has an answer",
+                        into_slug, prov.label
+                    ));
+                }
+            }
+            a
+        }
+    };
     // Spaces on BOTH sides. The client's extractor requires whitespace (or
     // start-of-input) before the `@`, and this cannot see the prompt to know
     // whether there already is any; the trailing one closes the `\b` and
-    // dismisses the completion popup the `@` opens as it arrives.
+    // dismisses the completion popup the `@` opens as it arrives. An address
+    // wants the same separation from whatever is already typed.
     //
     // Addressed by the AI's pane, not by an index — see `tmux::ai_pane` for the
-    // three ordinary ways pane 0 turns out not to be Claude.
-    tmux::paste_to_ai(&into_session, "claude", &format!(" {token} "))?;
-    applog("info", &format!("drop_reference: {token} -> {into_session}"));
-    Ok(token)
+    // three ordinary ways pane 0 turns out not to be the agent.
+    tmux::paste_to_ai(&into_session, prov.match_word, &format!(" {text} "))?;
+    applog("info", &format!("drop_reference: {text} -> {into_session} ({})", prov.id));
+    Ok(text)
+}
+
+/// The `@<server>:place://…` token for `slug` (among `places`, the DRAGGED
+/// project's index), named by the server the RECEIVING session has — read
+/// from `into_root`'s sidecar, where that session's profile stamp lives.
+fn drop_token(places: &[worktrees_core::model::PlaceRef], slug: &str, into_root: &str, into_slug: &str, claude_json: &Path) -> Result<String, String> {
+    let uri = mention::uri_for(places, slug).ok_or_else(|| format!("no such place: {slug}"))?;
+    let server = mention::server_name_for(into_root, into_slug, claude_json)?;
+    Ok(mention::mention(&server, &uri))
+}
+
+/// Settings → Agent guidance's cross-project section, and the offer's input:
+/// the user's level and the registered projects (names, `private`). Read-only
+/// and machine-level — the same answer whichever project is in focus.
+#[derive(Serialize)]
+struct CrossProjectStatus {
+    level: &'static str,
+    config_path: String,
+    projects: Vec<CrossProjectEntry>,
+}
+#[derive(Serialize)]
+struct CrossProjectEntry {
+    root: String,
+    name: String,
+    private: bool,
+}
+fn cross_project_now() -> CrossProjectStatus {
+    CrossProjectStatus {
+        level: worktrees_core::reach::user_level().as_str(),
+        config_path: worktrees_core::config::config_toml_path().to_string_lossy().into_owned(),
+        projects: worktrees_core::registry::read_lenient()
+            .projects
+            .into_iter()
+            .map(|e| CrossProjectEntry { root: e.root, name: e.name, private: e.private })
+            .collect(),
+    }
+}
+
+#[tauri::command]
+async fn cross_project_status() -> Result<CrossProjectStatus, String> {
+    Ok(cross_project_now())
+}
+
+/// The user's act: set `cross_project` in `~/.config/worktrees/config.toml`.
+/// Sessions read it when they start.
+#[tauri::command]
+async fn set_cross_project(level: String) -> Result<CrossProjectStatus, String> {
+    let l = worktrees_core::reach::Level::parse(&level).ok_or_else(|| format!("not a level: {level}"))?;
+    worktrees_core::reach::set_user_level(l)?;
+    applog("info", &format!("cross_project = {}", l.as_str()));
+    Ok(cross_project_now())
+}
+
+/// Mark a registered project private (out of reach in both directions) or not.
+#[tauri::command]
+async fn set_project_private(root: String, private: bool) -> Result<CrossProjectStatus, String> {
+    worktrees_core::registry::set_private(&root, private)?;
+    Ok(cross_project_now())
 }
 
 /// Every "Copy …" in the app (`clipboard.ts`). Native because the web API
@@ -7956,6 +8072,9 @@ pub fn run() {
             list_places,
             list_workspace,
             drop_reference,
+            cross_project_status,
+            set_cross_project,
+            set_project_private,
             copy_text,
             add_project,
             create_project,
@@ -8120,6 +8239,41 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// The receiving session's server is looked up in the RECEIVING
+    /// project's sidecar. Both repos have a place called `lane`; the dragged
+    /// one is stamped with a profile that no longer exists, the receiving one
+    /// is unprofiled, and claude's user config has no worktrees server — so
+    /// each sidecar gives a DIFFERENT refusal, and the message says which one
+    /// was read. Reading the dragged repo's (the code before the split) names
+    /// the ghost profile for a drop into `b`.
+    #[test]
+    fn a_drop_token_names_the_receiving_sessions_server() {
+        let base = std::env::temp_dir().join(format!("wt-droptoken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let ghost = format!("ghost-{}", std::process::id());
+        worktrees_core::store::edit(&a.to_string_lossy(), "lane", |d| d.profile_id = Some(ghost.clone())).unwrap();
+        let cj = base.join("claude.json");
+        std::fs::write(&cj, "{}").unwrap();
+        let places = vec![worktrees_core::model::PlaceRef {
+            slug: "lane".into(),
+            path: a.join(".worktrees/lane").to_string_lossy().into_owned(),
+            branch: None,
+            is_main: false,
+            registered: true,
+        }];
+        let into_b = drop_token(&places, "lane", &b.to_string_lossy(), "lane", &cj).unwrap_err();
+        assert!(into_b.contains("no worktrees MCP server") && !into_b.contains(&ghost), "{into_b}");
+        let into_a = drop_token(&places, "lane", &a.to_string_lossy(), "lane", &cj).unwrap_err();
+        assert!(into_a.contains(&ghost), "{into_a}");
+        // With a server in user scope, the token itself.
+        std::fs::write(&cj, r#"{"mcpServers":{"worktrees":{"command":"/x/bin/worktrees","args":["mcp","--mutations"]}}}"#).unwrap();
+        assert_eq!(drop_token(&places, "lane", &b.to_string_lossy(), "lane", &cj).unwrap(), "@worktrees:place://lane");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// The rules behind a terminal link: a FILE, inside a registered project,
     /// found from the first base that has it; `~/` and git's `a/`/`b/`.
     #[test]

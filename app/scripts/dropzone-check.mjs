@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // The nav drag can drop a place onto the terminal, which types a reference to
-// that place into the Claude session there. Three invariants hold that up, and
+// that place into the agent session there — an `@`-mention for a Claude pane in
+// the same project, a plain-text address otherwise (cross-project §6; the
+// decision itself is `dnd.ts::mentionPlan`, which drop-check.mjs runs). Three invariants hold that up, and
 // every one of them is invisible to `tsc` and to the unit tests — each would
 // break the feature (or another one) while still compiling and still passing.
 //
@@ -30,7 +32,7 @@ const check = (ok, what) => {
 // ── 1. the shared component ────────────────────────────────────────────────
 const pane = read("TerminalPane.tsx");
 check(
-  /<div className="term-wrap" data-drop=\{drop\}>/.test(pane),
+  /<div className="term-wrap" data-drop=\{drop\} data-drop-provider=\{dropProvider\}>/.test(pane),
   "`.term-wrap` takes data-drop from a PROP, not a literal (TermSurface is shared)",
 );
 // NOTE the boundary: these components' PROP TYPES contain `\n}` too
@@ -48,7 +50,9 @@ const body = (name) => {
 for (const name of ["TerminalPane", "ShellPane"]) {
   check(body(name) !== "", `${name} is still an exported component this can read`);
 }
-check(/drop=\{provider === "claude" \? "mention" : undefined\}/.test(body("TerminalPane")), "only Claude's terminal marks itself a mention drop target");
+// Every harness's pane is a target since cross-project P1b (Codex and pi take
+// the plain-text address); each says WHICH harness it is.
+check(/drop=\{provider \? "mention" : undefined\} dropProvider=\{provider\}/.test(body("TerminalPane")), "every agent's terminal marks itself a drop target, labelled with its harness");
 check(!/drop=/.test(body("ShellPane")), "ShellPane does NOT — a dock scratch shell is not a place");
 
 // ── 2. branch order in resolveDrop ─────────────────────────────────────────
@@ -61,16 +65,17 @@ check(
   mentionAt > -1 && tierAt > -1 && mentionAt < tierAt,
   "the terminal is tested BEFORE [data-tier] (after it, the branch is unreachable)",
 );
-// The cross-project guard: the MCP server is pinned to one repo, so a foreign
-// slug cannot resolve and the token would be dead text.
+// A cross-project drop is no longer refused outright: `mentionPlan` decides
+// (refusing while reach is off, a project is private, or a Codex/pi agent is
+// waiting) and the branch must honour its refusals rather than insert anyway.
 const mentionBranch = resolve.slice(mentionAt, tierAt);
 check(
-  /item\.repo !== sel\.repo/.test(mentionBranch) && /kind: "reject"/.test(mentionBranch),
-  "a cross-project drop is REJECTED rather than silently inserted",
+  /mentionPlan\(\{/.test(mentionBranch) && /if \(!plan\.ok\) return \{ kind: "reject"/.test(mentionBranch),
+  "the drop asks mentionPlan, and a refusal is REJECTED rather than silently inserted",
 );
 check(
-  /selectedAgents\?\.claude\.up/.test(mentionBranch),
-  "a place without a live Claude session is not a mention target",
+  /agentUp: !!agent\?\.up/.test(mentionBranch) && /if \(!plan \|\| !agent\) return null/.test(mentionBranch),
+  "a pane without a live agent is not a drop target",
 );
 
 // ── 3. the affordance's selector matches the attribute ─────────────────────

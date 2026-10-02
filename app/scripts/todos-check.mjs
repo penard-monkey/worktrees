@@ -149,10 +149,21 @@ const count = (h, a) => todoCount(projectTodos(h, a));
     fail(`edit-only findings: ${JSON.stringify(manual)} — expected a 0-count row naming 4, with no button`);
   } else ok("edit-only findings (unknown-key, undeclared, slot-conflict, dangling-link) are a row with no count");
   const rs = all.remedies;
-  if (rs.relink + rs.force + rs.provision + rs.manual !== all.issues) fail("remedies must sum to issueCount's population");
+  if (rs.relink + rs.force + rs.provision + rs.stray + rs.registry + rs.manual !== all.issues) fail("remedies must sum to issueCount's population");
   else ok("the remedy split sums to the issue count");
   if (remedies(report("totally-new-code")).manual !== 1) fail("an unknown code must land in manual — the bucket that promises no button");
   else ok("an unknown code promises no button");
+  // Registry notes are not .worktrees.toml's to fix — their own row, never manual.
+  {
+    const rr = remedies(report("nested-project", "prefix-collision"));
+    if (rr.registry !== 2 || rr.manual !== 0) fail(`nested-project/prefix-collision: ${JSON.stringify(rr)} — expected registry 2, manual 0`);
+    else ok("nested-project + prefix-collision land in their own bucket, not manual");
+    const rrows = projectTodos({ issues: 2, error: null, remedies: rr }, null);
+    const reg = rrows.find((r) => r.id === "doctor-registry");
+    if (!reg || reg.n !== 0 || reg.action !== null || /\.worktrees\.toml/.test(reg.label) || rrows.some((r) => r.id === "doctor-manual")) {
+      fail(`registry row: ${JSON.stringify(rrows)} — expected a 0-count info row that does not send you to .worktrees.toml`);
+    } else ok("registry notes are a row that never says to edit .worktrees.toml");
+  }
   const info = { code: 0, schema_version: 1, error: null, findings: [finding("port-busy", "info"), finding("copy-stale", "info")] };
   if (Object.values(remedies(info)).some((v) => v !== 0)) fail("info findings must not count (issueCount excludes them)");
   else ok("info findings count nowhere");

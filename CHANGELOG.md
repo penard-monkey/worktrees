@@ -106,6 +106,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (`worktrees_mcp_cross_project: "off"`). Sessions pick it up when they
   start. `doctor` warns when two registered projects share a session prefix.
 
+- **Settings → Agent guidance → Other projects.** Turn cross-project reach
+  off, to Read or to Full, and mark any registered project private. An
+  after-update suggestion offers it once you have two or more registered
+  projects. Running sessions keep the reach they started with. The worktrees
+  skill gains an "Across projects" section, so the agent-guidance suggestion
+  appears once more.
+- **Drag a place from another project into any agent.** Dropping a place onto
+  a session's terminal used to work only for a place in the same project, and
+  only into Claude. Now a place from another project drops in as a plain
+  address (`place <project>:<slug>`) that the agent can look up, and Codex
+  and pi panes take a drop too. Within one project, a Claude pane still gets
+  the `@`-mention. A drop is refused, with the reason, while reach is off,
+  when either project is private, and when a Codex or pi agent is waiting on
+  an approval or a question.
+
 ### Changed
 - **Both plan-usage readers moved into the engine.** Claude's and Codex's
   usage readers lived under `app/src-tauri`, where only the desktop app could
