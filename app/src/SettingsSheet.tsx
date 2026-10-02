@@ -26,7 +26,7 @@ type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: b
 type TermHistoryInfo = { dir: string; bytes: number; tabs: number };
 type Release = { tag: string; published: string };
 
-const RELEASES_URL = "https://github.com/penard-monkey/worktrees/releases";
+export const RELEASES_URL = "https://github.com/penard-monkey/worktrees/releases";
 
 /** The by-hand route for the same install — for when the buttons fail, or the
  *  app is too broken to press them. The version MUST ride in
@@ -330,6 +330,7 @@ export function SettingsSheet({
   cliMissing,
   appStale,
   onCheckUpdate,
+  onCatShown,
   onShowNotes,
   onReset,
   repo,
@@ -370,7 +371,11 @@ export function SettingsSheet({
   cliStale: boolean;
   cliMissing: boolean;
   appStale: boolean;
-  onCheckUpdate: () => Promise<void> | void;
+  onCheckUpdate: () => Promise<unknown> | void;
+  /** The category on screen, whichever way it got there (opened at it, or
+   *  clicked to). App uses it to retire the update bubble once Updates has
+   *  been seen — `at` alone only knows where the sheet was OPENED. */
+  onCatShown?: (cat: CatId) => void;
   onShowNotes: () => void;
   onReset: () => void;
   /// The project in focus — AI profiles can be bound per repo, so the panel
@@ -424,7 +429,11 @@ export function SettingsSheet({
   // an offer's deep link, which would otherwise drop you on Appearance and make
   // you hunt for the thing it just offered.
   const [cat, setCat] = useState<CatId>("appearance");
-  useEffect(() => { if (open) setCat(at?.cat ?? "appearance"); }, [open, at]);
+  // Reset on CLOSE too: the open effect below it reads `cat` in the same commit
+  // as this one sets it, so a sheet reopened at Appearance would otherwise
+  // report last visit's category once — and "Updates, seen" retires a bubble.
+  useEffect(() => { setCat(open ? at?.cat ?? "appearance" : "appearance"); }, [open, at]);
+  useEffect(() => { if (open) onCatShown?.(cat); }, [open, cat, onCatShown]);
   const [codexMcpStatus, setCodexMcpStatus] = useState<CodexMcpStatus | null>(null);
   const [piMcpStatus, setPiMcpStatus] = useState<PiMcpStatus | null>(null);
   useEffect(() => {
@@ -1066,9 +1075,9 @@ export function SettingsSheet({
                 checked={settings.update_auto_check}
                 onChange={(e) => onChange({ update_auto_check: e.currentTarget.checked })}
               />
-              Check for updates at launch
+              Check for updates automatically
             </label>
-            <div className="hint">“Check for updates” below always works regardless of this setting.</div>
+            <div className="hint">Hourly while the window is open. “Check for updates” below always works regardless of this setting.</div>
             <div className="ver-rows">
               <div className="ver-row">app <b>{update?.app_version ?? "…"}</b></div>
               <div className="ver-row">
