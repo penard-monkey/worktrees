@@ -120,11 +120,29 @@ if (ids({ guidance: null }).length !== 0) fail("agent-guidance: an unknown statu
   else ok("agent-guidance: dismissed per guidance version");
 }
 
+// cross-project (cross-project P1b, decided: reach OFF by default and OFFERED).
+// Only while off, and only with two or more registered projects — with one
+// there is nothing else to reach. Turning it on to either level retires it.
+const xp = (level, n = 2) => ({ level, config_path: "", projects: Array.from({ length: n }, (_, i) => ({ root: `/r${i}`, name: `p${i}`, private: false })) });
+if (!ids({ crossProject: xp("off") }).includes("cross-project")) fail("cross-project: not offered while off with two projects");
+else ok("cross-project: offered while off with two registered projects");
+if (ids({ crossProject: xp("off", 1) }).length !== 0) fail("cross-project: offered with a single project — nothing to reach");
+else ok("cross-project: silent with one project");
+if (ids({ crossProject: xp("read") }).length !== 0 || ids({ crossProject: xp("full") }).length !== 0) fail("cross-project: still offered after reach was turned on");
+else ok("cross-project: retired once reach is on (read or full)");
+if (ids({ crossProject: null }).length !== 0) fail("cross-project: an unknown status must offer nothing");
+{
+  const [c] = pendingOffers({ mcp: null, crossProject: xp("off") }, {});
+  const quiet = pendingOffers({ mcp: null, crossProject: xp("off", 5) }, dismissPatch(c, {}));
+  if (quiet.length !== 0) fail("cross-project: a dismissal must hold while reach stays off (more projects is not a new question)");
+  else ok("cross-project: a dismissal holds while reach stays off");
+}
+
 // ── 2. an offer's action is a DESTINATION, not a deed ──────────────────────
 // Every offer id, not just the first: a new offer whose deep link lands
 // nowhere is the same bug as the old one.
 const every = pendingOffers(
-  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true) }, {});
+  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true), crossProject: xp("off") }, {});
 const sheetSrc = read("../src/SettingsSheet.tsx");
 // The render of ONE category: from its `{cat === "x" && <>` to the next
 // category's. A data-focus found anywhere in src/ proves nothing about where
@@ -154,12 +172,12 @@ for (const o of every) {
   } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
   // dismissal, per offer
-  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true) },
+  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true), crossProject: xp("off") },
     dismissPatch(o, {})).some((x) => x.id === o.id)) fail(`${o.id}: dismissing it did not silence it`);
   else ok(`${o.id}: dismissal silences its own fingerprint (${JSON.stringify(o.fingerprint)})`);
 }
-if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills,agent-guidance") {
-  fail(`expected all five offers, got [${every.map((o) => o.id)}]`);
+if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills,agent-guidance,cross-project") {
+  fail(`expected all six offers, got [${every.map((o) => o.id)}]`);
 }
 // The skills fingerprint is the SET of unlinked skills: a new one is a new question.
 {
@@ -295,9 +313,20 @@ if (offersTitle(1) !== "1 thing to set up — open" || offersTitle(3) !== "3 thi
 // …and the CONTEXT: an offer whose input is never fed can never render. The two
 // Codex inputs must be the machine-level probes, not some project's status.
 const ctxCall = app.match(/pendingOffers\(\{([^}]*)\}/);
-if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1]) || !/\bguidance\b/.test(ctxCall[1])) {
-  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp, userSkills and guidance must all reach it`);
-} else ok("pendingOffers is fed mcp + codexMcp + piMcp + userSkills + guidance");
+if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1]) || !/\bguidance\b/.test(ctxCall[1]) || !/\bcrossProject\b/.test(ctxCall[1])) {
+  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp, userSkills, guidance and crossProject must all reach it`);
+} else ok("pendingOffers is fed mcp + codexMcp + piMcp + userSkills + guidance + crossProject");
+if (!/invoke<CrossProjectStatus>\("cross_project_status"\)\.then\(setCrossProject\)/.test(app)) {
+  fail("App.tsx no longer probes cross_project_status straight into the offer input");
+} else ok("the cross-project offer input comes from a machine-level probe");
+{
+  const xpSrc = read("../src/CrossProjectPanel.tsx");
+  if (!/offerPending/.test(xpSrc) || !/onSilenceOffer/.test(xpSrc) || !/<section[^>]*data-focus=\{focusId\}/.test(xpSrc)) {
+    fail("CrossProjectSection must carry offerPending/onSilenceOffer and put data-focus on its section");
+  } else ok("Settings → Agent guidance → Other projects can end its suggestion on demand, and is a deep-link target");
+  if (!/crossProjectOfferPending=\{!!crossProjectOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the cross-project offer is pending");
+  else ok("Settings is told whether the cross-project offer is pending");
+}
 if (!/invoke<GuidanceStatus>\("agent_guidance_status"\)\.then\(setGuidance\)/.test(app)) {
   fail("App.tsx no longer probes agent_guidance_status straight into the offer input");
 } else ok("the agent-guidance offer input comes from a machine-level probe");

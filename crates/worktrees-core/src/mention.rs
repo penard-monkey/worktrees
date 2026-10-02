@@ -206,9 +206,34 @@ pub fn mention(server: &str, uri: &str) -> String {
     format!("@{server}:{uri}")
 }
 
+/// The plain-text ADDRESS a drag drops where an `@`-mention cannot work:
+/// a place in another project (the session's server cannot resolve its
+/// resource — cross-project §6.2), or any place dropped into a Codex or pi pane
+/// (no `@`-resources there at all). `place <project>:<slug>`, or `place <slug>`
+/// for an unregistered project's own place. Built here, beside `mention`, for
+/// the same reason: two producers of one string drift.
+///
+/// An agent that reads it calls `place_status` with the address; on a server
+/// too old for qualified addresses that fails LOUDLY ("no such place"), which
+/// is why this, and not a token that would silently resolve to nothing, is
+/// what a foreign drop types.
+pub fn address(project: Option<&str>, slug: &str) -> String {
+    match project {
+        Some(p) => format!("place {p}:{slug}"),
+        None => format!("place {slug}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_address_is_the_qualified_form_place_status_takes() {
+        assert_eq!(address(Some("beta"), "lane-x"), "place beta:lane-x");
+        assert_eq!(address(Some("beta"), "(main)"), "place beta:(main)");
+        assert_eq!(address(None, "lane-x"), "place lane-x");
+    }
 
     fn p(slug: &str, is_main: bool) -> PlaceRef {
         PlaceRef {

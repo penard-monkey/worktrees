@@ -42,7 +42,8 @@ pub const SKILL_MD: &str = include_str!("guidance/SKILL.md");
 /// What agents are told, as a version a USER would care about: bumped when the
 /// guidance changes enough to show the after-update offer again (the app's
 /// `agent-guidance` offer fingerprints on it). A wording fix does not bump it.
-pub const VERSION: u32 = 2;
+/// 3: the "Across projects" section (cross-project P1b).
+pub const VERSION: u32 = 3;
 
 /// The rule plus where the how-to lives, for the channels that take a prompt
 /// rather than a skill (pi's `--append-system-prompt`, Codex's

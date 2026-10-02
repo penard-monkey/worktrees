@@ -775,7 +775,7 @@ export type TermFindProps = {
 
 /** The rendered pane: xterm plus its find bar. Both kinds of terminal share it,
  *  so find behaves identically in the main pane and in a dock shell tab. */
-function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnabled = true, drop, links, findOpen = false, findToken = 0, onFindClose }: {
+function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnabled = true, drop, dropProvider, links, findOpen = false, findToken = 0, onFindClose }: {
   makeTransport: () => Transport; tkey: string; termVersion: number; focusToken: number; focusEnabled?: boolean;
   /** ⌘-clickable file paths, or absent for none (see `termLinkProvider`). */
   links?: TermLinks;
@@ -784,6 +784,9 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnable
    *  too, and only the place's own tmux pane is somewhere a worktree reference
    *  can be dropped. */
   drop?: string;
+  /** Which agent the drop lands in (`data-drop-provider`): Claude takes an
+   *  `@`-mention within its own project, Codex and pi a plain-text address. */
+  dropProvider?: string;
 } & TermFindProps) {
   // The right-click menu on a link. The provider only reports it; the menu is
   // the app's shared `CtxMenu` (clamping, Escape through `useEscape`, and an
@@ -878,7 +881,7 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnable
   }, [searchRef, termRef, onFindClose]);
 
   return (
-    <div className="term-wrap" data-drop={drop}>
+    <div className="term-wrap" data-drop={drop} data-drop-provider={dropProvider}>
       <div ref={hostRef} className="term-host" />
       {findOpen && (
         <FindBar
@@ -928,7 +931,7 @@ export function TerminalPane({ session, provider = "claude", termVersion = 0, fo
   const links = root && onOpenPath ? { root, session, onOpen: onOpenPath, onError } : undefined;
   return (
     <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}
-      termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider === "claude" ? "mention" : undefined}
+      termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider ? "mention" : undefined} dropProvider={provider}
       links={links} {...find} />
   );
 }

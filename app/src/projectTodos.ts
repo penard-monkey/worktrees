@@ -37,6 +37,7 @@ export type TodoId =
   | "doctor-force"
   | "doctor-provision"
   | "doctor-stray"
+  | "doctor-registry"
   | "doctor-manual"
   | "agent-dirs"
   | "agent-skills"
@@ -59,7 +60,7 @@ export type Todo = {
 
 /** Doctor's actionable findings by the command that clears them. Built by
  *  `remedies()` in ProjectSheet.tsx; sums to `issueCount`. */
-export type Remedies = { relink: number; force: number; provision: number; stray: number; manual: number };
+export type Remedies = { relink: number; force: number; provision: number; stray: number; registry: number; manual: number };
 
 /** The slice of App's `ProjectHealth` this needs — the sheet builds the same
  *  shape from its own fresher report. */
@@ -79,7 +80,7 @@ export function projectTodos(
       action: null, section: "health", n: 0, sev: "error",
     });
   } else if (health) {
-    const { relink, force, provision, stray, manual } = health.remedies;
+    const { relink, force, provision, stray, registry, manual } = health.remedies;
     if (relink > 0) {
       out.push({
         id: "doctor-relink", label: `${relink} declared file${s(relink)} not linked into ${relink === 1 ? "a worktree" : "worktrees"}`,
@@ -114,6 +115,19 @@ export function projectTodos(
         id: "doctor-stray",
         label: `${stray} worktree${s(stray)} registered outside .worktrees/ — adopting ${stray === 1 ? "it" : "them"} is a move, not a config edit`,
         action: null, section: "strays", n: 0, sev: "info",
+      });
+    }
+    // Registry notes (`nested-project`, `prefix-collision`) get their own
+    // row for the same reason strays do: the manual row says "edit
+    // .worktrees.toml", and neither is fixed there. A nested vendor checkout
+    // is legitimate; a shared prefix is fixed by giving one repo its own
+    // `.worktree-prefix`. Informational, like doctor's own severity for the
+    // first — `worktrees doctor` names the other project.
+    if (registry > 0) {
+      out.push({
+        id: "doctor-registry",
+        label: `${registry} note${s(registry)} about your registered projects (nested, or sharing a session prefix) — see worktrees doctor`,
+        action: null, section: "health", n: 0, sev: "info",
       });
     }
     if (manual > 0) {

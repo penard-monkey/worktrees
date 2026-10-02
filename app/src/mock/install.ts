@@ -101,6 +101,22 @@ let mockPiMcp: Record<string, unknown> = (() => {
     config_path: "/Users/demo/.pi/agent/mcp.json",
   };
 })();
+// Cross-project reach (`cross_project_status`): `?reach=read|full` starts the
+// user's level there (default off, as shipped); `?private=<name>,…` marks
+// those registered projects private. Names are the root's basename, which is
+// what the registry seeds them with for these fixtures.
+let mockReach: string = new URLSearchParams(location.search).get("reach") ?? "off";
+const mockPrivate = new Set((new URLSearchParams(location.search).get("private") ?? "").split(",").filter(Boolean));
+const projectName = (root: string) => root.split("/").filter(Boolean).pop() ?? root;
+function mockCrossProject(): Record<string, unknown> {
+  return {
+    level: mockReach,
+    config_path: "/Users/demo/.config/worktrees/config.toml",
+    projects: ws.projects.map((p) => ({ root: p.root, name: projectName(p.root), private: mockPrivate.has(projectName(p.root)) })),
+  };
+}
+const withNames = (w: Workspace): Workspace =>
+  ({ ...w, projects: w.projects.map((p) => ({ ...p, name: projectName(p.root), private: mockPrivate.has(projectName(p.root)) })) });
 // Agent guidance (`agent_guidance_status`): `?guidance=off` starts with
 // delivery off, `?guidance=codex-own` makes Codex the user-has-their-own case,
 // `unchecked` Codex before any launch, `noguard` no CLI that has the guard.
@@ -111,7 +127,7 @@ function mockGuidance(): Record<string, unknown> {
   const dir = "/Users/demo/.local/share/worktrees/agent/f05534dced979d78";
   const d = (flags: string[]) => (on ? { state: "on", flags } : { state: "off" });
   return {
-    version: 2,
+    version: 3,
     settings: { ...mockGuidanceSettings },
     guard_available: mode !== "noguard",
     settings_path: "/Users/demo/.config/worktrees/agent-guidance.json",
@@ -1079,7 +1095,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // banner and the project sheet's adopt block were all undrivable here.
       // Off by default: a stray is an abnormal condition and every other test
       // asserts against a project without one.
-      return withStrays(clone(ws));
+      return withNames(withStrays(clone(ws)));
     case "list_places":
       return clone(findProject(args.repo)?.snapshot ?? null);
 
@@ -1185,14 +1201,42 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // it into pane 0 via tmux; there is no tmux here, so record the call and
     // return a token of the same SHAPE — a harness drop can then assert what
     // would have been inserted, which is the only part the frontend owns.
+    // Mirrors `reach::plan_drop`: a token only within one project into
+    // Claude; otherwise a plain-text address, refused across projects while
+    // reach is off or either side is private. The real command also refuses a
+    // Codex/pi pane that is waiting on an answer; the frontend says so first.
     case "drop_reference": {
-      const uri = `place://${String(args.slug).replace(/[^\p{L}\p{N}_.-]/gu, "-").replace(/^[-.]+|[-.]+$/g, "") || "place"}`;
-      const token = `@worktrees:${uri}`;
+      const provider = String(args.provider ?? "claude");
+      const from = projectName(String(args.repo));
+      const into = projectName(String(args.intoRepo ?? args.repo));
+      let token: string;
+      if (args.repo === (args.intoRepo ?? args.repo)) {
+        token = provider === "claude"
+          ? `@worktrees:place://${String(args.slug).replace(/[^\p{L}\p{N}_.-]/gu, "-").replace(/^[-.]+|[-.]+$/g, "") || "place"}`
+          : `place ${from}:${args.slug}`;
+      } else {
+        if (mockReach === "off") throw "cross-project reach is off — turn it on in Settings → Agent guidance";
+        if (mockPrivate.has(from)) throw `'${from}' is private; its places cannot be referenced from other projects`;
+        if (mockPrivate.has(into)) throw `this session's project ('${into}') is private, so it reaches no other project`;
+        token = `place ${from}:${args.slug}`;
+      }
       mockDrops.push({
-        repo: args.repo, slug: args.slug,
-        intoSlug: args.intoSlug, intoSession: args.intoSession, token,
+        repo: args.repo, slug: args.slug, intoRepo: args.intoRepo ?? args.repo,
+        intoSlug: args.intoSlug, intoSession: args.intoSession, provider, token,
       });
       return token;
+    }
+    case "cross_project_status":
+      return mockCrossProject();
+    case "set_cross_project":
+      if (!["off", "read", "full"].includes(String(args.level))) throw `not a level: ${args.level}`;
+      mockReach = String(args.level);
+      return mockCrossProject();
+    case "set_project_private": {
+      const n = projectName(String(args.root));
+      if (args.private) mockPrivate.add(n); else mockPrivate.delete(n);
+      emitEvent("places:changed", null);
+      return mockCrossProject();
     }
     // Every "Copy …". The real one is pbcopy; here, record the text
     // (`__mock.copies()`) so a harness run can assert what a click copied
@@ -3186,7 +3230,7 @@ setTimeout(() => emitEvent("sessions:drafts", { drafts }), 500);
 /** Every `drop_reference` this session recorded — what the nav drag would have
  *  pasted, and into which session. The real command's effect is a tmux paste,
  *  which the harness has no way to observe. */
-type MockDrop = { repo: string; slug: string; intoSlug: string; intoSession: string; token: string };
+type MockDrop = { repo: string; slug: string; intoRepo: string; intoSlug: string; intoSession: string; provider: string; token: string };
 const mockDrops: MockDrop[] = [];
 /** Every `copy_text` this session recorded, oldest first. */
 const mockCopies: string[] = [];

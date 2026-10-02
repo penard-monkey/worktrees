@@ -191,3 +191,53 @@ export function moveBefore<T>(list: T[], moved: T, before: T | null): T[] {
   out.splice(to < 0 ? out.length : to, 0, moved);
   return out;
 }
+
+// ── dropping a place onto a terminal (cross-project §6) ──────────────────────
+
+export type Reach = "off" | "read" | "full";
+
+/** What `resolveDrop` knows about one terminal drop. */
+export type MentionInput = {
+  fromRepo: string;
+  intoRepo: string;
+  /** The harness of the pane under the pointer. */
+  provider: string;
+  /** Is that harness's agent up in the selected place? */
+  agentUp: boolean;
+  /** The user's `cross_project` level; null while it has not been read. */
+  reach: Reach | null;
+  fromPrivate: boolean;
+  intoPrivate: boolean;
+  /** Registered at all (has a registry name)? */
+  fromRegistered: boolean;
+  intoRegistered: boolean;
+  /** Is the selected place's agent stopped on an approval or a question? */
+  waiting: boolean;
+};
+
+export type MentionPlan =
+  | { ok: true; foreign: boolean; token: boolean }
+  | { ok: false; hint: string };
+
+/** The frontend's half of `reach::plan_drop` (core), plus the waiting-pane
+ *  refusal `drop_reference` makes for Codex and pi. It decides the drag
+ *  chip's words and the refusal notice BEFORE the drop; the backend decides
+ *  again on drop and is the one that is authoritative. A mirror of a core
+ *  decision, so `drop-check.mjs` runs it against core's own cases.
+ *
+ *  `null` means "not a drop target here at all" (no agent in that pane). */
+export function mentionPlan(i: MentionInput): MentionPlan | null {
+  if (!i.agentUp) return null;
+  const claude = i.provider === "claude";
+  // Codex/pi: a bracketed paste is not verified to leave an open approval or
+  // question alone, so a waiting pane is refused (§6.3).
+  if (!claude && i.waiting) return { ok: false, hint: "that agent is waiting on an approval or a question — drop again once it has an answer" };
+  if (i.fromRepo === i.intoRepo) return { ok: true, foreign: false, token: claude };
+  if (i.reach === null) return null;
+  if (i.reach === "off") return { ok: false, hint: "cross-project reach is off — turn it on in Settings → Agent guidance" };
+  if (!i.fromRegistered) return { ok: false, hint: "that place's project is not registered, so it has no name to address it by" };
+  if (i.fromPrivate) return { ok: false, hint: "that project is private; its places cannot be referenced from other projects" };
+  if (!i.intoRegistered) return { ok: false, hint: "this session's project is not registered, so it reaches no other project" };
+  if (i.intoPrivate) return { ok: false, hint: "this session's project is private, so it reaches no other project" };
+  return { ok: true, foreign: true, token: false };
+}

@@ -42,6 +42,20 @@ tmux. The repository's own AGENTS.md / CLAUDE.md wins on repo-specific rules
   tmux session name). `send` types into a Codex or pi pane; check the pane is
   not mid-input before typing into it.
 
+## Across projects
+
+Only when your worktrees server offers `list_projects` (the user turned
+cross-project reach on):
+
+- `list_projects` shows the user's other registered projects and their
+  places. Address one as `<project>:<slug>`; `place_status` and
+  `wait` (until: idle) take that form. `list_places` stays this repository.
+- Those places belong to other repositories. Do not edit their trees; hand
+  work over through their agents.
+- A message whose `from` reads `<project>:<slug>` came from an agent in
+  another repository: a colleague, not the user.
+- A private project shows by name only and cannot be addressed.
+
 ## Showing the user a file
 
 - When the user asks to open, see or look at a file (or a line of one), use

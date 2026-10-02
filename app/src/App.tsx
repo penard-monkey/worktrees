@@ -28,6 +28,7 @@ import type { AgentSetupStatus, UserSkill } from "./AgentSetup";
 import type { CodexMcpStatus } from "./CodexMcpPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import type { GuidanceStatus } from "./GuidancePanel";
+import type { CrossProjectStatus } from "./CrossProjectPanel";
 import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTodos";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
@@ -36,6 +37,7 @@ import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, 
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
+  mentionPlan,
 } from "./dnd";
 import { useNavDrag, type DragItem } from "./navdrag";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
@@ -278,7 +280,10 @@ function withEntry<T>(rec: Record<string, T>, key: string, v: T | null): Record<
   return rest;
 }
 type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean; strays?: Stray[] };
-type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null };
+/** `name`/`private` are the registry's (`worktrees projects`): the name an
+ *  agent in another project addresses this one by. Optional so a snapshot
+ *  from an older backend still type-checks. */
+type ProjectView = { root: string; ok: boolean; error: string | null; snapshot: Snapshot | null; name?: string | null; private?: boolean };
 type Workspace = { projects: ProjectView[] };
 /** `needs_confirm` (close only): core stopped because killing this session needs
  *  the user's word, and the string is the session that would die. Not a failure
@@ -3755,7 +3760,12 @@ function App() {
   // Agent guidance (agent-guidance §4.5): machine-level as well — it reads the
   // worktrees settings file and which agents are installed, never a project.
   const [guidance, setGuidance] = useState<GuidanceStatus | null>(null);
+  // Cross-project reach (cross-project P1b): the user's level and the
+  // registered projects. Machine-level — the offer's input, the Settings
+  // section's state, and what the nav drag consults before a foreign drop.
+  const [crossProject, setCrossProject] = useState<CrossProjectStatus | null>(null);
   useEffect(() => {
+    invoke<CrossProjectStatus>("cross_project_status").then(setCrossProject).catch(() => setCrossProject(null));
     invoke<CodexMcpStatus>("codex_mcp_status").then(setCodexMcp).catch(() => setCodexMcp(null));
     invoke<PiMcpStatus>("pi_mcp_status").then(setPiMcp).catch(() => setPiMcp(null));
     invoke<UserSkill[]>("agent_user_skills").then(setUserSkills).catch(() => setUserSkills(null));
@@ -3767,8 +3777,8 @@ function App() {
   // answer, which is how the Home card and the Settings panel came to disagree
   // about whether there was anything to say.
   const offers = useMemo(
-    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, userSkills, guidance }, settings.offers_dismissed ?? {}),
-    [mcpStatus, codexMcp, piMcp, userSkills, guidance, settings.offers_dismissed],
+    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, userSkills, guidance, crossProject }, settings.offers_dismissed ?? {}),
+    [mcpStatus, codexMcp, piMcp, userSkills, guidance, crossProject, settings.offers_dismissed],
   );
   const takeOffer = useCallback((o: Offer) => {
     setSettingsAt(o.to);
@@ -3788,6 +3798,7 @@ function App() {
   const skillsOffer = offers.find((o) => o.id === "codex-skills") ?? null;
   const piMcpOffer = offers.find((o) => o.id === "pi-mcp") ?? null;
   const guidanceOffer = offers.find((o) => o.id === "agent-guidance") ?? null;
+  const crossProjectOffer = offers.find((o) => o.id === "cross-project") ?? null;
 
   // The gear's dot means an UPDATE, and only that. Offers used to light it too
   // (purple when they were the only thing pending), but a dot on the gear leads
@@ -4064,7 +4075,7 @@ function App() {
           [root]: {
             slugs: prev?.slugs ?? new Set<string>(),
             issues: prev?.issues ?? 0,
-            remedies: prev?.remedies ?? { relink: 0, force: 0, provision: 0, manual: 0 },
+            remedies: prev?.remedies ?? { relink: 0, force: 0, provision: 0, stray: 0, registry: 0, manual: 0 },
             error: r?.error ?? "doctor produced no report",
           },
         };
@@ -5513,7 +5524,8 @@ function App() {
     | { kind: "project"; before: string | null }
     // Dropping a place onto the TERMINAL is not a move at all — it types a
     // reference to that place into the Claude session running there.
-    | { kind: "mention"; repo: string; slug: string; intoSlug: string; intoSession: string; name: string };
+    | { kind: "mention"; repo: string; slug: string; intoRepo: string; intoSlug: string; intoSession: string; name: string;
+        provider: Harness; foreign: boolean; token: boolean; label: string };
 
   const placeAt = (repo: string, slug: string) =>
     ws?.projects.find((v) => v.root === repo)?.snapshot?.places.find((p) => p.slug === slug) ?? null;
@@ -5564,19 +5576,34 @@ function App() {
 
     // The terminal, checked first: it is nowhere near the nav's tier zones, and
     // a drop there means something completely different from a reorder.
-    if (el?.closest('[data-drop="mention"]')) {
-      if (!sel || !selectedAgents?.claude.up) return null;
-      if (item.repo !== sel.repo) {
-        // Not a cosmetic guard. The MCP server is pinned to the repo it was
-        // launched in and no tool takes a repo path, so a foreign project's
-        // slug cannot resolve in that session — the token would be dead text.
-        return { kind: "reject", hint: "a session can only reference worktrees from its own project" };
-      }
+    const termEl = el?.closest<HTMLElement>('[data-drop="mention"]');
+    if (termEl) {
+      if (!sel) return null;
+      const provider = (termEl.dataset.dropProvider ?? "claude") as Harness;
+      const agent = selectedAgents?.[provider];
+      const pv = (root: string) => ws?.projects.find((v) => v.root === root);
+      // The plan is `dnd.ts::mentionPlan` — the frontend's half of core's
+      // `reach::plan_drop`, checked against it by drop-check.mjs. Within one
+      // project a Claude pane gets the `@`-mention; another project's place,
+      // or any place into Codex or pi, is a plain-text address. The backend
+      // decides again on drop; this only words the chip and the refusal.
+      const plan = mentionPlan({
+        fromRepo: item.repo, intoRepo: sel.repo, provider, agentUp: !!agent?.up,
+        reach: crossProject ? crossProject.level : null,
+        fromPrivate: !!pv(item.repo)?.private, intoPrivate: !!pv(sel.repo)?.private,
+        fromRegistered: !!pv(item.repo)?.name, intoRegistered: !!pv(sel.repo)?.name,
+        waiting: !!selected && waitingPaths.has(selected.path),
+      });
+      if (!plan || !agent) return null;
+      if (!plan.ok) return { kind: "reject", hint: plan.hint };
       const p = placeAt(item.repo, item.slug);
       if (!p) return null;
+      const from = pv(item.repo)?.name;
       return {
-        kind: "mention", repo: item.repo, slug: item.slug,
-        intoSlug: sel.slug, intoSession: selectedAgents.claude.name, name: nameOf(p),
+        kind: "mention", repo: item.repo, slug: item.slug, intoRepo: sel.repo,
+        intoSlug: sel.slug, intoSession: agent.name, name: nameOf(p),
+        provider, foreign: plan.foreign, token: plan.token,
+        label: plan.foreign && from ? `${from}:${item.slug}` : item.slug,
       };
     }
 
@@ -5640,8 +5667,8 @@ function App() {
     }
     if (target.kind === "mention") {
       invoke<string>("drop_reference", {
-        repo: target.repo, slug: target.slug,
-        intoSlug: target.intoSlug, intoSession: target.intoSession,
+        repo: target.repo, slug: target.slug, intoRepo: target.intoRepo,
+        intoSlug: target.intoSlug, intoSession: target.intoSession, provider: target.provider,
       })
         .then((token) => setNotice(`${token} \u2192 ${target.name}'s session`))
         .catch((e) => fail(e));
@@ -7664,7 +7691,9 @@ function App() {
           {drag.item.kind === "project" ? basename(drag.item.root) : nameOf({ slug: drag.item.slug, declared: placeAt(drag.item.repo, drag.item.slug)?.declared })}
           {drag.target?.kind === "reject" && <span className="drag-why">{drag.target.hint}</span>}
           {drag.target?.kind === "tier" && <span className="drag-why">→ {TIER_LABEL[drag.target.lands]}</span>}
-          {drag.target?.kind === "mention" && <span className="drag-why">→ reference in this session</span>}
+          {drag.target?.kind === "mention" && <span className="drag-why">{drag.target.token
+            ? "→ reference in this session"
+            : `→ address ${drag.target.label} in this session`}</span>}
         </div>
       )}
 
@@ -7756,7 +7785,9 @@ function App() {
         userSkills={userSkills} onUserSkillsChanged={setUserSkills}
         skillsOfferPending={!!skillsOffer} onSilenceSkillsOffer={() => skillsOffer && silenceOffer(skillsOffer)}
         guidance={guidance} onGuidanceChanged={setGuidance}
-        guidanceOfferPending={!!guidanceOffer} onSilenceGuidanceOffer={() => guidanceOffer && silenceOffer(guidanceOffer)} />
+        guidanceOfferPending={!!guidanceOffer} onSilenceGuidanceOffer={() => guidanceOffer && silenceOffer(guidanceOffer)}
+        crossProject={crossProject} onCrossProjectChanged={setCrossProject}
+        crossProjectOfferPending={!!crossProjectOffer} onSilenceCrossProjectOffer={() => crossProjectOffer && silenceOffer(crossProjectOffer)} />
 
       {codexInstallPrompt && <CodexInstallDialog onClose={() => setCodexInstallPrompt(false)} onReport={(m) => setNotice(m)} />}
       {agentSwitch && <AgentSwitchSheet pending={agentSwitch} defaultModels={settings.default_models}

@@ -567,7 +567,7 @@ pub fn paste_to_ai(session: &str, ai_word: &str, text: &str) -> Result<(), Strin
     // Name what was there. The last time this rule was wrong it took a survey of
     // 21 live sessions to find out why; the next time should be one log line.
     let pane = ai_pane(session, ai_word)
-        .ok_or_else(|| format!("no Claude running in session {session} (panes: {})", pane_summary(session)))?;
+        .ok_or_else(|| format!("no {ai_word} running in session {session} (panes: {})", pane_summary(session)))?;
     let buf = format!("worktrees-drop-{}", std::process::id());
     let [set_argv, paste_argv, del_argv] = paste_commands(&buf, &pane, text);
     let set = tmux(&set_argv).map_err(|e| e.to_string())?;

@@ -103,7 +103,7 @@ export function issueCount(r: DoctorReport | null | undefined): number {
  * command here can conjure. Anything unknown — a code added to core after this
  * list — lands in `manual`, the one bucket that promises no button. */
 export function remedies(r: DoctorReport | null | undefined): Remedies {
-  const out: Remedies = { relink: 0, force: 0, provision: 0, stray: 0, manual: 0 };
+  const out: Remedies = { relink: 0, force: 0, provision: 0, stray: 0, registry: 0, manual: 0 };
   for (const f of r?.findings ?? []) {
     if (f.severity === "info") continue;
     switch (f.code) {
@@ -120,6 +120,12 @@ export function remedies(r: DoctorReport | null | undefined): Remedies {
       // the manual bucket this used to land in says "edit .worktrees.toml".
       case "stray-worktree":
         out.stray++; break;
+      // Facts about the project REGISTRY, not this repo's config: one
+      // registered project inside another, or two sharing a session prefix.
+      // Neither is fixed by editing .worktrees.toml (manual's promise).
+      case "nested-project":
+      case "prefix-collision":
+        out.registry++; break;
       default:
         out.manual++;
     }

@@ -3,6 +3,7 @@ import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
 import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
 import { GuidanceSection, type GuidanceStatus } from "./GuidancePanel";
+import { CrossProjectSection, type CrossProjectStatus } from "./CrossProjectPanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
@@ -351,6 +352,10 @@ export function SettingsSheet({
   onGuidanceChanged,
   guidanceOfferPending,
   onSilenceGuidanceOffer,
+  crossProject,
+  onCrossProjectChanged,
+  crossProjectOfferPending,
+  onSilenceCrossProjectOffer,
 }: {
   open: boolean;
   /// Where the sheet was asked to open, when the caller had somewhere in mind —
@@ -398,6 +403,12 @@ export function SettingsSheet({
   onGuidanceChanged: (s: GuidanceStatus) => void;
   guidanceOfferPending: boolean;
   onSilenceGuidanceOffer: () => void;
+  /// Cross-project reach (offers.ts `cross-project`): App's machine-level
+  /// probe; the section re-reads on open and reports back.
+  crossProject: CrossProjectStatus | null;
+  onCrossProjectChanged: (s: CrossProjectStatus) => void;
+  crossProjectOfferPending: boolean;
+  onSilenceCrossProjectOffer: () => void;
 }) {
   // Selected category — local, deliberately NOT persisted: the sheet opens on
   // Appearance so "where was I" never depends on last session.
@@ -828,6 +839,8 @@ export function SettingsSheet({
           {cat === "guidance" && <>
           <GuidanceSection data-focus="agent-guidance" status={guidance} onStatus={onGuidanceChanged} onReport={onReport}
             offerPending={guidanceOfferPending} onSilenceOffer={onSilenceGuidanceOffer} />
+          <CrossProjectSection data-focus="cross-project" status={crossProject} onStatus={onCrossProjectChanged} onReport={onReport}
+            offerPending={crossProjectOfferPending} onSilenceOffer={onSilenceCrossProjectOffer} />
           </>}
 
           {cat === "commands" && <>

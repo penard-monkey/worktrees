@@ -51,9 +51,10 @@ import type { CodexMcpStatus } from "./CodexMcpPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import type { UserSkill } from "./AgentSetup";
 import type { GuidanceStatus } from "./GuidancePanel";
+import type { CrossProjectStatus } from "./CrossProjectPanel";
 import type { CatId } from "./SettingsSheet";
 
-export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "agent-guidance";
+export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "agent-guidance" | "cross-project";
 
 export type Offer = {
   id: OfferId;
@@ -88,6 +89,8 @@ export type OfferCtx = {
   userSkills?: UserSkill[] | null;
   /** `agent_guidance_status` — machine-level too (agent-guidance §4.5). */
   guidance?: GuidanceStatus | null;
+  /** `cross_project_status` — the user's level and the registered projects. */
+  crossProject?: CrossProjectStatus | null;
 };
 
 /** The pending offers, in the order they should be listed.
@@ -182,6 +185,23 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
       cta: "Review…",
       to: { cat: "guidance", focus: "agent-guidance" },
       fingerprint: `v${g.version}`,
+    });
+  }
+  // Cross-project reach (cross-project P1b, decided 2026-10-01: off by
+  // default, OFFERED after the update). Only while it is off, and only on a
+  // machine with at least two registered projects — with one there is nothing
+  // else to reach, and the offer would be noise. The level is the suggestion:
+  // turning reach on (to either level) retires it, and a dismissal holds for
+  // as long as it stays off.
+  const xp = ctx.crossProject;
+  if (xp && xp.level === "off" && xp.projects.length >= 2) {
+    out.push({
+      id: "cross-project",
+      title: "Let agents see your other projects",
+      body: "An orchestrator in one repo can check on lanes in your other projects, read-only, addressed as project:place. Private projects stay out.",
+      cta: "Review…",
+      to: { cat: "guidance", focus: "cross-project" },
+      fingerprint: "off",
     });
   }
   return out.filter((o) => dismissed[o.id] !== o.fingerprint);
