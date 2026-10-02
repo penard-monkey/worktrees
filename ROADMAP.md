@@ -5,6 +5,23 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Hand-test terminal file links and the line viewer in the real app
+  (#399, #400).** Every check ran against the mock in Chromium and headless
+  WebKit, which has no tmux, no Finder and no clipboard. Owed:
+  - in claude's pane with mouse mode ON, a ⌘-click and a right-click on a
+    link that claude never sees, while a plain drag still selects and
+    claude's own click and scroll still work;
+  - the #373 wheel routing and tmux copy-mode, unchanged;
+  - relative links after a `cd` in the tmux pane (`#{pane_current_path}`) and
+    in a dock shell (`proc_cwd`);
+  - a real Finder reveal and a real clipboard write from the link menu;
+  - WKWebView's `navigator.platform` is `MacIntel`, so the gesture is ⌘ and
+    not Ctrl;
+  - `show_doc` with a `line` from a restarted lane (a running session keeps
+    the old MCP server and the old tool schema);
+  - an app relaunch brings the marked line back with its file.
+  See [the session](docs/sessions/2026-10-01-open-file/summary.md).
+
 - **The quota refusal has never fired against a REAL spent window.** Every
   proof of it (`test/quota.bats`, the reviews' fixture runs) goes through the
   `WORKTREES_USAGE_PROBE` fixture seam. The live mappings
