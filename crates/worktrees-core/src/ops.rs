@@ -2038,7 +2038,11 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         Vec::new()
     } else {
         let mut v = stray_findings(p);
-        v.extend(nested_findings(&p.main_root, &crate::registry::read_lenient()));
+        let reg = crate::registry::read_lenient();
+        v.extend(nested_findings(&p.main_root, &reg));
+        v.extend(prefix_collision_findings(&p.main_root, &p.prefix, &reg, |root| {
+            Project::discover(Path::new(root)).ok().filter(|o| o.main_root == root).map(|o| o.prefix)
+        }));
         v
     };
     // Agent guidance a harness is NOT getting, said where someone looks for
@@ -2155,10 +2159,56 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     report.exit_code()
 }
 
+/// One warning per OTHER registered project whose session prefix equals this
+/// one's (`Code::PrefixCollision`). Only for a registered repo: an
+/// unregistered one is not in the namespace this check is about.
+/// `prefix_of` resolves a root's prefix (a `Project::discover`), injected so
+/// the rule is testable without git.
+fn prefix_collision_findings(
+    main_root: &str,
+    prefix: &str,
+    reg: &crate::registry::Registry,
+    prefix_of: impl Fn(&str) -> Option<String>,
+) -> Vec<Finding> {
+    if reg.by_root(main_root).is_none() {
+        return Vec::new();
+    }
+    reg.projects
+        .iter()
+        .filter(|e| e.root != main_root)
+        .filter(|e| prefix_of(&e.root).as_deref() == Some(prefix))
+        .map(|e| {
+            // Name only, and not even that for a private one (see
+            // `nested_findings`).
+            let who = if e.private { "another registered project".to_string() } else { format!("registered project '{}'", e.name) };
+            Finding::warn(
+                Code::PrefixCollision,
+                format!(
+                    "{who} also names its sessions `{prefix}-<slug>`, so the two share one tmux \
+                     namespace. Give one of them its own prefix (`.worktree-prefix`, or \
+                     `[project] prefix` in .worktrees.toml)."
+                ),
+            )
+        })
+        .collect()
+}
+
 /// One warning per registry entry nested inside, or containing, this
 /// project's own entry (`Code::NestedProject`). A repo the user never
 /// registered has no entry and gets nothing.
 fn nested_findings(main_root: &str, reg: &crate::registry::Registry) -> Vec<Finding> {
+    // Names, never roots, and a PRIVATE other side is not even named: `doctor`
+    // is also an MCP tool, readable by an agent whatever cross-project reach
+    // says. This project's own name and root are its own business.
+    let label = |e: &crate::registry::Entry| {
+        if e.root == main_root {
+            format!("this project ('{}')", e.name)
+        } else if e.private {
+            "another registered project".to_string()
+        } else {
+            format!("registered project '{}'", e.name)
+        }
+    };
     reg.nested()
         .into_iter()
         .filter(|(inner, outer)| inner.root == main_root || outer.root == main_root)
@@ -2166,9 +2216,10 @@ fn nested_findings(main_root: &str, reg: &crate::registry::Registry) -> Vec<Find
             Finding::warn(
                 Code::NestedProject,
                 format!(
-                    "registered project '{}' ({}) lies inside registered project '{}' ({}). Each \
-                     session still belongs to the repo it was started in; this is only unusual.",
-                    inner.name, inner.root, outer.name, outer.root
+                    "{} lies inside {}. Each session still belongs to the repo it was started in; \
+                     this is only unusual.",
+                    label(inner),
+                    label(outer)
                 ),
             )
         })
@@ -3029,8 +3080,38 @@ mod tests {
             assert_eq!(f[0].code, crate::diag::Code::NestedProject);
             assert!(f[0].message.contains("'inner'") && f[0].message.contains("'outer'"), "{}", f[0].message);
         }
+        let f = super::nested_findings("/w/outer", &reg);
+        assert!(!f[0].message.contains("/w/outer/vendor"), "no other project's root: {}", f[0].message);
+        // A private other side is not even named.
+        let mut reg = reg;
+        reg.projects[1].private = true;
+        let f = super::nested_findings("/w/outer", &reg);
+        assert!(!f[0].message.contains("inner") && f[0].message.contains("another registered project"), "{}", f[0].message);
         assert!(super::nested_findings("/w/other", &reg).is_empty());
         assert!(super::nested_findings("/w/unregistered", &reg).is_empty());
+    }
+
+    #[test]
+    fn a_shared_prefix_among_registered_projects_is_flagged() {
+        use crate::registry::{Entry, Registry};
+        let e = |root: &str, name: &str| Entry { root: root.into(), name: name.into(), private: false };
+        let reg = Registry {
+            projects: vec![e("/w/one/app", "app"), e("/w/two/app", "app-2"), e("/w/other", "other")],
+            ..Default::default()
+        };
+        let prefix_of = |r: &str| Some(if r.ends_with("/app") { "app" } else { "other" }.to_string());
+        let f = super::prefix_collision_findings("/w/one/app", "app", &reg, prefix_of);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].code, crate::diag::Code::PrefixCollision);
+        assert!(f[0].message.contains("'app-2'"), "{}", f[0].message);
+        assert!(!f[0].message.contains("/w/two"), "no root: {}", f[0].message);
+        let mut private = reg.clone();
+        private.projects[1].private = true;
+        let f = super::prefix_collision_findings("/w/one/app", "app", &private, prefix_of);
+        assert!(!f[0].message.contains("app-2") && f[0].message.contains("another registered project"), "{}", f[0].message);
+        assert!(super::prefix_collision_findings("/w/other", "other", &reg, prefix_of).is_empty());
+        // Unregistered: not in the namespace, nothing said.
+        assert!(super::prefix_collision_findings("/w/x/app", "app", &reg, prefix_of).is_empty());
     }
 
     use super::*;

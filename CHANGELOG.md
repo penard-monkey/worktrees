@@ -91,6 +91,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Preview, Source or Diff dismisses the mark. Leaving the place and coming
   back keeps it, like the open file.
 
+- **Agents can read places in your other projects — off until you turn it
+  on.** With `cross_project = "read"` in `~/.config/worktrees/config.toml`, a
+  session's worktrees MCP server gains `list_projects` (every registered
+  project's places, by name) and accepts `<project>:<slug>` in
+  `place_status` and `wait` (until: idle), so an orchestrator in one repo can
+  see a lane in another. Below `full`, nothing an agent gets about another
+  project carries a path. Projects are named by the registry
+  (`worktrees projects`), never by anything a repo sets. Nothing writes
+  across projects yet: `report`, `send` and the rest refuse a place in
+  another project by name. A private project shows as its name only and
+  cannot be addressed; a private or unregistered repo reaches nothing, and
+  neither does an automation run. A profile can narrow the setting
+  (`worktrees_mcp_cross_project: "off"`). Sessions pick it up when they
+  start. `doctor` warns when two registered projects share a session prefix.
+
 ### Changed
 - **Both plan-usage readers moved into the engine.** Claude's and Codex's
   usage readers lived under `app/src-tauri`, where only the desktop app could
@@ -128,6 +143,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   alone, so a downgrade still has it. Every change to the list now happens
   under a lock, so a project added from the CLI while you reorder the nav is
   no longer lost.
+- **A registered project counts as worktrees-managed.** Its sessions get the
+  places rule and skill even before its first place.
 
 ## [0.34.1] - 2026-09-30
 

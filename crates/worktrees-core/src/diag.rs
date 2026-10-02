@@ -188,6 +188,13 @@ pub enum Code {
     /// Warn, because a person reading the nav does not expect one project to
     /// contain another.
     NestedProject,
+    /// Another registered project resolves to the SAME session prefix, so the
+    /// two share one tmux namespace: `<prefix>-<slug>` can name a session of
+    /// either, and Claude's `--name` (the full session name) collides with it.
+    /// Addressing across projects is unaffected (it uses registry names), but
+    /// `close`, `send` and a peer's `SendMessage` can reach the wrong repo's
+    /// session. Warn; the fix is a prefix for one of them.
+    PrefixCollision,
     /// Agent guidance was not delivered to a harness that is installed (today:
     /// Codex, when the user set their own `developer_instructions`, or when it
     /// could not tell). Info only — the user's own text winning is the design.
@@ -300,6 +307,7 @@ mod tests {
             (Code::MissingSource, "missing-source"),
             (Code::StrayWorktree, "stray-worktree"),
             (Code::NestedProject, "nested-project"),
+            (Code::PrefixCollision, "prefix-collision"),
             (Code::GuidanceSkipped, "guidance-skipped"),
             (Code::NotLinked, "not-linked"),
             (Code::UnsafePath, "unsafe-path"),
