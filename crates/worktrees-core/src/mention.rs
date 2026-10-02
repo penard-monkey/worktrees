@@ -206,6 +206,31 @@ pub fn mention(server: &str, uri: &str) -> String {
     format!("@{server}:{uri}")
 }
 
+/// The uri of a place in ANOTHER registered project, as a session's server
+/// lists it (cross-project P4): `place://<project>/<slug-part>`, where
+/// `<slug-part>` is the place's uri within ITS project (`uri_map`), so two
+/// projects' `place://main` stay distinct. A local uri never contains `/`
+/// (`safe_uri_part` folds it), which is what makes the two forms unambiguous.
+/// `/` passes both of the client's @-mention rules (see `safe_uri_part`).
+///
+/// The project segment is the registry name AS IS when it is a valid name
+/// (`[A-Za-z0-9._-]`, which both client rules admit mid-uri), so two distinct
+/// names can never fold into one segment; only a hand-edited, invalid name is
+/// folded through `safe_uri_part`.
+pub fn foreign_uri(project: &str, local_uri: &str) -> String {
+    let part = local_uri.strip_prefix("place://").unwrap_or(local_uri);
+    let seg = if crate::registry::valid_name(project).is_ok() { project.to_string() } else { safe_uri_part(project) };
+    format!("place://{seg}/{part}")
+}
+
+/// The inverse: `Some((project_part, local_uri))` for a foreign uri, `None`
+/// for a local one.
+pub fn split_foreign_uri(uri: &str) -> Option<(&str, String)> {
+    let rest = uri.strip_prefix("place://")?;
+    let (project, part) = rest.split_once('/')?;
+    (!project.is_empty() && !part.is_empty()).then(|| (project, format!("place://{part}")))
+}
+
 /// The plain-text ADDRESS a drag drops where an `@`-mention cannot work:
 /// a place in another project (the session's server cannot resolve its
 /// resource — cross-project §6.2), or any place dropped into a Codex or pi pane
@@ -227,6 +252,20 @@ pub fn address(project: Option<&str>, slug: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_foreign_uri_round_trips_and_never_collides_with_a_local_one() {
+        let u = foreign_uri("beta", "place://lane-x");
+        assert_eq!(u, "place://beta/lane-x");
+        assert_eq!(split_foreign_uri(&u), Some(("beta", "place://lane-x".to_string())));
+        assert_eq!(split_foreign_uri("place://lane-x"), None, "a local uri has no '/'");
+        // A slug with '/' was folded by safe_uri_part, so it cannot look foreign.
+        assert!(!safe_uri_part("feat/x").contains('/'));
+        // A valid name is used as is: `my.app.` and `my.app` stay distinct.
+        assert_ne!(foreign_uri("my.app.", "place://main"), foreign_uri("my.app", "place://main"));
+        // A hand-edited, invalid name is folded rather than passed through.
+        assert_eq!(foreign_uri("has space", "place://main"), "place://has-space/main");
+    }
 
     #[test]
     fn an_address_is_the_qualified_form_place_status_takes() {
