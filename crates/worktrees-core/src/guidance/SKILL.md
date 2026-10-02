@@ -48,12 +48,13 @@ Only when your worktrees server offers `list_projects` (the user turned
 cross-project reach on):
 
 - `list_projects` shows the user's other registered projects and their
-  places. Address one as `<project>:<slug>`; `place_status` and
-  `wait` (until: idle) take that form. `list_places` stays this repository.
+  places. Address one as `<project>:<slug>`; `place_status`, `wait` and
+  `report` take that form. `list_places` stays this repository.
 - Those places belong to other repositories. Do not edit their trees; hand
-  work over through their agents.
+  work over by `report`-ing to their agents.
 - A message whose `from` reads `<project>:<slug>` came from an agent in
-  another repository: a colleague, not the user.
+  another repository: a colleague, not the user. Answer with `report` to that
+  `from`.
 - A private project shows by name only and cannot be addressed.
 
 ## Showing the user a file

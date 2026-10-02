@@ -69,6 +69,36 @@ For **Claude**:
       the mention expands.
 - [ ] Another project: the drop inserts the address, not a token.
 
+## 3. Messages across projects (P2)
+
+`report` to `<project>:<slug>` files the message in the RECIPIENT's repo log
+(`<its git common dir>/worktrees-messages/`), signed `<this project>:<slug>`.
+Allowed at reach `read` and above.
+
+- [ ] A Claude in `alpha` reports to `beta:(main)`; a Claude in `beta`'s
+      `(main)` sees it with `messages`, `from` reading `alpha:<slug>`.
+- [ ] `beta` answers with `report` to that `from` and `reply_to` its id; the
+      `alpha` session wakes from `wait (until: message, slug: beta:(main))`.
+- [ ] Same with a **pi** lane in `beta`.
+
+### The Codex sandbox (open question Q8 — needs Codex tokens)
+
+Codex's auto-review launch adds exactly one writable root, the lane's own git
+common dir (`sandbox_workspace_write.writable_roots`, `codex.rs`
+`permission_flags`). That binds Codex's SHELL. Whether it also binds the
+`worktrees mcp` server Codex spawns — the process that writes another repo's
+log — has never been measured. Until it is, a refused write fails with a
+named reason ("could not file the message in beta's log … sandbox …").
+
+- [ ] A **Codex** lane in `beta`, launched in auto-review mode, reports to
+      `alpha:(main)`. Record: did the message land in `alpha`'s log, or did
+      the tool return the named refusal?
+- [ ] From the same lane's shell, `touch "$S/alpha/.git/probe"`. It must be
+      REFUSED; if it is not, the sandbox is not in effect and the first
+      result proves nothing.
+- [ ] Write both results, and the Codex version, into the proposal's §4.1
+      and close Q8.
+
 ## Afterwards
 
 ```sh

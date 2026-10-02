@@ -89,7 +89,14 @@ pub fn set_user_level_at(path: &std::path::Path, level: Level) -> Result<(), Str
         let t = l.trim_start();
         if t.starts_with('[') {
             if !placed {
-                out.push(line.clone());
+                // Above any comment block that introduces this table: a
+                // comment directly over `[trust]` is about `[trust]`, and a key
+                // wedged between them orphans it.
+                let mut at = out.len();
+                while at > 0 && out[at - 1].trim_start().starts_with('#') {
+                    at -= 1;
+                }
+                out.insert(at, line.clone());
                 placed = true;
             }
             in_table = true;
@@ -312,6 +319,13 @@ mod tests {
         std::fs::write(&p, "ai_cmd = \"x\"\n[trust]\npi = []\n").unwrap();
         set_user_level_at(&p, Level::Full).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "ai_cmd = \"x\"\ncross_project = \"full\"\n[trust]\npi = []\n");
+        // A comment block introducing the first table stays with it.
+        std::fs::write(&p, "ai_cmd = \"x\"\n\n# repos allowed to load pi resources\n# (see worktrees trust)\n[trust]\npi = []\n").unwrap();
+        set_user_level_at(&p, Level::Read).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "ai_cmd = \"x\"\n\ncross_project = \"read\"\n# repos allowed to load pi resources\n# (see worktrees trust)\n[trust]\npi = []\n"
+        );
         // A broken file is refused, never rewritten.
         std::fs::write(&p, "this is = = not toml\n").unwrap();
         assert!(set_user_level_at(&p, Level::Read).is_err());

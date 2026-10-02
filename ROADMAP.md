@@ -5,6 +5,14 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Cross-project reach: what the proposal's P1b deferred.** A badge on a
+  project header whose session prefix collides with another registered
+  project's (doctor already reports `prefix-collision`, and the project's
+  To do list counts it, but the nav says nothing), and rename/private
+  controls in the project sheet (today: Settings → Agent guidance → Other
+  projects for `private`, `worktrees projects rename` for the name). See
+  `docs/proposals/cross-project.md` §8 and §9.
+
 - **Hand-test terminal file links and the line viewer in the real app
   (#399, #400).** Every check ran against the mock in Chromium and headless
   WebKit, which has no tmux, no Finder and no clipboard. Owed:

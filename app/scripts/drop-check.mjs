@@ -100,6 +100,20 @@ const call = app.match(/invoke<string>\("drop_reference", \{([^}]*)\}/);
 if (!call || !/intoRepo/.test(call[1]) || !/provider/.test(call[1])) {
   fail("commitDrop must pass intoRepo and provider to drop_reference — the server name is the RECEIVING project's");
 } else ok("drop_reference gets the receiving project and the pane's provider");
+{
+  const rd = app.slice(app.indexOf("const termEl = el?.closest"), app.indexOf('const zone = el?.closest<HTMLElement>("[data-tier]")'));
+  // The waiting refusal keys on the RECEIVING harness, as drop_reference does
+  // per provider — the merged set refused a Codex drop because a Claude in the
+  // same place was waiting.
+  if (!/waitingBy\s*\?\s*!!waitingBy\[provider\]\?\.has\(selected\.path\)/.test(rd)) fail("the drop's waiting check is not keyed on the receiving harness (waiting_by)");
+  else ok("the waiting check keys on the receiving harness");
+  // The chip shows what will be PASTED (mention::address), not a bare slug.
+  if (!/label: from \? `place \$\{from\}:\$\{item\.slug\}` : `place \$\{item\.slug\}`/.test(rd)) fail("the drag chip no longer shows the address that will be pasted");
+  else ok("the drag chip shows the exact address that will be pasted");
+  // Names and `private` from the registry as last read, not the workspace snapshot.
+  if (!/const pv = \(root: string\) => crossProject\?\.projects/.test(rd)) fail("the drop reads names/private from ws rather than crossProject");
+  else ok("names and private come from crossProject");
+}
 if (/a session can only reference worktrees from its own project/.test(app)) fail("the old blanket refusal is back");
 else ok("the old same-project-only refusal is gone");
 
