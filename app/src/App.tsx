@@ -438,6 +438,8 @@ const isTextField = (t: EventTarget | null) =>
  *  chord at all. ⌘[ / ⌘] everywhere (Safari, Finder, Xcode), matched on the
  *  key with the PHYSICAL key as fallback — a layout that puts `[` behind ⌥
  *  still has a BracketLeft. ⌘← / ⌘→ only outside a text field. */
+/** How many entries the ‹ / › right-click list offers. */
+const NAV_MENU_MAX = 12;
 const navChordDir = (e: KeyboardEvent): -1 | 1 | undefined => {
   if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return undefined;
   if (e.key === "[" || e.code === "BracketLeft") return -1;
@@ -451,17 +453,24 @@ const navChordDir = (e: KeyboardEvent): -1 | 1 | undefined => {
 /** ‹ › — back / forward through what the panes showed. Module scope: a
  *  component defined inside App would remount every render. The tooltip names
  *  where each one goes. */
-function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep }: {
+function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onList }: {
   canBack: boolean; canForward: boolean; backTitle: string; forwardTitle: string; onStep: (dir: -1 | 1) => void;
+  /** Right-click: the entries that way, to jump more than one step. */
+  onList: (dir: -1 | 1, x: number, y: number) => void;
 }) {
+  const list = (dir: -1 | 1) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    const r = e.currentTarget.getBoundingClientRect();
+    onList(dir, r.left, r.bottom + 4);
+  };
   return (
     <span className="navhist" role="group" aria-label="Navigation history">
       <button className="icon-btn" data-testid="nav-back" data-track="nav.back" disabled={!canBack}
-        title={backTitle} aria-label={backTitle} onClick={() => onStep(-1)}>
+        title={backTitle} aria-label={backTitle} onClick={() => onStep(-1)} onContextMenu={list(-1)}>
         <Icons.ChevronLeft size={15} />
       </button>
       <button className="icon-btn" data-testid="nav-forward" data-track="nav.forward" disabled={!canForward}
-        title={forwardTitle} aria-label={forwardTitle} onClick={() => onStep(1)}>
+        title={forwardTitle} aria-label={forwardTitle} onClick={() => onStep(1)} onContextMenu={list(1)}>
         <Icons.ChevronRight size={15} />
       </button>
     </span>
@@ -6657,15 +6666,22 @@ function App() {
     window.addEventListener("mouseup", onUp);
     return () => window.removeEventListener("mouseup", onUp);
   }, []);
+  const navName = (repo: string, slug: string) => {
+    const pl = ws?.projects.find((p) => p.root === repo)?.snapshot?.places.find((x) => x.slug === slug);
+    return pl ? nameOf(pl) : slug;
+  };
   const navTitle = (dir: -1 | 1) => {
     const [i] = reachableNav(hist, dir, navAlive);
     if (i === undefined) return dir < 0 ? "Back" : "Forward";
-    const to = labelNav(hist.entries[i], (repo, slug) => {
-      const pl = ws?.projects.find((p) => p.root === repo)?.snapshot?.places.find((x) => x.slug === slug);
-      return pl ? nameOf(pl) : slug;
-    });
-    return `${dir < 0 ? "Back" : "Forward"} to ${to} (${dir < 0 ? "⌘[" : "⌘]"})`;
+    return `${dir < 0 ? "Back" : "Forward"} to ${labelNav(hist.entries[i], navName)} (${dir < 0 ? "⌘[" : "⌘]"})`;
   };
+  // Right-click on ‹ / ›: up to NAV_MENU_MAX entries that way, nearest first.
+  // Disabled buttons fire no contextmenu in WebKit, and an empty list is not
+  // offered either.
+  const [navMenu, setNavMenu] = useState<{ dir: -1 | 1; x: number; y: number } | null>(null);
+  const openNavMenu = useCallback((dir: -1 | 1, x: number, y: number) => {
+    if (reachableNav(histRef.current, dir, navAlive).length) setNavMenu({ dir, x, y });
+  }, [navAlive]);
   const navButtons = (
     <NavButtons
       canBack={canStepNav(hist, -1, navAlive)}
@@ -6673,6 +6689,7 @@ function App() {
       backTitle={navTitle(-1)}
       forwardTitle={navTitle(1)}
       onStep={navStep}
+      onList={openNavMenu}
     />
   );
 
@@ -8208,6 +8225,18 @@ function App() {
       )}
       {menu && <div className="menu-catch" onClick={closeMenu} />}
 
+      {/* ── right-click: ‹ / › history list ── */}
+      {navMenu && (
+        <CtxMenu x={navMenu.x} y={navMenu.y} onClose={() => setNavMenu(null)}>
+          <div className="pop-hint">{navMenu.dir < 0 ? "back" : "forward"}</div>
+          {reachableNav(hist, navMenu.dir, navAlive).slice(0, NAV_MENU_MAX).map((i) => (
+            <button key={i} className="pop-item" data-testid="nav-menu-item"
+              onClick={() => { setNavMenu(null); navGo(i); }}>
+              {labelNav(hist.entries[i], navName)}
+            </button>
+          ))}
+        </CtxMenu>
+      )}
       {/* ── right-click: place ── */}
       {ctx?.kind === "place" && ctxPlace && (
         <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>

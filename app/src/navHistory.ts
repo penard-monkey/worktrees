@@ -138,7 +138,9 @@ export const label = (l: Loc, nameOf?: (repo: string, slug: string) => string): 
   if (d) {
     if (d.tab === "files" && d.file) parts.push(base(d.file.path) + (d.file.line ? `:${d.file.line}` : ""));
     else if (d.tab === "terminal" && d.shell != null) parts.push(`Terminal · sh ${d.shell}`);
-    else parts.push(TAB_LABEL[d.tab]);
+    // A bare Files tab is every place's default, dock open or not (⌘J is not
+    // in the location), so naming it says nothing — the other tabs are news.
+    else if (d.tab !== "files") parts.push(TAB_LABEL[d.tab]);
   }
   return parts.join(" · ");
 };

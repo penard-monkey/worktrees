@@ -94,6 +94,7 @@ eq("label: home", H.label(HOME), "Home");
 eq("label: file at line", H.label(P("a", { tab: "files", file: { path: "src/App.tsx", line: 12 } })), "a · App.tsx:12");
 eq("label: shell", H.label(P("a", { tab: "terminal", shell: 2 })), "a · Terminal · sh 2");
 eq("label: tab, with nameOf", H.label(P("a", { tab: "docs" }), () => "Alpha"), "Alpha · Docs");
+eq("label: a bare Files tab is the default and goes unsaid", H.label(P("a", { tab: "files" })), "a");
 
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log("navhistory-check: all ok");
