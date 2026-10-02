@@ -81,6 +81,11 @@ Allowed at reach `read` and above.
       `alpha` session wakes from `wait (until: message, slug: beta:(main))`.
 - [ ] Same with a **pi** lane in `beta`.
 
+- [ ] Known limits to keep in mind while testing (proposal §4.1): no
+      per-sender cap on another project's log (the oldest are pruned first);
+      a symlinked log directory is followed; a project renamed mid-session
+      signs with its old name until its sessions restart.
+
 ### The Codex sandbox (open question Q8 — needs Codex tokens)
 
 Codex's auto-review launch adds exactly one writable root, the lane's own git

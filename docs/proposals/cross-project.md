@@ -381,6 +381,22 @@ recipient's repo log**:
     cannot write to beta's message log (sandbox?); report to your own
     (main) instead"*) rather than surfacing a raw `os error 1`.
 
+- **Known limits, as built in P2** (review of #405). None is a new power —
+  each is what a LOCAL agent can already do to its own project's log — but
+  each now reaches across a boundary:
+  - **No per-sender cap.** A project at `read` can fill another project's
+    log, and the `MAX_COUNT` prune drops the OLDEST messages first, whoever
+    sent them. A per-`from` share is the fix if it ever matters.
+  - **The log directory is followed as found.** A
+    `.git/worktrees-messages` that is a symlink out of the recipient's repo
+    is written through. Planting one needs write access to that repo's
+    `.git`, which is the user's own tier.
+  - **A rename signs with the old name until sessions restart.** The
+    server reads the registry once, at start, like the reach level, so a
+    session started before `worktrees projects rename` keeps signing
+    `<old name>:<slug>`, and replies to that address are refused until the
+    replier's own session restarts too.
+
 ### 4.2 `from` across a project boundary
 
 - `from` stays **derived, never an argument**. Today it is `caller_place().slug`.

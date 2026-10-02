@@ -1650,8 +1650,13 @@ impl Server {
                     Ok(Target::Foreign { project: fp, name, place }) => {
                         // The per-TARGET hub-copy refusal (§5.4): mail filed in
                         // another machine's mirror is erased by its next pull.
-                        if let Some(msg) = worktrees_core::sync::hub_copy_refusal(std::path::Path::new(&fp.main_root)) {
-                            return Ok(text_err(&format!("{name}: {msg}")));
+                        // Pathless: the manifest names the other machine's root,
+                        // and below `full` an agent gets no paths (§3.4).
+                        if worktrees_core::sync::hub_copy_of(std::path::Path::new(&fp.main_root)).is_some() {
+                            return Ok(text_err(&format!(
+                                "{name}: that checkout is a hub copy (another machine's mirror) — mail filed \
+                                 there is erased by its next pull"
+                            )));
                         }
                         let Some(my_name) = self.reach.my_name() else {
                             return Ok(text_err("this project has no registry name to sign a cross-project message with"));
@@ -1680,11 +1685,19 @@ impl Server {
                     // write only its OWN repository's git dir (Codex's
                     // auto-review mode: `codex.rs` `permission_flags`) — not
                     // measured yet; docs/cross-project-manual-checks.md §3.
-                    Err(e) if foreign.is_some() && !e.starts_with("reply_to") && !e.starts_with("text") => Ok(text_err(&format!(
-                        "could not file the message in {}'s log: {e}. If this session runs in a sandbox, it may \
+                    //
+                    // Only the OS's reason is kept: core's message leads with
+                    // the file it could not write, which is the other repo's
+                    // git dir — a path, and below `full` an agent gets none.
+                    // Refusals of the MESSAGE (text, reply_to, a slug) pass
+                    // through unchanged; they are not about the write.
+                    Err(e) if foreign.is_some()
+                        && !["reply_to", "text", "from ", "to "].iter().any(|p| e.starts_with(p)) => Ok(text_err(&format!(
+                        "could not file the message in {}'s log: {}. If this session runs in a sandbox, it may \
                          be allowed to write only to its own repository; report to a place in this project \
                          instead, and say where the work is.",
-                        foreign.as_deref().and_then(|a| a.split(':').next()).unwrap_or("that project")
+                        foreign.as_deref().and_then(|a| a.split(':').next()).unwrap_or("that project"),
+                        e.rsplit(": ").next().unwrap_or("the write was refused")
                     ))),
                     Ok(m) => Ok(text_ok(
                         &serde_json::to_string_pretty(&serde_json::json!({
@@ -2180,13 +2193,27 @@ impl Server {
                 };
                 // The sender filter is what a message's `from` CARRIES: a bare
                 // slug for this project, `<name>:<slug>` for another one.
+                //
+                // A FOREIGN filter is matched literally on the carried `from`,
+                // never re-resolved through reach: mail that already landed
+                // must stay waitable even if reach was turned off since, and
+                // reading one's own log needs no reach at all.
                 let from = if slug_raw.is_empty() {
                     None
                 } else {
-                    match self.target(&slug_raw) {
-                        Ok(Target::Local(v)) => Some(v),
-                        Ok(Target::Foreign { name, place, .. }) => Some(format!("{name}:{}", place.slug)),
-                        Err(e) => return Ok(text_err(&e)),
+                    let here = project.place_index();
+                    let local = |s: &str| here.iter().any(|p| p.slug == s);
+                    match slug_raw.split_once(':') {
+                        _ if local(&slug_raw) => Some(slug_raw.clone()),
+                        Some((n, s)) if Some(n) == self.reach.my_name() && local(s) => Some(s.to_string()),
+                        Some((n, s)) if !n.is_empty() && !s.is_empty() => match safe_arg(&slug_raw, "slug") {
+                            Ok(v) => Some(v),
+                            Err(e) => return Ok(text_err(&e)),
+                        },
+                        _ => match self.known_slug(&slug_raw) {
+                            Ok(v) => Some(v),
+                            Err(e) => return Ok(text_err(&e)),
+                        },
                     }
                 };
                 let dir = messages::dir(std::path::Path::new(&project.git_common));
@@ -4562,6 +4589,20 @@ mod tests {
         assert_eq!(back["messages"][0]["reply_to"], serde_json::json!(qid));
     }
 
+    /// Mail from another project stays waitable when reach is off: the filter
+    /// is the carried `from`, matched literally, not a fresh resolution.
+    #[test]
+    fn waiting_for_mail_from_another_project_needs_no_reach() {
+        let t = two("xp-msg-wait-off");
+        let mut b = t.server(&t.beta, Level::Read);
+        let r = call(&mut b, "report", serde_json::json!({ "to": "alpha:(main)", "text": "done" }));
+        assert_eq!(r["isError"], false, "{}", text(&r));
+        let mut a = t.server(&t.alpha, Level::Off);
+        let got = body(&call(&mut a, "wait", serde_json::json!({ "until": "message", "slug": "beta:(main)", "timeout_s": 0 })));
+        assert_eq!(got["event"], "message", "{got}");
+        assert_eq!(got["messages"][0]["from"], "beta:(main)");
+    }
+
     #[test]
     fn a_cross_project_report_is_refused_by_name_when_it_cannot_reach() {
         let t = two("xp-msg-refuse");
@@ -4592,6 +4633,7 @@ mod tests {
         let r = call(&mut a, "report", serde_json::json!({ "to": "beta:(main)", "text": "hi" }));
         assert_eq!(r["isError"], true, "{}", text(&r));
         assert!(text(&r).contains("hub copy"), "{}", text(&r));
+        assert!(!text(&r).contains("/elsewhere"), "the manifest's root must not leak: {}", text(&r));
         assert!(!t.beta.join(".git").join(messages::DIR_NAME).exists());
     }
 
@@ -4611,5 +4653,9 @@ mod tests {
         assert_eq!(r["isError"], true, "{}", text(&r));
         let e = text(&r);
         assert!(e.contains("could not file the message in beta's log") && e.contains("sandbox"), "{e}");
+        // ...and below `full` it carries no path: not beta's git dir, not
+        // its checkout (§3.4) — measured leaking in review.
+        let gc = std::fs::canonicalize(t.beta.join(".git")).unwrap();
+        assert!(!e.contains(&*gc.to_string_lossy()) && !e.contains(&*t.beta.to_string_lossy()), "path leaked: {e}");
     }
 }

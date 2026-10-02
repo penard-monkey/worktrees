@@ -195,7 +195,10 @@ pub fn post_into(
     }
     if let Some(r) = reply_to {
         if !valid_id(r) || !entries(reply_log).iter().any(|(id, _, _)| id == r) {
-            return Err(format!("reply_to names no message in the log: {r}"));
+            return Err(format!(
+                "reply_to names no message in the log: {r} (or names one you sent — a follow-up to your own \
+                 message cannot thread; leave reply_to out)"
+            ));
         }
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
