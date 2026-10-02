@@ -647,9 +647,11 @@ impl Adapter for Pi {
         if let Err(e) = may_type(self.provider().label, req.reading.state) {
             return Delivery::Refused(e);
         }
-        let session = self.provider().sidecar_name(req.canonical);
+        // Use the same session resolution as Codex: in a canonical session
+        // where pi runs as `node`, find it by the tty foreground process.
+        let session = crate::activity::pi_session_for(req.panes, req.canonical);
         // pi runs as `node`, which `agent_pane` counts as an agent: in the
-        // place's own `~agent~pi` session, that pane is pi.
+        // place's own session (sidecar or canonical), that pane is pi.
         let Some(pane) = tmux::agent_pane(&session, req.path, req.exclude, self.provider().match_word) else {
             return Delivery::Refused(format!(
                 "{session} has no pane running pi in {}; send only types into this project's own pi pane. \
@@ -806,7 +808,7 @@ pub(crate) fn may_type(label: &str, state: State) -> Result<(), String> {
             "{label} is waiting on you (an approval, a question or a trust prompt) — typing would \
              answer it. Answer it, or wait until: idle first."
         )),
-        State::None => Err(format!("{label} is not running there (its pane is back at a shell). Use report.")),
+        State::None | State::Unknown => Err(format!("{label} is not running there (its pane is back at a shell). Use report.")),
     }
 }
 

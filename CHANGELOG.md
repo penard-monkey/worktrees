@@ -178,6 +178,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   protocol stream.** "branch 'x' set up to track …" and "HEAD is now at …"
   went to the server's stdout — the JSON-RPC channel — on every create. A
   client that parses strictly saw a broken line. They now go to stderr.
+- **Pi in a canonical session (not its own sidecar) is now recognized.** When
+  you type `pi …` in a place's main session, tmux reports the pane as running
+  `node`. The fix adds a fake-`ps` call (one for all node panes) to resolve
+  each tty's foreground process; macOS pi sets `process.title` so it reports
+  as `pi`. The app's dot poll, `place_status`, wait and send now read pi
+  correctly. `wait until: idle` no longer returns instantly on a working pi.
+  Guidance says never to type an agent command into a place's pane, and why.
 
 ## [0.34.1] - 2026-09-30
 

@@ -126,11 +126,15 @@ pub fn worktree_session_excluding(wt: &str, ai_word: &str, exclude_under: Option
 /// caller (one tmux shell-out) and reused: `ls`/`place_json` resolves adopted
 /// sessions for many worktrees against this instead of shelling out per place.
 pub struct PaneList {
-    panes: Vec<(String, String, String)>,
+    /// `(session, pane_current_path, pane_current_command)` per pane.
+    pub panes: Vec<(String, String, String)>,
     /// `(session, pane_pid)` per pane — what tells two launches under the
     /// same session NAME apart (a close + open recreates `~agent~pi`).
     /// Empty from `from_rows` and from a tmux that printed no fourth field.
-    pids: Vec<(String, String)>,
+    pub pids: Vec<(String, String)>,
+    /// `(session, pane_tty)` per pane — used to resolve the foreground process
+    /// of a `node` pane (pi runs as `node`). Empty from `from_rows`.
+    pub ttys: Vec<(String, String)>,
 }
 
 impl PaneList {
@@ -144,7 +148,7 @@ impl PaneList {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}",
+            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}",
         ])
         .ok()?;
         if !o.status.success() {
@@ -152,23 +156,88 @@ impl PaneList {
         }
         let mut panes = Vec::new();
         let mut pids = Vec::new();
+        let mut ttys = Vec::new();
         for line in String::from_utf8_lossy(&o.stdout).lines() {
-            let mut it = line.splitn(4, '\t');
+            let mut it = line.splitn(5, '\t');
             let session = it.next().unwrap_or("").to_string();
             let path = it.next().unwrap_or("").to_string();
             let cmd = it.next().unwrap_or("").to_string();
             if let Some(pid) = it.next().filter(|p| !p.is_empty()) {
                 pids.push((session.clone(), pid.to_string()));
             }
+            if let Some(tty) = it.next().filter(|t| !t.is_empty()) {
+                ttys.push((session.clone(), tty.to_string()));
+            }
             panes.push((session, path, cmd));
         }
-        Some(PaneList { panes, pids })
+        Some(PaneList { panes, pids, ttys })
     }
 
     /// A snapshot from rows a caller already holds, as
     /// `(session, pane_current_path, pane_current_command)`.
     pub fn from_rows(panes: Vec<(String, String, String)>) -> PaneList {
-        PaneList { panes, pids: Vec::new() }
+        PaneList { panes, pids: Vec::new(), ttys: Vec::new() }
+    }
+
+    /// Resolves the foreground process for panes whose command is `node`.
+    /// On macOS, pi sets `process.title` so `ps` reports it as `pi`, not `node`.
+    /// We need ONE ps call for ALL node panes (efficient), mapping tty to comm.
+    pub fn resolve_tty_foreground(&self) -> std::collections::HashMap<String, String> {
+        // Collect all unique ttys from node panes
+        let mut node_ttys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (_, _, cmd) in &self.panes {
+            if cmd == "node" {
+                // Find the tty for this pane by looking up in ttys
+                for (session, tty) in &self.ttys {
+                    if let Some((_, _, c)) = self.panes.iter().find(|(s, _, _)| s == session) {
+                        if c == "node" {
+                            node_ttys.insert(tty.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if node_ttys.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        
+        // One ps call for all ttys: -A for all processes, output tty,pid,tpgid,comm
+        // pid == tpgid means it's the foreground process group leader
+        let output = match std::process::Command::new("ps")
+            .args(["-A", "-o", "tty=,pid=,tpgid=,comm="])
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return std::collections::HashMap::new(),
+        };
+        
+        let mut tty_to_comm: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let mut parts = line.split_whitespace();
+            let tty = parts.next().unwrap_or("").trim();
+            if tty.is_empty() {
+                continue;
+            }
+            let pid = match parts.next().map(|s| s.trim().parse::<i32>().ok()) {
+                Some(Some(p)) => p,
+                _ => continue,
+            };
+            let tpgid = match parts.next().map(|s| s.trim().parse::<i32>().ok()) {
+                Some(Some(p)) => p,
+                _ => continue,
+            };
+            let comm = parts.next().unwrap_or("").trim();
+            
+            // pid == tpgid means this is the foreground process group leader
+            if pid == tpgid && node_ttys.contains(tty) {
+                tty_to_comm.insert(tty.to_string(), comm.to_string());
+            }
+        }
+        
+        tty_to_comm
     }
 
     /// Which LAUNCH of session `name` this is: its first pane's pid. A session
@@ -199,6 +268,25 @@ impl PaneList {
 
     /// Legacy canonical sessions default to Claude (including a bare shell).
     pub fn canonical_provider(&self, name: &str) -> &'static crate::provider::Provider {
+        // First check if this session has a node pane that's actually pi
+        for (session, _path, cmd) in &self.panes {
+            if session == name && cmd == "node" {
+                // This pane runs node; check if it's pi by resolving the tty
+                let tty_map = self.resolve_tty_foreground();
+                for (sess, tty) in &self.ttys {
+                    if sess == name {
+                        if let Some(comm) = tty_map.get(tty) {
+                            // macOS pi reports as "pi", not "node"
+                            if comm == "pi" {
+                                return crate::provider::PI;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        
         crate::provider::PROVIDERS.iter().filter(|p| !p.canonical_default)
             .find(|p| self.panes.iter().any(|(s, _, cmd)| s == name && cmd.rsplit('/').next() == Some(p.match_word)))
             .unwrap_or(crate::provider::CLAUDE)
@@ -840,6 +928,7 @@ mod tests {
         PaneList {
             panes: rows.iter().map(|(s, p, c)| (s.to_string(), p.to_string(), c.to_string())).collect(),
             pids: Vec::new(),
+            ttys: Vec::new(),
         }
     }
 

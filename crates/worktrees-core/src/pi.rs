@@ -717,7 +717,7 @@ pub fn lane_file_in(dir: &Path, cwd: &str, born: Option<i64>) -> Option<LaneFile
 /// `~agent~pi` session is up and running something other than a shell (the
 /// pane is `pi …; exec "$SHELL"`, so it outlives pi, and pi runs as `node`).
 pub fn pi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Option<Activity> {
-    let name = crate::provider::PI.sidecar_name(canonical);
+    let name = crate::activity::pi_session_for(panes, canonical);
     if !panes.session_runs_program(&name) {
         return None;
     }

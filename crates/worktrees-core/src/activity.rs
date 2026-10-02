@@ -51,6 +51,9 @@ pub enum State {
     Idle,
     /// No agent running in the place.
     None,
+    /// A non-shell program is running but no harness claims it (e.g., pi in
+    /// the canonical session running as `node`). Wait should not consider this settled.
+    Unknown,
 }
 
 impl State {
@@ -60,6 +63,7 @@ impl State {
             State::Waiting => 1,
             State::Idle => 2,
             State::None => 3,
+            State::Unknown => 4, // Unknown is not settled (wait continues)
         }
     }
 }
@@ -267,6 +271,12 @@ pub fn codex_session_for(panes: &tmux::PaneList, canonical: &str) -> String {
     crate::provider::CODEX.session_name(canonical, panes.canonical_provider(canonical).id, false)
 }
 
+/// The pi session name for a place: uses `PI.session_name` just like Codex,
+/// so pi in the canonical session (not a sidecar) gets the right name.
+pub fn pi_session_for(panes: &tmux::PaneList, canonical: &str) -> String {
+    crate::provider::PI.session_name(canonical, panes.canonical_provider(canonical).id, false)
+}
+
 /// The Codex half of `place_activity`, for one place: `None` unless the place's
 /// managed codex session is up AND running something other than a shell (the
 /// pane is `codex …; exec "$SHELL"`, so it outlives codex).
@@ -308,8 +318,29 @@ pub fn most_active(readings: impl IntoIterator<Item = Activity>) -> Activity {
 pub fn place_activity(project: &Project, slug: &str, path: &str) -> Activity {
     let probes = agent::live_probes();
     let panes = tmux::PaneList::fetch();
+    let canonical = project.session_name(slug);
+    
+    // First check if no harness claimed the session
     let scan = crate::harness::Scan { probes: &probes, panes: panes.as_ref() };
-    most_active(crate::harness::place_activities(project, slug, path, &scan).into_iter().map(|(_, x)| x))
+    let activities = crate::harness::place_activities(project, slug, path, &scan);
+    
+    // If no harness claims the session but a non-shell program is running,
+    // report unknown
+    if activities.is_empty() {
+        if let Some(ref panes) = scan.panes {
+            // Check if the canonical session has a non-shell program running
+            if panes.session_runs_program(&canonical) {
+                return Activity {
+                    provider: None,
+                    state: State::Unknown,
+                    last_done: None,
+                    session: Some(canonical.clone()),
+                };
+            }
+        }
+    }
+    
+    most_active(activities.into_iter().map(|(_, x)| x))
 }
 
 #[cfg(test)]

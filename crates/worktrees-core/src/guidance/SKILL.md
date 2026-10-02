@@ -25,12 +25,20 @@ tmux. The repository's own AGENTS.md / CLAUDE.md wins on repo-specific rules
 
 ## Handing work to another agent (a lane)
 
+- Create a place with an agent: MCP `create_worktree {branch} {provider} {model}` or
+  `worktrees new <branch> --ai <provider> [--model <backend>/<id>]`. Then work in its directory.
 - `create_worktree` with a `brief` writes `.planning/brief.md` in the new place
   and starts an agent on it. The brief is the whole handover: goal,
   deliverable, rules, and when to stop. It is never passed on a command line.
 - `provider` picks the agent (claude, codex, pi) and `model` its model.
 - A place with an agent running belongs to that agent. Do not edit its tree;
   talk to it.
+
+**Start an agent only through `create_worktree` (provider/model) or
+`worktrees new|open --ai <harness> [--model …]`; never type an agent command
+into a place's pane.** A pi session in the canonical slot runs as `node`, so
+worktrees cannot tell it from npm's pi or any other node program. Using the
+proper launch flow ensures worktrees can always find and address your agent.
 
 ## Talking between places
 

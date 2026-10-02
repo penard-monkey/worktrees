@@ -98,6 +98,31 @@ pub fn for_pane(session: &str, command: &str) -> Option<&'static Provider> {
     if session.contains(SIDECAR_MARKER) {
         return wrapper.and(PROVIDERS.iter().find(|p| session.contains(p.sidecar_suffix)));
     }
+    // For a `node` pane in a canonical session (no sidecar marker), check if
+    // it's actually pi by resolving the tty foreground process. This is a lazy
+    // resolution: we don't have access to PaneList here, so we only do it for
+    // the most common case where pi runs as `node` in a canonical session.
+    if command == "node" && !session.contains(SIDECAR_MARKER) {
+        // Try to resolve the tty for this session by fetching panes
+        if let Some(panes) = crate::tmux::PaneList::fetch() {
+            for (sess, _, cmd) in &panes.panes {
+                if sess == session && cmd == "node" {
+                    let tty_map = panes.resolve_tty_foreground();
+                    for (s, tty) in &panes.ttys {
+                        if s == session {
+                            if let Some(comm) = tty_map.get(tty) {
+                                // macOS pi reports as "pi", not "node"
+                                if comm == "pi" {
+                                    return Some(PI);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
     wrapper
 }
 impl Provider {

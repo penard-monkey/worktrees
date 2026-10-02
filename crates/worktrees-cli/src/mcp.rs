@@ -2852,7 +2852,7 @@ fn safe_arg(v: &str, what: &str) -> Result<String, String> {
 /// lands as its own user entry ~2ms after the reply it follows — so a pi
 /// reading counts only when the sample before it was non-busy pi as well.
 fn settled(prev: Option<&activity::Activity>, cur: &activity::Activity) -> bool {
-    if cur.state == activity::State::Busy {
+    if cur.state == activity::State::Busy || cur.state == activity::State::Unknown {
         return false;
     }
     if cur.provider != Some(worktrees_core::provider::PI.id) {
