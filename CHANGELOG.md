@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-02
+
 ### Added
 - **You can edit the `worktrees` skill your agents are given.** Settings →
   Agent guidance → What agents are told now has **Edit…**: your text is saved
