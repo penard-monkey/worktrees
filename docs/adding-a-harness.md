@@ -113,8 +113,13 @@ The same derivation must reach **all four** readers. Keep them on one reader
       Settings → Agents default, a Settings category for the harness (binary,
       version, runtime, readiness, MCP setup), the after-update offer
       (`offers.ts`, `offers-check.mjs`).
-- [ ] The terminal: alternate screen or not, mouse or not — does the wheel
-      scroll it (`term_wheel`), does scrollback exist?
+- [ ] **The wheel scrolls it.** Measure the live pane (`#{alternate_on}`,
+      `#{mouse_any_flag}`, `#{history_size}`) and SCROLL it, in the app. An
+      alternate screen with no mouse mode has nothing to scroll: `term_wheel`
+      can only send it ↑/↓, which an agent reads as prompt history. Codex 0.15x
+      was exactly that until it was launched with `--no-alt-screen`; pi draws on
+      the main screen and scrolls through tmux history; Claude asks for the
+      mouse and scrolls itself.
 - [ ] **Mock harness** (`app/src/mock/install.ts`) tracks every new command and
       can show this harness's dot, mark and states.
 - [ ] **WKWebView pass** in the real app (`app/scripts/sandbox.sh --app`) —

@@ -1021,6 +1021,15 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   re-lists on a tmux fingerprint change or every 30s, and neither a finished
   turn nor a `/model` moves tmux; `claude_activity` + `codex_models_moved`
   exist for that.
+  **Codex 0.15x runs on the ALTERNATE screen and never asks for the mouse**, so
+  tmux holds no history and the wheel had nothing to scroll: `term_wheel` could
+  only send ↑/↓, which Codex reads as composer history. We launch it inline
+  (`--no-alt-screen`, `harness::Codex::launch_args`, resume too). Measured on
+  0.159.0: the transcript lands in tmux history, a resize clears and re-emits it
+  instead of stacking copies, and the modals still end on their footer in a
+  visible-screen capture (`tests/fixtures/codex-inline/`). Alt-screen Codex does
+  scroll itself on PageUp/PageDown, but only a page at a time, behind a "Back
+  to bottom" mode that Esc leaves.
 - **A predicate that gates a DISPLAY must not also gate a WRITE.** The dot slot
   shows one glyph, so `unreadOf` subtracts live activity — correct for painting,
   and fatal as the ack's guard: a visit to a place whose session sits at
