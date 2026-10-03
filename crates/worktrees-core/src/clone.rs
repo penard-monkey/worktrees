@@ -589,6 +589,156 @@ fn run_clone(
     })
 }
 
+/// Ctrl-C during `worktrees clone`. git runs in its OWN process group (so a
+/// cancel can reach its helpers), which also means the terminal's SIGINT no
+/// longer reaches it — this flag is how the keypress becomes a cancel, and why
+/// an interrupted CLI clone cleans up exactly like the app's Cancel button.
+static CLI_CANCEL: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigint(_: libc::c_int) {
+    CLI_CANCEL.store(true, Ordering::SeqCst);
+}
+
+/// `worktrees clone <url> [--into <dir>] [--name <folder>]` — clone into
+/// `<dir>/<folder>` (default: the current directory and the URL's name) and
+/// register the result as a project, as the app's "Clone from URL…" does.
+/// Runs ahead of the git guard: there is no repository to stand in yet.
+pub fn cmd_clone(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
+    const USAGE: &str = "usage: worktrees clone <url> [--into <dir>] [--name <folder>]";
+    let mut url: Option<&str> = None;
+    let mut into: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut it = args.iter();
+    let mut opts_done = false;
+    while let Some(a) = it.next() {
+        if opts_done {
+            if url.is_some() {
+                ui.error(USAGE);
+                return 2;
+            }
+            url = Some(a);
+            continue;
+        }
+        match a.as_str() {
+            "--" => opts_done = true,
+            "-h" | "--help" => {
+                ui.plain(USAGE);
+                return 0;
+            }
+            "--into" => match it.next() {
+                Some(v) => into = Some(v.clone()),
+                None => {
+                    ui.error(USAGE);
+                    return 2;
+                }
+            },
+            "--name" => match it.next() {
+                Some(v) => name = Some(v.clone()),
+                None => {
+                    ui.error(USAGE);
+                    return 2;
+                }
+            },
+            s if s.starts_with("--") => {
+                ui.error(&format!("unknown option {s}\n{USAGE}"));
+                return 2;
+            }
+            s if url.is_none() => url = Some(s),
+            _ => {
+                ui.error(USAGE);
+                return 2;
+            }
+        }
+    }
+    let Some(url) = url else {
+        ui.error(USAGE);
+        return 2;
+    };
+    let src = match parse_source(url) {
+        Ok(s) => s,
+        Err(e) => {
+            ui.error(&e);
+            return 1;
+        }
+    };
+    let parent = match into {
+        Some(d) => d,
+        None => match std::env::current_dir() {
+            Ok(d) => d.to_string_lossy().into_owned(),
+            Err(e) => {
+                ui.error(&e.to_string());
+                return 1;
+            }
+        },
+    };
+    let folder = name.unwrap_or_else(|| src.name.clone());
+    let target = match plan_target(&parent, &folder) {
+        Ok(t) => t,
+        Err(e) => {
+            ui.error(&e.message);
+            return 1;
+        }
+    };
+    ui.info(&format!("cloning {} → {}", src.url, target.display()));
+    // SAFETY: installs a handler that only stores to an atomic.
+    unsafe {
+        libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
+    }
+    // SAFETY: isatty on a constant fd.
+    let tty = unsafe { libc::isatty(2) } == 1;
+    let mut drew = false;
+    let mut sink = |p: CloneProgress| {
+        if !tty {
+            return;
+        }
+        let line = match (&p.phase, p.percent) {
+            (Some(ph), Some(pc)) => match &p.detail {
+                Some(d) => format!("{ph}: {pc}% · {d}"),
+                None => format!("{ph}: {pc}%"),
+            },
+            _ => return,
+        };
+        eprint!("\r\x1b[2K{line}");
+        drew = true;
+    };
+    let res = clone_repo(&src, &target, &CloneOpts::default(), &CLI_CANCEL, Some(&mut sink));
+    // SAFETY: restores the default disposition.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+    }
+    if drew {
+        eprintln!();
+    }
+    let out = match res {
+        Ok(o) => o,
+        Err(e) => {
+            ui.error(&e.message);
+            return if e.kind == CloneErrorKind::Cancelled { 130 } else { 1 };
+        }
+    };
+    let root = match crate::Project::discover(Path::new(&out.dir)) {
+        Ok(p) => p.main_root,
+        Err(e) => {
+            ui.error(&format!("cloned to {}, but it is not readable as a project: {}", out.dir, e.msg));
+            return 1;
+        }
+    };
+    match crate::registry::add(&root) {
+        Ok(e) => ui.info(&format!("registered '{}': {}", e.name, e.root)),
+        Err(e) => {
+            ui.error(&format!("cloned to {}, but registering it failed: {e}", out.dir));
+            return 1;
+        }
+    }
+    if out.has_submodules {
+        ui.warn(&format!(
+            "this repository has submodules, which were not fetched — run `git -C {} submodule update --init --recursive` if you need them",
+            out.dir
+        ));
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
