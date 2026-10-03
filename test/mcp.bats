@@ -166,16 +166,21 @@ print("ok")
   [ ! -d "$REPO/.worktrees/pwned" ]
 }
 
-@test "create_worktree opens a single pane by default; spare:true keeps the split" {
+@test "create_worktree opens a single pane by default; spare:true splits" {
   # An agent's place has nobody at the keyboard for a spare shell.
   mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-a"}}}'
   [[ "$output" == *'"isError":false'* ]]
   tmux_session_exists repo-agent-a
   [ -z "$(tmux_pane1_cmd repo-agent-a)" ]
+  mcp --mutations '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-e","spare":false}}}'
+  [[ "$output" == *'"isError":false'* ]]
+  [ -z "$(tmux_pane1_cmd repo-agent-e)" ]
   ! grep -q 'split-window' "$TMUX_LOG"
+  # The CLI no longer splits by default, so spare:true has to ASK for it.
   mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-b","spare":true}}}'
   [[ "$output" == *'"isError":false'* ]]
   [ -n "$(tmux_pane1_cmd repo-agent-b)" ]
+  grep -q 'split-window' "$TMUX_LOG"
   mcp --mutations '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-c","spare":"yes"}}}'
   [[ "$output" == *'"isError":true'* ]]
   [ ! -d "$REPO/.worktrees/agent-c" ]

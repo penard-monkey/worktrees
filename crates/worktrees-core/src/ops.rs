@@ -347,12 +347,12 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         } else {
             keep.to_string()
         };
-        // The spare shell is a SECOND pane next to pane0 (AI). The CLI keeps it
-        // (it's where deps install; `new` and `open` both split by default,
-        // unless `--no-spare`). The app opens
-        // single-pane (`spare_shell=false`) so Claude gets full width — its
-        // scratch shell lives in the right dock's Terminal tab instead. An
-        // install_cmd is only ever passed WITH the spare shell.
+        // The spare shell is an opt-in SECOND pane next to pane0 (AI): `new`
+        // and `open` split only with `--spare`, and that pane is where `new`
+        // runs the detected install. Everything else — the CLI's default, the
+        // app, MCP's create_worktree — opens single-pane so the agent gets full
+        // width; the app's scratch shell lives in the right dock's Terminal tab.
+        // An install_cmd is only ever passed WITH the spare shell.
         let pane1 = if !install_cmd.is_empty() {
             format!("{install_cmd} && echo '✓ deps ready'; {keep}")
         } else {
@@ -585,10 +585,12 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // worktree; claude then opens on BRIEF_OPENER. This is how an orchestrator
     // (the MCP `create_worktree` tool) hands a place its work.
     let mut brief: Option<String> = None;
-    // Default keeps the CLI's spare shell (pane 1) — that's where deps install.
-    // The app passes --no-spare so its embedded view is single-pane (Claude
-    // full-width); deps install by hand in the dock's Terminal tab.
-    let mut spare_shell = true;
+    // Single pane by default: the agent gets full width, and a detected install
+    // is printed as a `then:` hint instead of run. `--spare` opts back into the
+    // old split, where pane 1 runs that install. `--no-spare` was the opt-out
+    // when the split was the default; the app, scripts and older briefs still
+    // pass it, so it stays accepted, and of the two the last one given wins.
+    let mut spare_shell = false;
     let mut expect = "";
     for arg in args {
         if !expect.is_empty() {
@@ -613,6 +615,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             "--no-install" => do_install = false,
             "--no-tmux" => do_tmux = false,
             "--no-attach" => do_attach = false,
+            "--spare" => spare_shell = true,
             "--no-spare" => spare_shell = false,
             "--no-fetch" => do_fetch = false,
             "-r" | "--resume" => resume = true,
@@ -848,13 +851,13 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // The worktree already exists at this point — a failed session is a partial
     // success the user MUST see (loud-guard). Propagate launch's rc so cmd_new
     // returns nonzero. (Fake shims always succeed → bats success path unchanged.)
-    // `new` keeps the spare shell (pane 1) unless --no-spare — that's where deps
-    // install, so suppressing it also suppresses the install command (launch's
-    // contract: an install_cmd only ever rides along WITH the spare shell). The
-    // detected command isn't lost silently — it's echoed as a hint, same as the
-    // --no-tmux branch above.
+    // Only `--spare` splits off pane 1, and that pane is where deps install
+    // (launch's contract: an install_cmd only ever rides along WITH the spare
+    // shell). Without it — the default — the detected command isn't lost
+    // silently: it's echoed as a hint, same as the --no-tmux branch above, and
+    // the hint names the flag for anyone who expected the old auto-install.
     if !spare_shell && !install_cmd.is_empty() {
-        ui.info(&format!("then: {install_cmd}"));
+        ui.info(&format!("then: {install_cmd}   (not run — `--spare` runs it in a second pane)"));
     }
     let pane1_install = if spare_shell { install_cmd.as_str() } else { "" };
     let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
@@ -969,10 +972,9 @@ pub fn cmd_switch(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut name, mut ai_flag, mut resume, mut do_attach) = (String::new(), None::<String>, false, true);
     let (mut model, mut force) = (None::<String>, false);
-    // Default keeps the CLI's spare shell (pane 1). The app passes --no-spare so
-    // its embedded view is single-pane (Claude full-width); the scratch shell
-    // moves to the dock's Terminal tab.
-    let mut spare_shell = true;
+    // Single pane by default; `--spare` opts into a spare shell as pane 1.
+    // `--no-spare` (the old opt-out) stays accepted; the last one given wins.
+    let mut spare_shell = false;
     let mut expect = "";
     for a in args {
         if !expect.is_empty() {
@@ -989,6 +991,7 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         match a.as_str() {
             "--no-attach" => do_attach = false,
+            "--spare" => spare_shell = true,
             "--no-spare" => spare_shell = false,
             "-r" | "--resume" => resume = true,
             "--force" => force = true,

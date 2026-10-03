@@ -2,8 +2,8 @@
 
 **A durable place for every work stream.** Not a throwaway worktree per branch —
 a place you keep: `ui-changes`, `prod-reviews`, `mcp-server`. Each place is a
-git worktree + a tmux session — pane 0 runs your AI CLI (claude, codex,
-opencode, …), pane 1 installs deps and gives you a shell — and it lives as long
+git worktree + a tmux session running your AI CLI (claude, codex, opencode, …)
+— with `--spare`, a second pane installs deps and gives you a shell — and it lives as long
 as the work does: an afternoon, or weeks of async iteration until it's right.
 
 **Branches flow through places.** The place keeps the expensive parts
@@ -136,7 +136,7 @@ building from source needs a Rust toolchain.
 ## Commands
 
 ```
-worktrees new <branch> [base]         create a worktree + tmux (AI | shell)
+worktrees new <branch> [base]         create a worktree + tmux (one AI pane; --spare adds a shell)
 worktrees new <branch> --name <topic> ...place named independently of the branch
 worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
 worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
@@ -157,7 +157,7 @@ Flags:
 
 | Command | Flags |
 |---|---|
-| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--model <m>` (the agent's model for this launch) · `--force` (launch despite an advisory refusal — see below) · `--no-spare` (single pane — no spare shell, and for `new` no auto-install) |
+| `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--model <m>` (the agent's model for this launch) · `--force` (launch despite an advisory refusal — see below) · `--spare` (add a spare shell as pane 1; for `new` it runs the detected install there — without it the install is printed as a `then:` hint) · `--no-spare` (accepted, and the default: single pane) |
 | `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` · `--brief <text>` (write the agent's task to `.planning/brief.md` and launch the selected agent on it) |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |
@@ -191,9 +191,10 @@ silently mint a junk branch.
 ## The tmux layout
 
 Each worktree gets a session named `<prefix>-<slug>`: pane 0 launches your AI
-CLI through an interactive shell (so shell aliases resolve), pane 1 runs the
-detected package-manager install (pnpm/bun/yarn/npm, by lockfile) and drops to a
-shell. Sessions are reused, never duplicated — `open` finds a session already
+CLI through an interactive shell (so shell aliases resolve), and that is the
+whole session by default. `--spare` adds pane 1, which runs the detected
+package-manager install (pnpm/bun/yarn/npm, by lockfile) and drops to a shell;
+without it `new` prints the install command as a `then:` hint. Sessions are reused, never duplicated — `open` finds a session already
 living in the worktree even under a different name.
 
 ## JSON output

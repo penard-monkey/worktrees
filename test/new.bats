@@ -331,57 +331,79 @@ setup() {
 
 # ── install-pane detection ───────────────────────────────────────────────────
 
-@test "new: pnpm-lock.yaml → pane 1 runs pnpm install" {
+@test "new --spare: pnpm-lock.yaml → pane 1 runs pnpm install" {
   add_lockfile pnpm-lock.yaml
-  run_wt new feat-pl
+  run_wt new feat-pl --spare
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane1_cmd repo-feat-pl)" == *"pnpm install"* ]]
 }
 
-@test "new: yarn.lock → pane 1 runs yarn" {
+@test "new --spare: yarn.lock → pane 1 runs yarn" {
   add_lockfile yarn.lock
-  run_wt new feat-yl
+  run_wt new feat-yl --spare
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane1_cmd repo-feat-yl)" == *yarn* ]]
 }
 
-@test "new: no lockfile → pane 1 has no install command" {
-  run_wt new feat-nl
+@test "new --spare: no lockfile → pane 1 has no install command" {
+  run_wt new feat-nl --spare
   [ "$status" -eq 0 ]
   local p1; p1="$(tmux_pane1_cmd repo-feat-nl)"
+  [ -n "$p1" ]
   [[ "$p1" != *install* ]]
   [[ "$p1" != *yarn* ]]
 }
 
-@test "new: --no-install → pane 1 has no install despite lockfile" {
+@test "new --spare --no-install → pane 1 has no install despite lockfile, and no hint" {
   add_lockfile pnpm-lock.yaml
-  run_wt new feat-ni --no-install
+  run_wt new feat-ni --spare --no-install
   [ "$status" -eq 0 ]
+  [ -n "$(tmux_pane1_cmd repo-feat-ni)" ]
   [[ "$(tmux_pane1_cmd repo-feat-ni)" != *install* ]]
+  [[ "$output" != *"then: pnpm install"* ]]
 }
 
-@test "new (default) splits a spare shell into pane 1" {
+@test "new (default) is single pane: no split-window" {
   run_wt new feat-sp
   [ "$status" -eq 0 ]
-  [ -n "$(tmux_pane1_cmd repo-feat-sp)" ]   # split-window ran → pane 1 exists
-  grep -q 'split-window' "$TMUX_LOG"
-}
-
-@test "new --no-spare: single pane, no split-window (the app's path)" {
-  run_wt new feat-ns --no-spare
-  [ "$status" -eq 0 ]
-  tmux_session_exists repo-feat-ns
-  [[ "$(tmux_pane0_cmd repo-feat-ns)" == *fake-ai* ]]
-  [ -z "$(tmux_pane1_cmd repo-feat-ns)" ]   # no pane 1
+  tmux_session_exists repo-feat-sp
+  [[ "$(tmux_pane0_cmd repo-feat-sp)" == *fake-ai* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-sp)" ]   # no pane 1
   ! grep -q 'split-window' "$TMUX_LOG"
 }
 
-@test "new --no-spare: a detected install is hinted, never silently dropped" {
+@test "new (default): a detected install is hinted with the flag that runs it, never silently dropped" {
   add_lockfile pnpm-lock.yaml
-  run_wt new feat-nsi --no-spare
+  run_wt new feat-dh
   [ "$status" -eq 0 ]
+  [[ "$output" == *"then: pnpm install"*"--spare"* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-dh)" ]
+}
+
+@test "new --spare splits a spare shell into pane 1" {
+  run_wt new feat-ss --spare
+  [ "$status" -eq 0 ]
+  [ -n "$(tmux_pane1_cmd repo-feat-ss)" ]   # split-window ran → pane 1 exists
+  grep -q 'split-window' "$TMUX_LOG"
+}
+
+@test "new --no-spare is still accepted (the app's path): single pane, install hinted" {
+  add_lockfile pnpm-lock.yaml
+  run_wt new feat-ns --no-spare
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd repo-feat-ns)" == *fake-ai* ]]
+  [ -z "$(tmux_pane1_cmd repo-feat-ns)" ]
+  ! grep -q 'split-window' "$TMUX_LOG"
   [[ "$output" == *"then: pnpm install"* ]]
-  [ -z "$(tmux_pane1_cmd repo-feat-nsi)" ]
+}
+
+@test "new: --spare and --no-spare together — the last one wins" {
+  run_wt new feat-l1 --spare --no-spare
+  [ "$status" -eq 0 ]
+  [ -z "$(tmux_pane1_cmd repo-feat-l1)" ]
+  run_wt new feat-l2 --no-spare --spare
+  [ "$status" -eq 0 ]
+  [ -n "$(tmux_pane1_cmd repo-feat-l2)" ]
 }
 
 @test "new: --no-attach → session ready detached, no attach/switch-client" {

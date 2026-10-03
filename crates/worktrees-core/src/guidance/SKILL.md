@@ -26,10 +26,13 @@ tmux. The repository's own AGENTS.md / CLAUDE.md wins on repo-specific rules
 ## Handing work to another agent (a lane)
 
 - Start a lane with MCP `create_worktree {branch, provider, model, brief}`,
-  or `worktrees new <branch> --ai <provider> [--model <model>] [--brief <text>]`
-  (`worktrees open <slug> --ai …` for a place that exists). `provider` picks
+  or `worktrees new <branch> --ai <provider> [--model <model>] [--brief <text>]
+  --no-attach` (`worktrees open <slug> --ai … --no-attach` for a place that
+  exists). Always pass `--no-attach`: the lane is the other agent's, and
+  attaching would take over your own terminal. `provider` picks
   the agent (claude, codex, pi) and `model` its model; pi's is
-  `<host>/<id>`, for example `lm-studio/qwen3-coder-next`.
+  `<host>/<id>`, for example `lm-studio/qwen3-coder-next`. The lane opens as
+  one pane, the agent's, which is what an agent needs.
 - A `brief` is written to `.planning/brief.md` in the new place and the agent
   is started on it. The brief is the whole handover: goal, deliverable, rules,
   and when to stop. It is never passed on a command line.

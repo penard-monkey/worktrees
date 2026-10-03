@@ -1843,11 +1843,14 @@ impl Server {
                 // Single pane unless asked: an agent's place has no one at the
                 // keyboard to use a spare shell, and the pane it would take is
                 // width claude reads by. Typed strictly, like set_pin's bool.
+                // Both directions are spelled out: single pane is the CLI's
+                // default now, but `spare: true` once relied on the OLD default
+                // and silently stopped splitting when it flipped.
                 match a.get("spare") {
                     None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => {
                         args.push("--no-spare".to_string())
                     }
-                    Some(serde_json::Value::Bool(true)) => {}
+                    Some(serde_json::Value::Bool(true)) => args.push("--spare".to_string()),
                     Some(_) => return Ok(text_err("spare must be true or false")),
                 }
                 // The brief is free text and never a flag: it rides as the value
