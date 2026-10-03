@@ -7520,6 +7520,18 @@ function App() {
             <header className="topbar">
               {navButtons}
               <div className="identity">
+                {/* Which project this place belongs to — the same name the nav's
+                    project header shows (`basename(root)`). `(main)` named after
+                    its own project would read "x / ◆ x", so it says it once.
+                    Display only: the separator is a real text node (a `::before`
+                    on an ellipsising span dangles) and sits OUTSIDE the name so
+                    the name can ellipsise without taking it along. */}
+                {!(selected.is_main && nameOf(selected) === basename(sel.repo)) && (
+                  <span className="topbar-proj" title={sel.repo} data-track="topbar.project">
+                    <span className="topbar-proj-name">{basename(sel.repo)}</span>
+                    <span className="topbar-proj-sep" aria-hidden="true">/</span>
+                  </span>
+                )}
                 {renaming ? (
                   <TitleEditor
                     key={sel.repo + "|" + sel.slug}

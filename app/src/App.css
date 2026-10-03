@@ -853,6 +853,18 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi);
 }
+/* The project this place belongs to, left of the place name. Dimmer than the
+   name (the place stays the hero) and the FIRST thing to give way: a shrink
+   factor of 8 against the slug's 1, so it ellipsises while the place name still
+   has all its width. The separator is its own `flex: none` node — never a
+   `::before` on the ellipsising span, which dangles. */
+.topbar-proj {
+  display: flex; align-items: baseline; gap: var(--s2);
+  flex: 0 8 auto; min-width: 0; overflow: hidden;
+  font-size: var(--fs-meta); color: var(--txt-dim);
+}
+.topbar-proj-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-proj-sep { flex: none; color: var(--txt-mute); }
 /* The slug beside a renamed place. Quieter than the branch chip and NOT a
    chip — it is what the directory and the tmux session are called, so it has to
    stay legible without competing with the name. */

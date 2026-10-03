@@ -22,6 +22,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   one shared answer. The CLI has the same thing:
   `worktrees clone <url> [--into <dir>] [--name <folder>]` clones and
   registers the project, and Ctrl-C cleans up like Cancel.
+- **The place header names its project.** `worktrees / clone-project` now reads
+  to the left of the place name, so a lane says which project it belongs to. It
+  is the nav's own project name (the full path is its tooltip), dimmer than the
+  place, and the first thing to ellipsise in a narrow window. `(main)` named
+  after its project shows the name once.
 
 ## [0.36.1] - 2026-10-03
 
