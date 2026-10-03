@@ -15,7 +15,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   accepted and now matches the default; given together, the last of the two
   wins. The app and MCP `create_worktree` were already single-pane, and
   `create_worktree`'s `spare: true` still splits. The `worktrees` skill now
-  tells agents to start a lane from the CLI with `--no-attach`.
+  tells agents to start a lane from the CLI with `--no-attach`. `--spare`
+  shapes a session only when it creates one: `open --spare` on a session that
+  is already up keeps its panes, and now says so instead of only "reusing it".
 
 ### Fixed
 - **The wheel scrolls a Codex lane.** Codex 0.15x draws its TUI on the

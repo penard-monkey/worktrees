@@ -1,21 +1,45 @@
 #!/usr/bin/env bats
-# Integration smokes against REAL tmux. The fake tmux shim is removed and the
-# server is isolated via TMUX_TMPDIR (socket lives under the test tmpdir), so
-# these never touch the developer's own tmux server. Always --no-attach (no tty).
+# Integration smokes against REAL tmux, on a PRIVATE server. Always --no-attach
+# (no tty).
+#
+# Isolation is the whole point of this setup, and TMUX_TMPDIR is NOT it: inside
+# a tmux pane (every lane runs in one) a bare `tmux …` talks to the server
+# `$TMUX` names — the developer's real one — and TMUX_TMPDIR only picks the
+# socket dir when `$TMUX` is unset. A bare `tmux kill-server` in teardown has
+# killed a user's whole tmux server that way (AGENTS.md). So:
+#   - `$TMUX` is unset (common_setup does it too; this file does not rely on it);
+#   - the fake shim is replaced by a WRAPPER that pins every call to this test's
+#     own `-S` socket. worktrees shells out to plain `tmux` from PATH, so the
+#     binary under test lands on the same private server as the assertions;
+#   - teardown names that socket explicitly and never runs a bare kill-server.
+# The socket lives in a short mktemp dir under /tmp, not $BATS_TEST_TMPDIR:
+# macOS caps a unix socket path at 104 bytes, and the bats tmpdir is longer.
 
 load 'helpers/common'
 
 setup() {
   common_setup
+  unset TMUX
   remove_fake_tmux                        # fall through to the real tmux binary
-  export TMUX_TMPDIR="$BATS_TEST_TMPDIR"  # isolated socket dir per test
+  REAL_TMUX="$(command -v tmux || true)"
+  RT_DIR="$(mktemp -d /tmp/wtrt.XXXXXX)"
+  RT_SOCK="$RT_DIR/s"
+  export TMUX_TMPDIR="$RT_DIR"            # third layer: even a stray default socket is ours
+  if [ -n "$REAL_TMUX" ]; then
+    printf '#!/bin/sh\nexec "%s" -S "%s" "$@"\n' "$REAL_TMUX" "$RT_SOCK" > "$SHIMS/tmux"
+    chmod +x "$SHIMS/tmux"
+  fi
   export SHELL=/bin/bash                  # deterministic pane shell
   # ($REPO physicalized centrally in make_repo; symlinked-path handling is
   #  fixed in bin/worktrees via pwd -P — regression test in misc.bats.)
 }
 
 teardown() {
-  tmux kill-server 2>/dev/null || true
+  # This test's private server only, by its own socket — never a bare kill-server.
+  if [ -n "${REAL_TMUX:-}" ] && [ -n "${RT_SOCK:-}" ]; then
+    "$REAL_TMUX" -S "$RT_SOCK" kill-server 2>/dev/null || true
+  fi
+  case "${RT_DIR:-}" in /tmp/wtrt.?*) rm -rf "$RT_DIR" ;; esac
 }
 
 # bats test_tags=real-tmux
@@ -23,6 +47,9 @@ teardown() {
   command -v tmux >/dev/null || skip "no real tmux"
   run_wt new feat-x --no-install --no-attach
   [ "$status" -eq 0 ]
+  # The binary's session is on THIS test's private server, by its socket.
+  [ -S "$RT_SOCK" ]
+  "$REAL_TMUX" -S "$RT_SOCK" has-session -t repo-feat-x
   tmux has-session -t repo-feat-x
   run tmux list-panes -t repo-feat-x -F '#{pane_id}'
   [ "$status" -eq 0 ]

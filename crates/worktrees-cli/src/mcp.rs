@@ -1279,7 +1279,7 @@ impl Server {
                         "provider": { "type": "string", "enum": worktrees_core::provider::ids(), "description": "Agent to start. Omit to use the project's AI command." },
                         "model": { "type": "string", "description": "The agent's model: pi takes `<backend>/<id>` (e.g. lm-studio/qwen3.6-27b), claude an alias or id, codex a model id. Letters, digits and . _ / : - only. Optional." },
                         "brief": { "type": "string", "description": "The agent's task, as markdown. Written to .planning/brief.md; the chosen agent opens on it. Optional." },
-                        "spare": { "type": "boolean", "description": "Also open a spare shell pane (where deps install). Default false." },
+                        "spare": { "type": "boolean", "description": "Also open a spare shell pane beside the agent; on a newly created place it runs the detected dependency install. Default false." },
                         "project": { "type": "string", "description": "Create it in ANOTHER registered project, by its list_projects name. Needs cross_project = \"full\". Omit for this project." },
                         "force": { "type": "boolean", "description": "Launch anyway despite an advisory refusal (a spent plan window, an unreachable model host). Only after the user has been told the reason and asked for it. Default false." }
                     },

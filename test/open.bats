@@ -48,6 +48,28 @@ session_count() {
   [ -n "$(tmux_pane1_cmd repo-feat-ss)" ]   # split-window ran → pane 1 exists
 }
 
+@test "open --spare on a live session says it applies only at creation, and splits nothing" {
+  make_worktree feat-ru
+  run_wt open feat-ru --no-attach
+  [ "$status" -eq 0 ]
+  : > "$TMUX_LOG"
+  run_wt open feat-ru --spare --no-attach
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"reusing it."* ]]
+  [[ "$output" == *"--spare applies only when the session is created"* ]]
+  ! grep -q 'split-window' "$TMUX_LOG"
+  [ -z "$(tmux_pane1_cmd repo-feat-ru)" ]
+}
+
+@test "open on a live session without --spare says nothing about it" {
+  make_worktree feat-rn
+  run_wt open feat-rn --no-attach
+  run_wt open feat-rn --no-attach
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"reusing it."* ]]
+  [[ "$output" != *"--spare"* ]]
+}
+
 @test "open --no-spare is still accepted (the app's path): single pane" {
   make_worktree feat-ns
   run_wt open feat-ns --no-spare
