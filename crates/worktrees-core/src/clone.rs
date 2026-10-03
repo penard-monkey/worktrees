@@ -321,7 +321,7 @@ pub fn classify(stderr: &str) -> CloneErrorKind {
 fn failure_message(kind: CloneErrorKind, url: &str, stderr: &str) -> String {
     let head = match kind {
         CloneErrorKind::Auth => format!(
-            "Could not authenticate to {url}. The repository is private (or does not exist), and git has no credentials for it it may use without asking — set up an ssh key or a credential helper, then try again."
+            "Could not authenticate to {url}. The repository is private (or does not exist), and git has no credentials for it that work without asking — set up an ssh key or a credential helper, then try again."
         ),
         CloneErrorKind::NotFound => format!("No repository at {url} — check the URL."),
         CloneErrorKind::HostKey => format!(

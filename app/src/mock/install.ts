@@ -305,7 +305,7 @@ const mockListDelayMs = (() => {
 const mockCloneDelayMs = Number(new URLSearchParams(location.search).get("clonedelay") ?? 2400);
 const mockCloneCancels = new Set<string>();
 const MOCK_CLONE_FAIL: [string, CloneErrorKind, string][] = [
-  ["private", "auth", "Could not authenticate to {url}. The repository is private (or does not exist), and git has no credentials for it it may use without asking — set up an ssh key or a credential helper, then try again.\nfatal: could not read Username for 'https://github.com': terminal prompts disabled"],
+  ["private", "auth", "Could not authenticate to {url}. The repository is private (or does not exist), and git has no credentials for it that work without asking — set up an ssh key or a credential helper, then try again.\nfatal: could not read Username for 'https://github.com': terminal prompts disabled"],
   ["missing", "not_found", "No repository at {url} — check the URL.\nERROR: Repository not found."],
   ["hostkey", "host_key", "This Mac has not trusted that host's ssh key yet. Connect once from a terminal (for example `ssh -T git@github.com`) and accept it, then try again.\nHost key verification failed."],
   ["offline", "network", "Could not reach the host for {url} — check the network and the address.\nfatal: unable to access '{url}': Could not resolve host: github.com"],
