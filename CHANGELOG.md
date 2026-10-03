@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-10-03
+
 ### Changed
 - **`worktrees new` and `worktrees open` open a single pane by default.** The
   agent gets the whole width; there is no spare shell beside it unless you ask
