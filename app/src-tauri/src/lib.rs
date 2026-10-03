@@ -648,6 +648,144 @@ async fn create_project(app: AppHandle, location: String, name: String) -> Resul
     Ok(ws)
 }
 
+/// Running clones by the id the dialog chose, so `clone_cancel` can reach one.
+/// A struct (not a bare static) so the tests own the map they assert against —
+/// the `_in` seam AGENTS.md asks of process-global state.
+#[derive(Default)]
+struct CloneJobs(Mutex<HashMap<String, Arc<AtomicBool>>>);
+
+impl CloneJobs {
+    /// Register `id`; the guard unregisters it however the clone ends. A second
+    /// clone under a live id is refused rather than sharing the first's flag.
+    fn start<'a>(&'a self, id: &str) -> Result<(Arc<AtomicBool>, CloneJobGuard<'a>), String> {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if m.contains_key(id) {
+            return Err(format!("a clone with id {id} is already running"));
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        m.insert(id.to_string(), flag.clone());
+        Ok((flag, CloneJobGuard { jobs: self, id: id.to_string() }))
+    }
+    /// `false` when nothing runs under `id` (already finished — not an error).
+    fn cancel(&self, id: &str) -> bool {
+        let m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.get(id).map(|f| f.store(true, Ordering::SeqCst)).is_some()
+    }
+}
+
+struct CloneJobGuard<'a> {
+    jobs: &'a CloneJobs,
+    id: String,
+}
+
+impl Drop for CloneJobGuard<'_> {
+    fn drop(&mut self) {
+        self.jobs.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+    }
+}
+
+static CLONE_JOBS: std::sync::LazyLock<CloneJobs> = std::sync::LazyLock::new(CloneJobs::default);
+
+#[derive(Serialize)]
+struct CloneDone {
+    workspace: Workspace,
+    /// The project's root as the workspace stores it (canonical) — what the
+    /// dialog selects. `dir` is where the clone was written, as asked.
+    root: String,
+    dir: String,
+    has_submodules: bool,
+}
+
+/// "Clone from URL…": clone into `<parent>/<name>` and add the result exactly
+/// as "Add existing…" would — through `add_project`, the one door.
+///
+/// All of the clone is `worktrees_core::clone` (the CLI's `worktrees clone` is
+/// the same code): the URL rules, the existing-target refusal, the no-prompt
+/// environment, and the cleanup that removes only the directory this clone
+/// created. Here is only the glue: progress over a `Channel` (the `sync_apply`
+/// mechanism), a cancel flag `clone_cancel` can reach, and the blocking clone
+/// moved off the async runtime.
+///
+/// An `Err` is core's `CloneError` (`{kind, message}`) so the dialog can tell a
+/// cancel — which is not an error to show — from a failure.
+///
+/// Nothing the repository declares runs here or in `add_project` (ADR 0001):
+/// registering reads no `.worktrees.toml` argv, and the first thing that could
+/// run anything at all is a place the user creates later.
+#[tauri::command]
+async fn clone_project(
+    app: AppHandle,
+    id: String,
+    url: String,
+    parent: String,
+    name: Option<String>,
+    on_progress: Channel<worktrees_core::clone::CloneProgress>,
+) -> Result<CloneDone, worktrees_core::clone::CloneError> {
+    use worktrees_core::clone::{self as wclone, CloneError, CloneErrorKind};
+    let invalid = |m: String| CloneError { kind: CloneErrorKind::Invalid, message: m };
+    let src = wclone::parse_source(&url).map_err(invalid)?;
+    let folder = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| src.name.clone());
+    let target = wclone::plan_target(&parent, &folder)?;
+    applog("info", &format!("clone_project start {} -> {}", src.url, target.display()));
+    let started = std::time::Instant::now();
+    let src2 = src.clone();
+    let t2 = target.clone();
+    // Registered BEFORE the blocking task is scheduled, so a Cancel pressed in
+    // the first instant still finds the flag.
+    let (flag, guard) = CLONE_JOBS.start(&id).map_err(invalid)?;
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        // A closed channel (the window went away) must not stop the clone —
+        // logged once, then quiet, as in `sync_apply`.
+        let mut sink_dead = false;
+        let mut sink = |p: wclone::CloneProgress| {
+            if sink_dead {
+                return;
+            }
+            if let Err(e) = on_progress.send(p) {
+                sink_dead = true;
+                applog("warn", &format!("clone progress channel closed: {e}"));
+            }
+        };
+        wclone::clone_repo(&src2, &t2, &wclone::CloneOpts::default(), &flag, Some(&mut sink))
+    })
+    .await
+    .map_err(|e| CloneError { kind: CloneErrorKind::Other, message: e.to_string() })?;
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            applog(
+                if e.kind == CloneErrorKind::Cancelled { "info" } else { "warn" },
+                &format!("clone_project {:?} {} ({:.1}s): {}", e.kind, src.url, started.elapsed().as_secs_f32(), e.message),
+            );
+            return Err(e);
+        }
+    };
+    applog("info", &format!("clone_project ok {} ({:.1}s)", out.dir, started.elapsed().as_secs_f32()));
+    // Half-success must not read as failure OR success: the files are there,
+    // only the bookkeeping failed — say both, and how to finish by hand.
+    let workspace = add_project(app.clone(), out.dir.clone()).await.map_err(|e| {
+        applog("error", &format!("clone_project cloned but add_project failed {}: {e}", out.dir));
+        CloneError {
+            kind: CloneErrorKind::Other,
+            message: format!(
+                "Cloned to {}, but adding it to the workspace failed: {e}\nAdd it with “Add existing…” and pick that folder.",
+                out.dir
+            ),
+        }
+    })?;
+    let _ = app.emit("places:changed", ());
+    let root = Project::discover(Path::new(&out.dir)).map(|p| p.main_root).unwrap_or_else(|_| out.dir.clone());
+    Ok(CloneDone { workspace, root, dir: out.dir, has_submodules: out.has_submodules })
+}
+
+/// Cancel the clone running under `id`. `false` when none is (it finished
+/// first) — the dialog then simply receives that clone's own result.
+#[tauri::command]
+async fn clone_cancel(id: String) -> Result<bool, String> {
+    Ok(CLONE_JOBS.cancel(&id))
+}
+
 /// `git init` + a first commit, then add the repo to the workspace. The commit
 /// is not optional politeness: without it HEAD is unborn and the very next thing
 /// the user does (new worktree) fails on an invalid object name.
@@ -8144,6 +8282,8 @@ pub fn run() {
             copy_text,
             add_project,
             create_project,
+            clone_project,
+            clone_cancel,
             probe_dir,
             init_repo,
             create_initial_commit,
@@ -8382,6 +8522,31 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn clone_cancel_reaches_a_running_clone_and_only_while_it_runs() {
+        let jobs = CloneJobs::default();
+        assert!(!jobs.cancel("a"), "nothing running yet");
+        let (flag, guard) = jobs.start("a").unwrap();
+        assert!(jobs.start("a").is_err(), "a live id is not shared");
+        assert!(!flag.load(Ordering::SeqCst));
+        assert!(jobs.cancel("a"));
+        assert!(flag.load(Ordering::SeqCst), "cancel set THIS clone's flag");
+        drop(guard);
+        assert!(!jobs.cancel("a"), "a finished clone is unregistered");
+        assert!(jobs.start("a").is_ok(), "and its id is free again");
+    }
+
+    #[test]
+    fn clone_errors_serialize_with_a_kind_the_dialog_can_branch_on() {
+        let e = worktrees_core::clone::CloneError {
+            kind: worktrees_core::clone::CloneErrorKind::NotFound,
+            message: "No repository".into(),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["kind"], "not_found");
+        assert_eq!(v["message"], "No repository");
+    }
 
     /// A GUI launch has no locale, and pbcopy without one mangles every
     /// non-ASCII byte of a copied path. Asserted on the command rather than by

@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **Clone from URL… adds a project straight from a git URL.** It sits in the
+  nav's add menu beside New project… and Add existing…. Paste any git URL
+  (`https://…`, `git@host:owner/repo.git`, `ssh://…`) or GitHub's
+  `owner/repo` shorthand. The dialog previews the folder it will create,
+  streams git's progress, and Cancel stops the clone and removes the partial
+  folder (only the folder that clone created). The finished clone is added
+  and selected. An existing folder is refused. Nothing runs that the
+  repository declares: no hooks, no install, and submodules are not fetched
+  (you are told when there are some). git never waits on a prompt nobody can
+  see: terminal prompts are off and ssh runs in batch mode, while your ssh
+  config, agent and credential helpers still apply. A failure says which kind
+  it is: authentication, not found, an unknown ssh host key, or the network.
+  New project… and Clone from URL… now remember the folder you last used, as
+  one shared answer. The CLI has the same thing:
+  `worktrees clone <url> [--into <dir>] [--name <folder>]` clones and
+  registers the project, and Ctrl-C cleans up like Cancel.
+
 ## [0.36.1] - 2026-10-03
 
 ### Changed

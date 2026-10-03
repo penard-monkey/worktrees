@@ -359,6 +359,11 @@ export type Settings = {
   // because the answer is the same every time for a given person, and re-ticking
   // it on every push is how a checkbox teaches you to ignore it.
   sync_with_sessions: boolean;
+  // The folder new projects go in — ONE remembered answer for both "New
+  // project…" (its Location) and "Clone from URL…" (its Clone into), written by
+  // whichever of them last SUCCEEDED. "" = never chosen: both fall back to the
+  // folder the workspace's projects already share, else ~/workspace.
+  projects_parent: string;
   collapsed: Record<string, boolean>; // per-project-root collapse
   hidden_tiers: string[]; // lifecycle tiers hidden in the Places tree (active/idle/dormant)
   sort_mode: "recent" | "alpha" | "manual";
@@ -450,6 +455,7 @@ export const DEFAULTS: Settings = {
   restore_last: false,
   restore_window: true,
   sync_with_sessions: false,
+  projects_parent: "",
   collapsed: {},
   hidden_tiers: [],
   sort_mode: "recent",
@@ -686,6 +692,7 @@ export async function loadSettings(): Promise<Settings> {
     // ui-state.json must be corrected HERE rather than everywhere they are used.
     s.done_horizon_secs = snapHorizon(s.done_horizon_secs);
     s.done_steps = clampSteps(s.done_steps);
+    if (typeof s.projects_parent !== "string") s.projects_parent = "";
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     if (!CODEX_PERMISSIONS.includes(s.codex_permissions)) s.codex_permissions = "auto-review";
     if (!PI_PROJECT_TRUST.includes(s.pi_project_trust)) s.pi_project_trust = "never";
