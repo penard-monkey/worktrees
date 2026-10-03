@@ -853,6 +853,23 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi);
 }
+/* The project this place belongs to, left of the place name. Dimmer than the
+   name (the place stays the hero) and the FIRST thing to give way. Flex-shrink
+   is weighted by basis × factor, so a modest factor (8) still shrinks the slug
+   alongside it; 999 makes the crumb absorb the whole deficit, and the slug
+   stays whole until the crumb has collapsed. The separator is its own
+   `flex: none` node — never a `::before` on the ellipsising span, which
+   dangles — and the name's `2ch` floor makes the container clip the separator
+   first, so a bare `/` never shows. The name is `basename(root)`, the same as
+   the nav's project header: if the nav ever shows the registry name
+   (`ProjectView.name`), change both together. */
+.topbar-proj {
+  display: flex; align-items: baseline; gap: var(--s2);
+  flex: 0 999 auto; min-width: 0; overflow: hidden;
+  font-size: var(--fs-meta); color: var(--txt-dim);
+}
+.topbar-proj-name { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-proj-sep { flex: none; color: var(--txt-mute); }
 /* The slug beside a renamed place. Quieter than the branch chip and NOT a
    chip — it is what the directory and the tmux session are called, so it has to
    stay legible without competing with the name. */

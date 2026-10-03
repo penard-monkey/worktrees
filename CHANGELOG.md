@@ -22,6 +22,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   one shared answer. The CLI has the same thing:
   `worktrees clone <url> [--into <dir>] [--name <folder>]` clones and
   registers the project, and Ctrl-C cleans up like Cancel.
+- **The place header names its project.** `worktrees / clone-project` now reads
+  to the left of the place name, so a lane says which project it belongs to. It
+  is the nav's own project name (the full path is its tooltip), dimmer than the
+  place, and the first thing to ellipsise in a narrow window. `(main)` named
+  after its project shows the name once.
+
+### Fixed
+- **A stale rename box no longer lingers in the place header.** The name editor
+  and the branch switcher shared one React key, so after Enter or Esc on a
+  rename the empty input stayed beside the name. The branch switcher now has its
+  own key, and `identity-keys-check.mjs` guards it.
 
 ## [0.36.1] - 2026-10-03
 
