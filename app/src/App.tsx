@@ -7580,7 +7580,7 @@ function App() {
                   ? showBranch && <span className="branch">{selected.branch}</span>
                   : (
                     <HeaderBranch
-                      key={sel.repo + "|" + sel.slug}
+                      key={"branch|" + sel.repo + "|" + sel.slug}
                       repo={sel.repo}
                       slug={sel.slug}
                       branch={selected.branch}

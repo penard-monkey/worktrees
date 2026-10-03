@@ -28,6 +28,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   place, and the first thing to ellipsise in a narrow window. `(main)` named
   after its project shows the name once.
 
+### Fixed
+- **A stale rename box no longer lingers in the place header.** The name editor
+  and the branch switcher shared one React key, so after Enter or Esc on a
+  rename the empty input stayed beside the name. The branch switcher now has its
+  own key, and `identity-keys-check.mjs` guards it.
+
 ## [0.36.1] - 2026-10-03
 
 ### Changed
