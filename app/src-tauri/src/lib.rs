@@ -666,6 +666,19 @@ impl CloneJobs {
         m.insert(id.to_string(), flag.clone());
         Ok((flag, CloneJobGuard { jobs: self, id: id.to_string() }))
     }
+    /// Cancel every running clone; returns their ids. For app exit: a clone
+    /// left running would outlive the window as an orphaned `git` writing a
+    /// folder nobody will add — cancelled, core removes that folder.
+    fn cancel_all(&self) -> Vec<String> {
+        let m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for f in m.values() {
+            f.store(true, Ordering::SeqCst);
+        }
+        m.keys().cloned().collect()
+    }
+    fn is_idle(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
     /// `false` when nothing runs under `id` (already finished — not an error).
     fn cancel(&self, id: &str) -> bool {
         let m = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -726,7 +739,9 @@ async fn clone_project(
     let src = wclone::parse_source(&url).map_err(invalid)?;
     let folder = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| src.name.clone());
     let target = wclone::plan_target(&parent, &folder)?;
-    applog("info", &format!("clone_project start {} -> {}", src.url, target.display()));
+    // Never the raw URL: `https://user:TOKEN@host/…` is a legal thing to paste.
+    let shown = wclone::redact_url(&src.url);
+    applog("info", &format!("clone_project start {shown} -> {}", target.display()));
     let started = std::time::Instant::now();
     let src2 = src.clone();
     let t2 = target.clone();
@@ -756,7 +771,7 @@ async fn clone_project(
         Err(e) => {
             applog(
                 if e.kind == CloneErrorKind::Cancelled { "info" } else { "warn" },
-                &format!("clone_project {:?} {} ({:.1}s): {}", e.kind, src.url, started.elapsed().as_secs_f32(), e.message),
+                &format!("clone_project {:?} {shown} ({:.1}s): {}", e.kind, started.elapsed().as_secs_f32(), e.message),
             );
             return Err(e);
         }
@@ -8439,6 +8454,20 @@ pub fn run() {
                 // them to whatever finds the port, with nothing on screen to
                 // say it is still running.
                 viewer::kill(&handle.state::<viewer::Viewer>());
+                // In-flight clones: cancel, and give core a moment to kill
+                // git's group and remove the partial folder (the guard leaves
+                // the map when that is done). Bounded — exit must not hang.
+                let clones = CLONE_JOBS.cancel_all();
+                if !clones.is_empty() {
+                    applog("info", &format!("exit: cancelling {} clone(s): {}", clones.len(), clones.join(", ")));
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    while !CLONE_JOBS.is_idle() && std::time::Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    if !CLONE_JOBS.is_idle() {
+                        applog("warn", "exit: a cancelled clone had not finished cleaning up");
+                    }
+                }
                 if let Ok(d) = handle.path().app_config_dir() {
                     viewer::cleanup(&d);
                 }
@@ -8535,6 +8564,21 @@ mod tests {
         drop(guard);
         assert!(!jobs.cancel("a"), "a finished clone is unregistered");
         assert!(jobs.start("a").is_ok(), "and its id is free again");
+    }
+
+    #[test]
+    fn exit_cancels_every_running_clone() {
+        let jobs = CloneJobs::default();
+        assert!(jobs.cancel_all().is_empty() && jobs.is_idle());
+        let (a, ga) = jobs.start("a").unwrap();
+        let (b, gb) = jobs.start("b").unwrap();
+        let mut ids = jobs.cancel_all();
+        ids.sort();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(a.load(Ordering::SeqCst) && b.load(Ordering::SeqCst));
+        assert!(!jobs.is_idle());
+        drop((ga, gb));
+        assert!(jobs.is_idle());
     }
 
     #[test]

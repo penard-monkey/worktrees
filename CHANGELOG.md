@@ -23,6 +23,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `worktrees clone <url> [--into <dir>] [--name <folder>]` clones and
   registers the project, and Ctrl-C cleans up like Cancel.
 
+### Fixed
+- **Clone from URL… hardening.** A clone that fails after a long transfer now
+  reports the real reason (authentication, not found, …), not a generic
+  failure that quotes a progress line. A URL that carries credentials
+  (`https://user:TOKEN@host/…`) is no longer written to the app log or
+  printed by `worktrees clone`. An upper-case scheme such as `HTTPS://` now
+  clones. git itself is told to allow only the https, http, ssh, git and file
+  transports. Quitting the app mid-clone cancels the clone and removes its
+  partial folder.
+
 ## [0.36.1] - 2026-10-03
 
 ### Changed
