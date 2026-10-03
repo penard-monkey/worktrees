@@ -13,6 +13,7 @@ pub mod automation;
 pub mod config;
 pub mod codex;
 pub mod claude_usage;
+pub mod clone;
 pub mod codex_usage;
 pub mod codexmcp;
 pub mod derive;
