@@ -19,3 +19,4 @@ maintained documentation. Where a proposal and the code disagree, the code wins.
 | [Agent guidance](agent-guidance.html) | teaching every agent — Claude, Codex, pi; orchestrator and lane — to do its own branch work in a place: which channel each harness honours, the text, per-launch delivery, guards, and an eval |
 | [Cross-project reach](cross-project.html) | letting an agent see, message and (opt-in) act on places in other projects — a core-owned project registry, `<project>:<slug>` addressing, routed messages, and drag and drop of a foreign place |
 | [Navigation history](nav-history.html) | back / forward (⌘[ ⌘], ⌘← ⌘→ outside text fields) through what the two panes showed — what a location is, what is noise, coalescing, gone targets |
+| [Context usage](context-usage.html) | how full each agent session's context window is — per-harness numerator and window, compaction, a threshold-gated nav mark and MCP `place_status` |
