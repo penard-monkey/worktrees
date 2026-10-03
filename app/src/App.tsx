@@ -11,6 +11,7 @@ import { clampSteps, doneBounds, doneOpacity, doneTierSeen, isUnread, seenEpoch 
 import * as Icons from "./icons";
 import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
+import { cloneSource, dirNameProblem, isCloneError, type CloneProgress } from "./clone";
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
@@ -3108,6 +3109,122 @@ function NewProjectDialog({ defaultLocation, busy, error, onBrowse, onCreate, on
   );
 }
 
+/** "Clone from URL…" — a URL, the folder it goes in, and the path that makes.
+ *
+ *  Core does the clone (`worktrees_core::clone`, the CLI's `worktrees clone`
+ *  too); this owns the fields and says out loud, before anything is written,
+ *  which folder will be created. The preview's name comes from `cloneSource`,
+ *  a mirror of core's parser that `clone-check.mjs` pins to core's own table.
+ *
+ *  While a clone runs, the dialog cannot be dismissed by Escape or the scrim:
+ *  the only way out is the Cancel button, which cancels the CLONE (and core
+ *  removes the folder it had started) — a closed dialog over a clone still
+ *  running would be a clone nobody can stop.
+ *
+ *  Module scope (CLAUDE.md): it owns three text inputs, and App re-renders on
+ *  every refresh tick. */
+function CloneDialog({ defaultParent, running, cancelling, progress, error, note, onBrowse, onClone, onCancel, onClose }: {
+  defaultParent: string;
+  running: boolean;
+  cancelling: boolean;
+  progress: CloneProgress | null;
+  /** The backend's refusal or git's failure, already worded by core. */
+  error: string;
+  /** A non-error outcome to say (a cancelled clone). */
+  note: string;
+  onBrowse: () => Promise<string | null>;
+  onClone: (url: string, parent: string, name: string) => void;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [parent, setParent] = useState(defaultParent);
+  const [name, setName] = useState("");
+  const urlRef = useRef<HTMLInputElement | null>(null);
+  // preventScroll: `.sync-modal` hides its overflow, and a plain focus() may
+  // scroll that box to reveal the input (AGENTS.md: never autofocus inside an
+  // overflow-hidden ancestor without it).
+  useEffect(() => { urlRef.current?.focus({ preventScroll: true }); }, []);
+  useEscape(() => { if (!running) onClose(); });
+  const src = cloneSource(url);
+  const srcOk = "url" in src;
+  const folder = name.trim() || (srcOk ? src.name : "");
+  const nameBad = name.trim() ? dirNameProblem(name.trim()) : "";
+  const trimmedParent = parent.trim().replace(/\/+$/, "");
+  // Only once something is typed: an empty field is a question, not an error.
+  const problem = url.trim() && !srcOk ? src.error : nameBad;
+  const ready = srcOk && !!trimmedParent && !nameBad && !running;
+  const submit = () => { if (ready) onClone(src.url, trimmedParent, name.trim()); };
+  const pct = progress?.percent ?? null;
+  return (
+    <div className="scrim scrim-center" onClick={() => !running && onClose()}>
+      <div className="sync-modal nw-modal" role="dialog" aria-label="Clone from URL" data-testid="clone-dialog"
+        onClick={(e) => e.stopPropagation()}>
+        <header className="sync-h"><b>Clone from URL</b></header>
+        <div className="sync-body">
+          <label className="np-field">
+            <span className="np-label">Repository URL</span>
+            <input ref={urlRef} className="np-input" data-testid="clone-url" value={url} disabled={running}
+              placeholder="https://github.com/owner/repo, git@host:owner/repo.git or owner/repo"
+              spellCheck={false} autoCapitalize="off" autoCorrect="off"
+              onChange={(e) => setUrl(e.currentTarget.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
+          </label>
+          <label className="np-field">
+            <span className="np-label">Clone into</span>
+            <div className="np-row">
+              <input className="np-input" data-testid="clone-parent" value={parent} disabled={running}
+                spellCheck={false} autoCapitalize="off" autoCorrect="off"
+                onChange={(e) => setParent(e.currentTarget.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
+              <button className="ctrl" data-testid="clone-browse" disabled={running}
+                onClick={async () => { const d = await onBrowse(); if (d) setParent(d); }}>Change…</button>
+            </div>
+          </label>
+          <label className="np-field">
+            <span className="np-label">Folder name</span>
+            <input className="np-input" data-testid="clone-name" value={name} disabled={running}
+              placeholder={srcOk ? src.name : "from the URL"}
+              spellCheck={false} autoCapitalize="off" autoCorrect="off"
+              onChange={(e) => setName(e.currentTarget.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
+          </label>
+          <div className="np-path" data-testid="clone-path">
+            will create <code>{`${trimmedParent || "…"}/${folder || "…"}`}</code>
+          </div>
+          {problem && <div className="sync-err" data-testid="clone-problem">{problem}</div>}
+          {running && (
+            <div className="sync-prog" data-testid="clone-prog">
+              {pct === null ? (
+                <div className="sync-bar indet"><div className="sync-bar-fill" /></div>
+              ) : (
+                <div className="sync-bar">
+                  <div className="sync-bar-fill" data-testid="clone-bar-fill" data-pct={pct} style={{ width: `${pct}%` }} />
+                </div>
+              )}
+              <div className="sync-prog-line">
+                <span data-testid="clone-phase">
+                  {cancelling ? "Cancelling…" : progress?.phase ? `${progress.phase}${pct !== null ? ` ${pct}%` : ""}` : "Connecting…"}
+                </span>
+                {!cancelling && progress?.detail && <span className="sync-rate">{progress.detail}</span>}
+              </div>
+            </div>
+          )}
+          {!running && error && <div className="sync-err" data-testid="clone-error">{error}</div>}
+          {!running && !error && note && <div className="sync-skipped" data-testid="clone-note">{note}</div>}
+        </div>
+        <footer className="sync-foot">
+          <button className="ctrl" data-testid="clone-cancel" disabled={cancelling}
+            onClick={running ? onCancel : onClose}>Cancel</button>
+          <button className="enter-btn" data-testid="clone-go" disabled={!ready} onClick={submit}>
+            {running ? "Cloning…" : "Clone"}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 /** "Import from hub…" — the workspace-level picker.
  *
  *  Every other sync surface hangs off a project ROW, which a project that is
@@ -3452,6 +3569,14 @@ function App() {
   const [npOpen, setNpOpen] = useState(false);
   const [npBusy, setNpBusy] = useState(false);
   const [npErr, setNpErr] = useState("");
+  /** "Clone from URL…". `cloneId` is non-null while a clone runs — the id
+   *  `clone_cancel` addresses — and the dialog cannot be closed until it ends. */
+  const [cloneOpen, setCloneOpen] = useState(false);
+  const [cloneId, setCloneId] = useState<string | null>(null);
+  const [cloneCancelling, setCloneCancelling] = useState(false);
+  const [cloneProg, setCloneProg] = useState<CloneProgress | null>(null);
+  const [cloneErr, setCloneErr] = useState("");
+  const [cloneNote, setCloneNote] = useState("");
   /** The remove-worktree confirmation. Identified by `repo`+`slug` rather than
    *  by holding the `Place`: the 3s refresh replaces every Place object, and a
    *  captured one would go stale while the dialog sits open — the render looks
@@ -5052,6 +5177,9 @@ function App() {
       setErr("");
       commitWs(await invoke<Workspace>("create_project", { location, name }));
       setNpOpen(false);
+      // The folder that just worked is the next dialog's default — for this
+      // one and for "Clone from URL…" alike (one remembered answer).
+      updateSettings({ projects_parent: location });
     } catch (e) {
       setNpErr(String((e as { message?: string })?.message ?? e));
       fail(e);
@@ -5072,8 +5200,59 @@ function App() {
     let best = "";
     let n = 0;
     for (const [p, c] of counts) if (c > n) { best = p; n = c; }
-    return best || "~/workspace";
-  }, [ws]);
+    return settings.projects_parent || best || "~/workspace";
+  }, [ws, settings.projects_parent]);
+
+  const openClone = () => {
+    closeCtx();
+    setCloneErr("");
+    setCloneNote("");
+    setCloneProg(null);
+    setCloneOpen(true);
+  };
+  /** Change… — fills the "Clone into" FIELD, starting from what it holds. */
+  const browseCloneParent = async (): Promise<string | null> => {
+    try {
+      const dir = await open({ directory: true, title: "Clone into which folder?" });
+      return typeof dir === "string" ? dir : null;
+    } catch (e) { fail(e); return null; }
+  };
+  /** Clone, add, select. Every failure stays IN the dialog with the fields
+   *  still editable; a cancel is not a failure and says so quietly. */
+  const runClone = async (url: string, parent: string, name: string) => {
+    const id = `clone-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setCloneId(id);
+    setCloneCancelling(false);
+    setCloneErr("");
+    setCloneNote("");
+    setCloneProg(null);
+    const onProgress = new Channel<CloneProgress>();
+    onProgress.onmessage = (p) => setCloneProg(p);
+    try {
+      setErr("");
+      const done = await invoke<{ workspace: Workspace; root: string; dir: string; has_submodules: boolean }>(
+        "clone_project", { id, url, parent, name: name || null, onProgress });
+      commitWs(done.workspace);
+      updateSettings({ projects_parent: parent });
+      setCloneOpen(false);
+      const pv = done.workspace.projects.find((p) => p.root === done.root);
+      const main = pv?.snapshot?.places.find((p) => p.is_main);
+      if (main) selectSlug(done.root, main.slug);
+      if (done.has_submodules)
+        setNotice(`${done.dir} has submodules, which were not fetched — run \`git submodule update --init --recursive\` there if you need them.`);
+    } catch (e) {
+      if (isCloneError(e) && e.kind === "cancelled") setCloneNote("Cancelled — the partial clone was removed.");
+      else setCloneErr(isCloneError(e) ? e.message : String((e as { message?: string })?.message ?? e));
+    } finally {
+      setCloneId(null);
+      setCloneCancelling(false);
+    }
+  };
+  const cancelClone = async () => {
+    if (!cloneId) return;
+    setCloneCancelling(true);
+    try { await invoke<boolean>("clone_cancel", { id: cloneId }); } catch (e) { fail(e); }
+  };
   const initRepo = async (dir: string) => {
     try {
       setErr("");
@@ -8251,6 +8430,20 @@ function App() {
           onClose={() => { setNpOpen(false); setNpErr(""); }}
         />
       )}
+      {cloneOpen && (
+        <CloneDialog
+          defaultParent={defaultLocation}
+          running={cloneId !== null}
+          cancelling={cloneCancelling}
+          progress={cloneProg}
+          error={cloneErr}
+          note={cloneNote}
+          onBrowse={browseCloneParent}
+          onClone={runClone}
+          onCancel={cancelClone}
+          onClose={() => setCloneOpen(false)}
+        />
+      )}
       {importOpen && (
         <ImportPicker
           list={importList}
@@ -8409,6 +8602,8 @@ function App() {
             onClick={openNewProject}>New project…</button>
           <button className="pop-item" data-testid="add-existing"
             onClick={() => { closeCtx(); addProject(); }}>Add existing…</button>
+          <button className="pop-item" data-testid="add-clone"
+            onClick={openClone}>Clone from URL…</button>
           <button className="pop-item" data-testid="add-import"
             onClick={() => { closeCtx(); openImport(); }}>Import from hub…</button>
         </CtxMenu>

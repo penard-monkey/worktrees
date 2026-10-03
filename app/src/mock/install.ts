@@ -9,6 +9,7 @@
 import type { MigrationRow, MigrationOutcome } from "../CodexMcpPanel";
 import { agentSessions, initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 import { isHarness, type Harness } from "../harness";
+import { cloneSource, type CloneErrorKind, type CloneProgress } from "../clone";
 
 /** `worktrees_core::docs::DocEntry` — see the `list_docs` case. */
 type MockDoc = { path: string; rel: string; title: string; group: string; mtime_ms: number };
@@ -295,6 +296,28 @@ const mockListDelayMs = (() => {
   const m = /[?&]slowlist(?:=(\d+))?/.exec(location.search);
   return m ? Number(m[1] ?? 1500) : 0;
 })();
+// "Clone from URL…" (lib.rs clone_project / clone_cancel). The failure a clone
+// meets is chosen by the URL itself, so one harness load can drive every kind:
+// a URL containing `private` fails auth, `missing` not-found, `hostkey` an
+// unknown ssh host, `offline` the network. `?clonedelay=<ms>` stretches the
+// staged progress (default 2400) — an instant clone can never show the bar or
+// be cancelled, the class of bug the harness is otherwise blind to.
+const mockCloneDelayMs = Number(new URLSearchParams(location.search).get("clonedelay") ?? 2400);
+const mockCloneCancels = new Set<string>();
+const MOCK_CLONE_FAIL: [string, CloneErrorKind, string][] = [
+  ["private", "auth", "Could not authenticate to {url}. The repository is private (or does not exist), and git has no credentials for it it may use without asking — set up an ssh key or a credential helper, then try again.\nfatal: could not read Username for 'https://github.com': terminal prompts disabled"],
+  ["missing", "not_found", "No repository at {url} — check the URL.\nERROR: Repository not found."],
+  ["hostkey", "host_key", "This Mac has not trusted that host's ssh key yet. Connect once from a terminal (for example `ssh -T git@github.com`) and accept it, then try again.\nHost key verification failed."],
+  ["offline", "network", "Could not reach the host for {url} — check the network and the address.\nfatal: unable to access '{url}': Could not resolve host: github.com"],
+];
+const MOCK_CLONE_PROGRESS: CloneProgress[] = [
+  { phase: "Counting objects", percent: 100, detail: null },
+  { phase: "Receiving objects", percent: 12, detail: "340.00 KiB | 680.00 KiB/s" },
+  { phase: "Receiving objects", percent: 47, detail: "1.31 MiB | 1.10 MiB/s" },
+  { phase: "Receiving objects", percent: 83, detail: "2.30 MiB | 1.18 MiB/s" },
+  { phase: "Receiving objects", percent: 100, detail: "2.77 MiB | 1.20 MiB/s" },
+  { phase: "Resolving deltas", percent: 100, detail: null },
+];
 const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
 // ── sync (courier sync of a project through a mounted hub) ──────────────────
 // A real sync is rsync over an SSD: seconds at best, and the states worth
@@ -1182,6 +1205,39 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // the reason the dialog has an inline error at all, so the one a harness can
     // reach — the target already exists — is modelled: any fixture project's
     // path, or a dir a previous create already made.
+    // Same refusals, failures and cancel as core's clone (see MOCK_CLONE_FAIL);
+    // success adds the project through add_project, as lib.rs does.
+    case "clone_project": {
+      const id = String(args.id);
+      const src = cloneSource(String(args.url ?? ""));
+      if ("error" in src) throw { kind: "invalid", message: src.error };
+      const parent = String(args.parent ?? "").trim().replace(/\/+$/, "");
+      const name = (args.name as string | null)?.trim() || src.name;
+      const dir = `${parent}/${name}`;
+      if (findProject(dir) || mockInited.has(dir)) {
+        throw { kind: "exists", message: `${dir} already exists and is a git repo — add it with “Add existing…” instead.` };
+      }
+      const ch = args.onProgress as { onmessage?: (v: unknown) => void } | undefined;
+      const fail = MOCK_CLONE_FAIL.find(([k]) => src.url.includes(k));
+      const steps = fail ? MOCK_CLONE_PROGRESS.slice(0, 1) : MOCK_CLONE_PROGRESS;
+      const step = mockCloneDelayMs / MOCK_CLONE_PROGRESS.length;
+      await sleep(step);
+      for (const p of steps) {
+        if (mockCloneCancels.delete(id)) throw { kind: "cancelled", message: "Clone cancelled." };
+        try { ch?.onmessage?.(p); } catch { /* frontend gone */ }
+        await sleep(step);
+      }
+      if (mockCloneCancels.delete(id)) throw { kind: "cancelled", message: "Clone cancelled." };
+      if (fail) throw { kind: fail[1], message: fail[2].split("{url}").join(src.url) };
+      mockInited.add(dir);
+      await mockInvoke("add_project", { dir });
+      emitEvent("places:changed", {});
+      return { workspace: clone(ws), root: dir, dir, has_submodules: src.url.includes("submod") };
+    }
+    case "clone_cancel": {
+      mockCloneCancels.add(String(args.id));
+      return true;
+    }
     case "create_project": {
       const loc = String(args.location ?? "").trim().replace(/\/+$/, "");
       const name = String(args.name ?? "").trim();

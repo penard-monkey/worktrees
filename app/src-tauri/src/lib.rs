@@ -689,6 +689,9 @@ static CLONE_JOBS: std::sync::LazyLock<CloneJobs> = std::sync::LazyLock::new(Clo
 #[derive(Serialize)]
 struct CloneDone {
     workspace: Workspace,
+    /// The project's root as the workspace stores it (canonical) — what the
+    /// dialog selects. `dir` is where the clone was written, as asked.
+    root: String,
     dir: String,
     has_submodules: bool,
 }
@@ -772,7 +775,8 @@ async fn clone_project(
         }
     })?;
     let _ = app.emit("places:changed", ());
-    Ok(CloneDone { workspace, dir: out.dir, has_submodules: out.has_submodules })
+    let root = Project::discover(Path::new(&out.dir)).map(|p| p.main_root).unwrap_or_else(|_| out.dir.clone());
+    Ok(CloneDone { workspace, root, dir: out.dir, has_submodules: out.has_submodules })
 }
 
 /// Cancel the clone running under `id`. `false` when none is (it finished
