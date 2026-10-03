@@ -5,6 +5,11 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Header crumb leaves a 12px gap when it collapses.** At 900px with the nav
+  pinned the project crumb is 0px wide but its flex `gap` still sits before the
+  place name. Not looked at in the real app either (only the mock, Chromium and
+  WebKit). See [the session](docs/sessions/2026-10-03-topbar-project/summary.md).
+
 - **Context usage per session (parked).** Proposal in
   `docs/proposals/context-usage.md`; six open questions (§11) for David before
   phase 1 — exact Claude window via a statusline hook or table + ratchet,
