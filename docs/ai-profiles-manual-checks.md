@@ -24,6 +24,8 @@ zsh -lic 'which -a claude'   # >1 install on PATH is its own bug — the app
 
 ## Running this without disturbing a worktrees app you already have open
 
+**Pick a probe's model with `claude --model X` at launch, never `/model`.** Since Claude Code 2.1.288, `/model X` also writes `model` into `~/.claude/settings.json` as the default for new sessions; if it happens, restore the previous value through `/model` and say so.
+
 **It does collide, so do not just launch a second build.** Three ways:
 
 | | |
