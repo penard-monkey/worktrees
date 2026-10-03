@@ -5,6 +5,22 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Context usage per session (parked).** Proposal in
+  `docs/proposals/context-usage.md`; six open questions (§11) for David before
+  phase 1 — exact Claude window via a statusline hook or table + ratchet,
+  nav mark threshold-gated vs always on, a personal 1M ceiling, `ls --json`,
+  Codex's 12K-baseline arithmetic, and the `/model` hazard below. See
+  [the session](docs/sessions/2026-10-03-context-usage/summary.md).
+
+- **Claude `/model` silently changes David's default model.** In Claude Code
+  2.1.288, `/model X` writes `model` into `~/.claude/settings.json` ("saved as
+  your default for new sessions"), so a lane that runs `/model` changes the
+  model of every later launch that does not pin one — orchestrator and lanes
+  alike. Decide whether worktrees should always pin `--model` at launch, or
+  warn. Probes must pass `--model` at launch instead (line added to
+  `docs/ai-profiles-manual-checks.md`). See
+  [the session](docs/sessions/2026-10-03-context-usage/summary.md).
+
 - **Cross-project reach: the real-app and token checks are owed.** Every
   check in `docs/cross-project-manual-checks.md` is open:
   - reach as an agent sees it, including `place_status` against the other
