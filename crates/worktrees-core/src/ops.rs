@@ -331,6 +331,13 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         // "— attaching." was simply not true there.
         let tail = if do_attach { "attaching." } else { "reusing it." };
         ui.info(&format!("tmux session '{session}' already in this worktree — {tail}"));
+        // A reused session keeps the layout it was created with: `--spare`
+        // shapes a session only when it creates one, and silently doing
+        // nothing would read as the flag being broken. Said, never acted on —
+        // splitting a live agent's pane is not this flag's job.
+        if spare_shell {
+            ui.info("--spare applies only when the session is created; this one keeps its panes (close it and open again to get the split).");
+        }
     } else {
         ui.header(&format!("Opening tmux session '{session}'"));
         // Env assignments go INSIDE the -ic string, ahead of the command, rather
