@@ -5,6 +5,33 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **`rollout_turn_since`: one enormous line is copied quadratically.** Each
+  64 KiB step re-copies the whole carry (`buf.extend_from_slice(&carry)`, then
+  `carry = buf[..hi].to_vec()`). A single line of L bytes costs about
+  L²/128 KiB of copying. A 50 MB tool result in one line is ~20 GB of memmove,
+  once per growth step that has to cross it. Fix: keep the carried bytes as a
+  list of chunks and join them only once the line's start is found. Or skip a
+  line's body once it is longer than any turn marker, because a boundary line
+  is short. Review nice-to-have 2 on #434. See
+  [the session](docs/sessions/2026-10-03-codex-turn-tail/summary.md).
+
+- **`codex_tail` assumes a rollout only GROWS.** A file at the same path that
+  is replaced by a LONGER one reads as growth. The scan then floors at the old
+  length and keeps the old file's cached turn for everything below it. A
+  shrink is handled (scanned from scratch). Codex appends to its rollouts, so
+  this is theoretical today. If it ever matters, key the cache on (inode,
+  length) or on a hash of the first line (`session_meta`). Review
+  nice-to-have 3 on #434. See
+  [the session](docs/sessions/2026-10-03-codex-turn-tail/summary.md).
+
+- **pi lanes write outside their place.** The pi lane that drafted #434
+  edited the (main) checkout as well as its own worktree; the orchestrator
+  reverted (main) by hand. pi's own fixtures also fitted inside the window
+  they were meant to exceed, so they passed on main. Until pi's lane prompt
+  or tooling keeps it in its own tree: check `git status` in (main) after
+  any pi lane, and treat its tests as unproven until they are shown red. See
+  [the session](docs/sessions/2026-10-03-codex-turn-tail/summary.md).
+
 - **Header crumb leaves a 12px gap when it collapses.** At 900px with the nav
   pinned the project crumb is 0px wide but its flex `gap` still sits before the
   place name. Not looked at in the real app either (only the mock, Chromium and
