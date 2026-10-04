@@ -249,18 +249,7 @@ pub fn set_user_policy(p: Policy) -> Result<(), String> {
 }
 
 pub fn set_user_policy_at(path: &std::path::Path, p: Policy) -> Result<(), String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
-    };
-    let new = with_policy(&text, p)?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    }
-    let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, new).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("could not replace {}: {e}", path.display()))
+    crate::config::edit_user_config(path, |text| with_policy(text, p).map(Some)).map(|_| ())
 }
 
 /// `text` with `[quota]` set to `p`. Pure, for the tests.
@@ -859,6 +848,15 @@ mod tests {
         assert!(set_user_policy_at(&f, at(0)).is_err());
         assert_eq!(policy_from(&std::fs::read_to_string(&f).unwrap()).policy, at(88), "a refused write writes nothing");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_user_policy_edits_a_symlinked_config_through_the_link() {
+        crate::config::assert_writes_through_a_link(
+            "quota",
+            |p| set_user_policy_at(p, at(80)).unwrap(),
+            |t| policy_from(t).policy == at(80),
+        );
     }
 
     /// Set an env var for the duration of `f`. Tests that use this are run

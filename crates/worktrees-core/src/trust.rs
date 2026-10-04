@@ -355,29 +355,19 @@ pub fn set_allowed(harness: &str, repo_root: &str, allow: bool) -> Result<bool, 
 }
 
 pub fn set_allowed_at(path: &Path, harness: &str, repo_root: &str, allow: bool) -> Result<bool, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
-    };
-    let mut list = allowed_in(&text, harness);
-    let had = list.iter().any(|r| r == repo_root);
-    if had == allow {
-        return Ok(false);
-    }
-    if allow {
-        list.push(repo_root.to_string());
-    } else {
-        list.retain(|r| r != repo_root);
-    }
-    let new = with_allowed(&text, harness, &list)?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    }
-    let tmp: PathBuf = path.with_extension(format!("toml.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, new).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("could not replace {}: {e}", path.display()))?;
-    Ok(true)
+    crate::config::edit_user_config(path, |text| {
+        let mut list = allowed_in(text, harness);
+        let had = list.iter().any(|r| r == repo_root);
+        if had == allow {
+            return Ok(None);
+        }
+        if allow {
+            list.push(repo_root.to_string());
+        } else {
+            list.retain(|r| r != repo_root);
+        }
+        with_allowed(text, harness, &list).map(Some)
+    })
 }
 
 /// `worktrees trust pi [<repo>] [--revoke]` — and bare `worktrees trust` lists.
@@ -465,6 +455,15 @@ mod tests {
         // A layout the edit does not understand is refused, not guessed at.
         assert!(with_allowed("trust.pi = [\"/r\"]\n", "pi", &[]).is_err());
         assert!(with_allowed("[broken\n", "pi", &[]).is_err());
+    }
+
+    #[test]
+    fn set_allowed_edits_a_symlinked_config_through_the_link() {
+        crate::config::assert_writes_through_a_link(
+            "trust",
+            |p| assert_eq!(set_allowed_at(p, "pi", "/r/a", true), Ok(true)),
+            |t| allowed_in(t, "pi") == vec!["/r/a".to_string()],
+        );
     }
 
     #[test]
