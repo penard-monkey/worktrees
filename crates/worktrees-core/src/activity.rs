@@ -575,6 +575,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The other direction: growth that holds NO boundary leaves the cached
+    /// turn standing. A long turn's output between two polls is exactly that,
+    /// and dropping the cached answer would read it idle mid-turn.
+    #[test]
+    fn codex_tail_growth_without_a_marker_keeps_the_cached_turn() {
+        let d = scratch("nomarker");
+        let f = d.join("r.jsonl");
+        let started = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}"#;
+        let first = format!("{}{started}\n{}", filler(4096), filler(4096));
+        std::fs::write(&f, &first).unwrap();
+        assert_eq!(codex_tail(&f).1, Some(Turn::Busy));
+        std::fs::write(&f, format!("{first}{}", filler(8192))).unwrap();
+        assert_eq!(codex_tail(&f).1, Some(Turn::Busy), "marker-free growth: still the same turn");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// A boundary line split by the backward scan's chunk seam — through the
     /// middle of a multi-byte character, the worst place — is reassembled
     /// whole. Placed beyond the tail window so only the scan can find it.
