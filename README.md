@@ -171,6 +171,20 @@ waits, so nothing has to be re-typed once the window rolls over. `--force`
 launches anyway (the app: **Launch anyway**; MCP: `force: true`), and
 `worktrees open <slug> --force` is the retry it prints.
 
+It is yours to tune, in Settings → Behavior → Plan limits or in
+`~/.config/worktrees/config.toml` (a repo's `.worktrees.toml` cannot set it):
+
+```toml
+[quota]
+gate = false            # never refuse a launch on usage
+weekly_warn_pct = 90    # weekly windows refuse at >= 90%, whatever the provider grades
+```
+
+The percentage applies to weekly windows only; the 5-hour window keeps the
+provider's grade unless the gate is off. Both are read at launch time, so a
+change reaches the next launch everywhere, running agents' MCP servers
+included.
+
 It fails open in every direction — no reading, an unreadable one, a provider
 with no allowance to report, or `--no-tmux` (no agent starts at all) and the
 launch simply proceeds. It is deliberately not a burst limiter: lanes bill
@@ -180,7 +194,7 @@ switches the gate off entirely (the app's usage meter keeps reading). The check
 costs a launch one reading of the provider's usage — usually cached, but on a
 network that hangs rather than fails it can hold a `new` for up to ~15s
 (Claude's GET) or ~13s (Codex's probe) before failing open; `--force` skips
-the reading altogether.
+the reading altogether, and so does `gate = false`.
 
 Guards you'll be glad exist: dirty worktrees refuse to `switch`/`rm` (override
 with `--force`); a stale *unregistered* dir under `.worktrees/` is never treated
