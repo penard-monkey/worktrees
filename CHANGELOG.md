@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-04
+
 ### Added
 - **You decide when a nearly spent plan stops an agent from starting.** The
   check that refuses to start Claude or Codex on a nearly spent plan window
