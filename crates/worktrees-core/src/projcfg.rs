@@ -64,6 +64,9 @@ const USER_ONLY_KEYS: &[&str] = &[
     // (cross-project §5). A repo opting itself into reach, or out of being
     // private, is the consent the registry exists to keep with the user.
     "cross_project",
+    // The launch gate's policy (`quota.rs`): whether an agent may start on a
+    // nearly spent plan. Spending the user's allowance is the user's call.
+    "quota",
 ];
 
 // ── errors ───────────────────────────────────────────────────────────────────
@@ -1239,6 +1242,9 @@ mod tests {
             "[model]\npi = \"x/y\"\n",
             // Cross-project reach is the user's to grant (cross-project §5).
             "cross_project = \"full\"\n",
+            // The quota gate is the user's spending policy, not a repo's.
+            "[quota]\ngate = false\n",
+            "quota = { weekly_warn_pct = 100 }\n",
         ] {
             let e = parse(t).unwrap_err();
             assert!(e.message.contains("may not be set by a project"), "{t}: {e}");

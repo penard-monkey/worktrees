@@ -237,6 +237,81 @@ pub fn user_policy() -> UserPolicy {
     }
 }
 
+/// Set the user's `[quota]` — the user's act only (Settings, or by hand); the
+/// MCP server never calls this. Edits the two keys inside `[quota]` in place,
+/// or adds the table at the end, leaving every other line byte for byte; the
+/// result is re-parsed and must read back as `p`, or nothing is written
+/// (a dotted `quota.gate = …` or an inline `quota = {…}` refuses rather than
+/// guess). `weekly_warn_pct: None` REMOVES the key: absent is the provider's
+/// grade, and that has no spelling of its own.
+pub fn set_user_policy(p: Policy) -> Result<(), String> {
+    set_user_policy_at(&crate::config::config_toml_path(), p)
+}
+
+pub fn set_user_policy_at(path: &std::path::Path, p: Policy) -> Result<(), String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+    };
+    let new = with_policy(&text, p)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, new).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("could not replace {}: {e}", path.display()))
+}
+
+/// `text` with `[quota]` set to `p`. Pure, for the tests.
+pub fn with_policy(text: &str, p: Policy) -> Result<String, String> {
+    if let Some(n) = p.weekly_warn_pct {
+        if !(PCT_MIN..=PCT_MAX).contains(&n) {
+            return Err(format!("weekly_warn_pct must be from {PCT_MIN} to {PCT_MAX} (got {n})"));
+        }
+    }
+    let mut ours = vec![format!("gate = {}", p.gate)];
+    if let Some(n) = p.weekly_warn_pct {
+        ours.push(format!("weekly_warn_pct = {n}"));
+    }
+    let is_key = |l: &str, k: &str| l.trim_start().strip_prefix(k).is_some_and(|r| r.trim_start().starts_with('='));
+    let mut out: Vec<String> = Vec::new();
+    let mut in_quota = false;
+    let mut placed = false;
+    for l in text.lines() {
+        let t = l.trim_start();
+        if t.starts_with('[') {
+            in_quota = t.trim_end() == "[quota]";
+            out.push(l.to_string());
+            if in_quota && !placed {
+                out.extend(ours.iter().cloned());
+                placed = true;
+            }
+            continue;
+        }
+        if in_quota && (is_key(l, "gate") || is_key(l, "weekly_warn_pct")) {
+            continue;
+        }
+        out.push(l.to_string());
+    }
+    if !placed {
+        if out.last().is_some_and(|l| !l.trim().is_empty()) {
+            out.push(String::new());
+        }
+        out.push("[quota]".into());
+        out.extend(ours);
+    }
+    let mut new = out.join("\n");
+    new.push('\n');
+    let back = policy_from(&new);
+    if back.policy != p || toml::from_str::<toml::Table>(&new).is_err() {
+        return Err(
+            "could not set [quota] in your config.toml safely (an unusual layout?) — edit it by hand".into(),
+        );
+    }
+    Ok(new)
+}
+
 /// Does this window, on its own, say "nearly spent" under `policy`?
 fn trips(w: &Window, policy: &Policy) -> bool {
     match (w.weekly, policy.weekly_warn_pct) {
@@ -736,6 +811,53 @@ mod tests {
             assert!(ws[0].weekly);
             assert!(!ws[1].weekly, "absent means not weekly");
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setting_the_policy_edits_only_its_own_keys() {
+        let before = "# mine\nai_cmd = \"codex\"\n\n[trust]\npi = [\"/r\"]\n";
+        let p = Policy { gate: false, weekly_warn_pct: Some(90) };
+        let after = with_policy(before, p).unwrap();
+        assert!(after.starts_with(before), "everything else byte for byte:\n{after}");
+        assert!(after.ends_with("\n[quota]\ngate = false\nweekly_warn_pct = 90\n"), "{after}");
+        assert_eq!(policy_from(&after).policy, p);
+        // a second write edits in place: no second table, no duplicate key
+        let again = with_policy(&after, Policy { gate: true, weekly_warn_pct: None }).unwrap();
+        assert_eq!(again.matches("[quota]").count(), 1, "{again}");
+        assert!(!again.contains("weekly_warn_pct"), "None removes the key: {again}");
+        assert_eq!(policy_from(&again).policy, D);
+        // a comment inside the table, and a key after it, survive
+        let hand = "[quota]\n# I keep this\ngate = true\n[model]\npi = \"x\"\n";
+        let got = with_policy(hand, at(75)).unwrap();
+        assert!(got.contains("# I keep this"), "{got}");
+        assert!(got.contains("[model]\npi = \"x\""), "{got}");
+        assert_eq!(policy_from(&got).policy, at(75));
+        assert!(policy_from(&got).problems.is_empty());
+        // from nothing
+        assert_eq!(with_policy("", OFF).unwrap(), "[quota]\ngate = false\n");
+    }
+
+    #[test]
+    fn setting_the_policy_refuses_nonsense_and_layouts_it_cannot_edit() {
+        for n in [0u8, 101, 255] {
+            let e = with_policy("", at(n)).unwrap_err();
+            assert!(e.contains("from 1 to 100"), "{n}: {e}");
+        }
+        // dotted keys / an inline table: refuse rather than write a duplicate
+        assert!(with_policy("quota.gate = true\n", OFF).is_err());
+        assert!(with_policy("quota = { gate = true }\n", OFF).is_err());
+    }
+
+    #[test]
+    fn set_user_policy_at_writes_atomically_and_creates_the_dir() {
+        let dir = std::env::temp_dir().join(format!("wt-quota-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let f = dir.join("worktrees").join("config.toml");
+        set_user_policy_at(&f, at(88)).unwrap();
+        assert_eq!(policy_from(&std::fs::read_to_string(&f).unwrap()).policy, at(88));
+        assert!(set_user_policy_at(&f, at(0)).is_err());
+        assert_eq!(policy_from(&std::fs::read_to_string(&f).unwrap()).policy, at(88), "a refused write writes nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
