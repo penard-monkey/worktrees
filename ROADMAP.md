@@ -133,6 +133,26 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   exit 5 and `open x --force`. See
   [the session](docs/sessions/2026-10-01-quota-gate-pr358/summary.md).
 
+- **A Codex quota refusal says "at 81% of its Codex window".** The refusal
+  uses `Window.label`, and for Codex that is `bucket_label`, the bucket's NAME
+  (`limitName`, falling back to "Codex"), not its span. So it never says 5h or
+  weekly, which is exactly what a user needs to decide between waiting and
+  `[quota]`. The span is available as `Limit::window_minutes`. Build the label
+  from it ("5h", "Weekly") in `windows_from_codex`, keeping the bucket name for
+  non-default buckets. Check the usage meter, which reads the same rows. See
+  [the session](docs/sessions/2026-10-03-quota-settings/summary.md).
+
+- **Should `weekly_warn_pct = 100` still allow a window the provider calls
+  `over`?** With a threshold set, the user's number REPLACES the provider's
+  grade on weekly windows, so at 100 a weekly window at 99.9% graded `over`
+  launches. That is consistent: the user asked to be stopped only at 100%. But
+  "over" at 99.9% probably means the provider rounds or has already started
+  throttling, and launching into it buys nothing. Options:
+  - an `over` grade always refuses, whatever the threshold;
+  - document 100 as "only when the provider says the window is gone".
+  Raised in the #437 review. See
+  [the session](docs/sessions/2026-10-03-quota-settings/summary.md).
+
 - **A slug re-used after `rm` counts as launched for Claude and Codex.** Their
   `never_launched` (#358) is `!session_present`, which reads transcripts BY
   PATH, and the old lane's transcripts outlive `rm`. So a refused `--brief`
