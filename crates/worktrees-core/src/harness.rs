@@ -710,6 +710,7 @@ pub(crate) fn windows_from_claude(info: &crate::claude_usage::UsageInfo) -> Vec<
             severity: crate::quota::Severity::from_provider(l.severity()),
             resets_at: l.resets_at(),
             model: l.scoped_model().map(str::to_string),
+            weekly: l.is_weekly(),
         })
         .collect()
 }
@@ -725,6 +726,7 @@ pub(crate) fn windows_from_codex(info: &crate::codex_usage::Info) -> Vec<crate::
             severity: crate::quota::Severity::from_provider(l.severity()),
             resets_at: l.resets_at(),
             model: None,
+            weekly: l.is_weekly(),
         })
         .collect()
 }
@@ -1179,6 +1181,25 @@ mod tests {
         assert_eq!(ws[2].severity, crate::quota::Severity::Elevated);
         assert_eq!(ws[2].resets_at, Some(900));
         assert_eq!(ws[0].severity, crate::quota::Severity::Normal);
+        // Weekly is the reader's KIND, not the label: "Fable" is weekly too.
+        assert_eq!(ws.iter().map(|w| w.weekly).collect::<Vec<_>>(), [false, true, true]);
+    }
+
+    #[test]
+    fn a_codex_window_is_weekly_by_its_length_never_its_label() {
+        use crate::codex_usage::{Info, Limit};
+        // Codex labels a bucket by its NAME — both of these say "Codex".
+        let info = Info::for_test(vec![
+            Limit::for_test("Codex", 40.0, "normal", None).minutes(300),
+            Limit::for_test("Codex", 40.0, "normal", None).minutes(10080),
+            Limit::for_test("Codex", 40.0, "normal", None),
+        ]);
+        let ws = windows_from_codex(&info);
+        assert_eq!(
+            ws.iter().map(|w| w.weekly).collect::<Vec<_>>(),
+            [false, true, false],
+            "5h is not weekly, 7d is, and an unreported length keeps the provider's grade"
+        );
     }
 
     #[test]

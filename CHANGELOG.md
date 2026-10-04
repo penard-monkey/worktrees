@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **You decide when a nearly spent plan stops an agent from starting.** The
+  check that refuses to start Claude or Codex on a nearly spent plan window
+  can now be turned off, or given your own threshold for the weekly window,
+  in Settings → Behavior → Plan limits (or `[quota]` in
+  `~/.config/worktrees/config.toml`: `gate = false`, `weekly_warn_pct = 90`).
+  With a threshold set, the weekly window is refused at that percentage
+  whatever the provider grades it, and the 5-hour window still uses the
+  provider's own warning. Untouched, nothing changes. It applies to every
+  launch, from the app, the CLI and agents' `create_worktree`, from the next
+  launch on, with no restart. A refusal now says which rule stopped it and
+  where to change it. A repository's `.worktrees.toml` cannot set it.
+
+### Fixed
+- **Settings no longer break a `config.toml` kept in your dotfiles.** When the
+  app saved a setting into `~/.config/worktrees/config.toml` (Other projects,
+  pi's per-repo trust, and now Plan limits), it replaced a symlinked file with
+  a plain copy, leaving your dotfiles copy unchanged, and a file you had made
+  private (mode 600) came back readable by everyone. The setting is now
+  written through the link to the real file, and the file keeps its
+  permissions.
+
 ## [0.37.0] - 2026-10-03
 
 ### Added

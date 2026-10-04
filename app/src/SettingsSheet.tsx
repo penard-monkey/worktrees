@@ -4,6 +4,7 @@ import { McpSection, type McpStatus } from "./McpPanel";
 import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
 import { GuidanceSection, type GuidanceStatus } from "./GuidancePanel";
 import { CrossProjectSection, type CrossProjectStatus } from "./CrossProjectPanel";
+import { QuotaSection } from "./QuotaPanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
@@ -1064,6 +1065,8 @@ export function SettingsSheet({
             </select>
             <div className="hint">Keeps the divergence counts fresh. Fetches each project's origin in the background.</div>
           </section>
+
+          <QuotaSection data-focus="plan-limits" onReport={onReport} />
           </>}
 
           {cat === "updates" && <>

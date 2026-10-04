@@ -91,6 +91,75 @@ pub fn cfg_toml_get(path: &Path, key: &str) -> Option<String> {
     table.get(key)?.as_str().map(|s| s.to_string())
 }
 
+/// Every in-process writer of the user's `config.toml` holds this across its
+/// read-modify-write, so two of them (the app's Settings saving `[quota]` while
+/// a `trust` grant lands) cannot interleave and lose one edit.
+static USER_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read-modify-write the user's `config.toml` — THE way to write it.
+///
+/// `edit` gets the current text ("" when absent) and answers the new text, or
+/// `None` for "nothing to change". Three things a bare tmp-write-and-rename
+/// gets wrong, and all three writers (`quota`, `reach`, `trust`) used to:
+///
+/// - **A symlink is edited THROUGH, not replaced.** stow/chezmoi/home-manager
+///   keep `config.toml` as a link into a dotfiles repo. Renaming onto the LINK
+///   turns it into a regular file and leaves the dotfiles copy with the old
+///   content — silently, until the next `stow` puts the old settings back. So
+///   the rename lands on the link's resolved target, in the target's own
+///   directory (a rename cannot cross filesystems).
+/// - **The mode is kept.** A fresh temp file is created 0644 under the usual
+///   umask; a config someone made 0600 must not come back world-readable.
+/// - **One writer at a time**, in process (`USER_CONFIG_LOCK`).
+///
+/// Returns whether anything was written.
+pub fn edit_user_config(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<Option<String>, String>,
+) -> Result<bool, String> {
+    let _g = USER_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let target = resolve_link(path);
+    let text = match std::fs::read_to_string(&target) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+    };
+    let Some(new) = edit(&text)? else { return Ok(false) };
+    if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    let tmp = target.with_extension(format!("toml.tmp-{}", std::process::id()));
+    let perms = std::fs::metadata(&target).ok().map(|m| m.permissions());
+    let write = || -> Result<(), String> {
+        std::fs::write(&tmp, &new).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+        if let Some(p) = perms {
+            std::fs::set_permissions(&tmp, p).map_err(|e| format!("could not set the mode of {}: {e}", tmp.display()))?;
+        }
+        std::fs::rename(&tmp, &target).map_err(|e| format!("could not replace {}: {e}", target.display()))
+    };
+    write().inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    Ok(true)
+}
+
+/// `path` with every symlink in its LAST component followed, a relative link
+/// resolved against the link's own directory. A dangling link resolves to the
+/// file it names (which the write then creates). Bounded, so a link loop
+/// stops rather than spins — the read then fails with a real error.
+fn resolve_link(path: &Path) -> PathBuf {
+    let mut p = path.to_path_buf();
+    for _ in 0..40 {
+        let is_link = std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink());
+        if !is_link {
+            break;
+        }
+        let Ok(t) = std::fs::read_link(&p) else { break };
+        p = if t.is_absolute() { t } else { p.parent().unwrap_or(Path::new("")).join(t) };
+    }
+    p
+}
+
 /// The `[sync]` section of `config.toml` (`sync.rs`'s schema), as data.
 ///
 /// `cfg_toml_get` above reads top-level STRINGS only, and `sync` needs a table,
@@ -290,6 +359,48 @@ pub fn resolve_ai_resume_arg_for(ai_cmd: &str, cwd: &str) -> String {
         return arg.to_string();
     }
     crate::harness::for_cmd(ai_cmd).unwrap_or_else(crate::harness::default_adapter).resume_arg(cwd)
+}
+
+/// Test support for every writer of `config.toml` (`quota`, `reach`, `trust`):
+/// a dotfiles-managed config is a SYMLINK to a mode-0600 file, and a writer
+/// must edit it THROUGH the link — the link survives, its target gets the new
+/// content, and the mode is kept. `write` edits the file at the path it is
+/// given; `check` inspects the content that results.
+#[cfg(test)]
+pub(crate) fn assert_writes_through_a_link(tag: &str, write: impl Fn(&Path), check: impl Fn(&str) -> bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("wt-cfglink-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+    std::fs::create_dir_all(dir.join("cfg")).unwrap();
+    let target = dir.join("dotfiles").join("config.toml");
+    std::fs::write(&target, "# managed by my dotfiles\nai_cmd = \"claude\"\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let link = dir.join("cfg").join("config.toml");
+    // Relative, as stow writes them — resolved against the link's own dir.
+    std::os::unix::fs::symlink("../dotfiles/config.toml", &link).unwrap();
+
+    write(&link);
+
+    let meta = std::fs::symlink_metadata(&link).unwrap();
+    assert!(meta.file_type().is_symlink(), "{tag}: the symlink was replaced by a regular file");
+    let got = std::fs::read_to_string(&target).unwrap();
+    assert!(check(&got), "{tag}: the link's TARGET does not have the new content:\n{got}");
+    assert!(got.starts_with("# managed by my dotfiles\n"), "{tag}: {got}");
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "{tag}: mode {mode:o} through the link, expected 600");
+
+    // A plain file keeps its mode too — a 0600 config must not come back 0644.
+    let plain = dir.join("cfg").join("plain.toml");
+    std::fs::write(&plain, "ai_cmd = \"claude\"\n").unwrap();
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+    write(&plain);
+    assert!(check(&std::fs::read_to_string(&plain).unwrap()), "{tag}: plain file not written");
+    let mode = std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "{tag}: plain file mode {mode:o}, expected 600");
+    let stray: Vec<_> = std::fs::read_dir(dir.join("cfg")).unwrap().chain(std::fs::read_dir(dir.join("dotfiles")).unwrap()).filter_map(|e| e.ok()).map(|e| e.file_name()).filter(|n| n.to_string_lossy().contains(".tmp-")).collect();
+    assert!(stray.is_empty(), "{tag}: temp files left behind: {stray:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(test)]

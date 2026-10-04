@@ -76,11 +76,10 @@ pub fn set_user_level(level: Level) -> Result<(), String> {
 }
 
 pub fn set_user_level_at(path: &std::path::Path, level: Level) -> Result<(), String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
-    };
+    crate::config::edit_user_config(path, |text| with_level(text, level, path).map(Some)).map(|_| ())
+}
+
+fn with_level(text: &str, level: Level, path: &std::path::Path) -> Result<String, String> {
     let line = format!("{KEY} = \"{}\"", level.as_str());
     let mut out: Vec<String> = Vec::new();
     let mut placed = false;
@@ -122,12 +121,7 @@ pub fn set_user_level_at(path: &std::path::Path, level: Level) -> Result<(), Str
         Some(v) if v == level.as_str() => {}
         _ => return Err(format!("could not set {KEY} in {} safely — edit it by hand", path.display())),
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    }
-    let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, new).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("could not replace {}: {e}", path.display()))
+    Ok(new)
 }
 
 /// What one session may reach. Built ONCE, at server start, like
@@ -305,6 +299,15 @@ mod tests {
 
     fn reach(root: &str, user: Level, flag: Option<Level>, in_run: bool) -> Reach {
         Reach::new(Inputs { main_root: root, user, flag, in_run, registry: reg() })
+    }
+
+    #[test]
+    fn setting_the_level_edits_a_symlinked_config_through_the_link() {
+        crate::config::assert_writes_through_a_link(
+            "reach",
+            |p| set_user_level_at(p, Level::Read).unwrap(),
+            |t| t.contains("cross_project = \"read\""),
+        );
     }
 
     #[test]

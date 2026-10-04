@@ -118,6 +118,17 @@ let mockPiMcp: Record<string, unknown> = (() => {
 let mockReach: string = new URLSearchParams(location.search).get("reach") ?? "off";
 const mockPrivate = new Set((new URLSearchParams(location.search).get("private") ?? "").split(",").filter(Boolean));
 const projectName = (root: string) => root.split("/").filter(Boolean).pop() ?? root;
+// The launch gate's `[quota]` policy (`quota_settings`): `?quota=off` starts
+// with the gate off, `?quotapct=<n>` with a weekly threshold, and
+// `?quotapct=bad` with a hand-edit the gate ignored (so the problems line shows).
+const mockQuotaQ = new URLSearchParams(location.search);
+let mockQuota: { gate: boolean; weekly_warn_pct: number | null; problems: string[] } = {
+  gate: mockQuotaQ.get("quota") !== "off",
+  weekly_warn_pct: /^\d+$/.test(mockQuotaQ.get("quotapct") ?? "") ? +mockQuotaQ.get("quotapct")! : null,
+  problems: mockQuotaQ.get("quotapct") === "bad"
+    ? ["[quota] weekly_warn_pct = 150 is not a whole number from 1 to 100 — ignored, the provider's own grade applies"] : [],
+};
+const mockQuotaNow = () => ({ ...mockQuota, config_path: "/Users/demo/.config/worktrees/config.toml" });
 function mockCrossProject(): Record<string, unknown> {
   return {
     level: mockReach,
@@ -1336,6 +1347,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         intoSlug: args.intoSlug, intoSession: args.intoSession, provider, token,
       });
       return token;
+    }
+    case "quota_settings":
+      return mockQuotaNow();
+    case "set_quota_settings": {
+      const pct = args.weeklyWarnPct as number | null;
+      if (pct !== null && (!Number.isInteger(pct) || pct < 1 || pct > 100)) throw `weekly_warn_pct must be from 1 to 100 (got ${pct})`;
+      // A write rewrites both keys, so whatever the hand-edit got wrong is gone.
+      mockQuota = { gate: !!args.gate, weekly_warn_pct: pct, problems: [] };
+      return mockQuotaNow();
     }
     case "cross_project_status":
       return mockCrossProject();
