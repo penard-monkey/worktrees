@@ -60,3 +60,11 @@ REG() { echo "$HOME/.config/worktrees/projects.json"; }
   [ "$status" -eq 2 ]
   [[ "$output" == *"usage: worktrees clone"* ]]
 }
+
+@test "a token in the URL is never printed" {
+  mkdir -p "$BATS_TEST_TMPDIR/dest"
+  run_wt -C "$BATS_TEST_TMPDIR/dest" clone "file://u:SECRET@$BATS_TEST_TMPDIR/missing.git"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cloning file://u:***@"* ]]
+  [[ "$output" != *SECRET* ]]
+}

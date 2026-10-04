@@ -72,6 +72,7 @@ pub const NAME_CASES: &[(&str, Option<&str>)] = &[
     ("  owner/repo  ", Some("repo")),
     ("", None),
     ("-oProxyCommand=x", None),
+    ("-ohost:path", None),
     ("ext::sh -c touch% /tmp/pwned", None),
     ("fd::17", None),
     ("ftp://host/repo.git", None),
@@ -103,7 +104,9 @@ pub fn parse_source(input: &str) -> Result<CloneSource, String> {
         if !SCHEMES.iter().any(|k| k.eq_ignore_ascii_case(scheme)) {
             return Err(format!("'{scheme}://' URLs are not supported — use https://, ssh:// or git@host:path"));
         }
-        s.to_string()
+        // git matches schemes case-SENSITIVELY (`FILE://` is "unable to find
+        // remote helper"), so what we accept is lowercased before git sees it.
+        format!("{}{}", scheme.to_ascii_lowercase(), &s[i..])
     } else if s.contains("::") {
         return Err("remote-helper URLs (`helper::address`) are not supported".into());
     } else if is_scp_like(s) {
@@ -119,6 +122,34 @@ pub fn parse_source(input: &str) -> Result<CloneSource, String> {
     let name = derive_name(&url).ok_or("cannot tell the repository's name from that URL")?;
     valid_dir_name(&name)?;
     Ok(CloneSource { url, name })
+}
+
+/// `url` with any credentials taken out, for every log line and printed
+/// message. `https://user:TOKEN@host/…` and `https://TOKEN@host/…` both carry a
+/// secret in the userinfo, so for http(s) the whole userinfo goes; for other
+/// schemes a userinfo is normally just a login name (`ssh://git@host`) and only
+/// a `:password` part is removed. scp-style `user@host:path` has no password
+/// slot and is returned as is.
+pub fn redact_url(url: &str) -> String {
+    let Some(i) = url.find("://") else {
+        return url.to_string();
+    };
+    let scheme = &url[..i];
+    let rest = &url[i + 3..];
+    let auth_end = rest.find('/').unwrap_or(rest.len());
+    let Some(at) = rest[..auth_end].rfind('@') else {
+        return url.to_string();
+    };
+    let userinfo = &rest[..at];
+    let shown = if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+        "***".to_string()
+    } else {
+        match userinfo.split_once(':') {
+            Some((user, _)) => format!("{user}:***"),
+            None => userinfo.to_string(),
+        }
+    };
+    format!("{scheme}://{shown}{}", &rest[at..])
 }
 
 /// git's own rule for the scp form: a ':' that comes before any '/', and a
@@ -319,6 +350,7 @@ pub fn classify(stderr: &str) -> CloneErrorKind {
 /// The headline for a kind, then git's own last `fatal:`/`error:` line — the
 /// headline is what to DO, git's line is the evidence.
 fn failure_message(kind: CloneErrorKind, url: &str, stderr: &str) -> String {
+    let url = &redact_url(url);
     let head = match kind {
         CloneErrorKind::Auth => format!(
             "Could not authenticate to {url}. The repository is private (or does not exist), and git has no credentials for it that work without asking — set up an ssh key or a credential helper, then try again."
@@ -364,9 +396,21 @@ pub fn ssh_command(base: &str) -> String {
 /// The environment a clone runs under, as pairs to set. `GIT_TERMINAL_PROMPT=0`
 /// stops git's own username/password prompt; credential HELPERS (the macOS
 /// keychain) are not prompts and still run.
+///
+/// `GIT_ALLOW_PROTOCOL` is the belt to `parse_source`'s braces: git itself then
+/// refuses any transport outside `SCHEMES` (`ext::`, `fd::`, any remote
+/// helper), so a future edit to the parser cannot open a command line.
+/// `git+ssh`/`ssh+git` and the scp form all run as `ssh`.
 pub fn clone_env(ssh_base: &str) -> Vec<(&'static str, String)> {
-    vec![("GIT_TERMINAL_PROMPT", "0".into()), ("GIT_SSH_COMMAND", ssh_command(ssh_base))]
+    vec![
+        ("GIT_TERMINAL_PROMPT", "0".into()),
+        ("GIT_SSH_COMMAND", ssh_command(ssh_base)),
+        ("GIT_ALLOW_PROTOCOL", ALLOWED_PROTOCOLS.into()),
+    ]
 }
+
+/// git's protocol names for `SCHEMES`.
+const ALLOWED_PROTOCOLS: &str = "https:http:ssh:git:file";
 
 /// The user's ssh command, resolved the way git would before we append to it.
 pub fn user_ssh_base() -> String {
@@ -443,9 +487,28 @@ pub struct CloneOpts {
 }
 
 const PROGRESS_MIN_GAP: Duration = Duration::from_millis(66);
-/// stderr kept for classification — enough for every fatal line, bounded so a
-/// chatty remote cannot grow it without limit.
+/// stderr kept for classification — the NON-progress lines only, and the most
+/// RECENT of them: git's `fatal:` line comes last, after every `\r` progress
+/// segment, so keeping the first N bytes kept exactly the wrong end. Bounded so
+/// a chatty remote cannot grow it without limit.
 const STDERR_KEEP: usize = 64 * 1024;
+
+/// Append one stderr segment unless it is progress (already consumed by
+/// `parse_progress`), then trim from the FRONT to `STDERR_KEEP`.
+fn keep_segment(kept: &mut String, seg: &str) {
+    if parse_progress(seg).is_some() || seg.trim().is_empty() {
+        return;
+    }
+    kept.push_str(seg.trim_end_matches(['\r', '\n']));
+    kept.push('\n');
+    if kept.len() > STDERR_KEEP {
+        let mut cut = kept.len() - STDERR_KEEP;
+        while !kept.is_char_boundary(cut) {
+            cut += 1;
+        }
+        kept.drain(..cut);
+    }
+}
 
 /// Clone `src` into `target` (from `plan_target`). Creates missing parents,
 /// claims `target` with `create_dir`, runs `git clone --progress -- <url> <target>`,
@@ -525,7 +588,7 @@ fn run_clone(
         }
     });
 
-    let mut stderr: Vec<u8> = Vec::new();
+    let mut stderr = String::new();
     let mut partial = String::new();
     let mut last_sent: Option<Instant> = None;
     let mut pending: Option<CloneProgress> = None;
@@ -546,15 +609,13 @@ fn run_clone(
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(chunk) => {
-                if stderr.len() < STDERR_KEEP {
-                    stderr.extend_from_slice(&chunk);
-                }
                 partial.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(i) = partial.find(['\r', '\n']) {
                     let seg: String = partial.drain(..=i).collect();
                     if let Some(p) = parse_progress(&seg) {
                         pending = Some(p);
                     }
+                    keep_segment(&mut stderr, &seg);
                 }
                 if let (Some(cb), Some(p)) = (progress.as_mut(), pending.as_ref()) {
                     if last_sent.is_none_or(|t| t.elapsed() >= PROGRESS_MIN_GAP) {
@@ -575,7 +636,9 @@ fn run_clone(
     if !cancelled {
         let _ = reader.join();
     }
-    let stderr = String::from_utf8_lossy(&stderr);
+    // A last line without a terminator (git exiting mid-line) still counts.
+    let rest = std::mem::take(&mut partial);
+    keep_segment(&mut stderr, &rest);
     if cancelled {
         return Err(CloneError { kind: CloneErrorKind::Cancelled, message: "Clone cancelled.".into() });
     }
@@ -679,7 +742,7 @@ pub fn cmd_clone(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
             return 1;
         }
     };
-    ui.info(&format!("cloning {} → {}", src.url, target.display()));
+    ui.info(&format!("cloning {} → {}", redact_url(&src.url), target.display()));
     // SAFETY: installs a handler that only stores to an atomic.
     unsafe {
         libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
@@ -841,6 +904,63 @@ mod tests {
     }
 
     #[test]
+    fn credentials_never_reach_a_log_line() {
+        let cases = [
+            ("https://user:ghp_SECRET@github.com/o/r.git", "https://***@github.com/o/r.git"),
+            ("https://ghp_SECRET@github.com/o/r.git", "https://***@github.com/o/r.git"),
+            ("HTTP://u:SECRET@host/r", "HTTP://***@host/r"),
+            ("ssh://git:SECRET@host/r.git", "ssh://git:***@host/r.git"),
+            ("ssh://git@host/r.git", "ssh://git@host/r.git"),
+            ("https://github.com/o/r.git", "https://github.com/o/r.git"),
+            ("https://host/path@thing", "https://host/path@thing"),
+            ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+        ];
+        for (u, want) in cases {
+            assert_eq!(redact_url(u), want, "{u}");
+        }
+        // …and the message a failed clone shows is built from the redacted form.
+        let m = failure_message(CloneErrorKind::Auth, "https://u:ghp_SECRET@github.com/o/r.git", "fatal: x");
+        assert!(!m.contains("SECRET"), "{m}");
+    }
+
+    #[test]
+    fn a_secret_in_the_url_is_not_printed_by_a_failed_clone() {
+        let d = tmp("redact");
+        let src = parse_source(&format!("file://u:SECRET@{}/missing.git", d.display())).unwrap();
+        let target = plan_target(d.to_str().unwrap(), &src.name).unwrap();
+        let e = clone_repo(&src, &target, &CloneOpts::default(), &AtomicBool::new(false), None).unwrap_err();
+        assert!(!e.message.contains("SECRET"), "{}", e.message);
+    }
+
+    #[test]
+    fn scheme_case_is_normalized_for_git() {
+        assert_eq!(parse_source("HTTPS://github.com/o/r").unwrap().url, "https://github.com/o/r");
+        let d = tmp("case");
+        let bare = remote(&d);
+        let src = parse_source(&format!("FILE://{}", bare.display())).unwrap();
+        let target = plan_target(d.to_str().unwrap(), "cased").unwrap();
+        clone_repo(&src, &target, &CloneOpts::default(), &AtomicBool::new(false), None).unwrap();
+    }
+
+    #[test]
+    fn git_itself_refuses_transports_outside_the_allowlist() {
+        // The parser refuses these first; this is the witness that git would
+        // too, if a parser edit ever let one through.
+        let d = tmp("proto");
+        for url in ["ext::sh -c true", "nosuchhelper::x"] {
+            let mut c = Command::new("git");
+            c.args(["ls-remote", "--", url]).current_dir(&d).stdin(Stdio::null());
+            for (k, v) in clone_env("ssh") {
+                c.env(k, v);
+            }
+            let out = c.output().unwrap();
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success(), "{url} ran");
+            assert!(err.contains("not allowed"), "{url}: {err}");
+        }
+    }
+
+    #[test]
     fn env_turns_off_prompts_and_keeps_the_users_ssh() {
         let env = clone_env("ssh -F ~/.ssh/work_config");
         assert!(env.contains(&("GIT_TERMINAL_PROMPT", "0".to_string())));
@@ -892,6 +1012,27 @@ mod tests {
         let e = clone_repo(&src, &target, &CloneOpts::default(), &AtomicBool::new(false), None).unwrap_err();
         assert_eq!(e.kind, CloneErrorKind::Exists);
         assert!(target.join("theirs.txt").exists());
+    }
+
+    #[test]
+    fn a_late_failure_after_a_flood_of_progress_is_still_classified() {
+        // git's `fatal:`/remote `ERROR:` line comes LAST, after every `\r`
+        // progress segment; a long clone easily writes more than STDERR_KEEP of
+        // those first. The fake remote floods ~100 KB of progress, then fails.
+        let d = tmp("late");
+        let fake = d.join("fake-ssh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\ni=0\nwhile [ $i -lt 2500 ]; do printf 'remote: Counting objects:  %d%% (%d/2500)\\r' $((i/25)) $i >&2; i=$((i+1)); done\necho 'ERROR: Repository not found.' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let src = parse_source("ssh://example.invalid/owner/late.git").unwrap();
+        let target = plan_target(d.to_str().unwrap(), &src.name).unwrap();
+        let opts = CloneOpts { ssh_base: Some(fake.to_string_lossy().into_owned()) };
+        let e = clone_repo(&src, &target, &opts, &AtomicBool::new(false), None).unwrap_err();
+        assert_eq!(e.kind, CloneErrorKind::NotFound, "{}", e.message);
+        assert!(!e.message.contains("Counting objects"), "evidence is a progress line: {}", e.message);
     }
 
     #[test]

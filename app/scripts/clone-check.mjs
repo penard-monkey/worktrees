@@ -45,6 +45,7 @@ for (const { input, want } of rows) {
 
 // ── shorthand expansion: the URL the preview implies is the one core clones ─
 eq("owner/repo → github https", C.cloneSource("owner/repo").url, "https://github.com/owner/repo.git");
+eq("an upper-case scheme reaches git lowercased", C.cloneSource("HTTPS://github.com/o/r").url, "https://github.com/o/r");
 eq("owner/repo.git → github https", C.cloneSource("owner/repo.git").url, "https://github.com/owner/repo.git");
 
 // ── CloneErrorKind ⇔ CLONE_ERROR_KINDS ──────────────────────────────────────

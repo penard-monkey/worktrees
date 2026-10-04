@@ -81,7 +81,8 @@ export function cloneSource(input: string): CloneSource | { error: string } {
     const scheme = s.slice(0, i);
     if (!SCHEMES.includes(scheme.toLowerCase()))
       return { error: `'${scheme}://' URLs are not supported — use https://, ssh:// or git@host:path` };
-    url = s;
+    // git matches schemes case-sensitively; core lowercases, and so does this.
+    url = scheme.toLowerCase() + s.slice(i);
   } else if (s.includes("::")) {
     return { error: "remote-helper URLs (`helper::address`) are not supported" };
   } else if (isScpLike(s)) {
