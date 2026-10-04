@@ -19,6 +19,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   where to change it. A repository's `.worktrees.toml` cannot set it.
 
 ### Fixed
+- **An agent opening a place no longer takes over your terminal view.** `worktrees new`/`open` now attach or switch tmux clients only when run from an interactive terminal; from an agent's shell (no tty) they print the detached line instead of switching the app's own client to the new lane.
 - **Settings no longer break a `config.toml` kept in your dotfiles.** When the
   app saved a setting into `~/.config/worktrees/config.toml` (Other projects,
   pi's per-repo trust, and now Plan limits), it replaced a symlinked file with

@@ -123,6 +123,12 @@ run_wt() {
   run bash -c 'cd "$1" && shift && exec "${RUN_BASH:-bash}" "$@"' _ "$d" "$WT_BIN" "$@" < /dev/null
 }
 
+# Same, on a real pty (BSD `script`), as a person typing in a terminal. The
+# default run_wt has stdin from /dev/null: an agent's Bash tool.
+run_wt_tty() {
+  run bash -c 'cd "$1" && shift && exec script -q /dev/null "$@"' _ "$REPO" "$WT_BIN" "$@"
+}
+
 # Same but with stdin from a heredoc/pipe for confirmation prompts: wt_answer "y" rm foo
 wt_answer() {
   local ans="$1"; shift

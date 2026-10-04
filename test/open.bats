@@ -93,7 +93,7 @@ session_count() {
   # Simulate an AI pane already running here under a foreign session name.
   printf 'cwd=%s\ncmd0=x\n' "$REPO/.worktrees/feat-x" > "$TMUX_STATE/other-sess"
   echo fake-ai > "$TMUX_STATE/other-sess.cmd"
-  run_wt open feat-x
+  run_wt_tty open feat-x
   [ "$status" -eq 0 ]
   [[ "$output" == *"already in this worktree"* ]]
   # No second session minted — registry still holds exactly the pre-made one.
@@ -216,4 +216,39 @@ session_count() {
   run_wt open feat-x
   [ "$status" -eq 1 ]
   [[ "$output" == *"tmux not found"* ]]
+}
+
+# An agent's Bash tool has no tty but DOES inherit $TMUX from its pane, so a
+# bare switch-client moved the APP's embedded client onto the new lane.
+@test "open with no tty never attaches or switches, even inside tmux" {
+  make_worktree feat-x
+  : > "$TMUX_LOG"
+  TMUX=/tmp/fake,1,0 run_wt open feat-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Session ready (detached)"* ]]
+  ! grep -E '(attach|switch-client)' "$TMUX_LOG"
+}
+
+@test "new with no tty never attaches or switches, even inside tmux" {
+  : > "$TMUX_LOG"
+  TMUX=/tmp/fake,1,0 run_wt new feat-nt --no-install
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Session ready (detached)"* ]]
+  ! grep -E '(attach|switch-client)' "$TMUX_LOG"
+}
+
+@test "open on a tty inside tmux still switches the client" {
+  make_worktree feat-x
+  : > "$TMUX_LOG"
+  TMUX=/tmp/fake,1,0 run_wt_tty open feat-x
+  [ "$status" -eq 0 ]
+  grep -q 'switch-client -t repo-feat-x' "$TMUX_LOG"
+}
+
+@test "open on a tty outside tmux still attaches" {
+  make_worktree feat-x
+  : > "$TMUX_LOG"
+  run_wt_tty open feat-x
+  [ "$status" -eq 0 ]
+  grep -q 'attach -t repo-feat-x' "$TMUX_LOG"
 }
