@@ -1112,6 +1112,41 @@ async fn set_cross_project(level: String) -> Result<CrossProjectStatus, String> 
     Ok(cross_project_now())
 }
 
+/// Settings → Behavior → Plan limits: the user's `[quota]` launch-gate policy
+/// (`worktrees_core::quota`), and what was wrong with a hand-edited one.
+/// Machine-level, and read by the gate at launch time — a change reaches the
+/// next launch everywhere, running MCP servers included.
+#[derive(Serialize)]
+struct QuotaSettings {
+    gate: bool,
+    weekly_warn_pct: Option<u8>,
+    problems: Vec<String>,
+    config_path: String,
+}
+fn quota_now() -> QuotaSettings {
+    let u = worktrees_core::quota::user_policy();
+    QuotaSettings {
+        gate: u.policy.gate,
+        weekly_warn_pct: u.policy.weekly_warn_pct,
+        problems: u.problems,
+        config_path: worktrees_core::config::config_toml_path().to_string_lossy().into_owned(),
+    }
+}
+
+#[tauri::command]
+async fn quota_settings() -> Result<QuotaSettings, String> {
+    Ok(quota_now())
+}
+
+/// The user's act: set `[quota]` in `~/.config/worktrees/config.toml`.
+#[tauri::command]
+async fn set_quota_settings(gate: bool, weekly_warn_pct: Option<u8>) -> Result<QuotaSettings, String> {
+    worktrees_core::quota::set_user_policy(worktrees_core::quota::Policy { gate, weekly_warn_pct })
+        .inspect_err(|e| applog("error", &format!("set_quota_settings: {e}")))?;
+    applog("info", &format!("quota: gate = {gate}, weekly_warn_pct = {weekly_warn_pct:?}"));
+    Ok(quota_now())
+}
+
 /// Mark a registered project private (out of reach in both directions) or not.
 #[tauri::command]
 async fn set_project_private(root: String, private: bool) -> Result<CrossProjectStatus, String> {
@@ -8293,6 +8328,8 @@ pub fn run() {
             drop_reference,
             cross_project_status,
             set_cross_project,
+            quota_settings,
+            set_quota_settings,
             set_project_private,
             copy_text,
             add_project,

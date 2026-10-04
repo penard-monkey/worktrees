@@ -2706,6 +2706,7 @@ body.dragging .menu-catch { pointer-events: none; }
   padding: var(--s2); font-size: var(--fs-label); color: var(--txt); outline: none;
 }
 .setting input:focus, .setting select:focus { border-color: var(--line-strong); }
+.setting select:disabled { opacity: 0.5; cursor: default; }
 .preview { padding: var(--s2); background: var(--bg-panel); border-radius: var(--r-sm); color: var(--txt-hi); font-size: var(--fs-row); }
 .seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; width: fit-content; }
 .seg button { background: var(--bg-input); color: var(--txt-dim); border: 0; padding: var(--s2) var(--s4); font-size: var(--fs-label); text-transform: capitalize; }
