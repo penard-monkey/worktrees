@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-03
+
 ### Added
 - **Clone from URL… adds a project straight from a git URL.** It sits in the
   nav's add menu beside New project… and Add existing…. Paste any git URL
