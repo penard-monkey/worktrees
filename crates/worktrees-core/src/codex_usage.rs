@@ -46,6 +46,11 @@ impl Limit {
     pub fn severity(&self) -> &str { &self.severity }
     pub fn bucket_label(&self) -> &str { &self.bucket_label }
     pub fn resets_at(&self) -> Option<i64> { self.resets_at }
+    /// A weekly-type window: longer than a day (10080 minutes today). The
+    /// LENGTH, because `bucket_label` is the bucket's name ("Codex"), not its
+    /// span. A window whose length Codex did not report is not weekly, so it
+    /// keeps the provider's grade — today's behaviour.
+    pub fn is_weekly(&self) -> bool { self.window_minutes.is_some_and(|m| m > 24 * 60) }
 }
 
 impl Info {
@@ -67,6 +72,9 @@ impl Limit {
             bucket_label: bucket_label.into(), window_role: "primary".into(),
             window_minutes: None, percent, severity: severity.into(), resets_at,
         }
+    }
+    pub(crate) fn minutes(self, m: u64) -> Self {
+        Self { window_minutes: Some(m), ..self }
     }
 }
 

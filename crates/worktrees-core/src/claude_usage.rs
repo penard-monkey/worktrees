@@ -280,6 +280,13 @@ impl UsageLimit {
     pub fn scoped_model(&self) -> Option<&str> {
         (self.kind == "weekly_scoped").then_some(self.label.as_str())
     }
+
+    /// A weekly window — `weekly_all` or a model's `weekly_scoped` — which a
+    /// user's `[quota] weekly_warn_pct` grades. Keyed on `kind`, which this
+    /// reader sets, never on the label, which is display text.
+    pub fn is_weekly(&self) -> bool {
+        self.kind.starts_with("weekly")
+    }
 }
 
 /// Constructors for tests in sibling modules (`harness`'s window mappings).
