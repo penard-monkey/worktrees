@@ -311,6 +311,72 @@ pub fn rollout_turn(lines: &[String]) -> Option<Turn> {
     })
 }
 
+/// How far `rollout_turn_since` reads per step backwards. Small, because the
+/// usual call covers one poll's growth — a few KiB of a streaming turn — and
+/// stops at its floor inside the first step.
+pub const TURN_SCAN_CHUNK: u64 = 64 * 1024;
+
+/// The newest turn boundary in `path`'s first `end` bytes, among the lines
+/// that were NOT yet complete at byte `floor` — `None` when there is none, which
+/// means the newest boundary (if any) is the one an earlier read up to `floor`
+/// found. `floor = 0` asks about the whole file.
+///
+/// Reads backwards in `TURN_SCAN_CHUNK` steps and stops at the first boundary
+/// or at the floor, whichever comes first. A tail of fixed size is not enough:
+/// a long turn's tool output pushes its `task_started` megabytes back (one was
+/// 1.2 MB from the end of its rollout, measured 2026-10-03), and a window that
+/// misses it reads a running turn as idle. A line split by a step is carried
+/// whole into the next one before it is decoded, so neither a marker nor a
+/// multi-byte character is ever cut at a seam.
+pub fn rollout_turn_since(path: &Path, end: u64, floor: u64) -> std::io::Result<Option<Turn>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let mut pos = end.min(f.metadata()?.len());
+    // `buf` holds bytes [start, start + buf.len()): a chunk, then the front of
+    // the chunk before it — a line whose start is still further back.
+    let mut carry: Vec<u8> = Vec::new();
+    loop {
+        let start = pos.saturating_sub(TURN_SCAN_CHUNK);
+        let mut buf = vec![0; (pos - start) as usize];
+        f.seek(SeekFrom::Start(start))?;
+        f.read_exact(&mut buf)?;
+        buf.extend_from_slice(&carry);
+        // `hi` is the index of the current line's terminator (or the end of the
+        // read, for an unterminated last line), newest line first.
+        let mut hi = buf.len();
+        loop {
+            let lo = match buf[..hi].iter().rposition(|&b| b == b'\n') {
+                Some(nl) => nl + 1,
+                None if start == 0 => 0,
+                None => break,
+            };
+            // Complete at `floor`: an earlier read already weighed this line.
+            if start + (hi as u64) < floor {
+                return Ok(None);
+            }
+            if let Some(t) = turn_of_line(&buf[lo..hi]) {
+                return Ok(Some(t));
+            }
+            if lo == 0 {
+                return Ok(None);
+            }
+            hi = lo - 1;
+        }
+        carry = buf[..hi].to_vec();
+        pos = start;
+    }
+}
+
+/// `rollout_turn` for one raw line, with the cheap reject done on the bytes so
+/// a scan through megabytes of tool output decodes almost nothing.
+fn turn_of_line(line: &[u8]) -> Option<Turn> {
+    let has = |n: &[u8]| line.windows(n.len()).any(|w| w == n);
+    if !(has(b"\"task_") || has(b"\"turn_aborted\"")) {
+        return None;
+    }
+    rollout_turn(&[String::from_utf8_lossy(line).into_owned()])
+}
+
 /// The footer Codex's approval modals end on — a command, a file edit, a
 /// permission grant — captured from the 0.157.1 TUI (`findings.md`).
 const APPROVAL_FOOTER: &str = "Press enter to confirm or esc to cancel";

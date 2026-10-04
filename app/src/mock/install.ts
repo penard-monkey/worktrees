@@ -3292,7 +3292,7 @@ const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
   // is mid-turn (its session file ends on the user's message)
   { busy: [`${CDV}/billing-refactor`, `${CDV}/catalog-import`], waiting: [`${WT}/feat-redesign`] },
   // working shifts; the Codex place parks on an approval (amber, from its
-  // pane — lib.rs `codex_waiting_panes`); pi's reply lands (an ember)
+  // pane — core `activity::codex_panes`); pi's reply lands (an ember)
   { busy: [`${CDV}/messaging`], waiting: [`${CDV}/billing-refactor`] },
   // approved: the Codex turn runs on, and a Claude session waits; the pi lane
   // was relaunched and sits on pi's trust modal (lib.rs `pi_tick`)

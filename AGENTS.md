@@ -1011,7 +1011,7 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   `agent-turn-complete`, nothing on Esc; `-c` hooks stop on a trust prompt.
   "Waiting on the user" is on disk NOWHERE — an approval's rollout tail is the
   same pending tool call as a running command — so the amber dot captures the
-  pane of a mid-turn session (`codex_waiting_panes`) and keys on the modal's
+  pane of a mid-turn session (`activity::codex_panes`) and keys on the modal's
   FOOTER being the bottom line, never on its question text, which history can
   quote. A codex session OUTLIVES codex (`codex …; exec "$SHELL"`), and a
   kill writes no `turn_aborted`, so a rollout ending on `task_started` means
