@@ -180,3 +180,92 @@ JSON
   tmux_session_exists repo-agent-q2
   [[ "$(tmux_pane0_cmd repo-agent-q2)" == *"$OPENER"* ]]
 }
+
+# ── the user's [quota] policy (config.toml) ────────────────────────────────
+# `common_setup` puts HOME in the test's tmpdir and unsets XDG_CONFIG_HOME, so
+# this is the user config the binary reads — never the developer's real one.
+
+quota_cfg() {
+  mkdir -p "$HOME/.config/worktrees"
+  printf '%s\n' "[quota]" "$@" > "$HOME/.config/worktrees/config.toml"
+}
+
+# Claude's weekly window at $1 percent, severity $2.
+weekly_fixture() {
+  cat > "$FIXTURE" <<JSON
+{"claude":[{"label":"Weekly","percent":$1,"severity":"$2","weekly":true,"resets_at":$(( $(date +%s) + 86400 ))}]}
+JSON
+  export WORKTREES_USAGE_PROBE="$FIXTURE"
+}
+
+@test "quota policy: gate = false launches on a window the provider calls over" {
+  quota_cfg "gate = false"
+  usage_fixture 99 over
+  run_wt new feat-gateoff
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-gateoff
+}
+
+@test "quota policy: weekly_warn_pct = 90 allows 85% weekly the provider calls warning" {
+  quota_cfg "weekly_warn_pct = 90"
+  weekly_fixture 85 warning
+  run_wt new feat-wk85
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-wk85
+}
+
+@test "quota policy: weekly_warn_pct = 90 refuses 92% weekly, and says where to change it" {
+  quota_cfg "weekly_warn_pct = 90"
+  weekly_fixture 92 normal
+  run_wt new feat-wk92
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"92% of its Weekly window"* ]]
+  [[ "$output" == *"the user's limit: 90% of a weekly window"* ]]
+  [[ "$output" == *"Settings → Behavior → Plan limits"* ]]
+  [[ "$output" == *'`[quota]` in ~/.config/worktrees/config.toml'* ]]
+  [[ "$output" == *"worktrees open feat-wk92 --force"* ]]
+}
+
+@test "quota policy: the 5h window keeps the provider's grade under a weekly threshold" {
+  quota_cfg "weekly_warn_pct = 95"
+  usage_fixture 85 warning
+  run_wt new feat-5h
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"Claude graded it nearly spent"* ]]
+}
+
+@test "quota policy: a nonsense percentage is ignored — the provider's grade applies" {
+  quota_cfg "weekly_warn_pct = 150"
+  weekly_fixture 81 warning
+  run_wt new feat-bogus
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"Claude graded it nearly spent"* ]]
+}
+
+@test "quota policy: the remedy works — following it lets the same launch through" {
+  # The refusal says "[quota] in config.toml"; do exactly that and retry.
+  weekly_fixture 92 warning
+  run_wt new feat-remedy --brief "do x"
+  [ "$status" -eq 5 ]
+  [[ "$output" == *'`[quota]` in ~/.config/worktrees/config.toml'* ]]
+  quota_cfg "weekly_warn_pct = 95"
+  run_wt open feat-remedy
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-remedy
+}
+
+@test "quota policy: MCP create_worktree honours gate = false" {
+  quota_cfg "gate = false"
+  usage_fixture 99 over
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-off","brief":"do x"}}}' > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$REPO' && '$WT_BIN' mcp --mutations < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  [[ "$output" == *'"isError":false'* ]]
+  tmux_session_exists repo-agent-off
+}
+
+@test "quota policy: a repo's .worktrees.toml may not set it" {
+  printf '[quota]\ngate = false\n' > "$REPO/.worktrees.toml"
+  run_wt new feat-repoq
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"quota may not be set by a project"* ]]
+}
