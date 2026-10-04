@@ -15,6 +15,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   row — see below).
 
 ### Added
+- **A folder macOS is blocking now says so, and how to give it back.** Deny
+  the access prompt by accident — on a repo in Documents, on iCloud Drive, on
+  a USB disk — and macOS never asks again; it just refuses every read. The
+  Files tab showed `Operation not permitted (os error 1)` over an empty tree,
+  which reads as a broken app rather than a permission you can restore. It now
+  names the folder and who refused it, and offers the two things that actually
+  work: a button straight to the right Privacy pane in System Settings, and
+  the exact `tccutil reset` line for the case where the app is not listed
+  there. Both say the part people miss — the decision is read once per
+  process, so the app has to be quit and reopened before a fix takes. There is
+  deliberately no "try again": nothing an app can call re-raises the prompt.
+  The card appears only when the path really is refused AND sits somewhere
+  macOS gates, so an ordinary unreadable directory still reports itself
+  honestly.
+
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

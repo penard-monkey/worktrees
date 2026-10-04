@@ -27,6 +27,7 @@ use worktrees_core::{git, harness, mcpsetup, mention, ops, provider, store, sync
 // surface is worth reading in one piece.
 mod docserver;
 mod editors;
+mod macprivacy;
 mod viewer;
 mod winstate;
 // Moved to worktrees-core so the LAUNCH path can read it too: a harness that
@@ -5500,6 +5501,23 @@ async fn list_dir(app: AppHandle, path: String, show_ignored: Option<bool>) -> R
     Ok(entries)
 }
 
+/// Why a listing failed, when the reason is macOS privacy rather than us.
+///
+/// Asked only AFTER something has already failed, so the common path pays
+/// nothing. `None` means "not a privacy denial" — the caller keeps whatever
+/// error it already had. See `macprivacy` for why this is a separate command
+/// rather than a richer error type on `list_dir`.
+#[tauri::command]
+async fn privacy_denial(app: AppHandle, path: String) -> Option<macprivacy::Denial> {
+    let bundle = app.config().identifier.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        macprivacy::denial_at(std::path::Path::new(&path), &macprivacy::home_dir(), &bundle)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Paths git would ignore (best-effort). `-z` in/out keeps it robust to spaces
 /// and newlines in filenames. Empty set on any git failure → nothing filtered.
 fn git_check_ignore<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) -> std::collections::HashSet<String> {
@@ -9044,6 +9062,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            privacy_denial,
             list_places,
             list_workspace,
             drop_reference,

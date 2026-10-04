@@ -3507,3 +3507,27 @@ body.dragging .grip { cursor: grabbing; }
   position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
+
+/* ── macOS privacy denial (PrivacyCard) ──────────────────────────────────────
+   Borrows `.init-banner`'s box — the app's one "here is something to deal
+   with" idiom — and keeps its amber edge, because this one genuinely does
+   need a human. The HEADING inherits `.init-banner-h`'s `--warn`; everything
+   below is `--txt-dim`, per the rule that an accent token is a fill and not
+   text (`--warn` as small text fails contrast in tokyo-day and
+   catppuccin-latte). The card is the whole pane here rather than a strip
+   above a tree, so it gets the tree's padding instead of the banner's
+   nav-column margins. */
+.privacy-card { margin: var(--s3); }
+/* The refused path: long, and the user needs to recognise it, so it wraps on
+   any character rather than ellipsising — a middle-truncated path is exactly
+   the part you cannot identify. */
+.privacy-path {
+  padding: var(--s1) var(--s2);
+  background: var(--bg-abyss); border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-family: var(--term-family); font-size: var(--fs-micro); color: var(--txt);
+  word-break: break-all;
+}
+/* The quit-and-reopen step. Same size as the body copy above it — it is not a
+   footnote, it is the half people skip. */
+.privacy-why { color: var(--txt-dim); }
+.privacy-why strong { color: var(--txt-hi); font-weight: var(--fw-med); }
