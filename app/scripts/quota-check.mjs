@@ -10,7 +10,7 @@
 //      the range is a menu entry that fails when chosen.
 //
 //   2. THE REMEDY. Every refusal says where to change the setting
-//      (`HOW_TO_CHANGE`: "Settings → Behavior → Plan limits"). A message's
+//      (`SETTINGS_PATH`, via `how_to_change`: "Settings → Behavior → Plan limits"). A message's
 //      remedy is a claim (AGENTS.md); renaming the section or moving it to
 //      another category would leave every refusal pointing at nothing. So the
 //      path is checked against what SettingsSheet actually renders.
@@ -49,19 +49,21 @@ else {
 }
 
 // ── 2. the remedy names a section that exists ───────────────────────────────
-const how = quota.match(/pub const HOW_TO_CHANGE: &str = "([^"]*)/);
-const path = how?.[1].match(/Settings → ([^→]+?) → ([^,\\]+?)\s*[,\\]/);
-if (!path) fail("quota.rs: HOW_TO_CHANGE no longer names a `Settings → <category> → <section>` path");
+const how = [...quota.matchAll(/pub const SETTINGS_PATH: &str = "([^"]*)"/g)];
+const path = how.length === 1 ? how[0][1].match(/^Settings → ([^→]+?) → ([^→]+)$/) : null;
+if (how.length !== 1) fail(`quota.rs: expected exactly one SETTINGS_PATH, found ${how.length}`);
+else if (!path) fail("quota.rs: SETTINGS_PATH no longer reads `Settings → <category> → <section>`");
+else if (!/\{SETTINGS_PATH\}/.test(quota.match(/pub fn how_to_change[\s\S]*?\n\}/)?.[0] ?? "")) fail("quota.rs: how_to_change no longer names SETTINGS_PATH, so refusals carry no Settings remedy");
 else {
   const [cat, section] = [path[1].trim(), path[2].trim()];
   const catId = [...sheet.matchAll(/\{ id: "([a-z-]+)", label: "([^"]+)" \}/g)].find((m) => m[2] === cat)?.[1];
-  if (!catId) fail(`HOW_TO_CHANGE names category "${cat}", which SettingsSheet's CATS does not have`);
+  if (!catId) fail(`SETTINGS_PATH names category "${cat}", which SettingsSheet's CATS does not have`);
   else {
     // The section must be rendered INSIDE that category's block.
     const block = sheet.split(`{cat === "${catId}" && <>`)[1]?.split("</>}")[0] ?? "";
     if (!block.includes("<QuotaSection")) fail(`<QuotaSection> is not rendered under cat === "${catId}" (${cat})`);
-    else if (!panel.includes(`<label>${section}</label>`)) fail(`QuotaPanel's heading is not "${section}", which HOW_TO_CHANGE promises`);
-    else ok(`HOW_TO_CHANGE's "Settings → ${cat} → ${section}" is where QuotaSection renders`);
+    else if (!panel.includes(`<label>${section}</label>`)) fail(`QuotaPanel's heading is not "${section}", which SETTINGS_PATH promises`);
+    else ok(`SETTINGS_PATH's "Settings → ${cat} → ${section}" is where QuotaSection renders`);
   }
 }
 

@@ -2707,6 +2707,8 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .setting input:focus, .setting select:focus { border-color: var(--line-strong); }
 .setting select:disabled { opacity: 0.5; cursor: default; }
+.quota-problems { font-size: var(--fs-micro); color: var(--txt-dim); margin-top: 2px; }
+.quota-problem-mark { color: var(--warn); }
 .preview { padding: var(--s2); background: var(--bg-panel); border-radius: var(--r-sm); color: var(--txt-hi); font-size: var(--fs-row); }
 .seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; width: fit-content; }
 .seg button { background: var(--bg-input); color: var(--txt-dim); border: 0; padding: var(--s2) var(--s4); font-size: var(--fs-label); text-transform: capitalize; }

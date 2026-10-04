@@ -18,6 +18,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   launch on, with no restart. A refusal now says which rule stopped it and
   where to change it. A repository's `.worktrees.toml` cannot set it.
 
+### Fixed
+- **Settings no longer break a `config.toml` kept in your dotfiles.** When the
+  app saved a setting into `~/.config/worktrees/config.toml` (Other projects,
+  pi's per-repo trust, and now Plan limits), it replaced a symlinked file with
+  a plain copy, leaving your dotfiles copy unchanged, and a file you had made
+  private (mode 600) came back readable by everyone. The setting is now
+  written through the link to the real file, and the file keeps its
+  permissions.
+
 ## [0.37.0] - 2026-10-03
 
 ### Added

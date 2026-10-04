@@ -269,3 +269,15 @@ JSON
   [ "$status" -ne 0 ]
   [[ "$output" == *"quota may not be set by a project"* ]]
 }
+
+@test "quota policy: under XDG_CONFIG_HOME the refusal names the file actually read" {
+  export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/xdg"
+  mkdir -p "$XDG_CONFIG_HOME/worktrees"
+  printf '[quota]\nweekly_warn_pct = 90\n' > "$XDG_CONFIG_HOME/worktrees/config.toml"
+  weekly_fixture 92 normal
+  run_wt new feat-xdg
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"the user's limit: 90%"* ]]
+  [[ "$output" == *"\`[quota]\` in $XDG_CONFIG_HOME/worktrees/config.toml"* ]]
+  [[ "$output" != *"~/.config/worktrees/config.toml"* ]]
+}

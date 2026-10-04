@@ -152,10 +152,22 @@ pub const TABLE: &str = "quota";
 /// checked against these by `app/scripts/quota-check.mjs`.
 pub const PCT_MIN: u8 = 1;
 pub const PCT_MAX: u8 = 100;
-/// Where the user changes it — said in every refusal, so the remedy is one
-/// the reader can actually follow.
-pub const HOW_TO_CHANGE: &str = "The user can change when this applies in Settings → Behavior → Plan limits, \
-     or `[quota]` in ~/.config/worktrees/config.toml";
+/// Where in the app the user changes it. Named in every refusal, so the
+/// remedy is one the reader can follow — `app/scripts/quota-check.mjs` checks
+/// that the Settings panel really lives here.
+pub const SETTINGS_PATH: &str = "Settings → Behavior → Plan limits";
+
+/// The refusal's remedy sentence, naming the config file the binary actually
+/// reads (`$XDG_CONFIG_HOME` honoured), `~`-abbreviated under `$HOME`.
+pub fn how_to_change(config_path: &std::path::Path) -> String {
+    let shown = config_path.to_string_lossy().into_owned();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let shown = match shown.strip_prefix(&format!("{}/", home.trim_end_matches('/'))) {
+        Some(rest) if !home.is_empty() => format!("~/{rest}"),
+        _ => shown,
+    };
+    format!("The user can change when this applies in {SETTINGS_PATH}, or `[quota]` in {shown}")
+}
 
 /// `[quota]` as the gate reads it. `Default` is today's behaviour exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,45 +265,87 @@ pub fn set_user_policy_at(path: &std::path::Path, p: Policy) -> Result<(), Strin
 }
 
 /// `text` with `[quota]` set to `p`. Pure, for the tests.
+///
+/// Edits each key's VALUE in place, so an inline comment on it survives
+/// (`gate = false  # too eager for me`), keeps the file's line ending (a CRLF
+/// file stays CRLF), and inserts a missing key after its sibling (or under
+/// the header).
 pub fn with_policy(text: &str, p: Policy) -> Result<String, String> {
     if let Some(n) = p.weekly_warn_pct {
         if !(PCT_MIN..=PCT_MAX).contains(&n) {
             return Err(format!("weekly_warn_pct must be from {PCT_MIN} to {PCT_MAX} (got {n})"));
         }
     }
-    let mut ours = vec![format!("gate = {}", p.gate)];
-    if let Some(n) = p.weekly_warn_pct {
-        ours.push(format!("weekly_warn_pct = {n}"));
-    }
-    let is_key = |l: &str, k: &str| l.trim_start().strip_prefix(k).is_some_and(|r| r.trim_start().starts_with('='));
+    const KEYS: [&str; 2] = ["gate", "weekly_warn_pct"];
+    let value = |k: &str| match k {
+        "gate" => Some(p.gate.to_string()),
+        _ => p.weekly_warn_pct.map(|n| n.to_string()),
+    };
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let key_of = |l: &str| {
+        KEYS.into_iter()
+            .find(|k| l.trim_start().strip_prefix(k).is_some_and(|r| r.trim_start().starts_with('=')))
+    };
     let mut out: Vec<String> = Vec::new();
     let mut in_quota = false;
-    let mut placed = false;
+    let mut header: Option<usize> = None;
+    let mut seen: Vec<&str> = Vec::new();
+    // Where a missing key goes: after the last of ours already in the table,
+    // else directly under the header.
+    let mut last_ours: Option<usize> = None;
     for l in text.lines() {
         let t = l.trim_start();
         if t.starts_with('[') {
-            in_quota = t.trim_end() == "[quota]";
+            // `[quota]  # note` is ours; `[quota.sub]` and `[[quota]]` are not.
+            in_quota = t.split('#').next().unwrap_or("").trim_end() == "[quota]";
             out.push(l.to_string());
-            if in_quota && !placed {
-                out.extend(ours.iter().cloned());
-                placed = true;
+            if in_quota && header.is_none() {
+                header = Some(out.len());
             }
             continue;
         }
-        if in_quota && (is_key(l, "gate") || is_key(l, "weekly_warn_pct")) {
+        if let Some(k) = key_of(l).filter(|_| in_quota) {
+            if seen.contains(&k) {
+                continue; // a duplicate key: keep one (TOML would refuse two)
+            }
+            seen.push(k);
+            if let Some(v) = value(k) {
+                let indent = &l[..l.len() - t.len()];
+                let after_eq = &t[t.find('=').map_or(t.len(), |i| i + 1)..];
+                // From the whitespace run before the first `#` that follows
+                // whitespace, so the comment keeps its alignment.
+                let comment = after_eq
+                    .find(" #")
+                    .or_else(|| after_eq.find("\t#"))
+                    .map_or("", |i| {
+                        let start = after_eq[..i].trim_end_matches([' ', '\t']).len();
+                        &after_eq[start..]
+                    });
+                out.push(format!("{indent}{k} = {v}{comment}"));
+                last_ours = Some(out.len());
+            }
             continue;
         }
         out.push(l.to_string());
     }
-    if !placed {
-        if out.last().is_some_and(|l| !l.trim().is_empty()) {
-            out.push(String::new());
+    let missing: Vec<String> =
+        KEYS.into_iter().filter(|k| !seen.contains(k)).filter_map(|k| value(k).map(|v| format!("{k} = {v}"))).collect();
+    match last_ours.or(header) {
+        Some(at) => {
+            for (i, l) in missing.into_iter().enumerate() {
+                out.insert(at + i, l);
+            }
         }
-        out.push("[quota]".into());
-        out.extend(ours);
+        None => {
+            if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
+            out.push("[quota]".into());
+            out.extend(missing);
+        }
     }
-    let mut new = out.join("\n");
-    new.push('\n');
+    let mut new = out.join(eol);
+    new.push_str(eol);
     let back = policy_from(&new);
     if back.policy != p || toml::from_str::<toml::Table>(&new).is_err() {
         return Err(
@@ -452,7 +506,7 @@ fn fixture(path: &std::path::Path, provider_id: &str) -> Vec<Window> {
 ///
 /// `others` is the harnesses actually installed here, never a hardcoded "the
 /// other provider" — there are three, and the next one is not far off.
-pub fn refusal(provider_label: &str, w: &Window, now: i64, others: &[&str], policy: &Policy) -> String {
+pub fn refusal(provider_label: &str, w: &Window, now: i64, others: &[&str], policy: &Policy, how: &str) -> String {
     let when = until(w.resets_at, now)
         .map(|s| format!(", resets in {s}"))
         .unwrap_or_default();
@@ -468,7 +522,7 @@ pub fn refusal(provider_label: &str, w: &Window, now: i64, others: &[&str], poli
     };
     format!(
         "{provider_label} is at {:.0}% of its {} window{when} — not starting another agent on it{rule}.{alt} \
-         Ask the user before overriding: this spends an allowance they are nearly out of. {HOW_TO_CHANGE}",
+         Ask the user before overriding: this spends an allowance they are nearly out of. {how}",
         w.percent, w.label
     )
 }
@@ -503,16 +557,31 @@ pub fn gate(
     if launch.force {
         return Ok(());
     }
-    // Before the probe as well: a user who turned the gate off pays for no
-    // keychain read, no GET and no `codex app-server` spawn on every launch.
-    let policy = user_policy().policy;
+    let how = how_to_change(&crate::config::config_toml_path());
+    gate_with(adapter, launch, now, &user_policy().policy, &how)
+}
+
+/// `gate`, with the policy and the remedy passed in — so a test can prove the
+/// order of the checks without touching the process-global config env.
+fn gate_with(
+    adapter: &dyn crate::harness::Adapter,
+    launch: &crate::profile::AiLaunch,
+    now: i64,
+    policy: &Policy,
+    how: &str,
+) -> Result<(), crate::harness::Refusal> {
+    if launch.force {
+        return Ok(());
+    }
+    // Before the probe: a user who turned the gate off pays for no keychain
+    // read, no GET and no `codex app-server` spawn on every launch.
     if !policy.gate {
         return Ok(());
     }
     let Some(windows) = adapter.usage() else {
         return Ok(());
     };
-    let Some(w) = worst_window(&windows, launch.model.as_deref(), now, &policy) else {
+    let Some(w) = worst_window(&windows, launch.model.as_deref(), now, policy) else {
         return Ok(());
     };
     let others = other_harnesses(adapter.provider());
@@ -521,7 +590,8 @@ pub fn gate(
         w,
         now,
         &others,
-        &policy,
+        policy,
+        how,
     )))
 }
 
@@ -549,6 +619,7 @@ mod tests {
         Policy { gate: true, weekly_warn_pct: Some(pct) }
     }
     const OFF: Policy = Policy { gate: false, weekly_warn_pct: None };
+    const HOW: &str = "The user can change when this applies in Settings → Behavior → Plan limits, or `[quota]` in ~/.config/worktrees/config.toml";
 
     #[test]
     fn no_data_fails_open() {
@@ -633,7 +704,7 @@ mod tests {
     fn the_refusal_names_the_window_and_asks_before_overriding() {
         let mut over = w("5h", 92.0, "warning");
         over.resets_at = Some(3_600);
-        let msg = refusal("Codex", &over, 0, &["Claude", "pi"], &D);
+        let msg = refusal("Codex", &over, 0, &["Claude", "pi"], &D, HOW);
         assert!(msg.contains("Codex is at 92% of its 5h window"), "{msg}");
         assert!(msg.contains("resets in 1h 0m"), "{msg}");
         assert!(msg.contains("Other agents available here: Claude, pi."), "{msg}");
@@ -645,7 +716,7 @@ mod tests {
         // The first cut said `if provider == "codex" {"claude"} else {"codex"}`
         // — with three harnesses in the registry that is a guess, and on a
         // machine with neither installed it is advice that cannot be followed.
-        let msg = refusal("Codex", &w("5h", 90.0, "warning"), 0, &[], &D);
+        let msg = refusal("Codex", &w("5h", 90.0, "warning"), 0, &[], &D, HOW);
         assert!(!msg.contains("Claude"), "{msg}");
         assert!(!msg.contains("available here"), "{msg}");
     }
@@ -773,12 +844,12 @@ mod tests {
 
     #[test]
     fn the_refusal_says_which_rule_fired_and_where_to_change_it() {
-        let msg = refusal("Claude", &weekly(92.0, "normal"), 0, &[], &at(90));
+        let msg = refusal("Claude", &weekly(92.0, "normal"), 0, &[], &at(90), HOW);
         assert!(msg.contains("Claude is at 92% of its Weekly window"), "{msg}");
         assert!(msg.contains("the user's limit: 90% of a weekly window"), "{msg}");
         assert!(msg.contains("Settings → Behavior → Plan limits"), "{msg}");
         assert!(msg.contains("`[quota]` in ~/.config/worktrees/config.toml"), "{msg}");
-        let msg = refusal("Codex", &w("5h", 85.0, "warning"), 0, &[], &at(90));
+        let msg = refusal("Codex", &w("5h", 85.0, "warning"), 0, &[], &at(90), HOW);
         assert!(msg.contains("Codex graded it nearly spent"), "{msg}");
         assert!(msg.contains("Settings → Behavior → Plan limits"), "{msg}");
     }
@@ -857,6 +928,83 @@ mod tests {
             |p| set_user_policy_at(p, at(80)).unwrap(),
             |t| policy_from(t).policy == at(80),
         );
+    }
+
+    // ── review follow-ups ───────────────────────────────────────────────────
+
+    /// An adapter whose probe must never run, and whose usage otherwise reads
+    /// a spent weekly window — so `gate_with` either refuses or panics unless
+    /// it returns before asking.
+    struct Probe(bool);
+    impl crate::harness::Adapter for Probe {
+        fn provider(&self) -> &'static crate::provider::Provider {
+            crate::provider::CLAUDE
+        }
+        fn usage(&self) -> Option<Vec<Window>> {
+            assert!(self.0, "the usage probe ran with the gate off");
+            Some(vec![weekly(99.0, "over")])
+        }
+        fn launch_args(&self, _: &crate::profile::AiLaunch, _: &str) -> crate::harness::LaunchArgs {
+            unreachable!()
+        }
+        fn resume_arg(&self, _: &str) -> String {
+            unreachable!()
+        }
+        fn session_present(&self, _: &crate::Project, _: &str) -> bool {
+            unreachable!()
+        }
+        fn activity(&self, _: &crate::harness::Scan, _: &str, _: &str) -> Option<crate::activity::Activity> {
+            unreachable!()
+        }
+        fn send(&self, _: &crate::harness::SendRequest) -> crate::harness::Delivery {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn gate_off_returns_before_the_probe_runs() {
+        let launch = crate::profile::AiLaunch::default();
+        assert!(gate_with(&Probe(false), &launch, 0, &OFF, HOW).is_ok(), "gate off must allow without asking");
+        // …and with the gate on, the same adapter is asked and refuses, so the
+        // early return is the only thing standing between it and the panic.
+        assert!(gate_with(&Probe(true), &launch, 0, &D, HOW).is_err());
+    }
+
+    #[test]
+    fn the_remedy_names_the_config_the_binary_reads() {
+        let how = how_to_change(std::path::Path::new("/xdg/somewhere/worktrees/config.toml"));
+        assert!(how.contains("`[quota]` in /xdg/somewhere/worktrees/config.toml"), "{how}");
+        assert!(how.contains(SETTINGS_PATH), "{how}");
+        if let Ok(home) = std::env::var("HOME").map(|h| h.trim_end_matches('/').to_string()) {
+            if !home.is_empty() {
+                let how = how_to_change(&std::path::Path::new(&home).join(".config/worktrees/config.toml"));
+                assert!(how.contains("`[quota]` in ~/.config/worktrees/config.toml"), "{how}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_crlf_config_stays_crlf_and_inline_comments_survive() {
+        let before = "ai_cmd = \"x\"\r\n[quota]  # mine\r\ngate = true  # too eager?\r\nweekly_warn_pct = 80\t# was 90\r\n";
+        let after = with_policy(before, Policy { gate: false, weekly_warn_pct: Some(95) }).unwrap();
+        assert_eq!(
+            after,
+            "ai_cmd = \"x\"\r\n[quota]  # mine\r\ngate = false  # too eager?\r\nweekly_warn_pct = 95\t# was 90\r\n"
+        );
+        assert!(!after.replace("\r\n", "").contains('\n'), "a bare LF crept in: {after:?}");
+        // a key that has to be ADDED takes the file's ending too
+        let added = with_policy("[quota]\r\ngate = true\r\n", at(70)).unwrap();
+        assert_eq!(added, "[quota]\r\ngate = true\r\nweekly_warn_pct = 70\r\n");
+    }
+
+    #[test]
+    fn a_subtable_named_quota_something_is_not_quota() {
+        // `[quota.sub]` starts with "[quota" — its keys are not ours to edit.
+        let before = "[quota.sub]\ngate = true\n";
+        let after = with_policy(before, OFF).unwrap();
+        assert!(after.starts_with("[quota.sub]\ngate = true\n"), "{after}");
+        assert!(after.ends_with("[quota]\ngate = false\n"), "{after}");
+        assert_eq!(policy_from(&after).policy, OFF);
     }
 
     /// Set an env var for the duration of `f`. Tests that use this are run

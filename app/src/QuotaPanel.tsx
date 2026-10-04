@@ -18,7 +18,7 @@ export type QuotaSettings = {
 export const QUOTA_PCTS = [50, 60, 70, 75, 80, 85, 90, 95, 100];
 
 /** Settings → Behavior → Plan limits. The refusal message names this path, so
- *  renaming the section means changing `quota::HOW_TO_CHANGE` too. */
+ *  renaming the section means changing `quota::SETTINGS_PATH` too (quota-check.mjs). */
 export function QuotaSection({ onReport, "data-focus": focusId }: {
   onReport: (text: string) => void;
   "data-focus"?: string;
@@ -58,8 +58,10 @@ export function QuotaSection({ onReport, "data-focus": focusId }: {
         Applies to weekly windows. The 5-hour window always uses the provider's own warning; turn the check
         off to launch past it. The usage meter's colours always show the provider's reading.
       </div>
-      {s.problems.length > 0 && <div className="hint" data-testid="quota-problems">
-        {s.problems.map((p) => <div key={p}>⚠ {p}</div>)}
+      {/* Hue in the glyph only, words in --txt-dim: `.hint`'s --txt-mute is
+          2.2:1 in tokyo-day, too faint for the one line saying an edit did nothing. */}
+      {s.problems.length > 0 && <div className="quota-problems" data-testid="quota-problems">
+        {s.problems.map((p) => <div key={p}><span className="quota-problem-mark" aria-hidden>⚠</span> {p}</div>)}
       </div>}
       <div className="hint">Takes effect at the next launch — agents already running are not affected.</div>
       <div className="hint">Settings file: {s.config_path} (<code>[quota]</code>)</div>
