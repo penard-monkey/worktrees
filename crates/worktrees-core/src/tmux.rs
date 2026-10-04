@@ -903,13 +903,29 @@ pub fn select_pane(pane_id: &str) {
     let _ = tmux(&["select-pane", "-t", pane_id]);
 }
 
+/// Whether an attach/switch may happen at all: only for a person at a terminal.
+/// An agent's shell has no tty on stdin/stdout, yet inherits `$TMUX` from its
+/// pane; a bare `switch-client` there resolves to whichever client tmux deems
+/// current for that session, which is the APP's embedded one, and the lane
+/// took over the user's view. No `-c` is added for the interactive case: with
+/// a tty the caller is a human in their own client, and tmux's pick is theirs.
+pub fn may_attach(stdin_tty: bool, stdout_tty: bool) -> bool {
+    stdin_tty && stdout_tty
+}
+
 /// Attach (or switch-client if already in tmux). stdio inherited so the tty
-/// reaches tmux; failure ignored (headless CI has no tty).
-pub fn attach_or_switch(session: &str) {
+/// reaches tmux; failure ignored. Returns false (doing nothing) when there is
+/// no interactive terminal, so the caller can print the detached line.
+pub fn attach_or_switch(session: &str) -> bool {
+    use std::io::IsTerminal;
     use std::process::Command;
+    if !may_attach(std::io::stdin().is_terminal(), std::io::stdout().is_terminal()) {
+        return false;
+    }
     let in_tmux = std::env::var("TMUX").map(|v| !v.is_empty()).unwrap_or(false);
     let sub = if in_tmux { "switch-client" } else { "attach" };
     let _ = Command::new("tmux").args([sub, "-t", session]).status();
+    true
 }
 
 /// Kill EXACTLY `name` (`-t =name`). NO bare fallback: on tmux ≥ 2.1 the exact
@@ -924,6 +940,14 @@ pub fn kill_session(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_person_at_a_terminal_may_attach() {
+        assert!(may_attach(true, true));
+        assert!(!may_attach(false, true), "an agent's stdin is not a tty");
+        assert!(!may_attach(true, false), "piped output is not a person watching");
+        assert!(!may_attach(false, false));
+    }
 
     #[test]
     fn provider_session_names_are_persistent() {

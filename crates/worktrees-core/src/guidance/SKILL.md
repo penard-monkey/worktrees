@@ -15,8 +15,9 @@ tmux. The repository's own AGENTS.md / CLAUDE.md wins on repo-specific rules
 ## Doing branch work yourself
 
 - Create a place: MCP `create_worktree {branch}` or `worktrees new <branch>
-  --no-attach` (attaching would take over your own terminal). Then work in
-  its directory, `.worktrees/<slug>`.
+  --no-attach` (attaching would take over your own terminal); the same goes
+  for `worktrees open <slug> --no-attach`. Then work in its directory,
+  `.worktrees/<slug>`.
 - Never `git worktree add` by hand: the tree gets no session, and outside
   `.worktrees/` it is invisible to the app and to `list_places`.
 - Never switch branches in `(main)` or in a place that is not yours.

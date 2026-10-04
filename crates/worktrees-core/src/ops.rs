@@ -439,7 +439,9 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
         return 0;
     }
-    tmux::attach_or_switch(&session);
+    if !tmux::attach_or_switch(&session) {
+        ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
+    }
     0
 }
 
