@@ -5,6 +5,13 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **An agent with a PTY still passes `may_attach`.** An agent whose shell
+  allocates a PTY (Codex's exec can) has ttys on stdin and stdout, so it can
+  still `switch-client` the app's client. A stricter guard needs a signal that
+  the caller is the user. One option is an env var set in agent launches, e.g.
+  `WORKTREES_AGENT=1`, which makes `attach_or_switch` refuse. See
+  [the session](docs/sessions/2026-10-03-no-steal-client/summary.md).
+
 - **`rollout_turn_since`: one enormous line is copied quadratically.** Each
   64 KiB step re-copies the whole carry (`buf.extend_from_slice(&carry)`, then
   `carry = buf[..hi].to_vec()`). A single line of L bytes costs about
