@@ -10,6 +10,14 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   place name. Not looked at in the real app either (only the mock, Chromium and
   WebKit). See [the session](docs/sessions/2026-10-03-topbar-project/summary.md).
 
+- **Clone from URL…: the real-app hand test is owed.** Cancel during a large
+  clone; the folder should be gone and the dialog should say so. Also clone a
+  private repo over https with a working keychain or gh helper. This Mac has no
+  github.com https keychain entry, so only an injected gh helper was proven.
+  Optional: offer Clone on the Home screen beside New project / Import (it is
+  only in the nav's add menu today). See
+  [the session](docs/sessions/2026-10-03-clone-project/summary.md).
+
 - **Context usage per session (parked).** Proposal in
   `docs/proposals/context-usage.md`; six open questions (§11) for David before
   phase 1 — exact Claude window via a statusline hook or table + ratchet,
