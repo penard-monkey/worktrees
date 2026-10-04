@@ -20,7 +20,8 @@
 //!   whatever the rollout's last line says.
 //!
 //! Cost is the app's, unchanged by the move: `codex_tail` re-reads a rollout's
-//! 256K tail only once the file has GROWN (the cache moved here with it), and
+//! 256K tail only once the file has GROWN (the cache moved here with it), plus
+//! a backward scan of just the bytes that growth added, and
 //! `codex_panes` is one chained `tmux` call for however many sessions are
 //! mid-turn, and none while none are.
 
@@ -34,9 +35,9 @@ use serde::Serialize;
 use crate::codex::{self, Turn};
 use crate::{agent, tmux, Project};
 
-/// How much of a rollout's end is read per growth. Matches the app's transcript
-/// tail, so one enormous tool result cannot hide the turn boundary before it
-/// from both readers differently.
+/// How much of a rollout's end is read per growth for its MODEL. Matches the
+/// app's transcript tail. The turn boundary is NOT read from this window — a
+/// long turn outgrows it (`codex_tail`).
 pub const ROLLOUT_TAIL_BYTES: u64 = 256 * 1024;
 
 /// The state of the agent in one place.
@@ -182,29 +183,44 @@ pub fn tail_lines_checked(path: &Path, max_bytes: u64) -> Result<Vec<String>, St
 }
 
 /// Last answer per codex rollout: its length when read, the model it named and
-/// where its newest turn stands. One cache and one tail read serve both, so a
-/// streaming turn costs a single 256K read per tick, not one per question.
+/// where its newest turn stands. One cache serves both, so a streaming turn
+/// costs one tail read and one short backward scan per growth, not per question.
 type TailCache = HashMap<PathBuf, (u64, Option<String>, Option<Turn>)>;
 static CODEX_TAIL: Mutex<Option<TailCache>> = Mutex::new(None);
 
-/// `path`'s (model, turn), re-read only once the file has GROWN. A tail that
-/// now names neither (one enormous tool result filling it) keeps the last
-/// answer for each: nothing changed because a big line landed.
+/// `path`'s (model, turn), re-read only once the file has GROWN.
+///
+/// The model is the tail's newest, else the last answer: nothing changed
+/// because one enormous tool result filled the tail. The turn is the newest
+/// boundary in the WHOLE file, which a tail cannot promise — a long turn's
+/// output scrolls its `task_started` out of any fixed window. So the bytes
+/// since the last read are scanned back to the last read's length
+/// (`rollout_turn_since`), and only when they hold no boundary does the cached
+/// turn stand — it was the newest up to exactly there. A file that SHRANK was
+/// replaced, and is scanned from scratch. A failed scan caches nothing, so the
+/// next poll retries the same bytes instead of skipping them.
 pub fn codex_tail(path: &Path) -> (Option<String>, Option<Turn>) {
     let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
         return (None, None);
     };
     let mut guard = CODEX_TAIL.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(HashMap::new);
-    if let Some((l, m, t)) = cache.get(path) {
+    let prev = cache.get(path).cloned();
+    if let Some((l, m, t)) = &prev {
         if *l == len {
             return (m.clone(), t.clone());
         }
     }
-    let (pm, pt) = cache.get(path).map(|(_, m, t)| (m.clone(), t.clone())).unwrap_or((None, None));
     let lines = tail_lines_checked(path, ROLLOUT_TAIL_BYTES).unwrap_or_default();
-    let m = codex::rollout_model(&lines).or(pm);
-    let t = codex::rollout_turn(&lines).or(pt);
+    let m = codex::rollout_model(&lines).or(prev.as_ref().and_then(|p| p.1.clone()));
+    let (floor, pt) = match prev {
+        Some((l, _, t)) if l < len => (l, t),
+        _ => (0, None),
+    };
+    let Ok(found) = codex::rollout_turn_since(path, len, floor) else {
+        return (m, pt);
+    };
+    let t = found.or(pt);
     cache.insert(path.to_path_buf(), (len, m.clone(), t.clone()));
     (m, t)
 }
@@ -497,6 +513,107 @@ mod tests {
         let done = r#"{"type":"event_msg","payload":{"type":"task_complete","completed_at":123}}"#;
         std::fs::write(&f, format!("{started}\n{done}\n")).unwrap();
         assert_eq!(codex_tail(&f).1, Some(Turn::Done { at: Some(123), turn_id: None }), "growth is read");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Exactly `n` bytes of rollout lines that hold no turn boundary — tool
+    /// output, as a long turn writes it. `n` must be at least 40.
+    fn filler(n: usize) -> String {
+        let line = format!(r#"{{"type":"response_item","payload":{{"output":"{}"}}}}"#, "x".repeat(150));
+        let mut out = String::new();
+        while n - out.len() > 2 * (line.len() + 1) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        let pad = n - out.len() - r#"{"type":"response_item","payload":{"output":""}}"#.len() - 1;
+        out.push_str(&format!(r#"{{"type":"response_item","payload":{{"output":"{}"}}}}"#, "x".repeat(pad)));
+        out.push('\n');
+        assert_eq!(out.len(), n);
+        out
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wtact-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const MARGIN: usize = 64 * 1024;
+
+    /// A long turn's `task_started` is far more than the tail window back
+    /// (1.2 MB of 1.27, measured on a real rollout) and the turn is still busy.
+    #[test]
+    fn codex_tail_finds_a_turn_start_beyond_the_tail() {
+        let d = scratch("beyond");
+        let f = d.join("r.jsonl");
+        let started = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}"#;
+        let after = filler(ROLLOUT_TAIL_BYTES as usize + MARGIN);
+        std::fs::write(&f, format!("{}{started}\n{after}", filler(4096))).unwrap();
+        assert!(after.len() as u64 > ROLLOUT_TAIL_BYTES, "the marker must be OUTSIDE the tail window");
+        assert_eq!(codex_tail(&f).1, Some(Turn::Busy));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The cached answer is the newest boundary only up to the length it was
+    /// read at. A turn that started after it — and whose output then scrolled
+    /// its start out of the tail before the next poll — is the truth, not the
+    /// previous turn's `Done`.
+    #[test]
+    fn codex_tail_a_cached_done_does_not_outlive_a_new_turn() {
+        let d = scratch("stale");
+        let f = d.join("r.jsonl");
+        let done = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","completed_at":100}}"#;
+        let first = format!("{}{done}\n{}", filler(4096), filler(4096));
+        std::fs::write(&f, &first).unwrap();
+        assert_eq!(codex_tail(&f).1, Some(Turn::Done { at: Some(100), turn_id: Some("t1".into()) }));
+        let started = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}"#;
+        let after = filler(ROLLOUT_TAIL_BYTES as usize + MARGIN);
+        std::fs::write(&f, format!("{first}{started}\n{after}")).unwrap();
+        assert!(after.len() as u64 > ROLLOUT_TAIL_BYTES, "the new marker must be OUTSIDE the tail window");
+        assert_eq!(codex_tail(&f).1, Some(Turn::Busy), "a new turn started since the cached Done");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A boundary line split by the backward scan's chunk seam — through the
+    /// middle of a multi-byte character, the worst place — is reassembled
+    /// whole. Placed beyond the tail window so only the scan can find it.
+    #[test]
+    fn codex_tail_reads_a_marker_split_by_a_scan_seam() {
+        let d = scratch("seam");
+        let f = d.join("r.jsonl");
+        let done = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"tür-1","completed_at":7}}"#;
+        let cut = done.find('ü').unwrap() + 1; // between ü's two bytes
+        // The seam lands `6 * TURN_SCAN_CHUNK` from the end: put `cut` there.
+        let seam_from_end = 6 * codex::TURN_SCAN_CHUNK as usize;
+        assert!(seam_from_end as u64 > ROLLOUT_TAIL_BYTES + MARGIN as u64);
+        let after = filler(seam_from_end - (done.len() - cut) - 1);
+        let body = format!("{}{done}\n{after}", filler(4096));
+        let marker_at = 4096;
+        assert_eq!(body.len() - seam_from_end, marker_at + cut, "the seam is inside the marker line");
+        std::fs::write(&f, body).unwrap();
+        assert_eq!(codex_tail(&f).1, Some(Turn::Done { at: Some(7), turn_id: Some("tür-1".into()) }));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Cost: with a floor, the scan stops there and does not walk back to an
+    /// older boundary, so a poll reads only what the file grew by.
+    #[test]
+    fn rollout_turn_since_stops_at_its_floor() {
+        let d = scratch("floor");
+        let f = d.join("r.jsonl");
+        let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+        let head = format!("{started}\n{}", filler(ROLLOUT_TAIL_BYTES as usize + MARGIN));
+        std::fs::write(&f, format!("{head}{}", filler(4096))).unwrap();
+        let len = std::fs::metadata(&f).unwrap().len();
+        assert_eq!(codex::rollout_turn_since(&f, len, 0).unwrap(), Some(Turn::Busy), "no floor: the whole file");
+        assert_eq!(codex::rollout_turn_since(&f, len, head.len() as u64).unwrap(), None, "floored above it");
+        // A line still unterminated at the floor is weighed again once whole.
+        let done = r#"{"type":"event_msg","payload":{"type":"task_complete","completed_at":9}}"#;
+        std::fs::write(&f, format!("{head}{done}\n")).unwrap();
+        let len = std::fs::metadata(&f).unwrap().len();
+        let floor = head.len() as u64 + 10;
+        assert_eq!(codex::rollout_turn_since(&f, len, floor).unwrap(), Some(Turn::Done { at: Some(9), turn_id: None }));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

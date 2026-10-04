@@ -33,8 +33,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and the branch switcher shared one React key, so after Enter or Esc on a
   rename the empty input stayed beside the name. The branch switcher now has its
   own key, and `identity-keys-check.mjs` guards it.
-
-### Fixed
 - **Clone from URL… hardening.** A clone that fails after a long transfer now
   reports the real reason (authentication, not found, …), not a generic
   failure that quotes a progress line. A URL that carries credentials
@@ -43,6 +41,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   clones. git itself is told to allow only the https, http, ssh, git and file
   transports. Quitting the app mid-clone cancels the clone and removes its
   partial folder.
+- **A long Codex turn no longer reads as idle.** The turn's state came from
+  the last 256 KiB of its rollout, and a turn whose tool output ran past that
+  lost its `task_started`: `place_status` said `idle` and the nav showed no dot
+  while the pane said "Working (7m…)". The newest turn boundary is now found
+  anywhere in the file, by a backward scan of just the bytes each poll added,
+  so a previous turn's cached "done" can no longer stand in for a turn that
+  started since.
 
 ## [0.36.1] - 2026-10-03
 
