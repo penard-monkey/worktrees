@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-10-06
+
 ### Added
 - **The + on a project row is always visible, and ⌘N makes a new worktree.**
   The new-worktree button used to appear only when you hovered the row; now it
