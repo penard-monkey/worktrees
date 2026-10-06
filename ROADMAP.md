@@ -52,6 +52,36 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   only in the nav's add menu today). See
   [the session](docs/sessions/2026-10-03-clone-project/summary.md).
 
+- **In-app editor (CodeMirror 6) — parked.** Proposal in closed PR #444,
+  branch `in-app-editor-proposal` (kept on GitHub on purpose — the proposal is
+  `docs/proposals/in-app-editor.md` there, not on main). §9's five questions are
+  unanswered: admit CodeMirror 6 as a third "no UI libraries" exception (five
+  core packages, no Lezer grammars, highlighting from `highlight.ts`, behind a
+  boundary check); whether any read-only mode stays for editable text; ⌘S vs
+  autosave; writes to files outside the place; when rename/Trash land. Also in
+  it: New file / New folder from the tree. Measurements (CM6 105 KB gz vs
+  Monaco 701 KB) are in the session's `planning.tar.gz`. See
+  [the session](docs/sessions/2026-10-06-in-app-editor/summary.md).
+
+- **Three live bugs in the dock's markdown editor** (`FilesPane.tsx`
+  `SourceEditor` + `lib.rs` `read_file` / `write_file`), whatever happens to the
+  in-app editor:
+  1. **CRLF is rewritten to LF on save.** A `<textarea>` normalises line breaks
+     (measured in WebKit: `"a\r\nb\r\n"` reads back `"a\nb\n"`), so the first
+     keystroke makes every line ending differ and ⌘S writes the file as LF.
+     Fix shape: `read_file` reports the EOL; the save re-applies CRLF (or the
+     view refuses to edit a mixed-EOL file).
+  2. **Non-UTF-8 is corrupted on save.** `read_file` decodes with
+     `from_utf8_lossy`, so an invalid byte becomes U+FFFD in the buffer and is
+     written back. Fix shape: report `utf8: false` and make the view read-only.
+  3. **Two saves of one file race on a fixed temp name** (`.{name}.wt-tmp`) —
+     the dock and the reading overlay are both mounted. Fix shape:
+     `edit_user_config`'s pid-suffixed temp (+ a counter), mode set before the
+     rename.
+  Each needs a fail-first test (a CRLF round-trip through `write_file` alone
+  will pass — the loss is in the textarea, so pin it in the harness too). See
+  [the session](docs/sessions/2026-10-06-in-app-editor/summary.md).
+
 - **Context usage per session (parked).** Proposal in
   `docs/proposals/context-usage.md`; six open questions (§11) for David before
   phase 1 — exact Claude window via a statusline hook or table + ratchet,
