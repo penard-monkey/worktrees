@@ -20,3 +20,4 @@ maintained documentation. Where a proposal and the code disagree, the code wins.
 | [Cross-project reach](cross-project.html) | letting an agent see, message and (opt-in) act on places in other projects — a core-owned project registry, `<project>:<slug>` addressing, routed messages, and drag and drop of a foreign place |
 | [Navigation history](nav-history.html) | back / forward (⌘[ ⌘], ⌘← ⌘→ outside text fields) through what the two panes showed — what a location is, what is noise, coalescing, gone targets |
 | [Context usage](context-usage.html) | how full each agent session's context window is — per-harness numerator and window, compaction, a threshold-gated nav mark and MCP `place_status` |
+| [In-app editor](in-app-editor.html) | editing every text file in the Files dock (CodeMirror 6 as a proposed library exception), saving against agents' concurrent writes, and New file / folder from the tree |
