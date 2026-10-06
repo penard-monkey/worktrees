@@ -8,11 +8,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 - **Pick your editor from the ones you have.** Settings → Commands now lists
   the editors installed on this Mac — Visual Studio Code, Cursor, Zed,
-  Windsurf, Sublime Text, Nova, BBEdit, TextMate, Xcode and the JetBrains IDEs
-  (Toolbox installs included) — plus their command-line launchers when they
-  are on your PATH. Choosing one sets the editor command; "Custom…" keeps the
-  free-text field, and a command that matches nothing on the list shows as
-  Custom.
+  Windsurf, Sublime Text, Nova, BBEdit, TextMate, Xcode, Android Studio and
+  the JetBrains IDEs (Toolbox installs included) — plus their command-line
+  launchers when they are on your PATH. Choosing one sets the editor command;
+  "Custom…" keeps the free-text field, and a command that matches nothing on
+  the list shows as Custom.
 
 ### Fixed
 - **An editor or terminal command that fails now says so.** "Editor" in the

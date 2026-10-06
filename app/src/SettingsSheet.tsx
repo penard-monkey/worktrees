@@ -925,7 +925,11 @@ export function SettingsSheet({
                     <input
                       type="text" value={settings.editor_cmd}
                       aria-label="Editor command"
-                      onChange={(e) => onChange({ editor_cmd: e.currentTarget.value })}
+                      // Typing IS choosing Custom. Without this, a field shown
+                      // only because the stored value matched nothing unmounts
+                      // — focused, mid-word — the keystroke its text first
+                      // equals a detected entry's command.
+                      onChange={(e) => { setEditorCustom(true); onChange({ editor_cmd: e.currentTarget.value }); }}
                     />
                   )}
                 </>

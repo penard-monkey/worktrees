@@ -52,6 +52,8 @@ const KNOWN: &[(&str, &[&str], &[&str])] = &[
     ("PhpStorm", &["PhpStorm"], &["phpstorm"]),
     ("RubyMine", &["RubyMine"], &["rubymine"]),
     ("Fleet", &["Fleet"], &["fleet"]),
+    ("DataGrip", &["DataGrip"], &["datagrip"]),
+    ("Android Studio", &["Android Studio"], &["studio"]),
 ];
 
 /// The directories an app bundle is looked for in, in order.
@@ -146,6 +148,37 @@ mod tests {
                 ("IntelliJ IDEA".into(), "open -a \"IntelliJ IDEA CE\"".into(), "app"),
                 ("Visual Studio Code (code command)".into(), "code".into(), "cli"),
                 ("Sublime Text (subl command)".into(), "subl".into(), "cli"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// The FIRST bundle name in KNOWN wins when several editions are
+    /// installed, so the stored command is stable rather than whichever
+    /// directory listing came first. And a launcher reached through a symlink
+    /// (Homebrew's `code` points into the app bundle) is judged by its TARGET.
+    #[test]
+    fn first_edition_wins_and_launcher_links_are_followed() {
+        let t = tmp("edition");
+        let (apps, bin, real) = (t.join("A"), t.join("bin"), t.join("app"));
+        for d in [&apps, &bin, &real] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // created in the OPPOSITE order to KNOWN's, so creation order can't
+        // be what decides
+        std::fs::create_dir(apps.join("Visual Studio Code - Insiders.app")).unwrap();
+        std::fs::create_dir(apps.join("Visual Studio Code.app")).unwrap();
+        exe(&real.join("code"), 0o755);
+        std::os::unix::fs::symlink("../app/code", bin.join("code")).unwrap();
+        // a dangling link is not a launcher
+        std::os::unix::fs::symlink("../app/nope", bin.join("zed")).unwrap();
+        let got = detect_in(&[apps], &bin.display().to_string());
+        let flat: Vec<(String, String)> = got.into_iter().map(|e| (e.label, e.cmd)).collect();
+        assert_eq!(
+            flat,
+            vec![
+                ("Visual Studio Code".into(), "open -a \"Visual Studio Code\"".into()),
+                ("Visual Studio Code (code command)".into(), "code".into()),
             ]
         );
         let _ = std::fs::remove_dir_all(&t);

@@ -1501,6 +1501,15 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   before it trains everyone to re-run CI on red.
   _From: [2026-08-07 power-consumption session](docs/sessions/2026-08-07-power-consumption/summary.md)_
 
+- **Flaky test: `codex_usage::tests::fake_cli_auth_classification_and_rpc_failure_do_not_invent_logout`**
+  (`crates/worktrees-core/src/codex_usage.rs`) failed on ubuntu CI only, on
+  #443's first run (run 37462006555): `left: "unavailable"`, `right:
+  "unsupported_auth"`. That PR touches no core code, and the same tree passed
+  on the next run and locally. A fake-CLI test, so look first at what it races
+  against (spawn timing, a timeout that a slow runner crosses) before the
+  classification itself.
+  _From: 2026-10-06 in-app-editor lane (#443)_
+
 - **Links in release notes still print raw.** `renderInline` (App.tsx) now
   handles `code`, `**strong**` and `*em*` — the markup the changelog bullets
   actually use — but not `[text](url)`. Nothing renders wrong today: links

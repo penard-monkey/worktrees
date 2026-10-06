@@ -4883,7 +4883,11 @@ fn launch_watched(
         .map_err(|e| format!("couldn't launch '{cmd}': {e}"))?;
     // Drain stderr on its own thread for the child's whole life: a launcher
     // that outlives the grace must never block on a full pipe. Only the tail
-    // is kept — it is for a one-line error, not a log.
+    // is kept — it is for a one-line error, not a log. The thread lives as long
+    // as ANY process holds the write end: a GUI editor forked by the launcher
+    // inherits it, so one parked thread per launch can outlast the click by
+    // the editor's whole session. It does nothing but block in read(), and
+    // ends at EOF when the last holder exits.
     let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     if let Some(mut err) = child.stderr.take() {
