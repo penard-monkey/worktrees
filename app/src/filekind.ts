@@ -112,6 +112,30 @@ export function relPath(root: string, path: string): string {
   return path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path;
 }
 
+/** `path` as the Files tree names it. Every row the backend lists is
+ *  CANONICAL (`list_dir` canonicalises the directory, then joins names), but a
+ *  path built from the place path — the Docs and Plan tabs do that — keeps
+ *  whatever the user registered, `/tmp/…` where the rows say `/private/tmp/…`.
+ *  Compared raw, such a path matches no row at all and the tree can neither
+ *  select nor reveal it. `canon` is "" until the first listing says what the
+ *  canonical root is.
+ *
+ *  Case-EXACT, on a case-insensitive filesystem (APFS): `/Users/x/Repo` and
+ *  `/Users/x/repo` name one directory and compare unequal here. Every row and
+ *  every path the backend resolves comes out of `canonicalize`, which returns
+ *  the on-disk case (macOS `realpath(3)` does; measured), so only a hand-typed place path can differ — and then the
+ *  file simply goes unrevealed. */
+export function treePath(root: string, canon: string, path: string): string {
+  const r = root.replace(/\/+$/, ""), c = canon.replace(/\/+$/, "");
+  return c && r !== c && path.startsWith(`${r}/`) ? c + path.slice(r.length) : path;
+}
+
+/** Does revealing `path` mean opening the directory `dir`? Separator included,
+ *  for `relPath`'s reason: `app-old/` is not inside `app`. */
+export function revealsThrough(dir: string, path: string): boolean {
+  return path.startsWith(`${dir.replace(/\/+$/, "")}/`);
+}
+
 /** Lowercased extension without the dot ("" when the name has none). */
 export function ext(path: string): string {
   const n = basename(path);

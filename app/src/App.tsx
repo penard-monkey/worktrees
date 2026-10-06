@@ -3672,6 +3672,9 @@ function App() {
   // NEW request — the viewer re-scrolls to it even if you scrolled away.
   const [dockAt, setDockAt] = useState<DockAt | null>(null);
   const dockAtSeq = useRef(0);
+  /** Bumped by every `openDockFile`; the Files tree reveals the open file on
+   *  each bump (and on every change of `dockFile`, which covers the restore). */
+  const [revealToken, setRevealToken] = useState(0);
   // What the viewer shows RIGHT NOW, for the async restore below: it must not
   // land on top of a file opened while it was in flight.
   const dockFileRef = useRef(dockFile);
@@ -4638,6 +4641,10 @@ function App() {
    *  deleting the very entry it is about to read. */
   const openDockFile = useCallback((path: string, at?: { line?: number; col?: number }) => {
     setDockFile(path);
+    // …and tell the Files tree to bring it into view. A token, not the path:
+    // opening the file that is ALREADY open changes no path, and is exactly
+    // the "where is this?" that should scroll back to it.
+    setRevealToken((t) => t + 1);
     // A file opened without a line (a tree row, a markdown link) CLEARS the
     // mark: the line belonged to the previous ask, not to this file.
     const line = at?.line;
@@ -8149,6 +8156,7 @@ function App() {
                   <FilesPane
                     root={selected.path}
                     openPath={dockFile}
+                    revealToken={revealToken}
                     at={dockAt}
                     onAtClear={clearDockAt}
                     dockW={fit.dockW}
