@@ -1408,6 +1408,7 @@ export function SettingsSheet({
                 ["⌘S", "Save the markdown file you are editing in Source view"],
                 ["⌘B / ⌘I", "Bold / italic — while the markdown editor has focus (⌘B is the sidebar everywhere else)"],
                 ["⌘T", "New terminal in the dock"],
+                ["⌘N", "New worktree — in the current project, or pick one"],
                 ["⌘⇧E", "Read the dock's file over the whole pane"],
                 ["⌘+ / ⌘−", "Overall size — the whole window, terminal included"],
                 ["⌘0", "Overall size back to 100%"],

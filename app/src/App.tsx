@@ -1865,7 +1865,7 @@ type Verdict = {
  *  Module scope (CLAUDE.md): it owns its fields, and App re-renders on the 3s
  *  poll — defined inside App() it would remount and drop focus per keystroke. */
 function NewPlaceDialog({
-  project, prefix, places, unborn, initial, initialBase, defaultProvider, defaultModels,
+  project, prefix, places, unborn, initial, initialBase, defaultProvider, defaultModels, choices, onPickProject,
   onCreate, onClose, onOpenPlace, onInitialCommit, onError,
 }: {
   project: string;
@@ -1881,6 +1881,11 @@ function NewPlaceDialog({
   initialBase: string;
   defaultProvider: Harness;
   defaultModels: Partial<Record<Harness, string>>;
+  /** ⌘N with no current project: the projects to pick from, shown in the header.
+   *  Picking one re-keys the dialog (the caller's `key` carries the project), so
+   *  places/prefix/unborn and the branch list are all read afresh. */
+  choices?: { root: string; name: string }[];
+  onPickProject?: (root: string) => void;
   onCreate: (branch: string, name: string, base: string, provider: Harness, model: string) => void;
   onClose: () => void;
   onOpenPlace: (slug: string) => void;
@@ -2050,7 +2055,14 @@ function NewPlaceDialog({
         }}>
         <header className="sync-h">
           <b>New worktree</b>
-          <span className="sync-hub">{basename(project)}</span>
+          {choices && onPickProject ? (
+            <select className="np-input nw-project" aria-label="project for the new worktree" data-testid="nw-project"
+              value={project} onChange={(e) => onPickProject(e.target.value)}>
+              {choices.map((c) => <option key={c.root} value={c.root}>{c.name}</option>)}
+            </select>
+          ) : (
+            <span className="sync-hub">{basename(project)}</span>
+          )}
         </header>
 
         {unborn ? (
@@ -3451,6 +3463,9 @@ function App() {
   // question you ask ("what needs me?"), not a mode you live in.
   const [attnOnly, setAttnOnly] = useState(false);
   const [newFor, setNewFor] = useState<string | null>(null);
+  /** The dialog was opened by ⌘N with no current project, so it carries a picker. */
+  const [newChoose, setNewChoose] = useState(false);
+  useEffect(() => { if (!newFor) setNewChoose(false); }, [newFor]);
   const [newBase, setNewBase] = useState("");
   // What a REJECTED create had typed in it, so reopening the form restores the
   // fields instead of handing back three empty boxes. Null for a fresh form.
@@ -6379,6 +6394,16 @@ function App() {
     // ⌘F: which surfaces can take the bar, and which one already has it.
     dockShown, dockTab: eff.dock_tab, mainTermUp: !!selected?.tmux_session.up, findOn,
   };
+  const newWorktreeRef = useRef<() => void>(() => {});
+  newWorktreeRef.current = () => {
+    const roots = (ws?.projects ?? []).filter((p) => p.ok).map((p) => p.root);
+    const cur = sel && roots.includes(sel.repo) ? sel.repo : null;
+    setNewBase(""); setNewDraft(null);
+    if (cur) { setNewChoose(false); setNewFor(cur); }
+    else if (roots.length === 1) { setNewChoose(false); setNewFor(roots[0]); }
+    else if (roots.length > 1) { setNewChoose(true); setNewFor(roots[0]); }
+    else void addProject();
+  };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Esc closes the find bar before anything else — but NOT when the
@@ -6537,6 +6562,18 @@ function App() {
       if (e.metaKey && k === "k") {
         e.preventDefault();
         setSwitchOpen((v) => !v);
+        return;
+      }
+      // ⌘N — new worktree. "Current project" is the SELECTED place's repo (`sel`,
+      // not `selected`, which is null for the seconds before the first list).
+      // Home / nothing selected has none: one project opens straight onto it,
+      // several open the dialog with a project picker, none offers Add project.
+      // Fires from a text field too (as in every Mac app) — the modal guard
+      // above already keeps it from stacking on another dialog. Meta only: Ctrl+N
+      // is the shell's (next history line) and never reaches here.
+      if (e.metaKey && !e.ctrlKey && (k === "n" || e.code === "KeyN")) {
+        e.preventDefault();
+        newWorktreeRef.current();
         return;
       }
       // (The palette's own "swallow the other chords" check used to live here.
@@ -7205,7 +7242,7 @@ function App() {
             <button className="mini" title="Sync" data-testid={`sync-mini|${pv.root}`} data-track="nav.project.sync"
               onClick={(e) => openSyncPop(e, pv.root)}>⇄</button>
           )}
-          <button className="mini" title="new worktree" data-track="nav.project.new" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
+          <button className="mini pnew" title="new worktree (⌘N)" data-track="nav.project.new" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
           <button
             className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
             data-track="nav.project.remove"
@@ -8420,6 +8457,8 @@ function App() {
           unborn={unbornProjects.has(newFor)}
           initial={newDraft}
           initialBase={newBase}
+          choices={newChoose ? ws?.projects.filter((p) => p.ok).map((p) => ({ root: p.root, name: basename(p.root) })) : undefined}
+          onPickProject={(root) => { setNewFor(root); setNewBase(""); setNewDraft(null); }}
           defaultProvider={settings.default_provider}
           defaultModels={settings.default_models}
           onCreate={(b, n, ba, provider, model) => createPlace(newFor, b, n, ba, provider, model)}
