@@ -512,7 +512,12 @@ html[data-places-side="right"] .dock-resizer { left: auto; right: -2px; }
   background: transparent; color: var(--txt-mute); border: 0; border-radius: var(--r-sm);
   padding: 0 5px; font-size: var(--fs-label); opacity: 0; transition: opacity var(--dur-fast);
 }
-.project-h:hover .mini { opacity: 1; }
+.project-h:hover .mini,
+.project-h:focus-within .mini { opacity: 1; }
+/* The + is the one header action that is always there: it is how a worktree gets
+   made, and a control revealed only by hover cannot be found. It keeps its slot
+   like the hidden ones do, so nothing shifts when they fade in. */
+.mini.pnew { opacity: 1; }
 .mini:hover { color: var(--txt-hi); background: var(--bg-elev); }
 /* the project-level "doctor could not run here" flag: a standing signal, so it
    must survive .mini's hover-only opacity. --warn is the drift colour already
@@ -3484,3 +3489,4 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
 .np-hint.warn, .setting .hint.warn { color: var(--txt-hi); }
 .pi-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--r-full); margin-right: var(--s2); background: var(--txt-mute); vertical-align: middle; }
 .pi-dot.ok { background: var(--ok); }
+.nw-project { width: auto; max-width: 60%; margin-left: auto; padding: 2px var(--s2); }

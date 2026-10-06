@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The + on a project row is always visible, and ⌘N makes a new worktree.**
+  The new-worktree button used to appear only when you hovered the row; now it
+  is always there (the other row actions still reveal on hover, and on keyboard
+  focus). ⌘N opens New worktree for the project of the selected place; from Home
+  with several projects the dialog carries a project picker, with one project it
+  opens straight onto it, and with none it offers Add project.
 - **Pick your editor from the ones you have.** Settings → Commands now lists
   the editors installed on this Mac — Visual Studio Code, Cursor, Zed,
   Windsurf, Sublime Text, Nova, BBEdit, TextMate, Xcode, Android Studio and
