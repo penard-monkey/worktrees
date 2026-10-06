@@ -5,6 +5,24 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **The Plan tab's "open in Files" reveals nothing while gitignored files are
+  hidden.** `task_plan.md` and friends are gitignored, so with Show ignored off
+  the row is not in the listing and the reveal is (deliberately) a quiet no-op.
+  The one button whose whole job is "show me this file in Files" is the one that
+  never reveals. Options: turn on Show ignored for that open, or list the single
+  ignored path on the way down. See docs/sessions/2026-10-06-tree-reveal/.
+- **The mock's `list_dir` never canonicalises**, so `/tmp` → `/private/tmp` (and
+  any symlinked place path) is never exercised by the harness; `treePath` is
+  covered only by `treereveal-check.mjs`. A `?canonroot=` knob that serves rows
+  under a different prefix than the place path would close it. See docs/sessions/2026-10-06-tree-reveal/.
+- **Deep rows in a narrow dock overflow sideways, and the reveal ignores it.**
+  `scrollRowIntoBox` moves `scrollTop` only; a revealed row indented past the
+  tree's width stays clipped at the left. Decide whether to also set
+  `scrollLeft` (and whether rows should ellipsise instead). See docs/sessions/2026-10-06-tree-reveal/.
+- **A rapid A-then-B open leaves A's partly opened chain open.** A reveal of A
+  that has not reached its row when B arrives is replaced, but the folders it
+  already opened stay open. VS Code behaves the same; worth deciding rather than
+  inheriting. See docs/sessions/2026-10-06-tree-reveal/.
 - **Resting `+` contrast, unmeasured.** The always-visible `+` on a project row
   uses `--txt-mute` (`rgb(86,95,137)` in tokyo-night), the token `.mini` already
   uses, but its ratio was never measured per theme against `--bg-tree`. Compare
