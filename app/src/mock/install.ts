@@ -1541,6 +1541,20 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "set_fetch_interval":
       console.info("[mock] set_fetch_interval:", args);
       return null;
+    case "detect_editors": {
+      // `?editors=none|one|many` (default many) — the picker's three shapes:
+      // no list at all (free text only), a single app, and apps + CLIs.
+      const m = new URLSearchParams(location.search).get("editors") ?? "many";
+      if (m === "none") return [];
+      const vsc = { label: "Visual Studio Code", cmd: 'open -a "Visual Studio Code"', kind: "app" };
+      if (m === "one") return [vsc];
+      return [
+        vsc,
+        { label: "Zed", cmd: 'open -a "Zed"', kind: "app" },
+        { label: "IntelliJ IDEA", cmd: 'open -a "IntelliJ IDEA"', kind: "app" },
+        { label: "Visual Studio Code (code command)", cmd: "code", kind: "cli" },
+      ];
+    }
     case "open_editor":
       console.info("[mock] open_editor:", args);
       return null;

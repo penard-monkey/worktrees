@@ -26,6 +26,7 @@ use worktrees_core::{git, harness, mcpsetup, mention, ops, provider, store, sync
 // something outside the app, and every rule in it is a refusal — the security
 // surface is worth reading in one piece.
 mod docserver;
+mod editors;
 mod viewer;
 mod winstate;
 // Moved to worktrees-core so the LAUNCH path can read it too: a harness that
@@ -4818,6 +4819,13 @@ async fn open_editor(path: String, cmd: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Installed editors for Settings → Commands' picker (`editors.rs`). A stat
+/// per known path, off the async runtime because there are a few dozen.
+#[tauri::command]
+async fn detect_editors() -> Result<Vec<editors::Editor>, String> {
+    tauri::async_runtime::spawn_blocking(editors::detect).await.map_err(|e| e.to_string())
+}
+
 /// Open a place's tmux session in the user's external terminal app
 /// (`terminal_cmd` from Settings, e.g. `ghostty -e tmux attach -t {session}`).
 /// Every `{session}` token is replaced with the SINGLE-QUOTED session name —
@@ -4923,7 +4931,12 @@ fn launch_watched(
     let first = cmd.split_whitespace().next().unwrap_or(cmd);
     Err(match status.code() {
         Some(127) => format!(
-            "{setting} `{first}` was not found — install it, or change it in Settings → Commands"
+            "{setting} `{first}` was not found — {}",
+            if setting == "Editor command" {
+                "choose an installed editor in Settings → Commands"
+            } else {
+                "install it, or change it in Settings → Commands"
+            }
         ),
         Some(126) => format!(
             "{setting} `{first}` is not executable — change it in Settings → Commands"
@@ -8507,6 +8520,7 @@ pub fn run() {
             log_tail,
             get_changelog,
             open_editor,
+            detect_editors,
             open_terminal,
             list_dir,
             changed_files,
@@ -8616,7 +8630,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("`wt-no-such-editor-xyz` was not found"), "{e}");
-        assert!(e.contains("Settings → Commands"), "{e}");
+        assert!(e.contains("choose an installed editor in Settings → Commands"), "{e}");
     }
 
     /// Any other quick non-zero exit is an error too, carrying the last line
