@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **An editor or terminal command that fails now says so.** "Editor" in the
+  Files dock, ⌘E, "Open in editor" and "Open in terminal app" ran the command
+  from Settings → Commands and never looked at the result, so with the default
+  `code` and no VS Code installed the button did nothing at all. A command that
+  exits with an error within about a second and a half is now reported —
+  "Editor command `code` was not found — install it, or change it in Settings
+  → Commands", or the error the command printed. One that is still running at
+  that point (`code --wait`, a terminal that stays open) counts as launched.
+
 ## [0.38.0] - 2026-10-04
 
 ### Added
