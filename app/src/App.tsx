@@ -6571,7 +6571,7 @@ function App() {
       // Fires from a text field too (as in every Mac app) — the modal guard
       // above already keeps it from stacking on another dialog. Meta only: Ctrl+N
       // is the shell's (next history line) and never reaches here.
-      if (e.metaKey && !e.ctrlKey && (k === "n" || e.code === "KeyN")) {
+      if (e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && (k === "n" || e.code === "KeyN")) {
         e.preventDefault();
         newWorktreeRef.current();
         return;

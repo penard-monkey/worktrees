@@ -19,6 +19,7 @@ need(/className="mini pnew"[^>]*nav\.project\.new/.test(app) || /className="mini
 const guard = app.indexOf("if ((e.metaKey || e.ctrlKey) && modalOpen())");
 const chord = app.indexOf("newWorktreeRef.current()");
 need(guard > 0 && chord > guard, "⌘N must be handled after the modal guard");
+need(/e\.metaKey && !e\.ctrlKey && !e\.shiftKey && !e\.altKey && \(k === "n"/.test(app), "⌘N must exclude Ctrl, Shift and Alt (⌥⌘N arrives with code KeyN)");
 need(/\(k === "n" \|\| e\.code === "KeyN"\)/.test(app), "⌘N must match e.key with a KeyN fallback");
 
 if (fails.length) { console.error(fails.join("\n")); process.exit(1); }
