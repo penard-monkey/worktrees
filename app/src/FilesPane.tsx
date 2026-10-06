@@ -37,7 +37,7 @@ import { CtxMenu } from "./CtxMenu";
 import { DiffView, type FileDiffDto } from "./DiffView";
 import { FindBar, useFileFind } from "./Find";
 import { Markdown } from "./markdown";
-import { basename, fileInfo, humanSize, relPath, type FileKind } from "./filekind";
+import { basename, fileInfo, humanSize, relPath, revealsThrough, treePath, type FileKind } from "./filekind";
 import { MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom, type Settings } from "./settings";
 import { applyMd, spliceRange, type MdAction } from "./mdedit";
 
@@ -163,11 +163,35 @@ type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number }
 
 // ── tree ─────────────────────────────────────────────────────────────────
 
+/** One request to bring the open file into view: open every directory on the
+ *  way to it, then scroll its row inside the tree's own box. A fresh OBJECT per
+ *  request (a changed open path, or `openDockFile` bumping the token for a
+ *  re-open), which is what the nodes' effects key on, and `done` once the row
+ *  has scrolled — or once the user toggles a directory, which means they took
+ *  over. Without `done`, collapsing a folder on the path and opening its parent
+ *  again would remount the chain and spring it all open a second time.
+ *
+ *  Expansion is node-local state (nothing persists it), so this has to be
+ *  DELIVERED to the nodes rather than written somewhere: each directory checks
+ *  it as it mounts, and since children mount only once their listing lands,
+ *  the lazy tree loads each level on the way down by itself. */
+type Reveal = { path: string; done: boolean };
+
+/** Scroll `row` into the middle of `box` if it is not already fully visible.
+ *  By hand rather than `scrollIntoView`, which scrolls EVERY overflow ancestor
+ *  as well — the dock, the space body — and a tree reveal has no business
+ *  moving anything but the tree. */
+function scrollRowIntoBox(box: HTMLElement, row: HTMLElement) {
+  const b = box.getBoundingClientRect(), r = row.getBoundingClientRect();
+  if (r.top >= b.top && r.bottom <= b.bottom) return;
+  box.scrollTop += (r.top + r.height / 2) - (b.top + b.height / 2);
+}
+
 // One lazy directory node. Files bubble a click up via onOpen; dirs toggle.
 // A right-click bubbles up too (onContext) — the menu itself belongs to the
 // pane, so only one can ever be open and the row keeps no state for it.
-function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, changedOnly, onOpen, onContext, onError }: {
-  entry: FsEntry; depth: number; openPath: string | null; showIgnored: boolean; reloadToken: number;
+function TreeNode({ entry, depth, openPath, reveal, showIgnored, reloadToken, changes, changedOnly, onOpen, onContext, onError }: {
+  entry: FsEntry; depth: number; openPath: string | null; reveal: Reveal | null; showIgnored: boolean; reloadToken: number;
   changes: Changes; changedOnly: boolean;
   onOpen: (path: string) => void; onContext: (e: React.MouseEvent, entry: FsEntry) => void;
   onError: (e: unknown) => void;
@@ -241,9 +265,28 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, c
     return () => { alive = false; };
   }, [entry.is_dir, entry.path, open, inert, ghost, showIgnored, reloadToken, onError]);
 
+  // The reveal, directory half: open if the file is somewhere beneath. Runs on
+  // MOUNT too, which is the whole cascade — this level opening mounts the next
+  // once its listing lands, and that one asks the same question.
+  useEffect(() => {
+    if (!reveal || reveal.done || !entry.is_dir || inert) return;
+    if (revealsThrough(entry.path, reveal.path)) setOpen(true);
+  }, [reveal, entry.is_dir, entry.path, inert]);
+  // …and the row half: the file's own row scrolls into the tree's box. A layout
+  // effect, so the measurement and the scroll land before the frame paints.
+  const rowRef = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (!reveal || reveal.done || entry.is_dir || reveal.path !== entry.path) return;
+    reveal.done = true;
+    const row = rowRef.current;
+    const box = row?.closest<HTMLElement>(".dock-tree");
+    if (row && box) scrollRowIntoBox(box, row);
+  }, [reveal, entry.is_dir, entry.path]);
+
   const toggle = () => {
     if (inert) return;
     if (!entry.is_dir) { onOpen(entry.path); return; }
+    if (reveal) reveal.done = true; // the user is steering now
     setOpen((o) => !o);
   };
 
@@ -273,6 +316,7 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, c
   return (
     <div className="tree-node">
       <button
+        ref={rowRef}
         className={"tree-row" + (isSel ? " sel" : "") + (entry.is_dir ? " dir" : "") + (entry.ignored ? " ign" : "")
           + (entry.link ? " link" : "") + (inert ? " inert" : "")
           + (status ? ` chg chg-${status}` : "") + (count ? " chg chg-dir" : "") + (ghost ? " ghost" : "")}
@@ -308,7 +352,7 @@ function TreeNode({ entry, depth, openPath, showIgnored, reloadToken, changes, c
             <div className="tree-note">{changedOnly && listed?.length ? "no changes here" : "empty"}</div>
           )}
           {shown?.map((k) => (
-            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath}
+            <TreeNode key={k.path} entry={k} depth={depth + 1} openPath={openPath} reveal={reveal}
               showIgnored={showIgnored} reloadToken={reloadToken} changes={changes} changedOnly={changedOnly}
               onOpen={onOpen} onContext={onContext} onError={onError} />
           ))}
@@ -324,8 +368,8 @@ const KIND_GLYPH: Record<FileKind, string> = {
 };
 
 // Files tab tree. `root` = the place's worktree path; remount per place via key.
-function FileTree({ root, openPath, showIgnored, reloadToken, changedOnly, onOpen, onContext, onError }: {
-  root: string; openPath: string | null; showIgnored: boolean; reloadToken: number; changedOnly: boolean;
+function FileTree({ root, openPath: rawOpen, revealToken, showIgnored, reloadToken, changedOnly, onOpen, onContext, onError }: {
+  root: string; openPath: string | null; revealToken: number; showIgnored: boolean; reloadToken: number; changedOnly: boolean;
   onOpen: (path: string) => void; onContext: (e: React.MouseEvent, entry: FsEntry) => void;
   onError: (e: unknown) => void;
 }) {
@@ -370,6 +414,19 @@ function FileTree({ root, openPath, showIgnored, reloadToken, changedOnly, onOpe
   // instead of swapping it out: this effect re-runs on every bump now, so
   // returning the bare note would unmount every TreeNode — and with them every
   // expansion the user had opened — on one transient failure.
+  // The canonical root, as the listing itself reports it (every top-level row's
+  // parent), falling back to the change set's. The `root` prop is the place
+  // path as registered and may run through a symlink.
+  const canonRoot = entries?.length ? parentOf(entries[0].path) : changes.root;
+  const openPath = rawOpen && treePath(root, canonRoot, rawOpen);
+  // A new request whenever the open file changes, or the same one is opened
+  // again (the token), or the tree mounts — the dock opening onto Files, a
+  // place switch, the reader collapsing. A path outside the tree, or under a
+  // directory the tree does not list (gitignored while those are hidden, a
+  // followed symlink whose rows carry the TARGET's path), matches nothing and
+  // reveals nothing: quietly, since the viewer already names the file.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the token IS the trigger
+  const reveal = useMemo<Reveal | null>(() => (openPath ? { path: openPath, done: false } : null), [openPath, revealToken]);
   if (err && !entries) return <div className="tree-note err-note">{err}</div>;
   if (!entries) return <div className="tree-note">loading…</div>;
   if (!entries.length) return <div className="tree-note">empty worktree</div>;
@@ -400,7 +457,7 @@ function FileTree({ root, openPath, showIgnored, reloadToken, changedOnly, onOpe
         <div className="tree-note">{changesLoaded ? "nothing changed on this branch" : "…"}</div>
       )}
       {rows.map((e) => (
-        <TreeNode key={e.path} entry={e} depth={0} openPath={openPath}
+        <TreeNode key={e.path} entry={e} depth={0} openPath={openPath} reveal={reveal}
           showIgnored={showIgnored} reloadToken={reloadToken} changes={changes} changedOnly={changedOnly}
           onOpen={onOpen} onContext={onContext} onError={onError} />
       ))}
@@ -1131,6 +1188,8 @@ export const SPLIT_FLOOR = 420;
 export type FilesPaneProps = Omit<FileViewProps, "path" | "expanded" | "onExpand"> & {
   root: string;
   openPath: string | null;
+  /** bumped by every open, so opening the SAME file again re-reveals it */
+  revealToken: number;
   /** list gitignored entries too, dimmed (the reader overlay has no tree) */
   showIgnored: boolean;
   /** hide anything the branch did not touch — the tree becomes its diff list */
@@ -1156,7 +1215,7 @@ export function orientationFor(layout: Settings["files_layout"], dockW: number):
 
 export function FilesPane(props: FilesPaneProps) {
   const { root, openPath, dockW, layout, splitPct, stackPct, onSplitPct, onOpen, onError, expanded,
-    showIgnored, changedOnly, reloadToken } = props;
+    showIgnored, changedOnly, reloadToken, revealToken } = props;
   const orient = expanded ? "split" : orientationFor(layout, dockW);
   const hostRef = useRef<HTMLDivElement>(null);
   // The drag reads BOTH of these live: the window can resize mid-drag (flipping
@@ -1226,7 +1285,7 @@ export function FilesPane(props: FilesPaneProps) {
       {!expanded && (
         <>
           <div className="dock-tree" style={treeStyle}>
-            <FileTree key={root} root={root} openPath={openPath} showIgnored={showIgnored}
+            <FileTree key={root} root={root} openPath={openPath} revealToken={revealToken} showIgnored={showIgnored}
               changedOnly={changedOnly} reloadToken={reloadToken}
               onOpen={onOpen} onContext={onContext} onError={onError} />
           </div>
