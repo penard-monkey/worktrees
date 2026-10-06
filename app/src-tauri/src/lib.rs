@@ -26,6 +26,7 @@ use worktrees_core::{git, harness, mcpsetup, mention, ops, provider, store, sync
 // something outside the app, and every rule in it is a refusal — the security
 // surface is worth reading in one piece.
 mod docserver;
+mod editors;
 mod viewer;
 mod winstate;
 // Moved to worktrees-core so the LAUNCH path can read it too: a harness that
@@ -4810,15 +4811,19 @@ async fn open_editor(path: String, cmd: String) -> Result<(), String> {
     if cmd.trim().is_empty() {
         return Err("no editor configured (Settings → Editor command)".into());
     }
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", &format!("{cmd} \"$0\""), &path])
-        .spawn()
-        .map_err(|e| format!("couldn't launch '{cmd}': {e}"))?;
-    // reap in the background — a dropped Child is never waited on (zombie per click)
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    let line = format!("{cmd} \"$0\"");
+    tauri::async_runtime::spawn_blocking(move || {
+        launch_watched(&line, Some(&path), "Editor command", &cmd, LAUNCH_GRACE)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Installed editors for Settings → Commands' picker (`editors.rs`). A stat
+/// per known path, off the async runtime because there are a few dozen.
+#[tauri::command]
+async fn detect_editors() -> Result<Vec<editors::Editor>, String> {
+    tauri::async_runtime::spawn_blocking(editors::detect).await.map_err(|e| e.to_string())
 }
 
 /// Open a place's tmux session in the user's external terminal app
@@ -4833,15 +4838,117 @@ async fn open_terminal(cmd: String, session: String) -> Result<(), String> {
     }
     let quoted = worktrees_core::tmux::sq(&session);
     let line = cmd.replace("{session}", &quoted);
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", &line])
+    tauri::async_runtime::spawn_blocking(move || {
+        launch_watched(&line, None, "Terminal command", &cmd, LAUNCH_GRACE)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// How long a launched editor/terminal command has to fail before we stop
+/// watching. A GUI launcher (`code`, `cursor`, `open -a …`, `ghostty -e …`)
+/// either hands off and exits within a few hundred ms or fails just as fast —
+/// `command not found` is immediate. A command that is STILL running at the
+/// deadline (`code --wait`, a terminal app that stays in the foreground) is a
+/// success by definition: we cannot tell "working" from "slow" past this
+/// point, and blocking the click on it would be worse than missing a late
+/// failure. So the rule is: a non-zero exit inside the grace is an error the
+/// user sees; anything else is fine.
+const LAUNCH_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Run `line` through `/bin/sh -c` (with `arg0` as `$0` when given) and report
+/// a failure that happens within `grace`. The child used to be spawned and
+/// reaped blind, so a `code` that was not installed exited 127 and the click
+/// did nothing at all. `setting` names the Settings field ("Editor command")
+/// and `cmd` is the user's text, so the message says what to change.
+fn launch_watched(
+    line: &str,
+    arg0: Option<&str>,
+    setting: &str,
+    cmd: &str,
+    grace: std::time::Duration,
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut c = std::process::Command::new("/bin/sh");
+    c.arg("-c").arg(line);
+    if let Some(a) = arg0 {
+        c.arg(a);
+    }
+    let mut child = c
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("couldn't launch '{cmd}': {e}"))?;
-    // reap in the background — a dropped Child is never waited on (zombie per click)
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    // Drain stderr on its own thread for the child's whole life: a launcher
+    // that outlives the grace must never block on a full pipe. Only the tail
+    // is kept — it is for a one-line error, not a log. The thread lives as long
+    // as ANY process holds the write end: a GUI editor forked by the launcher
+    // inherits it, so one parked thread per launch can outlast the click by
+    // the editor's whole session. It does nothing but block in read(), and
+    // ends at EOF when the last holder exits.
+    let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    if let Some(mut err) = child.stderr.take() {
+        let tail = tail.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = err.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let mut t = tail.lock().unwrap();
+                t.extend_from_slice(&buf[..n]);
+                let over = t.len().saturating_sub(2048);
+                t.drain(..over);
+            }
+            let _ = done_tx.send(());
+        });
+    }
+    let deadline = std::time::Instant::now() + grace;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
+            _ => break None,
+        }
+    };
+    let Some(status) = status else {
+        // still running (or unknowable): reap in the background — a dropped
+        // Child is never waited on (zombie per click)
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        return Ok(());
+    };
+    if status.success() {
+        return Ok(());
+    }
+    // A forked grandchild can hold stderr open past sh's exit; take what has
+    // arrived rather than waiting for an EOF that may never come.
+    let _ = done_rx.recv_timeout(std::time::Duration::from_millis(200));
+    let said = String::from_utf8_lossy(&tail.lock().unwrap()).trim().to_string();
+    let said = said.lines().last().unwrap_or("").to_string();
+    let first = cmd.split_whitespace().next().unwrap_or(cmd);
+    Err(match status.code() {
+        Some(127) => format!(
+            "{setting} `{first}` was not found — {}",
+            if setting == "Editor command" {
+                "choose an installed editor in Settings → Commands"
+            } else {
+                "install it, or change it in Settings → Commands"
+            }
+        ),
+        Some(126) => format!(
+            "{setting} `{first}` is not executable — change it in Settings → Commands"
+        ),
+        Some(n) if said.is_empty() => format!("{setting} `{cmd}` failed (exit {n})"),
+        Some(n) => format!("{setting} `{cmd}` failed (exit {n}): {said}"),
+        None => format!("{setting} `{cmd}` was killed by a signal"),
+    })
 }
 
 // ── file browser (right dock, Files tab) ─────────────────────────────────────
@@ -8417,6 +8524,7 @@ pub fn run() {
             log_tail,
             get_changelog,
             open_editor,
+            detect_editors,
             open_terminal,
             list_dir,
             changed_files,
@@ -8514,6 +8622,56 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// A launcher that fails fast is REPORTED. Before: spawned and reaped
+    /// blind, so an uninstalled `code` (sh exit 127) made the Editor button do
+    /// nothing at all, with no error anywhere.
+    #[test]
+    fn a_missing_editor_command_is_an_error_naming_it() {
+        let cmd = "wt-no-such-editor-xyz";
+        let e = super::launch_watched(
+            &format!("{cmd} \"$0\""), Some("/tmp/f.txt"), "Editor command", cmd,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(e.contains("`wt-no-such-editor-xyz` was not found"), "{e}");
+        assert!(e.contains("choose an installed editor in Settings → Commands"), "{e}");
+    }
+
+    /// Any other quick non-zero exit is an error too, carrying the last line
+    /// the command wrote to stderr (`open -a Nope` says why on stderr).
+    #[test]
+    fn a_quick_failure_carries_its_stderr() {
+        let e = super::launch_watched(
+            "echo noise >&2; echo 'Unable to find application' >&2; exit 1", None,
+            "Terminal command", "fake", std::time::Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(e.contains("failed (exit 1): Unable to find application"), "{e}");
+    }
+
+    /// Success, and a command that is still running at the deadline, are both
+    /// fine — and the call returns at the deadline, not when the child exits.
+    #[test]
+    fn a_clean_exit_or_a_long_runner_is_ok() {
+        assert!(super::launch_watched("true", Some("x"), "Editor command", "true",
+            std::time::Duration::from_secs(5)).is_ok());
+        let t = std::time::Instant::now();
+        assert!(super::launch_watched("sleep 5", None, "Terminal command", "sleep",
+            std::time::Duration::from_millis(200)).is_ok());
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    /// `$0` still carries the path unquoted-safe: a space in it survives.
+    #[test]
+    fn the_path_reaches_the_command_as_one_argument() {
+        let e = super::launch_watched(
+            "test \"$0\" = 'a b' && exit 7", Some("a b"), "Editor command", "x",
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(e.contains("exit 7"), "{e}");
+    }
+
     /// The receiving session's server is looked up in the RECEIVING
     /// project's sidecar. Both repos have a place called `lane`; the dragged
     /// one is stamped with a profile that no longer exists, the receiving one

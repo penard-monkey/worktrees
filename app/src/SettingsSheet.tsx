@@ -118,6 +118,11 @@ const CATS = [
   // what the app has RECORDED rather than what it will do.
   { id: "usage", label: "Usage" },
 ] as const;
+/** One row of `detect_editors` (lib.rs `editors::Editor`). */
+type DetectedEditor = { label: string; cmd: string; kind: "app" | "cli" };
+/** The select's Custom… value — not a command anyone could store. */
+const EDITOR_CUSTOM = "\u0000custom";
+
 export type CatId = (typeof CATS)[number]["id"];
 
 // ── Settings → Usage ────────────────────────────────────────────────────────
@@ -435,6 +440,12 @@ export function SettingsSheet({
   // report last visit's category once — and "Updates, seen" retires a bubble.
   useEffect(() => { setCat(open ? at?.cat ?? "appearance" : "appearance"); }, [open, at]);
   useEffect(() => { if (open) onCatShown?.(cat); }, [open, cat, onCatShown]);
+  /** Installed editors (lib.rs `detect_editors`); null until the Commands
+   *  page has asked. Probed on entry, like the MCP states below. */
+  const [editors, setEditors] = useState<DetectedEditor[] | null>(null);
+  /** "Custom…" was CHOSEN. Without it, picking Custom while the stored command
+   *  matches a detected entry would snap straight back to that entry. */
+  const [editorCustom, setEditorCustom] = useState(false);
   const [codexMcpStatus, setCodexMcpStatus] = useState<CodexMcpStatus | null>(null);
   const [piMcpStatus, setPiMcpStatus] = useState<PiMcpStatus | null>(null);
   useEffect(() => {
@@ -442,6 +453,9 @@ export function SettingsSheet({
     let alive = true;
     invoke<CodexMcpStatus>("codex_mcp_status")
       .then((status) => { if (alive) setCodexMcpStatus(status); })
+      .catch((e) => { if (alive) onReport(String(e)); });
+    invoke<DetectedEditor[]>("detect_editors")
+      .then((list) => { if (alive) setEditors(list); })
       .catch((e) => { if (alive) onReport(String(e)); });
     invoke<PiMcpStatus>("pi_mcp_status")
       .then((status) => { if (alive) setPiMcpStatus(status); })
@@ -884,12 +898,48 @@ export function SettingsSheet({
           </section>
           <section className="setting">
             <label>Commands</label>
-            <label className="sub">Editor command</label>
-            <input
-              type="text" value={settings.editor_cmd}
-              onChange={(e) => onChange({ editor_cmd: e.currentTarget.value })}
-            />
-            <div className="hint">Used by right-click “Open in editor” and ⌘E. Quoted args work (e.g. code, cursor, open -a "Visual Studio Code").</div>
+            <label className="sub">Editor</label>
+            {(() => {
+              // `editor_cmd` stays the ONE stored value: a pick writes its
+              // command there, and a stored command that matches no detected
+              // entry simply reads as Custom.
+              const known = editors?.some((e) => e.cmd === settings.editor_cmd) ?? false;
+              const custom = editors === null || editors.length === 0 || editorCustom || !known;
+              return (
+                <>
+                  {editors !== null && editors.length > 0 && (
+                    <select
+                      value={custom ? EDITOR_CUSTOM : settings.editor_cmd}
+                      onChange={(e) => {
+                        const v = e.currentTarget.value;
+                        if (v === EDITOR_CUSTOM) { setEditorCustom(true); return; }
+                        setEditorCustom(false);
+                        onChange({ editor_cmd: v });
+                      }}
+                    >
+                      {editors.map((e) => <option key={e.cmd} value={e.cmd}>{e.label}</option>)}
+                      <option value={EDITOR_CUSTOM}>Custom…</option>
+                    </select>
+                  )}
+                  {custom && (
+                    <input
+                      type="text" value={settings.editor_cmd}
+                      aria-label="Editor command"
+                      // Typing IS choosing Custom. Without this, a field shown
+                      // only because the stored value matched nothing unmounts
+                      // — focused, mid-word — the keystroke its text first
+                      // equals a detected entry's command.
+                      onChange={(e) => { setEditorCustom(true); onChange({ editor_cmd: e.currentTarget.value }); }}
+                    />
+                  )}
+                </>
+              );
+            })()}
+            <div className="hint">
+              Used by right-click “Open in editor” and ⌘E.
+              {editors !== null && editors.length === 0 && " No known editor was found in Applications or on your PATH."}
+              {" "}A custom command takes quoted args (e.g. code, cursor, open -a "Visual Studio Code"); the file is added as the last argument.
+            </div>
             <label className="sub">Terminal command</label>
             <input
               type="text" value={settings.terminal_cmd}
