@@ -5,6 +5,18 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Resting `+` contrast, unmeasured.** The always-visible `+` on a project row
+  uses `--txt-mute` (`rgb(86,95,137)` in tokyo-night), the token `.mini` already
+  uses, but its ratio was never measured per theme against `--bg-tree`. Compare
+  it with the app's own numbers before calling it a defect. See
+  docs/sessions/2026-10-06-nav-plus-cmdn/.
+- **⌘N with zero projects, never driven in a browser.** It calls `addProject`
+  (the folder picker); the mock was only exercised with one, several, and one
+  broken project. See docs/sessions/2026-10-06-nav-plus-cmdn/.
+- **`cargo check -p app` warns `function claim is never used`**
+  (`app/src-tauri/src/viewer.rs:422`, dead_code). It predates #446, which touched
+  no Rust; it arrived with #311. Delete it or use it.
+
 - **An agent with a PTY still passes `may_attach`.** An agent whose shell
   allocates a PTY (Codex's exec can) has ttys on stdin and stdout, so it can
   still `switch-client` the app's client. A stricter guard needs a signal that
