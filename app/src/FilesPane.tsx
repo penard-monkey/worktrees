@@ -167,9 +167,10 @@ type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number }
  *  way to it, then scroll its row inside the tree's own box. A fresh OBJECT per
  *  request (a changed open path, or `openDockFile` bumping the token for a
  *  re-open), which is what the nodes' effects key on, and `done` once the row
- *  has scrolled — or once the user toggles a directory, which means they took
- *  over. Without `done`, collapsing a folder on the path and opening its parent
- *  again would remount the chain and spring it all open a second time.
+ *  has scrolled — or once the user toggles a directory ON THE PATH, which
+ *  means they took over. Without `done`, collapsing a folder on the path and
+ *  opening its parent again would remount the chain and spring it all open a
+ *  second time.
  *
  *  Expansion is node-local state (nothing persists it), so this has to be
  *  DELIVERED to the nodes rather than written somewhere: each directory checks
@@ -286,7 +287,10 @@ function TreeNode({ entry, depth, openPath, reveal, showIgnored, reloadToken, ch
   const toggle = () => {
     if (inert) return;
     if (!entry.is_dir) { onOpen(entry.path); return; }
-    if (reveal) reveal.done = true; // the user is steering now
+    // Toggling a folder ON the path means the user is steering now. Any other
+    // folder is not a vote on this reveal: opening `src/` while a lazy cascade
+    // is still loading `crates/…` must not strand it halfway down.
+    if (reveal && revealsThrough(entry.path, reveal.path)) reveal.done = true;
     setOpen((o) => !o);
   };
 
@@ -425,8 +429,15 @@ function FileTree({ root, openPath: rawOpen, revealToken, showIgnored, reloadTok
   // directory the tree does not list (gitignored while those are hidden, a
   // followed symlink whose rows carry the TARGET's path), matches nothing and
   // reveals nothing: quietly, since the viewer already names the file.
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- the token IS the trigger
-  const reveal = useMemo<Reveal | null>(() => (openPath ? { path: openPath, done: false } : null), [openPath, revealToken]);
+  //
+  // A ref keyed by hand, not `useMemo`: the request is MUTABLE (`done`), and
+  // React is free to discard a memoised value and recompute it — which would
+  // hand out a fresh, un-done request and re-run a finished reveal.
+  const revealRef = useRef<{ openPath: string | null; revealToken: number; reveal: Reveal | null } | null>(null);
+  if (revealRef.current?.openPath !== openPath || revealRef.current?.revealToken !== revealToken) {
+    revealRef.current = { openPath, revealToken, reveal: openPath ? { path: openPath, done: false } : null };
+  }
+  const reveal = revealRef.current.reveal;
   if (err && !entries) return <div className="tree-note err-note">{err}</div>;
   if (!entries) return <div className="tree-note">loading…</div>;
   if (!entries.length) return <div className="tree-note">empty worktree</div>;

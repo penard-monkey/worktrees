@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **A file opened from a session or by Claude now shows in the Files tree.**
+  ⌘-clicking a path in a terminal, or a document Claude put on screen with
+  `show_doc`, opened the file in the viewer but left the tree as it was —
+  folders shut, the row nowhere to be seen. The tree now reveals whatever the
+  viewer shows, the way VS Code does: every folder on the way opens, the row is
+  highlighted and scrolled into view. That includes Back/Forward, the file a
+  place reopens on, and opening the same file again. A file the tree does not
+  list (outside the place, or gitignored while those are hidden) is simply
+  left unrevealed.
+
 ## [0.39.0] - 2026-10-06
 
 ### Added
@@ -23,15 +34,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the list shows as Custom.
 
 ### Fixed
-- **A file opened from a session or by Claude now shows in the Files tree.**
-  ⌘-clicking a path in a terminal, or a document Claude put on screen with
-  `show_doc`, opened the file in the viewer but left the tree as it was —
-  folders shut, the row nowhere to be seen. The tree now reveals whatever the
-  viewer shows, the way VS Code does: every folder on the way opens, the row is
-  highlighted and scrolled into view. That includes Back/Forward, the file a
-  place reopens on, and opening the same file again. A file the tree does not
-  list (outside the place, or gitignored while those are hidden) is simply
-  left unrevealed.
 - **An editor or terminal command that fails now says so.** "Editor" in the
   Files dock, ⌘E, "Open in editor" and "Open in terminal app" ran the command
   from Settings → Commands and never looked at the result, so with the default
