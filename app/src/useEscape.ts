@@ -49,15 +49,21 @@ export function useEscape(fn: () => void, active = true) {
   ref.current = fn;
   useEffect(() => {
     if (!active) return;
-    const entry: Entry = { fn: () => ref.current() };
-    stack.push(entry);
-    if (stack.length === 1) window.addEventListener("keydown", onKeyCapture, true);
-    return () => {
-      const i = stack.indexOf(entry);
-      if (i >= 0) stack.splice(i, 1);
-      if (stack.length === 0) window.removeEventListener("keydown", onKeyCapture, true);
-    };
+    return registerEscape(() => ref.current());
   }, [active]);
+}
+
+/** Imperative dialogs use the SAME stack as React surfaces. Release on every
+ * close path and actual teardown, never on a render or StrictMode rehearsal. */
+export function registerEscape(fn: () => void): () => void {
+  const entry: Entry = { fn };
+  stack.push(entry);
+  if (stack.length === 1) window.addEventListener("keydown", onKeyCapture, true);
+  return () => {
+    const i = stack.indexOf(entry);
+    if (i >= 0) stack.splice(i, 1);
+    if (stack.length === 0) window.removeEventListener("keydown", onKeyCapture, true);
+  };
 }
 
 /** Test seam: how many surfaces currently own Escape. */

@@ -3569,3 +3569,17 @@ button.prs-group-head:hover { color: var(--txt-hi); }
    it) for "this many need you". */
 .rail-count.prs-count { background: var(--bg-elev); color: var(--txt-dim); }
 .rail-count.prs-count.attn { background: color-mix(in srgb, var(--danger) 32%, var(--bg-abyss)); color: var(--txt-hi); }
+
+.feedback-notice {
+  position: fixed; z-index: 2147483002; bottom: var(--s4); right: var(--s4);
+  max-width: min(34rem, calc(100vw - 32px)); display: flex; gap: var(--s3);
+  align-items: center; padding: var(--s3); border: 1px solid var(--line);
+  border-radius: var(--r-md); background: var(--bg-panel); color: var(--txt-hi);
+  font-size: var(--fs-meta); box-shadow: var(--shadow-pop);
+}
+/* The offline preview stands in for the SDK's own shadow-root dialog, so it
+   has to be roughly its size: unbounded it spans the window, and a UI review
+   then judges proportions the real widget will never have. */
+.feedback-mock { padding: var(--s5); display: grid; gap: var(--s3); width: min(30rem, calc(100vw - 2 * var(--s4))); }
+.feedback-mock label { display: grid; gap: var(--s2); }
+.feedback-mock textarea { min-height: 8rem; }
