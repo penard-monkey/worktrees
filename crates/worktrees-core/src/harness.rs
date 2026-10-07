@@ -39,7 +39,7 @@ pub struct Scan<'a> {
 
 /// Shell words a harness adds around the configured command, already quoted
 /// for the inner `sh -ic`. `head` goes right after the executable — before a
-/// resume SUBCOMMAND (`codex … resume --last`), which would otherwise swallow
+/// resume SUBCOMMAND (`codex … resume '<id>'`), which would otherwise swallow
 /// them — and `tail` after the whole command, before the opener.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct LaunchArgs {
@@ -83,6 +83,26 @@ pub enum Delivery {
 pub enum Refusal {
     Hard(String),
     Soft(String),
+}
+
+/// What a harness answers when asked which session a resume here must attach to.
+///
+/// Three states, not `Option`, because "I do not name sessions" and "I name
+/// them and found none" are opposite instructions: the first leaves the
+/// decision to `may_resume`, the second is a refusal to resume at all. An
+/// `Option` conflated them, and the conflation is what left `Codex::prepare`
+/// with an untested fallback standing in for both.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResumeTarget {
+    /// This harness does not resume by session id. Claude appends `-r`; pi
+    /// derives its own id inside `prepare` from the declared store. For both,
+    /// `may_resume` is the answer.
+    NotNamed,
+    /// It names one, and this place has it.
+    Session(String),
+    /// It names one, and this place has none — so there is nothing to resume
+    /// and no fallback that would stay inside the place.
+    Nothing,
 }
 
 /// Whether a typed message was confirmed submitted.
@@ -173,7 +193,8 @@ pub trait Adapter: Sync {
         Vec::new()
     }
 
-    /// The resume words appended to the command (`-r`, `resume --last`). A
+    /// The resume words appended to the command (`-r`; Codex appends none — see
+    /// `resume_target`). A
     /// method, not a registry string: a harness that resumes an exact session
     /// derives the id from the place. Empty for such a harness — its resume is
     /// carried by `AiLaunch::resume` and emitted by `prepare`/`launch_args`.
@@ -219,9 +240,21 @@ pub trait Adapter: Sync {
     /// Whether this harness has a conversation on disk for `cwd`.
     fn session_present(&self, project: &Project, cwd: &str) -> bool;
 
+    /// Which session a resume in `cwd` must attach to.
+    ///
+    /// Resolved ONCE per launch by `ops::resume_plan` and carried on
+    /// `AiLaunch::resume_id`, so the history is walked once rather than once
+    /// here and again in `prepare`.
+    fn resume_target(&self, _project: &Project, _cwd: &str) -> ResumeTarget {
+        ResumeTarget::NotNamed
+    }
+
     /// Whether a resume requested in `cwd` may actually be launched. Claude's
-    /// `-r` is harmless with nothing to resume; Codex's `resume --last` would
-    /// pick up a conversation from ANOTHER directory, so it needs one here.
+    /// `-r` is harmless with nothing to resume. Codex needs a conversation
+    /// HERE: it resumes by exact id now (`resume_target`), and the `--last`
+    /// it used to get filters by `repository_cwd_filter`, which matches the
+    /// primary root and every linked worktree — so it could attach to a
+    /// sibling place's session, or to (main)'s.
     fn may_resume(&self, _project: &Project, _cwd: &str) -> bool {
         true
     }
@@ -401,7 +434,15 @@ impl Adapter for Codex {
     }
 
     fn resume_arg(&self, _cwd: &str) -> String {
-        "resume --last".into()
+        String::new() // resolved once, immediately before launch in prepare
+    }
+
+    fn resume_display(&self) -> String {
+        "resume <per place session>".into()
+    }
+
+    fn exact_resume(&self) -> bool {
+        true
     }
 
     fn usage(&self) -> Option<Vec<crate::quota::Window>> {
@@ -416,7 +457,20 @@ impl Adapter for Codex {
     }
 
     fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
-        crate::quota::gate(self, launch, crate::sysclock::now_epoch())
+        crate::quota::gate(self, launch, crate::sysclock::now_epoch())?;
+        if launch.resume {
+            match launch.resume_id.as_deref() {
+                Some(id) => launch.cmd.push_str(&format!(" resume {}", shell_quote(id))),
+                // Nothing was resolved for this place: either the caller never
+                // resolved one, or it vanished since. Degrade to a FRESH
+                // launch — never `--last`, which filters by
+                // `repository_cwd_filter` and so matches the primary root and
+                // every linked worktree, and never the picker. Reachable and
+                // unit-tested, unlike the branch this replaced.
+                None => launch.resume = false,
+            }
+        }
+        Ok(())
     }
 
     /// As Claude's: a quota refusal leaves a brief nobody has read.
@@ -426,6 +480,13 @@ impl Adapter for Codex {
 
     fn session_present(&self, _project: &Project, cwd: &str) -> bool {
         crate::codex::session_present(cwd)
+    }
+
+    fn resume_target(&self, _project: &Project, cwd: &str) -> ResumeTarget {
+        match crate::codex::resume_id(cwd) {
+            Some(id) => ResumeTarget::Session(id),
+            None => ResumeTarget::Nothing,
+        }
     }
 
     fn may_resume(&self, project: &Project, cwd: &str) -> bool {
@@ -845,10 +906,10 @@ mod tests {
     #[test]
     fn resume_words_are_the_registry_strings_they_replace() {
         assert_eq!(CLAUDE.resume_arg("/w"), "-r");
-        assert_eq!(CODEX.resume_arg("/w"), "resume --last");
+        assert_eq!(CODEX.resume_arg("/w"), "");
         // pi resumes an EXACT session: no words, and no user override either.
         assert_eq!(PI.resume_arg("/w"), "");
-        assert!(PI.exact_resume() && !CLAUDE.exact_resume() && !CODEX.exact_resume());
+        assert!(PI.exact_resume() && !CLAUDE.exact_resume() && CODEX.exact_resume());
         assert_eq!(crate::ops::resume_command("pi", "/w"), "pi", "no trailing space into argv");
         // Settings' display default is never a session id derived from "".
         assert_eq!(CLAUDE.resume_display(), "-r");
@@ -896,15 +957,17 @@ mod tests {
         let once = |cmd: &str| cmd.split_whitespace().filter(|w| *w == "--no-alt-screen").count();
         let fresh = AiLaunch::plain("codex").launch_cmd("p-feat");
         assert_eq!(once(&fresh), 1, "{fresh}");
-        let mut resumed = AiLaunch::plain("codex resume --last");
+        // `resume <uuid>`, not `resume --last`: nothing produces `--last` any
+        // more (`Codex::resume_arg` is empty and `prepare` emits the id).
+        let mut resumed = AiLaunch::plain("codex resume '019699ff-7c1a-7a30-9f0e-2b4e8d1c5a77'");
         resumed.resume = true;
         let r = resumed.launch_cmd("p-feat");
         assert_eq!(once(&r), 1, "{r}");
-        let (flag, sub) = (r.find("--no-alt-screen").unwrap(), r.find(" resume --last").unwrap());
+        let (flag, sub) = (r.find("--no-alt-screen").unwrap(), r.find(" resume '").unwrap());
         assert!(flag < sub, "before the subcommand: {r}");
         let lookalike = AiLaunch::plain("codex -c x=--no-alt-screen-ish").launch_cmd("p-feat");
         assert_eq!(once(&lookalike), 1, "{lookalike}");
-        for own in ["codex --no-alt-screen", "codex --no-alt-screen resume --last"] {
+        for own in ["codex --no-alt-screen", "codex --no-alt-screen resume '019699ff-7c1a-7a30-9f0e-2b4e8d1c5a77'"] {
             let c = AiLaunch::plain(own).launch_cmd("p-feat");
             assert_eq!(once(&c), 1, "{c}");
         }
@@ -927,11 +990,57 @@ mod tests {
         let mut x = AiLaunch::plain("codex");
         x.model = Some("gpt-5-codex".into());
         assert!(x.launch_cmd("s").ends_with(" -m 'gpt-5-codex'"), "{}", x.launch_cmd("s"));
-        let mut xr = AiLaunch::plain("codex resume --last");
+        let mut xr = AiLaunch::plain("codex resume '019699ff-7c1a-7a30-9f0e-2b4e8d1c5a77'");
         xr.model = Some("gpt-5-codex".into());
         xr.resume = true;
         assert!(!xr.launch_cmd("s").contains(" -m "), "{}", xr.launch_cmd("s"));
-        assert!(xr.launch_cmd("s").ends_with("resume --last"));
+        assert!(xr.launch_cmd("s").ends_with("resume '019699ff-7c1a-7a30-9f0e-2b4e8d1c5a77'"));
+    }
+
+    /// `resume` set with no id resolved must launch FRESH.
+    ///
+    /// This is the branch the review found untested, and it is the one that
+    /// matters: the alternative a reasonable person reaches for is
+    /// `resume --last`, which filters by `repository_cwd_filter` and so
+    /// matches the primary root AND every linked worktree — i.e. it attaches
+    /// to whichever sibling place or (main) was touched most recently. The
+    /// old shape re-derived the id inside `prepare`, which no caller could
+    /// make fail, so swapping this branch for `--last` left every test green.
+    ///
+    /// It is reachable: the app's `(main)` path builds its own launch without
+    /// going through `cmd_open`, and any resolved id can go stale between the
+    /// caller's walk and the launch.
+    #[test]
+    fn codex_resume_without_a_resolved_session_launches_fresh() {
+        let p = Project::for_test("/repo");
+        let mut l = AiLaunch::plain("codex");
+        l.resume = true;
+        // `force` short-circuits `quota::gate`, keeping the LIVE Codex usage
+        // probe (a `codex app-server` spawn) out of a test about resume. #358's
+        // review: no unit test may touch the network or the keychain.
+        l.force = true;
+        l.resume_id = None;
+        let before = l.cmd.clone();
+        CODEX.prepare(&p, "feat", "/repo/.worktrees/feat", &mut l).unwrap();
+        assert_eq!(l.cmd, before, "no resume words may be appended without an id");
+        assert!(!l.resume, "the launch must stop calling itself a resume");
+        assert!(!l.launch_cmd("s").contains("resume"), "{}", l.launch_cmd("s"));
+    }
+
+    /// …and with one, it is emitted quoted, exactly once.
+    #[test]
+    fn codex_resume_emits_the_resolved_session() {
+        let p = Project::for_test("/repo");
+        let mut l = AiLaunch::plain("codex");
+        l.resume = true;
+        // `force` short-circuits `quota::gate`, keeping the LIVE Codex usage
+        // probe (a `codex app-server` spawn) out of a test about resume. #358's
+        // review: no unit test may touch the network or the keychain.
+        l.force = true;
+        l.resume_id = Some("019699ff-7c1a-7a30-9f0e-2b4e8d1c5a77".into());
+        CODEX.prepare(&p, "feat", "/repo/.worktrees/feat", &mut l).unwrap();
+        assert_eq!(l.cmd, "codex resume '019699ff-7c1a-7a30-9f0e-2b4e8d1c5a77'");
+        assert!(l.resume, "still a resume");
     }
 
     #[test]

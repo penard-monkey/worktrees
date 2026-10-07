@@ -71,6 +71,23 @@ impl Project {
         Ok(Project { main_root, git_common, wt_root, prefix, clock: SysClock::detect() })
     }
 
+    /// A `Project` for tests that need one only to pass it along — the paths
+    /// are derived, nothing on disk is touched. `clock` is private, so a
+    /// struct literal is not available outside this module and `discover`
+    /// wants a real repository.
+    #[cfg(test)]
+    pub(crate) fn for_test(main_root: &str) -> Project {
+        Project {
+            main_root: main_root.to_string(),
+            git_common: format!("{main_root}/.git"),
+            wt_root: format!("{main_root}/.worktrees"),
+            prefix: crate::config::sanitize_prefix(
+                Path::new(main_root).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default().as_str(),
+            ),
+            clock: SysClock::detect(),
+        }
+    }
+
     pub fn session_name(&self, slug: &str) -> String {
         format!("{}-{}", self.prefix, slug).replace('.', "-")
     }

@@ -16,6 +16,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   list (outside the place, or gitignored while those are hidden) is simply
   left unrevealed.
 
+- **Codex stays in its own place.** Reopening a place resumes that place's own
+  conversation by exact id, never `resume --last`. Two paths led out of the
+  place and both are closed. `--last` filters threads by
+  `repository_cwd_filter`, which matches the primary checkout **and every
+  linked worktree**, then takes the most recently UPDATED one — so a sibling
+  place you were typing in, or `(main)`, could be resumed instead. And the
+  check that decided whether there was anything to resume counted *any*
+  rollout with a matching cwd, auto-review and scripted ones included, so a
+  place whose only rollout was a guardian run passed the check and then
+  resumed somebody else's session. A place with no conversation of its own now
+  starts fresh.
 ## [0.39.0] - 2026-10-06
 
 ### Added

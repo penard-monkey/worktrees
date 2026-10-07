@@ -198,6 +198,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 guidance: Vec::new(),
                 model: None,
                 resume: false,
+                resume_id: None,
                 force: false,
             }
         }
@@ -554,6 +555,27 @@ pub fn may_resume(p: &Project, ai_cmd: &str, wt: &str) -> bool {
     crate::harness::for_cmd(ai_cmd).is_none_or(|a| a.may_resume(p, wt))
 }
 
+/// Whether a resume in `wt` may launch, AND the exact session it must attach
+/// to when the harness names one.
+///
+/// Both answers from ONE history walk. They used to come from two: `may_resume`
+/// scanned all of Codex's rollouts to decide, and `prepare` scanned them again
+/// to pick — about 0.2–0.3s of duplicated work per open, three walks on
+/// `new --brief`. Worse, the second walk could disagree with the first, and the
+/// branch that handled the disagreement was unreachable from either caller and
+/// so untested; it was standing guard over the cross-worktree resume this whole
+/// change exists to prevent.
+pub fn resume_plan(p: &Project, ai_cmd: &str, wt: &str) -> (bool, Option<String>) {
+    let Some(a) = crate::harness::for_cmd(ai_cmd) else { return (true, None) };
+    match a.resume_target(p, wt) {
+        // Claude and pi: the id is not how they resume, so the old question
+        // still decides.
+        crate::harness::ResumeTarget::NotNamed => (a.may_resume(p, wt), None),
+        crate::harness::ResumeTarget::Session(id) => (true, Some(id)),
+        crate::harness::ResumeTarget::Nothing => (false, None),
+    }
+}
+
 /// What the Plan tab's "Generate plan" button pastes into a place's Claude
 /// session: a request to write down the work already in flight there.
 ///
@@ -844,7 +866,12 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 
     let install_cmd = if do_install && !already { detect_install_cmd(&wt) } else { String::new() };
     let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
-    let resume = resume && !ai_cmd.is_empty() && may_resume(p, &ai_cmd, &wt);
+    let (allowed, resume_id) = if resume && !ai_cmd.is_empty() {
+        resume_plan(p, &ai_cmd, &wt)
+    } else {
+        (false, None)
+    };
+    let resume = resume && allowed;
     if resume {
         ai_cmd = resume_command(&ai_cmd, &wt);
     }
@@ -871,6 +898,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let pane1_install = if spare_shell { install_cmd.as_str() } else { "" };
     let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
     (ai.model, ai.resume, ai.force) = (model, resume, force);
+    ai.resume_id = resume_id;
     if brief.is_some() && !ai.cmd.is_empty() {
         ai.opener = Some(BRIEF_OPENER.to_string());
     }
@@ -1055,12 +1083,18 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         ui.error(&e);
         return 1;
     }
-    let resume = resume && !ai_cmd.is_empty() && may_resume(p, &ai_cmd, &wt);
+    let (allowed, resume_id) = if resume && !ai_cmd.is_empty() {
+        resume_plan(p, &ai_cmd, &wt)
+    } else {
+        (false, None)
+    };
+    let resume = resume && allowed;
     if resume {
         ai_cmd = resume_command(&ai_cmd, &wt);
     }
     let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
     (ai.model, ai.resume, ai.force) = (model, resume, force);
+    ai.resume_id = resume_id;
     // `new --brief` whose launch was REFUSED (pi's model host down, a spent
     // Claude/Codex window) wrote the brief and started nothing; the
     // launch-anyway that follows is this `open`. Without the opener that
