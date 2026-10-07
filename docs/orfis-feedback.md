@@ -70,17 +70,43 @@ is now answered.
 
 Two things remain, neither of which code can settle:
 
-1. **No product key.** Orfis mints the key against the `Origin` a packaged
-   build sends, and we have not reported it. Production is live at
-   `https://orfis.otterly.digital`; the dev key is minted against
-   `http://localhost:1420`. **Capturing the packaged Origin is the next
-   action, and it unblocks everything else.**
+1. **No product key**, pending Orfis minting one against the Origin below.
+   Production is live at `https://orfis.otterly.digital`; the dev key is
+   minted against `http://localhost:1420`.
 2. **No license at the pinned revision.** `packages/sdk-web` is `"private": true`
    with no license file and no license field, so the bundled artifact may not
    be redistributed in an enabled build until the owner confirms rights.
 
 Once both land: run the packaged acceptance list below, then set
 `ACCEPTANCE_PENDING = false`.
+
+### The packaged Origin — measured
+
+Captured from a real `tauri build` bundle of `net.casadelvalle.worktrees` on
+macOS arm64, by a throwaway boot-time `fetch` to a local listener. Not
+inferred, and not from `tauri dev` — a dev build serves over
+`http://localhost:1420` and would have answered the wrong question.
+
+```
+Origin:          tauri://localhost
+Sec-Fetch-Site:  cross-site
+User-Agent:      Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)
+                 AppleWebKit/605.1.15 (KHTML, like Gecko)
+```
+
+Three things follow, beyond the key:
+
+- `Sec-Fetch-Site: cross-site` — the webview treats this as a genuine
+  cross-origin request, so `tauri://localhost` has to be in the **CORS /
+  origin allow-list**, not only attached to the key.
+- The User-Agent confirms the frozen `Mac OS X 10_15_7` the handoff warned
+  about, so the stored OS version is wrong for every user. That is why the
+  Settings copy says "your Mac's system type" and names no version.
+- It carries **no Safari token, no version, and no app name**, so whatever
+  Orfis's `deviceContext.ts` derives for *browser* will be generic or empty.
+  Worth knowing before a stored row is read as evidence of a bug.
+
+The app sets `"csp": null`, so nothing in the webview blocks the request.
 
 ## Bundle provenance
 
@@ -98,8 +124,8 @@ have to be confirmed by the owner before an enabled integration is distributed.
 
 None of these are Worktrees-side code, and none should be invented locally:
 
-1. The `Origin` a packaged build sends — **owed by us to Orfis**, and the
-   gating input for the two keys.
+1. ~~The `Origin` a packaged build sends~~ — **measured and reported**:
+   `tauri://localhost` (see above). The two keys are Orfis's to mint from it.
 2. Redistribution rights for the bundled artifact (no license at `3222a74`).
 3. Acceptance of a first release without attached logs, and sign-off on the
    disclosure wording and Settings placement.
