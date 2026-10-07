@@ -411,7 +411,7 @@ anyone commits to it.
 ## 8. What this does not do
 
 Read-only toward GitHub, permanently in phase 1: no merge, comment, label,
-approve or create from the app. "Create PR" for a pushed lane with none is a
+approve or create from the app. "Create PR" for a pushed lane with none is
 deferred with phase 2 (§10), because it is the first write.
 
 ## 9. Phasing
