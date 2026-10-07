@@ -1,0 +1,586 @@
+{
+    "data": {
+        "viewer": {
+            "login": "penard-monkey"
+        },
+        "repository": {
+            "open": {
+                "totalCount": 8,
+                "nodes": [
+                    {
+                        "number": 392,
+                        "title": "docs: rewrite the README around what the app actually is now",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/392",
+                        "isDraft": false,
+                        "updatedAt": "2026-10-03T03:25:29Z",
+                        "headRefName": "docs/readme-refresh",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "brethash"
+                        },
+                        "reviewDecision": null,
+                        "mergeable": "CONFLICTING",
+                        "mergeStateStatus": "DIRTY",
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "oid": "052128707e8dda059d7b7c75337bf57ba3eaa551",
+                                        "statusCheckRollup": {
+                                            "state": "SUCCESS"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "number": 350,
+                        "title": "chore: close out codex-parity session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/350",
+                        "isDraft": false,
+                        "updatedAt": "2026-09-27T00:43:06Z",
+                        "headRefName": "codex-skills-mcps-close-out",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        },
+                        "reviewDecision": null,
+                        "mergeable": "CONFLICTING",
+                        "mergeStateStatus": "DIRTY",
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "oid": "f491d9144ade2093267410682ade7a30ef30c948",
+                                        "statusCheckRollup": {
+                                            "state": "SUCCESS"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "number": 301,
+                        "title": "fix: clamp combobox highlight index after filter shrink",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/301",
+                        "isDraft": false,
+                        "updatedAt": "2026-09-19T00:25:55Z",
+                        "headRefName": "fix/combobox-hi-clamp",
+                        "headRepositoryOwner": {
+                            "login": "t957095"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "t957095"
+                        },
+                        "reviewDecision": null,
+                        "mergeable": "CONFLICTING",
+                        "mergeStateStatus": "DIRTY",
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "oid": "94ba19659ccf87f796982b973ad439f75d908344",
+                                        "statusCheckRollup": null
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "number": 300,
+                        "title": "feat(markdown): decode more entities, dedupe heading slugs",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/300",
+                        "isDraft": false,
+                        "updatedAt": "2026-09-19T00:22:16Z",
+                        "headRefName": "feat/markdown-entities-slugs",
+                        "headRepositoryOwner": {
+                            "login": "t957095"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "t957095"
+                        },
+                        "reviewDecision": null,
+                        "mergeable": "CONFLICTING",
+                        "mergeStateStatus": "DIRTY",
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "oid": "19503ad1917fd96dd3793cf23f1391767cefbfdd",
+                                        "statusCheckRollup": null
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "number": 299,
+                        "title": "feat: action button beside undeclared doctor findings",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/299",
+                        "isDraft": false,
+                        "updatedAt": "2026-09-19T00:14:08Z",
+                        "headRefName": "feat/undeclared-finding-action",
+                        "headRepositoryOwner": {
+                            "login": "t957095"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "t957095"
+                        },
+                        "reviewDecision": null,
+                        "mergeable": "MERGEABLE",
+                        "mergeStateStatus": "UNSTABLE",
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "oid": "204f918b8224a396b5bca9babe1ca5a0825b2919",
+                                        "statusCheckRollup": null
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "number": 298,
+                        "title": "feat: render [text](url) links in release notes",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/298",
+                        "isDraft": false,
+                        "updatedAt": "2026-09-18T23:47:16Z",
+                        "headRefName": "feat/release-notes-links",
+                        "headRepositoryOwner": {
+                            "login": "t957095"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "t957095"
+                        },
+                        "reviewDecision": null,
+                        "mergeable": "CONFLICTING",
+                        "mergeStateStatus": "DIRTY",
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "oid": "e122050deca89aa32acd162ec68aa0ce62850f1d",
+                                        "statusCheckRollup": null
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "number": 297,
+                        "title": "feat: global error boundary above App",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/297",
+                        "isDraft": false,
+                        "updatedAt": "2026-09-18T23:43:57Z",
+                        "headRefName": "feat/global-error-boundary",
+                        "headRepositoryOwner": {
+                            "login": "t957095"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "t957095"
+                        },
+                        "reviewDecision": null,
+                        "mergeable": "CONFLICTING",
+                        "mergeStateStatus": "DIRTY",
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "oid": "8806b0931c7824ad7c0f1826391eaf6c712e0f15",
+                                        "statusCheckRollup": null
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "number": 296,
+                        "title": "docs: move the roadmap into GitHub issues",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/296",
+                        "isDraft": false,
+                        "updatedAt": "2026-09-18T22:56:26Z",
+                        "headRefName": "roadmap-and-github-issues",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        },
+                        "reviewDecision": null,
+                        "mergeable": "CONFLICTING",
+                        "mergeStateStatus": "DIRTY",
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "oid": "2abd39b510817e8fa4ee1747226f5ce36a83f1bc",
+                                        "statusCheckRollup": null
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "recent": {
+                "nodes": [
+                    {
+                        "number": 454,
+                        "title": "chore: close out pr-panel session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/454",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-07T21:50:16Z",
+                        "mergedAt": "2026-10-07T21:50:12Z",
+                        "closedAt": "2026-10-07T21:50:12Z",
+                        "headRefName": "pr-panel-closeout",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 452,
+                        "title": "docs: proposal \u2014 pull requests in the app",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/452",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-07T21:49:04Z",
+                        "mergedAt": "2026-10-07T21:49:00Z",
+                        "closedAt": "2026-10-07T21:49:00Z",
+                        "headRefName": "pr-panel",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 453,
+                        "title": "chore: close out md-path-links session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/453",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-07T21:43:22Z",
+                        "mergedAt": "2026-10-07T21:43:18Z",
+                        "closedAt": "2026-10-07T21:43:18Z",
+                        "headRefName": "md-path-links-closeout",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 451,
+                        "title": "feat(app): clickable file paths in rendered markdown",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/451",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-07T21:33:38Z",
+                        "mergedAt": "2026-10-07T21:33:32Z",
+                        "closedAt": "2026-10-07T21:33:32Z",
+                        "headRefName": "md-path-links",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 442,
+                        "title": "fix(core): Fix Codex session resumption per Place",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/442",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-07T20:48:21Z",
+                        "mergedAt": "2026-10-07T19:29:53Z",
+                        "closedAt": "2026-10-07T19:29:53Z",
+                        "headRefName": "fix/codex-place-session",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "brethash"
+                        }
+                    },
+                    {
+                        "number": 450,
+                        "title": "chore: close out tree-reveal session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/450",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-06T20:39:28Z",
+                        "mergedAt": "2026-10-06T20:39:24Z",
+                        "closedAt": "2026-10-06T20:39:24Z",
+                        "headRefName": "tree-reveal-close-out",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 449,
+                        "title": "fix(app): reveal the open file in the Files tree",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/449",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-06T20:37:44Z",
+                        "mergedAt": "2026-10-06T20:37:39Z",
+                        "closedAt": "2026-10-06T20:37:39Z",
+                        "headRefName": "tree-reveal",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 448,
+                        "title": "release: v0.39.0",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/448",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-06T19:50:39Z",
+                        "mergedAt": "2026-10-06T19:50:34Z",
+                        "closedAt": "2026-10-06T19:50:34Z",
+                        "headRefName": "release-v0.39.0",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 447,
+                        "title": "chore: close out nav-plus-cmdn session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/447",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-06T19:24:36Z",
+                        "mergedAt": "2026-10-06T19:24:32Z",
+                        "closedAt": "2026-10-06T19:24:32Z",
+                        "headRefName": "nav-plus-cmdn-closeout",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 446,
+                        "title": "feat(app): always-visible + on project rows, and \u2318N for a new worktree",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/446",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-06T19:23:38Z",
+                        "mergedAt": "2026-10-06T19:23:34Z",
+                        "closedAt": "2026-10-06T19:23:34Z",
+                        "headRefName": "nav-plus-cmdn",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 445,
+                        "title": "chore: close out in-app-editor session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/445",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-06T13:37:47Z",
+                        "mergedAt": "2026-10-06T13:37:44Z",
+                        "closedAt": "2026-10-06T13:37:44Z",
+                        "headRefName": "in-app-editor-close-out",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 444,
+                        "title": "docs: proposal \u2014 an in-app editor for the Files dock",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/444",
+                        "state": "CLOSED",
+                        "updatedAt": "2026-10-06T13:35:58Z",
+                        "mergedAt": null,
+                        "closedAt": "2026-10-06T13:35:58Z",
+                        "headRefName": "in-app-editor-proposal",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 443,
+                        "title": "fix(app): report a failing editor/terminal command, and pick from installed editors",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/443",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-06T13:05:31Z",
+                        "mergedAt": "2026-10-06T13:05:26Z",
+                        "closedAt": "2026-10-06T13:05:26Z",
+                        "headRefName": "in-app-editor-cmd-errors",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 440,
+                        "title": "chore: close out no-steal-client session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/440",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-04T04:27:55Z",
+                        "mergedAt": "2026-10-04T04:27:50Z",
+                        "closedAt": "2026-10-04T04:27:50Z",
+                        "headRefName": "no-steal-client-closeout",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 441,
+                        "title": "release: v0.38.0",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/441",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-04T04:17:35Z",
+                        "mergedAt": "2026-10-04T04:17:32Z",
+                        "closedAt": "2026-10-04T04:17:32Z",
+                        "headRefName": "release-v0.38.0",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 439,
+                        "title": "fix(attach): an agent launching a place must not take over the user's terminal view",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/439",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-04T03:59:09Z",
+                        "mergedAt": "2026-10-04T03:59:05Z",
+                        "closedAt": "2026-10-04T03:59:05Z",
+                        "headRefName": "no-steal-client",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 438,
+                        "title": "chore: close out quota-settings session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/438",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-04T03:23:21Z",
+                        "mergedAt": "2026-10-04T03:23:17Z",
+                        "closedAt": "2026-10-04T03:23:17Z",
+                        "headRefName": "quota-settings-close-out",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 437,
+                        "title": "feat(quota): let the user turn the launch quota gate off, or set its weekly %",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/437",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-04T03:21:06Z",
+                        "mergedAt": "2026-10-04T03:21:02Z",
+                        "closedAt": "2026-10-04T03:21:02Z",
+                        "headRefName": "quota-settings",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 436,
+                        "title": "release: v0.37.0",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/436",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-04T02:10:36Z",
+                        "mergedAt": "2026-10-04T02:10:33Z",
+                        "closedAt": "2026-10-04T02:10:34Z",
+                        "headRefName": "release-v0.37.0",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    },
+                    {
+                        "number": 435,
+                        "title": "chore: close out codex-turn-tail session",
+                        "url": "https://github.com/penard-monkey/worktrees/pull/435",
+                        "state": "MERGED",
+                        "updatedAt": "2026-10-04T01:47:46Z",
+                        "mergedAt": "2026-10-04T01:47:42Z",
+                        "closedAt": "2026-10-04T01:47:42Z",
+                        "headRefName": "codex-turn-tail-close-out",
+                        "headRepositoryOwner": {
+                            "login": "penard-monkey"
+                        },
+                        "baseRefName": "main",
+                        "author": {
+                            "login": "penard-monkey"
+                        }
+                    }
+                ]
+            }
+        }
+    }
+}

@@ -21,6 +21,7 @@ pub mod diag;
 pub mod docs;
 pub mod error;
 pub mod git;
+pub mod github;
 pub mod guidance;
 pub mod harness;
 pub mod health;

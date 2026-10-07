@@ -5,7 +5,7 @@
 // the current one, or nothing. `app/scripts/navhistory-check.mjs` evaluates
 // this file as-is. Design: docs/proposals/nav-history.md.
 
-export type DockTab = "files" | "terminal" | "docs" | "plan" | "automations";
+export type DockTab = "files" | "terminal" | "docs" | "plan" | "automations" | "prs";
 
 /** What the panes show. `place: null` is Home. `dock.file` only means anything
  *  on the Files tab and `dock.shell` only on Terminal — `normalize` drops the
@@ -127,7 +127,7 @@ export const prune = (h: History, dead: (l: Loc) => boolean): History => {
 };
 
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
-const TAB_LABEL: Record<DockTab, string> = { files: "Files", terminal: "Terminal", docs: "Docs", plan: "Plan", automations: "Automations" };
+const TAB_LABEL: Record<DockTab, string> = { files: "Files", terminal: "Terminal", docs: "Docs", plan: "Plan", automations: "Automations", prs: "Pull requests" };
 
 /** One line for a tooltip or the history menu. `nameOf` turns a place into
  *  what the nav calls it (a title, `(main)`); the slug otherwise. */

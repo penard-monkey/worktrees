@@ -66,7 +66,7 @@ export type PlacePanels = {
    *  This union is MIRRORED by `DOCK_RAIL` in App.tsx, and `dockrail-check.mjs`
    *  asserts the two sets are equal — in BOTH places below, since a tab added
    *  to one and not the other type-checks perfectly and then cannot persist. */
-  dock_tab: "files" | "terminal" | "docs" | "plan" | "automations";
+  dock_tab: "files" | "terminal" | "docs" | "plan" | "automations" | "prs";
   dock_width: number;
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
@@ -191,9 +191,15 @@ export type Settings = {
   usage_place: "strip" | "footer" | "rail" | "off";
   usage_claude: boolean;
   usage_codex: boolean;
+  // Pull requests (docs/proposals/pull-requests.md): the header chip, the dock
+  // tab and the rail badge. Off is a REAL off switch, like `usage_place: "off"`:
+  // App makes no `project_prs` call at all, so `gh` is never run — not a hidden
+  // tab that keeps polling. Projects that do not resolve to GitHub show nothing
+  // either way, so there is no per-project switch.
+  pull_requests: boolean;
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
-  dock_tab: "files" | "terminal" | "docs" | "plan" | "automations"; // last-used dock tab
+  dock_tab: "files" | "terminal" | "docs" | "plan" | "automations" | "prs"; // last-used dock tab
   // Files tab: how the tree and the viewer sit relative to each other.
   // "auto" flips to side-by-side once the dock is at least SPLIT_AT wide — a
   // narrow dock has no room for two columns, a wide one wastes half its width
@@ -420,6 +426,7 @@ export const DEFAULTS: Settings = {
   usage_place: "strip",
   usage_claude: true,
   usage_codex: true,
+  pull_requests: true,
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
@@ -684,6 +691,7 @@ export async function loadSettings(): Promise<Settings> {
     delete (s as Partial<Settings> & { agent_setup_dismissed?: unknown }).agent_setup_dismissed;
     s.usage_claude = typeof s.usage_claude === "boolean" ? s.usage_claude : true;
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
+    s.pull_requests = typeof s.pull_requests === "boolean" ? s.pull_requests : true;
     s.theme = normalizeTheme(s.theme);
     s.theme_light = normalizePair(s.theme_light, "light", DEFAULTS.theme_light);
     s.theme_dark = normalizePair(s.theme_dark, "dark", DEFAULTS.theme_dark);

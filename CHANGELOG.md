@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Pull requests, for projects on GitHub.** A place whose branch has a PR
+  shows it in the header — a dot, `#451` and one word (ready, checking, CI
+  failing, conflicts, changes requested, draft, merged) — and a click opens it
+  on GitHub. A merged PR stays on its place until you remove the place: this
+  repo squash-merges, and git cannot see that a squashed branch landed. A new
+  Pull requests tab in the dock lists the project's PRs, the current place's
+  pinned on top, then the ones in a place, the ones with none, and recent
+  merges; its icon counts the open ones, and turns red to count the ones that
+  need you. Read through the GitHub CLI (`gh`), for the selected project only,
+  while the window is visible — and only read: the app never comments,
+  merges or opens a PR. Without `gh`, or signed out, the tab shows the command
+  to run, with a Copy button. Projects not on GitHub look exactly as before.
+  Settings → Behavior → Pull requests turns it all off, `gh` calls included.
 - **File paths in a rendered document are links.** In the Files tab's
   markdown preview and the Plan tab, a path that names a real file in the
   project — `app/src/App.tsx` in prose, or in backticks — opens it in the

@@ -4734,6 +4734,18 @@ async fn diagnostics(app: AppHandle) -> Result<String, String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let (git_path, git_version) = tool_report("git");
     let (tmux_path, tmux_version) = tool_report("tmux");
+    // `gh` feeds the Pull requests tab. Version + per-host login and token
+    // source, from `gh auth status --json hosts` — local, never the token.
+    let gh_line = {
+        let gh = worktrees_core::github::gh_bin();
+        let mut which = std::process::Command::new("which");
+        which.arg(&gh);
+        let at = match run_deadline(which, 10) {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => "(not found)".to_string(),
+        };
+        format!("{} @ {at}", worktrees_core::github::diag_line(&gh))
+    };
     // The documentation viewer's BROWSER BUNDLE, by STAT — never by running
     // anything. "It should be there and it is not" belongs here, on demand,
     // beside the other tools, and NOT on any path the app takes at launch: a
@@ -4768,6 +4780,7 @@ async fn diagnostics(app: AppHandle) -> Result<String, String> {
          PATH        : {path}\n\
          git         : {git_version} @ {git_path}\n\
          tmux        : {tmux_version} @ {tmux_path}\n\
+         gh          : {gh_line}\n\
          docs viewer : {viewer_path}\n\
          \n\
          core config\n\
@@ -4799,27 +4812,187 @@ async fn remote_url(repo: String) -> Result<Option<String>, String> {
     else {
         return Ok(None);
     };
-    Ok(normalize_remote(&remote))
+    Ok(worktrees_core::github::web_base(&remote))
 }
 
-/// `git@host:owner/repo(.git)` / `ssh://git@host/…` / `http(s)://host/…` → the
-/// https web base; None for exotic remotes (local paths, other protocols).
-fn normalize_remote(remote: &str) -> Option<String> {
-    let r = remote.trim();
-    let r = r.strip_suffix(".git").unwrap_or(r);
-    if let Some(rest) = r.strip_prefix("git@") {
-        let (host, path) = rest.split_once(':')?;
-        Some(format!("https://{host}/{path}"))
-    } else if let Some(rest) = r.strip_prefix("ssh://git@") {
-        // the authority may carry a port (host:2222/owner/repo) — strip it
-        let (auth, path) = rest.split_once('/')?;
-        let host = auth.split(':').next().unwrap_or(auth);
-        Some(format!("https://{host}/{path}"))
-    } else if r.starts_with("https://") || r.starts_with("http://") {
-        Some(r.to_string())
-    } else {
-        None
+// ── Pull requests (docs/proposals/pull-requests.md, phase 1) ────────────────
+//
+// ONE fetch per project, never per place: the app keeps the last answer per
+// project root and every place of that project is joined against it. The
+// frontend decides WHEN (selected project only, window visible, focus) and
+// says how old an answer it will accept; this decides whether that costs a
+// `gh` call. Concurrent callers for one project queue on a per-project lock
+// and the second finds the first one's answer — a focus event and a timer
+// tick never spend two calls. Read-only toward GitHub: `gh auth token`
+// (offline) and one `gh api graphql` query, nothing else.
+//
+// NOT in `list_workspace`: that sweep is local git/tmux, runs constantly and
+// must stay offline-fast; a 1.2s network call in it would stall the nav.
+
+/// What a project's PR fetch last concluded. `snap` survives an offline
+/// failure, so a dropped network keeps the last good list ("as of …").
+#[derive(Clone)]
+struct PrCacheEntry {
+    /// when this conclusion was reached (ms)
+    at: u64,
+    state: &'static str,
+    host: Option<String>,
+    web: Option<String>,
+    push_owner: String,
+    snap: Option<(u64, worktrees_core::github::Snapshot)>,
+    message: Option<String>,
+    viewer: Option<String>,
+}
+
+static PR_CACHE: Mutex<Option<HashMap<String, PrCacheEntry>>> = Mutex::new(None);
+static PR_LOCKS: Mutex<Option<HashMap<String, std::sync::Arc<Mutex<()>>>>> = Mutex::new(None);
+
+#[derive(Serialize)]
+struct PrsReply {
+    /// `ok` / `not_github` / `gh_missing` / `logged_out` / `no_host_token` /
+    /// `not_found` / `error`. `not_github` renders NOTHING — no tab, no chip.
+    state: &'static str,
+    host: Option<String>,
+    web: Option<String>,
+    view: Option<worktrees_core::github::View>,
+    /// when the shown list was fetched (ms) — older than `checked_at` when an
+    /// offline failure is being papered over
+    fetched_at: Option<u64>,
+    checked_at: u64,
+    stale: bool,
+    message: Option<String>,
+    viewer: Option<String>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Reach a conclusion for one project, from scratch. Blocking (git + gh).
+fn pr_conclude(root: &str, prev: Option<&PrCacheEntry>) -> PrCacheEntry {
+    use worktrees_core::github::{self as gh, Auth, FetchError};
+    let at = now_ms();
+    let blank = |state: &'static str| PrCacheEntry {
+        at,
+        state,
+        host: None,
+        web: None,
+        push_owner: String::new(),
+        snap: None,
+        message: None,
+        viewer: None,
+    };
+    let Some(res) = gh::resolve(root) else { return blank("not_github") };
+    let bin = gh::gh_bin();
+    let host = res.repo.host.clone();
+    let mut e = PrCacheEntry {
+        host: Some(host.clone()),
+        web: Some(res.repo.web()),
+        push_owner: res.push_owner.clone(),
+        ..blank("ok")
+    };
+    let auth = gh::probe_auth(&bin, &host);
+    if !gh::is_github_host(&host, &auth) {
+        return blank("not_github");
     }
+    e.state = match auth {
+        Auth::Ok => "ok",
+        Auth::Missing => "gh_missing",
+        Auth::LoggedOut => "logged_out",
+        Auth::NoHostToken => "no_host_token",
+    };
+    if e.state != "ok" {
+        return e;
+    }
+    // a previous good list, for this same repo, survives a network failure
+    let prev_snap = prev.and_then(|p| p.snap.clone()).filter(|(_, s)| s.repo == res.repo);
+    match gh::fetch(&bin, &res.repo) {
+        Ok(snap) => {
+            e.viewer = snap.viewer.clone();
+            e.snap = Some((at, snap));
+        }
+        Err(FetchError::Offline { message }) => {
+            e.viewer = prev_snap.as_ref().and_then(|(_, s)| s.viewer.clone());
+            e.state = if prev_snap.is_some() { "ok" } else { "error" };
+            e.snap = prev_snap;
+            e.message = Some(message);
+        }
+        Err(FetchError::NotFound { viewer }) => {
+            e.state = "not_found";
+            e.viewer = viewer;
+        }
+        Err(FetchError::Missing) => e.state = "gh_missing",
+        Err(FetchError::LoggedOut) => e.state = "logged_out",
+        Err(FetchError::Other { message }) => {
+            e.state = if prev_snap.is_some() { "ok" } else { "error" };
+            e.snap = prev_snap;
+            e.message = Some(message);
+        }
+    }
+    // One line per real fetch (at most every ~2 min, visible window, selected
+    // project only), so cadence and auth state can be read back from app.log.
+    match &e.message {
+        Some(m) => applog("warn", &format!("pull requests: {root}: {} — {m}", e.state)),
+        None => applog(
+            "info",
+            &format!(
+                "pull requests: {root}: {} ({} open) in {}ms",
+                e.state,
+                e.snap.as_ref().map(|(_, s)| s.open.len()).unwrap_or(0),
+                now_ms().saturating_sub(at)
+            ),
+        ),
+    }
+    e
+}
+
+/// The project's pull requests, joined to `places` (each place's slug and
+/// CURRENT local branch — the frontend holds them, and a branch switch re-maps
+/// against the cached list without a fetch). Answers from the cache when it is
+/// at most `max_age_secs` old; `0` forces a fetch, which a concurrent caller
+/// that queued behind it still shares.
+#[tauri::command]
+async fn project_prs(
+    repo: String,
+    max_age_secs: u64,
+    places: Vec<worktrees_core::github::PlaceBranch>,
+) -> Result<PrsReply, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let asked = now_ms();
+        let lock = {
+            let mut g = PR_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+            g.get_or_insert_with(HashMap::new).entry(repo.clone()).or_default().clone()
+        };
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cached = PR_CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&repo).cloned());
+        let fresh = cached.as_ref().is_some_and(|c| {
+            // concluded while we queued (coalesced), or young enough
+            c.at >= asked || asked.saturating_sub(c.at) <= max_age_secs.saturating_mul(1000)
+        });
+        let entry = if fresh {
+            cached.expect("fresh implies cached")
+        } else {
+            let root = Project::discover(Path::new(&repo)).map(|p| p.main_root).unwrap_or_else(|_| repo.clone());
+            let e = pr_conclude(&root, cached.as_ref());
+            PR_CACHE.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(repo.clone(), e.clone());
+            e
+        };
+        let view = entry.snap.as_ref().map(|(_, s)| worktrees_core::github::view(s, &entry.push_owner, &places));
+        let fetched_at = entry.snap.as_ref().map(|(t, _)| *t);
+        Ok(PrsReply {
+            state: entry.state,
+            host: entry.host,
+            web: entry.web,
+            stale: fetched_at.is_some_and(|t| t < entry.at),
+            view,
+            fetched_at,
+            checked_at: entry.at,
+            message: entry.message,
+            viewer: entry.viewer,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Open a place in the user's editor (`editor_cmd` from Settings, e.g. `code`).
@@ -8613,6 +8786,7 @@ pub fn run() {
             open_place,
             close_place,
             remote_url,
+            project_prs,
             fetch_origin,
             set_fetch_interval,
             check_update,
@@ -10989,28 +11163,5 @@ mod tests {
         assert_eq!(all[0].key, "older", "the older generation comes first");
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The remote spec is whatever `git remote get-url` says; the web base is
-    /// what a browser can open. Every shape git accepts for a hosted repo maps
-    /// to one https URL, and everything else (a local clone, an unknown scheme)
-    /// is None rather than a made-up link.
-    #[test]
-    fn a_remote_spec_becomes_one_https_base_or_none() {
-        for (spec, want) in [
-            ("git@github.com:acme/repo.git", "https://github.com/acme/repo"),
-            ("git@github.com:acme/repo", "https://github.com/acme/repo"),
-            ("ssh://git@github.com/acme/repo.git", "https://github.com/acme/repo"),
-            ("ssh://git@gitea.local:2222/acme/repo.git", "https://gitea.local/acme/repo"),
-            ("https://github.com/acme/repo.git", "https://github.com/acme/repo"),
-            ("https://github.com/acme/repo", "https://github.com/acme/repo"),
-            ("http://gitlab.internal/group/sub/repo.git", "http://gitlab.internal/group/sub/repo"),
-            ("  git@github.com:acme/repo.git\n", "https://github.com/acme/repo"),
-        ] {
-            assert_eq!(normalize_remote(spec).as_deref(), Some(want), "{spec}");
-        }
-        for spec in ["/Users/x/repo.git", "../sibling", "file:///tmp/repo", "git://github.com/acme/repo", "git@nocolon"] {
-            assert_eq!(normalize_remote(spec), None, "{spec}");
-        }
     }
 }
