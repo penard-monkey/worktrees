@@ -5,6 +5,14 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Pull requests in the app — phase 1 not built.** Design approved in
+  `docs/proposals/pull-requests.md` (§9 phase 1, §10 decisions): a core
+  `github` module (remote → repo, fork resolution, auth probe, one GraphQL
+  query, lane mapping), the `project_prs` command with a TTL cache, the lane
+  header chip, the Pull requests dock tab, the rail badge, the Settings switch
+  and the `gh` install/login empty state. First thing to confirm in
+  `sandbox.sh --app`: that keyring auth works from a Finder launch. See
+  docs/sessions/2026-10-07-pr-panel/.
 - **Markdown path links: the name menu is cut off before it is sorted.**
   `resolve_doc_path` stops at `DOC_NAME_CHOICES_MAX` (12) while collecting, then
   sorts, so which 12 you see depends on `ls-files` order. Collect all, sort,
