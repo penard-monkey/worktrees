@@ -4,7 +4,8 @@ title: "Proposal — pull requests in the app"
 
 # Proposal — a project's pull requests, and each lane's own
 
-**Status:** design, 2026-10-07. Not built. Open questions for David are in §9.
+**Status:** design, 2026-10-07; questions answered the same day (§10). Not
+built. Phase 1 only — phase 2 (agents, merged → remove) is deferred.
 
 **The ask.** When a project's remote is GitHub, see its open PRs from the app,
 viewed from `(main)`; and when a lane's branch is a PR's head, see that PR on
@@ -233,7 +234,7 @@ per-place call later — **one fetch per project, never per place.**
 - **A nav-row glyph for every PR (phase 1).** The row already carries the
   activity dot, dirty count, ↑/↓, age and lifecycle; most lanes have a PR, so a
   per-row PR mark is noise that says "this lane has a PR", which is the normal
-  case. Reconsidered in phase 3 as a mark for **exceptions** only (§8).
+  case. Reconsidered in phase 3 as a mark for **exceptions** only (§7).
 - **A sheet (the StatusSheet / ProjectSheet pattern).** Sheets are for a
   one-shot check you read and dismiss; they slide over the terminal. A PR list
   is reference you keep beside the work while an agent runs, which is what the
@@ -332,41 +333,118 @@ or guesses from git — which cannot see a squash-merge.
   `ls --json` diff rule in AGENTS.md); a separate `worktrees prs [--json]`
   verb does, for scripts.
 
-## 7. What this does not do
+## 7. Settings, `gh` detection, and the marks
+
+### One switch, and automatic absence
+
+Settings → Behavior gets **Pull requests: On / Off** (`pull_requests: boolean`
+in `settings.ts`, default **on**). Off is a real off switch, the way
+`usage_place: "off"` is: no `gh` call of any kind, no tab, no chip, no badge —
+not a hidden component that keeps polling.
+
+No per-project switch. A project that does not resolve to GitHub (§2) already
+gets nothing — no rail icon, no chip, no empty state — so a mixed workspace
+needs no configuration: the GitHub ones show PRs, the others look exactly as
+they do today. And since only the selected project is polled, a GitHub
+project you do not care about costs nothing while you are elsewhere. If one
+turns out to be wanted later, it is a per-machine entry in `ui-state.json`
+keyed by repo, never `.worktrees.toml` (a cloned repo should not decide what
+this machine fetches).
+
+### Detecting `gh`, and offering it
+
+Yes, detect it — it decides which of four things the tab says, and it costs
+40 ms (`gh --version`). The app probes **once at startup** (after
+`fixup_gui_path`), and again **on window focus while it is missing**, so
+installing it in a terminal is picked up without a restart. Once present, the
+login probe (`gh auth token -h <host>`, 50 ms, offline) runs before each
+project's first fetch.
+
+The offer lives where the gap is felt — the Pull requests tab of a GitHub
+project — and nowhere else in phase 1:
+
+```
+┌ Pull requests ────────────────────────────────────┐
+│ The GitHub CLI is not installed.                  │
+│   brew install gh                         [Copy]  │
+│ Then sign in once:                                │
+│   gh auth login                           [Copy]  │
+│                                   About gh ↗      │
+└───────────────────────────────────────────────────┘
+```
+
+The app shows the commands; it does not run them. `brew install` installs
+software system-wide and `gh auth login` is interactive (browser + device
+code), and neither is an action this app has taken on anyone's behalf before.
+The rail icon still renders in that state so the tab is discoverable; it is
+the one empty state allowed, because it is the reason the feature is not
+working, not an absence of data. Not-logged-in and wrong-host get the same
+shape with only the login line. An `offers.ts` entry (the after-update band)
+is the natural place for a one-time "See your pull requests — install gh"
+suggestion, gated on feature on + gh missing + at least one registered GitHub
+project; listed as optional, since the tab already says it.
+
+### Attention without nav noise
+
+The nav row does **not** get a second dot. Its dot is agent activity, and two
+dots in one row would have to be read by colour alone, which is exactly the
+contrast trap AGENTS.md records for accent tokens.
+
+Instead the attention goes on the **rail icon's badge**. The Pull requests
+icon carries a count (`rail-count`, as the offers icon does):
+
+- plain/dim: open PRs in the project, when none needs you;
+- `--danger` tint: the number that **need you** — CI failing, changes
+  requested, conflicting, or merged while their place still exists.
+
+That answers "is anything on GitHub waiting for me?" from every place in the
+project, with no per-row cost. The header chip (§5) then says which state the
+current lane is in.
+
+If a per-row mark is still wanted after living with that, the candidate is a
+**hollow ring** (not a filled dot) at the row's trailing edge, shown only for
+the same four exception states and behind its own Navigation setting, default
+off — so the shape differs from the activity dot before the colour does.
+Deferred; it should be looked at in the harness against a real nav before
+anyone commits to it.
+
+## 8. What this does not do
 
 Read-only toward GitHub, permanently in phase 1: no merge, comment, label,
 approve or create from the app. "Create PR" for a pushed lane with none is a
-phase-2 question (§9), because it is the first write.
+deferred with phase 2 (§10), because it is the first write.
 
-## 8. Phasing
+## 9. Phasing
 
 **Phase 1 — useful alone.** `worktrees-core::github` (remote → repo, fork
 resolution, auth probe, query, parse, mapping) with fixture tests; the app's
 `project_prs` command with TTL cache and in-flight coalescing; the lane header
 chip; the Pull requests dock tab with the four groups; visibility-gated
-polling; the auth-state empty lines; the `gh` line in diagnostics; mock
+polling (selected project only); the auth-state and install empty states;
+the rail badge with its attention tint; the Settings switch; the `gh` line in
+diagnostics; mock
 harness support. Verified in `sandbox.sh --app` against this repo, including a
 Finder-style launch (bare PATH) to see keyring auth work.
 
-**Phase 2 — close the loop.** `merged` chip → "Remove place…" through the
+**Phase 2 — deferred (David, 2026-10-07: not needed for now).** `merged` chip → "Remove place…" through the
 existing RemoveDialog; `pr` on `place_status`/`list_places` from the shared
 cache + `pull_requests` MCP tool; `worktrees prs`; "Open in a place" for
 same-repo PRs with no place; health/StatusSheet uses a merged PR to replace
 the `maybe_merged` guess.
 
-**Phase 3 — only if wanted.** A nav-row mark for exceptions only (CI failing,
-changes requested, conflicting, merged-with-place-still-here); ⌘K entries
+**Phase 3 — only if wanted.** The hollow-ring nav mark (§7); ⌘K entries
 ("Go to PR #…"); fork PRs into a place; "Create PR" (the first write).
 
-## 9. Open questions for David
+## 10. Decisions (David, 2026-10-07)
 
-1. **Tab content on a lane:** the whole project list with the lane's PR pinned
-   (recommended — one rendering), or only the lane's PR?
-2. **Merged window:** keep a merged PR on its lane until the place is removed
-   (recommended), or for a fixed time?
-3. **Scope of polling:** selected project only (recommended), or every
-   project with a visible place, so another project's chips are fresh when
-   you switch?
-4. **Create PR from the app** for a pushed lane with none — in phase 2, or
-   stay read-only?
-5. **Nav mark for exceptions** (phase 3) — wanted at all?
+1. **Tab on a lane:** the whole project list, the lane's own PR pinned on top.
+2. **Merged:** stays on its lane until the place is removed.
+3. **Polling:** the selected project only.
+4. **Phase 2** (agents/MCP, merged → remove, open-in-a-place, create PR):
+   not now. The app stays read-only toward GitHub.
+5. **Nav mark:** the nav is noisy enough. Attention goes on the rail icon's
+   badge; a per-row mark only as a distinct shape, opt-in, later (§7).
+6. **Settings:** one global on/off; non-GitHub projects show nothing on their
+   own (§7).
+7. **`gh` missing:** detected; the tab shows the install and login commands to
+   copy. The app never runs them.
