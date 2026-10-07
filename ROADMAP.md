@@ -5,14 +5,39 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
-- **Pull requests in the app — phase 1 not built.** Design approved in
-  `docs/proposals/pull-requests.md` (§9 phase 1, §10 decisions): a core
-  `github` module (remote → repo, fork resolution, auth probe, one GraphQL
-  query, lane mapping), the `project_prs` command with a TTL cache, the lane
-  header chip, the Pull requests dock tab, the rail badge, the Settings switch
-  and the `gh` install/login empty state. First thing to confirm in
-  `sandbox.sh --app`: that keyring auth works from a Finder launch. See
-  docs/sessions/2026-10-07-pr-panel/.
+- **Pull requests: `sandbox.sh --app` hand test still pending.** Phase 1
+  shipped in #455 without it; David runs it before v0.40.0. Look for: a Finder
+  launch (bare PATH) finding keyring auth; app.log's `pull requests: <root>: ok
+  (N open) in Nms` lines and their cadence (selected project, visible window,
+  ~120s). See docs/sessions/2026-10-07-pr-view/.
+- **Pull requests: the remembered-tab → Files fallback WRITES.** `App.tsx`'s
+  `prsGone` effect calls `updatePanels({dock_tab: "files"})`, which freezes a
+  `place_panels` entry for a place never opened and resets the global
+  `dock_tab` seed. It also fires with the dock closed. That is the "a
+  `place_panels` field whose global twin is a SEED" trap. Substitute at render
+  instead: `eff.dock_tab === "prs" && prsGone ? "files" : eff.dock_tab`.
+  See docs/sessions/2026-10-07-pr-view/.
+- **Pull requests: `diagnostics`' `gh: None` means "on".** An older caller
+  that sends no flag still runs `gh`; say so in a comment on the parameter.
+  See docs/sessions/2026-10-07-pr-view/.
+- **Pull requests: `not_github` answers use the normal TTL.** A GitLab or
+  local-only project is re-resolved, and re-probed with `gh auth token`, every
+  time its cache entry expires. Give `not_github` a much longer TTL (it only
+  changes when the remotes do). See docs/sessions/2026-10-07-pr-view/.
+- **Pull requests: two remote shapes parse as `not_github`.** Neither an scp
+  remote with a user other than `git` (`me@host:o/r`) nor an Enterprise
+  remote on a non-default port gets a tab or chip today. Widen
+  `split_remote` and decide what host a port-carrying remote maps to.
+  See docs/sessions/2026-10-07-pr-view/.
+- **Pull requests: a `gh auth token` timeout reads as "not signed in".**
+  `probe_auth` maps `RunErr::Timeout` to `NoHostToken`, so a wedged `gh`
+  tells the user to log in. Give the timeout its own state.
+  See docs/sessions/2026-10-07-pr-view/.
+- **Pull requests: an unauthenticated GHE remote is undiscoverable.** It
+  looks like any non-GitHub host (§2), so nothing tells the user that a `gh`
+  login would light it up. If wanted: a per-repo "treat as GitHub" override in
+  `ui-state.json` (this machine's choice), never `.worktrees.toml`.
+  See docs/sessions/2026-10-07-pr-view/.
 - **Markdown path links: the name menu is cut off before it is sorted.**
   `resolve_doc_path` stops at `DOC_NAME_CHOICES_MAX` (12) while collecting, then
   sorts, so which 12 you see depends on `ls-files` order. Collect all, sort,
