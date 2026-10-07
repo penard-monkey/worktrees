@@ -269,7 +269,7 @@ other badges.
 
    merged lane:      ● #449 merged   [Remove place…]
    conflicting:      ● #350 conflicts
-   no PR, pushed:    (nothing — phase 2 may offer "Create PR")
+   no PR, pushed:    (nothing)
 ```
 
 **The Pull requests dock tab** — `GitPullRequest` icon, sixth on the right
@@ -410,9 +410,10 @@ anyone commits to it.
 
 ## 8. What this does not do
 
-Read-only toward GitHub, permanently in phase 1: no merge, comment, label,
-approve or create from the app. "Create PR" for a pushed lane with none is
-deferred with phase 2 (§10), because it is the first write.
+Read-only toward GitHub, in **every** phase: no merge, comment, label,
+approve — and **no PR creation**. A pushed lane with no PR shows nothing; the
+app does not offer "Create PR" now or later (decision 4, §10). Opening a PR
+stays with `gh`, the agent, or the browser.
 
 ## 9. Phasing
 
@@ -433,15 +434,16 @@ same-repo PRs with no place; health/StatusSheet uses a merged PR to replace
 the `maybe_merged` guess.
 
 **Phase 3 — only if wanted.** The hollow-ring nav mark (§7); ⌘K entries
-("Go to PR #…"); fork PRs into a place; "Create PR" (the first write).
+("Go to PR #…"); fork PRs into a place.
 
 ## 10. Decisions (David, 2026-10-07)
 
 1. **Tab on a lane:** the whole project list, the lane's own PR pinned on top.
 2. **Merged:** stays on its lane until the place is removed.
 3. **Polling:** the selected project only.
-4. **Phase 2** (agents/MCP, merged → remove, open-in-a-place, create PR):
-   not now. The app stays read-only toward GitHub.
+4. **No PR creation, ever.** The app stays read-only toward GitHub in every
+   phase (§8). Phase 2 (agents/MCP, merged → remove, open-in-a-place) is
+   not needed for now.
 5. **Nav mark:** the nav is noisy enough. Attention goes on the rail icon's
    badge; a per-row mark only as a distinct shape, opt-in, later (§7).
 6. **Settings:** one global on/off; non-GitHub projects show nothing on their
