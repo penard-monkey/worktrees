@@ -127,6 +127,16 @@ export const Zap = (p: IconProps) => (
     <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" />
   </Svg>
 );
+/** The dock's Pull requests tab — Lucide `git-pull-request`: two commits and
+ *  the arrow-less merge line, the shape GitHub itself draws for an open PR. */
+export const GitPullRequest = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="18" cy="18" r="3" />
+    <circle cx="6" cy="6" r="3" />
+    <path d="M13 6h3a2 2 0 0 1 2 2v7" />
+    <path d="M6 9v12" />
+  </Svg>
+);
 /** Pending setup offers (offers.ts) — Lucide `sparkles`. Drawn in `--ai`, the
  *  band's hue, so the rail button and the band it opens read as one thing. */
 export const Sparkles = (p: IconProps) => (

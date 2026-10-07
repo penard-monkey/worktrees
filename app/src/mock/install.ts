@@ -10,6 +10,8 @@ import type { MigrationRow, MigrationOutcome } from "../CodexMcpPanel";
 import { agentSessions, initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 import { isHarness, type Harness } from "../harness";
 import { cloneSource, type CloneErrorKind, type CloneProgress } from "../clone";
+import { mockProjectPrs } from "./prs";
+import type { PlaceBranch } from "../prs";
 
 /** `worktrees_core::docs::DocEntry` — see the `list_docs` case. */
 type MockDoc = { path: string; rel: string; title: string; group: string; mtime_ms: number };
@@ -1525,6 +1527,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // the menu's "No origin remote" path both have a row to be seen on.
       const name = (args.repo as string).split("/").pop() ?? "";
       return name === "deleted-thing" || name.startsWith("local") ? null : `https://github.com/demo/${name}`;
+    }
+    case "project_prs": {
+      // `?prs=` picks the state (mock/prs.ts). `slow` answers after 1.5s, the
+      // real query's ~1.2s, so the tab's "no spinner over a previous list" can
+      // be seen; every other mode answers at once.
+      const reply = mockProjectPrs(args.repo as string, (args.places ?? []) as PlaceBranch[]);
+      if (new URLSearchParams(location.search).get("prs") === "slow") await new Promise((r) => setTimeout(r, 1500));
+      return reply;
     }
     case "fetch_origin":
       console.info("[mock] fetch_origin:", args); // no ahead/behind state to model in the harness

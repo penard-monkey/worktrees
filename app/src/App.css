@@ -930,6 +930,30 @@ html[data-guides="off"] .kids > .places::after { display: none; }
    13px glyph has nothing to give. `line-height: 0` so the inline SVG does not
    add descender space and float the icon above the chip's midline. */
 .topbar .remote-link { flex: none; display: inline-flex; align-items: center; line-height: 0; padding: 3px 5px; }
+/* The lane's PR chip (prs.ts). Hue lives in the DOT only — the words take
+   --txt-hi / --txt-dim, the status-chip rule (an accent token is a fill, not
+   text). `display: block` with inline children, not a flex button: WebKit
+   shrink-wraps a flex-container <button> without its children (AGENTS.md, "The
+   mock harness is CHROME"). `flex: none` — a short chip has nothing to give. */
+.topbar .pr-chip {
+  flex: none; display: block; white-space: nowrap;
+  padding: 1px var(--s2); border: 0; border-radius: var(--r-sm);
+  background: transparent; font: inherit; font-size: var(--fs-label); line-height: 1.4;
+  cursor: pointer; transition: background var(--dur-fast);
+}
+.topbar .pr-chip:hover { background: var(--bg-elev); }
+.pr-chip .pr-dot { margin-right: 5px; vertical-align: 0.05em; }
+.pr-chip-num { color: var(--txt-hi); font-variant-numeric: tabular-nums; }
+.pr-chip-label { color: var(--txt-dim); margin-left: 5px; }
+.pr-dot {
+  display: inline-block; flex: none;
+  width: 8px; height: 8px; border-radius: var(--r-full); background: var(--txt-mute);
+}
+.pr-dot.ok { background: var(--ok); }
+.pr-dot.warn { background: var(--warn); }
+.pr-dot.danger { background: var(--danger); }
+.pr-dot.accent { background: var(--accent); }
+.pr-dot.mute { background: transparent; box-shadow: inset 0 0 0 1.5px var(--txt-mute); }
 .status-cluster { display: flex; align-items: center; gap: var(--s3); flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: var(--fs-meta); }
 .status-cluster .s { display: inline-flex; align-items: center; gap: 3px; }
 .status-cluster .ok { color: var(--ok); }
@@ -3495,3 +3519,53 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
 .pi-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--r-full); margin-right: var(--s2); background: var(--txt-mute); vertical-align: middle; }
 .pi-dot.ok { background: var(--ok); }
 .nw-project { width: auto; max-width: 60%; margin-left: auto; padding: 2px var(--s2); }
+
+/* ── Pull requests dock tab (PrsPane.tsx) ───────────────────────────────── */
+.prs-pane { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s2) 0 var(--s4); }
+.prs-group + .prs-group { margin-top: var(--s2); }
+.prs-group-head {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  padding: var(--s1) var(--s3); border: 0; background: transparent; font: inherit;
+  font-size: var(--fs-micro); font-weight: var(--fw-bold); letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--txt-dim); text-align: left;
+}
+button.prs-group-head { cursor: pointer; }
+button.prs-group-head:hover { color: var(--txt-hi); }
+.prs-group-toggle { text-transform: none; letter-spacing: 0; font-weight: var(--fw-body); color: var(--txt-mute); }
+/* block + inner spans, never a flex <button> (WebKit; see .pr-chip) */
+.prs-row {
+  display: block; width: 100%; padding: var(--s1) var(--s3) var(--s1) calc(var(--s3) + 14px);
+  position: relative; border: 0; background: transparent; font: inherit; text-align: left;
+  color: var(--txt); cursor: pointer;
+}
+.prs-row:hover { background: var(--bg-elev); }
+.prs-row > .pr-dot { position: absolute; left: var(--s3); top: calc(var(--s1) + 0.45em); }
+.prs-row.dim .prs-title { color: var(--txt-dim); }
+.prs-main { display: block; min-width: 0; }
+.prs-title {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--txt-hi); font-size: var(--fs-body);
+}
+.prs-num { color: var(--txt-dim); font-variant-numeric: tabular-nums; }
+.prs-meta {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--txt-dim); font-size: var(--fs-meta);
+}
+.prs-where { color: var(--txt); }
+.prs-stale { padding: var(--s1) var(--s3); font-size: var(--fs-meta); color: var(--txt-dim); }
+.prs-empty { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s4) var(--s3); font-size: var(--fs-meta); }
+.prs-empty-lead { color: var(--txt-hi); font-size: var(--fs-body); }
+.prs-empty-sub { color: var(--txt-dim); overflow-wrap: anywhere; }
+.prs-cmd {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s1) var(--s1) var(--s1) var(--s2); border-radius: var(--r-sm); background: var(--bg-panel);
+}
+.prs-cmd code { flex: 1; min-width: 0; font-family: var(--font-mono); color: var(--txt-hi); overflow-wrap: anywhere; }
+.prs-cmd .ctrl { flex: none; }
+.prs-link { align-self: flex-end; border: 0; background: transparent; font: inherit; color: var(--txt-dim); cursor: pointer; padding: 0; }
+.prs-link:hover { color: var(--txt-hi); text-decoration: underline; }
+.dock-tabs .prs-refresh { font-variant-numeric: tabular-nums; }
+/* The rail badge: dim for "open PRs", a --danger FILL (words stay --txt-hi on
+   it) for "this many need you". */
+.rail-count.prs-count { background: var(--bg-elev); color: var(--txt-dim); }
+.rail-count.prs-count.attn { background: color-mix(in srgb, var(--danger) 32%, var(--bg-abyss)); color: var(--txt-hi); }

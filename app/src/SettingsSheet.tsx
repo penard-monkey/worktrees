@@ -629,7 +629,10 @@ export function SettingsSheet({
   const [diagCopied, setDiagCopied] = useState(false);
   const copyDiagnostics = async () => {
     try {
-      const back = await invoke<string>("diagnostics");
+      // `gh`: the Pull requests switch reaches the backend, so "off stops
+      // every gh call" holds for this button too (`gh auth status` is a
+      // network check, ~0.5s).
+      const back = await invoke<string>("diagnostics", { gh: settings.pull_requests });
       const ui =
         `\nUI settings\n-----------\n` +
         `theme   : ${settings.theme}\n` +
@@ -1114,6 +1117,23 @@ export function SettingsSheet({
               <option value={60}>Every 60 min</option>
             </select>
             <div className="hint">Keeps the divergence counts fresh. Fetches each project's origin in the background.</div>
+          </section>
+
+          <section className="setting">
+            <label>Pull requests</label>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.pull_requests}
+                onChange={(e) => onChange({ pull_requests: e.currentTarget.checked })}
+              />
+              Show pull requests for GitHub projects
+            </label>
+            <div className="hint">
+              A chip in a place's header for its branch's PR, a Pull requests tab in the dock, and a
+              count on its icon. Read through the GitHub CLI (<code>gh</code>) for the selected
+              project only, while the window is visible. Off stops every <code>gh</code> call.
+            </div>
           </section>
 
           <QuotaSection data-focus="plan-limits" onReport={onReport} />

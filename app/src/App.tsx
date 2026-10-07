@@ -45,6 +45,8 @@ import {
 } from "./dnd";
 import { useNavDrag, type DragItem } from "./navdrag";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
+import { PrsPane } from "./PrsPane";
+import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -3865,6 +3867,19 @@ function App() {
   // they fail for different reasons, and a machine with no Claude Code
   // credentials (no bars at all) still wants to be told the API is down.
   const claudeStatus = useClaudeStatus(settings.usage_place !== "off", pageVisible, fail);
+  // The selected project's pull requests (prs.ts). ONE poller for the header
+  // chip, the dock tab and the rail badge, for the same reason as `usage`
+  // above: the tab mounting must not be what decides whether `gh` runs, and
+  // "off" (Settings → Behavior) has to reach the effect, not just the render.
+  // Places go in with their CURRENT branches; the backend maps, we draw.
+  const prPlaces = useMemo(
+    () => (ws?.projects.find((pv) => pv.root === sel?.repo)?.snapshot?.places ?? EMPTY_PLACES)
+      // detached HEAD (null) is no branch, so no PR
+      .filter((p) => !!p.branch).map((p) => ({ slug: p.slug, branch: p.branch! })),
+    [ws, sel?.repo],
+  );
+  const prs = useProjectPrs(settingsReady && settings.pull_requests, sel?.repo ?? null, prPlaces, pageVisible, fail);
+  const prsOn = prsShown(prs.reply);
   // The rail can only badge a tile that EXISTS. No usage data, no tile — so the
   // indicator falls back to the window-wide strip rather than inventing a rail
   // icon that appears mid-incident, which is the one thing the rail must not do
@@ -4631,6 +4646,15 @@ function App() {
       return next;
     });
   }, []);
+  // A place left on the Pull requests tab, reopened where there is no such tab
+  // (a project not on GitHub, or the feature switched off): fall back to Files,
+  // once, rather than a tab whose icon does not exist. Waits for THIS project's
+  // answer — `prs.reply` is per project — so a project switch that has not
+  // been answered yet does not send a GitHub place to Files.
+  const prsGone = settingsReady && (!settings.pull_requests || (!!prs.reply && !prsOn));
+  useEffect(() => {
+    if (prsGone && eff.dock_tab === "prs") updatePanels({ dock_tab: "files" });
+  }, [prsGone, eff.dock_tab, updatePanels]);
 
   /** Open a file in the Files tab AND remember it for the selected place.
    *
@@ -7360,6 +7384,9 @@ function App() {
     { key: "docs" as Settings["dock_tab"], track: "dock.docs", icon: <Icons.BookText size={17} />, title: "Docs" },
     { key: "plan" as Settings["dock_tab"], track: "dock.plan", icon: <Icons.ListChecks size={17} />, title: "Plan" },
     { key: "automations" as Settings["dock_tab"], track: "dock.automations", icon: <Icons.Zap size={17} />, title: "Automations" },
+    // Rendered only for a project that resolved to GitHub (`prsOn`) — see the
+    // rail's map below. A GitLab or local-only project gets no icon at all.
+    { key: "prs" as Settings["dock_tab"], track: "dock.prs", icon: <Icons.GitPullRequest size={17} />, title: "Pull requests" },
   ];
 
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
@@ -7648,6 +7675,25 @@ function App() {
                       title={`Open ${remoteTitle(url)}`}
                       onClick={() => openUrl(url).catch(fail)}>
                       <Icons.ExternalLink size={13} />
+                    </button>
+                  );
+                })()}
+                {/* This branch's PR — by the place's LOCAL branch, never its
+                    upstream (prs.ts / core `pr_for`). Hue in the DOT only; the
+                    words stay --txt-hi/--txt-dim, the status-chip contrast rule.
+                    Goes with the other badges in the squeeze. A merged PR stays
+                    here until the place is removed: a squash-merge is invisible
+                    to git, and this is the one place that says it landed. */}
+                {!fit.tight && (() => {
+                  const pr = prOfPlace(prs.reply, sel.slug);
+                  if (!pr || !prsOn) return null;
+                  return (
+                    <button className="pr-chip" data-track="topbar.pr" data-testid="topbar-pr"
+                      title={`${prSummary(pr)} — open on GitHub`}
+                      onClick={() => openUrl(pr.url).catch(fail)}>
+                      <span className={"pr-dot " + pr.tone} aria-hidden="true" />
+                      <span className="pr-chip-num">#{pr.number}</span>
+                      <span className="pr-chip-label">{pr.label}</span>
                     </button>
                   );
                 })()}
@@ -8056,6 +8102,19 @@ function App() {
                     ↻
                   </button>
                 )}
+                {eff.dock_tab === "prs" && prs.reply?.state === "ok" && (
+                  <button
+                    className="ctrl sm prs-refresh"
+                    aria-label="Refresh pull requests"
+                    title={prs.reply.fetched_at
+                      ? `Fetched ${new Date(prs.reply.fetched_at).toLocaleTimeString()} — click to refresh`
+                      : "Refresh"}
+                    data-track="dock.prs.refresh"
+                    onClick={() => prs.refresh(0)}
+                  >
+                    ↻ {prs.reply.fetched_at ? ageOf(new Date(prs.reply.fetched_at).toISOString()) : ""}
+                  </button>
+                )}
                 {eff.dock_tab === "plan" && (
                   <>
                     {planPath && (
@@ -8083,7 +8142,28 @@ function App() {
                 )}
               </div>
               <div className="dock-body">
-                {eff.dock_tab === "automations" ? (
+                {eff.dock_tab === "prs" ? (
+                  // Keyed on the project: the list is the project's, the same
+                  // from any of its places, so a place switch keeps its open
+                  // groups.
+                  prs.reply && prsOn && settings.pull_requests ? (
+                    <PrsPane
+                      key={sel.repo}
+                      reply={prs.reply}
+                      slug={sel.slug}
+                      placeName={(slug) => {
+                        const pl = (ws?.projects.find((pv) => pv.root === sel.repo)?.snapshot?.places ?? EMPTY_PLACES).find((x) => x.slug === slug);
+                        return pl ? nameOf(pl) : slug;
+                      }}
+                      onSelectPlace={(slug) => selectSlug(sel.repo, slug)}
+                      onError={fail}
+                    />
+                  ) : (
+                    // only until the effect beside `prsGone` moves this place
+                    // to Files, or the first answer for this project lands
+                    <div className="prs-empty" data-testid="prs-empty" data-state="none" />
+                  )
+                ) : eff.dock_tab === "automations" ? (
                   // Keyed on the PROJECT, not the place: what this tab shows is
                   // the project's — the same two lists from any of its places —
                   // so a switch between places of one project must NOT remount
@@ -8252,7 +8332,7 @@ function App() {
           a visible affordance; the active icon collapses the dock. Disabled
           with no place selected — Files/Terminal both need a worktree. */}
       <nav className="rail rail-right" style={{ order: ord.railRight }}>
-        {DOCK_RAIL.map((d) => {
+        {DOCK_RAIL.filter((d) => d.key !== "prs" || prsOn).map((d) => {
           const on = dockShown && eff.dock_tab === d.key;
           const why = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
           return (
@@ -8265,9 +8345,25 @@ function App() {
               // tab's key, silently. See `DOCK_RAIL`.
               data-track={d.track}
               title={why ? `${d.title} — ${why}` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
-              onClick={() => pickDockTab(d.key)}
+              onClick={() => {
+                if (d.key === "prs" && !on) prs.refresh(TAB_MAX_AGE_S);
+                pickDockTab(d.key);
+              }}
             >
               {d.icon}
+              {/* Open PRs, dim; red and counting only the ones that NEED you
+                  (failing, changes requested, conflicting, merged while its
+                  place exists) once any do. On the icon, not the nav rows:
+                  the nav's dot is agent activity, and a second dot there would
+                  have to be read by colour alone (proposal §7). */}
+              {d.key === "prs" && prs.reply?.view && (prs.reply.view.attention_count > 0 || prs.reply.view.open_count > 0) && (
+                <span
+                  className={"rail-count prs-count" + (prs.reply.view.attention_count > 0 ? " attn" : "")}
+                  data-testid="prs-count"
+                >
+                  {prs.reply.view.attention_count > 0 ? prs.reply.view.attention_count : prs.reply.view.open_count}
+                </span>
+              )}
             </button>
           );
         })}
