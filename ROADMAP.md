@@ -5,6 +5,26 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Markdown path links: the name menu is cut off before it is sorted.**
+  `resolve_doc_path` stops at `DOC_NAME_CHOICES_MAX` (12) while collecting, then
+  sorts, so which 12 you see depends on `ls-files` order. Collect all, sort,
+  truncate, and title the menu "12 of N". See docs/sessions/2026-10-07-md-path-links/.
+- **`resolve_doc_paths` trusts its `root`.** An empty or relative root reaches
+  `git -C ""`, which means the current directory. Reject a non-absolute or empty root up front
+  (the same family as AGENTS.md's `git -C ""` note). See docs/sessions/2026-10-07-md-path-links/.
+- **The mock hard-codes `resolve_doc_paths`' caps (64, 12).** Import
+  `DOC_PATHS_BATCH` and mirror the choices max, so a change on the Rust side
+  cannot leave the harness answering differently. See docs/sessions/2026-10-07-md-path-links/.
+- **A failed path-link batch is not retried until the next generation.** That is acceptable
+  (the paths stay plain text), but the `mdpaths.ts` comment implies more; make it say so. See docs/sessions/2026-10-07-md-path-links/.
+- **The doc name index rebuilds every time `placesToken` moves** (roughly every 30 s while
+  anything changes). That is 20–35 ms when a bare name misses its stat. If it ever shows,
+  key the cache on the git index's mtime instead of the generation. See docs/sessions/2026-10-07-md-path-links/.
+- **Pre-existing: App's inline `onOpen` for the Plan and Files panes breaks
+  Markdown's memo.** A new arrow every App render means new props, so
+  `block()` re-runs on a big plan for every render of App (~165 ms per 1 MB).
+  `useDocPathLinks` already shields its own half with a ref; `useCallback` the
+  host props. See docs/sessions/2026-10-07-md-path-links/.
 - **The Plan tab's "open in Files" reveals nothing while gitignored files are
   hidden.** `task_plan.md` and friends are gitignored, so with Show ignored off
   the row is not in the listing and the reveal is (deliberately) a quiet no-op.
