@@ -5,7 +5,7 @@
 // in the harness moves its chip the way the real backend's re-map does.
 //
 //   ?prs=ok (default) | gh_missing | logged_out | no_host_token | not_found
-//        | error | offline | empty | slow
+//        | error | offline | empty | slow | not_github
 //
 // `offline` = a stale list ("as of …"); `empty` = a GitHub project with no
 // PRs; `slow` answers after 1.5s, as the real ~1.2s query does. Projects with
@@ -49,7 +49,7 @@ export function mockProjectPrs(repo: string, places: PlaceBranch[]): PrsReply {
   const mode = new URLSearchParams(location.search).get("prs") ?? "ok";
   const checked_at = Date.now();
   const base = { host: "github.com", web: `https://github.com/demo/${name}`, view: null, fetched_at: null, checked_at, stale: false, message: null, viewer: "demo" };
-  if (name === "deleted-thing" || name.startsWith("local")) return { ...base, state: "not_github", host: null, web: null, viewer: null };
+  if (name === "deleted-thing" || name.startsWith("local") || mode === "not_github") return { ...base, state: "not_github", host: null, web: null, viewer: null };
   switch (mode) {
     case "gh_missing": return { ...base, state: "gh_missing", viewer: null };
     case "logged_out": return { ...base, state: "logged_out", viewer: null };

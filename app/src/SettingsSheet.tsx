@@ -629,7 +629,10 @@ export function SettingsSheet({
   const [diagCopied, setDiagCopied] = useState(false);
   const copyDiagnostics = async () => {
     try {
-      const back = await invoke<string>("diagnostics");
+      // `gh`: the Pull requests switch reaches the backend, so "off stops
+      // every gh call" holds for this button too (`gh auth status` is a
+      // network check, ~0.5s).
+      const back = await invoke<string>("diagnostics", { gh: settings.pull_requests });
       const ui =
         `\nUI settings\n-----------\n` +
         `theme   : ${settings.theme}\n` +

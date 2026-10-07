@@ -229,12 +229,13 @@ pub fn classify_auth(spawn_failed: bool, code: Option<i32>, stderr: &str) -> Aut
     }
 }
 
-/// `gh auth token -h <host>`, its output discarded: the token never leaves the
-/// child. ~50ms, offline (keyring / config file).
+/// `gh auth token -h <host>`. Its stdout is `/dev/null`, so the token never
+/// reaches this process at all — only the exit code and stderr are read.
+/// ~50ms, offline (keyring / config file).
 pub fn probe_auth(gh: &str, host: &str) -> Auth {
     let mut c = Command::new(gh);
     c.args(["auth", "token", "-h", host]);
-    match run(c, AUTH_DEADLINE_SECS) {
+    match run_with(c, AUTH_DEADLINE_SECS, false) {
         Err(RunErr::Spawn) => Auth::Missing,
         Err(RunErr::Timeout) => Auth::NoHostToken,
         Ok(o) => classify_auth(false, o.code, &o.stderr),
@@ -501,9 +502,12 @@ pub fn fetch(gh: &str, repo: &RepoRef) -> Result<Snapshot, FetchError> {
     c.args(["api", "graphql", "--hostname", &repo.host])
         .arg("-f")
         .arg(format!("query={QUERY}"))
-        .arg("-F")
+        // `-f`, never `-F`: a typed field turns `2048`/`null`/`true` into JSON
+        // non-strings (GraphQL then rejects `String!`), expands `{owner}`, and
+        // reads a FILE for a value that starts with `@`. Names are data.
+        .arg("-f")
         .arg(format!("o={}", repo.owner))
-        .arg("-F")
+        .arg("-f")
         .arg(format!("r={}", repo.repo));
     match run(c, GH_DEADLINE_SECS) {
         Err(RunErr::Spawn) => Err(FetchError::Missing),
@@ -750,8 +754,9 @@ pub fn view(snap: &Snapshot, push_owner: &str, places: &[PlaceBranch]) -> View {
 // ── diagnostics ─────────────────────────────────────────────────────────────
 
 /// One line for the diagnostics block: version, and per host the login, token
-/// source and whether it is active — from `gh auth status --json hosts`, a local
-/// call. Never prints a token.
+/// source and whether it is active — from `gh auth status --json hosts`, which
+/// VALIDATES each token against the API (~0.5s), so the caller gates it on the
+/// Pull requests switch. Never prints a token.
 pub fn diag_line(gh: &str) -> String {
     let mut v = Command::new(gh);
     v.arg("--version");
@@ -825,19 +830,27 @@ enum RunErr {
 /// Run with no stdin, no prompts, and a deadline. Pipes are drained on threads
 /// so a large reply (the query is ~10KB, a busy repo far more) cannot fill the
 /// pipe and wedge the child.
-fn run(mut c: Command, deadline_secs: u64) -> Result<Out, RunErr> {
+fn run(c: Command, deadline_secs: u64) -> Result<Out, RunErr> {
+    run_with(c, deadline_secs, true)
+}
+
+/// `capture_stdout: false` sends the child's stdout to `/dev/null` — for a
+/// command whose output must never enter this process (a token).
+fn run_with(mut c: Command, deadline_secs: u64, capture_stdout: bool) -> Result<Out, RunErr> {
     c.env("GH_PROMPT_DISABLED", "1")
         .env("GH_NO_UPDATE_NOTIFIER", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(if capture_stdout { Stdio::piped() } else { Stdio::null() })
         .stderr(Stdio::piped());
     let mut child = c.spawn().map_err(|_| RunErr::Spawn)?;
-    let mut so = child.stdout.take().expect("piped");
+    let so = child.stdout.take();
     let mut se = child.stderr.take().expect("piped");
     let to = std::thread::spawn(move || {
         let mut b = Vec::new();
-        let _ = so.read_to_end(&mut b);
+        if let Some(mut so) = so {
+            let _ = so.read_to_end(&mut b);
+        }
         b
     });
     let te = std::thread::spawn(move || {
@@ -1094,11 +1107,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let reply = dir.join("reply.json");
         std::fs::write(&reply, REAL).unwrap();
+        // the fake records its argv, one arg per line: the seam is also where
+        // the CALL is pinned, not only the reply
+        let argv = dir.join("argv");
         let fake = dir.join("gh");
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\ncase \"$1 $2\" in\n  'auth token') [ \"$4\" = github.com ] && {{ echo tok; exit 0; }}; echo 'no oauth token found for '\"$4\" >&2; exit 1;;\n  'api graphql') cat '{}';;\n  *) exit 2;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncase \"$1 $2\" in\n  'auth token') [ \"$4\" = github.com ] && {{ echo tok; exit 0; }}; echo 'no oauth token found for '\"$4\" >&2; exit 1;;\n  'api graphql') cat '{}';;\n  *) exit 2;;\nesac\n",
+                argv.display(),
                 reply.display()
             ),
         )
@@ -1110,6 +1127,20 @@ mod tests {
         assert_eq!(probe_auth(dir.join("nope").to_str().unwrap(), "github.com"), Auth::Missing);
         let snap = fetch(gh, &rr()).unwrap();
         assert_eq!(snap.open.len(), 8);
+        // owner/repo go RAW (`-f`): gh's `-F` types `2048`/`null`/`true` as
+        // JSON, expands `{owner}`, and reads a file for a value starting `@`
+        let args: Vec<String> = std::fs::read_to_string(&argv).unwrap().lines().map(str::to_string).collect();
+        let pair = |flag: &str, val: &str| args.windows(2).any(|w| w[0] == flag && w[1] == val);
+        assert!(pair("--hostname", "github.com"), "{args:?}");
+        assert!(pair("-f", "o=penard-monkey"), "{args:?}");
+        assert!(pair("-f", "r=worktrees"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "-F"), "no typed fields: {args:?}");
+        // a repo named like a number still goes as a string
+        let numeric = RepoRef { host: "github.com".into(), owner: "@etc".into(), repo: "2048".into() };
+        let _ = fetch(gh, &numeric);
+        let args: Vec<String> = std::fs::read_to_string(&argv).unwrap().lines().map(str::to_string).collect();
+        assert!(args.windows(2).any(|w| w[0] == "-f" && w[1] == "r=2048"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "-f" && w[1] == "o=@etc"), "{args:?}");
         assert_eq!(fetch(dir.join("nope").to_str().unwrap(), &rr()), Err(FetchError::Missing));
         let _ = std::fs::remove_dir_all(&dir);
     }

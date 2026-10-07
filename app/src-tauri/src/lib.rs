@@ -4725,7 +4725,7 @@ fn tool_report(tool: &str) -> (String, String) {
 /// Assemble the diagnostics block. `async` (a login-shell CLI probe can take
 /// ~5s and two ~10s tool probes — must never run on the main thread).
 #[tauri::command]
-async fn diagnostics(app: AppHandle) -> Result<String, String> {
+async fn diagnostics(app: AppHandle, gh: Option<bool>) -> Result<String, String> {
     let app_version = env!("CARGO_PKG_VERSION").to_string();
     let (cli_path, cli_version) = match cli_binary() {
         Some((p, v)) => (p, v),
@@ -4735,8 +4735,12 @@ async fn diagnostics(app: AppHandle) -> Result<String, String> {
     let (git_path, git_version) = tool_report("git");
     let (tmux_path, tmux_version) = tool_report("tmux");
     // `gh` feeds the Pull requests tab. Version + per-host login and token
-    // source, from `gh auth status --json hosts` — local, never the token.
-    let gh_line = {
+    // source, from `gh auth status --json hosts` — never the token. That call
+    // validates tokens against the API, so with Pull requests switched off it
+    // is not made at all: "off stops every gh call" includes this button.
+    let gh_line = if gh == Some(false) {
+        "(not checked — Pull requests is off in Settings → Behavior)".to_string()
+    } else {
         let gh = worktrees_core::github::gh_bin();
         let mut which = std::process::Command::new("which");
         which.arg(&gh);
@@ -4844,8 +4848,56 @@ struct PrCacheEntry {
     viewer: Option<String>,
 }
 
-static PR_CACHE: Mutex<Option<HashMap<String, PrCacheEntry>>> = Mutex::new(None);
-static PR_LOCKS: Mutex<Option<HashMap<String, std::sync::Arc<Mutex<()>>>>> = Mutex::new(None);
+/// The per-project answers and the per-project locks callers queue on. A type
+/// rather than two bare statics so a test can own one (`PR_CACHE` is the app's;
+/// a process-global asserted by tests is order-dependent — AGENTS.md).
+#[derive(Default)]
+struct PrCache {
+    entries: Mutex<HashMap<String, PrCacheEntry>>,
+    locks: Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>,
+}
+
+static PR_CACHE: std::sync::LazyLock<PrCache> = std::sync::LazyLock::new(PrCache::default);
+
+impl PrCache {
+    /// The answer for `repo`: the cached one when it is at most `max_age_secs`
+    /// old OR was concluded after this caller asked (it queued behind an
+    /// in-flight fetch — one fetch serves both, even at `max_age_secs == 0`),
+    /// else `conclude`'s, which is cached.
+    ///
+    /// `at` is stamped when the conclusion is REACHED, not when it began: a
+    /// start stamp predates a caller that queued mid-fetch, which then fetched
+    /// again on its own.
+    fn answer(
+        &self,
+        repo: &str,
+        max_age_secs: u64,
+        conclude: impl FnOnce(Option<&PrCacheEntry>) -> PrCacheEntry,
+    ) -> PrCacheEntry {
+        let asked = now_ms();
+        let lock = self.locks.lock().unwrap_or_else(|e| e.into_inner()).entry(repo.to_string()).or_default().clone();
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cached = self.entries.lock().unwrap_or_else(|e| e.into_inner()).get(repo).cloned();
+        if let Some(c) = cached.as_ref() {
+            if c.at >= asked || asked.saturating_sub(c.at) <= max_age_secs.saturating_mul(1000) {
+                return c.clone();
+            }
+        }
+        let started = now_ms();
+        let mut e = conclude(cached.as_ref());
+        let done = now_ms();
+        // a snapshot fetched by THIS conclusion is dated with it; one carried
+        // over from before (offline) keeps its own, older, time
+        if let Some((t, _)) = e.snap.as_mut() {
+            if *t >= started {
+                *t = done;
+            }
+        }
+        e.at = done;
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).insert(repo.to_string(), e.clone());
+        e
+    }
+}
 
 #[derive(Serialize)]
 struct PrsReply {
@@ -4958,25 +5010,10 @@ async fn project_prs(
     places: Vec<worktrees_core::github::PlaceBranch>,
 ) -> Result<PrsReply, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let asked = now_ms();
-        let lock = {
-            let mut g = PR_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
-            g.get_or_insert_with(HashMap::new).entry(repo.clone()).or_default().clone()
-        };
-        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cached = PR_CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&repo).cloned());
-        let fresh = cached.as_ref().is_some_and(|c| {
-            // concluded while we queued (coalesced), or young enough
-            c.at >= asked || asked.saturating_sub(c.at) <= max_age_secs.saturating_mul(1000)
-        });
-        let entry = if fresh {
-            cached.expect("fresh implies cached")
-        } else {
+        let entry = PR_CACHE.answer(&repo, max_age_secs, |prev| {
             let root = Project::discover(Path::new(&repo)).map(|p| p.main_root).unwrap_or_else(|_| repo.clone());
-            let e = pr_conclude(&root, cached.as_ref());
-            PR_CACHE.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(repo.clone(), e.clone());
-            e
-        };
+            pr_conclude(&root, prev)
+        });
         let view = entry.snap.as_ref().map(|(_, s)| worktrees_core::github::view(s, &entry.push_owner, &places));
         let fetched_at = entry.snap.as_ref().map(|(t, _)| *t);
         Ok(PrsReply {
@@ -8949,6 +8986,47 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// Two callers that both force (`max_age 0`), the second arriving while the
+    /// first is mid-fetch, spend ONE fetch: the queued one finds a conclusion
+    /// reached after it asked. A start-stamped conclusion predates it and the
+    /// second fetches again.
+    #[test]
+    fn a_forced_ask_queued_behind_a_fetch_shares_it() {
+        use super::{now_ms, PrCache, PrCacheEntry};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let cache = Arc::new(PrCache::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ask = |cache: Arc<PrCache>, calls: Arc<AtomicUsize>| {
+            std::thread::spawn(move || {
+                cache.answer("/repo", 0, |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    PrCacheEntry {
+                        at: now_ms(),
+                        state: "ok",
+                        host: None,
+                        web: None,
+                        push_owner: String::new(),
+                        snap: None,
+                        message: None,
+                        viewer: None,
+                    }
+                })
+            })
+        };
+        let a = ask(cache.clone(), calls.clone());
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let b = ask(cache.clone(), calls.clone());
+        a.join().unwrap();
+        b.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the queued forced ask shares the in-flight fetch");
+        // a forced ask that comes AFTER both does fetch
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        ask(cache.clone(), calls.clone()).join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     /// A launcher that fails fast is REPORTED. Before: spawned and reaped
     /// blind, so an uninstalled `code` (sh exit 127) made the Editor button do
     /// nothing at all, with no error anywhere.

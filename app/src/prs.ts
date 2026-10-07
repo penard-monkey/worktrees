@@ -162,6 +162,9 @@ export function useProjectPrs(
   // the timer and focus — visible windows only
   useEffect(() => {
     if (!enabled || !repo || !pageVisible) return;
+    // becoming visible is not always a focus event (un-minimise, a Space
+    // switch back): without this the list sits up to a whole period stale
+    ask(FOCUS_MAX_AGE_S);
     // just under the period, so a tick always finds the last answer old enough
     const timer = setInterval(() => ask(PR_POLL_MS / 1000 - 5), PR_POLL_MS);
     const onFocus = () => {

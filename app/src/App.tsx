@@ -4646,6 +4646,15 @@ function App() {
       return next;
     });
   }, []);
+  // A place left on the Pull requests tab, reopened where there is no such tab
+  // (a project not on GitHub, or the feature switched off): fall back to Files,
+  // once, rather than a tab whose icon does not exist. Waits for THIS project's
+  // answer — `prs.reply` is per project — so a project switch that has not
+  // been answered yet does not send a GitHub place to Files.
+  const prsGone = settingsReady && (!settings.pull_requests || (!!prs.reply && !prsOn));
+  useEffect(() => {
+    if (prsGone && eff.dock_tab === "prs") updatePanels({ dock_tab: "files" });
+  }, [prsGone, eff.dock_tab, updatePanels]);
 
   /** Open a file in the Files tab AND remember it for the selected place.
    *
@@ -8136,8 +8145,7 @@ function App() {
                 {eff.dock_tab === "prs" ? (
                   // Keyed on the project: the list is the project's, the same
                   // from any of its places, so a place switch keeps its open
-                  // groups. The tab is only reachable from a remembered
-                  // `dock_tab` when the icon is absent, hence the one line.
+                  // groups.
                   prs.reply && prsOn && settings.pull_requests ? (
                     <PrsPane
                       key={sel.repo}
@@ -8151,11 +8159,9 @@ function App() {
                       onError={fail}
                     />
                   ) : (
-                    <div className="prs-empty" data-testid="prs-empty" data-state="none">
-                      <div className="prs-empty-sub">
-                        {!settings.pull_requests ? "Pull requests are off (Settings → Behavior)." : prs.reply ? "This project is not on GitHub." : "Checking…"}
-                      </div>
-                    </div>
+                    // only until the effect beside `prsGone` moves this place
+                    // to Files, or the first answer for this project lands
+                    <div className="prs-empty" data-testid="prs-empty" data-state="none" />
                   )
                 ) : eff.dock_tab === "automations" ? (
                   // Keyed on the PROJECT, not the place: what this tab shows is
