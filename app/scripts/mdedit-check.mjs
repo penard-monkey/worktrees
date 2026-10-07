@@ -80,7 +80,7 @@ export function build(env) {
     Component, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
     applyMd,
     invoke, openInDefaultApp, openUrl, revealItemInDir, Icons,
-    CodeBlock, CtxMenu, DiffView, FindBar, useFileFind, Markdown,
+    CodeBlock, CtxMenu, DiffView, FindBar, useFileFind, Markdown, useDocPathLinks,
     basename, fileInfo, humanSize, relPath,
     MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom,
     h, F,
@@ -180,6 +180,9 @@ const env = {
     DiffView: stub("DiffView"),
     FindBar: stub("FindBar"),
     Markdown: stub("Markdown"),
+    // Path links have their own check (mdpaths-check.mjs); here the hook only
+    // has to exist and answer "no links".
+    useDocPathLinks: () => ({ pathLinks: undefined, menu: null }),
     useFileFind: () => ({
       query: "", setQuery: () => {}, index: 0, count: 0, capped: false,
       caseSensitive: false, setCaseSensitive: () => {}, next: () => {}, prev: () => {},

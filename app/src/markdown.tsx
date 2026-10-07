@@ -9,8 +9,10 @@
 // Raw HTML in the source is rendered as literal text (visible, inert) rather
 // than dropped — a doc with an <img> tag shows the tag, which is honest.
 import { marked, type Token, type Tokens } from "marked";
-import { memo, useMemo, type ReactNode } from "react";
+import { Fragment, memo, useEffect, useMemo, type ReactNode } from "react";
 import { CodeBlock } from "./CodeView";
+import { codeSpanHit, textHits, type DocPathHit, type PathLinks } from "./mdpaths";
+import type { PathHit } from "./termlinks";
 
 export type MarkdownProps = {
   src: string;
@@ -49,7 +51,16 @@ export type MarkdownProps = {
    * properties inherit) and passes its own class here.
    */
   className?: string;
+  /**
+   * File paths in the prose become links (see `mdpaths.ts`). Absent — the
+   * browser viewer, Claude's read, a run report — and nothing is mined.
+   */
+  pathLinks?: PathLinks;
 };
+
+/** The renderer's own state: `found` collects every path candidate it drew,
+ *  which IS the extraction — see mdpaths.ts on why there is no second walk. */
+type Ctx = MarkdownProps & { found?: Set<string> };
 
 // marked's lexer leaves the five XML entities encoded in `text` tokens (it
 // escapes at render time, which we skip). Decode them so prose reads right.
@@ -91,7 +102,7 @@ function slugify(text: string): string {
 const MAX_DEPTH = 40;
 
 // ── inline ────────────────────────────────────────────────────────────────
-function inline(tokens: Token[] | undefined, ctx: MarkdownProps, keyBase = "i", depth = 0): ReactNode {
+function inline(tokens: Token[] | undefined, ctx: Ctx, keyBase = "i", depth = 0): ReactNode {
   if (!tokens) return null;
   if (depth > MAX_DEPTH) return tokens.map((t) => (t as Tokens.Generic).raw ?? "").join("");
   return tokens.map((t, i) => {
@@ -99,7 +110,7 @@ function inline(tokens: Token[] | undefined, ctx: MarkdownProps, keyBase = "i", 
     switch (t.type) {
       case "text": {
         const tt = t as Tokens.Text;
-        return tt.tokens ? <span key={k}>{inline(tt.tokens, ctx, k, depth + 1)}</span> : decode(tt.text);
+        return tt.tokens ? <span key={k}>{inline(tt.tokens, ctx, k, depth + 1)}</span> : pathText(decode(tt.text), ctx, k);
       }
       case "escape":
         return decode((t as Tokens.Escape).text);
@@ -109,8 +120,15 @@ function inline(tokens: Token[] | undefined, ctx: MarkdownProps, keyBase = "i", 
         return <em key={k}>{inline((t as Tokens.Em).tokens, ctx, k, depth + 1)}</em>;
       case "del":
         return <del key={k}>{inline((t as Tokens.Del).tokens, ctx, k, depth + 1)}</del>;
-      case "codespan":
-        return <code key={k} className="md-code-inline">{decode((t as Tokens.Codespan).text)}</code>;
+      case "codespan": {
+        const text = decode((t as Tokens.Codespan).text);
+        const code = <code key={k} className="md-code-inline">{text}</code>;
+        const h = ctx.pathLinks ? codeSpanHit(text) : null;
+        if (!h) return code;
+        ctx.found?.add(h.path);
+        const hits = ctx.pathLinks!.answers.get(h.path);
+        return hits?.length ? pathLink(hits, h, code, ctx.pathLinks!, k) : code;
+      }
       case "br":
         return <br key={k} />;
       case "checkbox":
@@ -128,6 +146,8 @@ function inline(tokens: Token[] | undefined, ctx: MarkdownProps, keyBase = "i", 
             </span>
           );
         }
+        // An authored link's text is not mined: it already goes somewhere.
+        const inner: Ctx = { ...ctx, pathLinks: undefined };
         return (
           <a
             key={k}
@@ -137,7 +157,7 @@ function inline(tokens: Token[] | undefined, ctx: MarkdownProps, keyBase = "i", 
             onClick={(e) => { e.preventDefault(); ctx.onLink?.(href); }}
             onAuxClick={(e) => e.preventDefault()}
           >
-            {inline(lt.tokens, ctx, k, depth + 1)}
+            {inline(lt.tokens, inner, k, depth + 1)}
           </a>
         );
       }
@@ -160,8 +180,57 @@ function inline(tokens: Token[] | undefined, ctx: MarkdownProps, keyBase = "i", 
   });
 }
 
+// ── path links ────────────────────────────────────────────────────────────
+/** A run of prose with every ANSWERED path in it as a link. Nothing answered
+ *  (no host, pending, names nothing) returns the string untouched — the same
+ *  node as before this existed, so an answer arriving changes styling only. */
+function pathText(text: string, ctx: Ctx, k: string): ReactNode {
+  const pl = ctx.pathLinks;
+  if (!pl) return text;
+  const out: ReactNode[] = [];
+  let at = 0;
+  textHits(text).forEach((h, j) => {
+    ctx.found?.add(h.path);
+    const hits = pl.answers.get(h.path);
+    if (!hits?.length) return;
+    out.push(text.slice(at, h.start), pathLink(hits, h, text.slice(h.start, h.end), pl, `${k}-p${j}`));
+    at = h.end;
+  });
+  if (!out.length) return text;
+  out.push(text.slice(at));
+  return <Fragment key={k}>{out}</Fragment>;
+}
+
+/** A detected path. Plain click opens it — this is prose, not a terminal, so
+ *  no ⌘ — and a name several files share asks which (the host's menu). No
+ *  `href`: nothing for a middle-click or a drag to follow. */
+function pathLink(hits: DocPathHit[], h: PathHit, label: ReactNode, pl: PathLinks, key: string): ReactNode {
+  const at = { line: h.line, col: h.col };
+  const title = hits.length === 1
+    ? hits[0].rel + (h.line ? `:${h.line}` : "")
+    : `${hits.length} files are named ${h.path} — click to choose`;
+  return (
+    <span
+      key={key}
+      role="link"
+      tabIndex={0}
+      className="md-link md-path"
+      title={title}
+      onClick={(e) => { e.preventDefault(); pl.open(hits, at, { x: e.clientX, y: e.clientY }); }}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const r = e.currentTarget.getBoundingClientRect();
+        pl.open(hits, at, { x: r.left, y: r.bottom });
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 // ── blocks ────────────────────────────────────────────────────────────────
-function block(tokens: Token[], ctx: MarkdownProps, keyBase = "b", depth = 0): ReactNode[] {
+function block(tokens: Token[], ctx: Ctx, keyBase = "b", depth = 0): ReactNode[] {
   const out: ReactNode[] = [];
   if (depth > MAX_DEPTH) return [<pre key="deep" className="md-rawhtml-block">{tokens.map((t) => (t as Tokens.Generic).raw ?? "").join("")}</pre>];
   tokens.forEach((t, i) => {
@@ -183,7 +252,7 @@ function block(tokens: Token[], ctx: MarkdownProps, keyBase = "b", depth = 0): R
         break;
       case "text": {
         const tt = t as Tokens.Text;
-        out.push(<p key={k} className="md-p">{tt.tokens ? inline(tt.tokens, ctx, k) : decode(tt.text)}</p>);
+        out.push(<p key={k} className="md-p">{tt.tokens ? inline(tt.tokens, ctx, k) : pathText(decode(tt.text), ctx, k)}</p>);
         break;
       }
       case "code": {
@@ -332,7 +401,18 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
       return { tokens: [] as Token[], failed: true };
     }
   }, [props.src]);
-  const body = useMemo(() => (parsed.failed ? null : block(parsed.tokens, props)), [parsed, props]);
+  const rendered = useMemo(() => {
+    if (parsed.failed) return null;
+    const found = new Set<string>();
+    return { nodes: block(parsed.tokens, { ...props, found }), found: [...found] };
+  }, [parsed, props]);
+  // After the render that drew them, so the host asks about exactly what is
+  // on screen. Re-runs when the answers re-render the body; the host skips
+  // what it has already asked, so that costs a set lookup per candidate.
+  const want = props.pathLinks?.want;
+  const found = rendered?.found;
+  useEffect(() => { if (want && found?.length) want(found); }, [want, found]);
+  const body = rendered?.nodes ?? null;
   if (parsed.failed) {
     return (
       <div className={props.className ?? "md"}>

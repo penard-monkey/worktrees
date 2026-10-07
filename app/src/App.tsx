@@ -8118,7 +8118,7 @@ function App() {
                     activity={activityOf(selected)}
                     draft={draftPaths.get(selected.path)?.text}
                     mdZoom={eff.files_md_zoom}
-                    onOpen={(p) => { openDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
+                    onOpen={(p, at) => { openDockFile(p, at); updatePanels({ dock_tab: "files", dock_open: true }); }}
                     onPlanPath={setPlanPath}
                     onError={fail}
                   />
@@ -8220,6 +8220,7 @@ function App() {
               <FileView
                 key={dockFile}
                 path={dockFile}
+                root={selected.path}
                 at={dockAt}
                 onAtClear={clearDockAt}
                 reloadToken={placesToken}
