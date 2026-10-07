@@ -252,3 +252,33 @@ session_count() {
   [ "$status" -eq 0 ]
   grep -q 'attach -t repo-feat-x' "$TMUX_LOG"
 }
+
+@test "codex resume names only this place's user thread despite newer sibling and subagent rollouts" {
+  install_fake_cmd codex
+  make_worktree feat-isolation
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"
+  local day="$CODEX_HOME/sessions/2026/10/05"
+  mkdir -p "$day"
+  printf '{"type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111","cwd":"%s","source":"cli"}}\n' "$REPO/.worktrees/feat-isolation" > "$day/rollout-a.jsonl"
+  printf '{"type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222","cwd":"%s","source":"cli"}}\n{"type":"event_msg","payload":{"type":"task_started"}}\n' "$REPO" > "$day/rollout-z.jsonl"
+  printf '{"type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333","cwd":"%s","source":{"subagent":"guardian"}}}\n' "$REPO/.worktrees/feat-isolation" > "$day/rollout-y.jsonl"
+  WORKTREES_AI_RESUME_ARG='resume --last --all' run_wt open --ai codex -r feat-isolation
+  [ "$status" -eq 0 ]
+  local cmd="$(tmux_pane0_cmd 'repo-feat-isolation~agent~codex')"
+  [[ "$cmd" == *resume*11111111-1111-4111-8111-111111111111* ]]
+  [[ "$cmd" != *--last* ]]
+  [[ "$cmd" != *22222222* ]]
+  [[ "$cmd" != *33333333* ]]
+}
+
+@test "codex may_resume refuses a place whose only rollout is a subagent" {
+  install_fake_cmd codex
+  make_worktree feat-isolation
+  export CODEX_HOME="$BATS_TEST_TMPDIR/codex"
+  local day="$CODEX_HOME/sessions/2026/10/05"
+  mkdir -p "$day"
+  printf '{"type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333","cwd":"%s","source":{"subagent":"guardian"}}}\n' "$REPO/.worktrees/feat-isolation" > "$day/rollout-y.jsonl"
+  run_wt open --ai codex -r feat-isolation
+  [ "$status" -eq 0 ]
+  [[ "$(tmux_pane0_cmd 'repo-feat-isolation~agent~codex')" != *resume* ]]
+}

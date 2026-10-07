@@ -1460,10 +1460,10 @@ async fn open_place(
     }
     let force = force.unwrap_or(false);
     run_op(&format!("open {slug} fresh={}", fresh.unwrap_or(false)), &repo, move |p, ui| {
-        // Auto-resume: if this place already has a Claude Code conversation on
-        // disk, launch the AI pane with the resume arg (-r) instead of cold.
-        // `fresh` (right-click "Open fresh") skips it. Gated on the configured
-        // AI actually being Claude — appending -r to an arbitrary ai_cmd breaks it.
+        // Auto-resume only a conversation belonging to this place, as the
+        // selected harness defines it. Codex resolves an exact session UUID
+        // before launch; its repository-wide --last selector is never used.
+        // `fresh` (right-click "Open fresh") skips resume.
         let wt = p.place_dir(&slug);
         let resume = !fresh.unwrap_or(false) && adapter.session_present(p, &wt);
         if slug == "(main)" {
@@ -1473,7 +1473,17 @@ async fn open_place(
             }
             let session = ops::agent_session_name(&p.session_name("(main)"), &provider);
             let mut ai_cmd = provider.clone();
-            if resume && !ai_cmd.is_empty() {
+            // (main) does not go through `cmd_open`, so it has to resolve its
+            // own resume target — without this it would set `resume` with no
+            // id and `Codex::prepare` would correctly degrade to a fresh
+            // launch, silently dropping (main)'s own conversation.
+            let (allowed, resume_id) = if resume && !ai_cmd.is_empty() {
+                ops::resume_plan(p, &ai_cmd, &p.main_root)
+            } else {
+                (false, None)
+            };
+            let resume = resume && allowed;
+            if resume {
                 ai_cmd = ops::resume_command(&ai_cmd, &p.main_root);
             }
             // Propagate launch's rc: a failed new-session must reach the UI
@@ -1482,6 +1492,7 @@ async fn open_place(
             // lives in the dock's Terminal tab.
             let mut ai = ops::ai_launch_for(p, ui, &p.main_root, &ai_cmd);
             (ai.model, ai.resume, ai.force) = (model.clone(), resume, force);
+            ai.resume_id = resume_id;
             ops::launch(p, ui, &p.main_root, &session, "", &ai, false, false)
         } else {
             let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
@@ -3139,9 +3150,19 @@ struct AiConfig {
 #[tauri::command]
 async fn get_ai_config() -> Result<AiConfig, String> {
     let path = worktrees_core::config::config_path();
+    let ai_cmd = worktrees_core::config::resolve_ai_cmd(None);
     Ok(AiConfig {
-        ai_cmd: worktrees_core::config::resolve_ai_cmd(None),
-        ai_resume_arg: worktrees_core::config::resolve_ai_resume_arg(),
+        // What this command will ACTUALLY resume with. A harness that names an
+        // exact session (Codex, pi) ignores `ai_resume_arg` entirely
+        // (`config::resolve_ai_resume_arg_for`), so printing the configured
+        // value here advertised an override that does nothing — and for Codex
+        // the override it advertised was the cross-worktree `resume --last`
+        // this release exists to stop.
+        ai_resume_arg: match worktrees_core::harness::for_cmd(&ai_cmd).filter(|a| a.exact_resume()) {
+            Some(a) => a.resume_display(),
+            None => worktrees_core::config::resolve_ai_resume_arg(),
+        },
+        ai_cmd,
         path: path.to_string_lossy().into_owned(),
         exists: path.exists(),
     })

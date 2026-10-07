@@ -498,10 +498,18 @@ pub struct AiLaunch {
     /// keeps the session's own model. `None`: the harness's default, which pi
     /// does not have (`harness::Pi::prepare` resolves one or refuses).
     pub model: Option<String>,
-    /// This launch resumes the place's conversation. Claude and Codex still
-    /// carry their resume WORDS in `cmd` (`ops::resume_command`); this is what
-    /// tells an adapter not to pass a model, and pi which session id to reopen.
+    /// This launch resumes the place's conversation. Claude carries its resume
+    /// words in `cmd`; Codex resolves an exact UUID in `prepare`, and pi derives
+    /// its session id. Also tells the adapter not to replace the resumed model.
     pub resume: bool,
+    /// The EXACT session a resume must attach to, for a harness that names one
+    /// (Codex). Resolved ONCE by the caller (`ops::resume_plan`) and carried
+    /// here, rather than re-derived in `prepare`: deriving it there meant the
+    /// history was walked twice per open, and left a fallback branch that no
+    /// test could reach — the branch guarding the very bug this exists for.
+    /// `None` with `resume` set means "nothing to attach to", which degrades to
+    /// a fresh launch and never to a picker.
+    pub resume_id: Option<String>,
     /// Launch even though the model host did not answer (`--force`, the app's
     /// "launch anyway"). Never overrides a harness that cannot run at all.
     pub force: bool,
@@ -559,6 +567,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         guidance: base.guidance.clone(),
         model: base.model.clone(),
         resume: base.resume,
+        resume_id: base.resume_id.clone(),
         force: base.force,
     }
 }
@@ -629,6 +638,7 @@ impl AiLaunch {
             guidance: Vec::new(),
             model: None,
             resume: false,
+            resume_id: None,
             force: false,
         }
     }
@@ -1697,6 +1707,7 @@ mod tests {
             guidance: Vec::new(),
             model: None,
             resume: false,
+            resume_id: None,
             force: false,
         };
         assert_eq!(l.match_word, "claude", "adoption matches the program, not the env prefix");
@@ -1731,6 +1742,7 @@ mod tests {
             guidance: Vec::new(),
             model: None,
             resume: false,
+            resume_id: None,
             force: false,
         };
         assert_eq!(
@@ -1774,6 +1786,7 @@ mod tests {
             guidance: Vec::new(),
             model: None,
             resume: false,
+            resume_id: None,
             force: false,
         };
         assert_eq!(
@@ -1820,6 +1833,7 @@ mod tests {
             guidance: Vec::new(),
             model: None,
             resume: false,
+            resume_id: None,
             force: false,
         };
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");

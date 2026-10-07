@@ -237,7 +237,7 @@ lines, `#` comments. It is parsed as data, never executed.
 | What | Flag | Env | Config key | Default |
 |---|---|---|---|---|
 | AI pane command | `--ai <cmd>` | `WORKTREES_AI_CMD` | `ai_cmd` | `claude` |
-| AI resume argument (`-r` appends it) | — | `WORKTREES_AI_RESUME_ARG` | `ai_resume_arg` | Claude: `-r`; Codex: `resume --last` |
+| AI resume argument (`-r` appends it) | — | `WORKTREES_AI_RESUME_ARG` | `ai_resume_arg` | Claude: `-r`; Codex: exact session (override ignored) |
 | Session/name prefix | — | `WORKTREES_PREFIX` | `prefix` | repo dir name |
 | Codex permissions (`ask`, `auto-review`, `full`) | — | `WORKTREES_CODEX_PERMISSIONS` | `codex_permissions` | `auto-review` |
 
@@ -278,8 +278,11 @@ the default is used when no agent is running. Changing the default does not
 stop a running session. The CLI keeps its
 `ai_cmd` default and accepts `open <place> --ai claude|codex` and
 `close <place> --ai claude|codex`. An unqualified `close` closes both managed
-agent sessions. Codex resumes its most recent conversation in that place with
-`codex resume --last` when one exists.
+agent sessions. Codex resumes the newest interactive conversation started in
+that exact place with `codex resume <session-id>`, excluding subagents and
+scripted runs. Without a matching conversation it starts fresh. The generic
+resume-argument override does not apply to Codex: its `--last` selector can
+include sibling worktrees, so Worktrees always names the session explicitly.
 
 Worktrees-launched Codex sessions require ChatGPT account sign-in. Run
 `codex login` once and complete its browser flow; `codex login status` shows

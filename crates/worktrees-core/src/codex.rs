@@ -1,5 +1,4 @@
-//! Small, read-only Codex session check for deciding whether `resume --last`
-//! has a conversation in this exact worktree. Codex owns these files.
+//! Read-only Codex session discovery and activity. Codex owns these files.
 
 use std::io::{BufRead, BufReader};
 use std::collections::HashMap;
@@ -13,29 +12,70 @@ fn sessions_dir() -> PathBuf {
         .join("sessions")
 }
 
-/// Rollout files live under `sessions/<year>/<month>/<day>/`. Read only the
-/// first JSONL record (`session_meta`) of each file, never transcript content.
+/// An eligible conversation in this exact place. Use the same selection rule
+/// for auto-resume and the actual launch, including subagent/exec exclusions.
 pub fn session_present(cwd: &str) -> bool {
-    fn walk(dir: &Path, depth: u8, cwd: &str) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else { return false };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && depth < 3 {
-                if walk(&path, depth + 1, cwd) { return true; }
-            } else if depth == 3 && path.extension().is_some_and(|x| x == "jsonl") {
-                let Ok(file) = std::fs::File::open(path) else { continue };
-                let mut first = String::new();
-                if BufReader::new(file).read_line(&mut first).is_ok() {
-                    let meta = serde_json::from_str::<serde_json::Value>(&first).ok();
-                    if meta.as_ref().and_then(|v| v.pointer("/payload/cwd")).and_then(|v| v.as_str()) == Some(cwd) {
-                        return true;
-                    }
-                }
+    resume_id(cwd).is_some()
+}
+
+pub fn resume_id(cwd: &str) -> Option<String> {
+    resume_id_in(&sessions_dir(), &physical(cwd))
+}
+
+/// The path as codex will have recorded it. Codex writes the cwd it was
+/// launched in, and on macOS `/tmp` and `/var` are symlinks into `/private`,
+/// so a caller holding the symlinked spelling would match nothing. Both sides
+/// are physical today (the CLI realpaths everything, `pwd -P`), which is why
+/// this is belt-and-braces rather than a fix — and why it falls back to the
+/// string it was given rather than refusing when the path cannot be resolved.
+fn physical(cwd: &str) -> String {
+    std::fs::canonicalize(cwd)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| cwd.to_string())
+}
+
+/// Search all history at launch (unlike the bounded activity poll).
+///
+/// Ordered by rollout START time (the file name), never by mtime or by last
+/// update. That is deliberately NOT codex's own `--last`, which takes the most
+/// recently UPDATED thread: under `--last` a sibling place still being typed
+/// into outranks this place's own older conversation, which is the bug. Start
+/// time also makes this agree with `latest_rollout`, so "the session we resume"
+/// and "the session we read activity from" are the same one.
+fn resume_id_in(root: &Path, cwd: &str) -> Option<String> {
+    fn walk(dir: &Path, depth: u8, cwd: &str) -> Option<String> {
+        for path in sorted_desc(dir, depth < 3) {
+            if depth < 3 {
+                if let Some(id) = walk(&path, depth + 1, cwd) { return Some(id); }
+            } else if path.extension().is_some_and(|x| x == "jsonl") {
+                let Some(meta) = session_meta(&path) else { continue };
+                if !is_user_thread(&meta, cwd) { continue; }
+                let Some(id) = meta.get("id").and_then(|v| v.as_str()) else { continue };
+                // Only UUIDs: Codex also accepts names, whose lookup need not
+                // identify this rollout. Never pass arbitrary metadata as argv.
+                if id.len() == 36 && id.bytes().enumerate().all(|(i, b)| {
+                    if [8, 13, 18, 23].contains(&i) { b == b'-' } else { b.is_ascii_hexdigit() }
+                }) { return Some(id.to_string()); }
             }
         }
-        false
+        None
     }
-    walk(&sessions_dir(), 0, cwd)
+    walk(root, 0, cwd)
+}
+
+fn sorted_desc(dir: &Path, dirs: bool) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut v: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir() == dirs).collect();
+    v.sort_by(|a, b| b.cmp(a));
+    v
+}
+
+fn session_meta(path: &Path) -> Option<serde_json::Value> {
+    let mut first = String::new();
+    BufReader::new(std::fs::File::open(path).ok()?).read_line(&mut first).ok()?;
+    if !first.ends_with('\n') { return None; }
+    let value: serde_json::Value = serde_json::from_str(&first).ok()?;
+    (value.get("type")?.as_str()? == "session_meta").then(|| value.get("payload").cloned()).flatten()
 }
 
 /// Day directories to search, newest first, when looking for a place's rollout.
@@ -72,12 +112,6 @@ fn is_user_thread(meta: &serde_json::Value, cwd: &str) -> bool {
 /// looking back `ROLLOUT_DAYS` day dirs. Rollout names begin with their start
 /// time, so the first match in descending name order is the newest session.
 pub fn latest_rollout(cwd: &str) -> Option<PathBuf> {
-    fn sorted_desc(dir: &Path, dirs: bool) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-        let mut v: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir() == dirs).collect();
-        v.sort_by(|a, b| b.cmp(a));
-        v
-    }
     let mut days = Vec::new();
     'walk: for year in sorted_desc(&sessions_dir(), true) {
         for month in sorted_desc(&year, true) {
@@ -89,8 +123,9 @@ pub fn latest_rollout(cwd: &str) -> Option<PathBuf> {
             }
         }
     }
+    let cwd = physical(cwd);
     days.iter().flat_map(|d| sorted_desc(d, false)).find(|path| {
-        path.extension().is_some_and(|x| x == "jsonl") && user_thread_cwd(path).as_deref() == Some(cwd)
+        path.extension().is_some_and(|x| x == "jsonl") && user_thread_cwd(path).as_deref() == Some(cwd.as_str())
     })
 }
 
@@ -571,6 +606,35 @@ mod tests {
         assert!(composer_settled(typed, typed));
         assert!(!composer_submitted(typed));
         assert!(composer_submitted(queued));
+    }
+
+    #[test]
+    fn resume_selects_only_an_exact_places_interactive_uuid_across_all_history() {
+        let root = std::env::temp_dir().join(format!("wt-resume-{}", std::process::id()));
+        let day = root.join("2020/01/01");
+        std::fs::create_dir_all(&day).unwrap();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let write = |name: &str, meta: serde_json::Value| {
+            std::fs::write(day.join(name), format!("{}\n", serde_json::json!({"type":"session_meta","payload":meta}))).unwrap();
+        };
+        write("rollout-a.jsonl", serde_json::json!({"id":id,"cwd":"/repo/.worktrees/a","source":"cli"}));
+        write("rollout-z.jsonl", serde_json::json!({"id":"22222222-2222-4222-8222-222222222222","cwd":"/repo","source":"cli"}));
+        write("rollout-y.jsonl", serde_json::json!({"id":"33333333-3333-4333-8333-333333333333","cwd":"/repo/.worktrees/a","source":{"subagent":"guardian"}}));
+        write("rollout-x.jsonl", serde_json::json!({"id":"44444444-4444-4444-8444-444444444444","cwd":"/repo/.worktrees/a","source":"exec"}));
+        write("rollout-w.jsonl", serde_json::json!({"id":"55555555-5555-4555-8555-555555555555","cwd":"/repo/.worktrees/a","source":"cli","parent_thread_id":id}));
+        write("rollout-v.jsonl", serde_json::json!({"id":"session-name","cwd":"/repo/.worktrees/a","source":"cli"}));
+        std::fs::write(day.join("rollout-u.jsonl"), r#"{"type":"session_meta","payload":{"id":"66666666-6666-4666-8666-666666666666","cwd":"/repo/.worktrees/a","source":"cli"}}"#).unwrap();
+        // Older conversations remain resumable even with >14 newer day dirs.
+        for d in 1..=20 { std::fs::create_dir_all(root.join(format!("2026/10/{d:02}"))).unwrap(); }
+        assert_eq!(resume_id_in(&root, "/repo/.worktrees/a").as_deref(), Some(id));
+        assert_eq!(resume_id_in(&root, "/repo/.worktrees/b"), None);
+        assert_eq!(resume_id_in(&root, "/repo/.worktrees/a/nested"), None);
+        write("rollout-b.jsonl", serde_json::json!({"id":"77777777-7777-4777-8777-777777777777","cwd":"/repo/.worktrees/a","source":"vscode"}));
+        assert_eq!(resume_id_in(&root, "/repo/.worktrees/a").as_deref(), Some("77777777-7777-4777-8777-777777777777"));
+        std::fs::remove_file(day.join("rollout-a.jsonl")).unwrap();
+        std::fs::remove_file(day.join("rollout-b.jsonl")).unwrap();
+        assert_eq!(resume_id_in(&root, "/repo/.worktrees/a"), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Shapes copied from real session_meta lines: codex's auto-reviewer shares

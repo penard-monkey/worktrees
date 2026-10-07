@@ -344,12 +344,11 @@ pub fn resolve_ai_resume_arg() -> String {
 
 /// The resume words for `ai_cmd` in `cwd`, as its harness spells them (Codex
 /// resumes by subcommand); a non-harness command inherits the default
-/// harness's. An explicitly configured resume argument still wins, preserving
-/// the existing user override for every AI command.
+/// harness's. An explicitly configured resume argument wins unless the
+/// harness requires an exact place session (Codex and pi).
 pub fn resolve_ai_resume_arg_for(ai_cmd: &str, cwd: &str) -> String {
-    // A harness that resumes an EXACT session (pi's `--session-id`) is not
-    // open to the override: `-r` appended there would reach pi's session
-    // PICKER, a different session than the one activity is read from.
+    // Exact-session adapters resolve their own target. A generic override
+    // could select another place through a picker or Codex's --last.
     if let Some(a) = crate::harness::for_cmd(ai_cmd).filter(|a| a.exact_resume()) {
         return a.resume_arg(cwd);
     }
