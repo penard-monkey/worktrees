@@ -37,6 +37,7 @@ import { CtxMenu } from "./CtxMenu";
 import { DiffView, type FileDiffDto } from "./DiffView";
 import { FindBar, useFileFind } from "./Find";
 import { Markdown } from "./markdown";
+import { useDocPathLinks } from "./useDocPathLinks";
 import { basename, fileInfo, humanSize, relPath, revealsThrough, treePath, type FileKind } from "./filekind";
 import { MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom, type Settings } from "./settings";
 import { applyMd, spliceRange, type MdAction } from "./mdedit";
@@ -771,8 +772,12 @@ export type FileViewProps = {
    *  token, so a new file appears without the user reselecting the place. */
   reloadToken: number;
   onOpenEditor: (path: string) => void;
-  onOpen: (path: string) => void;
+  /** open a file in the viewer — at a line when a path link carried one */
+  onOpen: (path: string, at?: { line?: number; col?: number }) => void;
   onError: (e: unknown) => void;
+  /** the place root: a rendered markdown file's paths resolve against its own
+   *  directory, then this (`useDocPathLinks`). Absent = no path links. */
+  root?: string;
   /** wrap long lines; owned by settings so it survives a place switch */
   wrap: boolean;
   onWrap: (v: boolean) => void;
@@ -799,7 +804,7 @@ export type FileViewProps = {
 
 export function FileView(props: FileViewProps) {
   const { path, reloadToken, onOpenEditor, onOpen, onError, wrap, onWrap, mdSource, onMdSource, mdZoom, onMdZoom, expanded, onExpand,
-    diff, onDiff, diffBase, onDiffBase, findOpen = false, findToken = 0, onFindClose, at = null, onAtClear } = props;
+    diff, onDiff, diffBase, onDiffBase, findOpen = false, findToken = 0, onFindClose, at = null, onAtClear, root = null } = props;
   const info = useMemo(() => fileInfo(path), [path]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [read, setRead] = useState<FileRead | null>(null);
@@ -897,6 +902,10 @@ export function FileView(props: FileViewProps) {
     }
     onOpen(resolve(href.split("#")[0]));
   }, [onOpen, onError, resolve]);
+
+  // Paths named in the rendered doc → links (mdpaths.ts). Only a markdown
+  // file asks; the hook is unconditional so the hook order is too.
+  const { pathLinks, menu: pathMenu } = useDocPathLinks(info.kind === "markdown" ? root : null, path, reloadToken, onOpen);
 
   const renderImage = useCallback((src: string, alt: string) => {
     if (/^https?:/i.test(src)) return <em className="md-img-note">[remote image: {alt || src}]</em>;
@@ -1013,7 +1022,8 @@ export function FileView(props: FileViewProps) {
       // as it was before you started.
       return (
         <div className="scroll" style={{ "--md-zoom": zoom } as CSSProperties}>
-          <Markdown src={text} onLink={onLink} renderImage={renderImage} />
+          <Markdown src={text} onLink={onLink} renderImage={renderImage} pathLinks={pathLinks} />
+          {pathMenu}
         </div>
       );
     // The editable branch. It is NOT wrapped in `.scroll`: the textarea is its

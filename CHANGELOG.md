@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **File paths in a rendered document are links.** In the Files tab's
+  markdown preview and the Plan tab, a path that names a real file in the
+  project — `app/src/App.tsx` in prose, or in backticks — opens it in the
+  Files tab with a click, and `path:42` opens it at that line, just as
+  ⌘-click does in a terminal. A bare name in backticks (`quota.rs`) works
+  too: if several files share it, the click asks which. Only what exists
+  becomes a link, judged by the same rules as the terminal's; anything else
+  is left exactly as it was. Code blocks and existing links are left alone.
+
 ### Fixed
 - **A file opened from a session or by Claude now shows in the Files tree.**
   ⌘-clicking a path in a terminal, or a document Claude put on screen with

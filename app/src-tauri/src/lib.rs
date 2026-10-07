@@ -5960,6 +5960,136 @@ async fn resolve_term_paths(
         .collect())
 }
 
+/// Each place's file names → its repo-relative paths, from ONE
+/// `git ls-files --cached --others --exclude-standard` (an index read plus
+/// the untracked walk git already does for `status`; no traversal of ours).
+/// Measured at 20–35 ms on the largest registered project (3.6k files).
+/// Rebuilt only when the frontend's `generation` moves — the same
+/// `places:changed`/Refresh token that re-lists the Files tree — never per
+/// render. Untracked files are in it on purpose: a plan names the files a
+/// branch is ADDING.
+#[derive(Default)]
+struct DocNameIndex(Mutex<HashMap<String, (u64, Arc<HashMap<String, Vec<String>>>)>>);
+
+/// `ls-files -z` output → basename → paths. Pure, for the tests.
+fn basename_index(listing: &[u8]) -> HashMap<String, Vec<String>> {
+    let mut idx: HashMap<String, Vec<String>> = HashMap::new();
+    for rel in listing.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let rel = String::from_utf8_lossy(rel).into_owned();
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        idx.entry(name).or_default().push(rel);
+    }
+    idx
+}
+
+/// How many same-named files a bare name may offer. Past this the dropdown is
+/// a search result, not a disambiguation.
+const DOC_NAME_CHOICES_MAX: usize = 12;
+
+/// A path found in rendered markdown, as the viewer needs it: the absolute
+/// file to open, and how to name it in a tooltip or a menu.
+#[derive(Serialize, Debug, PartialEq)]
+struct DocPathHit {
+    path: String,
+    /// Relative to the place root; the absolute path when it is elsewhere.
+    rel: String,
+}
+
+/// One candidate from a markdown document → every file it may name.
+/// Empty = no link, one = a link, several = the click asks which.
+///
+/// A PATH is decided by `resolve_term_path` — the terminal's rules, not a
+/// second resolver: a regular file, canonicalised, inside a registered
+/// project, `~/`, git's `a/`/`b/`. A BARE NAME (no `/`) that is not a file
+/// next to the doc or at the root is looked up in the place's name index, and
+/// every candidate the index offers goes through the same resolver again, so
+/// a file deleted since the index was built, or a symlink leading out, is
+/// still refused.
+fn resolve_doc_path(
+    raw: &str,
+    bases: &[PathBuf],
+    home: Option<&Path>,
+    roots: &[PathBuf],
+    root: &Path,
+    index: &mut dyn FnMut() -> Option<Arc<HashMap<String, Vec<String>>>>,
+) -> Vec<DocPathHit> {
+    let root_c = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let hit = |abs: String| {
+        let rel = Path::new(&abs).strip_prefix(&root_c).map(|r| r.to_string_lossy().into_owned()).unwrap_or_else(|_| abs.clone());
+        DocPathHit { path: abs, rel }
+    };
+    if let Some(abs) = resolve_term_path(raw, bases, home, roots) {
+        return vec![hit(abs)];
+    }
+    if raw.contains('/') || raw.starts_with('~') || !raw.contains('.') {
+        return Vec::new();
+    }
+    let Some(idx) = index() else { return Vec::new() };
+    let only_root = [root.to_path_buf()];
+    let mut out: Vec<DocPathHit> = Vec::new();
+    for rel in idx.get(raw).into_iter().flatten() {
+        if let Some(abs) = resolve_term_path(rel, &only_root, home, roots) {
+            if !out.iter().any(|h| h.path == abs) {
+                out.push(hit(abs));
+            }
+        }
+        if out.len() >= DOC_NAME_CHOICES_MAX {
+            break;
+        }
+    }
+    out.sort_by(|a, b| a.rel.cmp(&b.rel));
+    out
+}
+
+/// Which tokens in a rendered markdown document name files — the answer
+/// behind its path links (`mdpaths.ts`). The terminal's `resolve_term_paths`
+/// with the bases a DOCUMENT has: its own directory first (a plan that says
+/// `findings.md` means the one beside it), then the place root. The frontend
+/// batches a document's candidates `TERM_PATHS_MAX` at a time and caches the
+/// answers per document.
+#[tauri::command]
+async fn resolve_doc_paths(
+    app: AppHandle,
+    names: State<'_, DocNameIndex>,
+    root: String,
+    doc: Option<String>,
+    generation: u64,
+    paths: Vec<String>,
+) -> Result<Vec<Vec<DocPathHit>>, String> {
+    let mut bases = Vec::new();
+    if let Some(dir) = doc.as_deref().and_then(|d| Path::new(d).parent()) {
+        bases.push(dir.to_path_buf());
+    }
+    bases.push(PathBuf::from(&root));
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let roots = project_roots(&app);
+    let root_p = PathBuf::from(&root);
+    // Built at most once per call, and only when a bare name missed its stat.
+    let mut got: Option<Option<Arc<HashMap<String, Vec<String>>>>> = None;
+    let mut index = || {
+        got.get_or_insert_with(|| {
+            if let Some((g, idx)) = names.0.lock().unwrap().get(&root) {
+                if *g == generation {
+                    return Some(idx.clone());
+                }
+            }
+            let out = git::git(&root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]).ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let idx = Arc::new(basename_index(&out.stdout));
+            names.0.lock().unwrap().insert(root.clone(), (generation, idx.clone()));
+            Some(idx)
+        })
+        .clone()
+    };
+    Ok(paths
+        .iter()
+        .take(TERM_PATHS_MAX)
+        .map(|p| resolve_doc_path(p, &bases, home.as_deref(), &roots, &root_p, &mut index))
+        .collect())
+}
+
 /// Raw bytes as base64 — the viewer builds a `data:` URI from it to show an
 /// image inline. Same path guard as every other FS command. The cap is smaller
 /// than `read_file`'s (base64 inflates 4/3, and this crosses the IPC bridge as
@@ -8101,6 +8231,7 @@ pub fn run() {
         })
         .manage(Terminals::default())
         .manage(Shells::default())
+        .manage(DocNameIndex::default())
         .manage(viewer::Viewer::default())
         .manage(winstate::Tracker::default())
         .setup(|app| {
@@ -8553,6 +8684,7 @@ pub fn run() {
             read_file,
             file_readable,
             resolve_term_paths,
+            resolve_doc_paths,
             list_docs,
             place_plan,
             plan_prompt,
@@ -8762,6 +8894,57 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(r("sneaky.md", &bases, home, &roots), None, "a symlink is judged by where it LANDS");
         assert_eq!(r("", &bases, home, &roots), None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A markdown document's paths: the doc's own directory before the root,
+    /// the terminal's rules for everything that has a `/`, and a bare name
+    /// looked up in the name index — whose answers are re-checked by the same
+    /// resolver, so a stale index entry or an escaping symlink is no link.
+    #[test]
+    fn a_markdown_path_resolves_like_a_terminal_one_and_a_bare_name_by_index() {
+        use super::{basename_index, resolve_doc_path as r, DocPathHit};
+        let base = std::env::temp_dir().join(format!("wt-docpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let proj = base.join("proj");
+        let plan = proj.join(".planning");
+        std::fs::create_dir_all(proj.join("app/src")).unwrap();
+        std::fs::create_dir_all(proj.join("crates/core/src")).unwrap();
+        std::fs::create_dir_all(&plan).unwrap();
+        std::fs::write(proj.join("findings.md"), "root").unwrap();
+        std::fs::write(plan.join("findings.md"), "beside the doc").unwrap();
+        std::fs::write(proj.join("app/src/App.tsx"), "x").unwrap();
+        std::fs::write(proj.join("app/src/lib.rs"), "x").unwrap();
+        std::fs::write(proj.join("crates/core/src/lib.rs"), "x").unwrap();
+        std::fs::write(base.join("outside.rs"), "x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(base.join("outside.rs"), proj.join("app/src/sneaky.rs")).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        let roots = vec![std::fs::canonicalize(&proj).unwrap()];
+        let bases = vec![plan.clone(), proj.clone()];
+        let listing = b"findings.md\0.planning/findings.md\0app/src/App.tsx\0app/src/lib.rs\0crates/core/src/lib.rs\0app/src/sneaky.rs\0app/src/gone.ts\0";
+        let idx = Arc::new(basename_index(listing));
+        assert_eq!(idx["lib.rs"], ["app/src/lib.rs", "crates/core/src/lib.rs"]);
+        let built = std::cell::Cell::new(0);
+        let mut index = || { built.set(built.get() + 1); Some(idx.clone()) };
+        let one = |abs: String, rel: &str| vec![DocPathHit { path: abs, rel: rel.into() }];
+
+        assert_eq!(r("findings.md", &bases, None, &roots, &proj, &mut index), one(canon(&plan.join("findings.md")), ".planning/findings.md"), "the doc's own directory first");
+        assert_eq!(r("app/src/App.tsx", &bases, None, &roots, &proj, &mut index), one(canon(&proj.join("app/src/App.tsx")), "app/src/App.tsx"), "then the place root");
+        assert_eq!(r("b/app/src/App.tsx", &bases, None, &roots, &proj, &mut index).len(), 1, "git's b/ prefix, as in a terminal");
+        assert_eq!(built.get(), 0, "a path that stats never touches the index");
+        assert_eq!(r("App.tsx", &bases, None, &roots, &proj, &mut index), one(canon(&proj.join("app/src/App.tsx")), "app/src/App.tsx"), "a bare name, by index");
+        let two = r("lib.rs", &bases, None, &roots, &proj, &mut index);
+        assert_eq!(two.iter().map(|h| h.rel.as_str()).collect::<Vec<_>>(), ["app/src/lib.rs", "crates/core/src/lib.rs"], "several = the click asks");
+        assert!(r("gone.ts", &bases, None, &roots, &proj, &mut index).is_empty(), "an index entry that is no longer a file");
+        #[cfg(unix)]
+        assert!(r("sneaky.rs", &bases, None, &roots, &proj, &mut index).is_empty(), "an index entry that leads outside");
+        let before = built.get();
+        assert!(r("src/nope.rs", &bases, None, &roots, &proj, &mut index).is_empty(), "a missing PATH is not a name lookup");
+        assert!(r("Makefile", &bases, None, &roots, &proj, &mut index).is_empty(), "no extension, no lookup");
+        assert_eq!(built.get(), before);
+        assert!(r("../outside.rs", &bases, None, &roots, &proj, &mut index).is_empty(), "outside every project");
 
         let _ = std::fs::remove_dir_all(&base);
     }

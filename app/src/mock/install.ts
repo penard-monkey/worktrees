@@ -889,6 +889,9 @@ fn fixup_gui_path() -> Option<String> {
 ---
 
 Run \`worktrees new feature-x\` to make one.
+
+Paths in prose open in the viewer: start at src/App.tsx, or \`src/main.rs:3\`;
+\`lib.rs\` names two files, \`Cargo.toml\` one, and src/ghost.ts nothing.
 `;
 
 const MOCK_TS = `import { useEffect, useState } from "react";
@@ -1856,6 +1859,56 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         return null;
       });
     }
+    case "resolve_doc_paths": {
+      // lib.rs's `resolve_doc_path` over the fixture tree: the terminal's rules
+      // above with the doc's directory as the first base, then a bare name
+      // through a stand-in for the `git ls-files` index — the fixture tree
+      // walked minus ignored entries and symlinks, which ls-files would not
+      // list either. Answers are [] (no link), [one] or [several].
+      const root = args.root as string;
+      const doc = args.doc as string | null;
+      const bases = [...(doc ? [doc.slice(0, doc.lastIndexOf("/"))] : []), root];
+      const norm = (p: string) => {
+        const out: string[] = [];
+        for (const seg of p.split("/")) {
+          if (seg === "" || seg === ".") continue;
+          if (seg === "..") out.pop(); else out.push(seg);
+        }
+        return "/" + out.join("/");
+      };
+      const isFile = (p: string) => !!fsFile(p) && !fsChildren.has(p);
+      const tries = (raw: string): string | null => {
+        if (raw.startsWith("/")) return isFile(norm(raw)) ? norm(raw) : null;
+        if (raw.startsWith("~/")) return isFile(norm(`/Users/demo/${raw.slice(2)}`)) ? norm(`/Users/demo/${raw.slice(2)}`) : null;
+        for (const b of bases) if (isFile(norm(`${b}/${raw}`))) return norm(`${b}/${raw}`);
+        return null;
+      };
+      const rel = (abs: string) => (abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs);
+      let index: Map<string, string[]> | null = null;
+      const names = () => {
+        if (index) return index;
+        const idx = new Map<string, string[]>();
+        index = idx;
+        const walk = (dir: string, depth: number) => {
+          if (depth > 5) return;
+          for (const e of seedDir(dir)) {
+            if (e.ignored || e.link) continue;
+            if (e.is_dir) { walk(e.path, depth + 1); continue; }
+            idx.set(e.name, [...(idx.get(e.name) ?? []), e.path]);
+          }
+        };
+        walk(root, 0);
+        return idx;
+      };
+      return (args.paths as string[]).slice(0, 64).map((raw) => {
+        const m = /^[ab]\/(.+)$/.exec(raw);
+        const abs = tries(raw) ?? (m ? tries(m[1]) : null);
+        if (abs) return [{ path: abs, rel: rel(abs) }];
+        if (raw.includes("/") || raw.startsWith("~") || !raw.includes(".")) return [];
+        return (names().get(raw) ?? []).filter(isFile).slice(0, 12)
+          .map((p) => ({ path: p, rel: rel(p) })).sort((x, y) => x.rel.localeCompare(y.rel));
+      });
+    }
     case "term_write":
     case "term_resize":
     case "term_close":
@@ -2193,6 +2246,7 @@ Phase 3: Frontend pane and mock harness
 ## Key Questions
 
 1. Does a freeform plan still say something useful? (yes — goal, checks)
+2. Where does it start? In src/App.tsx — \`Cargo.toml\` pins the versions.
 
 ## Errors Encountered
 

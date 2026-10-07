@@ -20,6 +20,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSPrope
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Markdown } from "./markdown";
+import { useDocPathLinks } from "./useDocPathLinks";
 import { HARNESS_LABEL, type Harness } from "./harness";
 
 export type PlanPhaseStatus = "pending" | "in_progress" | "complete" | "blocked" | "unknown";
@@ -91,7 +92,7 @@ export type PlanPaneProps = {
    *  100 = normal), so the plan reads at the size this place's docs do. */
   mdZoom?: number;
   /** Open a file in the Files tab's renderer. */
-  onOpen: (path: string) => void;
+  onOpen: (path: string, at?: { line?: number; col?: number }) => void;
   /** Tells the dock header which file its "open" button opens (null: none). */
   onPlanPath?: (path: string | null) => void;
   onError: (e: unknown) => void;
@@ -385,6 +386,9 @@ export function PlanPane({ root, slug, place, agentSession, agentProvider, worke
     if (!docPath) return;
     onOpen(resolveFrom(docPath.slice(0, docPath.lastIndexOf("/")), href.split("#")[0]));
   }, [docPath, onOpen, onError]);
+  // Paths the plan names → links into the Files tab (mdpaths.ts). Relative to
+  // the plan's own directory first: `findings.md` in a plan means its sibling.
+  const { pathLinks, menu: pathMenu } = useDocPathLinks(docPath ? root : null, docPath, reloadToken, onOpen);
 
   // Above the early returns (hooks keep their order), and memoised: the text
   // can be 512 KiB and the pane re-renders on every activity flip.
@@ -547,7 +551,8 @@ export function PlanPane({ root, slug, place, agentSession, agentProvider, worke
       </div>
       {body != null && (
         <div ref={bodyRef} className="scroll plan-body" style={{ "--md-zoom": String((mdZoom ?? 100) / 100) } as CSSProperties}>
-          <Markdown src={body} onLink={onLink} />
+          <Markdown src={body} onLink={onLink} pathLinks={pathLinks} />
+          {pathMenu}
         </div>
       )}
     </div>

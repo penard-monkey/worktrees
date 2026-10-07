@@ -2174,6 +2174,11 @@ body.dragging .menu-catch { pointer-events: none; }
 .md-hr { border: 0; border-top: 1px solid var(--line); margin: var(--md-s5) 0; }
 .md-link { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
 .md-link:hover { border-bottom-color: var(--accent); }
+/* A path the app FOUND in the prose (mdpaths.ts), not one the author linked:
+   same token, dotted, so the two read as kin but not as the same promise. */
+.md-path { cursor: pointer; border-bottom-style: dotted; }
+.md-path:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; border-radius: var(--r-sm); }
+.md-path .md-code-inline { color: inherit; }
 .md-code-inline {
   font-family: var(--term-family); font-size: 0.9em;
   background: var(--bg-input); border: 1px solid var(--line);
