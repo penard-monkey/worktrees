@@ -5,6 +5,20 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Nested lanes: shallow-tree implementation and remaining decisions.** #458
+  merged the design only: opt-in hubs, first-class flat lanes, parent-aware
+  Git/close-out and scoped worktrees mutations. Settle the open choices in
+  [proposal §11](docs/proposals/nested-lanes.md), then build phase 2 after tmux
+  phase 1a routing/sandbox namespace/restart-based drain. Review policy belongs
+  to the owner, never the tool. `tmux-no-start` and `tmux-routing` are separate
+  active lanes; do not duplicate their work. See
+  [session archive](docs/sessions/2026-10-08-nested-lanes/summary.md).
+- **Tmux phase 1b: verified lease and socket recovery.** Follow #458's separate
+  design for endpoint/PID/start identity, startup serialization and bounded
+  SIGUSR1 recovery. This does not block nested lanes after phase 1a. Test on
+  isolated named servers on both platforms; the separate non-launch `-N`
+  hotfix does not protect intentional launch paths. See
+  [session archive](docs/sessions/2026-10-08-nested-lanes/summary.md).
 - **Pull requests: `sandbox.sh --app` hand test still pending.** Phase 1
   shipped in #455 without it; David runs it before v0.40.0. Look for: a Finder
   launch (bare PATH) finding keyring auth; app.log's `pull requests: <root>: ok
@@ -310,6 +324,11 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   long-lived `worktrees mcp` process: `codex_usage::CACHE` and
   `claude_usage::USAGE_CACHE` are 120s, so N parallel `create_worktree` calls
   all read the same figure.
+  Nested-lane fan-out also needs cross-process launch reservations with expiry
+  and reconciliation: simultaneous MCP servers can all observe spare capacity.
+  Account/provider budgets must span hubs and projects, with a conservative
+  provider bucket when account identity is unavailable. See
+  [nested-lanes close-out](docs/sessions/2026-10-08-nested-lanes/summary.md).
 
 - **`--ai auto`: pick the provider by headroom.** The data is now in core and
   in one shape (`quota::Window`, `harness::Adapter::usage`), so "start this on
