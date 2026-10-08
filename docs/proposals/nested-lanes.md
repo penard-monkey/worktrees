@@ -415,8 +415,11 @@ Unknown activity remains visible and is never reported as idle.
 
 PR attention rolls up in the **existing Pull requests rail badge** when a hub
 is selected, with hub/subtree counts explained in its tooltip and dock summary.
-The dock still shows the whole project, the selected lane's PR pinned first;
-add a subtree filter if needed, not a different default list. Do not add another
+The collapsed hub's tooltip also summarizes its subtree's PR attention (for
+example, “2 child PRs need attention”), even when another lane is selected; use
+the existing cached project data and show stale/unknown rather than polling a
+hidden project. The dock still shows the whole project, the selected lane's PR
+pinned first; add a subtree filter if needed, not a different default list. Do not add another
 colored nav dot. A collapsed hub's optional attention marker can only use the
 previously deferred distinct-shape, opt-in policy; it is not a prerequisite.
 
