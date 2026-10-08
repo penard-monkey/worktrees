@@ -17,6 +17,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   that is refusing connections. Older tmux behaves as before. If it already
   happened to you, `kill -USR1 <pid>` on the OLD server makes it recreate its
   socket (that takes the path back from the new one).
+- **A remote that uses an SSH host alias now opens the right page.** With
+  several GitHub accounts, `~/.ssh/config` usually names a `Host` like
+  `github.com-work` whose `HostName` is github.com, and the remote reads
+  `git@github.com-work:owner/repo.git`. The app took the alias for the host:
+  the header's remote link pointed at `https://github.com-work/…`, and Pull
+  requests treated the project as not on GitHub. The host is now resolved the
+  way ssh resolves it (`ssh -G`, which reads your config and connects to
+  nothing), so an alias to github.com, to an Enterprise host or to GitLab
+  lands on that host. Remotes without a `git@` user (`host:owner/repo`) are
+  recognised too. If ssh cannot answer, the host is used as written, as before.
 
 ## [0.40.0] - 2026-10-07
 
