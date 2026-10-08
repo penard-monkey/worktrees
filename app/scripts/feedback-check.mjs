@@ -40,7 +40,24 @@ lower();
 assert.equal(escape.escapeDepth(), 0);
 assert.equal(events.size, 0);
 
+class HTMLElement {
+  constructor(name) { this.name = name; this.inert = false; this.classes = new Set(); }
+  get classList() { return { add: c => this.classes.add(c), remove: c => this.classes.delete(c) }; }
+  contains(other) { return other === this; }
+  focus() {}
+  get isConnected() { return true; }
+}
+/** body > [app root, the SDK's shadow host] — the real shape: `init` appends a
+ *  body-level div carrying `data-orfis` and puts the dialog in its shadow. */
+function makeDom() {
+  const root = new HTMLElement('app-root');
+  const host = new HTMLElement('orfis-host');
+  const documentElement = new HTMLElement('html');
+  return { root, host, documentElement, document: { body: { children: [root, host] }, documentElement } };
+}
+
 async function adapter({ mock = false, configured = true, label = 'main', rejectVersion = false } = {}) {
+  const dom = makeDom();
   let sdk = 0, fake = 0, destroyed = 0, calls = [], options;
   let resolveVersion;
   const version = rejectVersion ? Promise.reject(Error('private native details')) : new Promise(r => { resolveVersion = r; });
@@ -58,8 +75,9 @@ async function adapter({ mock = false, configured = true, label = 'main', reject
       if (name === './mock/feedback') { fake++; return { createMockFeedback: cb => { options = { cb }; return widget; } }; }
       throw Error(name);
     },
+    HTMLElement, document: dom.document,
   }, s => s.replaceAll('import.meta.env', JSON.stringify(env)));
-  return { mod, resolveVersion, counts: () => ({ sdk, fake, destroyed }), calls, options: () => options };
+  return { mod, resolveVersion, counts: () => ({ sdk, fake, destroyed }), calls, options: () => options, dom };
 }
 for (const args of [{ configured: false }, { label: 'docs-123' }]) {
   const a = await adapter(args);
@@ -115,8 +133,53 @@ assert.equal(bad.calls.at(-1)[1].msg, 'Feedback initialization failed');
 const widgetSrc = fs.readFileSync('app/src/feedbackWidget.ts', 'utf8');
 assert.match(widgetSrc, /const ACCEPTANCE_PENDING = true;/, 'the real SDK path must stay gated');
 assert.match(widgetSrc, /captureDiagnostics: false/);
+// The adapter must hand over the SDK's own body-level shadow host. `opened()`
+// now degrades safely if it does not, which is exactly why this needs its own
+// assertion: reverting to `document.documentElement` leaves the dialog usable
+// and silently stops inerting the background, so the behavioural test above
+// cannot see it.
+assert.match(widgetSrc, /body > \[data-orfis\]/, 'the adapter must resolve the SDK shadow host');
+assert.doesNotMatch(
+  widgetSrc, /opened\(document\.documentElement\)/,
+  '<html> is not a child of <body>, so it exempts nothing from inerting',
+);
+
 assert.match(widgetSrc, /collectDeviceContext: false/);
 assert.match(widgetSrc, /askForEmail: false/);
+
+// ── Background inerting: the dialog must never inert ITSELF ──────────────
+// `inert` leaves an element fully visible and refuses every click, so getting
+// this wrong produces a perfect-looking form that does nothing — and no
+// snapshot, type or render test can see it. The host passed in is therefore
+// treated as untrusted, and both directions are asserted.
+{
+  const a = await adapter();
+  const p = a.mod.startFeedback();
+  a.resolveVersion({ version: '1.2.3' });
+  await p;
+  const { opened, closed } = a.options().cb;
+  const { root, host, documentElement } = a.dom;
+
+  opened(host);
+  assert.equal(host.inert, false, 'the dialog host must stay interactive');
+  assert.equal(root.inert, true, 'the app behind it must be inert');
+  assert.ok(host.classes.has('modal-scrim'), 'the scrim class marks the dialog for the chord guard');
+  closed();
+  assert.equal(root.inert, false, 'closing restores the app');
+  assert.equal(host.inert, false);
+
+  // The regression itself: <html> is not a child of <body>, so it exempts
+  // nothing. Inerting every child would take the dialog with it.
+  opened(documentElement);
+  assert.equal(host.inert, false, 'a host that is not a body child must inert NOTHING, not everything');
+  assert.equal(root.inert, false);
+  closed();
+
+  // Null degrades the same way rather than throwing.
+  opened(null);
+  assert.equal(host.inert, false);
+  closed();
+}
 
 // We ship someone else's bytes, so the terms have to ship WITH them. Two
 // independent carriers, because each fails differently: the sidecar file is
@@ -179,4 +242,4 @@ assert.equal(
   'the development endpoint must work in a dev build',
 );
 
-console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash, mode-split routing');
+console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash, mode-split routing, background inerting');

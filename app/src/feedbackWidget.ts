@@ -35,6 +35,19 @@ export function orfisTheme(root = document.documentElement): OrfisTheme {
   return THEMES.find((t) => t.id === id)?.appearance === "light" ? "light" : "dark";
 }
 
+/** The SDK's shadow host. `init` does `createElement("div")`,
+ *  `setAttribute("data-orfis", "")`, `attachShadow(...)`, then
+ *  `document.body.append(host)` — so the dialog lives in a shadow root on a
+ *  BODY-LEVEL div, and that div is what the app must exempt when it inerts the
+ *  background.
+ *
+ *  This used to pass `document.documentElement`, which is not a child of
+ *  `<body>` and therefore matched nothing: every body child was inerted,
+ *  the dialog included, and the form rendered perfectly while refusing every
+ *  click. Queried lazily rather than captured after `init`, so a host the SDK
+ *  ever re-creates is still found. */
+const orfisHost = () => document.querySelector<HTMLElement>("body > [data-orfis]");
+
 export function createFeedbackWidget(
   config: FeedbackConfig,
   version: string,
@@ -58,7 +71,7 @@ export function createFeedbackWidget(
     collectDeviceContext: false,
     askForEmail: false,
     theme: orfisTheme(),
-    onOpen: () => callbacks.opened(document.documentElement),
+    onOpen: () => callbacks.opened(orfisHost()),
     onClose: callbacks.closed,
     // `durable: false` is a memory-only queue — lost on quit. Passed straight
     // through so the notice can say which it was; saying "saved for retry"

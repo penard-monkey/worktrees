@@ -5,7 +5,10 @@ export type FeedbackWidget = {
   destroy(): void;
 };
 export type FeedbackCallbacks = {
-  opened(host: HTMLElement): void;
+  /** The dialog's own body-level element, to be EXEMPTED from inerting.
+   *  Nullable on purpose: if it cannot be found, the host must degrade to
+   *  "inert nothing" rather than inert the dialog along with the app. */
+  opened(host: HTMLElement | null): void;
   closed(): void;
   /** `durable: false` = memory only, lost on quit. The SDK reports this
    *  truthfully as of Orfis 3222a74; before that a shed queue still called

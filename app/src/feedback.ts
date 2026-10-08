@@ -27,17 +27,29 @@ let releaseDialog: (() => void) | null = null;
 let returnFocus: HTMLElement | null = null;
 
 /** Background is inert while the SDK's shadow-root dialog owns focus. Its own
- * Tab handler wraps focus; inert also covers navigation starting outside it. */
-function opened(host: HTMLElement) {
+ * Tab handler wraps focus; inert also covers navigation starting outside it.
+ *
+ * The exemption is resolved from `host` rather than trusted: what must stay
+ * live is the BODY-LEVEL element the dialog sits in, and a caller that hands
+ * over anything else — `document.documentElement` was the first one — matches
+ * no body child, so every child is inerted, the dialog with them. That failure
+ * is invisible to look at: the form renders correctly and silently refuses
+ * every click. If the element cannot be placed under <body>, inert NOTHING; a
+ * live background is a far smaller defect than a dialog nobody can use. */
+function opened(host: HTMLElement | null) {
   if (releaseDialog) return;
-  host.classList.add("modal-scrim"); // App's chord guard sees shadow-hosted modals too.
-  const background = [...document.body.children]
-    .filter((el): el is HTMLElement => el instanceof HTMLElement && el !== host && !el.inert);
+  const kids = [...document.body.children].filter((el): el is HTMLElement => el instanceof HTMLElement);
+  const top = host ? kids.find(el => el === host || el.contains(host)) : undefined;
+  const background = top ? kids.filter(el => el !== top && !el.inert) : [];
   for (const el of background) el.inert = true;
+  // App's chord guard sees shadow-hosted modals too. It only ever queries for
+  // the class, so the fallback keeps the guard working when inerting is off.
+  const scrim = top ?? document.documentElement;
+  scrim.classList.add("modal-scrim");
   const releaseEscape = registerEscape(() => widget?.close());
   releaseDialog = () => {
     releaseEscape();
-    host.classList.remove("modal-scrim");
+    scrim.classList.remove("modal-scrim");
     for (const el of background) el.inert = false;
   };
 }
