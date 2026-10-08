@@ -30,24 +30,70 @@ install-copy: build
 
 # Development loop for the desktop app: builds the app crate and serves the
 # frontend on 1420 with hot reload. NOT an install — see install-app for that.
+# `cd app && corepack pnpm`, never `pnpm --dir app`. Two separate reasons, and
+# fixing only one leaves the target broken for somebody.
+#
+# CD, not --dir: a bare `pnpm` is a COREPACK SHIM, and corepack picks the
+# version from the cwd's package.json BEFORE pnpm ever reads the flag. There is
+# no package.json at the repo root, so it takes its own default, then pnpm sees
+# app/package.json's `packageManager: pnpm@11.5.2` and refuses with
+# ERR_PNPM_BAD_PM_VERSION. The flag names the project; only the CWD reaches
+# corepack.
+#
+# COREPACK, not pnpm: `pnpm` is not guaranteed to exist at all. nvm installs it
+# per NODE VERSION, and the version .nvmrc pins ships `corepack node npm npx`
+# and nothing else — so `nvm use` (which this target tells you to run) can
+# REMOVE pnpm from PATH and leave `/bin/sh: pnpm: command not found`. corepack
+# is bundled with node, so it is always there, and it is what AGENTS.md already
+# tells you to use. Verify this one in `env -i` with only the pinned node's bin
+# on PATH: a login shell that has ever used another node version keeps that
+# version's bin further down $PATH and finds pnpm anyway, which hides it.
+#
+# And tauri runs its OWN `beforeDevCommand`/`beforeBuildCommand` from
+# tauri.conf.json, both of which say a bare `pnpm` — so fixing only this
+# recipe gets you one line further and then the same "command not found" from
+# inside tauri. They are overridden per target below rather than in
+# tauri.conf.json, because release.yml builds through that file and CI, where
+# pnpm IS on PATH, is correct as written.
+#
+# CI is immune to all of it: it installs the pinned pnpm directly
+# (`package_json_file: app/package.json`), which is why these stayed broken
+# locally while every CI run was green.
 dev-app:
 	@command -v node >/dev/null || { echo "node not found on PATH — run: nvm use"; exit 1; }
 	@want=$$(cat $(CURDIR)/.nvmrc); have=$$(node -v | tr -d v); \
 	  [ "$$(printf '%s\n%s\n' "$$want" "$$have" | sort -V | head -1)" = "$$want" ] || \
 	  { echo "node $$have is older than .nvmrc ($$want) — run: nvm use"; exit 1; }
-	pnpm --dir app tauri dev
+	cd app && corepack pnpm tauri dev \
+	  --config '{"build":{"beforeDevCommand":"corepack pnpm dev"}}'
 
 # Build the Tauri desktop app + install to /Applications (macOS; local builds
 # aren't quarantined, so no signing needed). App updates = git pull + this.
 install-app:
 	@[ "$$(uname -s)" = Darwin ] || { echo "install-app is macOS-only"; exit 1; }
-	@# pnpm dies with its own version error AFTER you've waited for cargo; check
-	@# the active node against .nvmrc first and say what to run instead.
+	@# Two different version errors can kill this AFTER you have waited for
+	@# cargo, so both are checked up front. The node one is below; the pnpm one
+	@# is structural and is why the recipe cd's into app/ (see dev-app above).
 	@command -v node >/dev/null || { echo "node not found on PATH — run: nvm use"; exit 1; }
 	@want=$$(cat $(CURDIR)/.nvmrc); have=$$(node -v | tr -d v); \
 	  [ "$$(printf '%s\n%s\n' "$$want" "$$have" | sort -V | head -1)" = "$$want" ] || \
 	  { echo "node $$have is older than .nvmrc ($$want) — run: nvm use"; exit 1; }
-	pnpm --dir app tauri build
+	@# Two overrides, because this target only ever ditto's the .app below while
+	@# tauri.conf.json is written for RELEASES. Both failures land AFTER the whole
+	@# cargo release build has succeeded, and make stops on them, so the install
+	@# simply never happens — the build log reads like a success with an error
+	@# stapled to the end.
+	@#   --bundles app   : conf asks for `targets: "all"`; the dmg is a published
+	@#                     release artifact and pure waste here.
+	@#   createUpdaterArtifacts false : conf has an updater pubkey, so tauri signs
+	@#                     the .tar.gz and ABORTS without TAURI_SIGNING_PRIVATE_KEY
+	@#                     (the real blocker — it is a repo secret, see Release in
+	@#                     AGENTS.md). A local install is never served by the
+	@#                     updater, so there is nothing to sign.
+	@# Do NOT "fix" either by narrowing tauri.conf.json: release.yml builds with
+	@# neither flag and needs both behaviours.
+	cd app && corepack pnpm tauri build --bundles app \
+	  --config '{"bundle":{"createUpdaterArtifacts":false},"build":{"beforeBuildCommand":"corepack pnpm build"}}'
 	rm -rf /Applications/worktrees.app
 	ditto "$(CURDIR)/target/release/bundle/macos/worktrees.app" /Applications/worktrees.app
 	@echo "installed: /Applications/worktrees.app ($$(plutil -extract CFBundleShortVersionString raw /Applications/worktrees.app/Contents/Info.plist))"

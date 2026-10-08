@@ -79,7 +79,9 @@ hash, which is the first time this pin's reproducibility has been checked by
 someone other than the script that makes it. `"private": true` stays, and
 governs registry publishing rather than redistribution.
 
-**Both keys are minted**, against the measured packaged Origin below — a
+**Both keys are minted and wired** (see
+[Where the keys live](#where-the-keys-live--and-why-they-are-committed)),
+against the measured packaged Origin below — a
 production key origin-locked to exactly `tauri://localhost` for
 `https://orfis.otterly.digital`, and a laptop key for `http://localhost:4100`
 that also accepts `http://localhost:1420` so `tauri dev` works. Orfis verified
@@ -120,6 +122,58 @@ Three things follow, beyond the key:
   Worth knowing before a stored row is read as evidence of a bug.
 
 The app sets `"csp": null`, so nothing in the webview blocks the request.
+
+### Where the keys live — and why they are committed
+
+Routing is two build-time vars, `VITE_ORFIS_KEY` and `VITE_ORFIS_API_URL`,
+read once in `feedback.ts` and validated by `feedbackConfig`. They live in
+vite's two MODE files, both committed:
+
+| File | Loaded by | Routes to |
+|---|---|---|
+| `app/.env.production` | every `tauri build`, local or CI | the production endpoint |
+| `app/.env.development` | `tauri dev`, `pnpm dev`, `pnpm dev:mock` | the laptop API |
+
+**Committing a `pk_` key is the considered choice, not an oversight.** It is a
+publishable key — Orfis's own description is that it routes, it does not
+authorize — and it is origin-locked. It also ships inside the bundle wherever
+it is stored, so anyone holding `worktrees.app` can read it with `strings`. A
+repo secret would therefore protect it from nobody, while costing something
+real: a local `tauri build` would silently lack a feature that CI builds have,
+which is a divergence this repo has been bitten by before. Be honest about the
+limit, though — an origin allow-list is browser-enforced, so it stops casual
+misuse and not a forged `Origin` header; rate limiting is Orfis's side of that.
+Nothing here is load-bearing for secrecy, and no release.yml change or repo
+secret is involved.
+
+Splitting dev from production by MODE rather than by one shared `.env` is what
+stops a `tauri dev` session posting into production. The split is also
+fail-safe rather than merely tidy, because `feedbackConfig` permits an `http://`
+endpoint only when the host is loopback **and** `import.meta.env.DEV`.
+Measured against the real validator, all four combinations:
+
+```
+dev key,  dev build      -> accepted
+dev key,  RELEASE build  -> REFUSED   <- the laptop key cannot ship
+prod key, release build  -> accepted
+prod key, dev build      -> accepted  (so a dev build CAN reach production;
+                                       the mode split is what prevents it)
+```
+
+That last row is the reason there are two files rather than one.
+`feedback-check.mjs` guards the invariant that matters — not which key is in
+which file, but that the laptop ENDPOINT can never ship — and asserts it with a
+dummy key, so the URL rule is what is under test rather than the credential.
+
+Two things were measured rather than assumed, because both would have failed
+silently. A production frontend build inlines the production routing and
+carries nothing from the development file (checked in `app/dist`, not inferred
+from the config). And a preflight to `/v1/feedback` echoes whichever `Origin`
+it is sent, with the per-key origin enforced on the POST — so the packaged
+`tauri://localhost` and `tauri dev`'s `:1420` both work. Note that a preflight
+to a path that does NOT exist returns a global admin-console `ACAO` and a 204,
+which looks like a working allow-list and is not one; check the header, and
+check the path.
 
 ## Bundle provenance
 
