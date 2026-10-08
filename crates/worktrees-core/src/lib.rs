@@ -55,6 +55,7 @@ pub mod store;
 pub mod sync;
 pub mod sysclock;
 pub mod tmux;
+pub mod tmux_server;
 pub mod trust;
 pub mod ui;
 
