@@ -27,6 +27,16 @@ required. Both shapes coexist in navigation and creation. MCP `create_worktree`
 defaults to a child of main unless a parent/hub is explicitly given. No migration
 turns existing flat lanes into hubs or adds a hub step to their workflow.
 
+**Review policy decision, relayed by main on 2026-10-08:** the project owner
+chooses who reviews child PRs. worktrees supplies tooling, never a restriction:
+a hub may launch a reviewer per child, the owner may review every child, or any
+mix. No reviewer identity, model or approval policy is hard-coded by the tool.
+A recommended default below is advice the owner may replace.
+
+**Hotfix decision, relayed by main on 2026-10-08:** the non-launch `-N` hotfix
+ships now in its own separate lane. It is decided and in progress, not part of
+this docs-only PR and not an open nesting decision.
+
 Vocabulary choice, merge strategy, migration details and scope below remain
 recommendations.
 
@@ -200,12 +210,14 @@ plus each affected child's resolution, without rewriting every sibling's base.
 2. The hub creates children from its published tip. Each child opens a PR with
    an **explicit** `--base feature/experimental`, naming its parent in the body.
    A child never targets main merely because `gh` defaulted there.
-3. Each child is reviewed and runs the project's gates against the hub target.
-   The recommended policy is a Fable reviewer per child PR, launched by the hub;
-   the hub agent may squash-merge after that reviewer approves and gates pass,
-   then updates its **own** worktree from the remote before integration testing or creating more
-   children. The merge destination must match the recorded target immediately
-   before the `gh` operation.
+3. Each child follows the project owner's review policy and runs the project's
+   gates against the hub target. A suggested default is a Fable reviewer per
+   child, launched by the hub; the owner may instead review every child or use
+   any mix. Tooling never requires that default, a particular reviewer or model.
+   Under the owner's chosen merge authority and approval policy, the hub agent
+   may squash-merge, then updates its **own** worktree from the remote before
+   integration testing or creating more children. The merge destination must
+   match the recorded target immediately before the `gh` operation.
 4. As main advances, the hub owner fetches and merges the updated main ref into
    the hub in the hub's worktree, resolves conflicts, runs integration gates,
    and pushes. It reports the new tip to its children. Each child's agent, once
@@ -214,9 +226,10 @@ plus each affected child's resolution, without rewriting every sibling's base.
    edits a busy child's index. Conflicts stop that child, not the whole tree.
 5. After children close out, the hub finishes integration tests and its own
    close-out, updates the draft PR with the complete feature behavior, migration
-   notes and links to child PRs. David reviews the entire aggregate diff with
-   main, which squash-merges it. Child approvals are evidence, not approval of the final
-   composition. Only main releases.
+   notes and links to child PRs. The suggested default is owner review of the
+   aggregate diff with main before main squash-merges it; the owner chooses the
+   actual reviewers and approval policy here too. Child approvals are evidence,
+   not automatic approval of the final composition. Only main releases.
 
 Squash at both boundaries preserves this repository's convention. Merge commits
 for child PRs would preserve child SHAs and ease ancestry checks, but would
@@ -520,9 +533,10 @@ release authority; tags, publishing and the release ritual stay in `(main)`.
 
 ## 8. Tmux: independent hotfix, routing prerequisite, later recovery
 
-### Independent hotfix — non-launch clients never start servers
+### Independent hotfix — decided, in progress in a separate lane
 
-Ship independently now: add global `-N` to **every non-launch tmux invocation**
+David decided to ship independently now: add global `-N` to **every non-launch
+tmux invocation**
 (list/list-panes, capture, send-keys, kill-session, tune, attach and the app's
 PTY client), including chained commands. Do not add it to intentional
 `new-session`/server creation. This can ship on the existing socket topology.
@@ -539,8 +553,8 @@ launches or establish which client caused the October 7 incident.
 `README.md:132` recommends ≥1.9. Detect support once per executable/version,
 without starting a server; never blindly pass an unsupported option. On older
 versions retain explicitly non-starting commands, report the protection gap
-and recommend upgrading; do not claim the same guarantee. The decision to
-ship this guarded hotfix is separate from nesting (§11, decision 8).
+and recommend upgrading; do not claim the same guarantee. Shipping this guarded
+hotfix is decided and proceeding separately from nesting (§11, decision 8).
 
 ### Phase 1a — routing and identity
 
@@ -701,8 +715,8 @@ Required implementation witnesses, with new regression tests shown red first:
 
 ## 10. Phasing
 
-- **Independent hotfix, ship now:** feature-detected `-N` on non-launch calls,
-  with the Bats shim updated. No dependency on project routing or nesting.
+- **Independent hotfix — decided, in progress in its own lane:** feature-detected
+  `-N` on non-launch calls, with the Bats shim updated. No dependency on project routing or nesting.
 - **Phase 1a — per-project routing, useful alone:** descriptor and sandbox
   namespace, `-L` on every core/app/MCP call, endpoint-qualified identities,
   restart-based drain listing legacy and project servers, and real-app witnesses.
@@ -724,7 +738,7 @@ Do not build arbitrary depth, automatic cascading deletion, a new message bus,
 a stacked-PR dependency manager, or GitHub write controls in the app. Those are
 separate decisions, not latent powers of `parent`.
 
-## 11. Decisions requested from David
+## 11. Open decisions and recorded decisions from David
 
 1. **Vocabulary:** adopt “lane,” with optional “hub” role? Recommended yes;
    API `place` stays compatible. Depth and first-class flat lanes are already
@@ -744,11 +758,13 @@ separate decisions, not latent powers of `parent`.
    then ship configurable account/provider-wide launch reservations before larger
    fan-out? Choose a preferred concurrency budget; quota percentage alone cannot
    prevent a burst.
-7. **Review policy:** should the hub launch a Fable reviewer for each child PR
-   and merge after approval and passing gates, with David reviewing only the
-   aggregate hub PR, or should David review every child too? Recommend the
-   former; this is proposed policy, not authority granted by this document.
-8. **Immediate tmux hotfix:** ship feature-detected `-N` on all non-launch calls
-   now, independently of 1a/1b/nesting, with explicit older-tmux compatibility
-   and the Bats shim changes? Recommended yes; intentional launches still need
-   the later recovery guard for protection against a missing live-server socket.
+7. **Review policy — decided, 2026-10-08:** the project owner decides who
+   reviews child PRs. worktrees provides tooling, never a restriction: reviewer
+   agents per child, owner review of every child, or any mix. A Fable reviewer
+   per child and owner review of the aggregate is only a suggested default;
+   nothing in the design requires it or hard-codes a reviewer/model.
+8. **Immediate tmux hotfix — decided, in progress, 2026-10-08:** the
+   feature-detected non-launch `-N` hotfix ships now in its own separate lane,
+   independently of 1a/1b/nesting, with older-tmux compatibility and Bats shim
+   changes. No implementation is included here. Intentional launches still
+   need the later recovery guard for a missing live-server socket.
