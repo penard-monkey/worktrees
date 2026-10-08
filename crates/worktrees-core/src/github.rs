@@ -6,7 +6,8 @@
 //!
 //! Shape, in the order a fetch walks it:
 //!
-//! 1. [`parse_remote`] — `git@host:o/r`, `ssh://…`, `https://…` → `{host, owner, repo}`.
+//! 1. [`parse_remote`] — `[user@]host:o/r`, `ssh://…`, `https://…` → `{host, owner, repo}`,
+//!    an SSH host resolved through `ssh -G` first ([`ssh_host`]: `github.com-work` → `github.com`).
 //! 2. [`resolve`] — which repo the PRs live on, mirroring `gh`'s own choice so
 //!    the app never disagrees with `gh pr list` run in the same checkout:
 //!    `remote.<n>.gh-resolved` (set by `gh repo set-default`) wins, then a remote
@@ -22,6 +23,7 @@
 //!    frontend renders and never re-decides.
 //!
 //! `WORKTREES_GH_BIN` is the seam (as in `agentfiles.rs`): no test reaches GitHub.
+//! `WORKTREES_SSH_BIN` is ssh's, though unit tests pass the binary explicitly.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -82,11 +84,27 @@ impl RepoRef {
     }
 }
 
+/// Maps the host an SSH-form remote NAMES to the host it reaches. The real one
+/// is [`ssh_host`]; tests pass [`literal_host`] or a table.
+pub type HostOf<'a> = &'a dyn Fn(&str) -> String;
+
+/// The host as written — today's behaviour, and every fallback's.
+pub fn literal_host(h: &str) -> String {
+    h.to_string()
+}
+
 /// The https web base of a remote URL, or None for local paths and other
 /// protocols. Kept byte-compatible with the app's former `normalize_remote`
 /// (whose tests moved here): a path with more than two segments (GitLab
-/// subgroups) still has a web base, it just is not a [`RepoRef`].
+/// subgroups) still has a web base, it just is not a [`RepoRef`]. An SSH
+/// remote's host goes through `ssh -G` first ([`ssh_host`]): an alias like
+/// `github.com-work` is not a web host.
 pub fn web_base(remote: &str) -> Option<String> {
+    web_base_with(remote, &ssh_host)
+}
+
+/// [`web_base`] with the SSH host lookup supplied.
+pub fn web_base_with(remote: &str, host_of: HostOf) -> Option<String> {
     let r = remote.trim();
     let r = r.strip_suffix(".git").unwrap_or(r);
     // An http(s) remote is already a web URL: keep its scheme (a plain-http
@@ -98,15 +116,21 @@ pub fn web_base(remote: &str) -> Option<String> {
             return Some(if path.is_empty() { format!("{scheme}{host}") } else { format!("{scheme}{host}/{path}") });
         }
     }
-    let (host, path) = split_remote(r)?;
+    let (host, path) = split_remote(r, host_of)?;
     Some(format!("https://{host}/{path}"))
 }
 
-/// `{host, owner, repo}` of a remote URL — `git@host:o/r(.git)`,
-/// `ssh://git@host[:port]/o/r`, `http(s)://[user@]host[:port]/o/r`. None for
-/// anything else, including a path that is not exactly `owner/repo`.
+/// `{host, owner, repo}` of a remote URL — `[user@]host:o/r(.git)`,
+/// `ssh://[user@]host[:port]/o/r`, `http(s)://[user@]host[:port]/o/r`. None for
+/// anything else, including a path that is not exactly `owner/repo`. An SSH
+/// remote's host is the one `ssh -G` resolves it to ([`ssh_host`]).
 pub fn parse_remote(remote: &str) -> Option<RepoRef> {
-    let (host, path) = split_remote(remote)?;
+    parse_remote_with(remote, &ssh_host)
+}
+
+/// [`parse_remote`] with the SSH host lookup supplied.
+pub fn parse_remote_with(remote: &str, host_of: HostOf) -> Option<RepoRef> {
+    let (host, path) = split_remote(remote, host_of)?;
     let path = path.trim_matches('/');
     let mut it = path.split('/');
     let (owner, repo) = (it.next()?, it.next()?);
@@ -119,27 +143,119 @@ pub fn parse_remote(remote: &str) -> Option<RepoRef> {
 }
 
 /// (host, path) of a remote, `.git` stripped. The host may still carry a port
-/// for http(s) remotes, as the old `normalize_remote` kept it.
-fn split_remote(remote: &str) -> Option<(String, String)> {
+/// for http(s) remotes, as the old `normalize_remote` kept it. Only the SSH
+/// forms go through `host_of` — an https host is a DNS name already.
+fn split_remote(remote: &str, host_of: HostOf) -> Option<(String, String)> {
     let r = remote.trim();
     let r = r.strip_suffix(".git").unwrap_or(r);
-    if let Some(rest) = r.strip_prefix("git@") {
-        let (host, path) = rest.split_once(':')?;
-        Some((host.to_string(), path.to_string()))
-    } else if let Some(rest) = r.strip_prefix("ssh://") {
-        let rest = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
-        // the authority may carry a port (host:2222/owner/repo) — strip it
-        let (auth, path) = rest.split_once('/')?;
-        let host = auth.split(':').next().unwrap_or(auth);
-        Some((host.to_string(), path.to_string()))
-    } else if let Some(rest) = r.strip_prefix("https://").or_else(|| r.strip_prefix("http://")) {
+    for scheme in ["ssh://", "git+ssh://", "ssh+git://"] {
+        if let Some(rest) = r.strip_prefix(scheme) {
+            let rest = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
+            // the authority may carry a port (host:2222/owner/repo) — strip it
+            let (auth, path) = rest.split_once('/')?;
+            let host = auth.split(':').next().unwrap_or(auth);
+            return Some((host_of(host), path.to_string()));
+        }
+    }
+    if let Some(rest) = r.strip_prefix("https://").or_else(|| r.strip_prefix("http://")) {
         let (auth, path) = rest.split_once('/')?;
         // credentials in the URL (`https://user:tok@host/…`) are never echoed
         let host = auth.rsplit_once('@').map(|(_, h)| h).unwrap_or(auth);
-        Some((host.to_string(), path.to_string()))
-    } else {
-        None
+        return Some((host.to_string(), path.to_string()));
     }
+    // git's scp-like form: `[user@]host:path`, recognised as git does — a `:`
+    // with no `/` before it and no `://` anywhere. `git@` is only the usual user.
+    if r.contains("://") {
+        return None;
+    }
+    let (auth, path) = r.split_once(':')?;
+    if auth.contains('/') || path.is_empty() {
+        return None;
+    }
+    let host = auth.rsplit_once('@').map(|(_, h)| h).unwrap_or(auth);
+    if host.is_empty() {
+        return None;
+    }
+    Some((host_of(host), path.to_string()))
+}
+
+// ── 1b. SSH host aliases ────────────────────────────────────────────────────
+//
+// `git@github.com-work:o/r` is the standard multi-account setup: `github.com-work`
+// is a `Host` block in ~/.ssh/config whose `HostName` is github.com. git never
+// sees the real host — ssh resolves it at connect time — so neither did we, and
+// the app built `https://github.com-work/o/r` and asked `gh` about a host that
+// does not exist. `ssh -G <host>` prints the configuration ssh WOULD use and
+// connects to nothing; its `hostname` line is the answer, from the same config
+// file and the same `ssh` (PATH, as git's default) that `git push` goes through.
+
+/// Deadline on `ssh -G`: it reads config files and nothing else, measured at a
+/// few ms. A `Match exec` in the user's config could make it slower; a wedge
+/// costs one deadline per host per process, then the cache answers.
+const SSH_DEADLINE_SECS: u64 = 3;
+
+/// The `ssh` binary: `$WORKTREES_SSH_BIN`, else `ssh` on PATH — the one git
+/// itself runs. In the app that is the login-shell PATH `fixup_gui_path`
+/// installed, and launchd's bare PATH already holds `/usr/bin/ssh`.
+pub fn ssh_bin() -> String {
+    std::env::var("WORKTREES_SSH_BIN").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "ssh".into())
+}
+
+/// SSH-over-443 endpoints an `ssh_config` points at to get through a firewall:
+/// the same service as their web host, which is what a link and `gh` need.
+const SSH_ALT_HOSTS: &[(&str, &str)] =
+    &[("ssh.github.com", "github.com"), ("altssh.gitlab.com", "gitlab.com"), ("altssh.bitbucket.org", "bitbucket.org")];
+
+/// A host safe to hand `ssh` as an argument, and to put in a URL: a DNS-ish
+/// name or alias. A remote URL is the user's config, but it arrives in a clone
+/// from anywhere — a leading `-` would be an OPTION (`-oProxyCommand=…`), and
+/// `%`, `/`, `@`, whitespace have no business in either place.
+pub fn valid_ssh_host(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 253
+        && h.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// The host `ssh -G` resolves `host` to, or None when it cannot say: a refused
+/// host string (ssh never runs), no ssh, a timeout, a non-zero exit, no
+/// `hostname` line, or a reply that is not itself a valid host. Uncached; the
+/// callers go through [`ssh_host`].
+pub fn ssh_hostname_with(ssh: &str, host: &str, deadline_secs: u64) -> Option<String> {
+    if !valid_ssh_host(host) {
+        return None;
+    }
+    let mut c = Command::new(ssh);
+    c.args(["-G", "--", host]);
+    let out = run_with(c, deadline_secs, true).ok()?;
+    if out.code != Some(0) {
+        return None;
+    }
+    let got = out.stdout.lines().find_map(|l| l.strip_prefix("hostname "))?.trim().to_ascii_lowercase();
+    if !valid_ssh_host(&got) {
+        return None;
+    }
+    Some(SSH_ALT_HOSTS.iter().find(|(alt, _)| *alt == got).map(|(_, web)| web.to_string()).unwrap_or(got))
+}
+
+/// [`ssh_hostname_with`] through [`ssh_bin`], cached per (binary, host) for the
+/// life of the process, and never an error: anything it cannot resolve is the
+/// literal host, which is exactly what this returned before aliases were read.
+pub fn ssh_host(host: &str) -> String {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    let ssh = ssh_bin();
+    let key = (ssh, host.to_string());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(h) = cache.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return h;
+    }
+    let h = ssh_hostname_with(&key.0, host, SSH_DEADLINE_SECS).unwrap_or_else(|| host.to_string());
+    if let Ok(mut m) = cache.lock() {
+        m.insert(key, h.clone());
+    }
+    h
 }
 
 // ── 2. which repo the PRs live on ───────────────────────────────────────────
@@ -155,9 +271,11 @@ pub struct Resolved {
 }
 
 /// Pure half of [`resolve`]: `remotes` is `(name, url)`, `gh_resolved` is the
-/// `(remote name, value)` pairs of `remote.<name>.gh-resolved`.
-pub fn resolve_from(remotes: &[(String, String)], gh_resolved: &[(String, String)]) -> Option<Resolved> {
+/// `(remote name, value)` pairs of `remote.<name>.gh-resolved`; `host_of`
+/// resolves SSH host aliases ([`ssh_host`] for real).
+pub fn resolve_from(remotes: &[(String, String)], gh_resolved: &[(String, String)], host_of: HostOf) -> Option<Resolved> {
     let url_of = |name: &str| remotes.iter().find(|(n, _)| n == name).map(|(_, u)| u.as_str());
+    let parse_remote = |u: &str| parse_remote_with(u, host_of);
     // `gh repo set-default` writes `base` on the chosen remote; an older gh
     // wrote `owner/repo` there instead. Either way that remote's host is the host.
     let mut repo = None;
@@ -177,7 +295,9 @@ pub fn resolve_from(remotes: &[(String, String)], gh_resolved: &[(String, String
     Some(Resolved { repo, push_owner })
 }
 
-/// [`resolve_from`] against a checkout's real git config.
+/// [`resolve_from`] against a checkout's real git config. `remote -v` prints
+/// URLs AFTER `url.<base>.insteadOf` rewriting (as `remote get-url` does), so
+/// a shorthand like `gh:o/r` arrives as the URL git actually fetches from.
 pub fn resolve(root: &str) -> Option<Resolved> {
     let remotes: Vec<(String, String)> = crate::git::git_out(root, &["remote", "-v"])
         .unwrap_or_default()
@@ -198,7 +318,7 @@ pub fn resolve(root: &str) -> Option<Resolved> {
                 Some((name.to_string(), v.to_string()))
             })
             .collect();
-    resolve_from(&remotes, &gh_resolved)
+    resolve_from(&remotes, &gh_resolved, &ssh_host)
 }
 
 // ── 3. auth ─────────────────────────────────────────────────────────────────
@@ -892,6 +1012,9 @@ mod tests {
     fn s(v: &[(&str, &str)]) -> Vec<(String, String)> {
         v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
     }
+    fn parse_remote_lit(spec: &str) -> Option<RepoRef> {
+        parse_remote_with(spec, &literal_host)
+    }
 
     /// Moved from the app's `normalize_remote` test, cases unchanged: the remote
     /// spec is whatever `git remote get-url` says; the web base is what a
@@ -910,44 +1033,44 @@ mod tests {
             // new: credentials never reach a link
             ("https://user:tok@github.com/acme/repo.git", "https://github.com/acme/repo"),
         ] {
-            assert_eq!(web_base(spec).as_deref(), Some(want), "{spec}");
+            assert_eq!(web_base_with(spec, &literal_host).as_deref(), Some(want), "{spec}");
         }
         for spec in ["/Users/x/repo.git", "../sibling", "file:///tmp/repo", "git://github.com/acme/repo", "git@nocolon"] {
-            assert_eq!(web_base(spec), None, "{spec}");
+            assert_eq!(web_base_with(spec, &literal_host), None, "{spec}");
         }
     }
 
     #[test]
     fn parse_remote_handles_ssh_https_and_enterprise_hosts() {
         let r = |h: &str, o: &str, n: &str| Some(RepoRef { host: h.into(), owner: o.into(), repo: n.into() });
-        assert_eq!(parse_remote("git@github.com:penard-monkey/worktrees.git"), r("github.com", "penard-monkey", "worktrees"));
-        assert_eq!(parse_remote("ssh://git@ghe.example.com:2222/team/app.git"), r("ghe.example.com", "team", "app"));
-        assert_eq!(parse_remote("https://GitHub.com/o/r"), r("github.com", "o", "r"));
-        assert_eq!(parse_remote("https://user:secret@ghe.corp.net/o/r.git"), r("ghe.corp.net", "o", "r"));
+        assert_eq!(parse_remote_lit("git@github.com:penard-monkey/worktrees.git"), r("github.com", "penard-monkey", "worktrees"));
+        assert_eq!(parse_remote_lit("ssh://git@ghe.example.com:2222/team/app.git"), r("ghe.example.com", "team", "app"));
+        assert_eq!(parse_remote_lit("https://GitHub.com/o/r"), r("github.com", "o", "r"));
+        assert_eq!(parse_remote_lit("https://user:secret@ghe.corp.net/o/r.git"), r("ghe.corp.net", "o", "r"));
         // not owner/repo
-        assert_eq!(parse_remote("https://gitlab.com/group/sub/r.git"), None);
-        assert_eq!(parse_remote("/srv/git/r.git"), None);
-        assert_eq!(parse_remote("https://github.com/o"), None);
+        assert_eq!(parse_remote_lit("https://gitlab.com/group/sub/r.git"), None);
+        assert_eq!(parse_remote_lit("/srv/git/r.git"), None);
+        assert_eq!(parse_remote_lit("https://github.com/o"), None);
     }
 
     #[test]
     fn resolve_mirrors_gh_default_repo_order() {
         let fork = s(&[("origin", "git@github.com:me/r.git"), ("upstream", "https://github.com/parent/r.git")]);
         // upstream beats origin, push owner stays origin's
-        let got = resolve_from(&fork, &[]).unwrap();
+        let got = resolve_from(&fork, &[], &literal_host).unwrap();
         assert_eq!((got.repo.owner.as_str(), got.push_owner.as_str()), ("parent", "me"));
         // gh-resolved=base on origin wins over upstream
-        let got = resolve_from(&fork, &s(&[("origin", "base")])).unwrap();
+        let got = resolve_from(&fork, &s(&[("origin", "base")]), &literal_host).unwrap();
         assert_eq!(got.repo.owner, "me");
         // the older owner/repo form
-        let got = resolve_from(&fork, &s(&[("upstream", "other/thing")])).unwrap();
+        let got = resolve_from(&fork, &s(&[("upstream", "other/thing")]), &literal_host).unwrap();
         assert_eq!((got.repo.owner.as_str(), got.repo.repo.as_str()), ("other", "thing"));
         // `github` beats `origin`
-        let got = resolve_from(&s(&[("origin", "git@github.com:a/r"), ("github", "git@github.com:b/r")]), &[]).unwrap();
+        let got = resolve_from(&s(&[("origin", "git@github.com:a/r"), ("github", "git@github.com:b/r")]), &[], &literal_host).unwrap();
         assert_eq!((got.repo.owner.as_str(), got.push_owner.as_str()), ("b", "a"));
         // no usable remote
-        assert_eq!(resolve_from(&s(&[("origin", "/srv/r.git")]), &[]), None);
-        assert_eq!(resolve_from(&[], &[]), None);
+        assert_eq!(resolve_from(&s(&[("origin", "/srv/r.git")]), &[], &literal_host), None);
+        assert_eq!(resolve_from(&[], &[], &literal_host), None);
     }
 
     #[test]
@@ -1142,6 +1265,143 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "-f" && w[1] == "r=2048"), "{args:?}");
         assert!(args.windows(2).any(|w| w[0] == "-f" && w[1] == "o=@etc"), "{args:?}");
         assert_eq!(fetch(dir.join("nope").to_str().unwrap(), &rr()), Err(FetchError::Missing));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The aliases a multi-account ~/.ssh/config declares, as `ssh -G` would
+    /// resolve them. Anything else resolves to itself, as ssh does.
+    fn aliases(h: &str) -> String {
+        match h {
+            "github.com-penard-monkey" => "github.com",
+            "ghe-work" => "ghe.corp.net",
+            "gitlab-alias" => "gitlab.com",
+            _ => h,
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn an_ssh_host_alias_resolves_before_it_becomes_a_host() {
+        let r = |h: &str, o: &str, n: &str| Some(RepoRef { host: h.into(), owner: o.into(), repo: n.into() });
+        // the bug: the PR view asked gh about `github.com-penard-monkey`
+        let spec = "git@github.com-penard-monkey:penard-monkey/casa-del-valle-monorepo.git";
+        assert_eq!(parse_remote_with(spec, &aliases), r("github.com", "penard-monkey", "casa-del-valle-monorepo"));
+        assert_eq!(
+            web_base_with(spec, &aliases).as_deref(),
+            Some("https://github.com/penard-monkey/casa-del-valle-monorepo")
+        );
+        // every SSH spelling goes through the lookup, any user or none
+        for spec in [
+            "ssh://git@github.com-penard-monkey/o/r.git",
+            "ssh://github.com-penard-monkey:22/o/r",
+            "git+ssh://git@github.com-penard-monkey/o/r",
+            "me@github.com-penard-monkey:o/r.git",
+            "github.com-penard-monkey:o/r",
+        ] {
+            assert_eq!(parse_remote_with(spec, &aliases), r("github.com", "o", "r"), "{spec}");
+        }
+        // an Enterprise alias lands on the Enterprise host, a GitLab one on
+        // gitlab.com (which is then "not GitHub" — no gh token for it)
+        assert_eq!(parse_remote_with("git@ghe-work:team/app.git", &aliases), r("ghe.corp.net", "team", "app"));
+        assert_eq!(parse_remote_with("git@gitlab-alias:g/p.git", &aliases), r("gitlab.com", "g", "p"));
+        assert_eq!(web_base_with("git@gitlab-alias:g/sub/p.git", &aliases).as_deref(), Some("https://gitlab.com/g/sub/p"));
+        // and the whole resolve sees the real host
+        let got = resolve_from(&s(&[("origin", spec)]), &[], &aliases).unwrap();
+        assert_eq!((got.repo.host.as_str(), got.push_owner.as_str()), ("github.com", "penard-monkey"));
+    }
+
+    #[test]
+    fn an_https_remote_never_consults_ssh() {
+        let boom = |h: &str| -> String { panic!("ssh lookup for an https host: {h}") };
+        assert_eq!(parse_remote_with("https://github.com/o/r", &boom).unwrap().host, "github.com");
+        assert_eq!(web_base_with("https://u:t@gitea.local:3000/o/r.git", &boom).as_deref(), Some("https://gitea.local:3000/o/r"));
+        // nor does anything that is not a remote at all
+        for spec in ["/srv/r.git", "./a:b", "file:///tmp/r", "git://h/o/r", "git@nocolon", ":o/r", "@:o/r"] {
+            assert_eq!(parse_remote_with(spec, &boom), None, "{spec}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_host_never_becomes_argv() {
+        for h in ["", "-oProxyCommand=touch /tmp/x", "-", "a b", "a;b", "a/b", "%h", "a@b", ".x", "é.com"] {
+            assert!(!valid_ssh_host(h), "{h:?}");
+        }
+        for h in ["github.com", "github.com-penard-monkey", "gh_work", "10.0.0.1", "GHE.corp.net"] {
+            assert!(valid_ssh_host(h), "{h:?}");
+        }
+    }
+
+    /// A fake `ssh` that records it ran and answers `-G` per host the way the
+    /// real one does (`hostname <x>` among ~60 other lines).
+    #[cfg(unix)]
+    fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let ran = dir.join("ran");
+        let fake = dir.join("ssh");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\n[ \"$1 $2\" = '-G --' ] || exit 64\nh=\"$3\"\necho \"user git\"\ncase \"$h\" in\n  github.com-penard-monkey) echo 'hostname github.com';;\n  ghe-work) echo 'hostname GHE.corp.net';;\n  gitlab-alias) echo 'hostname gitlab.com';;\n  firewall) echo 'hostname ssh.github.com';;\n  garbage) echo 'no hostname line here';;\n  hostile) echo 'hostname evil.com/x@y';;\n  broken) echo 'Bad configuration option' >&2; exit 255;;\n  slow) sleep 5;;\n  *) echo \"hostname $h\";;\nesac\necho 'port 22'\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (fake.to_str().unwrap().to_string(), ran)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_dash_g_resolves_the_alias_and_every_failure_is_none() {
+        let dir = std::env::temp_dir().join(format!("wt-ssh-seam-{}-{}", std::process::id(), crate::sysclock::now_epoch()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ssh, ran) = fake_ssh(&dir);
+        let get = |h: &str| ssh_hostname_with(&ssh, h, 1);
+        assert_eq!(get("github.com-penard-monkey").as_deref(), Some("github.com"));
+        assert_eq!(get("ghe-work").as_deref(), Some("ghe.corp.net"));
+        assert_eq!(get("gitlab-alias").as_deref(), Some("gitlab.com"));
+        // no alias: ssh echoes the host back
+        assert_eq!(get("github.com").as_deref(), Some("github.com"));
+        // SSH-over-443 is the same service as its web host
+        assert_eq!(get("firewall").as_deref(), Some("github.com"));
+        // garbage, a reply that is not a host, a failing ssh, a wedged one, none at all
+        assert_eq!(get("garbage"), None);
+        assert_eq!(get("hostile"), None);
+        assert_eq!(get("broken"), None);
+        let t = Instant::now();
+        assert_eq!(get("slow"), None);
+        assert!(t.elapsed() < Duration::from_secs(4), "deadline not honoured: {:?}", t.elapsed());
+        assert_eq!(ssh_hostname_with(dir.join("nope").to_str().unwrap(), "github.com", 1), None);
+        // a refused host never reaches ssh at all
+        let before = std::fs::read_to_string(&ran).unwrap();
+        assert_eq!(get("-oProxyCommand=touch /tmp/pwned"), None);
+        assert_eq!(get(""), None);
+        assert_eq!(std::fs::read_to_string(&ran).unwrap(), before);
+        // the call itself: `-G -- <host>`, nothing else
+        assert!(before.lines().any(|l| l == "-G -- github.com-penard-monkey"), "{before}");
+        // end to end: a failure falls back to the literal host, never an error
+        let host_of = |h: &str| ssh_hostname_with(&ssh, h, 1).unwrap_or_else(|| h.to_string());
+        assert_eq!(parse_remote_with("git@broken:o/r", &host_of).unwrap().host, "broken");
+        assert_eq!(
+            web_base_with("git@github.com-penard-monkey:o/r.git", &host_of).as_deref(),
+            Some("https://github.com/o/r")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `resolve` reads `remote -v`, which git prints AFTER `insteadOf`
+    /// rewriting — pinned against real git, since that is a claim about git.
+    #[test]
+    fn resolve_sees_urls_after_instead_of() {
+        let dir = std::env::temp_dir().join(format!("wt-insteadof-{}-{}", std::process::id(), crate::sysclock::now_epoch()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap();
+        assert!(dir.starts_with(std::env::temp_dir()) && !root.is_empty());
+        crate::git::git_out(root, &["init", "-q"]).unwrap();
+        crate::git::git_out(root, &["remote", "add", "origin", "gh:penard-monkey/worktrees"]).unwrap();
+        crate::git::git_out(root, &["config", "url.https://github.com/.insteadOf", "gh:"]).unwrap();
+        let got = resolve(root).unwrap();
+        assert_eq!(got.repo, rr());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
