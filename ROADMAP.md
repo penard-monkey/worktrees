@@ -5,6 +5,25 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **tmux -N: `wait_out_refusal` costs ~1s on the COMMON cold start.** tmux
+  leaves its socket behind when the server exits normally, so the first
+  `new`/`open` after every session has closed waits 5×200ms for a "refusal"
+  that is just a stale socket. Shorten it (e.g. 3×100ms) or document the cost
+  (`tmux.rs` `wait_out_refusal`). See docs/sessions/2026-10-08-tmux-no-start/.
+- **tmux -N: AGENTS.md says every call goes through `tmux::tmux()`.** Two sites
+  spawn directly and add `no_start_args()` themselves: `attach_or_switch`
+  (`tmux.rs`) and the app's pty attach (`term_open`). Name both. See docs/sessions/2026-10-08-tmux-no-start/.
+- **tmux -N: `no_start_args`' doc says attach starts a server "under a tty".**
+  The review says it can without one too; correct the comment. See docs/sessions/2026-10-08-tmux-no-start/.
+- **tmux -N: the real-tmux witness skips tmux 3.10+.** `"tmux 3."[01]*` also
+  matches `3.10`…`3.19`; anchor the minor (`3.[01]` followed by a non-digit or
+  end). See docs/sessions/2026-10-08-tmux-no-start/.
+- **tmux -N: doctor should name the protection gap on tmux < 3.2.** Below 3.2
+  there is no `-N`, and a refused socket can still orphan a server. Report it
+  and recommend upgrading (nested-lanes design §8). See docs/sessions/2026-10-08-tmux-no-start/.
+- **tmux -N: one extra `tmux -V` per CLI process.** The `-N` verdict costs one
+  spawn on first use. Note it wherever spawn counts are measured or asserted
+  (`spawn-count.sh`). See docs/sessions/2026-10-08-tmux-no-start/.
 - **Pull requests: `sandbox.sh --app` hand test still pending.** Phase 1
   shipped in #455 without it; David runs it before v0.40.0. Look for: a Finder
   launch (bare PATH) finding keyring auth; app.log's `pull requests: <root>: ok
