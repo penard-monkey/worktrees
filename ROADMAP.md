@@ -57,11 +57,21 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   local-only project is re-resolved, and re-probed with `gh auth token`, every
   time its cache entry expires. Give `not_github` a much longer TTL (it only
   changes when the remotes do). See docs/sessions/2026-10-07-pr-view/.
-- **Pull requests: two remote shapes parse as `not_github`.** Neither an scp
-  remote with a user other than `git` (`me@host:o/r`) nor an Enterprise
-  remote on a non-default port gets a tab or chip today. Widen
-  `split_remote` and decide what host a port-carrying remote maps to.
-  See docs/sessions/2026-10-07-pr-view/.
+- **Pull requests: an Enterprise https remote on a non-default port.** #465
+  fixed the scp-with-any-user half (`me@host:o/r`, aliases via `ssh -G`).
+  `parse_remote` still drops an https port, so `gh` is asked about the bare host.
+  Decide whether that is the right host for a GHE on `:8443`.
+  See docs/sessions/2026-10-07-pr-view/ and docs/sessions/2026-10-08-ssh-host-alias/.
+- **Pull requests: `PrCache.entries` is keyed by project root, not by resolved
+  repo.** Two registered projects on the same GitHub repo (e.g. a clone and a
+  submodule checkout) each run their own `gh api graphql` fetch. Key the
+  snapshot by `RepoRef` and keep the per-root part (push owner, places) per root.
+  See docs/sessions/2026-10-08-ssh-host-alias/.
+- **SSH alias resolution ignores `core.sshCommand -F <file>`.** `ssh -G` reads
+  the default config, so a repo whose `core.sshCommand`/`GIT_SSH_COMMAND` points ssh
+  at another config file resolves against the wrong one, and falls back to the
+  literal host. Read the configured command's `-F` if anyone hits it.
+  See docs/sessions/2026-10-08-ssh-host-alias/.
 - **Pull requests: a `gh auth token` timeout reads as "not signed in".**
   `probe_auth` maps `RunErr::Timeout` to `NoHostToken`, so a wedged `gh`
   tells the user to log in. Give the timeout its own state.
