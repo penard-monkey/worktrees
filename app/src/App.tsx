@@ -17,6 +17,7 @@ import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
 import { AutomationsPane } from "./AutomationsPane";
 import { FilesPane, FileView, type DockAt } from "./FilesPane";
+import { FeedbackRailButton } from "./FeedbackSection";
 import { RELEASES_URL, SettingsSheet } from "./SettingsSheet";
 import { type McpStatus } from "./McpPanel";
 import { dismissPatch, offersTitle, pendingOffers, type Offer } from "./offers";
@@ -7486,6 +7487,9 @@ function App() {
             status={statusOnTile} onError={fail} />
         )}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
+        {/* Renders nothing unless the widget initialized, so a build with no
+            Orfis configuration leaves the rail exactly as it was. */}
+        <FeedbackRailButton />
         <button ref={setGearEl} className={"rail-icon" + (railAlert ? " upd" : "")} data-track="settings" title={railTitle} onClick={() => openSettings()}><Icons.Settings size={17} /></button>
       </nav>
 
