@@ -238,24 +238,51 @@ pub fn ssh_hostname_with(ssh: &str, host: &str, deadline_secs: u64) -> Option<St
     Some(SSH_ALT_HOSTS.iter().find(|(alt, _)| *alt == got).map(|(_, web)| web.to_string()).unwrap_or(got))
 }
 
-/// [`ssh_hostname_with`] through [`ssh_bin`], cached per (binary, host) for the
-/// life of the process, and never an error: anything it cannot resolve is the
-/// literal host, which is exactly what this returned before aliases were read.
+/// How long an `ssh -G` answer is trusted. A success is kept long enough that
+/// a poll never pays for it, short enough that an edited ~/.ssh/config (an
+/// alias added while the app runs) is picked up; a FAILURE is kept briefly, so
+/// one timeout on a cold or offline machine does not pin the literal alias —
+/// the very bug the lookup exists to fix — for the life of the process.
+const SSH_OK_TTL: Duration = Duration::from_secs(600);
+const SSH_FAIL_TTL: Duration = Duration::from_secs(60);
+
+/// What [`ssh_host`] remembers per (binary, host): the answer, `None` for a
+/// failed lookup, and when it was asked.
+type SshCache = std::collections::HashMap<(String, String), (Option<String>, Instant)>;
+
+/// [`ssh_hostname_with`] through [`ssh_bin`], cached per (binary, host), and
+/// never an error: anything it cannot resolve is the literal host, which is
+/// exactly what this returned before aliases were read.
 pub fn ssh_host(host: &str) -> String {
-    use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<SshCache>> = OnceLock::new();
     let ssh = ssh_bin();
-    let key = (ssh, host.to_string());
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some(h) = cache.lock().ok().and_then(|m| m.get(&key).cloned()) {
-        return h;
+    ssh_host_in(CACHE.get_or_init(Default::default), &ssh, host, Instant::now(), &|| {
+        ssh_hostname_with(&ssh, host, SSH_DEADLINE_SECS)
+    })
+}
+
+/// [`ssh_host`] against a cache, clock and lookup of the caller's — the seam
+/// that lets a test own the map and the time it asserts against.
+fn ssh_host_in(
+    cache: &std::sync::Mutex<SshCache>,
+    ssh: &str,
+    host: &str,
+    now: Instant,
+    lookup: &dyn Fn() -> Option<String>,
+) -> String {
+    let key = (ssh.to_string(), host.to_string());
+    let fresh = |(got, at): &(Option<String>, Instant)| {
+        now.saturating_duration_since(*at) < if got.is_some() { SSH_OK_TTL } else { SSH_FAIL_TTL }
+    };
+    if let Some((got, _)) = cache.lock().ok().and_then(|m| m.get(&key).filter(|e| fresh(e)).cloned()) {
+        return got.unwrap_or_else(|| host.to_string());
     }
-    let h = ssh_hostname_with(&key.0, host, SSH_DEADLINE_SECS).unwrap_or_else(|| host.to_string());
+    let got = lookup();
     if let Ok(mut m) = cache.lock() {
-        m.insert(key, h.clone());
+        m.insert(key, (got.clone(), now));
     }
-    h
+    got.unwrap_or_else(|| host.to_string())
 }
 
 // ── 2. which repo the PRs live on ───────────────────────────────────────────
@@ -1403,5 +1430,36 @@ mod tests {
         let got = resolve(root).unwrap();
         assert_eq!(got.repo, rr());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_ssh_lookup_is_asked_again_and_a_success_expires_too() {
+        use std::cell::{Cell, RefCell};
+        let cache = std::sync::Mutex::new(SshCache::new());
+        let t0 = Instant::now();
+        let calls = Cell::new(0);
+        let answer = RefCell::new(None::<String>);
+        let ask = |at: Instant| {
+            ssh_host_in(&cache, "ssh", "github.com-work", at, &|| {
+                calls.set(calls.get() + 1);
+                answer.borrow().clone()
+            })
+        };
+        // a cold machine: the lookup fails, the literal host stands in
+        assert_eq!(ask(t0), "github.com-work");
+        assert_eq!(ask(t0 + Duration::from_secs(30)), "github.com-work");
+        assert_eq!(calls.get(), 1, "a failure is held briefly, not re-run every poll");
+        // ...and is asked again once that expires, not pinned for the process
+        *answer.borrow_mut() = Some("github.com".into());
+        assert_eq!(ask(t0 + SSH_FAIL_TTL + Duration::from_secs(1)), "github.com");
+        assert_eq!(calls.get(), 2);
+        // a success is held far longer...
+        let t1 = t0 + SSH_FAIL_TTL + Duration::from_secs(1);
+        assert_eq!(ask(t1 + SSH_FAIL_TTL * 2), "github.com");
+        assert_eq!(calls.get(), 2);
+        // ...but an edited ~/.ssh/config is still picked up eventually
+        *answer.borrow_mut() = Some("ghe.corp.net".into());
+        assert_eq!(ask(t1 + SSH_OK_TTL + Duration::from_secs(1)), "ghe.corp.net");
+        assert_eq!(calls.get(), 3);
     }
 }
