@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-10-08
+
 ### Fixed
 - **A busy tmux server can no longer be replaced by a second one.** When a
   tmux command that is allowed to start a server — an attach from a terminal
