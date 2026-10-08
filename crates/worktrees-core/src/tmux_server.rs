@@ -42,7 +42,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 /// FNV-1a 64, fixed bytes and constants, independent of Rust's Hash/Hasher.
 /// This is a routing key, not a security digest; the full identity is checked
 /// against the local claim before the endpoint may be used.
-fn identity_hash(bytes: &[u8]) -> String {
+pub(crate) fn identity_hash(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -108,7 +108,7 @@ impl TmuxServer {
         publish(&path, &proposed)?;
         let assigned: Assignment = serde_json::from_slice(&fs::read(&path)?).map_err(|e| invalid(format!("tmux assignment {}: {e}", path.display())))?;
         if assigned.version != 1 || assigned.common_dir != common || assigned.namespace != proposed.namespace {
-            return Err(invalid(format!("tmux endpoint identity changed at {}; repository moves require explicit endpoint rebinding before launch", path.display())));
+            return Err(invalid(format!("tmux endpoint identity changed at {}; explicit rebinding required: after verifying old endpoint {} has been stopped or drained, remove this assignment file and retry to bind a new endpoint. Keep the old identity claim reserved", path.display(), assigned.key)));
         }
         // Validate persisted data before it can become argv or a claim filename.
         if !assigned.key.starts_with("wt-") || !assigned.key.ends_with(&format!("-{hash}")) || assigned.key.len() > 40
@@ -135,6 +135,8 @@ impl TmuxServer {
     /// No operation may fall back to whatever server the caller inherited.
     pub fn legacy(socket: PathBuf) -> io::Result<Self> {
         if !socket.is_absolute() { return Err(invalid("legacy tmux socket must be absolute")); }
+        let socket = socket.parent().and_then(|p| fs::canonicalize(p).ok())
+            .and_then(|p| socket.file_name().map(|n| p.join(n))).unwrap_or(socket);
         Ok(Self { endpoint: Endpoint::Legacy { socket }, socket_root: PathBuf::from("/tmp"), namespace: None })
     }
 
@@ -153,7 +155,8 @@ impl TmuxServer {
 
     pub fn socket_path(&self) -> PathBuf {
         match &self.endpoint {
-            Endpoint::Project { key } => self.socket_root.join(format!("tmux-{}", unsafe { libc::getuid() })).join(key),
+            Endpoint::Project { key } => fs::canonicalize(&self.socket_root).unwrap_or_else(|_| self.socket_root.clone())
+                .join(format!("tmux-{}", unsafe { libc::getuid() })).join(key),
             Endpoint::Legacy { socket } => socket.clone(),
         }
     }
@@ -167,7 +170,9 @@ impl TmuxServer {
 /// hard_link is an atomic no-replace operation on the same filesystem: the
 /// losing caller reads the winner's complete assignment. This is an identity
 /// publication primitive, NOT the phase-1b server startup lock.
-fn publish(path: &Path, value: &Assignment) -> io::Result<()> {
+fn publish(path: &Path, value: &Assignment) -> io::Result<()> { publish_json(path, value) }
+
+pub(crate) fn publish_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     if path.try_exists()? { return Ok(()); }

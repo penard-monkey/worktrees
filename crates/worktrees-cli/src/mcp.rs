@@ -68,7 +68,7 @@ use std::io::{BufRead, Read, Write};
 
 use worktrees_core::mention::uri_map;
 use worktrees_core::model::PlaceRef;
-use worktrees_core::{activity, agent, automation, harness, messages, ops, runs, store, tmux, ui::CaptureUi, Project};
+use worktrees_core::{activity, agent, automation, harness, messages, ops, runs, store, ui::CaptureUi, Project};
 use worktrees_core::harness::SendOutcome;
 
 /// Who is working in a place and what they are doing. `agents` lists every
@@ -78,7 +78,15 @@ use worktrees_core::harness::SendOutcome;
 /// app's nav dots use (`worktrees_core::activity`).
 fn add_agent_status(v: &mut serde_json::Value, project: &Project, slug: &str, path: &str) {
     let probes = agent::live_probes();
-    let panes = tmux::PaneList::fetch();
+    let panes = match project.lane_panes(slug, path) {
+        Ok(panes) => Some(panes),
+        Err(reason) => {
+            v["agent_state"] = serde_json::json!("unknown");
+            v["agents"] = serde_json::json!([]);
+            v["activity"] = serde_json::json!({"state":"unknown", "provider":null, "session":null, "last_done":null, "reason":reason});
+            return;
+        }
+    };
     let scan = harness::Scan { probes: &probes, panes: panes.as_ref() };
     let readings = harness::place_activities(project, slug, path, &scan);
     let agents: Vec<serde_json::Value> = harness::ALL
@@ -2362,9 +2370,7 @@ impl Server {
             return Ok(text_err(&e));
         }
         let path = project.place_dir(&slug);
-        let Some(panes) = tmux::PaneList::fetch() else {
-            return Ok(text_err("tmux is not available, so no agent session can be reached"));
-        };
+        let panes = match project.lane_panes(&slug, &path) { Ok(panes) => panes, Err(e) => return Ok(text_err(&e)) };
         let canonical = project.session_name(&slug);
         let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
         let probes = agent::live_probes();

@@ -37,7 +37,7 @@ common_setup() {
   # and reports v3, and sync.rs::find_rsync prefers a v3 candidate outright.
   install_fake_cmd rsync
   export WORKTREES_RSYNC="$SHIMS/rsync"
-  unset TMUX                      # don't inherit the developer's real tmux
+  unset TMUX TMUX_TMPDIR WORKTREES_TMUX_NAMESPACE                      # don't inherit the developer's real tmux
   export BATS_TEST_TIMEOUT=120    # no single test may hang the suite (CI backstop)
   export WORKTREES_AI_CMD="fake-ai"
   # The launch-time plan-usage gate (`quota`) must never run a REAL probe here.
@@ -218,10 +218,12 @@ install_fake_tmux() {
   cat > "$SHIMS/tmux" <<'EOF'
 #!/usr/bin/env bash
 globals=()
+endpoint=""; endpoint_kind=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -N|-u|-2|-l|-v) globals+=("$1"); shift ;;
-    -L|-S|-f) globals+=("$1" "$2"); shift 2 ;;
+    -L|-S) endpoint_kind="$1"; endpoint="$2"; globals+=("$1" "$2"); shift 2 ;;
+    -f) globals+=("$1" "$2"); shift 2 ;;
     *) break ;;
   esac
 done
@@ -231,12 +233,28 @@ if [ "${1:-}" = -V ]; then
   exit 0
 fi
 echo "${globals[*]}|${1:-}" >> "$TMUX_LOG.globals"
+# First project retains the historic flat fixtures. Every OTHER descriptor
+# has independent state; legacy never aliases the project, even when empty.
+base_state="$TMUX_STATE"
+if [ "$endpoint_kind" = -L ]; then
+  if [ ! -f "$base_state.primary" ]; then printf '%s' "$endpoint" > "$base_state.primary"; fi
+  if [ "$(cat "$base_state.primary")" != "$endpoint" ]; then TMUX_STATE="$base_state.endpoints/$endpoint"; fi
+elif [ "$endpoint_kind" = -S ]; then
+  endpoint_key="$(printf '%s' "$endpoint" | cksum | cut -d ' ' -f1)"
+  TMUX_STATE="$base_state.endpoints/legacy-$endpoint_key"
+else
+  echo "missing explicit tmux endpoint" >&2; exit 2
+fi
+mkdir -p "$TMUX_STATE"
+if [ -f "$TMUX_STATE/.unreachable" ]; then echo "connection refused at $endpoint" >&2; exit 1; fi
+
 # `copy-mode -q -t <pane> ;` heads every write into an agent's pane
 # (tmux::leave_mode — a pane scrolled back in the app would eat the input):
 # log it as a call of its own, then handle the rest as if invoked alone.
 if [ "${1:-}" = copy-mode ] && [ "${2:-}" = -q ] && [ "${5:-}" = ";" ]; then
   echo "tmux $1 $2 $3 $4" >> "$TMUX_LOG"
   shift 5
+  export TMUX_STATE="$base_state"
   exec "$0" ${globals[@]+"${globals[@]}"} "$@"
 fi
 echo "tmux $*" >> "$TMUX_LOG"
@@ -318,7 +336,7 @@ case "$sub" in
       # All five fields PaneList::fetch asks for. The tty is spelled the way
       # tmux spells it (`/dev/…`, which ps does not) and named after the
       # session, so a ps fixture can address a pane: `tty-<session>`.
-      printf '%s\t%s\t%s\t%s\t%s\n' "$s" "$c" "$cmd" "4242" "/dev/tty-$s"
+      printf '%s\t%s\t%s\t%s\t%s\t%%0\n' "$s" "$c" "$cmd" "4242" "/dev/tty-$s"
     done ;;
   -V|*) : ;;
 esac

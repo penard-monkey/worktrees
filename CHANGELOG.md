@@ -29,6 +29,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - MCP `place_status.plan` gains `level`, `topic`, `plan_scope` and `reason`,
   and `how_resolved` gains `pending`, `invalid_pointer` and `show_path` —
   only on projects that opted in.
+- **Each project gets its own tmux server.** Same-named lanes in independent
+  repositories no longer share sessions or pane IDs. Running legacy lanes stay
+  where they are until closed and reopened; ambiguous or unreachable endpoints
+  are reported and cannot trigger a duplicate launch. CLI, MCP and app terminals
+  route through the target project's endpoint, including cross-project sends.
 
 ## [0.40.1] - 2026-10-08
 

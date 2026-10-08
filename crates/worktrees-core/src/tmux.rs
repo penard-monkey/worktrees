@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::process::{Command, Output};
+use crate::tmux_server::TmuxServer;
 
 /// Marker for dock scratch-shell SIDECAR sessions. The dock's Terminal tab can
 /// hold several shells per place: the first is `<place-session>~term`, extra
@@ -47,8 +48,8 @@ pub fn is_shell_sidecar(name: &str) -> bool {
 }
 
 /// All live session names (empty when tmux is down / errors).
-pub fn session_names() -> Vec<String> {
-    match tmux(&["list-sessions", "-F", "#{session_name}"]) {
+pub fn session_names(server: &TmuxServer) -> Vec<String> {
+    match tmux(server, &["list-sessions", "-F", "#{session_name}"]) {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
             .filter(|l| !l.is_empty())
@@ -58,14 +59,22 @@ pub fn session_names() -> Vec<String> {
     }
 }
 
+/// Include old or currently unregistered harnesses during the restart drain.
+pub fn kill_agent_sidecars(server: &TmuxServer, canonical: &str) -> Result<(), String> {
+    let prefix = format!("{canonical}{}", crate::provider::SIDECAR_MARKER);
+    for name in crate::tmux_route::probe(server)?.names() {
+        if name.starts_with(&prefix) { kill_session(server, &name)?; }
+    }
+    Ok(())
+}
+
 /// End EVERY shell sidecar of `canonical_session` — the dock's shells for a
 /// place. Called on close/remove (core, so the CLI cleans up too). Best-effort.
-pub fn kill_shell_sidecars(canonical_session: &str) {
-    for n in session_names() {
-        if shell_sidecar_index(canonical_session, &n).is_some() {
-            kill_session(&n);
-        }
+pub fn kill_shell_sidecars(server: &TmuxServer, canonical_session: &str) -> Result<(), String> {
+    for n in crate::tmux_route::probe(server)?.names() {
+        if shell_sidecar_index(canonical_session, &n).is_some() { kill_session(server, &n)?; }
     }
+    Ok(())
 }
 
 pub fn have_tmux() -> bool {
@@ -128,15 +137,21 @@ pub fn supports_no_start(version: &str) -> bool {
 /// default; when the server is down it fails exactly as before ("no server
 /// running" / "error connecting to …"), so callers that treat a failure as
 /// "no sessions" are unchanged.
-pub fn tmux(args: &[&str]) -> std::io::Result<Output> {
-    Command::new("tmux").args(no_start_args()).args(args).output()
+fn command(server: &TmuxServer) -> Command {
+    let mut command = Command::new("tmux");
+    server.configure(&mut command);
+    command
+}
+
+pub fn tmux(server: &TmuxServer, args: &[&str]) -> std::io::Result<Output> {
+    command(server).args(no_start_args()).args(args).output()
 }
 
 /// Run tmux for a command that is MEANT to start a server when none is up
 /// (`new-session`). The only caller that may omit `-N`; see `no_start_args`.
-pub fn tmux_launch(args: &[&str]) -> std::io::Result<Output> {
-    wait_out_refusal();
-    Command::new("tmux").args(args).output()
+pub fn tmux_launch(server: &TmuxServer, args: &[&str]) -> std::io::Result<Output> {
+    wait_out_refusal(server);
+    command(server).args(args).output()
 }
 
 /// How long `tmux_launch` waits for a server that is REFUSING connections.
@@ -150,12 +165,12 @@ const REFUSED_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 /// ~1s it is most likely a stale socket, and the launch goes ahead so tmux's
 /// own stale-socket recovery still works. Narrows the race, cannot close it —
 /// only a `-N` probe can be refused without consequences.
-fn wait_out_refusal() {
+fn wait_out_refusal(server: &TmuxServer) {
     if no_start_args().is_empty() {
         return;
     }
     for _ in 0..REFUSED_TRIES {
-        match tmux(&["start-server"]) {
+        match tmux(server, &["start-server"]) {
             Ok(o) if !o.status.success() && is_refusal(&String::from_utf8_lossy(&o.stderr)) => {
                 std::thread::sleep(REFUSED_WAIT)
             }
@@ -174,8 +189,8 @@ fn is_refusal(stderr: &str) -> bool {
 
 /// Does a session named EXACTLY `name` exist? (`list-sessions` + exact match, not
 /// `has-session -t` which prefix-matches — so `rm api` can't hit `api-fix`.)
-pub fn session_exists(name: &str) -> bool {
-    match tmux(&["list-sessions", "-F", "#{session_name}"]) {
+pub fn session_exists(server: &TmuxServer, name: &str) -> bool {
+    match tmux(server, &["list-sessions", "-F", "#{session_name}"]) {
         Ok(o) if o.status.success() => {
             String::from_utf8_lossy(&o.stdout).lines().any(|l| l == name)
         }
@@ -187,8 +202,8 @@ pub fn session_exists(name: &str) -> bool {
 /// polls (empty when tmux is down / no sessions). Sessions come and go as places
 /// are opened/closed even from a bare terminal, so a change here is worth a
 /// UI refresh; an unchanged value lets the poll skip the full git sweep.
-pub fn session_fingerprint() -> String {
-    match tmux(&["list-sessions", "-F", "#{session_name}"]) {
+pub fn session_fingerprint(server: &TmuxServer) -> String {
+    match tmux(server, &["list-sessions", "-F", "#{session_name}"]) {
         Ok(o) if o.status.success() => {
             let text = String::from_utf8_lossy(&o.stdout);
             let mut names: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
@@ -214,13 +229,14 @@ pub fn sq(s: &str) -> String {
 /// checkout: worktree dirs live UNDER it (`<main_root>/.worktrees/<slug>`), so
 /// without excluding `.worktrees/` any worktree pane would falsely count as
 /// main's session and main would adopt (and attach to!) a worktree's session.
-pub fn worktree_session_excluding(wt: &str, ai_word: &str, exclude_under: Option<&str>) -> Option<String> {
-    PaneList::fetch()?.session_in(wt, ai_word, exclude_under)
+pub fn worktree_session_excluding(server: &TmuxServer, wt: &str, ai_word: &str, exclude_under: Option<&str>) -> Option<String> {
+    PaneList::fetch(server)?.session_in(wt, ai_word, exclude_under)
 }
 
 /// One pane of a `list-panes -a` snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pane {
+    pub id: Option<String>,
     pub session: String,
     /// `#{pane_current_path}`.
     pub path: String,
@@ -271,13 +287,13 @@ pub fn normalize_tty(tty: &str) -> &str {
 pub fn parse_pane_rows(text: &str) -> Vec<Pane> {
     text.lines()
         .map(|line| {
-            let mut it = line.splitn(5, '\t');
+            let mut it = line.splitn(6, '\t');
             let mut field = || it.next().unwrap_or("").to_string();
             let (session, path, cmd) = (field(), field(), field());
             let some = |s: String| (!s.trim().is_empty()).then_some(s);
             let pid = some(field());
             let tty = some(field()).map(|t| normalize_tty(&t).to_string());
-            Pane { session, path, cmd, pid, tty, fg: None }
+            Pane { session, path, cmd, pid, tty, id: some(field()), fg: None }
         })
         .collect()
 }
@@ -351,30 +367,42 @@ fn ps_foreground(ttys: &[&str]) -> Option<String> {
 /// `node` pane needs naming) and reused: `ls`/`place_json` resolves adopted
 /// sessions for many worktrees against this instead of shelling out per
 /// place, and every question asked of it afterwards is pure.
+#[derive(Clone, Debug)]
 pub struct PaneList {
+    pub server: TmuxServer,
     panes: Vec<Pane>,
+}
+
+fn fixture_server() -> TmuxServer {
+    TmuxServer::legacy(std::path::PathBuf::from("/__worktrees_fixture__/socket")).expect("absolute fixture path")
 }
 
 impl PaneList {
     /// One `list-panes -a` shell-out. `None` when tmux is absent or errors —
     /// callers then behave as if no adopted session exists.
-    pub fn fetch() -> Option<PaneList> {
-        if !have_tmux() {
-            return None;
-        }
-        let o = tmux(&[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}",
-        ])
-        .ok()?;
-        if !o.status.success() {
-            return None;
-        }
+    pub fn fetch(server: &TmuxServer) -> Option<PaneList> { Self::try_fetch(server).ok() }
+
+    pub fn try_fetch(server: &TmuxServer) -> Result<PaneList, String> {
+        let o = tmux(server, &["list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}\t#{pane_id}"])
+            .map_err(|e| format!("cannot execute tmux: {e}"))?;
+        if !o.status.success() { return Err(String::from_utf8_lossy(&o.stderr).trim().to_string()); }
         let mut panes = parse_pane_rows(&String::from_utf8_lossy(&o.stdout));
         resolve_foreground(&mut panes, ps_foreground);
-        Some(PaneList { panes })
+        Ok(Self { server: server.clone(), panes })
+    }
+
+    pub fn has_probe(&self, session: &str, pane: &str, cwd: &str) -> bool {
+        self.panes.iter().any(|p| p.session == session && p.id.as_deref() == Some(pane) && p.path == cwd)
+    }
+    pub fn empty(server: &TmuxServer) -> Self { Self { server: server.clone(), panes: Vec::new() } }
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.panes.iter().map(|p| p.session.clone()).collect();
+        names.sort(); names.dedup(); names
+    }
+    pub fn candidates(&self, path: &str, exclude: Option<&str>) -> Vec<String> {
+        let under = |p: &str, root: &str| p == root || p.starts_with(&format!("{root}/"));
+        self.panes.iter().filter(|p| under(&p.path, path) && !exclude.is_some_and(|e| under(&p.path, e)))
+            .map(|p| p.session.clone()).collect()
     }
 
     /// A snapshot from rows a caller already holds, as
@@ -386,7 +414,7 @@ impl PaneList {
     /// A snapshot from whole rows, foreground included — for a caller (a test)
     /// that already knows what `ps` would have said.
     pub fn from_panes(panes: Vec<Pane>) -> PaneList {
-        PaneList { panes }
+        PaneList { server: fixture_server(), panes }
     }
 
     /// Which LAUNCH of session `name` this is: its first pane's pid. A session
@@ -494,8 +522,8 @@ pub fn is_shell_command(cmd: &str) -> bool {
     matches!(base, "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "elvish" | "xonsh")
 }
 
-pub fn canonical_provider(name: &str) -> &'static crate::provider::Provider {
-    PaneList::fetch().map(|p| p.canonical_provider(name)).unwrap_or(crate::provider::CLAUDE)
+pub fn canonical_provider(server: &TmuxServer, name: &str) -> &'static crate::provider::Provider {
+    PaneList::fetch(server).map(|p| p.canonical_provider(name)).unwrap_or(crate::provider::CLAUDE)
 }
 
 /// Multi-client sizing: by default tmux clamps a window to its SMALLEST
@@ -504,9 +532,9 @@ pub fn canonical_provider(name: &str) -> &'static crate::provider::Provider {
 /// cells outside the region ("undeletable" artifacts). `window-size latest` +
 /// `aggressive-resize` make OUR sessions follow the most recently active
 /// client instead. Session-scoped: the user's global tmux config is untouched.
-pub fn tune_session(session: &str) {
-    let _ = tmux(&["set-option", "-t", session, "aggressive-resize", "on"]);
-    let _ = tmux(&["set-option", "-w", "-t", session, "window-size", "latest"]);
+pub fn tune_session(server: &TmuxServer, session: &str) {
+    let _ = tmux(server, &["set-option", "-t", session, "aggressive-resize", "on"]);
+    let _ = tmux(server, &["set-option", "-w", "-t", session, "window-size", "latest"]);
 }
 
 /// `new-session -d -s <session> -c <wt> -P -F '#{pane_id}' <pane0>` → pane id.
@@ -525,11 +553,11 @@ pub fn tune_session(session: &str) {
 /// private to this module and only `ai_pane` builds one, so the wrong target
 /// can no longer be spelled.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneId(String);
+pub struct PaneId { id: String, server: TmuxServer }
 
 impl PaneId {
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.id
     }
 }
 
@@ -549,13 +577,13 @@ impl PaneId {
 /// Matched on the pane's command against the AI word, the same rule
 /// `PaneList::session_in` uses for adoption, and returned as a `%id` because
 /// those are globally unique and never renumber.
-pub fn ai_pane(session: &str, ai_word: &str) -> Option<PaneId> {
+pub fn ai_pane(server: &TmuxServer, session: &str, ai_word: &str) -> Option<PaneId> {
     // `=` anchors the session name: a tmux target PREFIX-matches, so `-t api`
     // resolves to `api-fix` when that is the only session — which would drop a
     // reference into a DIFFERENT worktree's Claude. `session_exists` documents
     // the same trap for `has-session`.
     let target = format!("={session}");
-    let o = tmux(&[
+    let o = tmux(server, &[
         "list-panes",
         "-t",
         &target,
@@ -581,7 +609,7 @@ pub fn ai_pane(session: &str, ai_word: &str) -> Option<PaneId> {
             id.starts_with('%').then_some((id, it.next()?, it.next().unwrap_or("")))
         })
         .collect();
-    pick_ai_pane(&panes, ai_word).map(|id| PaneId(id.to_string()))
+    pick_ai_pane(&panes, ai_word).map(|id| PaneId { id: id.to_string(), server: server.clone() })
 }
 
 /// Which of a session's panes is the AI — the whole rule, as a pure function.
@@ -617,9 +645,9 @@ fn pick_ai_pane<'a>(panes: &[(&'a str, &'a str, &'a str)], ai_word: &str) -> Opt
 /// clone; and a session whose codex exited can have a split pane running vim,
 /// which "the first program pane" would have typed into. No fallback — no
 /// match is a refusal.
-pub fn agent_pane(session: &str, place_path: &str, exclude_under: Option<&str>, ai_word: &str) -> Option<PaneId> {
+pub fn agent_pane(server: &TmuxServer, session: &str, place_path: &str, exclude_under: Option<&str>, ai_word: &str) -> Option<PaneId> {
     let target = format!("={session}");
-    let o = tmux(&[
+    let o = tmux(server, &[
         "list-panes",
         "-t",
         &target,
@@ -638,7 +666,7 @@ pub fn agent_pane(session: &str, place_path: &str, exclude_under: Option<&str>, 
             Some((it.next()?, it.next()?, it.next()?))
         })
         .collect();
-    pick_agent_pane(&rows, place_path, exclude_under, ai_word).map(|id| PaneId(id.to_string()))
+    pick_agent_pane(&rows, place_path, exclude_under, ai_word).map(|id| PaneId { id: id.to_string(), server: server.clone() })
 }
 
 /// `agent_pane`'s rule, pure: `(pane_id, path, command)` rows of one session.
@@ -689,8 +717,8 @@ fn leave_mode(pane: &str) -> [&str; 5] {
     ["copy-mode", "-q", "-t", pane, ";"]
 }
 
-fn run_ok(args: &[&str]) -> Result<(), String> {
-    let o = tmux(args).map_err(|e| e.to_string())?;
+fn run_ok(server: &TmuxServer, args: &[&str]) -> Result<(), String> {
+    let o = tmux(server, args).map_err(|e| e.to_string())?;
     if o.status.success() {
         Ok(())
     } else {
@@ -708,11 +736,11 @@ fn run_ok(args: &[&str]) -> Result<(), String> {
 pub fn send_literal(pane: &PaneId, text: &str) -> Result<(), String> {
     let args = send_literal_args(pane.as_str(), text);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_ok(&argv)
+    run_ok(&pane.server, &argv)
 }
 
 pub fn press_enter(pane: &PaneId) -> Result<(), String> {
-    run_ok(&press_enter_args(pane.as_str()))
+    run_ok(&pane.server, &press_enter_args(pane.as_str()))
 }
 
 fn press_enter_args(pane: &str) -> Vec<&str> {
@@ -721,14 +749,14 @@ fn press_enter_args(pane: &str) -> Vec<&str> {
 
 /// The visible screen of `pane`, or `None` when tmux cannot say.
 pub fn capture(pane: &PaneId) -> Option<String> {
-    let o = tmux(&["capture-pane", "-p", "-t", pane.as_str()]).ok()?;
+    let o = tmux(&pane.server, &["capture-pane", "-p", "-t", pane.as_str()]).ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 /// `%0=zsh %1=vim`, so a refusal can be diagnosed from one log line.
-fn pane_summary(session: &str) -> String {
+fn pane_summary(server: &TmuxServer, session: &str) -> String {
     let target = format!("={session}");
-    tmux(&["list-panes", "-t", &target, "-F", "#{pane_id}=#{pane_current_command}"])
+    tmux(server, &["list-panes", "-t", &target, "-F", "#{pane_id}=#{pane_current_command}"])
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
@@ -788,25 +816,25 @@ fn is_version_like(cmd: &str) -> bool {
 /// The buffer is NAMED and deleted afterwards so this never disturbs the
 /// user's own paste stack, and `--` ends option parsing so a reference that
 /// begins with `-` cannot be read as a flag.
-pub fn paste_to_ai(session: &str, ai_word: &str, text: &str) -> Result<(), String> {
+pub fn paste_to_ai(server: &TmuxServer, session: &str, ai_word: &str, text: &str) -> Result<(), String> {
     // An honest failure. The alternative — pasting into whatever pane happens
     // to be at index 0 — puts the token on a shell prompt and still reports
     // success, which is worse than saying nothing happened.
     // Name what was there. The last time this rule was wrong it took a survey of
     // 21 live sessions to find out why; the next time should be one log line.
-    let pane = ai_pane(session, ai_word)
-        .ok_or_else(|| format!("no {ai_word} running in session {session} (panes: {})", pane_summary(session)))?;
+    let pane = ai_pane(server, session, ai_word)
+        .ok_or_else(|| format!("no {ai_word} running in session {session} (panes: {})", pane_summary(server, session)))?;
     let buf = format!("worktrees-drop-{}", std::process::id());
     let [set_argv, paste_argv, del_argv] = paste_commands(&buf, &pane, text);
-    let set = tmux(&set_argv).map_err(|e| e.to_string())?;
+    let set = tmux(server, &set_argv).map_err(|e| e.to_string())?;
     if !set.status.success() {
         return Err(String::from_utf8_lossy(&set.stderr).trim().to_string());
     }
-    let out = tmux(&paste_argv);
+    let out = tmux(server, &paste_argv);
     // Delete the buffer whatever happened to the paste — a named buffer left
     // behind would accumulate one entry per failed drop for the tmux server's
     // whole life.
-    let _ = tmux(&del_argv);
+    let _ = tmux(server, &del_argv);
     match out {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
@@ -840,7 +868,7 @@ mod paste_tests {
     /// The shape IS the safety argument, so it is asserted rather than assumed.
     #[test]
     fn a_drop_targets_a_pane_id_and_cleans_up_after_itself() {
-        let pane = PaneId("%7".into());
+        let pane = PaneId { id: "%7".into(), server: fixture_server() };
         let [set, paste, del] = paste_commands("buf1", &pane, "-@worktrees:place://x ");
 
         assert_eq!(set, ["set-buffer", "-b", "buf1", "--", "-@worktrees:place://x "]);
@@ -876,7 +904,7 @@ mod paste_tests {
     /// stops at the first failing command.
     #[test]
     fn a_send_leaves_copy_mode_first() {
-        let pane = PaneId("%7".into());
+        let pane = PaneId { id: "%7".into(), server: fixture_server() };
         let leave = ["copy-mode", "-q", "-t", "%7", ";"];
         let [_, paste, _] = paste_commands("buf1", &pane, "x");
         assert_eq!(paste[..5], leave, "{paste:?}");
@@ -980,23 +1008,25 @@ mod paste_tests {
     }
 }
 
-pub fn new_session(session: &str, wt: &str, pane0: &str) -> Result<String, String> {
-    let o = tmux_launch(&["new-session", "-d", "-s", session, "-c", wt, "-P", "-F", "#{pane_id}", pane0])
+pub fn new_session(server: &TmuxServer, session: &str, wt: &str, pane0: &str) -> Result<PaneId, String> {
+    crate::tmux_route::probe(server)?;
+    crate::tmux_route::remember(server)?;
+    let o = tmux_launch(server, &["new-session", "-d", "-s", session, "-c", wt, "-P", "-F", "#{pane_id}", pane0])
         .map_err(|e| e.to_string())?;
     if o.status.success() {
-        Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        Ok(PaneId { id: String::from_utf8_lossy(&o.stdout).trim().to_string(), server: server.clone() })
     } else {
         let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
         Err(if err.is_empty() { format!("tmux new-session exited {}", o.status.code().unwrap_or(-1)) } else { err })
     }
 }
 
-pub fn split_window(pane_id: &str, wt: &str, pane1: &str) {
-    let _ = tmux(&["split-window", "-h", "-t", pane_id, "-c", wt, pane1]);
+pub fn split_window(pane: &PaneId, wt: &str, pane1: &str) {
+    let _ = tmux(&pane.server, &["split-window", "-h", "-t", pane.as_str(), "-c", wt, pane1]);
 }
 
-pub fn select_pane(pane_id: &str) {
-    let _ = tmux(&["select-pane", "-t", pane_id]);
+pub fn select_pane(pane: &PaneId) {
+    let _ = tmux(&pane.server, &["select-pane", "-t", pane.as_str()]);
 }
 
 /// Whether an attach/switch may happen at all: only for a person at a terminal.
@@ -1012,25 +1042,41 @@ pub fn may_attach(stdin_tty: bool, stdout_tty: bool) -> bool {
 /// Attach (or switch-client if already in tmux). stdio inherited so the tty
 /// reaches tmux; failure ignored. Returns false (doing nothing) when there is
 /// no interactive terminal, so the caller can print the detached line.
-pub fn attach_or_switch(session: &str) -> bool {
+pub fn attach_route(server: &TmuxServer, session: &str) -> String {
+    let endpoint = server.endpoint_args().iter().map(|s| sq(&s.to_string_lossy())).collect::<Vec<_>>().join(" ");
+    format!("env -u TMUX TMUX_TMPDIR={} tmux {endpoint} attach -t {}", sq(&server.socket_root().to_string_lossy()), sq(&format!("={session}")))
+}
+
+pub fn attach_or_switch(server: &TmuxServer, session: &str) -> bool {
     use std::io::IsTerminal;
-    use std::process::Command;
-    if !may_attach(std::io::stdin().is_terminal(), std::io::stdout().is_terminal()) {
-        return false;
-    }
-    let in_tmux = std::env::var("TMUX").map(|v| !v.is_empty()).unwrap_or(false);
-    let sub = if in_tmux { "switch-client" } else { "attach" };
-    let _ = Command::new("tmux").args(no_start_args()).args([sub, "-t", session]).status();
-    true
+    if !may_attach(std::io::stdin().is_terminal(), std::io::stdout().is_terminal()) { return false; }
+    let inherited = std::env::var("TMUX").ok().filter(|s| !s.is_empty());
+    let mut cmd = command(server);
+    let sub = if let Some(inherited) = inherited {
+        let socket = inherited.rsplitn(3, ',').nth(2).and_then(|s| TmuxServer::legacy(s.into()).ok());
+        if !socket.is_some_and(|s| s.socket_path() == server.socket_path()) { return false; }
+        // Only restore the client context after proving it belongs to the
+        // exact endpoint we resolved. Cross-server callers get attach_route.
+        cmd.env("TMUX", inherited);
+        "switch-client"
+    } else { "attach" };
+    cmd.args(no_start_args()).args([sub, "-t", &format!("={session}")]).status().is_ok_and(|s| s.success())
 }
 
 /// Kill EXACTLY `name` (`-t =name`). NO bare fallback: on tmux ≥ 2.1 the exact
 /// form only fails when the session is already gone, so a bare `-t name` retry
 /// could only ever PREFIX-match a sibling (api → api-fix) — the precise case
 /// the `=` guard exists to prevent.
-pub fn kill_session(name: &str) {
-    let eq = format!("={name}");
-    let _ = tmux(&["kill-session", "-t", &eq]);
+pub fn kill_session(server: &TmuxServer, name: &str) -> Result<(), String> {
+    let before = crate::tmux_route::probe(server)?;
+    if !before.has_session(name) { return Ok(()); }
+    run_ok(server, &["kill-session", "-t", &format!("={name}")])?;
+    // A successful kill of the last observed session permits exit-empty.
+    // An unexpected failed query never supplies that permission.
+    if before.names().len() == 1 { crate::tmux_route::forget_empty(server); }
+    let after = crate::tmux_route::probe(server)?;
+    if after.has_session(name) { return Err(format!("tmux session '{name}' is still running at {}", server.socket_path().display())); }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1357,6 +1403,7 @@ pts/5     3007   3007 npm exec x
             cmd: cmd.into(),
             pid: pid.map(Into::into),
             tty: tty.map(Into::into),
+            id: None,
             fg: None,
         };
         assert_eq!(
