@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-07
+
 ### Added
 - **Pull requests, for projects on GitHub.** A place whose branch has a PR
   shows it in the header — a dot, `#451` and one word (ready, checking, CI
@@ -38,7 +40,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   place reopens on, and opening the same file again. A file the tree does not
   list (outside the place, or gitignored while those are hidden) is simply
   left unrevealed.
-
 - **Codex stays in its own place.** Reopening a place resumes that place's own
   conversation by exact id, never `resume --last`. Two paths led out of the
   place and both are closed. `--last` filters threads by
