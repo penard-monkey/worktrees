@@ -337,9 +337,18 @@ installed once per clone:
 
 ```sh
 nvm use                      # or any node >= the version in .nvmrc
-pnpm --dir app install       # first time only
-make dev-app                 # or: pnpm --dir app tauri dev
+cd app && corepack pnpm install   # first time only
+make dev-app                      # or, from app/: corepack pnpm tauri dev
 ```
+
+Run **`corepack pnpm`, from `app/`** — not a bare `pnpm`, and not
+`pnpm --dir app` from the root. From the root, corepack fixes its version from
+the current directory's `package.json` before pnpm reads the flag, and the root
+has none, so you get `ERR_PNPM_BAD_PM_VERSION` against the `pnpm@11.5.2` pin.
+And a bare `pnpm` may not exist at all: nvm installs it per node version, and
+the version `.nvmrc` pins ships only `corepack node npm npx`, so `nvm use` can
+take `pnpm` off your PATH. corepack comes with node and is always there. The
+`make` targets do both for you.
 
 That builds the `app` crate and serves the frontend on **port 1420**, with hot
 reload on the TypeScript/CSS side; a Rust change rebuilds and relaunches the
@@ -350,7 +359,7 @@ To work on the UI alone — no Rust build, no tmux, fake backend — use the moc
 harness, which runs the real `App.tsx` against fixtures in a plain browser:
 
 ```sh
-pnpm --dir app dev:mock --port 1425    # any port but 1420
+cd app && corepack pnpm dev:mock --port 1425    # any port but 1420
 ```
 
 Both are development loops. To actually *use* a locally built app, see

@@ -48,6 +48,7 @@ keeps running.
 | [README](https://github.com/penard-monkey/worktrees#readme) | install, commands, configuration, tmux layout |
 | [DESIGN.md](https://github.com/penard-monkey/worktrees/blob/main/DESIGN.md) | the app's design document |
 | [AI profiles](ai-profiles.html) | what a worktrees-launched `claude` runs with — rules, skills, MCP servers, model |
+| [Orfis feedback](orfis-feedback.html) | the Send-feedback integration: what it sends, why the bundled SDK is fail-closed, and what is still owed before it can ship |
 | [Adding an agent harness](adding-a-harness.html) | the checklist for a new agent (Claude, Codex, pi, …) — every surface it touches, and how to see each one working |
 | [Decisions (ADRs)](adr/) | choices that must survive being forgotten |
 | [Proposals](proposals/) | designs written up before they were built |

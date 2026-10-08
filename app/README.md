@@ -23,8 +23,15 @@ The app links `worktrees-core` in-process (no subprocess, no `WORKTREES_BIN`); c
 shells out to `git`/`tmux` directly, so just:
 
 ```sh
-pnpm --dir app tauri dev
+corepack pnpm tauri dev   # from app/, or `make dev-app` from the repo root
 ```
+
+`corepack pnpm`, not a bare `pnpm`: nvm installs pnpm per node version, and the
+one `.nvmrc` pins ships only `corepack node npm npx` — so `nvm use` can leave
+you with `pnpm: command not found`. And from `app/`, not `pnpm --dir app` from
+the repo root: corepack fixes its version from the cwd's `package.json` before
+reading the flag, and the root has none, so it refuses the `pnpm@11.5.2` pin
+here with `ERR_PNPM_BAD_PM_VERSION`.
 
 ## Verify P1 (exit criteria)
 

@@ -1,3 +1,4 @@
+import { FeedbackSection } from "./FeedbackSection";
 import { useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
@@ -1367,6 +1368,7 @@ export function SettingsSheet({
           </>}
 
           {cat === "data" && <>
+          <FeedbackSection />
           <section className="setting">
             <label>Logs</label>
             <div className="ver-rows">

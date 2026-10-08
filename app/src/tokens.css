@@ -430,3 +430,22 @@ html {
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; }
 }
+
+/* ── Orfis feedback widget ───────────────────────────────────────────────────
+   The SDK renders in a shadow root and reads `--orfis-*` from its `[data-orfis]`
+   host. Mapping them to this app's tokens HERE, in CSS, is what makes the
+   widget follow every theme without a line of JavaScript — including a theme
+   added later, which is the point: `setTheme()` only picks the SDK's light or
+   dark structure, never its colours.
+   Inherited, so the values resolve against whichever `[data-theme]` block is
+   live on the root. */
+[data-orfis] {
+  --orfis-ink: var(--txt-hi);
+  --orfis-muted: var(--txt-mute);
+  --orfis-ground: var(--bg-panel);
+  --orfis-sunk: var(--bg-abyss);
+  --orfis-line: var(--line);
+  --orfis-accent: var(--accent);
+  --orfis-accent-ink: var(--accent-ink);
+  --orfis-danger: var(--danger);
+}
