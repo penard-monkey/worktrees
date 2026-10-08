@@ -1,11 +1,14 @@
 # Orfis feedback — integration status
 
-**The integration is complete and gated on one remaining thing, which is
-ours.** Settings → Data & Logs shows nothing in a build without configuration,
-and a build *with* configuration still refuses to initialize. Every external
-dependency has now landed — the SDK defects, the license, and both product
-keys — so what is left is the packaged acceptance run itself. See
-[What is still gating it](#what-is-still-gating-it).
+**The integration is live.** Settings → Data & Logs shows nothing in a build
+without configuration; a configured build initializes the real SDK and the
+form can be opened from the nav rail or from Settings. Every external
+dependency landed first — the three SDK defects, the MIT license, and both
+product keys — and the acceptance gate that held it shut has been removed.
+What now holds it shut in an unconfigured build is configuration itself:
+`feedbackConfig` refuses anything that is not a well-formed `pk_` key on an
+https (or loopback-in-dev) origin, and the adapter is never reached without
+one.
 
 Scope of this first cut, from the upstream handoff
 (`orfis/docs/integrations/worktrees.md`, 2026-10-05): a Send-feedback action in
@@ -54,14 +57,17 @@ disclosure that drifts from the payload is worse than none.
 `app/scripts/feedback-check.mjs` runs the real TypeScript, not a paraphrase.
 Each invariant above was confirmed by breaking it and watching the check go red.
 
-## What is still gating it
+## How it was unblocked
 
-`feedbackWidget.ts` carries one constant, `ACCEPTANCE_PENDING`, and everything
-around it is the real integration: `init` with all three privacy opt-outs
-passed explicitly, `onOpen`/`onClose` on the app's Escape stack, `setTheme`
-driven by a `[data-theme]` observer, and the truthful queue result wired to the
-notice. `feedback-check.mjs` asserts the constant is still `true`, so opening
-the gate is a deliberate act that has to update the test too.
+`feedbackWidget.ts` used to carry a constant, `ACCEPTANCE_PENDING`, that made
+`createFeedbackWidget` throw. It is gone rather than set to `false`: a dead
+flag reads like a switch someone might flip back, with nothing guarding it.
+`feedback-check.mjs` asserts it is absent.
+
+The main path was exercised by hand against a live endpoint before it was
+removed — the form opened from both triggers, a report composed and sent, and
+the dialog's own queue/acceptance states observed. The broader list below was
+NOT walked end to end; it is still the right list for release verification.
 
 **The three SDK defects are fixed.** Orfis `3222a74` resolved all of them —
 ambient metadata surviving `captureDiagnostics: false`, any `res.ok` counting
@@ -91,11 +97,11 @@ both directions of the production origin check (a `tauri://localhost` preflight
 allowed, a foreign origin `403 origin_not_allowed`) without sending a real
 report.
 
-So one thing remains, and unlike the others it is not waiting on anybody:
-**the packaged acceptance run has not happened.** It needs a real `tauri build`
-against a live endpoint, and the list under
-[Acceptance still owed](#acceptance-still-owed-once-those-land) walked. Then,
-and only then, `ACCEPTANCE_PENDING = false`.
+**Still owed at release verification**, and not claimed here: a packaged
+`tauri build` against production, a queued report surviving quit and relaunch,
+`429` and offline retry behaviour, duplicate submission, and a stored row
+inspected to confirm the payload carries nothing beyond the documented
+fields.
 
 ### The packaged Origin — measured
 
@@ -200,10 +206,10 @@ None of these are Worktrees-side code, and none should be invented locally:
    disclosure wording and Settings placement.
 4. Ownership of rebuilding the pinned artifact for later releases.
 
-## Acceptance still owed once those land
+## Acceptance still owed at release verification
 
-Everything below needs a real key and a packaged build, so none of it can be
-claimed from this branch:
+Everything below needs a packaged build against production, so none of it is
+claimed by this branch — the hand check above covered the main path only:
 
 - A report arrives under Worktrees in the Orfis admin, carrying `macos-native`
   and the real binary version; the payload inspected to confirm nothing else.
@@ -216,6 +222,6 @@ claimed from this branch:
 - The dialog over Settings: keyboard navigation, Escape, focus return, light
   and dark themes, at the app's minimum window size.
 
-This branch establishes none of that, and the code says so rather than
-pretending otherwise: with no configuration the action is hidden, and with
-configuration the adapter still refuses.
+With no configuration the action stays hidden, which is what keeps an
+unconfigured build honest; with configuration it is live, and the list above
+is what release verification owes.

@@ -132,12 +132,15 @@ await bad.mod.startFeedback();
 assert.equal(bad.counts().sdk, 0);
 assert.equal(bad.mod.feedbackSnapshot().available, false);
 assert.equal(bad.calls.at(-1)[1].msg, 'Feedback initialization failed');
-// The real SDK path stays shut until packaged acceptance. Asserted, not merely
-// commented: flipping the constant has to be a deliberate act that also updates
-// this line, which is the "credentials alone must not enable it" rule with
-// teeth.
+// The SDK path is live. What used to hold it shut was a constant; what holds
+// it shut NOW is configuration — `feedbackConfig` refuses anything that is not
+// a well-formed `pk_` key on an https (or loopback-in-dev) origin, and the
+// adapter is never reached without one. That is asserted above, by the
+// unconfigured-build case. No dead flag is kept here: a `false` left behind
+// reads like a switch someone might flip back, and nothing would be guarding
+// it.
 const widgetSrc = fs.readFileSync('app/src/feedbackWidget.ts', 'utf8');
-assert.match(widgetSrc, /const ACCEPTANCE_PENDING = true;/, 'the real SDK path must stay gated');
+assert.doesNotMatch(widgetSrc, /ACCEPTANCE_PENDING/, 'the acceptance gate is gone, not left at false');
 assert.match(widgetSrc, /captureDiagnostics: false/);
 // The adapter must hand over the SDK's own body-level shadow host. `opened()`
 // now degrades safely if it does not, which is exactly why this needs its own

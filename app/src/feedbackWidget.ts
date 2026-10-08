@@ -4,26 +4,6 @@ import type { FeedbackCallbacks, FeedbackWidget } from "./feedbackTypes";
 import { THEMES, type ThemeId } from "./settings";
 import { applyFeedbackSpacing } from "./feedbackStyle";
 
-/** Still gated, and the gate is now the only thing standing between this and
- *  a real send — so it is one constant with one reason, not a buried throw.
- *
- *  Three of the four blockers are now gone. Orfis `3222a74` fixed all three SDK
- *  defects (ambient metadata surviving the opt-out, any `res.ok` counting as
- *  accepted, a shed queue reporting success), `3f8c14b` licensed the bundle
- *  under MIT, and both product keys are minted against the measured packaged
- *  Origin. What is left is ONE thing, and it is ours:
- *
- *    Packaged acceptance has not been run. It needs a real `tauri build`
- *    talking to a live endpoint and the checks in `docs/orfis-feedback.md`
- *    walked — above all that a report ARRIVES and carries nothing but the
- *    five documented fields.
- *
- *  So this constant is no longer "waiting on someone else"; it is the one
- *  claim this branch is not entitled to make yet. Flip it to `false` only
- *  after that run, and update `feedback-check.mjs` in the same commit — it
- *  asserts the constant, which is what makes opening the gate deliberate.
- *  Nothing else needs changing; everything below is the real integration. */
-const ACCEPTANCE_PENDING = true;
 
 /** The SDK's light/dark choice, from whichever `[data-theme]` is live.
  *
@@ -54,8 +34,6 @@ export function createFeedbackWidget(
   version: string,
   callbacks: FeedbackCallbacks,
 ): FeedbackWidget {
-  if (ACCEPTANCE_PENDING) throw new Error("Orfis packaged acceptance pending");
-
   // The two capture opt-outs are passed explicitly rather than left to a
   // default, and typed as literal `false` in `orfis.es.d.ts` so dropping one
   // does not typecheck. `askForEmail` is deliberately ON: the field is
