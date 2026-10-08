@@ -12,8 +12,9 @@ an ordinary lane with permission to own children, on a stable integration
 branch. Keep the worktrees physically flat, declare their parentage, and cap
 the tree at `(main) → hub → child`. Children squash into the hub; the hub
 merges main periodically and ultimately squash-merges into main. Ship
-per-project tmux routing and socket recovery **before** nesting. Keep GitHub
-writes in the agent's existing `gh` workflow, never in the app.
+per-project tmux routing and restart-based draining **before** nesting; socket
+recovery is a separate follow-up. Ship the non-launch `-N` hotfix independently.
+Keep GitHub writes in the agent's existing `gh` workflow, never in the app.
 
 ## Decisions already taken
 
@@ -32,8 +33,9 @@ recommendations.
 ## 1. Evidence and the gaps that actually exist
 
 Source baseline: `34ad3eec1864596e3b11478f6d5b1f40c5d83806` in this repository.
-Symbol names below are the durable references; line numbers in older proposals
-no longer describe the current code. The investigation read `AGENTS.md`,
+Symbol/file:line references below refer to that pinned SHA; line numbers in
+older proposals no longer describe the current code. The investigation read
+`AGENTS.md`,
 `DESIGN.md`, [ADR 0001](../adr/0001-no-repo-supplied-argv.html), and the
 [project-settings](project-settings.html), [cross-project](cross-project.html)
 and [pull-request](pull-requests.html) proposals. Historical proposals describe
@@ -42,14 +44,14 @@ app, not an app subprocess invoking the old bash engine.
 
 | Current evidence | Consequence for this design |
 |---|---|
-| `core/store.rs`: `Declared`, `Store`, `edit`, `reconcile`; unknown keys round-trip, writes lock, display reads are lenient | Parentage belongs here, but authorization must not turn corrupt state into an empty, unrestricted tree. |
-| `core/ops.rs`: `cmd_new` already accepts a positional base; `do_switch` and new-branch creation prefer `origin/<base>` when available | “Every lane always starts at origin/main” is only the default, not a limitation. A raw base is already possible; it records no parent or target contract. |
-| `core/project.rs`: `default_base` selects main/master or the checkout branch; `base_ref`, `snapshot` and `place_json` use a project-wide base | Per-lane divergence and health need a parent-aware base resolver. Do not hardcode the string `main`. |
-| `core/github.rs`: `pr_for` matches head branch + push owner, rejects head == base, prefers open then recent; `Row` retains `base` | PR mapping does **not** require main today. It lacks an expected parent target, so a PR to the wrong branch can look like this lane's completed work. |
+| `Declared` (`core/store.rs:33`), `Store` (:119), `edit` (:309), `reconcile` (:230); unknown keys round-trip, writes lock, display reads are lenient | Parentage belongs here, but authorization must not turn corrupt state into an empty, unrestricted tree. |
+| `cmd_new` (`core/ops.rs:611`) already accepts a positional base; `do_switch` and new-branch creation prefer `origin/<base>` when available | “Every lane always starts at origin/main” is only the default, not a limitation. A raw base is already possible; it records no parent or target contract. |
+| `default_base` (`core/project.rs:589`) selects main/master or the checkout branch; `base_ref` (:604), `ls` (:281) and `place_json` (:327) use a project-wide base; `ls_json` (:321) serializes `ls` | Per-lane divergence and health need a parent-aware base resolver. Do not hardcode the string `main`. |
+| `pr_for` (`core/github.rs:615`) matches head branch + push owner, rejects head == base, prefers open then recent; `Row` retains `base` | PR mapping does **not** require main today. It lacks an expected parent target, so a PR to the wrong branch can look like this lane's completed work. |
 | `core/ops.rs`: health construction calls `p.base_ref()` and `git cherry`; `health.rs::maybe_merged` is explicitly a hint | A child can look unmerged against main after landing in its hub. Patch equivalence is not deletion proof. |
-| `cli/mcp.rs`: `caller_place` derives identity from launch directory; local `mutable_target` accepts the resolved local slug | Identity exists; subtree authorization does not. `create_worktree` already has `base`, but no `parent`. Removal has its own path and must not miss the new guard. |
-| `core/tmux.rs::tmux`, `attach_or_switch`; `app/src-tauri/src/lib.rs::term_open` | Commands have no explicit project socket today, including the direct PTY attach and CLI attach path. They can use the default or inherited server. |
-| `core/provision.rs`: `select_slot`, `render_env`, `compose_project_name` | A hub already qualifies for its own slot and Compose name. Nesting needs no second slot allocator. |
+| `caller_place` (`cli/mcp.rs:2193`) derives identity from launch directory; local `mutable_target` (:2460) accepts the resolved local slug | Identity exists; subtree authorization does not. `create_worktree` already has `base`, but no `parent`. Removal has its own path and must not miss the new guard. |
+| `tmux` (`core/tmux.rs:75`), `attach_or_switch` (:919); app `term_open` attach (`app/src-tauri/src/lib.rs:7728`) | Commands have no explicit project socket today, including the direct PTY attach and CLI attach path. They can use the default or inherited server. |
+| `select_slot` (`core/provision.rs:251`), `render_env` (:163), `compose_project_name` (:511) | A hub already qualifies for its own slot and Compose name. Nesting needs no second slot allocator. |
 | `core/quota.rs` module contract | The launch gate checks near-spent windows, fails open without data, and is explicitly not a burst/concurrency limiter. |
 
 Here `core/` means `crates/worktrees-core/src/`, and `cli/` means
@@ -67,7 +69,9 @@ another. A merge or rebase changes ancestry without changing responsibility.
 Keep `.worktrees/<slug>` for every lane; never nest a worktree directory under
 a hub's working tree. Existing slugs stay project-unique, so `<project>:<slug>`,
 Claude history paths, Compose names, pane identities and saved navigation keep
-working. A title is still a label, never a directory rename.
+working. Existing `place_panels`, nav-history and `ui-state` lane keys are
+unaffected because slugs stay project-unique. A title is still a label, never a
+directory rename.
 
 Proposed additive fields in `.worktrees.places.json`:
 
@@ -158,8 +162,9 @@ can track its starting base, and a pushed branch normally tracks itself.
 
 Persist parent/target before launching the agent or writing its final brief.
 Because Git creation and JSON writing are not one transaction, journal the
-operation in the common dir: prepare validated intent → create worktree → commit
-relationship → provision/launch. Recover interrupted creation explicitly; an
+operation in `<git-common>/worktrees-operations/<operation-id>.json` (local-only,
+never committed or transferred by sync): prepare validated intent → create
+worktree → commit relationship → provision/launch. Recover interrupted creation explicitly; an
 unassigned child must not acquire main-level defaults. Never launch after a
 relationship write fails. Concurrent child creation and hub removal take the
 same relationship lock; revalidate the branch OID before creating.
@@ -196,8 +201,9 @@ plus each affected child's resolution, without rewriting every sibling's base.
    an **explicit** `--base feature/experimental`, naming its parent in the body.
    A child never targets main merely because `gh` defaulted there.
 3. Each child is reviewed and runs the project's gates against the hub target.
-   The hub agent may squash-merge that child PR after review, then updates its
-   **own** worktree from the remote before integration testing or creating more
+   The recommended policy is a Fable reviewer per child PR, launched by the hub;
+   the hub agent may squash-merge after that reviewer approves and gates pass,
+   then updates its **own** worktree from the remote before integration testing or creating more
    children. The merge destination must match the recorded target immediately
    before the `gh` operation.
 4. As main advances, the hub owner fetches and merges the updated main ref into
@@ -208,8 +214,8 @@ plus each affected child's resolution, without rewriting every sibling's base.
    edits a busy child's index. Conflicts stop that child, not the whole tree.
 5. After children close out, the hub finishes integration tests and its own
    close-out, updates the draft PR with the complete feature behavior, migration
-   notes and links to child PRs. Main reviews the entire aggregate diff and
-   squash-merges it. Child approvals are evidence, not approval of the final
+   notes and links to child PRs. David reviews the entire aggregate diff with
+   main, which squash-merges it. Child approvals are evidence, not approval of the final
    composition. Only main releases.
 
 Squash at both boundaries preserves this repository's convention. Merge commits
@@ -224,8 +230,19 @@ Do not continue new work on a squash-merged child branch: park on a fresh
 `<slug>-next` from the fetched hub tip, unset its upstream, then start a new topic.
 Otherwise rebasing can replay already-squashed commits. Exceptional recovery
 needs the recorded old boundary and an explicit `rebase --onto` plan reviewed by
-the owning agent; no automatic “guess which commits landed.” Concurrent child
-merges are serialized by the hub's workflow and rechecked against current base
+the owning agent; no automatic “guess which commits landed.”
+
+Never delete the hub branch while `gh pr list --base <hub-branch> --state open`
+is non-empty, even if no local child worktree remains. Check in the correct
+repository immediately before hub close-out/merge and again before deletion;
+a failed query is not an empty result. GitHub documents that deleting a merged
+head branch retargets open PRs based on it to the merged PR's base: for a hub,
+that is main. `gh pr merge --delete-branch` performs deletion after merging,
+so omit it for hubs until this guard passes; account for repository automatic
+head deletion too, blocking the hub merge while child PRs remain. This rule
+protects remote children as well as local lanes. [GitHub merge documentation](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/merging-a-pull-request).
+
+Concurrent child merges are serialized by the hub's workflow and rechecked against current base
 and CI. Git locks alone do not serialize remote PR decisions.
 
 ### The existing assumptions to change
@@ -233,11 +250,18 @@ and CI. Git locks alone do not serialize remote PR decisions.
 | Surface | Required change |
 |---|---|
 | `github::pr_for` and `view` | Accept expected target as well as head/owner; match its base, and expose a mismatched PR separately. A merged PR into some other branch is not “landed here.” Branch reuse also requires matching the current work's head/OID, not merely a historical PR with the same name. |
-| `Project::snapshot`, `place_json`, `ops` health construction | Resolve parent target once per lane, report its name beside ahead/behind. Do not silently fall back to main when the recorded hub is missing. Keep project totals separate. |
+| `Project::ls_json` → `ls`/`place_json` (`core/project.rs:321`, :281, :327), `ops` health construction | Resolve parent target once per lane, report its name beside ahead/behind. Do not silently fall back to main when the recorded hub is missing. Keep project totals separate. |
+| `Place` / `ls --json` | Carry new `parent`/`hub`/`target` fields through `core/model.rs:20`, `place_json` (`project.rs:327`, currently passed ONE project-wide `base_ref`), `test/json.bats`, MCP `list_places` rows (`cli/mcp.rs:1490`), app `Place` (`app/src/App.tsx:240`) and mock `fixtures.ts:23` / `install.ts`. The app's `snapshot` (`lib.rs:326`) and MCP `place_snapshot` (`mcp.rs:2987`) are separate consumers; there is no `Project::snapshot`. Rebuild and diff `ls --json` against the shipped binary, allowing only intentional additive fields and parent-relative divergence. |
 | `health::maybe_merged` | Remains a hint against the lane's integration target. A squash of several commits may match no individual `git cherry` patch. |
 | close-out skill and `.claude/close-out.md` | Replace hardcoded `origin/main` in fetch, did-it-land, archive PR and fresh-base steps with the recorded target. Child archive PR → hub; hub archive PR → main. Resolve once, print it and revalidate before writing/merging. |
-| `ops::remove_one` / app `remove_place` | `git branch -d` checks Git's upstream/HEAD rules, not our parent contract. Force selects `-D` as well as allowing a dirty removal. Never auto-escalate because a squash makes `-d` fail. |
+| `ops::remove_one` / app `remove_place` | `git branch -d` checks merger into the branch's upstream (or HEAD without one), not our parent contract. A pushed child equal to `origin/<child>` passes even after a squash into the hub: `-d` is no safety net for integration. Require PR evidence independently. CLI/app force selects `-D` as well as allowing a dirty removal; never infer deletion permission from either command's success. |
 | `<slug>-next` | Still unique per physical worktree, created from that lane's integration target with upstream unset. A parked child still belongs to its hub and blocks final hub retirement until removed or explicitly detached. |
+
+The close-out skill (`~/.claude/skills/close-out/SKILL.md`) currently has seven
+`origin/main` occurrences, including its preconditions and fresh-base commands;
+`.claude/close-out.md:42–45` also hardcodes it. Update all these sites, not just
+the final parking command. Every child work/archive PR must explicitly use
+`gh pr create --base <hub-branch>`; a default `gh` base is unsafe here.
 
 For cleanup, fetch the target and check the exact PR's head, repository, base,
 merged state and merge commit. Check for commits or uncommitted work made after
@@ -263,6 +287,18 @@ capability version in initialization/status results. Never accept `caller`,
 | Hub | Own ordinary lane state, plus create/open/close/remove and metadata operations for its children. No siblings, main, other hubs or foreign-project mutations, even with cross-project `full`. Cannot promote itself or children, change its parent, or grant wider authority. |
 | Child / ordinary leaf | Own non-destructive lane operations and metadata. No peer creation or peer mutation. Ask its owner to close/remove it. |
 | Automation or unresolved caller | Existing automation restrictions still subtract powers; unresolved identity gets no mutation powers. |
+
+Today `mutable_target` (`cli/mcp.rs:2460`) accepts any local slug: a child can
+`send`, `set_lifecycle` or `close_session` on a sibling. The proposed scope
+removes that authority server-side. In contrast, `remove_worktree`
+(`mcp.rs:1924`) currently invokes `cmd_rm <slug> -y` with neither `--branch` nor
+`--force`: **MCP removal cannot execute `git branch -D` today**, or delete a
+branch at all. The two-permissions force hazard in §3 is a CLI/app concern,
+not an existing MCP branch-deletion capability.
+
+Scope binds worktrees **mutations only**. Claude `SendMessage` and agent `gh`
+commands remain unscoped by this mechanism, by design; briefs and review policy
+must teach those boundaries without claiming MCP enforces them.
 
 Use one core authorization decision at all MCP dispatch sites, including
 `create_worktree`, `remove_worktree`, `send`, `close_session`, setters,
@@ -306,7 +342,7 @@ Claude↔Claude keeps Claude's own `ListAgents`/`SendMessage`, using the actual
 reported agent name. The repository delegates to that bus rather than
 implementing it. The cross-project proposal §4.3 recorded successful discovery
 across four projects. A read-only filesystem check in this investigation found
-23 Unix socket files under `/tmp/cc-socks`; that corroborates the separate
+about 20 Unix socket files (a changing count) under `/tmp/cc-socks`; that corroborates the separate
 socket transport described in the brief. It is not a fresh delivery/recovery
 test of Claude internals. Splitting tmux servers should require no bus rewrite;
 verify delivery across two servers before release. Keep names globally
@@ -401,6 +437,8 @@ header: worktrees / Experimental / API
 The ASCII glyphs stand for existing activity/unread shapes, not new colored
 text. A hub appears once in its own root-level tier; its children appear only
 beneath it, with lifecycle grouping and ordering local to that sibling set.
+Saved, Closed, Archived and Abandoned tiers nest under each hub too; they do
+not collect children into global tiers. Root-level flat lanes keep global tiers.
 Pinning a child pins it **within the hub**, never extracts a duplicate top-level
 row. The hub's own lifecycle stays its own reading: a closed hub with busy
 children says so through roll-up, not by falsifying `store::reconcile`.
@@ -443,7 +481,7 @@ previously deferred distinct-shape, opt-in policy; it is not a prerequisite.
   A later explicit reparent flow must review target branch and open PR changes.
 - `dnd.ts::predictTier` still mirrors `store::reconcile` for the individual row.
   Add parent-aware drop validation in core and its preview, and extend the
-  existing drift check to catch both overly broad and overly narrow acceptance.
+  existing `dnd-check.mjs` drift check (which parses `store.rs` constants) to catch both overly broad and overly narrow acceptance.
 
 Use existing React/CSS primitives and tokens, no UI library. Words use
 `--txt-hi`/`--txt-dim`; hue belongs to shapes/tints. Module-scope row components,
@@ -469,23 +507,50 @@ remove that parked child or explicitly release it to main via a reviewed empty
 lane transfer. Do not automatically rebase unfinished children onto main when
 the hub lands. They block final close-out or require an explicit changed plan.
 
-The hub owns the checklist: every child accounted for → full feature tests →
+Hub close-out also queries `gh pr list --base <hub-branch> --state open`;
+any open PR blocks hub branch deletion and final merge when automatic head
+deletion is enabled. No local children does not prove no remote child PRs.
+
+The hub owns the checklist: every child and open child PR accounted for → full feature tests →
 hub archive/roadmap reconciliation → aggregate review by main → hub PR merged
 into main → target-specific verification → clean up the hub. Archive paths keep
 project-unique slugs, so child histories do not collide. The hub summarizes and
 links children rather than duplicating every transcript. Hub work is never a
 release authority; tags, publishing and the release ritual stay in `(main)`.
 
-## 8. One tmux server per project — prerequisite
+## 8. Tmux: independent hotfix, routing prerequisite, later recovery
 
-### Routing and identity
+### Independent hotfix — non-launch clients never start servers
+
+Ship independently now: add global `-N` to **every non-launch tmux invocation**
+(list/list-panes, capture, send-keys, kill-session, tune, attach and the app's
+PTY client), including chained commands. Do not add it to intentional
+`new-session`/server creation. This can ship on the existing socket topology.
+
+In tmux 3.2, `client_connect` reaches socket unlink/startup only through the
+`CLIENT_STARTSERVER` path; `-N` sets `CLIENT_NOSTARTSERVER`, making it return
+before that path. Thus protected non-launch clients cannot unlink/recreate a
+live server's socket after ECONNREFUSED. This does not protect intentional
+launches or establish which client caused the October 7 incident.
+[tmux 3.2 client.c](https://github.com/tmux/tmux/blob/3.2/client.c#L94-L153),
+[tmux.c](https://github.com/tmux/tmux/blob/3.2/tmux.c#L372-L374).
+
+`-N` arrived in [tmux 3.2](https://github.com/tmux/tmux/blob/3.2/CHANGES), while
+`README.md:132` recommends ≥1.9. Detect support once per executable/version,
+without starting a server; never blindly pass an unsupported option. On older
+versions retain explicitly non-starting commands, report the protection gap
+and recommend upgrading; do not claim the same guarantee. The decision to
+ship this guarded hotfix is separate from nesting (§11, decision 8).
+
+### Phase 1a — routing and identity
 
 Introduce a core-owned `TmuxServer` descriptor, required by every session-scoped
-operation. Its normal endpoint is `tmux -L wt-<project-key> …`. Derive the key
-from the canonical git common-directory identity (fixed stable hash algorithm,
+operation. Its normal endpoint is `tmux -L wt-<name>-<hash> …`: a readable
+frozen local name plus a project-identity hash. Derive the key from the canonical git common-directory identity (fixed stable hash algorithm,
 not Rust's randomized hasher), with a locally recorded identity check to detect
-collisions. Do not use the repo-controlled prefix, registry display name or hub
-slug. Linked worktrees share the key; independent clones do not. Moving a repo
+collisions. Do not use the repo-controlled prefix, mutable registry display name
+or hub slug as identity; the readable name is frozen when the endpoint is
+assigned. Linked worktrees share the key; independent clones do not. Moving a repo
 requires explicit adoption/rebinding, not silently starting another server.
 Normalize the socket root across GUI/CLI environments; inherited `TMUX_TMPDIR`
 or `TMUX` must not redirect an otherwise identical key.
@@ -512,7 +577,7 @@ nest attaches accidentally. Version detection (`tmux -V`) is the only ordinary
 call with no session endpoint. Add an audit guard that rejects new raw tmux
 subprocess sites outside the descriptor/PTY adapter and version probe.
 
-### Guard against duplicate servers after socket loss
+### Phase 1b — lease and recovery guard (not a nesting dependency)
 
 Record a local, non-synced lease under the git common dir: endpoint, server PID,
 UID, process start identity/boot identity and executable identity. Take a
@@ -544,37 +609,36 @@ cause. Feature-detect/support the minimum shipped tmux versions explicitly; if
 `-N` is unavailable, use only non-starting probes and fail closed on ambiguity.
 macOS and Linux process-identity verification need platform-specific witnesses.
 
-### Live migration: drain, do not “move” processes
+### Phase 1a — restart-based drain, without an adoption UI
 
-Tmux does not provide a transparent transfer of running panes between independent
-servers. Do not kill/relaunch 25 agents as an update side effect, and do not
-pretend capture-pane restores process state.
+Tmux cannot transparently move running panes between independent servers.
+Existing live lanes stay on their legacy server; new launches use the project
+server. A lane moves when its owner closes and reopens it. No forced mass
+restart, capture-pane “restore,” special adoption screen or migration wizard.
 
-On upgrade, perform a read-only inventory of legacy endpoints, matching canonical
-session identities and pane cwd to registered lanes, including provider and
-`~term` sidecars. Save the concrete server/session assignment for adopted live
-lanes. Ambiguous sessions require user resolution; no default-server catch-all
-adoption on every poll. New launches use the project server, while existing
-lanes keep their legacy endpoint until their owner closes/restarts them.
-Snapshots query each distinct legacy endpoint once and partition its readings
-by project; control operations use that saved assignment. The UI shows the
-remaining legacy count and a planned drain/restart action. Never kill the shared
-legacy server while another project's or unmanaged sessions remain.
+During the drain, the app lists **both** the legacy default server and all
+project servers, including provider and `~term` sidecars. Enumerate each endpoint
+once and associate sessions by existing name/cwd rules; retain endpoint identity
+on every resolved session handle and control call. Existing legacy sessions win
+for their lane until closed; do not launch a duplicate on the project server.
+If both endpoints contain a candidate, report ambiguity and refuse mutation
+rather than adding an adoption UI or choosing arbitrarily. Stop querying the
+legacy endpoint after it is confirmed empty; never kill that shared server or
+other projects' or unmanaged sessions to hasten the drain.
 
-If the legacy socket is already missing, require verified process ownership
-before recovery; if it cannot be established, report the blocker and suppress
-duplicate launch. Remove the transition assignment only after the old session
-is confirmed gone, then create its replacement on the project server. Keep the
-session name where unambiguous so Claude naming does not change unnecessarily.
-Restart old MCP processes during the coordinated upgrade; they otherwise retain
-the default-socket implementation despite a new CLI on disk. Rollback must retain
-new endpoints and block unsupported mutation, not silently fall back to default.
+Phase 1a does not promise automatic recovery of a missing legacy socket. An
+unreachable known endpoint blocks automatic relaunch and requests manual
+recovery; an empty successful list is different from a failed probe. Phase 1b
+adds the verified lease/SIGUSR1 recovery described above. Restart old MCP
+processes during the upgrade: they otherwise keep the old socket implementation
+and lack the hotfix despite a new CLI on disk. Rollback must retain endpoints
+and block unsupported mutation, not silently fall back to default.
 
-**Ship this first.** It reduces the blast radius of today's failure without any
-new lane UI. One server still fails an entire project's tree, and does not solve
-quota or filesystem contention. No socket-loss experiments against the user's
-servers: future tests use unique explicit `-L` on **every** call, macOS and Linux,
-and prove one project's recovery leaves another project's panes alive.
+**Only phase 1a is a nesting prerequisite.** It reduces cross-project blast
+radius; phase 1b is independently useful hardening and must not delay the tree.
+One server still fails a project's whole tree. Future socket-loss tests use
+unique explicit `-L` on every call, on macOS and Linux; never experiment on the
+user's servers.
 
 ## 9. Load, quota and acceptance evidence
 
@@ -596,14 +660,28 @@ workflow guidance, not a hidden hardcoded spending policy. Quota overrides
 remain explicit and never override scope.
 
 Do not poll a separate full workspace for each hub. Build adjacency/roll-ups
-once from the existing snapshot, O(lanes); read each server once per app tick,
-batch captures per server, and cache provider logs as today. MCP resource lists
-stay cheap; full activity is on demand. Many `wait` clients can still multiply
+once from the existing snapshot, O(lanes). AGENTS.md records a 0.28s git sweep
+for one project with nine worktrees; that workload grows with lanes, not tree
+depth. Per-project servers also replace one global session/pane enumeration with
+P `list-sessions`/`list-panes` batches per tick for P project servers, plus the
+legacy endpoint while draining. Read each once, batch captures per server, and
+cache provider logs as today; isolation is not a claim of lower polling cost.
+MCP resource lists stay cheap; full activity is on demand. Many `wait` clients can still multiply
 polling: measure one project with 1, 5 and 20 agents, watcher count, process
 count, git/tmux spawns and visible/hidden app CPU before adding a shared daemon.
 Use CLI counting wrappers, not app PATH injection (AGENTS.md explains why that
 undercounts). Keep GitHub polling selected-project-only; hubs add no per-hub
 requests and no new background GitHub writer.
+
+The Bats shim must change in the same PR as the first global tmux flag.
+`test/helpers/common.bash:212–306` sets `sub` from `$1` at :224 before its
+option loop, and checks the `copy-mode -q -t X ;` prefix at :216 before either.
+Leading `-L`/`-N` therefore misparse the current shim. There are 47 `TMUX_LOG`
+references in `test/*.bats`, including literal argv assertions. Parse global
+options first, log endpoint/options separately from normalized subcommand argv,
+and preserve the copy-mode chain behavior. Keep explicit endpoint assertions so
+normalizing the log cannot hide a missing `-L`/`-N`. `real-tmux.bats` already uses
+an explicit `-S` socket; preserve that isolation.
 
 Required implementation witnesses, with new regression tests shown red first:
 
@@ -612,24 +690,32 @@ Required implementation witnesses, with new regression tests shown red first:
 | Flat compatibility | No hubs: unchanged nav grouping, ⌘N and omitted-parent MCP creation off main; mixed project: flat creation still available without promoting a hub. |
 | Relationship storage | Legacy empty parent, unknown-key preservation, invalid/cyclic/deep graph, tracked store, missing parent, branch mismatch, crash between Git/store writes, concurrent create/remove. |
 | Scope | Hub can act on child; same request to sibling/main/foreign project is denied, with aliases too. Leaf cannot create peers. Corrupt/missing identity cannot expand authority; generic apply/removal paths cannot bypass checks. |
-| Git | Two sibling PRs to a published hub, squash both, merge new main into hub, owner-only child rebase, child archive to hub, hub archive/aggregate PR to main. Wrong-base merged PR and post-merge child commits must block cleanup. |
+| Git | Two sibling PRs to a published hub, squash both, merge new main into hub, owner-only child rebase, child archive to hub, hub archive/aggregate PR to main. Wrong-base merged PR and post-merge child commits must block cleanup; an open remote child PR blocks hub branch deletion even with no child worktree. |
 | Removal | Closed/orphaned/parked child blocks hub removal, force does not cascade, branch-deletion consent distinct from dirty-tree consent. |
-| tmux | Every CLI/app/MCP route selects the target server; repeated `%1`/session names on two servers stay distinct. Missing-socket recovery preserves running pane PIDs; dead/reused/unknown PID cannot be signalled; concurrent launches cannot start duplicates. Legacy drain preserves sidecars and other projects. |
+| Bats | Shim parses leading `-L`/`-N` before subcommand and copy-mode detection, records flags separately, preserves literal argv assertions and chain execution; a missing required flag fails its own assertion. Real `-S` tests stay isolated. |
+| Hotfix | On supported tmux, every non-launch call carries `-N`, including command chains and PTY attach; intentional launch omits it. Unsupported versions produce a clear compatibility result rather than broken commands. |
+| tmux | Every CLI/app/MCP route selects the target server; repeated `%1`/session names on two servers stay distinct. Missing-socket recovery preserves running pane PIDs; dead/reused/unknown PID cannot be signalled; concurrent launches cannot start duplicates. Phase 1a restart-based drain preserves sidecars and other projects without an adoption UI; phase 1b separately proves recovery. |
 | Real app | Collapsed hub shows busy/waiting/unread children without clearing unread; hub/child terminals attach to intended endpoint; nav history, short-window hit tests and slow refresh races work. Claude, Codex and pi each observed on screen. |
 | Environment | Stable app and two hub dev builds coexist with separate data, ports and identities. Compose teardown of one lane leaves the others intact. |
 | Quota/load | Parallel launches across distinct MCP processes honor reservations; a near-spent window refuses launch but preserves brief; hidden app polling and collapsed-tree roll-up do not add full snapshots. |
 
 ## 10. Phasing
 
-1. **Per-project tmux servers and recovery, useful alone.** Descriptor, complete
-   core/app routing, validated lease, unknown/unreachable state, legacy drain,
-   cross-project target routing and real-app witnesses. No nesting yet.
-2. **A complete shallow-tree vertical slice.** Declared relationships, bound
-   targets, core invariants, scoped MCP, parent-aware new/health/PR interpretation,
+- **Independent hotfix, ship now:** feature-detected `-N` on non-launch calls,
+  with the Bats shim updated. No dependency on project routing or nesting.
+- **Phase 1a — per-project routing, useful alone:** descriptor and sandbox
+  namespace, `-L` on every core/app/MCP call, endpoint-qualified identities,
+  restart-based drain listing legacy and project servers, and real-app witnesses.
+  No adoption UI. This is the **only tmux prerequisite for phase 2**.
+- **Phase 1b — recovery, separate:** local lease, startup lock, no-start probes,
+  verified PID/socket identity and SIGUSR1 recovery. Can ship after phase 2;
+  phase 1a's unreachable state must not imply it already recovers sockets.
+- **Phase 2 — a complete shallow-tree vertical slice, depends on 1a only.**
+   Declared relationships, bound targets, core invariants, scoped MCP, parent-aware new/health/PR interpretation,
    guarded removal, lane terminology and the minimal tree UI ship together.
    Manually operated git/gh flow is sufficient; demonstrate one hub and two
    children through both close-outs before enabling general use.
-3. **Comfort and larger fan-out.** Refined roll-ups/search/DnD, concurrency
+- **Phase 3 — comfort and larger fan-out.** Refined roll-ups/search/DnD, concurrency
    reservations and measured polling budgets, user-only dev-environment presets,
    parent-aware skill guidance and explicit repair/rebind tooling. The essential
    target-aware close-out instructions ship in phase 2, not after users need them.
@@ -651,10 +737,18 @@ separate decisions, not latent powers of `parent`.
    shell/GitHub security boundary.
 4. **Lifecycle:** refuse hub removal/archive with any children and omit cascade?
    Recommended yes; close only the hub session independently.
-5. **Rollout:** ship tmux isolation/recovery first, drain legacy sessions on
-   owner-approved restarts, and upgrade/restart long-lived MCPs before nesting?
-   Recommended yes; no forced mass restart.
+5. **Rollout:** ship phase 1a routing/sandbox namespace/restart-based drain
+   before nesting, with phase 1b lease/SIGUSR1 recovery independent? Recommended
+   yes; upgrade/restart long-lived MCPs, no adoption UI or forced mass restart.
 6. **Fan-out:** start with guidance of two concurrently working children per hub,
    then ship configurable account/provider-wide launch reservations before larger
    fan-out? Choose a preferred concurrency budget; quota percentage alone cannot
    prevent a burst.
+7. **Review policy:** should the hub launch a Fable reviewer for each child PR
+   and merge after approval and passing gates, with David reviewing only the
+   aggregate hub PR, or should David review every child too? Recommend the
+   former; this is proposed policy, not authority granted by this document.
+8. **Immediate tmux hotfix:** ship feature-detected `-N` on all non-launch calls
+   now, independently of 1a/1b/nesting, with explicit older-tmux compatibility
+   and the Bats shim changes? Recommended yes; intentional launches still need
+   the later recovery guard for protection against a missing live-server socket.
