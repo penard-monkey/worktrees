@@ -146,4 +146,37 @@ assert.match(
   `README must record the bundle's real SHA-256 (${sha})`,
 );
 
-console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash');
+// Routing lives in vite's two MODE files, and the invariant that matters is
+// not which key is in them — it is that the laptop endpoint can NEVER ship.
+// Asserted with a dummy key so this holds both before the real keys are pasted
+// and after: the URL rule is what is under test, not the credential.
+const DUMMY = 'pk_test_key';
+const envRouting = (file) => Object.fromEntries(
+  fs.readFileSync(file, 'utf8').split('\n')
+    .filter((l) => l.startsWith('VITE_ORFIS_'))
+    .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+);
+for (const f of ['app/.env.production', 'app/.env.development']) {
+  assert.ok(fs.existsSync(f), `${f} must exist — routing is release-owned, not user-supplied`);
+}
+const prodUrl = envRouting('app/.env.production').VITE_ORFIS_API_URL;
+const devUrl = envRouting('app/.env.development').VITE_ORFIS_API_URL;
+// A release build must accept the production endpoint...
+assert.equal(
+  feedbackConfig(DUMMY, prodUrl, false)?.apiUrl, prodUrl,
+  'the production endpoint must be usable in a release build',
+);
+// ...and must REFUSE the development one. This is the whole point of splitting
+// the files by mode: `feedbackConfig` permits http:// only for a loopback host
+// in a dev build, so the laptop endpoint cannot reach a shipped binary even if
+// the file is copied there.
+assert.equal(
+  feedbackConfig(DUMMY, devUrl, false), null,
+  'the development endpoint must be refused in a release build',
+);
+assert.equal(
+  feedbackConfig(DUMMY, devUrl, true)?.apiUrl, devUrl,
+  'the development endpoint must work in a dev build',
+);
+
+console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash, mode-split routing');
