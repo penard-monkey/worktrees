@@ -85,8 +85,20 @@ if (gFrom < 0 || gTo < 0 || zFrom < 0 || !(from >= 0 && from < gFrom)) {
   process.exit(1);
 }
 // The predicate is DOM-based on purpose; a state mirror would drift silently.
-if (!/const modalOpen = \(\) => !!document\.querySelector\("\.modal-scrim, \.scrim"\);/.test(fs.readFileSync(APP, "utf8")))
-  fail("App.tsx: modalOpen no longer asks the DOM for `.modal-scrim, .scrim` — a dialog added later would go unguarded");
+// The selector lives in one constant (shared with onlySettingsOpen), so check
+// the constant's VALUE rather than the call site: both scrim classes must
+// still be queried, and extra entries are allowed — `[data-dialog-open]` is
+// how a dialog in a shadow root, which can paint no light-DOM class, declares
+// itself. Anything the guard must see has to appear here.
+{
+  const src = fs.readFileSync(APP, "utf8");
+  const sel = src.match(/const DIALOG_OPEN = "([^"]+)";/)?.[1];
+  const asksDom = /const modalOpen = \(\) => !!document\.querySelector\(DIALOG_OPEN\);/.test(src);
+  const counts = /document\.querySelectorAll\(DIALOG_OPEN\)\.length === 1/.test(src);
+  if (!sel || !asksDom || !counts || !sel.includes(".modal-scrim") || !sel.includes(".scrim"))
+    fail("App.tsx: modalOpen/onlySettingsOpen no longer ask the DOM for `.modal-scrim` and `.scrim` "
+       + `via DIALOG_OPEN — a dialog added later would go unguarded (selector: ${sel ?? "not found"})`);
+}
 if (from < 0 || to < 0 || !dirTables || !navChord) {
   fail("App.tsx: the ⌘/⌘⌥ zoom block's markers are gone — the chord is unchecked");
   console.error("\nzoom-check: 1 failure(s)");

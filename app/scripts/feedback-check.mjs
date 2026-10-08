@@ -41,8 +41,10 @@ assert.equal(escape.escapeDepth(), 0);
 assert.equal(events.size, 0);
 
 class HTMLElement {
-  constructor(name) { this.name = name; this.inert = false; this.classes = new Set(); }
+  constructor(name) { this.name = name; this.inert = false; this.classes = new Set(); this.attrs = new Map(); }
   get classList() { return { add: c => this.classes.add(c), remove: c => this.classes.delete(c) }; }
+  setAttribute(k, v) { this.attrs.set(k, v); }
+  removeAttribute(k) { this.attrs.delete(k); }
   contains(other) { return other === this; }
   focus() {}
   get isConnected() { return true; }
@@ -104,8 +106,12 @@ assert.match(real.mod.feedbackSnapshot().notice, /not yet received/);
 assert.doesNotMatch(real.mod.feedbackSnapshot().notice, /memory only/, 'a durable queue must not warn about losing it');
 real.options().cb.queued({ durable: false });
 assert.match(real.mod.feedbackSnapshot().notice, /memory only/, 'a memory-only queue must say so');
+// Acceptance shows NO toast — the dialog already told the user it was sent and
+// that nothing else was needed. But it must CLEAR the queued notice, or
+// "waiting for retry" stands as a lie once the report has landed.
 real.options().cb.accepted();
-assert.match(real.mod.feedbackSnapshot().notice, /received your feedback/);
+assert.equal(real.mod.feedbackSnapshot().notice, '', 'acceptance must not raise a toast');
+assert.equal(real.mod.feedbackSnapshot().error, false);
 real.mod.stopFeedback();
 assert.equal(real.counts().destroyed, 1);
 const late = await adapter();
@@ -163,10 +169,13 @@ assert.match(widgetSrc, /askForEmail: false/);
   opened(host);
   assert.equal(host.inert, false, 'the dialog host must stay interactive');
   assert.equal(root.inert, true, 'the app behind it must be inert');
-  assert.ok(host.classes.has('modal-scrim'), 'the scrim class marks the dialog for the chord guard');
+  assert.ok(host.attrs.has('data-dialog-open'), 'the dialog marks itself for the chord guard');
+  assert.ok(!host.classes.has('modal-scrim'),
+    '.modal-scrim is a full-screen scrim, not a marker — on the host it paints a second one');
   closed();
   assert.equal(root.inert, false, 'closing restores the app');
   assert.equal(host.inert, false);
+  assert.ok(!host.attrs.has('data-dialog-open'), 'closing clears the marker');
 
   // The regression itself: <html> is not a child of <body>, so it exempts
   // nothing. Inerting every child would take the dialog with it.
@@ -180,6 +189,26 @@ assert.match(widgetSrc, /askForEmail: false/);
   assert.equal(host.inert, false);
   closed();
 }
+
+// The chord guard and the dialog marker are two halves of one agreement in two
+// files. Pin them together, and pin that the marker stays STYLE-FREE: giving
+// it a rule would recreate the double-scrim bug under a new name.
+const feedbackSrc = fs.readFileSync('app/src/feedback.ts', 'utf8');
+const appSrc = fs.readFileSync('app/src/App.tsx', 'utf8');
+const marker = feedbackSrc.match(/DIALOG_MARKER = "([a-z-]+)"/)?.[1];
+assert.ok(marker, 'feedback.ts must name its dialog marker');
+// The SELECTOR, not the file: the comment above it names the marker too, so
+// `appSrc.includes(...)` passes on prose while the real query has dropped it.
+const selector = appSrc.match(/const DIALOG_OPEN = "([^"]+)"/)?.[1];
+assert.ok(selector, 'App.tsx must declare DIALOG_OPEN as one selector constant');
+assert.ok(
+  selector.includes(`[${marker}]`),
+  `App.tsx's dialog-open selector must include [${marker}] (got: ${selector})`,
+);
+assert.doesNotMatch(
+  fs.readFileSync('app/src/App.css', 'utf8'), new RegExp(`\\[${marker}\\]`),
+  'the dialog marker must carry no styling',
+);
 
 // We ship someone else's bytes, so the terms have to ship WITH them. Two
 // independent carriers, because each fails differently: the sidecar file is
@@ -242,4 +271,4 @@ assert.equal(
   'the development endpoint must work in a dev build',
 );
 
-console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash, mode-split routing, background inerting');
+console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash, mode-split routing, background inerting, style-free dialog marker');

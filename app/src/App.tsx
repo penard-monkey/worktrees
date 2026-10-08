@@ -367,14 +367,21 @@ const zoomDir = (e: KeyboardEvent): 1 | -1 | 0 | undefined => ZOOM_BY_KEY[e.key]
  *  dialogs), so a dialog written next year is covered without anyone
  *  remembering to add a flag. The sidebar's `.menu-catch` check is the same
  *  idea; `.menu-catch` itself is NOT included, because a context menu is
- *  dismissed by the very act of pressing a chord elsewhere. */
-const modalOpen = () => !!document.querySelector(".modal-scrim, .scrim");
+ *  dismissed by the very act of pressing a chord elsewhere.
+ *
+ *  `[data-dialog-open]` is the exception the rule needed: a dialog rendered in
+ *  a SHADOW ROOT (the Orfis feedback form) paints its backdrop where no
+ *  light-DOM class can be found, so it marks its host instead. That marker
+ *  must stay style-free — adding `.modal-scrim` to it instead, which is what
+ *  this did first, paints a second full-screen scrim over the dialog's own. */
+const DIALOG_OPEN = ".modal-scrim, .scrim, [data-dialog-open]";
+const modalOpen = () => !!document.querySelector(DIALOG_OPEN);
 /** …and is that dialog Settings, alone? ⌘, is the one chord allowed through the
  *  guard, and only because it CLOSES what is on top. With anything stacked over
  *  Settings (What's new) or any other dialog up, it must do nothing rather than
  *  pull a surface out from under the one being read. */
 const onlySettingsOpen = () =>
-  document.querySelectorAll(".modal-scrim, .scrim").length === 1 &&
+  document.querySelectorAll(DIALOG_OPEN).length === 1 &&
   !!document.querySelector(".settings-modal");
 
 /** Where ⌘F lands. Follows the surface the user last TOUCHED, not the one that

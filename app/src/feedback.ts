@@ -9,7 +9,12 @@ export const QUEUED_NOTICE = "Feedback is waiting for retry, not yet received. R
  *  sentence because the SDK could not tell us which had happened; it can now
  *  (`QueuedResult.durable`), so the notice stops guessing. */
 export const QUEUED_MEMORY_NOTICE = "Feedback is waiting for retry, not yet received — and it is held in memory only, so quitting Worktrees loses it.";
-export const ACCEPTED_NOTICE = "Orfis received your feedback. Thank you.";
+/** There is deliberately no "we received it" notice. The SDK's own dialog
+ *  already closes on "Your note is in the queue. Nothing else is needed from
+ *  you." — a toast afterwards re-tells the user something they were just told
+ *  and promised they could forget, and it lands over the app rather than in
+ *  the surface they were using. The queued and error notices stay, because
+ *  those say something the dialog did not. */
 export type FeedbackState = { available: boolean; notice: string; error: boolean };
 let state: FeedbackState = { available: false, notice: "", error: false };
 const listeners = new Set<() => void>();
@@ -25,6 +30,12 @@ let starting: Promise<void> | null = null;
 let generation = 0;
 let releaseDialog: (() => void) | null = null;
 let returnFocus: HTMLElement | null = null;
+
+/** Marks "a shadow-hosted dialog is open" for App.tsx's chord guard. An
+ *  attribute, not a class, and deliberately not `.modal-scrim`: it must carry
+ *  no styling of any kind. App.tsx's `modalOpen`/`onlySettingsOpen` query it;
+ *  `feedback-check.mjs` asserts the two stay in step. */
+export const DIALOG_MARKER = "data-dialog-open";
 
 /** Background is inert while the SDK's shadow-root dialog owns focus. Its own
  * Tab handler wraps focus; inert also covers navigation starting outside it.
@@ -42,14 +53,21 @@ function opened(host: HTMLElement | null) {
   const top = host ? kids.find(el => el === host || el.contains(host)) : undefined;
   const background = top ? kids.filter(el => el !== top && !el.inert) : [];
   for (const el of background) el.inert = true;
-  // App's chord guard sees shadow-hosted modals too. It only ever queries for
-  // the class, so the fallback keeps the guard working when inerting is off.
-  const scrim = top ?? document.documentElement;
-  scrim.classList.add("modal-scrim");
+  // The app's chord guard must see shadow-hosted modals too, but it cannot see
+  // one the way it sees the others: its rule is "every overlay PAINTS a
+  // `.modal-scrim`", and this dialog paints its backdrop inside the shadow
+  // root, where no light-DOM class exists to find. Borrowing `.modal-scrim` as
+  // a marker is what it did first, and that class is not a marker — it is a
+  // full-screen fixed scrim with its own background, padding and z-index, so
+  // the host painted a SECOND scrim over the SDK's own and trapped the dialog
+  // in a z-index 100 stacking context. This marker paints nothing; App.tsx
+  // queries for it alongside the two scrim classes.
+  const marker = top ?? document.documentElement;
+  marker.setAttribute(DIALOG_MARKER, "");
   const releaseEscape = registerEscape(() => widget?.close());
   releaseDialog = () => {
     releaseEscape();
-    scrim.classList.remove("modal-scrim");
+    marker.removeAttribute(DIALOG_MARKER);
     for (const el of background) el.inert = false;
   };
 }
@@ -63,7 +81,10 @@ const callbacks: FeedbackCallbacks = {
   opened,
   closed,
   queued: ({ durable }) => update({ notice: durable ? QUEUED_NOTICE : QUEUED_MEMORY_NOTICE, error: false }),
-  accepted: () => update({ notice: ACCEPTED_NOTICE, error: false }),
+  // Not a notice of its own — but it must CLEAR a queued one. Having said
+  // "waiting for retry", staying silent once it lands would leave that
+  // standing as a lie until something else happened to replace it.
+  accepted: () => update({ notice: "", error: false }),
 };
 
 /** Called once by main.tsx, outside React/StrictMode. Duplicate calls share the
