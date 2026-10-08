@@ -282,3 +282,32 @@ session_count() {
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane0_cmd 'repo-feat-isolation~agent~codex')" != *resume* ]]
 }
+
+# tmux -N ("do not start the server"): a client that may start one, finding the
+# socket refused or missing, unlinks it and starts a SECOND server — orphaning
+# every session in the first. Only `new-session` may leave it off.
+@test "open passes -N to every tmux call except new-session" {
+  make_worktree feat-x
+  : > "$TMUX_LOG.globals"
+  run_wt_tty open feat-x --spare
+  [ "$status" -eq 0 ]
+  grep -qx '|new-session' "$TMUX_LOG.globals"
+  for sub in list-sessions list-panes split-window select-pane set-option attach; do
+    grep -qx -- "-N|$sub" "$TMUX_LOG.globals" || { echo "no -N on $sub"; cat "$TMUX_LOG.globals"; false; }
+  done
+  # Nothing but new-session runs without it.
+  [ "$(grep -v '^-N|' "$TMUX_LOG.globals" | grep -vcx '|new-session')" -eq 0 ]
+  # And the subcommand log reads exactly as it did before.
+  grep -q 'attach -t repo-feat-x' "$TMUX_LOG"
+  grep -q '^tmux new-session -d -s repo-feat-x' "$TMUX_LOG"
+}
+
+@test "open on a tmux older than 3.2 never passes -N (it would reject it)" {
+  make_worktree feat-x
+  : > "$TMUX_LOG.globals"
+  FAKE_TMUX_VERSION=3.1c run_wt_tty open feat-x --spare
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-x
+  grep -qx '|attach' "$TMUX_LOG.globals"
+  ! grep -q -- '-N' "$TMUX_LOG.globals"
+}

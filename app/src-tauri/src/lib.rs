@@ -7725,7 +7725,11 @@ async fn term_open(
     // UTF-8-capable. Without it tmux sniffs LC_ALL/LC_CTYPE/LANG, and a
     // GUI-launched app has none — tmux then draws every non-ASCII cell as "_".
     // Always safe here: the receiving end is xterm.js, which is always UTF-8.
+    // -N (`tmux::no_start_args`): an attach under a tty that finds the socket
+    // refused or missing would otherwise unlink it and start a second server,
+    // orphaning every session in the first.
     let mut cmd = CommandBuilder::new("tmux");
+    cmd.args(worktrees_core::tmux::no_start_args());
     cmd.args(["-u", "attach-session", "-t", &session]);
     cmd.env("TERM", "xterm-256color");
 

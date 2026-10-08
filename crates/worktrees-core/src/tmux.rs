@@ -69,11 +69,107 @@ pub fn kill_shell_sidecars(canonical_session: &str) {
 }
 
 pub fn have_tmux() -> bool {
-    Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
+    tmux_version().is_some()
 }
 
+/// `tmux -V`'s output, or `None` when tmux cannot be run. Probed every call on
+/// purpose: the app re-checks after refreshing PATH, so "not installed" must
+/// never stick. Only the `-N` verdict below is cached, and only once a probe
+/// succeeded.
+fn tmux_version() -> Option<String> {
+    let o = Command::new("tmux").arg("-V").output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+static NO_START: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The global options every NON-launching tmux call carries: `["-N"]` on a
+/// tmux that has it (≥ 3.2), else nothing (today's behaviour).
+///
+/// **Why.** A tmux client whose command may start a server (`new-session`,
+/// and `attach-session` under a tty — measured on 3.7c), on finding the socket
+/// refused or missing, takes the lock, UNLINKS the socket and starts a fresh
+/// server. A live server that was only too busy to accept (full listen
+/// backlog) is then orphaned with every session in it, and the next `open`
+/// relaunches agents that are still running. `-N` makes the client fail
+/// instead. Only `tmux_launch` may leave it off.
+pub fn no_start_args() -> &'static [&'static str] {
+    let supported = match NO_START.get() {
+        Some(b) => *b,
+        None => match tmux_version() {
+            Some(v) => *NO_START.get_or_init(|| supports_no_start(&v)),
+            None => false,
+        },
+    };
+    if supported { &["-N"] } else { &[] }
+}
+
+/// Does this `tmux -V` line name a tmux with `-N` (added in 3.2)? `master` is
+/// a source build, newer than any release. Anything unparsable is `false`:
+/// an unknown tmux keeps the behaviour it has always had.
+pub fn supports_no_start(version: &str) -> bool {
+    let Some(v) = version.trim().strip_prefix("tmux ") else { return false };
+    let v = v.trim();
+    if v == "master" {
+        return true;
+    }
+    let v = v.strip_prefix("next-").unwrap_or(v);
+    let mut it = v.splitn(2, '.');
+    let (Some(major), Some(rest)) = (it.next(), it.next()) else { return false };
+    let minor: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    match (major.parse::<u32>(), minor.parse::<u32>()) {
+        (Ok(major), Ok(minor)) => (major, minor) >= (3, 2),
+        _ => false,
+    }
+}
+
+/// Run tmux for anything that must NOT bring a server up — which is every call
+/// but `new-session`. Carries `no_start_args()`, so a new call site is safe by
+/// default; when the server is down it fails exactly as before ("no server
+/// running" / "error connecting to …"), so callers that treat a failure as
+/// "no sessions" are unchanged.
 pub fn tmux(args: &[&str]) -> std::io::Result<Output> {
+    Command::new("tmux").args(no_start_args()).args(args).output()
+}
+
+/// Run tmux for a command that is MEANT to start a server when none is up
+/// (`new-session`). The only caller that may omit `-N`; see `no_start_args`.
+pub fn tmux_launch(args: &[&str]) -> std::io::Result<Output> {
+    wait_out_refusal();
     Command::new("tmux").args(args).output()
+}
+
+/// How long `tmux_launch` waits for a server that is REFUSING connections.
+const REFUSED_TRIES: u32 = 5;
+const REFUSED_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Before a launch: if the socket is there but refuses (a busy server's full
+/// backlog — or a dead server's leftover socket), wait a moment. A launch that
+/// meets a refusal unlinks the socket and starts a second server, orphaning
+/// the first; a busy server usually accepts again within milliseconds. After
+/// ~1s it is most likely a stale socket, and the launch goes ahead so tmux's
+/// own stale-socket recovery still works. Narrows the race, cannot close it —
+/// only a `-N` probe can be refused without consequences.
+fn wait_out_refusal() {
+    if no_start_args().is_empty() {
+        return;
+    }
+    for _ in 0..REFUSED_TRIES {
+        match tmux(&["start-server"]) {
+            Ok(o) if !o.status.success() && is_refusal(&String::from_utf8_lossy(&o.stderr)) => {
+                std::thread::sleep(REFUSED_WAIT)
+            }
+            _ => return,
+        }
+    }
+}
+
+/// tmux's client spells ECONNREFUSED — the socket exists and nobody accepted —
+/// as `no server running on <path>`, and every other connect error as
+/// `error connecting to <path> (<strerror>)` (measured on 3.7c). A MISSING
+/// socket is the latter, and means "no server": what a launch is for.
+fn is_refusal(stderr: &str) -> bool {
+    stderr.contains("no server running on ")
 }
 
 /// Does a session named EXACTLY `name` exist? (`list-sessions` + exact match, not
@@ -885,7 +981,7 @@ mod paste_tests {
 }
 
 pub fn new_session(session: &str, wt: &str, pane0: &str) -> Result<String, String> {
-    let o = tmux(&["new-session", "-d", "-s", session, "-c", wt, "-P", "-F", "#{pane_id}", pane0])
+    let o = tmux_launch(&["new-session", "-d", "-s", session, "-c", wt, "-P", "-F", "#{pane_id}", pane0])
         .map_err(|e| e.to_string())?;
     if o.status.success() {
         Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -924,7 +1020,7 @@ pub fn attach_or_switch(session: &str) -> bool {
     }
     let in_tmux = std::env::var("TMUX").map(|v| !v.is_empty()).unwrap_or(false);
     let sub = if in_tmux { "switch-client" } else { "attach" };
-    let _ = Command::new("tmux").args([sub, "-t", session]).status();
+    let _ = Command::new("tmux").args(no_start_args()).args([sub, "-t", session]).status();
     true
 }
 
@@ -940,6 +1036,36 @@ pub fn kill_session(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_start_is_offered_only_from_tmux_3_2() {
+        assert!(supports_no_start("tmux 3.7c"));
+        assert!(supports_no_start("tmux 3.7c\n"));
+        assert!(supports_no_start("tmux 3.2a"));
+        assert!(supports_no_start("tmux 3.2"));
+        assert!(supports_no_start("tmux 4.0"));
+        assert!(supports_no_start("tmux 3.10"), "minor compared as a number, not text");
+        assert!(supports_no_start("tmux next-3.6"));
+        assert!(supports_no_start("tmux master"));
+        assert!(!supports_no_start("tmux 3.1c"));
+        assert!(!supports_no_start("tmux 2.9a"));
+        assert!(!supports_no_start("tmux 1.9"));
+        assert!(!supports_no_start("tmux next-3.1"));
+        // Unknown means today's behaviour, never a flag an old tmux rejects.
+        assert!(!supports_no_start(""));
+        assert!(!supports_no_start("tmux"));
+        assert!(!supports_no_start("tmux openbsd-7.4"));
+        assert!(!supports_no_start("garbage 3.7"));
+        assert!(!supports_no_start("tmux 3"));
+        assert!(!supports_no_start("tmux x.y"));
+    }
+
+    #[test]
+    fn only_a_refused_socket_delays_a_launch() {
+        assert!(is_refusal("no server running on /private/tmp/tmux-501/default\n"));
+        assert!(!is_refusal("error connecting to /private/tmp/tmux-501/x (No such file or directory)\n"));
+        assert!(!is_refusal(""));
+    }
 
     #[test]
     fn only_a_person_at_a_terminal_may_attach() {

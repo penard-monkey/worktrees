@@ -39,6 +39,9 @@ teardown() {
   if [ -n "${REAL_TMUX:-}" ] && [ -n "${RT_SOCK:-}" ]; then
     "$REAL_TMUX" -S "$RT_SOCK" kill-server 2>/dev/null || true
   fi
+  # A server this test orphaned (its socket deleted) has no socket to reach it
+  # by. Only ever a pid this test started and recorded itself.
+  if [ -n "${RT_ORPHAN_PID:-}" ]; then kill "$RT_ORPHAN_PID" 2>/dev/null || true; fi
   case "${RT_DIR:-}" in /tmp/wtrt.?*) rm -rf "$RT_DIR" ;; esac
 }
 
@@ -90,4 +93,40 @@ teardown() {
   run tmux has-session -t repo-feat-x
   [ "$status" -ne 0 ]
   [ ! -d "$REPO/.worktrees/feat-x" ]
+}
+
+# The 2026-10-07 incident, reduced: a tmux client whose command may START a
+# server (attach under a tty, new-session), finding the socket missing or
+# refused, unlinks it and starts a SECOND server — the first one keeps running
+# with every session in it, unreachable. Here the socket is deleted between
+# `open`'s existence check and its attach, so the attach meets a missing socket.
+# With `-N` it must fail instead; the original server stays recoverable.
+# bats test_tags=real-tmux
+@test "real tmux: an attach that finds the socket gone starts no second server" {
+  command -v tmux >/dev/null || skip "no real tmux"
+  case "$("$REAL_TMUX" -V)" in "tmux "[012].*|"tmux 3."[01]*) skip "tmux < 3.2 has no -N" ;; esac
+  run_wt new feat-x --no-install --no-attach
+  [ "$status" -eq 0 ]
+  RT_ORPHAN_PID="$("$REAL_TMUX" -S "$RT_SOCK" display-message -p '#{pid}')"
+  [ -n "$RT_ORPHAN_PID" ]
+  # A server started by mistake must STAY up to be seen: by default an empty
+  # server exits at once and takes its socket with it.
+  printf 'set -s exit-empty off\n' > "$RT_DIR/keep.conf"
+  cat > "$SHIMS/tmux" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in attach|attach-session|switch-client) rm -f "$RT_SOCK"; break ;; esac
+done
+exec "$REAL_TMUX" -S "$RT_SOCK" -f "$RT_DIR/keep.conf" "\$@"
+EOF
+  chmod +x "$SHIMS/tmux"
+  run_wt_tty open feat-x
+  # No new server took the socket path...
+  [ ! -S "$RT_SOCK" ]
+  # ...and the old one, still alive, comes back on SIGUSR1 with its session.
+  kill -0 "$RT_ORPHAN_PID"
+  kill -USR1 "$RT_ORPHAN_PID"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$RT_SOCK" ] && break; sleep 0.1; done
+  "$REAL_TMUX" -S "$RT_SOCK" has-session -t repo-feat-x
+  [ "$("$REAL_TMUX" -S "$RT_SOCK" display-message -p '#{pid}')" = "$RT_ORPHAN_PID" ]
 }
