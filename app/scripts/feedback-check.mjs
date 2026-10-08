@@ -144,14 +144,20 @@ assert.match(widgetSrc, /captureDiagnostics: false/);
 // assertion: reverting to `document.documentElement` leaves the dialog usable
 // and silently stops inerting the background, so the behavioural test above
 // cannot see it.
-assert.match(widgetSrc, /body > \[data-orfis\]/, 'the adapter must resolve the SDK shadow host');
+assert.match(widgetSrc, /\[data-orfis\]/, 'the adapter must resolve the SDK shadow host');
 assert.doesNotMatch(
   widgetSrc, /opened\(document\.documentElement\)/,
   '<html> is not a child of <body>, so it exempts nothing from inerting',
 );
 
 assert.match(widgetSrc, /collectDeviceContext: false/);
-assert.match(widgetSrc, /askForEmail: false/);
+assert.match(widgetSrc, /askForEmail: true/, 'the optional reply-email field is on');
+// If it is on, Settings must not claim otherwise — the disclosure is a promise
+// about the payload, so it tracks the payload rather than the reverse.
+const sectionSrc = fs.readFileSync('app/src/FeedbackSection.tsx', 'utf8');
+assert.doesNotMatch(sectionSrc, /no email address is asked for/,
+  'Settings still says no email is asked for while the field is enabled');
+assert.match(sectionSrc, /email field is optional/, 'Settings must disclose the optional email field');
 
 // ── Background inerting: the dialog must never inert ITSELF ──────────────
 // `inert` leaves an element fully visible and refuses every click, so getting

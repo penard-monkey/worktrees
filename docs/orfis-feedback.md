@@ -21,11 +21,13 @@ surface. No diagnostic capture and no attached native logs.
   "surface": "macos-native",
   "type": "bug",
   "message": "<the user's text>",
-  "appVersion": "<version from the Rust binary>"
+  "appVersion": "<version from the Rust binary>",
+  "email": "<only if the user typed one>"
 }
 ```
 
-Nothing else *in the body*. Not logs, terminal contents, prompts, source,
+`email` is optional and user-entered — the field is shown, nothing is sent
+unless it is filled in. Nothing else *in the body*. Not logs, terminal contents, prompts, source,
 diffs, local metrics, repository or project paths, usernames, remotes, or any
 generated installation identifier.
 

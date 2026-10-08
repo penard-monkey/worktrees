@@ -2,6 +2,7 @@ import { init, type OrfisTheme } from "./vendor/orfis/orfis.es.js";
 import type { FeedbackConfig } from "./feedbackConfig";
 import type { FeedbackCallbacks, FeedbackWidget } from "./feedbackTypes";
 import { THEMES, type ThemeId } from "./settings";
+import { applyFeedbackSpacing } from "./feedbackStyle";
 
 /** Still gated, and the gate is now the only thing standing between this and
  *  a real send — so it is one constant with one reason, not a buried throw.
@@ -46,7 +47,7 @@ export function orfisTheme(root = document.documentElement): OrfisTheme {
  *  the dialog included, and the form rendered perfectly while refusing every
  *  click. Queried lazily rather than captured after `init`, so a host the SDK
  *  ever re-creates is still found. */
-const orfisHost = () => document.querySelector<HTMLElement>("body > [data-orfis]");
+const orfisHost = () => document.querySelector<HTMLElement>("[data-orfis]");
 
 export function createFeedbackWidget(
   config: FeedbackConfig,
@@ -55,11 +56,13 @@ export function createFeedbackWidget(
 ): FeedbackWidget {
   if (ACCEPTANCE_PENDING) throw new Error("Orfis packaged acceptance pending");
 
-  // Every privacy opt-out is passed explicitly rather than left to a default.
-  // With these three off, a report body is exactly `key`, `type`, `message`,
-  // `surface`, `appVersion` — and the form shows no diagnostics disclosure,
-  // because there is nothing to disclose. `orfis.es.d.ts` types them as the
-  // literal `false`, so dropping one does not typecheck.
+  // The two capture opt-outs are passed explicitly rather than left to a
+  // default, and typed as literal `false` in `orfis.es.d.ts` so dropping one
+  // does not typecheck. `askForEmail` is deliberately ON: the field is
+  // optional and the user types it or does not, which is a different thing
+  // from ambient collection. The body is then `key`, `type`, `message`,
+  // `surface`, `appVersion` and — only if filled in — `email`. Settings says
+  // so; that copy tracks this call, not the other way round.
   const widget = init({
     key: config.key,
     apiUrl: config.apiUrl,
@@ -69,7 +72,7 @@ export function createFeedbackWidget(
     title: "Send feedback about Worktrees",
     captureDiagnostics: false,
     collectDeviceContext: false,
-    askForEmail: false,
+    askForEmail: true,
     theme: orfisTheme(),
     onOpen: () => callbacks.opened(orfisHost()),
     onClose: callbacks.closed,
@@ -79,6 +82,12 @@ export function createFeedbackWidget(
     onQueued: (result) => callbacks.queued({ durable: result.durable !== false }),
     onSubmitted: () => callbacks.accepted(),
   });
+
+  // The SDK's `rem` sizing resolves against this app's 15px root, not the 16px
+  // it was drawn for, so the dialog rendered ~6% tight. applyFeedbackSpacing restates
+  // the SDK's own sheet against a 16px base — upstream's numbers exactly.
+  const host = orfisHost();
+  if (host) applyFeedbackSpacing(host);
 
   // Re-theme with the app. `[data-theme]` is written by `applySettings`, so one
   // observer on the root catches every path that changes appearance —

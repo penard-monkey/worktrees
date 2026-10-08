@@ -36,8 +36,9 @@ export interface OrfisOptions {
   /** No `device` block (locale, timezone, viewport, page path, referrer host,
    *  browser hints) and no `elapsedMs` form timing. */
   collectDeviceContext: false;
-  /** No reply-email field, so no address can be sent. */
-  askForEmail: false;
+  /** An OPTIONAL reply-email field. Not ambient collection: nothing is sent
+   *  unless the user types it. Settings discloses it in those terms. */
+  askForEmail: boolean;
   theme: OrfisTheme;
   onOpen(): void;
   onClose(): void;
