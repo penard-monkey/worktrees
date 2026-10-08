@@ -11,8 +11,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Endpoint {
     Project { key: String },
     Legacy { socket: PathBuf },
@@ -20,7 +19,7 @@ enum Endpoint {
 
 /// Required routing identity for a tmux connection. Equality includes the
 /// endpoint, socket root, and sandbox namespace, so `%1` on two servers differs.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TmuxServer {
     endpoint: Endpoint,
     socket_root: PathBuf,
@@ -79,8 +78,8 @@ impl TmuxServer {
             Err(std::env::VarError::NotPresent) => None,
             Err(e) => return Err(invalid(format!("WORKTREES_TMUX_NAMESPACE: {e}"))),
         };
-        let home = std::env::var_os("HOME").ok_or_else(|| invalid("HOME is required for tmux identity claims"))?;
-        Self::assign(common_dir, namespace.as_deref(), &PathBuf::from(home).join(".local/state/worktrees/tmux"))
+        let claims = crate::config::config_toml_path().with_file_name("tmux");
+        Self::assign(common_dir, namespace.as_deref(), &claims)
     }
 
     fn assign(common_dir: &Path, namespace: Option<&str>, claims: &Path) -> io::Result<Self> {
@@ -192,7 +191,13 @@ fn publish(path: &Path, value: &Assignment) -> io::Result<()> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TmuxTarget {
     pub server: TmuxServer,
-    pub target: String,
+    pub target: TargetKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TargetKind {
+    Session(String),
+    Pane(String),
 }
 
 /// Probe failures are data, never an empty session list. `Absent` is allowed
@@ -354,7 +359,7 @@ mod tests {
         let f = Fixture::new();
         let a = f.server();
         let b = TmuxServer::assign(&f.common(), Some("test"), &f.claims()).unwrap();
-        let keys: HashSet<_> = [a, b].into_iter().map(|server| TmuxTarget { server, target: "%1".into() }).collect();
+        let keys: HashSet<_> = [a, b].into_iter().map(|server| TmuxTarget { server, target: TargetKind::Pane("%1".into()) }).collect();
         assert_eq!(keys.len(), 2);
     }
 
@@ -399,6 +404,17 @@ mod tests {
             fn drop(&mut self) {
                 for server in &self.0 {
                     let _ = run(server, &["-N", "kill-session", "-t", "=same"]);
+                    // Only our private endpoints. Wait until the server has
+                    // exited before removing the socket file tmux leaves behind.
+                    for _ in 0..40 {
+                        let dead = std::os::unix::net::UnixStream::connect(server.socket_path())
+                            .is_err_and(|e| matches!(e.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound));
+                        if dead {
+                            let _ = fs::remove_file(server.socket_path());
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
                 }
             }
         }

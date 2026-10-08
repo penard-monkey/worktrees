@@ -26,14 +26,15 @@ are accepted (1–32 characters). The namespace participates in the hash. These
 are local Git metadata, not tracked or synced project settings.
 
 A matching full-identity claim at
-`~/.local/state/worktrees/tmux/<endpoint-key>.json` checks for key collisions.
+`$XDG_CONFIG_HOME/worktrees/tmux/<endpoint-key>.json`
+(or `~/.config/worktrees/tmux/<endpoint-key>.json`) checks for key collisions.
 Assignments and claims are published with same-directory atomic no-replace hard
 links, so concurrent readers cannot see a partially written JSON document.
 Corrupt or conflicting records fail closed. Moving a repository keeps the old
 assignment and refuses a new identity; explicit rebinding is not implemented in
 this increment. Do not silently delete these records on a discovery error.
 
-`TmuxTarget` carries `(server, target)` for endpoint-qualified cache and handle
+`TmuxTarget` carries `(server, Session(name) | Pane(id))` for endpoint-qualified cache and handle
 keys. `resolve_lane` accepts endpoint snapshots and candidates obtained from the
 existing name/cwd rules. Any candidate, including a provider or shell sidecar,
 keeps the lane on that server. Multiple candidate endpoints or an unreachable
@@ -49,8 +50,34 @@ claim. Lease, startup serialization and SIGUSR1 remain phase 1b.
 
 ## Remaining integration checklist
 
-- [ ] Rebase onto the independent non-launch `-N` hotfix; retain its wrapper and
-  fake-tmux global-option parser instead of creating competing versions.
+- [x] Rebased onto the merged non-launch `-N` hotfix (#459). Retain its
+  `tmux`/`tmux_launch` wrappers, `no_start_args`, and fake-tmux global-option
+  parser while adding descriptor routing.
+- [ ] Discover the legacy default socket from the caller's inherited
+  `TMUX_TMPDIR` (or `/tmp`) plus `tmux-<UID>/default`, before normalizing the
+  project-server environment. A shell using a custom root and a launchd GUI
+  otherwise inventory different legacy servers; retain discovered legacy
+  endpoints so both surfaces can see them during the drain.
+- [ ] Pass the descriptor into `wait_out_refusal`, whose `start-server` probe
+  otherwise reaches the default server. On macOS tmux 3.7c, a clean final-session
+  exit leaves a socket file; `-N start-server` reports `no server running on …`,
+  which the hotfix treats as busy and delays the next launch by ~1s. Phase 1b's
+  lease is the durable solution; evaluate stat plus a no-listener check or a
+  shorter wait without treating a failed known-endpoint probe as launch consent.
+  Canonicalize socket paths before comparing `socket_path()` (`/tmp/…`) with
+  tmux's `#{socket_path}` (`/private/tmp/…` on macOS).
+- [ ] Supply an actionable repository-move/rebind remedy before enabling routing.
+  A copied/restored Git common directory retains the old assignment. Either
+  provide a doctor rebind operation or name the exact assignment file to remove
+  after checking the old endpoint; do not refer users to a nonexistent command
+  or silently discard a possibly live endpoint.
+- [ ] Show the effective `WORKTREES_TMUX_NAMESPACE` in `ls`/doctor diagnostics.
+  A namespace exported from a shell profile can silently separate CLI sessions
+  from a launchd-started app; make that mismatch discoverable.
+- [ ] Verify that no lane-owned legacy sessions or sidecars remain before
+  reopening it on the project server. A best-effort `kill_shell_sidecars` may
+  leave `~term` behind and create permanent ambiguity after a new launch; close
+  must report surviving sessions instead of declaring migration complete.
 - [ ] Require a descriptor at every `tmux.rs` wrapper; qualify `PaneId`,
   `PaneList`, fingerprints, captures, and terminal/session handles.
 - [ ] Enumerate each project/known legacy endpoint once per snapshot. Preserve
@@ -87,5 +114,6 @@ cargo test -p worktrees-core \
 It starts two private endpoints with the same session name and pane ID, captures
 different content despite hostile inherited tmux environment, and closes one
 while the other remains reachable. Every tmux call specifies its descriptor's
-endpoint; cleanup closes only its own test sessions. The witness uses tmux 3.2+
+endpoint; cleanup closes only its own test sessions and removes their dead
+socket files after checking they no longer accept connections. The witness uses tmux 3.2+
 (`-N`); it is not an older-version compatibility test or an app witness.
