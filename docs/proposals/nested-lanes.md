@@ -525,7 +525,7 @@ any open PR blocks hub branch deletion and final merge when automatic head
 deletion is enabled. No local children does not prove no remote child PRs.
 
 The hub owns the checklist: every child and open child PR accounted for → full feature tests →
-hub archive/roadmap reconciliation → aggregate review by main → hub PR merged
+hub archive/roadmap reconciliation → review per the owner's policy → hub PR merged
 into main → target-specific verification → clean up the hub. Archive paths keep
 project-unique slugs, so child histories do not collide. The hub summarizes and
 links children rather than duplicating every transcript. Hub work is never a
