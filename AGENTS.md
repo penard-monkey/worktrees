@@ -11,6 +11,11 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   links it in-process (no subprocess). The legacy bash engine is retired.
 - git/tmux are **shelled out** on purpose (faithful port; keeps the bats
   fake-shim harness intercepting the compiled binary). Don't switch to libs.
+- **Every tmux call goes through `tmux::tmux()`, which adds `-N`** (tmux ≥ 3.2,
+  feature-detected); only `new-session` uses `tmux_launch()`. A client that may
+  start a server, meeting a refused or missing socket, unlinks it and starts a
+  SECOND server, orphaning every session in the first (2026-10-07). A spawn
+  that cannot use the wrapper (the app's pty attach) adds `no_start_args()`.
 - State split: **derived** (live git/tmux, recomputed) vs **declared**
   (`.worktrees.places.json` — lifecycle/pin/note, plain JSON, no DB).
   Terminals ATTACH to tmux, never own shells. Session name =

@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **A busy tmux server can no longer be replaced by a second one.** When a
+  tmux command that is allowed to start a server — an attach from a terminal
+  or the app, or creating a session — found the server's socket refused or
+  missing, tmux removed the socket and started a NEW server. The old one kept
+  running with every session in it, unreachable, and the app then relaunched
+  agents that were still alive. Every tmux call worktrees makes except creating
+  a session now passes `-N` ("do not start the server", tmux 3.2 or later), so
+  it fails instead; creating a session first waits up to a second for a server
+  that is refusing connections. Older tmux behaves as before. If it already
+  happened to you, `kill -USR1 <pid>` on the OLD server makes it recreate its
+  socket (that takes the path back from the new one).
+
 ## [0.40.0] - 2026-10-07
 
 ### Added

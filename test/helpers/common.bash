@@ -208,16 +208,36 @@ EOF
 # per session: name<TAB>cwd<TAB>cmd<TAB>pid<TAB>tty, where cmd comes from an
 # optional $TMUX_STATE/<session>.cmd file (tests write it to simulate a running
 # AI) and tty is /dev/tty-<session>.
+#
+# GLOBAL options (`-N`, `-u`, `-L <name>`, `-S <path>`, `-f <file>`) come before
+# the subcommand. They are consumed first and kept OUT of $TMUX_LOG, so its
+# lines stay `tmux <subcommand> …`; each call's globals are logged apart, to
+# $TMUX_LOG.globals, as `<globals>|<subcommand>`. `-V` answers
+# `tmux $FAKE_TMUX_VERSION` (default 3.7c, which has `-N`).
 install_fake_tmux() {
   cat > "$SHIMS/tmux" <<'EOF'
 #!/usr/bin/env bash
+globals=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -N|-u|-2|-l|-v) globals+=("$1"); shift ;;
+    -L|-S|-f) globals+=("$1" "$2"); shift 2 ;;
+    *) break ;;
+  esac
+done
+if [ "${1:-}" = -V ]; then
+  echo "tmux -V" >> "$TMUX_LOG"
+  echo "tmux ${FAKE_TMUX_VERSION:-3.7c}"
+  exit 0
+fi
+echo "${globals[*]}|${1:-}" >> "$TMUX_LOG.globals"
 # `copy-mode -q -t <pane> ;` heads every write into an agent's pane
 # (tmux::leave_mode — a pane scrolled back in the app would eat the input):
 # log it as a call of its own, then handle the rest as if invoked alone.
 if [ "${1:-}" = copy-mode ] && [ "${2:-}" = -q ] && [ "${5:-}" = ";" ]; then
   echo "tmux $1 $2 $3 $4" >> "$TMUX_LOG"
   shift 5
-  exec "$0" "$@"
+  exec "$0" ${globals[@]+"${globals[@]}"} "$@"
 fi
 echo "tmux $*" >> "$TMUX_LOG"
 all="$*"
