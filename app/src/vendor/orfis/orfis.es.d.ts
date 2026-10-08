@@ -6,7 +6,9 @@
  * this file too. The payload boundary is the point of the integration; it
  * should not be reachable by a one-character change.
  *
- * Upstream: Orfis `3222a74`, `packages/sdk-web`. See README.md beside this file.
+ * Upstream: Orfis `3f8c14b`, `packages/sdk-web` (MIT). See README.md beside
+ * this file. The API surface is unchanged from `3222a74` — that revision adds
+ * only the license and a banner — so nothing here moved with the re-pin.
  */
 
 /** `onQueued`'s argument. `durable: false` means the report is in memory only

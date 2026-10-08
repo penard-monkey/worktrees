@@ -1,3 +1,4 @@
+/*! Orfis web SDK | MIT License | Copyright (c) 2026 Bret Hash */
 var C = 5e3, L = 262144, B = 6048e5, c = "[redacted]", K = /[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9-]{1,63}\.){1,8}[A-Za-z]{2,24}/g, J = /\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b/g, G = /\b(?:[A-Fa-f0-9]{1,4}:){2,7}[A-Fa-f0-9]{1,4}\b/g, U = /\b(authorization|bearer|api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|token|secret|password|passwd|session[-_ ]?id)\b["']?\s*[:=]\s*["']?([^\s"',;)]+)/gi, F = /\b(?:[sr]k_(?:live|test)_[A-Za-z0-9]{8,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g, Q = /\b[A-Za-z0-9+/_-]{32,}={0,2}\b/g, ee = /((?:https?:\/\/|\/)[^\s"'<>?]*)\?[^\s"'<>]*/g, te = /(\/(?:Users|home))\/[^/\s"']+/g, re = /([A-Za-z]:\\Users\\)[^\\\s"']+/g, j = /\b(?:\d[ -]?){12,18}\d\b/g;
 function ne(e) {
   if (e.length !== 13) return !1;

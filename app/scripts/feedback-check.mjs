@@ -1,5 +1,6 @@
 // Behavioral adapter/config tests run with the real TypeScript, not a mirror.
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from '../node_modules/typescript/lib/typescript.js';
@@ -107,14 +108,42 @@ await bad.mod.startFeedback();
 assert.equal(bad.counts().sdk, 0);
 assert.equal(bad.mod.feedbackSnapshot().available, false);
 assert.equal(bad.calls.at(-1)[1].msg, 'Feedback initialization failed');
-// The real SDK path stays shut until packaged acceptance and the license are
-// settled. Asserted, not merely commented: flipping the constant has to be a
-// deliberate act that also updates this line, which is the "credentials alone
-// must not enable it" rule with teeth.
+// The real SDK path stays shut until packaged acceptance. Asserted, not merely
+// commented: flipping the constant has to be a deliberate act that also updates
+// this line, which is the "credentials alone must not enable it" rule with
+// teeth.
 const widgetSrc = fs.readFileSync('app/src/feedbackWidget.ts', 'utf8');
 assert.match(widgetSrc, /const ACCEPTANCE_PENDING = true;/, 'the real SDK path must stay gated');
 assert.match(widgetSrc, /captureDiagnostics: false/);
 assert.match(widgetSrc, /collectDeviceContext: false/);
 assert.match(widgetSrc, /askForEmail: false/);
 
-console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate');
+// We ship someone else's bytes, so the terms have to ship WITH them. Two
+// independent carriers, because each fails differently: the sidecar file is
+// what a reader looks for, and the in-artifact banner is what survives the
+// bundle being copied somewhere on its own. A re-vendor from a revision that
+// predates the license (or a build config that drops `postBanner`, which Vite
+// does silently in library mode) goes red here rather than shipping unlicensed.
+const bundle = 'app/src/vendor/orfis/orfis.es.js';
+assert.ok(fs.existsSync('app/src/vendor/orfis/LICENSE'), 'the vendored SDK must ship its LICENSE');
+assert.match(
+  fs.readFileSync('app/src/vendor/orfis/LICENSE', 'utf8'),
+  /^MIT License/,
+  'the vendored LICENSE must be the MIT text',
+);
+assert.match(
+  fs.readFileSync(bundle, 'utf8').split('\n', 1)[0],
+  /^\/\*! Orfis web SDK \| MIT License \| Copyright \(c\) \d{4} /,
+  'the vendored bundle must carry its license notice on line 1',
+);
+// And the provenance README must describe the artifact that is actually here —
+// a re-vendor that updates the bytes and forgets the hash is the whole reason
+// this file is reviewed at all.
+const sha = crypto.createHash('sha256').update(fs.readFileSync(bundle)).digest('hex');
+assert.match(
+  fs.readFileSync('app/src/vendor/orfis/README.md', 'utf8'),
+  new RegExp(`SHA-256: \`${sha}\``),
+  `README must record the bundle's real SHA-256 (${sha})`,
+);
+
+console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash');

@@ -1,9 +1,10 @@
 # Orfis feedback — integration status
 
-**The integration is complete and still gated.** Settings → Data & Logs shows
-nothing in a build without configuration, and a build *with* configuration
-still refuses to initialize — not because of the SDK any more, but because the
-last two items are not ours alone to settle. See
+**The integration is complete and gated on one remaining thing, which is
+ours.** Settings → Data & Logs shows nothing in a build without configuration,
+and a build *with* configuration still refuses to initialize. Every external
+dependency has now landed — the SDK defects, the license, and both product
+keys — so what is left is the packaged acceptance run itself. See
 [What is still gating it](#what-is-still-gating-it).
 
 Scope of this first cut, from the upstream handoff
@@ -68,17 +69,29 @@ scrubbing, metadata opt-out, quota). The revision also scrubs secrets from the
 message on the device. `docs/orfis-sdk-requests.md` is the original request and
 is now answered.
 
-Two things remain, neither of which code can settle:
+**The license is settled.** Orfis `3f8c14b` (PR #15) licenses
+`packages/sdk-web` under MIT and the built artifact carries the terms in its
+own first line, so a copy of the bundle alone still names them. The pin moved
+to that revision; `packages/sdk-web/src` is byte-identical to `3222a74`, so the
+80/80 suite result carries across and the artifact grew by exactly the 66 bytes
+of the banner. Orfis built the same revision independently and got the same
+hash, which is the first time this pin's reproducibility has been checked by
+someone other than the script that makes it. `"private": true` stays, and
+governs registry publishing rather than redistribution.
 
-1. **No product key**, pending Orfis minting one against the Origin below.
-   Production is live at `https://orfis.otterly.digital`; the dev key is
-   minted against `http://localhost:1420`.
-2. **No license at the pinned revision.** `packages/sdk-web` is `"private": true`
-   with no license file and no license field, so the bundled artifact may not
-   be redistributed in an enabled build until the owner confirms rights.
+**Both keys are minted**, against the measured packaged Origin below — a
+production key origin-locked to exactly `tauri://localhost` for
+`https://orfis.otterly.digital`, and a laptop key for `http://localhost:4100`
+that also accepts `http://localhost:1420` so `tauri dev` works. Orfis verified
+both directions of the production origin check (a `tauri://localhost` preflight
+allowed, a foreign origin `403 origin_not_allowed`) without sending a real
+report.
 
-Once both land: run the packaged acceptance list below, then set
-`ACCEPTANCE_PENDING = false`.
+So one thing remains, and unlike the others it is not waiting on anybody:
+**the packaged acceptance run has not happened.** It needs a real `tauri build`
+against a live endpoint, and the list under
+[Acceptance still owed](#acceptance-still-owed-once-those-land) walked. Then,
+and only then, `ACCEPTANCE_PENDING = false`.
 
 ### The packaged Origin — measured
 
@@ -117,16 +130,16 @@ refuses to write a bundle whose hash differs from the reviewed one. Builds and
 runtime need no Orfis checkout, registry package or remote script; the checkout
 path is a regeneration input only.
 
-⚠ **No license file exists at that private revision.** Redistribution rights
-have to be confirmed by the owner before an enabled integration is distributed.
+The pinned revision is `3f8c14b`, MIT, and `app/src/vendor/orfis/LICENSE` is a
+verbatim copy of the upstream license file at that commit.
 
 ## Unresolved before this can ship
 
 None of these are Worktrees-side code, and none should be invented locally:
 
 1. ~~The `Origin` a packaged build sends~~ — **measured and reported**:
-   `tauri://localhost` (see above). The two keys are Orfis's to mint from it.
-2. Redistribution rights for the bundled artifact (no license at `3222a74`).
+   `tauri://localhost` (see above), and both keys are minted from it.
+2. ~~Redistribution rights for the bundled artifact~~ — **MIT at `3f8c14b`**.
 3. Acceptance of a first release without attached logs, and sign-off on the
    disclosure wording and Settings placement.
 4. Ownership of rebuilding the pinned artifact for later releases.

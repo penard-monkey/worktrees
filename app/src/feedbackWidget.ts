@@ -6,19 +6,22 @@ import { THEMES, type ThemeId } from "./settings";
 /** Still gated, and the gate is now the only thing standing between this and
  *  a real send — so it is one constant with one reason, not a buried throw.
  *
- *  What was blocking before is FIXED: Orfis `3222a74` resolved all three
+ *  Three of the four blockers are now gone. Orfis `3222a74` fixed all three SDK
  *  defects (ambient metadata surviving the opt-out, any `res.ok` counting as
- *  accepted, a shed queue reporting success) and its suite passes 80/80. What
- *  is left is ours and the owner's:
+ *  accepted, a shed queue reporting success), `3f8c14b` licensed the bundle
+ *  under MIT, and both product keys are minted against the measured packaged
+ *  Origin. What is left is ONE thing, and it is ours:
  *
- *  1. Packaged acceptance has not been run — it cannot be, because Orfis mints
- *     the key against the Origin a packaged build sends and we have not
- *     reported it yet (`docs/orfis-feedback.md`).
- *  2. The pinned artifact has no license at that private revision, so it may
- *     not be redistributed in an enabled build until the owner confirms.
+ *    Packaged acceptance has not been run. It needs a real `tauri build`
+ *    talking to a live endpoint and the checks in `docs/orfis-feedback.md`
+ *    walked — above all that a report ARRIVES and carries nothing but the
+ *    five documented fields.
  *
- *  Flip this to `false` only with both settled. Nothing else needs changing —
- *  everything below is the real integration. */
+ *  So this constant is no longer "waiting on someone else"; it is the one
+ *  claim this branch is not entitled to make yet. Flip it to `false` only
+ *  after that run, and update `feedback-check.mjs` in the same commit — it
+ *  asserts the constant, which is what makes opening the gate deliberate.
+ *  Nothing else needs changing; everything below is the real integration. */
 const ACCEPTANCE_PENDING = true;
 
 /** The SDK's light/dark choice, from whichever `[data-theme]` is live.
