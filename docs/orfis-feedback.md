@@ -45,7 +45,7 @@ disclosure that drifts from the payload is worse than none.
 | One widget, main window only, started once outside StrictMode | `feedback.ts`, `main.tsx` | concurrent `startFeedback()` must share one promise; a non-`main` window must create nothing |
 | Teardown beats a slow start | `feedback.ts` | a `stopFeedback()` during startup must leave no widget, even after the import resolves |
 | The mock never reaches the SDK | `mock/feedback.ts` | the mock path must not even *import* `feedbackWidget` |
-| Escape, focus return, background inerting | `feedback.ts`, `useEscape.ts` | `registerEscape` puts the shadow-root dialog on the app's ONE Escape stack, LIFO with Settings |
+| Escape, focus return, background inerting | `feedback.ts`, `useEscape.ts` | `registerEscape` puts the shadow-root dialog on the app's ONE Escape stack, LIFO with Settings; `opened()` is driven over a fake body so the dialog's host stays interactive while the app goes inert, and the adapter's choice of host is asserted separately |
 | Queued ≠ accepted | `feedback.ts` | the two notices are distinct strings and `feedback-check.mjs` asserts both |
 | A failed start says so and leaks nothing | `feedback.ts` | the log line carries no report text, endpoint, key or native error detail |
 
