@@ -608,6 +608,62 @@ fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
     std::fs::write(path, body)
 }
 
+/// Full planning's write at `new`: `.planning/.active_plan` = the topic (the
+/// place's slug) and an empty `.planning/<topic>/`. Never through a link —
+/// every component is lstat'd first, and the pointer is created with
+/// `O_EXCL`, which refuses a symlink too — and never over an existing pointer,
+/// which the session may have chosen. Failures warn: the place is still
+/// usable, it just starts with "no plan yet".
+fn write_plan_pointer(p: &Project, ui: &mut dyn Ui, wt: &str, topic: &str) {
+    use std::io::Write;
+    let real_dir = |q: &Path| std::fs::symlink_metadata(q).map(|m| m.is_dir()).ok();
+    let planning = Path::new(wt).join(PLANNING_DIR);
+    match real_dir(&planning) {
+        Some(true) => {}
+        None => {
+            if let Err(e) = std::fs::create_dir(&planning) {
+                ui.warn(&format!("planning: could not create {PLANNING_DIR}/: {e}"));
+                return;
+            }
+        }
+        Some(false) => {
+            ui.warn(&format!("planning: {PLANNING_DIR} is not a real directory here — not writing a plan pointer"));
+            return;
+        }
+    }
+    let active = planning.join(".active_plan");
+    if std::fs::symlink_metadata(&active).is_ok() {
+        return;
+    }
+    let dir = planning.join(topic);
+    match real_dir(&dir) {
+        Some(true) => {}
+        None => {
+            if let Err(e) = std::fs::create_dir(&dir) {
+                ui.warn(&format!("planning: could not create {PLANNING_DIR}/{topic}/: {e}"));
+                return;
+            }
+        }
+        Some(false) => {
+            ui.warn(&format!("planning: {PLANNING_DIR}/{topic} is not a real directory — not writing a plan pointer"));
+            return;
+        }
+    }
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&active)
+        .and_then(|mut f| writeln!(f, "{topic}"));
+    if let Err(e) = written {
+        ui.warn(&format!("planning: could not write {PLANNING_DIR}/.active_plan: {e}"));
+        return;
+    }
+    if crate::planning::ensure_planning_excluded(&p.git_common, wt) {
+        ui.info("planning: added /.planning/ to .git/info/exclude (local, never committed)");
+    }
+    ui.info(&format!("plan: {PLANNING_DIR}/{topic}/ (owned planning)"));
+}
+
 pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut do_install, mut do_tmux, mut do_attach, mut do_fetch, mut resume) = (true, true, true, true, false);
     let (mut branch, mut base, mut name, mut ai_flag) = (String::new(), String::new(), None::<String>, None::<String>);
@@ -845,6 +901,22 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             worse_rc(files, ports)
         }
     };
+
+    // Owned planning (owned-planning.md §5): at full, the pointer and an empty
+    // topic dir, plus `/.planning/` in info/exclude when git does not already
+    // ignore it — the exclude write is what the brief's not-ignored warning
+    // below becomes in owned mode, so it runs first. Show and off write
+    // nothing here.
+    if crate::planning::effective(&p.main_root).level == crate::planning::Level::Full {
+        write_plan_pointer(p, ui, &wt, &slug);
+    }
+    // At every level: a `.planning/` with COMMITTED content shares a folder
+    // with the brief (and, at full, with worktrees' pointer). Full is refused
+    // there at adoption; this catches a commit that came later. A warning, not
+    // a refusal, because the brief is written there at every level.
+    if crate::planning::tracked_planning(&wt) {
+        ui.warn("`.planning/` holds tracked files: planning (full) and the brief share a folder with committed content");
+    }
 
     // The brief, once the worktree exists and its declared files are in place.
     // Written on a reused worktree too: a second `--brief` is a re-brief, and
@@ -3115,7 +3187,7 @@ mod tests {
     #[test]
     fn nested_projects_are_flagged_from_both_sides_only() {
         use crate::registry::{Entry, Registry};
-        let e = |root: &str, name: &str| Entry { root: root.into(), name: name.into(), private: false };
+        let e = |root: &str, name: &str| Entry { root: root.into(), name: name.into(), ..Default::default() };
         let reg = Registry {
             projects: vec![e("/w/outer", "outer"), e("/w/outer/vendor/inner", "inner"), e("/w/other", "other")],
             ..Default::default()
@@ -3140,7 +3212,7 @@ mod tests {
     #[test]
     fn a_shared_prefix_among_registered_projects_is_flagged() {
         use crate::registry::{Entry, Registry};
-        let e = |root: &str, name: &str| Entry { root: root.into(), name: name.into(), private: false };
+        let e = |root: &str, name: &str| Entry { root: root.into(), name: name.into(), ..Default::default() };
         let reg = Registry {
             projects: vec![e("/w/one/app", "app"), e("/w/two/app", "app-2"), e("/w/other", "other")],
             ..Default::default()

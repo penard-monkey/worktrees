@@ -5824,7 +5824,8 @@ async fn list_docs(app: AppHandle, repo: String, root: String) -> Result<DocsInd
 }
 
 /// The Plan dock tab: the place's planning-with-files summary (goal, phases,
-/// progress, errors) plus its brief. `worktrees_core::plan::summarize` never
+/// progress, errors) plus its brief, resolved by the project's effective
+/// planning level. `worktrees_core::plan::summarize_place` never
 /// fails — an absent or unreadable plan is `source: "none"` — so the only
 /// error here is the guard. Read-only: the session owns these files.
 #[tauri::command]
@@ -5833,7 +5834,7 @@ async fn place_plan(app: AppHandle, root: String) -> Result<worktrees_core::plan
     if !dir.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
-    Ok(worktrees_core::plan::summarize(&dir))
+    Ok(worktrees_core::plan::summarize_place(&dir))
 }
 
 /// The Plan tab's "Generate plan": paste `ops::PLAN_PROMPT` into the place's

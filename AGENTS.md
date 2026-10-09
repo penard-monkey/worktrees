@@ -307,7 +307,11 @@ too broad and does not look like it. Third sibling of the two notes above.
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old
 line), watch it go red, then restore. Two tests this repo now relies on were
-confirmed this way.
+confirmed this way. **Restore by editing back, never `mv file.bak file`**: `mv` keeps the
+backup's OLDER mtime, cargo sees an artifact newer than the source and keeps
+the mutated build, and the "restored" run stays red — or, the other way
+round, a mutation copied in with `cp -p` reads green. `touch` the file after
+any restore before believing the next run.
 
 **A message's REMEDY is a claim, and it needs following, not proofreading.**
 B3 refused a declared symlink source with "link the real file, or point the

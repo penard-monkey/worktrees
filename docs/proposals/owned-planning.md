@@ -4,7 +4,8 @@ title: "Proposal — worktrees owns planning (opt-in)"
 
 # Proposal — worktrees owns the planning mechanism, opt-in
 
-**Status:** investigation and design, 2026-10-09. Not implemented. Pilot
+**Status:** investigation and design, 2026-10-09. Phase 1 being built
+(core + CLI first, then the Claude plugin and the app). Pilot
 project: casa-del-valle-monorepo (§8.1, phase 1 in §9). Decisions
 requested in §11. Nothing here permits merging or implementing anything.
 
@@ -276,6 +277,12 @@ through it. There is no second reader.
     its branch had, which is the exact reason §4 reads `[plan] project` from
     main. Read per place, a goals file would show each lane a stale copy.
 
+  **Clarified at build time (final review):** `main` scope reads
+  `safe_under(MAIN's canonical root, rel)` — never the lane's root — and
+  "main's copy" means main's WORKING TREE as it is: possibly dirty, possibly
+  on another branch. It is never `HEAD:<rel>`, and must not be "fixed" to
+  it; the orchestrator's uncommitted edit is the point.
+
   With `main` scope, a lane's tab labels the plan "main's copy of `<rel>`",
   and the summary carries `plan_scope: "main"`, so main's goals are never
   presented as the lane's own plan (the §1.3 hijack, avoided by labelling).
@@ -316,7 +323,8 @@ through it. There is no second reader.
   - a path that fails `safe_under`, does not exist, or is neither a regular
     file nor a directory gives `how_resolved: "show_path"` with
     `plan_path: null` and a reason ("not found" / "outside the project" / "not
-    a file");
+    a file"), plus, for `main` scope, "main unreadable" (a bare repo or a
+    missing main checkout has no working tree to read);
   - it never falls back to `.planning/` and never says where to write.
 - **`how_resolved` gains `show_path`.** The earlier draft's `owned: bool`
   becomes `level: "off" | "show" | "full"`, which says the same thing for
@@ -468,6 +476,23 @@ in `.planning/evil/`" would instruct the agent to write *through the link*.
 "Valid" means the value passes `plain_component` and the topic path, if it
 exists, is an lstat'd real directory. Only then may anything say "write
 here".
+
+**Build notes (phase 1).** Four cases the table left open, decided while
+building it, all on the side of never saying "write here" through something
+that is not real:
+
+- a value with a control character is invalid too. A valid topic is printed
+  into the agent's context, and a newline in it would forge a line there;
+- a real topic dir whose `task_plan.md` exists but is not a regular file (a
+  symlink) is `invalid_pointer`, not `pending`. "Write your plan in
+  `.planning/<topic>/`" would write through that link;
+- a `.planning` that is itself a symlink (or not a directory) is
+  `invalid_pointer` in owned mode. Off mode keeps today's answer (root);
+- `show_path` is the `how_resolved` for show-only whether or not the path
+  resolved; `plan_path` null plus `reason` is the failure.
+
+And `new` never overwrites an existing `.active_plan`: a reused place keeps
+the pointer its session chose.
 
 **A reused place can show a stale root plan.** A place is durable, and branches
 flow through it. A root `task_plan.md` left by the previous branch shows over

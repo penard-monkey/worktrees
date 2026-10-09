@@ -42,7 +42,7 @@ pub const FILE: &str = "projects.json";
 /// a syscall, and keeps this correct if a later edit ever shares one handle.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct Entry {
     /// Canonical main root of the repo.
     pub root: String,
@@ -51,6 +51,19 @@ pub struct Entry {
     /// Out of reach in both directions (§5.2).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
+    /// Owned planning for this project (`planning.rs`). Absent = inherit the
+    /// global default. User tier for the same reason as `private`: it decides
+    /// which hooks run and what agents are told, so a repo cannot set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning: Option<crate::planning::Level>,
+    /// Show-only: the repo-relative path the Plan tab shows. Ignored at other
+    /// levels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_path: Option<String>,
+    /// Show-only: read `plan_path` in each place, or in main's working tree.
+    /// Absent = place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_scope: Option<crate::planning::Scope>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -252,7 +265,7 @@ fn add_in(reg: &mut Registry, root: &str, seed: &str) -> Entry {
     if let Some(e) = reg.by_root(root) {
         return e.clone();
     }
-    let e = Entry { root: root.to_string(), name: unique_name(reg, seed), private: false };
+    let e = Entry { root: root.to_string(), name: unique_name(reg, seed), ..Default::default() };
     reg.projects.push(e.clone());
     e
 }
