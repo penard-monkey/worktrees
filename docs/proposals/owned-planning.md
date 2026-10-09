@@ -41,13 +41,13 @@ config was written. No agent session was run. Claims are marked as follows:
 | What does "on" mean? | Worktrees owns the **layout** (`.planning/<topic>/` + `.active_plan`), the **resolution** (one function, `plan::resolve`, used by the Plan tab, MCP, the CLI and every hook), the **pointer** (`worktrees new` writes `.active_plan`), and the **agent hooks** (shipped per launch, the way agent guidance already ships). Plan *content* is still written only by the session. |
 | What does "off" mean? | Exactly today's behaviour, byte for byte. The Plan tab reads whatever exists and nothing is written. The default is off. |
 | Where is the choice? | **User tier only.** A global default with three values (unset / on / off), and a per-project override (inherit / on / off) on the project's registry entry. A cloned repo cannot switch it on for you. |
-| How is it offered? | One machine-level offer in `offers.ts`, `planning`, which opens Settings → Planning (the explanation lives there). A checkbox in Add / Clone / New project. A Planning section in the ProjectSheet for changing it later. |
-| Relationship to planning-with-files | **Wrap, don't replace.** The skill stays the *method* for writing the three files. Worktrees takes over *where they live*, *which one is active* and *what gets injected*. The skill's root-only hooks then have nothing to fire on, so nothing gets injected twice. |
+| How is it offered? | One machine-level offer in `offers.ts`, `planning`, which opens Settings → Planning (the explanation lives there). A checkbox in Add existing / New project, and a post-clone line for Clone. Settings' per-project list for changing it later; a ProjectSheet section in phase 2. |
+| Relationship to planning-with-files | **Wrap, don't replace.** The skill stays the *method* for writing the three files. Worktrees takes over *where they live*, *which one is active* and *what gets injected*. The skill's root-only hooks then have nothing to fire on. Hooks are SessionStart and UserPromptSubmit only, because a Stop hook's stdout never reaches the model. |
 | `[plan] project` | `[plan] project = "docs/plan/goals.md"` in `.worktrees.toml`. A **path**, which is data, so ADR 0001 allows it. Validated like `[docs]`, read through `safe_under`. It retires the tracked-copy hack in valleos and in cdv #684. |
-| Stale-dir trap | When planning is **on**, the "newest directory" guess is **gone**. The order is `[plan] project` (main only), then `.active_plan`, then "no plan yet". A pointer that names a missing plan means "not written yet". It never falls through to an old directory. When planning is off, nothing changes. |
-| Symlink bug | Hooks call `worktrees plan hook <event>`, which calls the same `plan::resolve` as the tab. There is no second resolver to drift. Parity is pinned by a test running valleos/cdv's scenarios through both entry points. |
+| Stale-dir trap | When planning is **on**, the "newest directory" guess is **gone**. The order is `[plan] project` (main only), then `.active_plan`, then "no plan yet". A valid pointer whose plan is not written yet means "not written yet" (or the root plan, if one exists). An invalid one (not a plain name, or a symlink) is `invalid_pointer` and never tells anyone where to write. It never falls through to an old directory. When planning is off, nothing changes. |
+| Symlink bug | Hooks call `worktrees plan hook <event>`, which calls the same `plan::resolve` as the tab. There is no second resolver to drift **at the same version**. The app (in-process) and the CLI (`<bin>`) can still be on different releases, so the hook stamps its version. Parity is pinned by a test running valleos/cdv's scenarios through both entry points of one binary. The hook re-checks the setting on every call, so turning planning off silences running sessions at once. |
 | Codex / pi | **pi:** `--extension <path>` per launch, with `session_start` / `before_agent_start` / `agent_end` **[source]**. Buildable, but needs a probe. **Codex:** `hooks` is a stable feature in 0.161 **[observed]**, but `-c` hooks stop on a trust prompt (AGENTS.md). Phase 1 gives Codex the CLI verb and MCP only. |
-| Phase 1 = the cdv pilot | cdv adopts from the offer, as it stands today. Phase 1 contains: the setting, the offer, the Settings panel and the Add/Clone checkbox; owned resolution; `worktrees plan resolve|hook`; `new` writing the pointer; and the Claude plugin. Nothing in cdv is moved: main's `.planning/orchestrator/` stays its plan, and live root-layout lanes keep working (§8.1). `[plan] project` and `migrate` (valleos, this repo) are phase 2. |
+| Phase 1 = the cdv pilot | cdv adopts from the offer, as it stands today. Phase 1 contains: the setting, the offer, the Settings panel and the Add/New-project checkbox (post-clone line for Clone); owned resolution; `worktrees plan resolve|hook`; `new` writing the pointer; and the Claude plugin. Nothing in cdv is moved: main's `.planning/orchestrator/` stays its plan, and live root-layout lanes keep working (§8.1). `[plan] project` and `migrate` (valleos, this repo) are phase 2. |
 
 ---
 
@@ -72,7 +72,7 @@ config was written. No agent session was run. Claims are marked as follows:
 | Lane plan | `.planning/<topic>/` + `.active_plan`, written by each lane at start | the same, after #684 | **root** `task_plan.md` (6 of 12 places; none use topic dirs) **[observed]** |
 | Main's plan | tracked copy `.planning/orchestrator/task_plan.md` of `docs/plan/goals.md`, kept identical by `scripts/memory/sync-goals.sh`; `.active_plan=orchestrator` | the same, plus a pre-push `--check` on blob ids | none |
 | Hooks | `.claude/settings.json` → `scripts/memory/plan-context.sh session|prompt|stop` | a port of it that resolves "exactly like plan.rs" | the skill's own (root only) |
-| `.gitignore` | `.planning/*` plus three negations re-including one file | the same, plus `/*/**/.planning/` anchoring | root files |
+| `.gitignore` | `.planning/*`, then two negations and one re-ignore (`!.planning/orchestrator/`, `.planning/orchestrator/*`, `!.planning/orchestrator/task_plan.md`) re-including one file | the same, plus `/*/**/.planning/` anchoring | root files |
 | Close-out | archives `.planning/` | `old-plans/<topic>-YYYYMMDD.tar.gz` (203 archives so far) **[observed]** | the global skill tarballs only the three ROOT files **[source]** |
 
 Survey (`~/.cache/worktrees/worktrees/owned-planning/survey.txt`) **[observed]**:
@@ -118,7 +118,7 @@ project  projects.json Entry                 "planning": "on" | "off"     (absen
   `guidance::settings()`: an app-memory override would never reach a
   `worktrees new` run in a terminal.
 - **The repo may *suggest* adoption, never decide it.** A `.worktrees.toml`
-  with a `[plan]` section pre-ticks the checkbox in Add / Clone (§2.3), and the
+  with a `[plan]` section pre-ticks the checkbox in Add existing / New project (§2.3; Clone decides after the clone), and the
   checkbox label says why ("this repo uses worktrees planning"). It does not
   change the effective value (Q2).
 
@@ -134,13 +134,15 @@ preconditions"; the file's own header comment):
   body: "One plan folder per place, the active plan always the one you see in the Plan tab, and agents reminded of it as they work.",
   cta: "Review…",
   to: { cat: "planning", focus: "planning" },
-  fingerprint: `v${p.version}`,
+  fingerprint: `v${ctx.planning.version}`,  // ctx.planning = planning_status, a machine-level command
 }
 ```
 
-- **Shown when** `planning.default === "unset"` and at least one project is
-  registered. Both are facts about the machine. "Is a project selected" is not
-  one of them, and it must not become one.
+- **Shown when** `planning.default === "unset"`, and nothing else. That is a
+  fact about the machine. Neither "a project is selected" nor "a project is
+  registered" may become a precondition (the v0.25.0 lesson). On a machine
+  with no projects the global choice is still meaningful: it is the default
+  every later Add inherits.
 - **Retired** by making any global choice (on, off, or "choose per project",
   which stores `off` and so leaves every project's own checkbox in charge).
   Dismissal stores the fingerprint, so a later planning `version` worth
@@ -181,8 +183,13 @@ project…) gain one row:
 [x] Use Worktrees planning in this project   (your default: on · this repo uses it)
 ```
 
-- It is pre-set from the effective global value, and pre-ticked when the repo
-  has a `[plan]` section.
+- It is pre-set from the effective global value. **Add existing** and **New
+  project** can also pre-tick it when the repo has a `[plan]` section, because
+  the repo is on disk when the dialog shows. **Clone** cannot:
+  `clone_project` (`lib.rs:730`) has no repo to read until the clone
+  finishes. So for Clone, the checkbox shows the global default only, and a
+  `[plan]` hint becomes a post-clone line on the result ("this repo uses
+  worktrees planning — turn it on for this project?").
 - It writes the registry entry's `planning` **only when it differs from the
   default**. "Inherit" stays the common case, so changing the global value
   later still means something.
@@ -204,8 +211,11 @@ project…) gain one row:
     read as today;
   - the `info/exclude` line stays (removing it could start showing hundreds of
     untracked files), and the panel says so;
-  - sessions already running keep their plugin until restart, which is how
-    every per-launch flag already behaves (agent-guidance §6).
+  - sessions already running keep their plugin's *flags* until restart, but
+    the plugin goes **silent at once**: `worktrees plan hook` re-checks
+    `planning::effective(project)` on every call and prints nothing when it is
+    off. So turning planning off takes effect on the next prompt, not the next
+    launch.
 
 ---
 
@@ -235,26 +245,59 @@ project…) gain one row:
 
 | Step | Legacy (off; today) | Owned (on) |
 |---|---|---|
-| 0 | — | main only: `[plan] project` (§4) |
-| 1 | `.active_plan` → `.planning/<id>/task_plan.md` | same |
-| 1b | pointer names a missing plan → fall through | a root `task_plan.md` if there is one (`legacy_root`: the session chose the one fixed legacy spot), otherwise **stop: `Pending { topic }`**. The tab says "no plan yet for `<topic>`" and shows the brief. It never falls through to another directory. |
+| 0 | — | main only: `[plan] project` (§4; phase 2) |
+| 1 | `.active_plan` → `.planning/<id>/task_plan.md` | see the case table below |
 | 2 | newest `.planning/<dir>/` | **removed** (§6) |
-| 3 | root `task_plan.md` | root, reported as `legacy_root` (and offered `migrate` from phase 2, §8.2) |
+| 3 | root `task_plan.md` | root, still reported as `root`; `owned: true` says it is the legacy spot (and `migrate` is offered from phase 2, §8.2) |
+
+**Owned mode, every case.** A pointer that is *missing its plan* is not the same
+as a pointer that is *invalid*. The first means "not written yet" and tells
+the agent where to write. The second must never tell anyone to write anywhere:
+for `.active_plan = evil` with `.planning/evil -> /elsewhere`, "write your plan
+in `.planning/evil/`" would instruct the agent to write *through the link*.
+
+| `.active_plan` | What is on disk | Result (`how_resolved`) |
+|---|---|---|
+| absent | main with `[plan] project` | the project file (`project_key`, phase 2) |
+| absent | root `task_plan.md` | root (`root`) |
+| absent | nothing | none (`null`); the tab shows the brief |
+| present, valid | `.planning/<topic>/task_plan.md` is a regular file under a real (lstat'd) dir | that plan (`active_plan`). **It wins over a root `task_plan.md`** if both exist. |
+| present, valid | `.planning/<topic>/` absent, or a real dir without a plan | root `task_plan.md` if one exists (`root`), otherwise `pending` |
+| present, **invalid** | value fails `plain_component` (`plan.rs:162`: empty, `.`, `..`, contains `/` or NUL), or `.planning/<topic>` is a symlink or not a directory (`is_dir_nofollow`, `plan.rs:141`), or `.active_plan` itself is a symlink | `invalid_pointer`. The tab says "`.active_plan` is not usable" and falls back to the root plan if there is one. The hook prints "`.active_plan` is not usable — fix or remove it" and **never echoes the pointer's value** (it is session-written text) or any path built from it. |
+
+"Valid" means the value passes `plain_component` and the topic path, if it
+exists, is an lstat'd real directory. Only then may anything say "write
+here".
+
+**A reused place can show a stale root plan.** A place is durable, and branches
+flow through it. A root `task_plan.md` left by the previous branch shows over
+a fresh pointer whose plan is not written yet (row 5). The cure is the
+close-out removing root files, or `migrate`. It is not a resolution rule,
+because the root is the one legacy location a session may legitimately be
+writing.
 
 There are four callers, and only one implementation:
 
 1. `summarize`, for the Plan tab and MCP;
 2. `worktrees plan resolve [--json]`, for humans and scripts;
 3. `worktrees plan show`, which prints the plan, for Codex and any shell;
-4. `worktrees plan hook <event>`, for agent hooks (§3.3).
+4. `worktrees plan hook <event>`, for agent hooks (§3.3), which re-checks
+   `planning::effective(project)` on every call.
 
-**Additive only on the contract.** `PlanSummary` fields are a contract with the
-frontend and MCP ("do not rename fields"). This adds:
+**The contract change, stated honestly.** `PlanSummary` is a contract with the
+frontend and MCP ("do not rename fields"). New *fields* are additive:
+`owned: bool`, `topic: Option<String>`, and `project: Option<{ rel, title,
+current }>` (phase 2). New `how_resolved` *values* are **not** additive: the
+field is a closed union in `app/src/PlanPane.tsx:32` (`"active_plan" | "newest"
+| "root" | null`) and is matched by MCP clients. So:
 
-- the `how_resolved` variants `project_key`, `pending` and `legacy_root`;
-- `owned: bool`, `topic: Option<String>`, and `project: Option<{ rel, title,
-  current }>`, the project goals' one-line summary, carried for every place
-  (§4).
+- existing values keep their meaning. Owned mode reports a root plan as
+  `root`, not as a renamed `legacy_root`; `owned: true` carries the
+  difference;
+- the new values are `pending` and `invalid_pointer` (phase 1) and
+  `project_key` (phase 2). Widening the TS union and the frontend's handling
+  of each is listed in phase 1's work (§9), and MCP clients see them only on
+  projects that opted in.
 
 ### 3.3 Agent hooks, shipped per launch
 
@@ -267,22 +310,35 @@ mechanism (`guidance::materialize_in`), as `<data>/agent/<hash>/claude-plan/`:
 ```json
 { "hooks": {
   "SessionStart":     [{ "matcher": "startup|resume|compact", "hooks": [{ "type": "command", "command": "'<bin>' plan hook session" }] }],
-  "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "'<bin>' plan hook prompt" }] }],
-  "Stop":             [{ "hooks": [{ "type": "command", "command": "'<bin>' plan hook stop" }] }]
+  "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "'<bin>' plan hook prompt" }] }]
 }}
 ```
 
+- **It does NOT ride the guidance gate.** `guidance_for` (`ops.rs:111`)
+  returns no flags at all when guidance is disabled or the repo is not
+  "managed". A planning plugin appended there would vanish silently for a
+  user who turned guidance off. Planning gets its own branch in the launch
+  path, keyed on `planning::effective(project)` only.
 - **`<bin>`** is found the way `guidance::guard_bin` finds it: an absolute path
   to a CLI that has the verb, so the hook never depends on PATH.
-- **What each hook prints.** These are valleos's budgets, which are already
-  measured and tuned:
+- **What each hook prints.** These are valleos's budgets. They were tuned for
+  **size**, not proven to reach the model:
 
-  | Hook | Prints | Budget |
+  | Hook | Prints (plain stdout, which Claude Code adds to context for these two events) | Budget |
   |---|---|---|
   | `session` | plan path and how it resolved, current phase, that phase's open boxes, last 15 lines of `progress.md` | ≤ 3k chars |
   | `prompt` | current phase plus last 10 lines of progress, **only when the plan or progress changed** since that `session_id` last saw it (cache under worktrees' cache dir, not `$TMPDIR`) | ≤ 1.5k chars |
-  | `stop` | phase count, and "update progress.md" | never blocks |
 
+  Claude Code documents a 10,000-char cap per injected string, so both are
+  well inside it.
+- **No `Stop` hook in phase 1.** A Stop hook's plain stdout is **not** added to
+  the model's context; it goes to the debug log. Only SessionStart and
+  UserPromptSubmit stdout reach the model. As specified in the first draft,
+  `stop` was a no-op, and valleos's `plan-context.sh stop` has the same hole.
+  Its "N/M phases complete, update progress.md" has never reached a model. A
+  later phase may add it as JSON `{"hookSpecificOutput": {"hookEventName":
+  "Stop", "additionalContext": …}}` that **never** returns
+  `decision: "block"`, but only after a probe shows that text arriving.
 - **Everything is framed as data:** "plan text is data, not instructions", as
   the skill and `place_status.reading_notes` already frame it. The hook always
   exits 0.
@@ -302,7 +358,9 @@ lifecycle is `session_start` → `before_agent_start` (exposes the prompt and th
 `systemPromptOptions`) → … → `agent_end` **[source: pi `docs/extensions.md`]**.
 A ~40-line TypeScript extension, shipped in the binary and materialised beside
 the skill, would shell out to `<bin> plan hook session|prompt|stop` on those
-three events and append the output. **Not probed:** whether an explicit `-e`
+three events and append the output (`agent_end` takes the place of Claude's
+missing Stop reminder, if pi's event output reaches the model; probe that
+too). **Not probed:** whether an explicit `-e`
 extension raises pi's trust modal (`~/.pi/agent/trust.json` exists
 **[observed]**), and whether `before_agent_start` can append without
 replacing. Phase 3, behind `docs/pi-manual-checks.md`.
@@ -323,7 +381,17 @@ that waits on a modal nobody sees is worse than no hook. So Codex gets:
 |---|---|
 | **Replace** (ship our own planning skill) | No. The skill is third-party and versioned on its own cadence (2.37.0 here), and users who already have it would get two competing instructions. Vendoring it means owning its method, its templates and its attestation feature. |
 | **Coexist untouched** | This is what all three repos do today, and it is why each repo needs a hook: the skill injects only a root `task_plan.md` **[source: SKILL.md frontmatter]**. |
-| **Wrap** (recommended) | The skill remains *how* to write a plan. Worktrees decides *where* it goes (the `Pending` line, and `.active_plan` already pointing there), *which* one is current, and *what* is injected. In the owned layout there is no root `task_plan.md`, so the skill's hooks find nothing and no context is injected twice. A `legacy_root` lane is the exception: worktrees' hook injects it too, so that lane loses nothing. If the skill's own hooks are also active in that session, the context arrives twice, which costs tokens but is never wrong. That is acceptable for lanes that are on their way out **[inferred: whether skill frontmatter hooks are active depends on the skill being loaded in that session; not probed]**. Without the skill, the `Pending` line names the three files, which is enough to work by. |
+| **Wrap** (recommended) | The skill remains *how* to write a plan. Worktrees decides *where* it goes (the `Pending` line, and `.active_plan` already pointing there), *which* one is current, and *what* is injected. In the owned layout there is no root `task_plan.md`, so the skill's hooks find nothing and no context is injected twice. A lane on a root plan is the exception: worktrees' hook injects it too, so that lane loses nothing. If the skill has been invoked in that session, its frontmatter hooks stay active for the rest of it, and its `PreToolUse` hook `cat`s 30 lines of `task_plan.md` on **every** Read/Write/Edit/Bash/Glob/Grep call. That is far more than "twice", and it is the skill's cost, already paid today in every root-layout lane; worktrees adds one bounded copy at start and on change. It is acceptable for lanes that are on their way out, and `migrate` ends it. Without the skill, the `Pending` line names the three files, which is enough to work by. |
+
+**What the owned layout loses: the skill's tamper check.** The skill's hooks
+compare `task_plan.md` against `.planning/<active>/.attestation` (or
+`./.plan-attestation`) and refuse to inject a plan whose hash changed (`/plan-attest`).
+Its hooks only ever read the root file, so in the owned layout that check
+never runs. Worktrees' hook does not carry it in phase 1. It frames the text
+as data, which is the same defence the tab and MCP use. If attestation
+matters to someone, the hook can honour an existing `.attestation` beside the
+resolved plan (refuse and say why on a mismatch) in a later phase; it is a
+hash compare, not a new mechanism.
 
 One rough edge, worth reporting upstream as valleos ROADMAP (c) already
 intends: the skill's `$PLAN_ID` step cannot be seen by worktrees, so a session
@@ -376,10 +444,10 @@ project = "docs/plan/goals.md"
 
 | Stage | Off (today) | On |
 |---|---|---|
-| `worktrees new` / MCP `create_worktree` | writes `.planning/brief.md` when given a brief | the same, **plus** `.planning/.active_plan` = `<topic>` and an empty `.planning/<topic>/`; ensures `/.planning/` in `$GIT_COMMON_DIR/info/exclude` (shared by every worktree of the clone) |
+| `worktrees new` / MCP `create_worktree` | writes `.planning/brief.md` when given a brief | the same, **plus** `.planning/.active_plan` = `<topic>` and an empty `.planning/<topic>/`; ensures `/.planning/` in `$GIT_COMMON_DIR/info/exclude` (shared by every worktree of the clone). The hook point exists: `cmd_new` already runs `git check-ignore` on the brief and warns when `.planning/` is not ignored (`ops.rs:862`); owned mode turns that warning into the exclude write. |
 | Launch | guidance plugin | guidance plugin **+** `claude-plan` plugin (Claude); later the pi extension |
-| Working | session writes wherever the skill says | session writes `.planning/<topic>/`, guided by the `Pending` line, then reminded by `prompt`/`stop` |
-| Plan dock tab | the summary; "Generate plan" | adds: how it resolved in words ("active plan: `<topic>`", "no plan yet", "project goals"); the project line; for a `legacy_root` plan, "Move into `.planning/<topic>/`"; a topic picker that rewrites `.active_plan` (Q5) |
+| Working | session writes wherever the skill says | session writes `.planning/<topic>/`, guided by the `Pending` line, then reminded by `session`/`prompt` |
+| Plan dock tab | the summary; "Generate plan" | adds: how it resolved in words ("active plan: `<topic>`", "no plan yet", "project goals"); the project line; for a root plan in owned mode, "Move into `.planning/<topic>/`" (phase 2); a topic picker that rewrites `.active_plan` (Q5) |
 | MCP `place_status.plan` | as today | adds `owned`, `topic`, `project`, and the new `how_resolved` values (§3.2) |
 | Close-out / remove | user's own ritual; removing a place deletes its gitignored plans for good | `worktrees plan archive [<place>] [--to <dir>]` tars `.planning/` (brief + every topic) into `<dir>` (default `~/.cache/worktrees/<project>/plans/<slug>-<date>.tar.gz`); `remove_worktree` runs it first when planning is on (Q6) |
 
@@ -438,7 +506,13 @@ The fix is structural, not another port:
 
 1. **One resolver.** Hooks run `worktrees plan hook`, which calls
    `plan::resolve`. That is the function `summarize` calls, so the hook and
-   the tab cannot disagree by construction.
+   the tab cannot disagree **at the same version**. They are two binaries:
+   the tab runs core in-process inside the app (`place_plan`,
+   `lib.rs:5836`), and the hook runs the CLI at `<bin>`. An app and a CLI on
+   different releases can resolve differently. `guard_bin`-style detection
+   proves the verb exists, not the version. So the hook stamps its version
+   in `plan resolve --json`, and the app's existing stale-CLI warning covers
+   a CLI behind the app. "By construction" holds only within one version.
 2. **The root is found the way the tab finds it.** `Project::discover(cwd)`
    finds the place whose root contains the hook's `cwd`, then canonicalises
    that root. A hook in a subdirectory resolves the same place, not
@@ -451,8 +525,10 @@ The fix is structural, not another port:
      `safe_under` (canonicalise, then require the result under the canonical
      root), which is the fix shape AGENTS.md names.
 4. **A parity test, written to fail first.** It runs cdv's four scenarios,
-   plus a symlinked `.planning` and a `../` pointer, through both `summarize`
-   and the `plan hook session` output, and asserts the same `plan_rel`. It
+   plus a symlinked `.planning`, a `../` pointer and `.active_plan = evil`
+   with `.planning/evil -> elsewhere` (must be `invalid_pointer` and print no
+   path), through both `summarize` and the `plan hook session` output **of one
+   binary**, and asserts the same `plan_rel`. It
    must be shown red against a deliberately divergent resolver before it is
    trusted (AGENTS.md, "A new test must be shown to FAIL first").
 
@@ -492,9 +568,9 @@ ships phase 1, accept the offer, and adopt for cdv. **Its state on 2026-10-09
 
 | What is there | After adopting (phase 1) | Moved or written? |
 |---|---|---|
-| main: `.active_plan` = `orchestrator` + `.planning/orchestrator/task_plan.md` | Resolves at step 1 (`active_plan`) to the same file the tab shows today. The difference is that the Claude hooks now inject it at start, on change and at stop, once main's session is relaunched. | **Nothing.** This IS main's plan now. Do not delete it or move it. |
-| A live lane with a root `task_plan.md` | Resolves `legacy_root`, still shown as today. The hooks inject it too (§3.3), so a lane on the old layout loses nothing. It finishes and closes out the old way. | **Nothing.** Phase 1 has no automatic move and no `migrate` (it is phase 2). A move under a live session would race it. |
-| A live lane with a brief and no plan | No pointer, so owned resolution gives "no plan yet" and the brief, the same as today. Its session may create a root plan, which then shows as `legacy_root`. | **Nothing.** Adoption never writes into existing places. |
+| main: `.active_plan` = `orchestrator` + `.planning/orchestrator/task_plan.md` | Resolves at step 1 (`active_plan`) to the same file the tab shows today. The difference is that the Claude hooks now inject it at start and on change, once main's session is relaunched. | **Nothing.** This IS main's plan now. Do not delete it or move it. |
+| A live lane with a root `task_plan.md` | Resolves `root` (`owned: true`), still shown as today. The hooks inject it too (§3.3), so a lane on the old layout loses nothing. It finishes and closes out the old way. | **Nothing.** Phase 1 has no automatic move and no `migrate` (it is phase 2). A move under a live session would race it. |
+| A live lane with a brief and no plan | No pointer, so owned resolution gives "no plan yet" and the brief, the same as today. Its session may create a root plan, which then shows as `root`. | **Nothing.** Adoption never writes into existing places. |
 | `chore-planning-convention` (`.active_plan` = `planning-convention`) | Step 1, unchanged. The `orchestrator/` copy beside it is no longer reachable by a guess (§6). | Nothing. |
 | A lane created AFTER adoption | `cmd_new` writes `.active_plan` = `<slug>` and an empty `.planning/<slug>/`. The session hook's `Pending` line says where the three files go. | Written by worktrees: the pointer and the empty dir only. |
 | `.gitignore` | `.planning/` is already ignored, so adoption's ignore check passes and `info/exclude` is not touched. | Nothing. |
@@ -598,13 +674,18 @@ adopt from the offer and have its agents and its Plan tab agree.
   - `plan::resolve` made public with `Resolution` and an `Owned | Legacy`
     mode.
   - Owned mode has no newest-dir guess, step 1b's root-then-`Pending` rule,
-    and root reported as `legacy_root`.
-  - Additive `PlanSummary` fields: `owned`, `topic`, and the
-    `pending`/`legacy_root` values of `how_resolved`.
+    root still reported as `root`, and `invalid_pointer` (§3.2 case table).
+  - `PlanSummary`: new fields `owned`, `topic`; new `how_resolved` values
+    `pending`, `invalid_pointer`. Widen the closed union in
+    `app/src/PlanPane.tsx:32` and handle each value.
 - **CLI**
   - `worktrees plan resolve [--json]` and `worktrees plan hook
-    <session|prompt|stop>`, with valleos's budgets.
-  - The parity test (§7, item 4), shown red first.
+    <session|prompt>` (no Stop, §3.3), with valleos's budgets, re-checking
+    `planning::effective` on every call.
+  - The parity test (§7, item 4), through one binary, shown red first.
+  - bats: `new` writes `.active_plan` + the topic dir only when planning is
+    on (and nothing when off); `plan resolve --json` for every row of the
+    §3.2 case table.
 - **`cmd_new`**
   - When planning is on, it writes `.active_plan` = slug and an empty topic
     dir.
@@ -612,14 +693,17 @@ adopt from the offer and have its agents and its Plan tab agree.
     `info/exclude` (Q4). It is a no-op for cdv.
 - **Claude**
   - The `claude-plan` per-launch plugin (second `--plugin-dir`), through
-    `guidance::materialize_in`.
+    `guidance::materialize_in`, on its own launch branch, NOT inside
+    `guidance_for` (`ops.rs:111`).
 - **App**
   - The `planning` offer.
   - Settings → Planning: the explanation, the global choice, and the
     per-project list, which is how an already-registered project like cdv
     is adopted.
-  - The checkbox in Add / Clone / New project.
-  - One line in the Plan tab saying how the plan resolved.
+  - The checkbox in Add existing / New project, and the post-clone line for
+    Clone (§2.3).
+  - In owned mode only, one line in the Plan tab saying how the plan
+    resolved (off mode renders exactly as today).
   - `offers-check.mjs` and mock harness entries.
 - **Proof**
   - The `adding-a-harness.md` surfaces, ticked by seeing them, for Claude.
