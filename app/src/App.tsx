@@ -255,7 +255,7 @@ type Place = {
   upstream?: string | null;
   created_epoch?: number | null;
   last_commit_subject?: string | null;
-  tmux_session: { name: string; up: boolean };
+  tmux_session: { name: string; up: boolean; server?: string; namespace?: string; error?: string };
   /** `model`: what the live agent last replied with, display-named (`Opus 5.5`,
    *  or codex's id verbatim); null before its first reply. */
   agent_sessions?: Record<Harness, AgentSession>;
@@ -5433,6 +5433,7 @@ function App() {
     setMenu(null);
     closeCtx();
     setTermFocus((v) => v + 1); // hand the keyboard back to the terminal
+    if (p.tmux_session.error) return;
     const fresh = opts?.fresh ?? !settings.ai_auto_resume;
     (async () => {
       if (!(await ensureCodexCli(provider))) return;
@@ -7321,6 +7322,10 @@ function App() {
             {ghosts.length > 0 && (
               <ul className="places">{ghosts.map((g) => <PendingRow key={g.id} label={g.label} />)}</ul>
             )}
+            {!!buckets.unknown?.length && <div className="group">
+              <div className="group-h">Unavailable<span className="count">{buckets.unknown.length}</span></div>
+              <ul className="places">{buckets.unknown.map((p) => <PlaceRow key={p.path} repo={pv.root} p={p} />)}</ul>
+            </div>}
             {liveShown.map((g) => {
               const key = `${pv.root}|${g}`;
               const opened = isOpen(key, g !== "idle"); // idle collapsed by default
@@ -7874,7 +7879,7 @@ function App() {
                             )}
                           </span>
                         </div>
-                        <TerminalPane key={selectedAgents![provider].name} provider={provider} session={selectedAgents![provider].name}
+                        <TerminalPane key={`${selected.path}|${selected.tmux_session.server}|${selectedAgents![provider].name}`} endpoint={selected.tmux_session.server} provider={provider} session={selectedAgents![provider].name}
                           termVersion={termVersion} focusToken={termFocus} focusEnabled={provider === planProvider}
                           root={selected.path} onOpenPath={openPathFromTerm} onError={fail}
                           findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
@@ -7904,8 +7909,9 @@ function App() {
                         trick as the StatusSheet's key below. */}
                     <div className="term-status" key={sel.repo + "|" + sel.slug}>
                       <div className="term-empty-card">
-                        <div className="te-title">No live session for <b>{selected.slug}</b></div>
-                        <button className="enter-btn big with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
+                        <div className="te-title">{selected.tmux_session.error ? "Session unavailable for " : "No live session for "}<b>{selected.slug}</b></div>
+                        {selected.tmux_session.error && <p role="alert">{selected.tmux_session.error}</p>}
+                        <button className="enter-btn big with-icon" disabled={!!selected.tmux_session.error} onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /> to start</button>
                       </div>
                       {/* ONE StatusBody on screen at a time, and the sheet wins
                           while it is open. `statusSheet` is tied to neither the

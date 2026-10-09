@@ -68,7 +68,7 @@ use std::io::{BufRead, Read, Write};
 
 use worktrees_core::mention::uri_map;
 use worktrees_core::model::PlaceRef;
-use worktrees_core::{activity, agent, automation, harness, messages, ops, runs, store, tmux, ui::CaptureUi, Project};
+use worktrees_core::{activity, agent, automation, harness, messages, ops, runs, store, ui::CaptureUi, Project};
 use worktrees_core::harness::SendOutcome;
 
 /// Who is working in a place and what they are doing. `agents` lists every
@@ -78,7 +78,15 @@ use worktrees_core::harness::SendOutcome;
 /// app's nav dots use (`worktrees_core::activity`).
 fn add_agent_status(v: &mut serde_json::Value, project: &Project, slug: &str, path: &str) {
     let probes = agent::live_probes();
-    let panes = tmux::PaneList::fetch();
+    let panes = match project.lane_panes(slug, path) {
+        Ok(panes) => Some(panes),
+        Err(reason) => {
+            v["agent_state"] = serde_json::json!("unknown");
+            v["agents"] = serde_json::json!([]);
+            v["activity"] = serde_json::json!({"state":"unknown", "provider":null, "session":null, "last_done":null, "reason":reason});
+            return;
+        }
+    };
     let scan = harness::Scan { probes: &probes, panes: panes.as_ref() };
     let readings = harness::place_activities(project, slug, path, &scan);
     let agents: Vec<serde_json::Value> = harness::ALL
@@ -2280,6 +2288,10 @@ impl Server {
                 // A foreign place says which one, as place_status does.
                 if let Some(a) = address {
                     v["address"] = serde_json::json!(a);
+                    if self.reach.level != worktrees_core::reach::Level::Full {
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        strip_paths(&mut v, &[&project.main_root, &project.git_common, &home]);
+                    }
                 }
                 answer(v)
             }
@@ -2362,9 +2374,7 @@ impl Server {
             return Ok(text_err(&e));
         }
         let path = project.place_dir(&slug);
-        let Some(panes) = tmux::PaneList::fetch() else {
-            return Ok(text_err("tmux is not available, so no agent session can be reached"));
-        };
+        let panes = match project.lane_panes(&slug, &path) { Ok(panes) => panes, Err(e) => return Ok(text_err(&e)) };
         let canonical = project.session_name(&slug);
         let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
         let probes = agent::live_probes();
@@ -3026,13 +3036,16 @@ fn foreign_status(project: &Project, name: &str, found: &PlaceRef, full: bool) -
     v
 }
 
-/// Remove, at any depth, every field whose value is a path under one of
-/// `roots` (the project's checkout, its git dir, the user's home — where
-/// claude's session dir lives). Keyed on the VALUE, not a list of field
+/// Remove, at any depth, fields containing known local roots or absolute
+/// path tokens, including paths embedded in routing diagnostics.
+/// Keyed on the VALUE, not a list of field
 /// names, so a path field added to `Place` later is withheld without anyone
 /// remembering to list it here.
 fn strip_paths(v: &mut serde_json::Value, roots: &[&str]) {
-    let is_path = |s: &str| roots.iter().any(|r| !r.is_empty() && std::path::Path::new(s).starts_with(r));
+    // Routing diagnostics embed socket/marker paths inside prose. Socket roots
+    // need not be inside HOME or the project, so absolute path tokens count too.
+    let is_path = |s: &str| roots.iter().any(|r| !r.is_empty() && s.contains(r))
+        || s.split_whitespace().any(|word| word.trim_start_matches(['\'', '"', '(']).starts_with('/'));
     match v {
         serde_json::Value::Object(m) => {
             m.retain(|_, x| !x.as_str().is_some_and(is_path));
@@ -4744,6 +4757,20 @@ mod tests {
     }
 
     #[test]
+    fn read_only_routing_diagnostics_withhold_local_paths() {
+        let mut v = serde_json::json!({
+            "tmux_session": {"server": "/private/tmp/tmux-501/wt-test", "error": "tmux unreachable; remove marker /home/private/.config/worktrees/tmux/known-test"},
+            "activity": {"state": "unknown", "reason": "tmux unreachable at /private/tmp/tmux-501/wt-test"},
+            "branch": "feat/routing"
+        });
+        strip_paths(&mut v, &["/home/private"]);
+        let flat = v.to_string();
+        assert!(!flat.contains("/home/private") && !flat.contains("/private/tmp"), "{flat}");
+        assert_eq!(v["activity"]["state"], "unknown");
+        assert_eq!(v["branch"], "feat/routing");
+    }
+
+    #[test]
     fn place_status_reaches_a_registered_project_by_name() {
         let t = two("xp-status");
         let mut s = t.server(&t.alpha, Level::Read);
@@ -4828,7 +4855,11 @@ mod tests {
         // ...while the same slug in ANOTHER project is someone else's place.
         let r = call(&mut s, "wait", serde_json::json!({ "until": "idle", "slug": "beta:lane", "timeout_s": 0 }));
         assert_eq!(r["isError"], false, "{}", text(&r));
-        assert_eq!(body(&r)["event"], "none", "{}", text(&r));
+        // This tests foreign/self addressing, not host tmux availability.
+        // A machine without tmux cannot certify an empty endpoint: it is unknown.
+        let b = body(&r);
+        assert!(b["event"] == "none" || (b["event"] == "timeout" && b["activity"]["state"] == "unknown"), "{}", text(&r));
+        assert!(!text(&r).contains(&*t.beta.to_string_lossy()), "foreign wait leaked a path: {}", text(&r));
         assert_eq!(body(&r)["address"], "beta:lane", "a foreign wait says which place: {}", text(&r));
     }
 

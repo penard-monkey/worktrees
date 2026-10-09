@@ -18,6 +18,26 @@ type MockDoc = { path: string; rel: string; title: string; group: string; mtime_
 
 let ws: Workspace = initialWorkspace();
 
+// Deterministic routing witness: two projects share a session name, while a
+// third place has an unreachable endpoint. Browser checks use real controls.
+if (new URLSearchParams(location.search).has("tmuxrouting")) {
+  ws.projects.forEach((project, index) => {
+    const place = project.snapshot?.places[0];
+    if (!place) return;
+    place.tmux_session = { name: "routing-same", up: true, server: `/tmp/mock-routing-${index}` };
+    place.agent_sessions = agentSessions("routing-same", "claude");
+    place.lifecycle_effective = "active";
+  });
+  const blocked = ws.projects[0]?.snapshot?.places.find((p) => p.slug === "catalog-import");
+  if (blocked) {
+    blocked.tmux_session = { name: "routing-blocked", up: false, error: "tmux server unreachable at /tmp/mock-routing-blocked; recover the endpoint before reopening this lane" };
+    blocked.agent_sessions = agentSessions("routing-blocked", null);
+    for (const agent of Object.values(blocked.agent_sessions)) agent.up = false;
+    blocked.lifecycle_effective = "unknown";
+  }
+}
+
+
 const mockMigration: MigrationRow[] = [
   { name: "literal-env", transport: "stdio", status: "copy_literal_env", reason: "API_KEY is a literal value; it will be written into Codex config and briefly visible in the process list while copying. Select this server explicitly to copy it." },
   { name: "filesystem", transport: "stdio", status: "copy", reason: "Ready to copy. ${VAR} references are passed literally, never expanded." },
@@ -1386,7 +1406,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // `paste_to_ai` refuses a session with no Claude in it.
     case "plan_prompt": {
       const up = ws.projects.some((pv) =>
-        pv.snapshot?.places.some((p) => p.tmux_session.name === args.session && p.tmux_session.up));
+        pv.snapshot?.places.some((p) => p.path === args.root && p.tmux_session.name === args.session && p.tmux_session.up));
       if (!up) throw `no Claude running in session ${args.session} (panes: none)`;
       mockPlanPrompts.push({ session: args.session });
       console.info("[mock] plan_prompt", args.session);
@@ -1455,6 +1475,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return { ok: true, code: 0, output: `Created worktree ${slug}`, slug };
     }
     case "open_place": {
+      const routingError = findProject(args.repo)?.snapshot?.places.find((p) => p.slug === args.slug)?.tmux_session.error;
+      if (routingError) return { ok: false, code: 1, output: routingError };
       console.info("[mock] open_place", args); // includes args.fresh so headless tests can assert the flag
       const provider: Harness = isHarness(args.provider) ? args.provider : "claude";
       if (provider === "pi" && String(args.model ?? "").includes("dead") && !args.force) {
@@ -1823,6 +1845,12 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     }
 
     case "term_open": {
+      console.info("[mock] term_open", JSON.stringify({ root: args.root, session: args.session }));
+      const place = ws.projects.flatMap((p) => p.snapshot?.places ?? []).find((p) => p.path === args.root);
+      if (!place) throw `not a place root: ${args.root}`;
+      if (place.tmux_session.error) throw place.tmux_session.error;
+      if (!(place.tmux_session.name === args.session && place.tmux_session.up) &&
+          !Object.values(place.agent_sessions ?? {}).some((s) => s.name === args.session && s.up)) throw "session is no longer running in this place";
       // best-effort: render a canned banner into the xterm via the Channel
       // The middle lines are paths in the shapes agents print, so the
       // ⌘-click links (`resolve_term_paths` below) are drivable here: three

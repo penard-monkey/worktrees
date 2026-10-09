@@ -402,7 +402,7 @@ export function PlanPane({ root, slug, place, agentSession, agentProvider, worke
   const generate = useCallback(() => {
     if (!session || pasting) return;
     setPasting(true);
-    invoke("plan_prompt", { session, provider: agentProvider })
+    invoke("plan_prompt", { root, session, provider: agentProvider })
       .then(() => setPasted(true))
       .catch(onError)
       .finally(() => setPasting(false));

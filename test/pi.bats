@@ -109,7 +109,7 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   # Same second as the place's birth is fine: the filter is `>=`.
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%S).000Z"
   printf '{"type":"session","version":3,"id":"01a0efd0-566d-7028-bbf8-2f78723dc57e","timestamp":"%s","cwd":"%s"}\n{"type":"message","id":"a","timestamp":"%s","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}\n' "$now" "$wt" "$now" > "$dir/2026-09-30T00-56-43-373Z_01a0efd0-566d-7028-bbf8-2f78723dc57e.jsonl"
-  tmux kill-session -t 'repo-feat-x~agent~pi'
+  tmux -L "$(cat "$TMUX_STATE.primary")" kill-session -t 'repo-feat-x~agent~pi'
   run_wt open feat-x --ai pi -r --no-attach --no-spare
   [ "$status" -eq 0 ]
   local c; c="$(pi_cmd feat-x)"
@@ -178,7 +178,7 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   mkdir -p "$dir"
   # The dead lane's conversation, left in the pinned session dir.
   printf '{"type":"session","version":3,"id":"dead-lane","timestamp":"2020-01-01T00:00:00.000Z","cwd":"%s"}\n{"type":"message","id":"a","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"old"}]}}\n' "$wt" > "$dir/2020-01-01T00-00-00-000Z_dead-lane.jsonl"
-  tmux kill-session -t 'repo-feat-x~agent~pi'
+  tmux -L "$(cat "$TMUX_STATE.primary")" kill-session -t 'repo-feat-x~agent~pi'
   run_wt rm feat-x -y
   run_wt new feat-x --no-tmux --no-spare --brief "do y"
   [ "$status" -eq 0 ]
@@ -217,6 +217,7 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   [[ "$c" == *" --approve "* ]]
   call '{"branch":"agent-q","provider":"pi"}'
   [[ "$output" == *'"isError":false'* ]]
-  c="$(pi_cmd agent-q)"
+  local key; key="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["key"])' "$REPO/.git/worktrees-tmux/project.json")"
+  c="$(TMUX_STATE="$TMUX_STATE.endpoints/$key" pi_cmd agent-q)"
   [[ "$c" == *" --no-approve "* ]]
 }

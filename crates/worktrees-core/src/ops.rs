@@ -65,19 +65,14 @@ fn indent(s: &str) -> String {
 /// `close` would fail to find.
 fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList>) -> Option<String> {
     let canonical = p.session_name(slug);
-    let exists = match panes {
-        Some(pl) => pl.has_session(&canonical),
-        None => tmux::session_exists(&canonical),
+    let owned;
+    let panes = match panes {
+        Some(panes) => panes,
+        None => { owned = p.lane_panes(slug, wt).ok()?; &owned }
     };
-    if exists {
-        return Some(canonical);
-    }
+    if panes.has_session(&canonical) { return Some(canonical); }
     let exclude = if slug == "(main)" { Some(p.wt_root_dir()) } else { None };
-    let ai_word = crate::project::adopt_ai_word();
-    match panes {
-        Some(pl) => pl.session_in(wt, &ai_word, exclude),
-        None => tmux::worktree_session_excluding(wt, &ai_word, exclude),
-    }
+    panes.session_in(wt, &crate::project::adopt_ai_word(), exclude)
 }
 
 /// THE seam where a profile turns a bare `ai_cmd` into the real launch shape.
@@ -249,10 +244,17 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
     } else { None };
     let place_slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+    let panes = match p.lane_panes(&place_slug, wt) {
+        Ok(panes) => panes,
+        Err(e) => { ui.error(&e); return 1; }
+    };
+    let server = &panes.server;
+    let session_name = agent_session_name(&panes, session_in, &ai_word);
+    let session_in = session_name.as_str();
     // The harness's last word on a launch that will CREATE its session — before
     // the other agent is closed below, so a refused launch (pi's model host is
     // down, its node is too old) leaves whatever was running exactly as it was.
-    if !ai_cmd.is_empty() && !tmux::session_exists(session_in) {
+    if !ai_cmd.is_empty() && !tmux::session_exists(server, session_in) {
         if let Some(adapter) = crate::harness::by_word(&ai_word) {
             match adapter.prepare(p, &place_slug, wt, &mut ai) {
                 Ok(()) => {}
@@ -283,7 +285,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         let selected = crate::provider::by_word(&ai_word).unwrap();
         let managed: Vec<String> = crate::provider::PROVIDERS.iter().map(|p| p.sidecar_name(&canonical)).collect();
         let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
-        if let Some(panes) = tmux::PaneList::fetch() {
+        if let Some(panes) = tmux::PaneList::fetch(server) {
             for (name, provider) in panes.agents_in(wt, exclude) {
                 if provider != selected.id && name != canonical && !managed.contains(&name) {
                     ui.error(&format!(
@@ -295,14 +297,14 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
         let mut other: Vec<String> = crate::provider::PROVIDERS.iter()
             .filter(|p| p.id != selected.id).map(|p| p.sidecar_name(&canonical)).collect();
-        if session_in != canonical && tmux::canonical_provider(&canonical).id != selected.id
-            && (selected.canonical_default || tmux::session_exists(&canonical)) {
+        if session_in != canonical && tmux::canonical_provider(server, &canonical).id != selected.id
+            && (selected.canonical_default || tmux::session_exists(server, &canonical)) {
             other.push(canonical);
         }
         for name in other {
-            if name == session_in || !tmux::session_exists(&name) { continue; }
-            tmux::kill_session(&name);
-            if tmux::session_exists(&name) {
+            if name == session_in || !tmux::session_exists(server, &name) { continue; }
+            if let Err(e) = tmux::kill_session(server, &name) { ui.error(&e); return 1; }
+            if tmux::session_exists(server, &name) {
                 ui.error(&format!("could not close the other agent session '{name}'; provider switch cancelled"));
                 return 1;
             }
@@ -310,16 +312,16 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
     }
     let mut session = session_in.to_string();
-    if !tmux::session_exists(&session) && !crate::provider::is_sidecar(&session) {
+    if !tmux::session_exists(server, &session) && !crate::provider::is_sidecar(&session) {
         // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
         // inside the main root, so without the exclusion opening main could
         // adopt (and attach to) a worktree's session instead of creating main's.
         let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
-        if let Some(existing) = tmux::worktree_session_excluding(wt, &ai_word, exclude) {
+        if let Some(existing) = tmux::worktree_session_excluding(server, wt, &ai_word, exclude) {
             session = existing;
         }
     }
-    if tmux::session_exists(&session) {
+    if tmux::session_exists(server, &session) {
         // INFO, not warn. Finding the session already up is the normal, healthy
         // outcome of reopening a place — it is what a durable place IS — so it is
         // not something the user has to act on. At Warn severity it rode out
@@ -366,9 +368,9 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         } else {
             keep.to_string()
         };
-        match tmux::new_session(&session, wt, &pane0) {
+        match tmux::new_session(server, &session, wt, &pane0) {
             Ok(pid) => {
-                tmux::tune_session(&session);
+                tmux::tune_session(server, &session);
                 // Stamp WHICH profile this session started with — including
                 // "none at all". Only here, in the branch that actually creates a
                 // session: an attach reuses whatever the running process already
@@ -437,11 +439,11 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
     // open for hours and must not hold the lock against a later switch.
     drop(_switch_lock);
     if !do_attach {
-        ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
+        ui.info(&format!("Session ready (detached). Attach with: {}", tmux::attach_route(server, &session)));
         return 0;
     }
-    if !tmux::attach_or_switch(&session) {
-        ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
+    if !tmux::attach_or_switch(server, &session) {
+        ui.info(&format!("Session ready (detached). Attach with: {}", tmux::attach_route(server, &session)));
     }
     0
 }
@@ -528,10 +530,10 @@ pub const BRIEF_PATH: &str = ".planning/brief.md";
 /// brief itself never travels through argv, only this pointer to it does.
 pub const BRIEF_OPENER: &str = "Read .planning/brief.md and begin.";
 
-pub fn agent_session_name(canonical: &str, ai_word: &str) -> String {
+pub fn agent_session_name(panes: &tmux::PaneList, canonical: &str, ai_word: &str) -> String {
     let Some(provider) = crate::provider::by_word(ai_word) else { return canonical.to_string() };
-    let owner = tmux::canonical_provider(canonical);
-    let sidecar_exists = provider.canonical_default && tmux::session_exists(&provider.sidecar_name(canonical));
+    let owner = panes.canonical_provider(canonical);
+    let sidecar_exists = provider.canonical_default && panes.has_session(&provider.sidecar_name(canonical));
     provider.session_name(canonical, owner.id, sidecar_exists)
 }
 
@@ -974,7 +976,6 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if brief.is_some() && !ai.cmd.is_empty() {
         ai.opener = Some(BRIEF_OPENER.to_string());
     }
-    let session = agent_session_name(&session, &ai.match_word);
     let rc = launch(p, ui, &wt, &session, pane1_install, &ai, do_attach, spare_shell);
     if rc != 0 {
         rc
@@ -1178,7 +1179,6 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             ai.opener = Some(BRIEF_OPENER.to_string());
         }
     }
-    let session = agent_session_name(&session, &ai.match_word);
     launch(p, ui, &wt, &session, "", &ai, do_attach, spare_shell)
 }
 
@@ -1267,18 +1267,24 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     let mut rc = 0;
     for n in &names {
+        let route_slug = match close_slug(p, ui, n) { Ok(slug) => slug, Err(e) => { rc = worse_rc(rc, e); continue; } };
+        let panes = match p.lane_panes(&route_slug, &p.place_dir(&route_slug)) {
+            Ok(panes) => panes,
+            Err(e) => { ui.error(&e); rc = worse_rc(rc, 1); continue; }
+        };
+        let server = &panes.server;
         if let Some(selected) = provider.as_deref().and_then(crate::provider::by_id) {
-            let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
+            let slug = route_slug.clone();
             let canonical = p.session_name(&slug);
-            let session = agent_session_name(&canonical, selected.match_word);
+            let session = agent_session_name(&panes, &canonical, selected.match_word);
             // Claude's canonical path retains adoption and confirmation handling.
             if !selected.canonical_default || session != canonical {
-                if tmux::session_exists(&session) {
+                if tmux::session_exists(server, &session) {
                     if expect.as_deref().is_some_and(|e| e != session) {
                         ui.error(&format!("{} session changed since confirmation; nothing was closed.", selected.label));
                         rc = worse_rc(rc, 1);
                     } else {
-                        tmux::kill_session(&session);
+                        if let Err(e) = tmux::kill_session(server, &session) { ui.error(&e); rc = worse_rc(rc, 1); continue; }
                         ui.info(&format!("closed {} tmux {session}", selected.label));
                     }
                 } else { ui.info(&format!("no live {} session for '{slug}'", selected.label)); }
@@ -1289,16 +1295,19 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         // names the caller must see "something broke" (1) rather than "ask the
         // user" (EXIT_NEEDS_CONFIRM), which is the code every existing caller
         // already understands. `worse_rc` is that ranking, written down once.
-        match close_one(p, ui, n, yes, expect.as_deref()) {
+        match close_one(p, ui, &route_slug, yes, expect.as_deref()) {
             Err(code) => rc = worse_rc(rc, code),
             Ok(()) if provider.is_none() => {
-                let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
+                let slug = route_slug.clone();
                 for provider in crate::provider::PROVIDERS.iter().rev() {
                     let session = provider.sidecar_name(&p.session_name(&slug));
-                    if tmux::session_exists(&session) {
-                        tmux::kill_session(&session);
+                    if tmux::session_exists(server, &session) {
+                        if let Err(e) = tmux::kill_session(server, &session) { ui.error(&e); rc = worse_rc(rc, 1); continue; }
                         ui.info(&format!("closed {} tmux {session}", provider.label));
                     }
+                }
+                if let Err(e) = tmux::kill_agent_sidecars(server, &p.session_name(&slug)) {
+                    ui.error(&e); rc = worse_rc(rc, 1);
                 }
             }
             Ok(()) => {}
@@ -1323,7 +1332,7 @@ pub fn place_session(p: &Project, slug: &str) -> Option<String> {
 /// question and the answer the named session can exit and another one can adopt
 /// the place by pane cwd. Without the binding, `-y` would kill whatever is live
 /// at execution time under a consent collected for something else.
-fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option<&str>) -> Result<(), i32> {
+fn close_slug(p: &Project, ui: &mut dyn Ui, name: &str) -> Result<String, i32> {
     let s = slugify(name);
     if name != "(main)" && (s.is_empty() || s == "." || s == "..") {
         ui.error(&format!("Invalid worktree name '{name}'."));
@@ -1348,6 +1357,11 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option
         ui.error(&format!("No worktree '{s}' under .worktrees/. See: worktrees ls"));
         return Err(1);
     };
+    Ok(slug)
+}
+
+fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option<&str>) -> Result<(), i32> {
+    let slug = close_slug(p, ui, name)?;
     let canonical = p.session_name(&slug);
     // `open` ADOPTS any session with a pane cwd'd in the place (tmux::
     // worktree_session_excluding), so close must be its inverse or an adopted
@@ -1355,10 +1369,12 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option
     // unclosable. Unlike before, `(main)` adopts too: it is a place whose
     // canonical name a prefix change moves like any other.
     let dir = p.place_dir(&slug);
-    let Some(session) = live_session(p, &slug, &dir, None) else {
+    let panes = p.lane_panes(&slug, &dir).map_err(|e| { ui.error(&e); 1 })?;
+    let server = &panes.server;
+    let Some(session) = live_session(p, &slug, &dir, Some(&panes)) else {
         // No AI session, but the dock may still hold scratch shells for this
         // place (canonical-named) — sweep them so `close` leaves nothing behind.
-        tmux::kill_shell_sidecars(&canonical);
+        tmux::kill_shell_sidecars(server, &canonical).map_err(|e| { ui.error(&e); 1 })?;
         ui.info(&format!("no live session for '{slug}' ({canonical}) — nothing to close."));
         return Ok(());
     };
@@ -1416,8 +1432,8 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option
             return Ok(());
         }
     }
-    tmux::kill_session(&session);
-    tmux::kill_shell_sidecars(&canonical); // the dock's scratch shells die with the place
+    tmux::kill_session(server, &session).map_err(|e| { ui.error(&e); 1 })?;
+    tmux::kill_shell_sidecars(server, &canonical).map_err(|e| { ui.error(&e); 1 })?; // the dock's scratch shells die with the place
     match (session == canonical, slug.as_str()) {
         (true, "(main)") => ui.info(&format!("closed tmux {session} — checkout untouched.")),
         (true, _) => {
@@ -1495,7 +1511,9 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
     // actually die, and after a prefix change (§5) that is not always the
     // canonical name. Falls back to the canonical name for display when nothing
     // is running, which is what the line meant all along.
-    let live = live_session(p, &slug, &path, None);
+    let panes = p.lane_panes(&slug, &path).map_err(|e| { ui.error(&e); 1 })?;
+    let server = &panes.server;
+    let live = live_session(p, &slug, &path, Some(&panes));
     let session = live.clone().unwrap_or_else(|| p.session_name(&slug));
 
     if !dirty.is_empty() && !force {
@@ -1525,14 +1543,15 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
     compose_down(p, ui, &slug, &path);
 
     if let Some(session) = &live {
-        tmux::kill_session(session);
+        tmux::kill_session(server, session).map_err(|e| { ui.error(&e); 1 })?;
         ui.info(&format!("killed tmux {session}"));
     }
     for provider in crate::provider::PROVIDERS.iter().rev() {
         let session = provider.sidecar_name(&p.session_name(&slug));
-        if tmux::session_exists(&session) { tmux::kill_session(&session); ui.info(&format!("killed tmux {session}")); }
+        if tmux::session_exists(server, &session) { tmux::kill_session(server, &session).map_err(|e| { ui.error(&e); 1 })?; ui.info(&format!("killed tmux {session}")); }
     }
-    tmux::kill_shell_sidecars(&session); // dock shells die with the worktree (past the refusal guards)
+    tmux::kill_agent_sidecars(server, &p.session_name(&slug)).map_err(|e| { ui.error(&e); 1 })?;
+    tmux::kill_shell_sidecars(server, &session).map_err(|e| { ui.error(&e); 1 })?; // dock shells die with the worktree (past the refusal guards)
     if reg {
         if git::git_status(&p.main_root, &["worktree", "remove", "--force", &path]) {
             ui.info(&format!("removed worktree {slug}"));
@@ -2473,12 +2492,15 @@ fn prefix_findings(p: &Project, cfg: &ProjectConfig) -> Vec<Finding> {
 /// `places` is `(slug, dir)` rather than dirs, because `(main)` is in this scan
 /// and its slug is not `basename(dir)`.
 fn session_findings(p: &Project, places: &[(String, String)]) -> Vec<Finding> {
-    let panes = tmux::PaneList::fetch();
+    let inventory = p.tmux_inventory();
     let mut out = Vec::new();
     for (slug, dir) in places {
         let slug = slug.clone();
         let canonical = p.session_name(&slug);
-        let Some(live) = live_session(p, &slug, dir, panes.as_ref()).filter(|s| *s != canonical)
+        let panes = inventory.as_ref().ok().and_then(|i| i.lane(&canonical, dir, if slug == "(main)" { Some(p.wt_root_dir()) } else { None }).ok());
+        // Failed routing is unknown; never re-probe it as an absent snapshot.
+        let Some(panes) = panes else { continue };
+        let Some(live) = live_session(p, &slug, dir, Some(&panes)).filter(|s| *s != canonical)
         else {
             continue;
         };

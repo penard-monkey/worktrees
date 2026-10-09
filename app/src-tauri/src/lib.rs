@@ -1,3 +1,5 @@
+mod tmux_host;
+use worktrees_core::tmux_server::TmuxServer;
 // worktrees UI — Tauri backend. Uses worktrees-core as a LIBRARY (in-process; no
 // subprocess, no WORKTREES_BIN). Two jobs of its own:
 //   1. state    — core computes derived `ls`; core::store owns the declared sidecar;
@@ -311,7 +313,7 @@ fn agent_sessions_for(
 /// caches transcript tails here and logs a failed read through `applog`.
 fn live_model(id: &str, probes: &[worktrees_core::agent::ClaudeProbe], session: &str, cwd: &str) -> Option<String> {
     match id {
-        "claude" => claude_model(probes, session),
+        "claude" => claude_model(probes, session, cwd),
         "codex" => codex_model(cwd),
         // By the place's DIR, as codex and the tick read it — never through
         // the session name, which a pi in the canonical session does not carry
@@ -324,8 +326,14 @@ fn live_model(id: &str, probes: &[worktrees_core::agent::ClaudeProbe], session: 
 /// One repo's merged snapshot: core's live `ls` + DECLARED store overlay +
 /// reconciled `lifecycle_effective` per place.
 fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
+    snapshot_with(repo, &Mutex::new(HashMap::new()))
+}
+fn snapshot_with(repo: &str, endpoints: &Mutex<HashMap<TmuxServer, Result<tmux::PaneList, String>>>) -> Result<serde_json::Value, String> {
     let project = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
-    let mut v = serde_json::to_value(project.ls()).map_err(|e| e.to_string())?;
+    tmux_host::register(&project);
+    let inventory = worktrees_core::tmux_route::Routes::discover(Path::new(&project.git_common))
+        .map(|routes| routes.snapshot_with(&mut endpoints.lock().unwrap()));
+    let mut v = serde_json::to_value(project.ls_with_inventory(&inventory)).map_err(|e| e.to_string())?;
     // Unborn HEAD (git init, no commits): the repo lists fine but no worktree can
     // be created from it. Carried on the snapshot so the nav can offer the first
     // commit instead of letting `new` fail on an invalid object name.
@@ -342,7 +350,6 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
     // Resolved against the set already loaded above — not a second read of the
     // same file in the same tick.
     let effective = worktrees_core::profile::resolve_profile_id_in(&profiles, repo);
-    let agent_panes = tmux::PaneList::fetch();
     let probes = worktrees_core::agent::live_probes();
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
@@ -351,6 +358,7 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             let primary_up = place.pointer("/tmux_session/up").and_then(|b| b.as_bool()).unwrap_or(false);
             let primary_name = place.pointer("/tmux_session/name").and_then(|s| s.as_str()).unwrap_or(&canonical).to_string();
             let place_path = place.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let agent_panes = inventory.as_ref().ok().and_then(|i| i.lane(&canonical, &place_path, (slug == "(main)").then_some(project.wt_root_dir())).ok());
             let sessions = agent_sessions_for(agent_panes.as_ref(), &probes, &canonical, &primary_name, primary_up, &place_path);
             // Watched only while the harness itself runs in the session: the
             // pane is `<cli> …; exec "$SHELL"`, so an agent that exited or was
@@ -361,8 +369,10 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             for s in &sessions {
                 let running = s.up && agent_panes.as_ref().is_some_and(|panes| panes.session_runs_program(&s.name));
                 let launch = agent_panes.as_ref().and_then(|panes| panes.session_launch(&s.name));
-                watch_lane(s.id, &place_path, running.then_some(&s.name), launch, &s.model);
+                watch_lane(agent_panes.as_ref().map(|p| &p.server), s.id, &place_path, running.then_some(&s.name), launch, &s.model);
             }
+            tmux_host::watch_place(&place_path, agent_panes.as_ref().map(|panes| sessions.iter().filter(|s| s.up)
+                .map(|s| (panes.server.clone(), s.name.clone(), panes.session_launch(&s.name).map(str::to_string))).collect()));
             let tmux_up = sessions.iter().any(|s| s.up);
             // Profiles are claude's recipe, so only a live Claude can be stale.
             let claude_up = sessions.iter().any(|s| s.up && s.id == provider::CLAUDE.id);
@@ -371,7 +381,8 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             // otherwise it follows the first live harness.
             let default_up = sessions.iter().any(|s| s.up && s.id == harness::default_adapter().provider().id);
             if let Some(live) = sessions.iter().find(|s| s.up).filter(|_| !default_up) {
-                place["tmux_session"] = serde_json::json!({ "name": live.name, "up": true });
+                place["tmux_session"]["name"] = serde_json::json!(live.name);
+                place["tmux_session"]["up"] = serde_json::json!(true);
             }
             place["agent_sessions"] = serde_json::Value::Object(
                 sessions
@@ -383,7 +394,7 @@ fn snapshot(repo: &str) -> Result<serde_json::Value, String> {
             place["declared"] = decl
                 .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
                 .unwrap_or(serde_json::Value::Null);
-            place["lifecycle_effective"] = serde_json::Value::String(store::reconcile(decl, tmux_up, now));
+            place["lifecycle_effective"] = serde_json::Value::String(if agent_panes.is_none() { "unknown".into() } else { store::reconcile(decl, tmux_up, now) });
 
             // What a LIVE session is actually running, versus the profile as
             // edited since. Both derived from the launch stamp ops writes when a
@@ -496,6 +507,7 @@ async fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
     let roots = read_projects(&app);
     let reg = worktrees_core::registry::read_lenient();
     let mut projects: Vec<ProjectView> = Vec::with_capacity(roots.len());
+    let endpoints = Mutex::new(HashMap::new());
     for chunk in roots.chunks(4) {
         let batch: Vec<ProjectView> = std::thread::scope(|s| {
             let handles: Vec<_> = chunk
@@ -503,9 +515,10 @@ async fn list_workspace(app: AppHandle) -> Result<Workspace, String> {
                 .cloned()
                 .map(|root| {
                     let entry = reg.by_root(&root).cloned();
+                    let endpoints = &endpoints;
                     s.spawn(move || {
                         let (name, private) = entry.map_or((None, false), |e| (Some(e.name), e.private));
-                        match snapshot(&root) {
+                        match snapshot_with(&root, endpoints) {
                             Ok(sn) => ProjectView { root, ok: true, error: None, snapshot: Some(sn), name, private },
                             Err(e) => ProjectView { root, ok: false, error: Some(e), snapshot: None, name, private },
                         }
@@ -1010,6 +1023,7 @@ async fn drop_reference(
     let prov = worktrees_core::provider::by_id(&provider).ok_or_else(|| format!("unknown agent: {provider}"))?;
     let project = Project::discover(std::path::Path::new(&repo)).map_err(|e| e.msg)?;
     let into = Project::discover(std::path::Path::new(&into_repo)).map_err(|e| e.msg)?;
+    let server = tmux_host::resolve(&into.place_dir(&into_slug), &into_session)?;
     let places = project.place_index();
     if !places.iter().any(|p| p.slug == slug) {
         return Err(format!("no such place: {slug}"));
@@ -1033,7 +1047,7 @@ async fn drop_reference(
             // composer, so a paste there could read as the answer.
             if prov.id != worktrees_core::provider::CLAUDE.id {
                 let probes = worktrees_core::agent::live_probes();
-                let panes = tmux::PaneList::fetch();
+                let panes = Some(into.lane_panes(&into_slug, &into.place_dir(&into_slug))?);
                 let scan = worktrees_core::harness::Scan { probes: &probes, panes: panes.as_ref() };
                 let path = into.place_dir(&into_slug);
                 let waiting = worktrees_core::harness::place_activities(&into, &into_slug, &path, &scan)
@@ -1057,7 +1071,7 @@ async fn drop_reference(
     //
     // Addressed by the AI's pane, not by an index — see `tmux::ai_pane` for the
     // three ordinary ways pane 0 turns out not to be the agent.
-    tmux::paste_to_ai(&into_session, prov.match_word, &format!(" {text} "))?;
+    tmux::paste_to_ai(&server, &into_session, prov.match_word, &format!(" {text} "))?;
     applog("info", &format!("drop_reference: {text} -> {into_session} ({})", prov.id));
     Ok(text)
 }
@@ -1471,7 +1485,7 @@ async fn open_place(
                 ui.error("tmux not found");
                 return 1;
             }
-            let session = ops::agent_session_name(&p.session_name("(main)"), &provider);
+            let session = p.session_name("(main)");
             let mut ai_cmd = provider.clone();
             // (main) does not go through `cmd_open`, so it has to resolve its
             // own resume target — without this it would set `resume` with no
@@ -1766,7 +1780,16 @@ struct Drafts {
 /// Panes whose session is not in that list are dropped BEFORE the call: a
 /// `capture-pane` on a dead pane makes tmux print an error and abandon the rest
 /// of the chain, which would silently blank every pane after it.
-fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
+fn scan_drafts(poll: &tmux_host::Poll) -> Result<Vec<Draft>, String> {
+    let mut drafts = Vec::new();
+    for (server, panes) in &poll.endpoints {
+        let panes = panes.as_ref().map_err(Clone::clone)?;
+        drafts.extend(scan_drafts_on(server, panes, poll)?);
+    }
+    Ok(drafts)
+}
+fn scan_drafts_on(server: &TmuxServer, panes: &tmux::PaneList, poll: &tmux_host::Poll) -> Result<Vec<Draft>, String> {
+    let sessions = panes.names().join("\n");
     let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
     let probes = worktrees_core::agent::live_probes();
     // (cwd, pane id, queued) for the panes worth capturing.
@@ -1787,6 +1810,10 @@ fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
         };
         if !live.contains(&sess) {
             continue;
+        }
+        if !panes.has_probe(sess, pane, &p.cwd) { continue; }
+        if poll.endpoints.values().filter_map(|p| p.as_ref().ok()).filter(|pl| pl.has_probe(sess, pane, &p.cwd)).count() != 1 {
+            return Err(format!("ambiguous tmux endpoint for Claude pane {sess}:{pane}"));
         }
         targets.push((p.cwd.clone(), pane.to_string(), state == "busy"));
     }
@@ -1809,7 +1836,7 @@ fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
         // (`agent::draft_from_screen` reads the attribute and strips the rest).
         args.extend(["capture-pane", "-e", "-p", "-t", pane, "-S", DRAFT_CAPTURE_LINES]);
     }
-    let out = worktrees_core::tmux::tmux(&args).map_err(|e| format!("tmux: {e}"))?;
+    let out = worktrees_core::tmux::tmux(server, &args).map_err(|e| format!("tmux: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if err.is_empty() { "tmux capture-pane failed".into() } else { err });
@@ -1840,7 +1867,7 @@ fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
 /// would otherwise show nothing until the user typed something.
 #[tauri::command]
 async fn list_drafts() -> Result<Vec<Draft>, String> {
-    let fp = worktrees_core::tmux::session_fingerprint();
+    let fp = tmux_host::Poll::read();
     Ok(scan_drafts(&fp).unwrap_or_default())
 }
 
@@ -2133,6 +2160,7 @@ static CODEX_WATCH: Mutex<Option<HashMap<String, CodexWatched>>> = Mutex::new(No
 
 #[derive(Clone)]
 struct CodexWatched {
+    server: TmuxServer,
     session: String,
     model: Option<String>,
 }
@@ -2159,9 +2187,9 @@ fn cached_model(path: &Path, parse: fn(&[String]) -> Option<String>) -> Option<S
 /// display-named (`Opus 5.5`). Found by the probe whose `tmux` names that
 /// session — the same session the label sits over, not merely a claude with
 /// the same cwd (a dock shell may be running another).
-fn claude_model(probes: &[worktrees_core::agent::ClaudeProbe], session: &str) -> Option<String> {
+fn claude_model(probes: &[worktrees_core::agent::ClaudeProbe], session: &str, cwd: &str) -> Option<String> {
     probe_model(probes.iter().find(|p| {
-        p.tmux.as_deref().and_then(worktrees_core::agent::session_name) == Some(session)
+        p.cwd == cwd && p.tmux.as_deref().and_then(worktrees_core::agent::session_name) == Some(session)
     })?)
 }
 
@@ -2185,14 +2213,14 @@ fn codex_model(cwd: &str) -> Option<String> {
 
 /// Record what a snapshot showed for `cwd`'s codex session: its tmux session
 /// while live, `None` when down (which stops the tick watching it).
-fn codex_watch_set(cwd: &str, session: Option<&String>, model: &Option<String>) {
+fn codex_watch_set(server: Option<&TmuxServer>, cwd: &str, session: Option<&String>, model: &Option<String>) {
     let mut guard = CODEX_WATCH.lock().unwrap_or_else(|e| e.into_inner());
     let w = guard.get_or_insert_with(HashMap::new);
     match session {
-        Some(session) => {
-            w.insert(cwd.to_string(), CodexWatched { session: session.clone(), model: model.clone() });
+        Some(session) if server.is_some() => {
+            w.insert(cwd.to_string(), CodexWatched { server: server.expect("live watch needs endpoint").clone(), session: session.clone(), model: model.clone() });
         }
-        None => {
+        _ => {
             w.remove(cwd);
         }
     }
@@ -2227,31 +2255,34 @@ struct LaneTick {
 /// (`findings.md`, 2026-09-26) — so those panes, and only those, are captured
 /// and read with `codex::waiting_on_screen`. `sessions` is the tick's tmux
 /// fingerprint, reused exactly as `scan_drafts` reuses it.
-fn codex_tick(sessions: &str) -> LaneTick {
+fn codex_tick(sessions: &tmux_host::Poll) -> LaneTick {
     let watched: Vec<(String, CodexWatched)> = {
         let guard = CODEX_WATCH.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|w| w.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
     };
     let mut out = LaneTick::default();
     let mut turns: Vec<(String, Option<worktrees_core::codex::Turn>)> = Vec::new();
-    let mut mid_turn: Vec<(String, String)> = Vec::new();
+    let mut mid_turn: HashMap<TmuxServer, Vec<(String, String)>> = HashMap::new();
     for (cwd, w) in watched {
+        if !sessions.names(&w.server).is_some_and(|names| names.lines().any(|s| s == w.session)) { continue; }
         let (model, turn) = match worktrees_core::codex::latest_rollout(&cwd) {
             Some(r) => codex_tail(&r),
             None => (None, None),
         };
         if model != w.model {
-            codex_watch_set(&cwd, Some(&w.session), &model);
+            codex_watch_set(Some(&w.server), &cwd, Some(&w.session), &model);
             out.models_moved = true;
         }
         if matches!(turn, Some(worktrees_core::codex::Turn::Busy)) {
-            mid_turn.push((cwd.clone(), w.session));
+            mid_turn.entry(w.server.clone()).or_default().push((cwd.clone(), w.session));
         }
         turns.push((cwd, turn));
     }
     // Only mid-turn panes are captured: one chained tmux call for all of them,
     // none at all while no codex turn runs.
-    let panes = activity::codex_panes(sessions, &mid_turn);
+    let panes: Vec<_> = mid_turn.into_iter().flat_map(|(server, targets)| {
+        sessions.names(&server).map(|names| activity::codex_panes(&server, &names, &targets)).unwrap_or_default()
+    }).collect();
     for (cwd, turn) in turns {
         let pane = panes.iter().find(|(c, _)| *c == cwd).map(|(_, p)| *p);
         // ONE derivation (core's), the same `place_status` and `wait` use.
@@ -2274,6 +2305,7 @@ static PI_WATCH: Mutex<Option<HashMap<String, PiWatched>>> = Mutex::new(None);
 
 #[derive(Clone, Debug, PartialEq)]
 struct PiWatched {
+    server: TmuxServer,
     session: String,
     /// The launch the snapshot saw (`PaneList::session_launch`): a close +
     /// open reuses the session NAME, and must start the startup read over.
@@ -2292,17 +2324,17 @@ struct PiWatched {
 /// pi runs there, `None` when not (which stops the tick watching it). The
 /// startup memory survives a re-list of the same session and resets for a
 /// new one — a relaunch is a new startup, modal and all.
-fn pi_watch_set(cwd: &str, session: Option<&String>, launch: Option<&str>, model: &Option<String>) {
+fn pi_watch_set(server: Option<&TmuxServer>, cwd: &str, session: Option<&String>, launch: Option<&str>, model: &Option<String>) {
     let mut guard = PI_WATCH.lock().unwrap_or_else(|e| e.into_inner());
     let w = guard.get_or_insert_with(HashMap::new);
     match session {
-        Some(session) => {
+        Some(session) if server.is_some() => {
             let launch = launch.map(str::to_string);
-            let keep = w.get(cwd).filter(|x| x.session == *session && x.launch == launch).cloned();
+            let keep = w.get(cwd).filter(|x| Some(&x.server) == server && x.session == *session && x.launch == launch).cloned();
             let (first_file, settled) = keep.map_or((None, false), |x| (x.first_file, x.settled));
-            w.insert(cwd.to_string(), PiWatched { session: session.clone(), launch, model: model.clone(), first_file, settled });
+            w.insert(cwd.to_string(), PiWatched { server: server.expect("live watch needs endpoint").clone(), session: session.clone(), launch, model: model.clone(), first_file, settled });
         }
-        None => {
+        _ => {
             w.remove(cwd);
         }
     }
@@ -2317,14 +2349,21 @@ fn pi_watch_set(cwd: &str, session: Option<&String>, launch: Option<&str>, model
 /// and a `stat`. What the dots then miss that `place_status` would see is a pi
 /// killed mid-turn, whose file ends busy forever — the snapshot stops
 /// watching it on the next re-list, exactly as for codex.
-fn pi_tick(sessions: &str) -> LaneTick {
+fn pi_tick(sessions: &tmux_host::Poll) -> LaneTick {
     let mut watched: HashMap<String, PiWatched> = {
         let guard = PI_WATCH.lock().unwrap_or_else(|e| e.into_inner());
         guard.clone().unwrap_or_default()
     };
+    watched.retain(|_, w| sessions.names(&w.server).is_some_and(|names| names.lines().any(|s| s == w.session)));
     let before = watched.clone();
     let out = pi_tick_in(&mut watched, worktrees_core::pi::lane_file, |targets| {
-        worktrees_core::pi::pi_panes(sessions, targets)
+        let mut groups: HashMap<TmuxServer, Vec<(String, String)>> = HashMap::new();
+        for (cwd, name) in targets {
+            if let Some(w) = before.get(cwd) { groups.entry(w.server.clone()).or_default().push((cwd.clone(), name.clone())); }
+        }
+        groups.into_iter().flat_map(|(server, targets)| {
+            sessions.names(&server).map(|names| worktrees_core::pi::pi_panes(&server, &names, &targets)).unwrap_or_default()
+        }).collect()
     });
     // Write back only what this tick learned, and only for lanes the snapshot
     // has not replaced or dropped in the meantime.
@@ -2400,7 +2439,7 @@ enum Feed {
     Unpolled,
 }
 
-fn harness_feed(id: &str, sessions: &str) -> Feed {
+fn harness_feed(id: &str, sessions: &tmux_host::Poll) -> Feed {
     match id {
         "claude" => Feed::Probes,
         "codex" => Feed::Lane(codex_tick(sessions)),
@@ -2413,15 +2452,15 @@ fn harness_feed(id: &str, sessions: &str) -> Feed {
 /// the tick to watch (`session` is `None` when that harness is not running in
 /// the place). `false` for a harness nothing watches — the drift test's other
 /// arm.
-fn watch_lane(id: &str, cwd: &str, session: Option<&String>, launch: Option<&str>, model: &Option<String>) -> bool {
+fn watch_lane(server: Option<&TmuxServer>, id: &str, cwd: &str, session: Option<&String>, launch: Option<&str>, model: &Option<String>) -> bool {
     match id {
         "claude" => true, // probes are global; nothing to watch per place
         "codex" => {
-            codex_watch_set(cwd, session, model);
+            codex_watch_set(server, cwd, session, model);
             true
         }
         "pi" => {
-            pi_watch_set(cwd, session, launch, model);
+            pi_watch_set(server, cwd, session, launch, model);
             true
         }
         _ => false,
@@ -5850,9 +5889,10 @@ async fn place_plan(app: AppHandle, root: String) -> Result<worktrees_core::plan
 /// place may be on an ADOPTED session whose name is not the canonical one, and
 /// the frontend already holds the real name from `ls`.
 #[tauri::command]
-async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), String> {
+async fn plan_prompt(root: String, session: String, provider: Option<String>) -> Result<(), String> {
     // Addressed by the AI's pane, not by an index (`tmux::ai_pane`), and an
     // honest error when no Claude is there rather than a paste onto a shell.
+    let server = tmux_host::resolve(&root, &session)?;
     let ai_word = provider.as_deref().unwrap_or(harness::default_adapter().provider().id);
     let Some(adapter) = harness::by_id(ai_word) else { return Err("unknown agent provider".into()) };
     // pi's only modal is project trust, whose highlighted answer is Trust: a
@@ -5860,7 +5900,7 @@ async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), St
     // capture that fails is not a clear screen either. (pi folds the paste to
     // `[paste #1 N chars]` — harmless, the user still submits it.)
     if adapter.provider().id == provider::PI.id {
-        match worktrees_core::pi::screen_of(&session) {
+        match worktrees_core::pi::screen_of(&server, &session) {
             Some(worktrees_core::pi::PiScreen::TrustModal) => {
                 return Err("pi is asking whether to trust this project — answer that in pi first, then generate the plan.".into())
             }
@@ -5869,7 +5909,7 @@ async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), St
             _ => {}
         }
     }
-    tmux::paste_to_ai(&session, adapter.provider().match_word, ops::PLAN_PROMPT)?;
+    tmux::paste_to_ai(&server, &session, adapter.provider().match_word, ops::PLAN_PROMPT)?;
     applog("info", &format!("plan_prompt: pasted into {session}"));
     Ok(())
 }
@@ -6111,12 +6151,12 @@ fn resolve_term_path(raw: &str, bases: &[PathBuf], home: Option<&Path>, roots: &
 /// `cdv-app` would answer for `cdv-app-x`). An unknown session prints an EMPTY
 /// line and still exits 0 — measured on a private `-L` server — so empty is
 /// read as "no answer" rather than trusted as a path.
-fn tmux_pane_cwd(session: &str) -> Option<PathBuf> {
+fn tmux_pane_cwd(server: &TmuxServer, session: &str) -> Option<PathBuf> {
     if session.is_empty() || session.contains(['\0', '\n']) {
         return None;
     }
     let target = format!("={session}:");
-    let out = worktrees_core::tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_current_path}"]).ok()?;
+    let out = worktrees_core::tmux::tmux(server, &["display-message", "-p", "-t", &target, "#{pane_current_path}"]).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -6146,7 +6186,7 @@ async fn resolve_term_paths(
     paths: Vec<String>,
 ) -> Result<Vec<Option<String>>, String> {
     let mut bases = Vec::new();
-    if let Some(cwd) = session.as_deref().and_then(tmux_pane_cwd) {
+    if let Some(cwd) = session.as_deref().and_then(|s| tmux_host::resolve(&root, s).ok().and_then(|server| tmux_pane_cwd(&server, s))) {
         bases.push(cwd);
     }
     if let Some(sh) = shell {
@@ -7684,6 +7724,7 @@ async fn ui_events_clear(app: AppHandle) -> Result<(), String> {
 // ── PTY host: attach to a live tmux session ─────────────────────────────────
 
 struct Term {
+    server: TmuxServer,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -7707,12 +7748,14 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 /// session survives and stays `tmux attach`-able from a bare terminal).
 #[tauri::command]
 async fn term_open(
+    root: String,
     session: String,
     cols: u16,
     rows: u16,
     on_bytes: Channel<InvokeResponseBody>,
     terms: State<'_, Terminals>,
 ) -> Result<u32, String> {
+    let server = tmux_host::resolve(&root, &session)?;
     let pair = native_pty_system()
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
@@ -7721,7 +7764,7 @@ async fn term_open(
     // smaller co-attached client can't clamp us — the clamp left stale painted
     // cells ("undeletable" artifacts) outside the redrawn region. Covers
     // sessions that predate the tuning-at-create in ops::launch.
-    worktrees_core::tmux::tune_session(&session);
+    worktrees_core::tmux::tune_session(&server, &session);
     // -u (global flag, must precede the subcommand): declare this client
     // UTF-8-capable. Without it tmux sniffs LC_ALL/LC_CTYPE/LANG, and a
     // GUI-launched app has none — tmux then draws every non-ASCII cell as "_".
@@ -7730,8 +7773,11 @@ async fn term_open(
     // refused or missing would otherwise unlink it and start a second server,
     // orphaning every session in the first.
     let mut cmd = CommandBuilder::new("tmux");
+    cmd.args(server.endpoint_args());
+    cmd.env("TMUX_TMPDIR", server.socket_root());
+    cmd.env_remove("TMUX");
     cmd.args(worktrees_core::tmux::no_start_args());
-    cmd.args(["-u", "attach-session", "-t", &session]);
+    cmd.args(["-u", "attach-session", "-t", &format!("={session}")]);
     cmd.env("TERM", "xterm-256color");
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| {
@@ -7771,11 +7817,11 @@ async fn term_open(
     // before the app quit, or from a bare `tmux attach`. Without the flag the
     // first keystrokes here would be copy-mode commands — Space selects, Enter
     // copies and leaves, the typed text is lost — so seed it from the pane.
-    let scrolled = tmux::tmux(&["display-message", "-p", "-t", &format!("={session}:"), "#{pane_id} #{pane_mode}"])
+    let scrolled = tmux::tmux(&server, &["display-message", "-p", "-t", &format!("={session}:"), "#{pane_id} #{pane_mode}"])
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| scrolled_at_attach(&String::from_utf8_lossy(&o.stdout)));
-    terms.0.lock().unwrap().insert(id, Term { master: pair.master, writer, child, stop, session, scrolled });
+    terms.0.lock().unwrap().insert(id, Term { server, master: pair.master, writer, child, stop, session, scrolled });
     Ok(id)
 }
 
@@ -7808,7 +7854,7 @@ async fn term_write(id: u32, data: Vec<u8>, terms: State<'_, Terminals>) -> Resu
         // `send-keys -X` fails outside a mode, so success means we really did
         // take the pane out of history (it may have left on its own: `-e`
         // exits when scrolled back to the bottom).
-        let left = tmux::tmux(&["send-keys", "-X", "-t", &pane, "cancel"]).is_ok_and(|o| o.status.success());
+        let left = tmux::tmux(&term.server, &["send-keys", "-X", "-t", &pane, "cancel"]).is_ok_and(|o| o.status.success());
         // Esc while scrolled back means "stop reading history", not "interrupt
         // the agent" — it is pi's and claude's abort key. Swallow it.
         if left && data == [0x1b] {
@@ -7885,13 +7931,13 @@ async fn term_wheel(id: u32, lines: i32, terms: State<'_, Terminals>) -> Result<
     if lines == 0 {
         return Ok(());
     }
-    let session = terms.0.lock().unwrap().get(&id).ok_or("no such terminal")?.session.clone();
+    let (server, session) = { let map = terms.0.lock().unwrap(); let term = map.get(&id).ok_or("no such terminal")?; (term.server.clone(), term.session.clone()) };
     // `=name:` — EXACT session, its current window's active pane: the pane this
     // client is showing. A bare name prefix-matches (tmux.rs's `PaneId` note).
     let target = format!("={session}:");
     // pane_mode LAST: it is empty outside a mode, and whitespace-splitting an
     // empty middle field would shift the others.
-    let out = tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_id} #{alternate_on} #{pane_mode}"])
+    let out = tmux::tmux(&server, &["display-message", "-p", "-t", &target, "#{pane_id} #{alternate_on} #{pane_mode}"])
         .map_err(|e| format!("tmux: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut f = text.split_whitespace();
@@ -7916,7 +7962,7 @@ async fn term_wheel(id: u32, lines: i32, terms: State<'_, Terminals>) -> Result<
         flag(&terms);
     }
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = tmux::tmux(&args).map_err(|e| format!("tmux: {e}"))?;
+    let out = tmux::tmux(&server, &args).map_err(|e| format!("tmux: {e}"))?;
     if history {
         flag(&terms);
     }
@@ -8145,7 +8191,9 @@ async fn shell_open(
     // idempotent, and only reached when this place has no shell yet. (Runs
     // under the registry lock — a tmux round-trip, but only on first open.)
     if worktrees_core::tmux::have_tmux() {
-        worktrees_core::tmux::kill_shell_sidecars(&session);
+        let p = Project::discover(Path::new(&repo)).map_err(|e| e.msg)?;
+        let panes = p.lane_panes(&slug, &cwd)?;
+        worktrees_core::tmux::kill_shell_sidecars(&panes.server, &session)?;
     }
 
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
@@ -8567,7 +8615,7 @@ pub fn run() {
                 // probes (see claude_activity), keyed by worktree path. Replaces the
                 // old tmux #{session_activity} signal, which tracked CLIENT attach/
                 // keypress, not pane output — so the dot decayed while Claude worked.
-                let mut last = worktrees_core::tmux::session_fingerprint();
+                let mut last = tmux_host::Poll::read().fingerprint();
                 let mut last_busy: Vec<String> = Vec::new();
                 let mut last_waiting: Vec<String> = Vec::new();
                 let mut last_waiting_by: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
@@ -8583,6 +8631,7 @@ pub fn run() {
                 // Consecutive ticks each path has been busy — the dwell guard's
                 // memory, and the only state a completion edge needs.
                 let mut busy_ticks: HashMap<String, u32> = HashMap::new();
+                let mut lane_identities = tmux_host::identities();
                 // The lane completion last stamped per place, per harness (see
                 // `new_dones`).
                 let mut done_seen: HashMap<&'static str, HashMap<String, i64>> = HashMap::new();
@@ -8673,10 +8722,10 @@ pub fn run() {
                         save_shell_cwds(&handle, &handle.state::<Shells>());
                         save_shell_scrollback(&handle, &handle.state::<Shells>());
                     }
-                    let fp = worktrees_core::tmux::session_fingerprint();
+                    let fp = tmux_host::Poll::read();
                     ticks += 1;
-                    if fp != last || ticks >= 10 {
-                        last = fp.clone(); // `fp` is the draft sample's session list too
+                    if fp.fingerprint() != last || ticks >= 10 {
+                        last = fp.fingerprint(); // `fp` is the draft sample's session list too
                         ticks = 0;
                         let _ = handle.emit("places:changed", ());
                     }
@@ -8724,7 +8773,18 @@ pub fn run() {
                             }
                         }
                     }
-                    let (busy, waiting, models) = claude_activity();
+                    let current_identities = tmux_host::identities();
+                    for path in tmux_host::changed_places(&lane_identities, &current_identities) {
+                        busy_ticks.remove(&path);
+                        for seen in done_seen.values_mut() { seen.remove(&path); }
+                    }
+                    lane_identities = current_identities;
+                    let available = |path: &String| lane_identities.get(path).is_none_or(|ids| ids.as_ref().is_some_and(|ids| ids.iter().any(|(server, name, _)| fp.names(server).is_some_and(|names| names.lines().any(|n| n == name)))));
+                    let (mut busy, mut waiting, models) = claude_activity();
+                    busy.retain(&available);
+                    waiting.retain(&available);
+                    // A failed endpoint is not a completion edge.
+                    busy_ticks.retain(|path, _| available(path));
                     // Every harness without a probe file, read once each
                     // (`harness_feed`: codex's rollouts, pi's session files).
                     let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS
@@ -9845,12 +9905,12 @@ mod tests {
     fn every_harness_feeds_the_dot_poll() {
         for p in worktrees_core::provider::PROVIDERS {
             assert!(
-                !matches!(harness_feed(p.id, ""), Feed::Unpolled),
+                !matches!(harness_feed(p.id, &tmux_host::Poll::default()), Feed::Unpolled),
                 "{} is in PROVIDERS but the nav dot poll never reads it (`harness_feed`)",
                 p.id
             );
             assert!(
-                watch_lane(p.id, "/nonexistent/drift-check", None, None, &None),
+                watch_lane(None, p.id, "/nonexistent/drift-check", None, None, &None),
                 "{} is in PROVIDERS but the snapshot never hands its sessions to the poll (`watch_lane`)",
                 p.id
             );
@@ -9862,10 +9922,12 @@ mod tests {
     );
     const PI_LANE: &str = "/tmp/wtfix/repo/.worktrees/lane";
 
+    fn fixture_server() -> TmuxServer { TmuxServer::legacy("/__app_fixture__/socket".into()).unwrap() }
+
     fn pi_watch(session: &str) -> HashMap<String, PiWatched> {
         HashMap::from([(
             PI_LANE.to_string(),
-            PiWatched { session: session.into(), launch: None, model: None, first_file: None, settled: false },
+            PiWatched { server: fixture_server(), session: session.into(), launch: None, model: None, first_file: None, settled: false },
         )])
     }
 
@@ -9962,16 +10024,21 @@ mod tests {
         let s = "x~agent~pi".to_string();
         let settled = || PI_WATCH.lock().unwrap().as_ref().unwrap()[cwd].settled;
         let settle = || PI_WATCH.lock().unwrap().as_mut().unwrap().get_mut(cwd).unwrap().settled = true;
-        pi_watch_set(cwd, Some(&s), Some("101"), &None);
+        pi_watch_set(Some(&fixture_server()), cwd, Some(&s), Some("101"), &None);
         settle();
-        pi_watch_set(cwd, Some(&s), Some("101"), &Some("m".into()));
+        pi_watch_set(Some(&fixture_server()), cwd, Some(&s), Some("101"), &Some("m".into()));
         assert!(settled(), "same launch: kept");
-        pi_watch_set(cwd, Some(&s), Some("202"), &None);
+        let other = TmuxServer::legacy("/__app_fixture__/other".into()).unwrap();
+        pi_watch_set(Some(&other), cwd, Some(&s), Some("101"), &None);
+        assert!(!settled(), "same pane and launch on a different endpoint starts fresh");
+        pi_watch_set(Some(&fixture_server()), cwd, Some(&s), Some("101"), &None);
+        settle();
+        pi_watch_set(Some(&fixture_server()), cwd, Some(&s), Some("202"), &None);
         assert!(!settled(), "same name, new launch (close + open): reset");
         settle();
-        pi_watch_set(cwd, Some(&"y~agent~pi".to_string()), Some("202"), &None);
+        pi_watch_set(Some(&fixture_server()), cwd, Some(&"y~agent~pi".to_string()), Some("202"), &None);
         assert!(!settled(), "new session: reset");
-        pi_watch_set(cwd, None, None, &None);
+        pi_watch_set(Some(&fixture_server()), cwd, None, None, &None);
         assert!(!PI_WATCH.lock().unwrap().as_ref().unwrap().contains_key(cwd));
     }
 
