@@ -4,7 +4,8 @@ title: "Proposal — worktrees owns planning (opt-in)"
 
 # Proposal — worktrees owns the planning mechanism, opt-in
 
-**Status:** investigation and design, 2026-10-09. Not implemented. Decisions
+**Status:** investigation and design, 2026-10-09. Not implemented. Pilot
+project: casa-del-valle-monorepo (§8.1, phase 1 in §9). Decisions
 requested in §11. Nothing here permits merging or implementing anything.
 
 **The request (David, relayed from cdv `(main)`):** "worktrees should actually
@@ -46,7 +47,7 @@ config was written. No agent session was run. Claims are marked as follows:
 | Stale-dir trap | When planning is **on**, the "newest directory" guess is **gone**. The order is `[plan] project` (main only), then `.active_plan`, then "no plan yet". A pointer that names a missing plan means "not written yet". It never falls through to an old directory. When planning is off, nothing changes. |
 | Symlink bug | Hooks call `worktrees plan hook <event>`, which calls the same `plan::resolve` as the tab. There is no second resolver to drift. Parity is pinned by a test running valleos/cdv's scenarios through both entry points. |
 | Codex / pi | **pi:** `--extension <path>` per launch, with `session_start` / `before_agent_start` / `agent_end` **[source]**. Buildable, but needs a probe. **Codex:** `hooks` is a stable feature in 0.161 **[observed]**, but `-c` hooks stop on a trust prompt (AGENTS.md). Phase 1 gives Codex the CLI verb and MCP only. |
-| Phase 1, useful alone | `[plan] project` + a public `plan::resolve` + `worktrees plan resolve|show|hook`. No opt-in is needed, because nothing changes for a repo that does not use them. valleos and cdv can delete `sync-goals.sh`, `plan-context.sh` and the tracked copy the day it ships. |
+| Phase 1 = the cdv pilot | cdv adopts from the offer, as it stands today. Phase 1 contains: the setting, the offer, the Settings panel and the Add/Clone checkbox; owned resolution; `worktrees plan resolve|hook`; `new` writing the pointer; and the Claude plugin. Nothing in cdv is moved: main's `.planning/orchestrator/` stays its plan, and live root-layout lanes keep working (§8.1). `[plan] project` and `migrate` (valleos, this repo) are phase 2. |
 
 ---
 
@@ -236,9 +237,9 @@ project…) gain one row:
 |---|---|---|
 | 0 | — | main only: `[plan] project` (§4) |
 | 1 | `.active_plan` → `.planning/<id>/task_plan.md` | same |
-| 1b | pointer names a missing plan → fall through | **stop: `Pending { topic }`**. The tab says "no plan yet for `<topic>`" and shows the brief |
+| 1b | pointer names a missing plan → fall through | a root `task_plan.md` if there is one (`legacy_root`: the session chose the one fixed legacy spot), otherwise **stop: `Pending { topic }`**. The tab says "no plan yet for `<topic>`" and shows the brief. It never falls through to another directory. |
 | 2 | newest `.planning/<dir>/` | **removed** (§6) |
-| 3 | root `task_plan.md` | root, reported as `legacy_root`, with a "migrate" affordance (§8) |
+| 3 | root `task_plan.md` | root, reported as `legacy_root` (and offered `migrate` from phase 2, §8.2) |
 
 There are four callers, and only one implementation:
 
@@ -322,7 +323,7 @@ that waits on a modal nobody sees is worse than no hook. So Codex gets:
 |---|---|
 | **Replace** (ship our own planning skill) | No. The skill is third-party and versioned on its own cadence (2.37.0 here), and users who already have it would get two competing instructions. Vendoring it means owning its method, its templates and its attestation feature. |
 | **Coexist untouched** | This is what all three repos do today, and it is why each repo needs a hook: the skill injects only a root `task_plan.md` **[source: SKILL.md frontmatter]**. |
-| **Wrap** (recommended) | The skill remains *how* to write a plan. Worktrees decides *where* it goes (the `Pending` line, and `.active_plan` already pointing there), *which* one is current, and *what* is injected. In the owned layout there is no root `task_plan.md`, so the skill's hooks find nothing and no context is injected twice. Without the skill, the `Pending` line names the three files, which is enough to work by. |
+| **Wrap** (recommended) | The skill remains *how* to write a plan. Worktrees decides *where* it goes (the `Pending` line, and `.active_plan` already pointing there), *which* one is current, and *what* is injected. In the owned layout there is no root `task_plan.md`, so the skill's hooks find nothing and no context is injected twice. A `legacy_root` lane is the exception: worktrees' hook injects it too, so that lane loses nothing. If the skill's own hooks are also active in that session, the context arrives twice, which costs tokens but is never wrong. That is acceptable for lanes that are on their way out **[inferred: whether skill frontmatter hooks are active depends on the skill being loaded in that session; not probed]**. Without the skill, the `Pending` line names the three files, which is enough to work by. |
 
 One rough edge, worth reporting upstream as valleos ROADMAP (c) already
 intends: the skill's `$PLAN_ID` step cannot be seen by worktrees, so a session
@@ -359,8 +360,8 @@ project = "docs/plan/goals.md"
   own plan ("Project: Phase 3, Fase II PoC"). The session hook prints it as
   one line at `session` only.
 - **It does not need the opt-in.** A repo that declares the key gets it in
-  either mode, because it adds only reads. This is what makes phase 1 useful
-  alone.
+  either mode, because it adds only reads. It ships in phase 2: the pilot
+  (cdv) tracks no goals file, so it does not need it.
 - **What it retires:**
   - valleos: `sync-goals.sh`, the three `.gitignore` negations, and the
     tracked `.planning/orchestrator/task_plan.md`;
@@ -459,81 +460,203 @@ The fix is structural, not another port:
 
 ## 8. Migration
 
-**`worktrees plan migrate [<place>] [--topic <t>]`.** Its behaviour is cdv's
-`migrate-lane-plan.sh`, whose eight cases are already specified and tested in
-#684:
+### 8.1 The pilot: casa-del-valle-monorepo, in the state it is in today
 
-- moves root (or `.planning/` top-level) `task_plan.md` / `findings.md` /
-  `progress.md` into `.planning/<topic>/` and writes `.active_plan`;
-- is idempotent;
-- **refuses** an existing destination, a file present in both places, a
-  second topic while a pointer is set, and a non-plain topic;
-- never overwrites.
+cdv is the pilot (decided 2026-10-09, relayed from cdv `(main)`). cdv will not
+merge its interim port: #684 stays a draft. It will install the release that
+ships phase 1, accept the offer, and adopt for cdv. **Its state on 2026-10-09
+[observed]:**
 
-It refuses a place whose agent is `busy`. A session that loaded the skill with
-root paths would recreate the root files mid-turn. The Plan tab offers it per
-place, and Settings → Planning offers it per project.
+- **`main` (`ec7e73cd`).** `.planning/.active_plan` = `orchestrator`, and
+  `.planning/orchestrator/{task_plan,findings,progress}.md`, all local and
+  gitignored by an unanchored `.planning/`. **Nothing from #684 is on `main`.**
+  There is no `scripts/memory/`, nothing under `.planning/` or `docs/plan/` is
+  tracked, and `.claude/settings.json` has only the next-server SessionStart
+  hook. `old-plans/` holds 203 committed tarballs.
+- **Lanes.** Eight use the legacy ROOT layout:
+  - `bosanet-and-export-discussions`
+  - `chat-history-for-improvements`
+  - `feat-training-web-batch3`
+  - `feedback-20260804`
+  - `fix-factura-forma-pago-default`
+  - `general-fixes`
+  - `investigate-jorge-agente-roles`
+  - `white-label`
+
+  Two have a brief and no plan (`feat-training-mobile-batch2`,
+  `feat-training-web-batch2`). Three have neither. Only
+  `chore-planning-convention` (#684's own lane) has `.planning/<topic>/` and a
+  pointer.
+
+**What adoption does with each, and what it does not do:**
+
+| What is there | After adopting (phase 1) | Moved or written? |
+|---|---|---|
+| main: `.active_plan` = `orchestrator` + `.planning/orchestrator/task_plan.md` | Resolves at step 1 (`active_plan`) to the same file the tab shows today. The difference is that the Claude hooks now inject it at start, on change and at stop, once main's session is relaunched. | **Nothing.** This IS main's plan now. Do not delete it or move it. |
+| A live lane with a root `task_plan.md` | Resolves `legacy_root`, still shown as today. The hooks inject it too (§3.3), so a lane on the old layout loses nothing. It finishes and closes out the old way. | **Nothing.** Phase 1 has no automatic move and no `migrate` (it is phase 2). A move under a live session would race it. |
+| A live lane with a brief and no plan | No pointer, so owned resolution gives "no plan yet" and the brief, the same as today. Its session may create a root plan, which then shows as `legacy_root`. | **Nothing.** Adoption never writes into existing places. |
+| `chore-planning-convention` (`.active_plan` = `planning-convention`) | Step 1, unchanged. The `orchestrator/` copy beside it is no longer reachable by a guess (§6). | Nothing. |
+| A lane created AFTER adoption | `cmd_new` writes `.active_plan` = `<slug>` and an empty `.planning/<slug>/`. The session hook's `Pending` line says where the three files go. | Written by worktrees: the pointer and the empty dir only. |
+| `.gitignore` | `.planning/` is already ignored, so adoption's ignore check passes and `info/exclude` is not touched. | Nothing. |
+
+**One rule this table needs** (it is folded into §3.2 step 1b): a pointer that
+names a plan not yet written yields to a root `task_plan.md` if one exists, and
+only otherwise means `Pending`. That is not a guess, because the root is one
+fixed location the session chose. Without the rule, a new lane whose agent
+followed the skill's no-argument default (root) would show "no plan yet" over
+a plan that exists.
+
+**Two pilot traps worth stating:**
+
+- **Restart `(main)`'s session after installing.** Lanes are created through
+  MCP `create_worktree`. A `worktrees mcp` server started before the upgrade
+  keeps running the old image (AGENTS.md, "an MCP bug report describes the
+  server that answered it"), so it creates lanes **without a pointer**. That
+  reads exactly like adoption failing.
+- **The plugin reaches only sessions launched after adoption.** A running lane
+  keeps its launch flags until it is relaunched. That is expected, not a bug.
+
+**What cdv must NOT remove:**
+
+- **The `.gitignore` rules:** `.planning/`, `/task_plan.md` …, `**/task_plan.md`,
+  `**/findings.md`. Owned planning relies on `.planning/` being ignored, and
+  the `**` rules still catch a legacy file written from a subdirectory.
+- **`.easignore`'s planning lines.**
+- **Main's local `.planning/orchestrator/` and `.active_plan`.**
+- **`old-plans/`.**
+- **The next-server SessionStart hook in `.claude/settings.json`.**
+- **`lane-create`'s `.planning/brief.md` wording,** which is still exactly
+  where `new` puts the brief.
+
+**What cdv removes or changes:**
+
+- **Before adopting:** nothing is required. Nothing from #684 landed, so
+  there is nothing to undo.
+- **Separately, and worth doing anyway:** #684's Finding 5. `.dockerignore`
+  on `main` still does not exclude `.planning/` or root `task_plan.md`, so
+  planning files, which may hold business data, ride into every API build
+  context **[observed: no `.planning` line in `.dockerignore`]**. That is a
+  one-line cdv PR, independent of this proposal.
+- **After adopting** (cdv's own docs, written by cdv):
+  - `AGENTS.md` line ~26 and § Plan lifecycle (line ~406): change "live in
+    the worktree root" to `.planning/<topic>/`;
+  - its step 2 archive command (`tar … task_plan.md findings.md progress.md`)
+    to `tar -czf old-plans/<topic>-YYYYMMDD.tar.gz -C .planning <topic>`,
+    keeping the root form for lanes still on the old layout;
+  - the planning row in `.claude/close-out.md`, to match.
+- **#684 itself:** close it once the pilot runs. Each piece is superseded by
+  phase 1:
+  - `plan-context.sh` by `worktrees plan hook`;
+  - `migrate-lane-plan.sh` by the phase 2 `migrate`;
+  - the `.active_plan` brief line, because `new` writes the pointer.
+
+  The goals sync and the tracked copy wait for `[plan] project` (phase 2) and
+  should not be revived.
+
+**#684's Findings 3 and 4 do not carry over, by design.** Finding 3 is that
+negation order decides which file under `.planning/` is tracked. Finding 4 is
+that pushed content must be checked by blob, not by the working tree. Both
+exist only because a goals file was tracked *inside* an ignored directory.
+Under this design nothing under `.planning/` is ever tracked: `[plan] project`
+points at a normal tracked file such as `docs/plan/goals.md`, so there is no
+negation to order and no copy to verify.
+
+### 8.2 The other two repos (phase 2, with `migrate` and `[plan] project`)
+
+**`worktrees plan migrate [<place>] [--topic <t>]`** (phase 2) behaves like
+cdv's `migrate-lane-plan.sh`, whose eight cases #684 specified and tested:
+
+- it moves root (or `.planning/` top-level) files into `.planning/<topic>/`
+  and writes `.active_plan`;
+- it is idempotent;
+- it refuses:
+  - an existing destination;
+  - a file present in both places;
+  - a second topic while a pointer is set;
+  - a non-plain topic;
+- it never overwrites;
+- it refuses a place whose agent is `busy`.
 
 | Repo | Adopt | Can delete afterwards |
 |---|---|---|
-| **worktrees** | turn planning on; `plan migrate` the 6 places with root plans (between sessions) | the root-file line in `.claude/close-out.md` (point it at `plan archive`); AGENTS.md "Planning docs" rewrites to the owned layout |
-| **valleos** | add `[plan] project = "docs/plan/goals.md"`; turn planning on (lanes already have pointers) | `scripts/memory/sync-goals.sh` and its gate, `scripts/memory/plan-context.sh`, the three plan hooks in `.claude/settings.json`, the `.gitignore` negations, `git rm --cached .planning/orchestrator/task_plan.md` (main's untracked findings/progress there stay), the "write `.active_plan`" line in its lane-create brief |
-| **cdv** | the same as valleos; `plan migrate` the 8 root-layout places | if #684 is still open: drop `sync-goals.sh`, the pre-push check, the tracked copy, `plan-context.sh` and `migrate-lane-plan.sh` from it, and **keep** its `.dockerignore` and `.gitignore` anchoring fixes (Findings 3 and 5 are real, independent fixes) (Q8) |
-
-**Order matters.** Ship the release first, and commit the key after. An older
-CLI meeting `[plan]` warns and ignores it (`survey_keys`: unknown is
-warn + ignore), so committing early is harmless. But deleting `sync-goals.sh`
-before the installed CLI reads the key would blank main's tab. Delete the
-tracked copy in the same PR that adds the key: a repo with both would keep
-hijacking lanes that lack a pointer.
+| **worktrees** | Turn planning on. Lanes on root plans (6 of 12) keep them, or `migrate` between sessions. | The root-file line in `.claude/close-out.md` (point it at `plan archive`). Rewrite AGENTS.md "Planning docs" to the owned layout. |
+| **valleos** | Add `[plan] project = "docs/plan/goals.md"`, then turn planning on. Lanes already have pointers. | `sync-goals.sh` and its gate; `plan-context.sh` and its three hooks in `.claude/settings.json`; the `.gitignore` negations; `git rm --cached .planning/orchestrator/task_plan.md` (main's untracked findings/progress there stay); the "write `.active_plan`" line in its lane-create brief. Delete the tracked copy **in the same PR that adds the key**: a repo with both keeps hijacking lanes that lack a pointer (§1.3). |
 
 ---
 
 ## 9. Phasing
 
-**Phase 1: one resolver and the project key.** No opt-in is needed: nothing
-changes unless a repo declares the key or a hook calls the verb.
+**Phase 1: the cdv pilot.** It is the smallest slice that lets a project
+adopt from the offer and have its agents and its Plan tab agree.
 
-- `[plan] project` (projcfg section, Layer A/B, a summary for main, and a
-  `project` line for every place);
-- `plan::resolve` made public with `Resolution`; the additive `PlanSummary`
-  fields;
-- `worktrees plan resolve|show|hook <session|prompt|stop>`, with valleos's
-  budgets;
-- the parity test (§7, item 4), shown red first.
+- **Core**
+  - `planning.json` (global default) and the registry entry's `planning`
+    field.
+  - `planning::effective(project)`, read by the app, the CLI and the MCP
+    server alike.
+- **Resolution**
+  - `plan::resolve` made public with `Resolution` and an `Owned | Legacy`
+    mode.
+  - Owned mode has no newest-dir guess, step 1b's root-then-`Pending` rule,
+    and root reported as `legacy_root`.
+  - Additive `PlanSummary` fields: `owned`, `topic`, and the
+    `pending`/`legacy_root` values of `how_resolved`.
+- **CLI**
+  - `worktrees plan resolve [--json]` and `worktrees plan hook
+    <session|prompt|stop>`, with valleos's budgets.
+  - The parity test (§7, item 4), shown red first.
+- **`cmd_new`**
+  - When planning is on, it writes `.active_plan` = slug and an empty topic
+    dir.
+  - An ignore check: if `.planning/` is not ignored, it appends to
+    `info/exclude` (Q4). It is a no-op for cdv.
+- **Claude**
+  - The `claude-plan` per-launch plugin (second `--plugin-dir`), through
+    `guidance::materialize_in`.
+- **App**
+  - The `planning` offer.
+  - Settings → Planning: the explanation, the global choice, and the
+    per-project list, which is how an already-registered project like cdv
+    is adopted.
+  - The checkbox in Add / Clone / New project.
+  - One line in the Plan tab saying how the plan resolved.
+  - `offers-check.mjs` and mock harness entries.
+- **Proof**
+  - The `adding-a-harness.md` surfaces, ticked by seeing them, for Claude.
+  - One new cdv lane driven end to end in the real app: create it, see the
+    `Pending` line, see the plan appear in the tab and in the hook, at the
+    same path.
 
-**Useful alone because** valleos and cdv can point their *own*
-`.claude/settings.json` at `worktrees plan hook …` and delete `plan-context.sh`
-and `sync-goals.sh` the same day. That is a repo's Claude config naming the
-user's installed tool, which is Claude's trust domain, not argv worktrees
-executes, so ADR 0001 is not touched. The symlink bug then disappears by
-construction.
+**Not in phase 1, deliberately:**
 
-**Phase 2: the opt-in.**
+- `[plan] project` (cdv tracks no goals file today);
+- `migrate` (live root lanes finish the old way);
+- `plan archive` and archive-on-remove;
+- the topic picker;
+- a ProjectSheet section (the Settings list covers changing it later);
+- pi and Codex.
 
-- `planning.json` and the registry `planning` field;
-- the `planning` offer and Settings → Planning (`planning_status`,
-  `set_planning`), plus the Add/Clone/New-project checkbox and the
-  ProjectSheet section;
-- owned resolution (§3.2, §6);
-- `cmd_new` writes the pointer, the topic dir and the `info/exclude` line;
-- the `claude-plan` per-launch plugin;
-- `plan migrate`, and `plan archive` + archive-on-remove;
-- the Plan tab's resolution line, the topic picker and the migrate button;
-- `offers-check.mjs` and mock harness entries;
-- the `docs/adding-a-harness.md` surfaces, ticked by **seeing** each one in
-  the real app;
-- one migrated lane driven end to end.
+**Phase 2: valleos and this repo.**
+
+- `[plan] project` (§4), with `safe_under` moved to core and the `project`
+  line on every place.
+- `worktrees plan migrate` and `plan show`.
+- `plan archive` + archive-on-remove (Q6).
+- The Plan tab's topic picker (Q5) and migrate button.
+- The ProjectSheet → Planning section.
+
+valleos then deletes `sync-goals.sh`, `plan-context.sh` and the tracked copy,
+which also ends the §1.3 hijack.
 
 **Phase 3: the other harnesses and hand-started sessions.**
 
-- the pi extension, after a probe of its trust modal (`pi-manual-checks.md`);
-- a probe of Codex's hook trust model, and per-launch Codex hooks only if they
-  can run unattended;
-- optionally linking the planning plugin's hooks for hand-started Claude
-  sessions, the agent-guidance §4.3 shape (a link, never an edit to
-  `~/.claude/settings.json`);
-- the upstream issue on the skill's root-only hooks.
+- The pi extension, after a probe of its trust modal (`pi-manual-checks.md`).
+- A probe of Codex's hook trust model; per-launch Codex hooks only if they can
+  run unattended.
+- Optionally, linking the planning plugin for hand-started Claude sessions
+  (the agent-guidance §4.3 shape: a link, never an edit to
+  `~/.claude/settings.json`).
+- The upstream issue on the skill's root-only hooks.
 
 ---
 
@@ -571,9 +694,10 @@ construction.
    first.** Recommended: yes, to the cache dir, never into the repo.
 7. **Whether to ship the `/close-out` skill.** Recommended: no. Ship
    `worktrees plan archive`, and update your skill to call it.
-8. **cdv #684: merge as is now, or slim it to wait for phase 1?**
-   Recommended: slim it if phase 1 is days away, and merge it as is if
-   weeks. Either way, its `.dockerignore` and `.gitignore` fixes stay.
+8. **cdv #684 (decided: stays a draft; cdv is the pilot):** whether to
+   close it once the pilot runs. Recommended: yes, every piece is superseded
+   (§8.1). Separately, land its `.dockerignore` fix (Finding 5) as a one-line
+   cdv PR now, because planning files still reach the API build context.
 9. **Main with `[plan] project` and an `.active_plan`:** whether the
    orchestrator's `findings.md`/`progress.md` show beside the goals.
    Recommended: yes (§4).
