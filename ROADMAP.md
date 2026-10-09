@@ -2363,3 +2363,6 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   dependency was dropped rather than waited on. Nothing here depends on it any
   more; the entry exists so the reason is not relearned.
   _From: [2026-09-20 live-docs-viewer](docs/sessions/2026-09-20-live-docs-viewer/summary.md)_
+
+- **Homebrew tap — considered and DECLINED (2026-10-09).** Do not re-propose.
+  _From: [2026-10-09 brew-tap](docs/sessions/2026-10-09-brew-tap/summary.md)_
