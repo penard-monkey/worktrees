@@ -47,7 +47,7 @@ config was written. No agent session was run. Claims are marked as follows:
 | Stale-dir trap | When planning is **on**, the "newest directory" guess is **gone**. The order is `[plan] project` (main only), then `.active_plan`, then "no plan yet". A valid pointer whose plan is not written yet means "not written yet" (or the root plan, if one exists). An invalid one (not a plain name, or a symlink) is `invalid_pointer` and never tells anyone where to write. It never falls through to an old directory. When planning is off, nothing changes. |
 | Symlink bug | Hooks call `worktrees plan hook <event>`, which calls the same `plan::resolve` as the tab. There is no second resolver to drift **at the same version**. The app (in-process) and the CLI (`<bin>`) can still be on different releases, so the hook stamps its version. Parity is pinned by a test running valleos/cdv's scenarios through both entry points of one binary. The hook re-checks the setting on every call, so turning planning off silences running sessions at once. |
 | Codex / pi | **pi:** `--extension <path>` per launch, with `session_start` / `before_agent_start` / `agent_end` **[source]**. Buildable, but needs a probe. **Codex:** `hooks` is a stable feature in 0.161 **[observed]**, but `-c` hooks stop on a trust prompt (AGENTS.md). Phase 1 gives Codex the CLI verb and MCP only. |
-| Phase 1 = the cdv pilot | cdv adopts from the offer, as it stands today. Phase 1 contains: the setting, the offer, the Settings panel and the Add/New-project checkbox (post-clone line for Clone); owned resolution; `worktrees plan resolve|hook`; `new` writing the pointer; and the Claude plugin. Nothing in cdv is moved: main's `.planning/orchestrator/` stays its plan, and live root-layout lanes keep working (§8.1). `[plan] project` and `migrate` (valleos, this repo) are phase 2. |
+| Phase 1 = the cdv pilot | cdv adopts from the offer, as it stands today. Phase 1 contains: the setting, the offer, the Settings panel and the Add/New-project checkbox (`[plan]` pre-tick in Add existing only; post-clone line for Clone); owned resolution; `worktrees plan resolve|hook`; `new` writing the pointer; and the Claude plugin. Nothing in cdv is moved: main's `.planning/orchestrator/` stays its plan, and live root-layout lanes keep working (§8.1). `[plan] project` and `migrate` (valleos, this repo) are phase 2. |
 
 ---
 
@@ -118,7 +118,7 @@ project  projects.json Entry                 "planning": "on" | "off"     (absen
   `guidance::settings()`: an app-memory override would never reach a
   `worktrees new` run in a terminal.
 - **The repo may *suggest* adoption, never decide it.** A `.worktrees.toml`
-  with a `[plan]` section pre-ticks the checkbox in Add existing / New project (§2.3; Clone decides after the clone), and the
+  with a `[plan]` section pre-ticks the checkbox in Add existing (§2.3; Clone asks after the clone), and the
   checkbox label says why ("this repo uses worktrees planning"). It does not
   change the effective value (Q2).
 
@@ -183,9 +183,11 @@ project…) gain one row:
 [x] Use Worktrees planning in this project   (your default: on · this repo uses it)
 ```
 
-- It is pre-set from the effective global value. **Add existing** and **New
-  project** can also pre-tick it when the repo has a `[plan]` section, because
-  the repo is on disk when the dialog shows. **Clone** cannot:
+- It is pre-set from the effective global value. Only **Add existing** can
+  also pre-tick it when the repo has a `[plan]` section, because only there is
+  the repo on disk when the dialog shows. **New project** has nothing to read:
+  a fresh `git init` has no `.worktrees.toml`, so it shows the global default.
+  **Clone** cannot either:
   `clone_project` (`lib.rs:730`) has no repo to read until the clone
   finishes. So for Clone, the checkbox shows the global default only, and a
   `[plan]` hint becomes a post-clone line on the result ("this repo uses
@@ -263,7 +265,7 @@ in `.planning/evil/`" would instruct the agent to write *through the link*.
 | absent | nothing | none (`null`); the tab shows the brief |
 | present, valid | `.planning/<topic>/task_plan.md` is a regular file under a real (lstat'd) dir | that plan (`active_plan`). **It wins over a root `task_plan.md`** if both exist. |
 | present, valid | `.planning/<topic>/` absent, or a real dir without a plan | root `task_plan.md` if one exists (`root`), otherwise `pending` |
-| present, **invalid** | value fails `plain_component` (`plan.rs:162`: empty, `.`, `..`, contains `/` or NUL), or `.planning/<topic>` is a symlink or not a directory (`is_dir_nofollow`, `plan.rs:141`), or `.active_plan` itself is a symlink | `invalid_pointer`. The tab says "`.active_plan` is not usable" and falls back to the root plan if there is one. The hook prints "`.active_plan` is not usable — fix or remove it" and **never echoes the pointer's value** (it is session-written text) or any path built from it. |
+| present, **invalid** | value fails `plain_component` (`plan.rs:162`: empty, `.`, `..`, contains `/` or NUL), or `.planning/<topic>` is a symlink or not a directory (`is_dir_nofollow`, `plan.rs:141`), or `.active_plan` itself is a symlink | `invalid_pointer`. The tab says "`.active_plan` is not usable" and falls back to the root plan if there is one. The hook does the same, so `plan_rel` matches the tab's: it injects that root plan if there is one, and prefixes "`.active_plan` is not usable — fix or remove it". It **never echoes the pointer's value** (it is session-written text) or any path built from it. |
 
 "Valid" means the value passes `plain_component` and the topic path, if it
 exists, is an lstat'd real directory. Only then may anything say "write
@@ -357,10 +359,10 @@ file… can be used multiple times") **[source: pi 0.99.1 `--help`]**. pi's
 lifecycle is `session_start` → `before_agent_start` (exposes the prompt and the
 `systemPromptOptions`) → … → `agent_end` **[source: pi `docs/extensions.md`]**.
 A ~40-line TypeScript extension, shipped in the binary and materialised beside
-the skill, would shell out to `<bin> plan hook session|prompt|stop` on those
-three events and append the output (`agent_end` takes the place of Claude's
-missing Stop reminder, if pi's event output reaches the model; probe that
-too). **Not probed:** whether an explicit `-e`
+the skill, would shell out to `<bin> plan hook session|prompt` on
+`session_start` and `before_agent_start` and append the output. Whether
+`agent_end` output reaches the model, so that a Stop-style reminder is
+possible on pi, is a separate probe; it is not specified until then. **Not probed:** whether an explicit `-e`
 extension raises pi's trust modal (`~/.pi/agent/trust.json` exists
 **[observed]**), and whether `before_agent_start` can append without
 replacing. Phase 3, behind `docs/pi-manual-checks.md`.
@@ -511,8 +513,11 @@ The fix is structural, not another port:
    `lib.rs:5836`), and the hook runs the CLI at `<bin>`. An app and a CLI on
    different releases can resolve differently. `guard_bin`-style detection
    proves the verb exists, not the version. So the hook stamps its version
-   in `plan resolve --json`, and the app's existing stale-CLI warning covers
-   a CLI behind the app. "By construction" holds only within one version.
+   in `plan resolve --json`. The app's existing stale-CLI warning (`cliStale`,
+   `App.tsx:3642`) only approximates this: it compares the CLI against the
+   LATEST release, not against the app's own version, so a CLI and an app
+   that are both behind but on different versions pass unwarned. Phase 1
+   adds an app-vs-CLI comparison on the version the hook stamps. "By construction" holds only within one version.
 2. **The root is found the way the tab finds it.** `Project::discover(cwd)`
    finds the place whose root contains the hook's `cwd`, then canonicalises
    that root. A hook in a subdirectory resolves the same place, not
@@ -700,8 +705,8 @@ adopt from the offer and have its agents and its Plan tab agree.
   - Settings → Planning: the explanation, the global choice, and the
     per-project list, which is how an already-registered project like cdv
     is adopted.
-  - The checkbox in Add existing / New project, and the post-clone line for
-    Clone (§2.3).
+  - The checkbox in Add existing / New project (pre-tick from `[plan]` in
+    Add existing only), and the post-clone line for Clone (§2.3).
   - In owned mode only, one line in the Plan tab saying how the plan
     resolved (off mode renders exactly as today).
   - `offers-check.mjs` and mock harness entries.
