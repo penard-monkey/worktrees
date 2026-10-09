@@ -31,8 +31,25 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 - **tmux -N: one extra `tmux -V` per CLI process.** The `-N` verdict costs one
   spawn on first use. Note it wherever spawn counts are measured or asserted
   (`spawn-count.sh`). See docs/sessions/2026-10-08-tmux-no-start/.
-- **Owned planning: phase 2 and 3 (phase 1 is being built in the
-  `owned-planning-p1` lane; cdv is the pilot).** Phase 2:
+- **Owned planning: run the cdv pilot.** Phase 1 shipped (#471, #475) but the
+  real-app pass has not been done by anyone: install a release carrying both,
+  restart cdv `(main)`'s session (stale MCP image creates pointer-less lanes),
+  adopt cdv at full, drive one new lane. Steps in
+  [the build session](docs/sessions/2026-10-09-owned-planning-p1/summary.md).
+- **Owned planning: phase 1 stragglers from #475's review.**
+  - Adding a plain folder through the git-init offer (`initRepo`, App.tsx)
+    skips the planning row — route it to `AddProjectDialog` after the init.
+  - `confirmAdd` drops the user's planning pick silently when the folder was
+    already registered (`newRoot` finds no new root) — say so in one line.
+  - `plancmd::probe_cli` spawns `worktrees plan hook --version` on every
+    `planning_status` and every full-level Claude launch; cache it per
+    path + mtime if it ever shows in a trace.
+  - `PlanningChoice` reads "(your default: off)" while the default is unset —
+    say "not chosen yet".
+
+  See [the build session](docs/sessions/2026-10-09-owned-planning-p1/summary.md).
+- **Owned planning: phase 2 and 3 (phase 1 shipped in #471 and #475; cdv is
+  the pilot).** Phase 2:
   - `[plan] project` (goals read from main's copy, a `project` line on every
     place);
   - `worktrees plan migrate|show|archive`, and archive-on-remove;

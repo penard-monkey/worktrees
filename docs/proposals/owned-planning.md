@@ -4,8 +4,9 @@ title: "Proposal — worktrees owns planning (opt-in)"
 
 # Proposal — worktrees owns the planning mechanism, opt-in
 
-**Status:** investigation and design, 2026-10-09. Phase 1 being built
-(core + CLI first, then the Claude plugin and the app). Pilot
+**Status:** investigation and design, 2026-10-09. Phase 1 shipped the same
+day: core + CLI in #471, the Claude plugin and the app in #475; the cdv pilot
+run is David's (steps in `docs/sessions/2026-10-09-owned-planning-p1/`). Pilot
 project: casa-del-valle-monorepo (§8.1, phase 1 in §9). Decisions
 requested in §11. Nothing here permits merging or implementing anything.
 
@@ -534,11 +535,14 @@ mechanism (`guidance::materialize_in`), as `<data>/agent/<hash>/claude-plan/`:
 
 ```json
 { "hooks": {
-  "SessionStart":     [{ "matcher": "startup|resume|compact", "hooks": [{ "type": "command", "command": "'<bin>' plan hook session" }] }],
+  "SessionStart":     [{ "matcher": "startup|resume|clear|compact", "hooks": [{ "type": "command", "command": "'<bin>' plan hook session" }] }],
   "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "'<bin>' plan hook prompt" }] }]
 }}
 ```
 
+- **`clear` is in the matcher (phase 1 as built).** `/clear` starts a fresh
+  context with the same session; without it, a cleared session would carry no
+  plan until the plan next changed.
 - **It does NOT ride the guidance gate.** `guidance_for` (`ops.rs:111`)
   returns no flags at all when guidance is disabled or the repo is not
   "managed". A planning plugin appended there would vanish silently for a
