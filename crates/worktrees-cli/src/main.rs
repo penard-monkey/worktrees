@@ -36,6 +36,10 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees show <file>[:line] [--line N]  ask the worktrees app to open a file (at a line)
   worktrees guide [--status] [--json]   what agents are told about places (--rules: the one-line rule;
                                         --default: the shipped skill, ignoring your edit)
+  worktrees plan [resolve] [--json]     how this place's plan resolves (owned planning; --json stamps the version)
+  worktrees plan default [unset|full|off]  your default for owned planning, every project
+  worktrees plan level [inherit|off|full|show <path> [--scope place|main]]  this project's planning
+  worktrees plan hook session|prompt    Claude's plan hook (prints nothing unless planning is full)
   worktrees agent-setup [status|fix|link-skills]  CLAUDE.md/AGENTS.md + skills for every agent (--json)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
@@ -91,6 +95,10 @@ fn run() -> i32 {
         // answer (allow) even where there is no repository at all.
         Some("guide") => return worktrees_core::guidance::cmd_guide(args.get(1..).unwrap_or(&[])),
         Some("guard") => return worktrees_core::guidance::cmd_guard(args.get(1..).unwrap_or(&[])),
+        // Owned planning. Ahead of the guards for `guard`'s reason: `plan hook`
+        // is Claude's SessionStart/UserPromptSubmit hook and must answer (with
+        // nothing) from anywhere; the other verbs find their repo themselves.
+        Some("plan") => return worktrees_core::plancmd::cmd_plan(args.get(1..).unwrap_or(&[])),
         // Also ahead of the guards: a `pull` that ADOPTS a project, and a
         // hub-level `status`, both run on a machine that does not have the repo
         // yet — there is no git worktree to stand in.

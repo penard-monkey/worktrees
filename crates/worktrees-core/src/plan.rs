@@ -60,12 +60,58 @@ pub enum Source {
 }
 
 /// Which step of the resolution order found the plan.
+///
+/// A CLOSED union on the other side (`app/src/PlanPane.tsx`, MCP clients), so
+/// a new value is not additive. `pending`, `invalid_pointer` and `show_path`
+/// appear only on projects that opted in (`planning.rs`); `off` never
+/// produces them.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolved {
     ActivePlan,
     Newest,
     Root,
+    /// Owned: `.active_plan` names a valid topic whose plan is not written
+    /// yet, and there is no root plan. `topic` says where it goes.
+    Pending,
+    /// Owned: `.active_plan` is not usable (not one plain name, a symlink, or
+    /// naming something that is not a real directory). Falls back to the root
+    /// plan when there is one; never says where to write.
+    InvalidPointer,
+    /// Show only: the user-chosen path. `plan_path` null + `reason` when it
+    /// names nothing usable.
+    ShowPath,
+}
+
+/// How to resolve: today's rule, worktrees' owned layout, or a user-chosen
+/// path (`docs/proposals/owned-planning.md` §3.2, §2.5.2). One function serves
+/// every caller — the Plan tab, MCP, `worktrees plan resolve` and the plan
+/// hook — so they cannot disagree at the same version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Planning off: `.active_plan`, then the newest plan directory, then root.
+    Legacy,
+    /// Planning full: no guessing (§6), see `resolve_owned`.
+    Owned,
+    /// Show only. `main_root` is the project's main checkout; with
+    /// `Scope::Main` the path is read from MAIN's working tree as it is,
+    /// never from `HEAD`.
+    Show { rel: String, scope: crate::planning::Scope, main_root: PathBuf },
+}
+
+/// What [`resolve`] found.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Resolution {
+    pub how: Option<Resolved>,
+    /// The plan relative to the root it was read from.
+    pub rel: Option<String>,
+    /// The file to read.
+    pub abs: Option<PathBuf>,
+    /// Owned: the topic a VALID `.active_plan` names (a plain component, so
+    /// safe to show; an invalid one is never echoed).
+    pub topic: Option<String>,
+    /// Show only, on failure: why nothing is shown.
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +171,20 @@ pub struct PlanSummary {
     /// The plan file was longer than `MAX_READ`; everything above was
     /// extracted from its first `MAX_READ` bytes.
     pub truncated: bool,
+    /// The project's effective planning level when this was resolved.
+    #[serde(default)]
+    pub level: crate::planning::Level,
+    /// Owned: the topic `.active_plan` names, when it is valid.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Show only: `place` or `main` — with `main` the plan is MAIN's copy,
+    /// never this place's own.
+    #[serde(default)]
+    pub plan_scope: Option<crate::planning::Scope>,
+    /// Show only, on failure: "not found", "outside the project", "not a
+    /// file", "main unreadable", or "no task_plan.md in <rel>".
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 impl PlanSummary {
@@ -183,7 +243,7 @@ fn read_capped(p: &Path) -> Option<(String, bool)> {
 ///
 /// The script's step 1 (`$PLAN_ID`) is skipped on purpose: it is a per-terminal
 /// environment variable of the claude session, and the app cannot know it.
-fn resolve(root: &Path) -> Option<(Resolved, String, PathBuf)> {
+fn resolve_legacy(root: &Path) -> Option<(Resolved, String, PathBuf)> {
     let planning = root.join(crate::ops::PLANNING_DIR);
     // `.planning` itself is lstat'd before ANYTHING under it is: every later
     // lstat would otherwise resolve a `.planning -> elsewhere` on its way past.
@@ -236,10 +296,170 @@ fn resolve(root: &Path) -> Option<(Resolved, String, PathBuf)> {
     None
 }
 
-/// The plan summary for the place at `root`. Never fails: anything unreadable
-/// degrades toward `source: "none"`.
+/// What one `symlink_metadata` says, in the three answers the owned table
+/// distinguishes. Any error other than "not there" (permissions, a loop) is
+/// `Other`, which the table treats as unusable — never as absent.
+#[derive(PartialEq)]
+enum Kind {
+    Absent,
+    Dir,
+    File,
+    Other,
+}
+
+fn kind(p: &Path) -> Kind {
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => Kind::Dir,
+        Ok(m) if m.is_file() => Kind::File,
+        Ok(_) => Kind::Other,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Kind::Absent,
+        Err(_) => Kind::Other,
+    }
+}
+
+/// Owned mode, every case of §3.2's table. There is no newest-directory guess
+/// (§6). A pointer MISSING its plan means "not written yet" (`pending`, or the
+/// root plan if one exists) and may say where to write; an INVALID pointer
+/// must never say that — `.planning/evil -> /elsewhere` would have the agent
+/// write through the link — so it falls back to the root plan or nothing, and
+/// its value is never carried out of here.
+///
+/// "Valid" is stricter than the legacy rule in one way: a value with a control
+/// character is refused, because a valid topic is printed into an agent's
+/// context and a newline in it would forge a line there.
+fn resolve_owned(root: &Path) -> Resolution {
+    let root_plan = root.join(TASK_PLAN);
+    let root_res = |how: Resolved, topic: Option<String>| -> Resolution {
+        if is_file_nofollow(&root_plan) {
+            Resolution { how: Some(how), rel: Some(TASK_PLAN.into()), abs: Some(root_plan.clone()), topic, reason: None }
+        } else {
+            Resolution { how: if how == Resolved::Root { None } else { Some(how) }, topic, ..Default::default() }
+        }
+    };
+    let invalid = || {
+        let mut r = root_res(Resolved::InvalidPointer, None);
+        r.how = Some(Resolved::InvalidPointer);
+        r
+    };
+    let planning = root.join(crate::ops::PLANNING_DIR);
+    match kind(&planning) {
+        Kind::Absent => return root_res(Resolved::Root, None),
+        Kind::Dir => {}
+        // A linked `.planning` (or a file by that name): nothing under it can
+        // be trusted, so no pointer in it can be either.
+        Kind::File | Kind::Other => return invalid(),
+    }
+    let active = planning.join(ACTIVE_PLAN);
+    match kind(&active) {
+        Kind::Absent => return root_res(Resolved::Root, None),
+        Kind::File => {}
+        Kind::Dir | Kind::Other => return invalid(),
+    }
+    let Some((text, _)) = read_capped(&active) else { return invalid() };
+    let id = text.trim();
+    if !plain_component(id) || id.chars().any(char::is_control) {
+        return invalid();
+    }
+    let dir = planning.join(id);
+    let pending = || {
+        let mut r = root_res(Resolved::Root, Some(id.to_string()));
+        if r.how.is_none() {
+            r.how = Some(Resolved::Pending);
+        }
+        r
+    };
+    match kind(&dir) {
+        Kind::Absent => return pending(),
+        Kind::Dir => {}
+        Kind::File | Kind::Other => return invalid(),
+    }
+    let file = dir.join(TASK_PLAN);
+    match kind(&file) {
+        Kind::File => Resolution {
+            how: Some(Resolved::ActivePlan),
+            rel: Some(format!("{}/{id}/{TASK_PLAN}", crate::ops::PLANNING_DIR)),
+            abs: Some(file),
+            topic: Some(id.to_string()),
+            reason: None,
+        },
+        Kind::Absent => pending(),
+        // A linked `task_plan.md`: "write here" would write through it.
+        Kind::Dir | Kind::Other => invalid(),
+    }
+}
+
+/// Show only (§2.5.2): `rel` names a file (the plan) or a directory (shown
+/// through its `task_plan.md`), read against the place or against main.
+/// Failures are a state, never a fallback — nothing here looks in
+/// `.planning/` or says where to write.
+fn resolve_show(root: &Path, rel: &str, scope: crate::planning::Scope, main_root: &Path) -> Resolution {
+    use crate::safepath::{classify, Target};
+    let fail = |why: String| Resolution { how: Some(Resolved::ShowPath), reason: Some(why), ..Default::default() };
+    let base = match scope {
+        crate::planning::Scope::Place => root,
+        crate::planning::Scope::Main => {
+            // A bare repo or a missing checkout has no working tree to read.
+            if !is_dir_nofollow(main_root) || kind(&main_root.join(".git")) != Kind::Dir {
+                return fail("main unreadable".into());
+            }
+            main_root
+        }
+    };
+    let rel = crate::safepath::normalize_entered(rel);
+    match classify(base, &rel) {
+        Ok(Target::File(f)) => Resolution { how: Some(Resolved::ShowPath), rel: Some(rel), abs: Some(f), ..Default::default() },
+        Ok(Target::Dir(_)) => {
+            let inner = format!("{rel}/{TASK_PLAN}");
+            match crate::safepath::safe_under(base, &inner) {
+                Some(f) => Resolution { how: Some(Resolved::ShowPath), rel: Some(inner), abs: Some(f), ..Default::default() },
+                None => fail(format!("no {TASK_PLAN} in {rel}")),
+            }
+        }
+        Err(r) => fail(r.reason().into()),
+    }
+}
+
+/// THE resolver. `summarize_with`, `worktrees plan resolve` and `worktrees
+/// plan hook` all come through here.
+pub fn resolve(root: &Path, mode: &Mode) -> Resolution {
+    match mode {
+        Mode::Legacy => match resolve_legacy(root) {
+            Some((how, rel, abs)) => Resolution { how: Some(how), rel: Some(rel), abs: Some(abs), ..Default::default() },
+            None => Resolution::default(),
+        },
+        Mode::Owned => resolve_owned(root),
+        Mode::Show { rel, scope, main_root } => resolve_show(root, rel, *scope, main_root),
+    }
+}
+
+/// The plan summary for the place at `root`, resolved by today's rule. Never
+/// fails: anything unreadable degrades toward `source: "none"`.
 pub fn summarize(root: &Path) -> PlanSummary {
-    let mut out = PlanSummary::default();
+    summarize_with(root, &Mode::Legacy)
+}
+
+/// The plan summary for the place at `root`, resolved the way its project's
+/// effective planning says (`planning::effective`). What the Plan tab and MCP
+/// `place_status` call.
+pub fn summarize_place(root: &Path) -> PlanSummary {
+    let main = crate::planning::main_root_of(root);
+    let eff = crate::planning::effective(&main.to_string_lossy());
+    summarize_with(root, &crate::planning::mode_from(&eff, &main))
+}
+
+pub fn summarize_with(root: &Path, mode: &Mode) -> PlanSummary {
+    let mut out = PlanSummary {
+        level: match mode {
+            Mode::Legacy => crate::planning::Level::Off,
+            Mode::Owned => crate::planning::Level::Full,
+            Mode::Show { .. } => crate::planning::Level::Show,
+        },
+        plan_scope: match mode {
+            Mode::Show { scope, .. } => Some(*scope),
+            _ => None,
+        },
+        ..Default::default()
+    };
 
     // The brief, whenever it exists — the header shows it beside a plan too.
     let planning = root.join(crate::ops::PLANNING_DIR);
@@ -258,7 +478,15 @@ pub fn summarize(root: &Path) -> PlanSummary {
         None
     };
 
-    if let Some((how, rel, file)) = resolve(root) {
+    let r = resolve(root, mode);
+    out.topic = r.topic.clone();
+    out.reason = r.reason.clone();
+    // Legacy reports a step only when a plan was READ (today's contract); the
+    // owned/show states are reported whether or not a file stands behind them.
+    if !matches!(mode, Mode::Legacy) {
+        out.how_resolved = r.how;
+    }
+    if let (Some(how), Some(rel), Some(file)) = (r.how, r.rel, r.abs) {
         if let Some((text, truncated)) = read_capped(&file) {
             let x = extract(&text);
             let dir = file.parent().unwrap_or(root);
@@ -683,6 +911,39 @@ pub fn extract(text: &str) -> Extracted {
         }
     }
     x
+}
+
+/// The current phase's name and its UNTICKED checkboxes (each clamped to
+/// `CURRENT_MAX`, at most `max`), for the plan hook. "Current" is the phase
+/// `## Current Phase` names by prefix ("Phase 3" → "Phase 3: Build"), else the
+/// first in-progress phase, else the first one not complete.
+pub fn current_phase_open(text: &str, max: usize) -> Option<(String, Vec<String>)> {
+    let x = extract(text);
+    let lines = prepass(text);
+    let hs = headings(&lines);
+    let named = x.current.as_deref().and_then(|c| x.phases.iter().position(|p| p.name.starts_with(c)));
+    let k = named
+        .or_else(|| x.phases.iter().position(|p| p.status == PhaseStatus::InProgress))
+        .or_else(|| x.phases.iter().position(|p| p.status != PhaseStatus::Complete))?;
+    let name = x.phases[k].name.clone();
+    // the k-th phase heading, in the same order `extract` pushed them
+    let mut seen = 0;
+    for (i, h) in hs.iter().enumerate() {
+        if !(2..=3).contains(&h.1) || !is_phase_heading(h.2) {
+            continue;
+        }
+        if seen == k {
+            let end = section_end(&hs, i, lines.len());
+            let open: Vec<String> = text_lines(&lines[h.0 + 1..end])
+                .filter(|t| checkbox(t) == Some(false))
+                .filter_map(|t| clamp(t.trim(), CURRENT_MAX))
+                .take(max)
+                .collect();
+            return Some((clamp(&name, CURRENT_MAX).unwrap_or(name), open));
+        }
+        seen += 1;
+    }
+    None
 }
 
 /// The pure extractor over a brief: its H1 and the first prose paragraph after
@@ -1143,8 +1404,8 @@ The real goal.
             keys,
             vec![
                 "brief_lead", "brief_path", "brief_title", "checks_done", "checks_total", "current", "errors",
-                "files", "goal", "how_resolved", "markdown", "mtime_ms", "phases", "plan_path", "plan_rel",
-                "source", "title", "truncated",
+                "files", "goal", "how_resolved", "level", "markdown", "mtime_ms", "phases", "plan_path",
+                "plan_rel", "plan_scope", "reason", "source", "title", "topic", "truncated",
             ]
         );
         assert_eq!(v["source"], serde_json::json!("plan"));
@@ -1152,6 +1413,182 @@ The real goal.
         assert_eq!(v["phases"][2]["status"], serde_json::json!("in_progress"));
         assert_eq!(v["files"], serde_json::json!({ "task_plan": true, "findings": false, "progress": false }));
         assert!(v["markdown"].is_null());
+    }
+
+    #[test]
+    fn the_current_phase_s_open_boxes_come_from_its_own_section() {
+        let (name, open) = current_phase_open(TEMPLATE, 10).unwrap();
+        assert_eq!(name, "Phase 3: Implementation");
+        assert_eq!(open, vec!["- [ ] Test incrementally"]);
+        assert_eq!(current_phase_open(FREEFORM, 10), None);
+    }
+
+    // ── owned mode (§3.2's case table) ──────────────────────────────────────
+
+    fn owned(r: &Path) -> PlanSummary {
+        summarize_with(r, &Mode::Owned)
+    }
+
+    #[test]
+    fn owned_with_no_pointer_is_the_root_plan_or_nothing_and_never_a_guess() {
+        let t = tmp("own-nopointer");
+        let r = &t.0;
+        assert_eq!(owned(r).how_resolved, None);
+        assert_eq!(owned(r).level, crate::planning::Level::Full);
+        // plan dirs on disk but no pointer: legacy guesses, owned does not
+        write(r, ".planning/orchestrator/task_plan.md", "# goals");
+        write(r, ".planning/brief.md", "# The brief\n\nDo it.\n");
+        assert_eq!(summarize(r).how_resolved, Some(Resolved::Newest));
+        let s = owned(r);
+        assert_eq!((s.how_resolved, s.source), (None, Source::Brief), "owned mode guessed a plan dir: {s:?}");
+        write(r, "task_plan.md", "# root");
+        let s = owned(r);
+        assert_eq!((s.how_resolved, s.plan_rel.as_deref()), (Some(Resolved::Root), Some("task_plan.md")));
+    }
+
+    #[test]
+    fn owned_a_valid_pointer_with_its_plan_wins_over_a_root_plan() {
+        let t = tmp("own-active");
+        let r = &t.0;
+        write(r, "task_plan.md", "# root");
+        write(r, ".planning/lane/task_plan.md", "# lane");
+        write(r, ".planning/.active_plan", "lane\n");
+        let s = owned(r);
+        assert_eq!(s.how_resolved, Some(Resolved::ActivePlan));
+        assert_eq!(s.plan_rel.as_deref(), Some(".planning/lane/task_plan.md"));
+        assert_eq!(s.topic.as_deref(), Some("lane"));
+        assert_eq!(s.title.as_deref(), Some("lane"));
+    }
+
+    #[test]
+    fn owned_a_valid_pointer_missing_its_plan_is_pending_unless_a_root_plan_exists() {
+        let t = tmp("own-pending");
+        let r = &t.0;
+        write(r, ".planning/.active_plan", "lane");
+        let s = owned(r);
+        assert_eq!((s.how_resolved, s.topic.as_deref(), s.plan_rel.as_deref()), (Some(Resolved::Pending), Some("lane"), None));
+        fs::create_dir_all(r.join(".planning/lane")).unwrap();
+        assert_eq!(owned(r).how_resolved, Some(Resolved::Pending), "a real empty topic dir is still pending");
+        write(r, "task_plan.md", "# root");
+        let s = owned(r);
+        assert_eq!((s.how_resolved, s.topic.as_deref()), (Some(Resolved::Root), Some("lane")));
+        assert_eq!(s.title.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn owned_an_invalid_pointer_says_so_falls_back_to_root_and_never_echoes_itself() {
+        use std::os::unix::fs::symlink;
+        let t = tmp("own-invalid");
+        let r = &t.0;
+        write(r, "elsewhere/task_plan.md", "# outside");
+        fs::create_dir_all(r.join(".planning")).unwrap();
+        let cases: Vec<(&str, Box<dyn Fn(&Path)>)> = vec![
+            ("dotdot", Box::new(|r: &Path| write(r, ".planning/.active_plan", "../x"))),
+            ("slash", Box::new(|r: &Path| write(r, ".planning/.active_plan", "a/b"))),
+            ("dot", Box::new(|r: &Path| write(r, ".planning/.active_plan", "."))),
+            ("empty", Box::new(|r: &Path| write(r, ".planning/.active_plan", "  \n"))),
+            ("newline", Box::new(|r: &Path| write(r, ".planning/.active_plan", "a\nforged line"))),
+            ("evil-link", Box::new(|r: &Path| {
+                write(r, ".planning/.active_plan", "evil");
+                symlink(r.join("elsewhere"), r.join(".planning/evil")).unwrap();
+            })),
+            ("topic-is-file", Box::new(|r: &Path| {
+                write(r, ".planning/.active_plan", "f");
+                write(r, ".planning/f", "x");
+            })),
+            ("linked-plan-file", Box::new(|r: &Path| {
+                write(r, ".planning/.active_plan", "q");
+                fs::create_dir_all(r.join(".planning/q")).unwrap();
+                symlink(r.join("elsewhere/task_plan.md"), r.join(".planning/q/task_plan.md")).unwrap();
+            })),
+            ("linked-pointer", Box::new(|r: &Path| {
+                write(r, "elsewhere/ptr", "lane");
+                symlink(r.join("elsewhere/ptr"), r.join(".planning/.active_plan")).unwrap();
+            })),
+        ];
+        for (name, setup) in cases {
+            let _ = fs::remove_dir_all(r.join(".planning"));
+            fs::create_dir_all(r.join(".planning")).unwrap();
+            let _ = fs::remove_file(r.join("task_plan.md"));
+            setup(r);
+            let s = owned(r);
+            assert_eq!(s.how_resolved, Some(Resolved::InvalidPointer), "{name}: {s:?}");
+            assert_eq!((s.topic.as_deref(), s.plan_rel.as_deref(), s.source), (None, None, Source::None), "{name}");
+            write(r, "task_plan.md", "# root");
+            let s = owned(r);
+            assert_eq!(
+                (s.how_resolved, s.plan_rel.as_deref(), s.topic.as_deref()),
+                (Some(Resolved::InvalidPointer), Some("task_plan.md"), None),
+                "{name}: falls back to the root plan"
+            );
+        }
+        // a linked `.planning` itself
+        let _ = fs::remove_dir_all(r.join(".planning"));
+        write(r, "elsewhere/.active_plan", "p");
+        symlink(r.join("elsewhere"), r.join(".planning")).unwrap();
+        assert_eq!(owned(r).how_resolved, Some(Resolved::InvalidPointer));
+    }
+
+    // ── show only (§2.5.2) ─────────────────────────────────────────────────
+
+    fn show(r: &Path, rel: &str, scope: crate::planning::Scope, main: &Path) -> PlanSummary {
+        summarize_with(r, &Mode::Show { rel: rel.into(), scope, main_root: main.to_path_buf() })
+    }
+
+    #[test]
+    fn show_reads_a_file_or_a_directory_s_task_plan_and_says_why_when_it_cannot() {
+        use crate::planning::Scope::Place;
+        use std::os::unix::fs::symlink;
+        let t = tmp("show");
+        let r = &t.0;
+        write(r, "docs/goals.md", "# goals");
+        write(r, "docs/plan/task_plan.md", "# dir plan");
+        fs::create_dir_all(r.join("docs/empty")).unwrap();
+        write(r, "out/task_plan.md", "# outside");
+        symlink(r.join("docs/plan"), r.join("docs/linked")).unwrap();
+        // the planning dir is ignored entirely in show mode
+        write(r, ".planning/x/task_plan.md", "# not this");
+        write(r, ".planning/.active_plan", "x");
+
+        let s = show(r, "docs/goals.md", Place, r);
+        assert_eq!((s.how_resolved, s.plan_rel.as_deref(), s.title.as_deref()), (Some(Resolved::ShowPath), Some("docs/goals.md"), Some("goals")));
+        assert_eq!((s.level, s.plan_scope), (crate::planning::Level::Show, Some(Place)));
+        for rel in ["docs/plan", "docs/plan/"] {
+            let s = show(r, rel, Place, r);
+            assert_eq!(s.plan_rel.as_deref(), Some("docs/plan/task_plan.md"), "{rel}");
+        }
+        let s = show(r, "docs/empty", Place, r);
+        assert_eq!((s.how_resolved, s.plan_path.as_deref(), s.reason.as_deref()), (Some(Resolved::ShowPath), None, Some("no task_plan.md in docs/empty")));
+        assert_eq!(show(r, "docs/nope", Place, r).reason.as_deref(), Some("not found"));
+        assert_eq!(show(r, "docs/linked", Place, r).reason.as_deref(), Some("outside the project"), "a symlinked dir");
+        assert_eq!(show(r, "../x", Place, r).reason.as_deref(), Some("outside the project"));
+        // escaping through an intermediate link
+        let base = tmp("show-out");
+        write(&base.0, "task_plan.md", "# far");
+        symlink(&base.0, r.join("docs/far")).unwrap();
+        let s = show(r, "docs/far/task_plan.md", Place, r);
+        assert_eq!((s.plan_path, s.reason.as_deref()), (None, Some("outside the project")));
+        let s = show(r, "docs/far", Place, r);
+        assert_eq!(s.reason.as_deref(), Some("outside the project"));
+    }
+
+    #[test]
+    fn show_main_scope_reads_main_s_working_tree_from_a_lane_and_reports_an_unreadable_main() {
+        use crate::planning::Scope::Main;
+        let t = tmp("show-main");
+        let main = &t.0;
+        fs::create_dir_all(main.join(".git")).unwrap();
+        write(main, "docs/goals.md", "# main's goals (uncommitted edit)");
+        let lane = main.join(".worktrees/lane");
+        write(&lane, "docs/goals.md", "# the lane's stale copy");
+        let s = show(&lane, "docs/goals.md", Main, main);
+        assert_eq!(s.title.as_deref(), Some("main's goals (uncommitted edit)"));
+        assert_eq!(s.plan_scope, Some(Main));
+        assert_eq!(s.plan_path, Some(fs::canonicalize(main.join("docs/goals.md")).unwrap().to_string_lossy().into_owned()));
+        // a bare or missing main
+        fs::remove_dir_all(main.join(".git")).unwrap();
+        assert_eq!(show(&lane, "docs/goals.md", Main, main).reason.as_deref(), Some("main unreadable"));
+        assert_eq!(show(&lane, "docs/goals.md", Main, &main.join("gone")).reason.as_deref(), Some("main unreadable"));
     }
 
     /// A MACHINE-LOCAL witness, like `docs/ai-profiles-manual-checks.md`: when

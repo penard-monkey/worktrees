@@ -462,40 +462,10 @@ fn hexval(c: u8) -> Option<u8> {
     }
 }
 
-/// Resolve a decoded relative path inside `root`, or refuse it.
-///
-/// Two layers, and the second is the one that holds. The first is arithmetic on
-/// a string — no empty, `.` or `..` component, nothing absolute, no backslash
-/// (a Windows separator that this platform would treat as an ordinary
-/// character in a name), no drive letter. A string cannot show a symlink, so
-/// the second layer stats the candidate with `symlink_metadata` (never
-/// `metadata`: a link is refused, not followed) and then canonicalises it,
-/// which resolves every parent component, and requires the result to still be
-/// under the canonical root.
-pub fn safe_under(root: &Path, rel: &str) -> Option<PathBuf> {
-    if rel.is_empty() || rel.len() > 1024 || rel.contains('\0') || rel.contains('\\') {
-        return None;
-    }
-    if rel.starts_with('/') || rel.as_bytes().get(1) == Some(&b':') {
-        return None;
-    }
-    for part in rel.split('/') {
-        if part.is_empty() || part == "." || part == ".." {
-            return None;
-        }
-    }
-    let cand = root.join(rel);
-    let md = std::fs::symlink_metadata(&cand).ok()?;
-    if !md.is_file() {
-        return None;
-    }
-    let canon = std::fs::canonicalize(&cand).ok()?;
-    // Canonical on BOTH sides: `starts_with` compares components, so a root
-    // that still contains a symlink (`/tmp` is `/private/tmp` here) would fail
-    // to match its own files and refuse everything.
-    let canon_root = std::fs::canonicalize(root).ok()?;
-    canon.starts_with(&canon_root).then_some(canon)
-}
+/// Resolve a decoded relative path inside `root`, or refuse it. Moved to core
+/// (`worktrees_core::safepath`) when owned planning needed the same rule in the
+/// CLI's plan hook; re-exported so this module and its tests keep one name.
+pub use worktrees_core::safepath::safe_under;
 
 /// One value of a query string, percent-decoded once. `+` is NOT read as a
 /// space: this is a path, and a file legitimately called `a+b.md` must not

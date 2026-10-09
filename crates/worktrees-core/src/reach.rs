@@ -290,7 +290,7 @@ mod tests {
     use super::*;
 
     fn reg() -> Registry {
-        let e = |root: &str, name: &str, private: bool| Entry { root: root.into(), name: name.into(), private };
+        let e = |root: &str, name: &str, private: bool| Entry { root: root.into(), name: name.into(), private, ..Default::default() };
         Registry {
             projects: vec![e("/w/alpha", "alpha", false), e("/w/beta", "beta", false), e("/w/client", "client", true)],
             ..Default::default()
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn a_duplicate_name_from_a_hand_edit_is_refused_not_guessed() {
         let mut g = reg();
-        g.projects.push(Entry { root: "/w/beta2".into(), name: "beta".into(), private: false });
+        g.projects.push(Entry { root: "/w/beta2".into(), name: "beta".into(), ..Default::default() });
         let r = Reach::new(Inputs { main_root: "/w/alpha", user: Level::Read, flag: None, in_run: false, registry: g });
         let e = r.parse("beta:x").unwrap_err();
         assert!(e.contains("ambiguous"), "{e}");

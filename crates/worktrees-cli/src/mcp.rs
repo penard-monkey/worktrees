@@ -2488,7 +2488,7 @@ impl Server {
         }
         // Re-checked here as well as in `foreign_project`: the gate is the
         // last word before a write, whatever path reached it.
-        self.consent_now(&worktrees_core::registry::Entry { root: project.main_root.clone(), name: name.to_string(), private: false })?;
+        self.consent_now(&worktrees_core::registry::Entry { root: project.main_root.clone(), name: name.to_string(), ..Default::default() })?;
         if worktrees_core::sync::hub_copy_of(std::path::Path::new(&project.main_root)).is_some() {
             return Err(format!(
                 "{name}: that checkout is a hub copy (another machine's mirror) — nothing done there survives \
@@ -3235,7 +3235,7 @@ const DESC_MAX: usize = 60;
 /// like every other session-written string here. `title`/`goal`/`current` and
 /// the brief's are already clamped by core, well under `FREE_TEXT_MAX`.
 fn plan_json(path: &str) -> serde_json::Value {
-    let plan = worktrees_core::plan::summarize(std::path::Path::new(path)).without_markdown();
+    let plan = worktrees_core::plan::summarize_place(std::path::Path::new(path)).without_markdown();
     let mut v = serde_json::to_value(&plan).unwrap_or_default();
     if let Some(list) = v["phases"].as_array_mut() {
         for ph in list.iter_mut() {
@@ -4682,6 +4682,7 @@ mod tests {
             root: r.to_string_lossy().into_owned(),
             name: n.into(),
             private,
+            ..Default::default()
         };
         let reg = Registry {
             projects: vec![e(&alpha, "alpha", false), e(&beta, "beta", false), e(&client, "client", true)],
@@ -4844,7 +4845,7 @@ mod tests {
         git_in(&inner, &["init", "-q"]);
         git_in(&inner, &["commit", "-q", "--allow-empty", "-m", "init"]);
         let mut reg = t.reg.clone();
-        reg.projects.push(Entry { root: inner.to_string_lossy().into_owned(), name: "inner".into(), private: false });
+        reg.projects.push(Entry { root: inner.to_string_lossy().into_owned(), name: "inner".into(), ..Default::default() });
         let t = Two { reg, ..t };
         std::fs::remove_dir_all(inner.join(".git")).unwrap();
         let mut s = t.server(&t.alpha, Level::Full);
@@ -4863,7 +4864,7 @@ mod tests {
         let t = two("xp-gone");
         let mut reg = t.reg.clone();
         let gone = t.sc.base.join("gone");
-        reg.projects.push(Entry { root: gone.to_string_lossy().into_owned(), name: "gone".into(), private: false });
+        reg.projects.push(Entry { root: gone.to_string_lossy().into_owned(), name: "gone".into(), ..Default::default() });
         let t = Two { reg, ..t };
         let mut s = t.server(&t.alpha, Level::Read);
         let r = call(&mut s, "place_status", serde_json::json!({ "slug": "gone:lane" }));

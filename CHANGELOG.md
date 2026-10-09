@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **Worktrees can own a project's planning, opt-in** (phase 1 of
+  `docs/proposals/owned-planning.md`; the app's side follows). Each project
+  is **off** (today's behaviour, unchanged), **show only** (the Plan tab and
+  MCP show your own planning files at a path you choose, read-only, no hooks)
+  or **full**. At full, `worktrees new` writes `.planning/.active_plan` and an
+  empty `.planning/<slug>/` for the session's plan, the plan resolves without
+  the "newest folder" guess that let a copied goals file take over a lane's
+  Plan tab, and `/.planning/` is added to `.git/info/exclude` if git does not
+  already ignore it. Nothing is ever turned on by a repo: the choice lives in
+  `~/.config/worktrees` (`worktrees plan default`, `worktrees plan level`).
+  Full is refused for a repo whose `.planning/` holds committed files, and
+  every `new` warns when it does.
+- **`worktrees plan resolve [--json]` and `worktrees plan hook session|prompt`.**
+  `resolve` says how this place's plan resolves, through the same function
+  as the Plan tab, and its JSON stamps the CLI's version. `hook` is the
+  Claude SessionStart/UserPromptSubmit hook: at full it prints the plan's
+  path, current phase, open items and recent progress (the prompt hook only
+  when they changed), framed as data, and prints nothing at any other level
+  — re-checked on every call, so turning planning off silences running
+  sessions on their next prompt.
+- MCP `place_status.plan` gains `level`, `topic`, `plan_scope` and `reason`,
+  and `how_resolved` gains `pending`, `invalid_pointer` and `show_path` —
+  only on projects that opted in.
+
 ## [0.40.1] - 2026-10-08
 
 ### Fixed
