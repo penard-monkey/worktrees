@@ -22,3 +22,4 @@ maintained documentation. Where a proposal and the code disagree, the code wins.
 | [Context usage](context-usage.html) | how full each agent session's context window is — per-harness numerator and window, compaction, a threshold-gated nav mark and MCP `place_status` |
 | [Pull requests](pull-requests.html) | a project's open PRs and each lane's own — one `gh api graphql` call per project, a header chip on the lane, a sixth dock tab, and a cached `pr` on MCP `place_status` later |
 | [Nested lanes](nested-lanes.html) | hubs with child lanes — declared parentage, scoped orchestration, target-aware close-out, tree navigation, and per-project tmux servers first |
+| [Owned planning](owned-planning.html) | worktrees owns the planning layout, resolution and agent hooks, opt-in globally or per project — an after-update offer, a `[plan] project` key for tracked goals, no stale-directory guessing, one resolver for the Plan tab and every hook |

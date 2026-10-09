@@ -24,6 +24,15 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 - **tmux -N: one extra `tmux -V` per CLI process.** The `-N` verdict costs one
   spawn on first use. Note it wherever spawn counts are measured or asserted
   (`spawn-count.sh`). See docs/sessions/2026-10-08-tmux-no-start/.
+- **Owned planning (option, not decided).** worktrees owns the planning
+  layout (`.planning/<topic>/` + `.active_plan`), the resolution and the agent
+  hooks, opt-in globally or per project from an after-update offer and the
+  Add/Clone dialogs. Phase 1 is useful alone: a `[plan] project` key in
+  `.worktrees.toml` (a path, ADR-safe) and `worktrees plan resolve|show|hook`
+  on the one `plan::resolve`, which lets valleos and cdv delete `sync-goals.sh`,
+  `plan-context.sh` and the tracked goals copy that currently hijacks lanes'
+  Plan tabs. Ten decisions for David in
+  [proposal §11](docs/proposals/owned-planning.md).
 - **Nested lanes: shallow-tree implementation and remaining decisions.** #458
   merged the design only: opt-in hubs, first-class flat lanes, parent-aware
   Git/close-out and scoped worktrees mutations. Settle the open choices in
