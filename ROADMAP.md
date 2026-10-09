@@ -5,6 +5,13 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **`~/.cache/worktrees` scratch has no retention.** Agents write
+  `<project>/<tree>/` scratch by convention and nothing deletes it, including
+  `remove_worktree`: 12G on 2026-10-08 (85 worktrees dirs vs 10 live places).
+  Options: delete a place's scratch dir on removal, or an age sweep (use
+  `find -mtime`, not BSD `-newermt`). Either changes what the tool deletes —
+  David's call. Never extend it to compose volumes; those go only via
+  `compose_down`. See docs/sessions/2026-10-09-investigate-ci-retention/.
 - **tmux -N: `wait_out_refusal` costs ~1s on the COMMON cold start.** tmux
   leaves its socket behind when the server exits normally, so the first
   `new`/`open` after every session has closed waits 5×200ms for a "refusal"
