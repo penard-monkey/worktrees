@@ -366,6 +366,25 @@ hand while CI ran 11 — local and CI on different majors. CI and release.yml re
 the SAME two pins (`node-version-file`, `package_json_file`); change them there,
 never in a workflow.
 
+**`nvm use` can REMOVE pnpm from your PATH, and three things break in a row.**
+nvm installs pnpm per NODE VERSION, and the version `.nvmrc` pins ships only
+`corepack node npm npx` — so the very command these targets tell you to run
+leaves `/bin/sh: pnpm: command not found`. Fixing that exposes the next one:
+`pnpm --dir app` from the repo root cannot work either, because a bare `pnpm`
+is a corepack shim and corepack fixes its version from the CWD's package.json
+BEFORE pnpm reads the flag; the root has none, so it takes corepack's default
+and then refuses `app/package.json`'s pin with ERR_PNPM_BAD_PM_VERSION. The
+flag names the project, only the cwd reaches corepack. And fixing THAT exposes
+the third: tauri runs its own `beforeDevCommand`/`beforeBuildCommand` from
+tauri.conf.json, both a bare `pnpm`, so you get the same error one line later
+from inside tauri — overridden per target in the Makefile, never in
+tauri.conf.json, because release.yml builds through that file. CI is immune to
+all three (it installs the pinned pnpm directly), which is why `make dev-app`
+and `make install-app` stayed broken while every run was green. **Verify this
+family with `env -i` carrying only the pinned node's bin**: a login shell that
+has ever used another node version keeps that version's bin further down
+`$PATH`, finds pnpm anyway, and a broken target looks fixed.
+
 **AI profiles have a manual gate too.** Everything claude-side (does the config
 swap apply, does session adoption still see `claude`, does auto-resume resume)
 is invisible to the bats suite — there is no fake claude. Re-run
@@ -906,6 +925,35 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   `.md-fence`), and **form controls do not inherit font**, so `1em` on an
   `<input>` resolves against WebKit's ~13.33px control font, not the prose —
   `.md-check` needs `font-size: inherit` before `width: 1em` means anything.
+- **An invalid `calc()` does not fall back to the old value — it falls back to
+  the INITIAL one.** A `calc()` whose custom property fails to resolve is
+  invalid at computed-value time, so the declaration is dropped: `gap` becomes
+  `normal` (0), not the number you meant. The feedback dialog's spacing was
+  written as `calc(n * var(--base))`, the base never resolved, and padding and
+  borders survived while every gap vanished — which reads as a layout nobody
+  styled rather than a variable nobody defined, i.e. exactly like the bug it
+  was meant to fix. Two rounds were lost to it. Prefer literal values in a
+  generated sheet; if you must use `var()` in `calc()`, assert the computed
+  result, never the declaration.
+- **A vendored widget in a shadow root sizes itself against OUR root.** The
+  Orfis SDK lays out in `rem`, and `rem` is root-relative — it reads `html`,
+  which this app pins to `--ui-rem` (15px), not the 16px the widget was drawn
+  for. Everything rendered ~6% tight and nothing looked broken. `rem` cannot be
+  re-based for a subtree, so the sheet is restated (`app/src/feedbackStyle.ts`).
+  Two more from the same dialog, both invisible to every check that stopped at
+  the module boundary: `inert` leaves an element fully VISIBLE while dropping
+  its events, so inerting the dialog along with the background gives a perfect
+  form that refuses every click; and `.modal-scrim` is a full-screen fixed
+  scrim with its own `z-index`, not a marker — a shadow-hosted dialog cannot
+  paint a light-DOM class, so it marks itself with a style-free attribute
+  (`[data-dialog-open]`, in `DIALOG_OPEN`).
+- **When a vendored library misbehaves, diff the REFERENCE integration before
+  re-reading your own copy.** The feedback form's rows had no spacing because
+  `gap` lives on `.panel` and the whole `<form>` is one of its children — the
+  SDK gives form rows nothing. jobmepls carries four `margin-block-start` rules
+  for exactly this, with a comment calling them "worth upstreaming". Three
+  rounds were spent re-deriving it from our vendored bundle; one `diff` against
+  the working integration would have ended it.
 - Design tokens: `app/src/tokens.css` — everything scales off `--ui-rem`;
   terminal font is independent (`--term-*`). No UI libraries, plain CSS. "No UI
   libraries" means no COMPONENT/design-system libraries and no editor — a pure

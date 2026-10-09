@@ -5,6 +5,27 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Orfis feedback: release verification is still owed.** Shipped ENABLED in
+  #466 after the main path was exercised by hand against a laptop endpoint.
+  Not claimed, and still the right list: a packaged `tauri build` against
+  production, a queued report surviving quit and relaunch, `429` and offline
+  retry, duplicate submission, and a stored row inspected to confirm the
+  payload carries nothing beyond the documented fields
+  (`docs/orfis-feedback.md`).
+  _From: [2026-10-08 orfis-feedback](docs/sessions/2026-10-08-orfis-feedback/summary.md)_
+- **Orfis feedback: the four form-spacing rules are jobmepls' deviation.**
+  `app/src/feedbackStyle.ts` carries them because the SDK gives the form's
+  rows no spacing at all (`gap` is on `.panel`, and the whole `<form>` is one
+  child). jobmepls' own `styles.ts` calls them "worth upstreaming" — if Orfis
+  adopts them the vendored sheet will carry them and our copy becomes
+  redundant. Check at the next re-vendor, and regenerate the sheet
+  (rem → px at 16) while you are there.
+  _From: [2026-10-08 orfis-feedback](docs/sessions/2026-10-08-orfis-feedback/summary.md)_
+- **Orfis feedback: `setTheme()` buys nothing.** It only swaps the SDK's own
+  eight colour properties, and an outer-document rule beats `:host` whatever
+  the specificity, so `[data-orfis]` in tokens.css always wins. The
+  `[data-theme]` observer in `feedbackWidget.ts` is harmless but could go.
+  _From: [2026-10-08 orfis-feedback](docs/sessions/2026-10-08-orfis-feedback/summary.md)_
 - **tmux -N: `wait_out_refusal` costs ~1s on the COMMON cold start.** tmux
   leaves its socket behind when the server exits normally, so the first
   `new`/`open` after every session has closed waits 5×200ms for a "refusal"
