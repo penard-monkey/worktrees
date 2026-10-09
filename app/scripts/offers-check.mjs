@@ -167,11 +167,31 @@ if (ids({ crossProject: null }).length !== 0) fail("cross-project: an unknown st
   else ok("cross-project: a dismissal holds while reach stays off");
 }
 
+// planning (owned-planning §2.2): shown while the global default is UNSET and
+// nothing else — a fact about the machine. No project may be a precondition
+// (the v0.25.0 lesson): with zero projects it still offers. Any global choice
+// retires it; a dismissal holds until core's planning VERSION moves.
+const pl = (dflt, n = 0, version = 1) => ({ default: dflt, version, config_path: "", app_version: "x", cli_version: "x", cli_path: "/w",
+  projects: Array.from({ length: n }, (_, i) => ({ root: `/r${i}`, name: `p${i}`, level: null, plan_path: null, plan_scope: null, effective: "off" })) });
+if (!ids({ planning: pl("unset") }).includes("planning")) fail("planning: not offered while unset with NO projects — a project must not be a precondition");
+else ok("planning: offered while unset, even with no projects registered");
+if (ids({ planning: pl("full", 3) }).length !== 0 || ids({ planning: pl("off", 3) }).length !== 0) fail("planning: still offered after a global choice");
+else ok("planning: retired by any global choice (full or off)");
+if (ids({ planning: null }).length !== 0) fail("planning: an unknown status must offer nothing");
+else ok("planning: an unknown status offers nothing");
+{
+  const [c] = pendingOffers({ mcp: null, planning: pl("unset") }, {});
+  const quiet = pendingOffers({ mcp: null, planning: pl("unset", 4) }, dismissPatch(c, {}));
+  const again = pendingOffers({ mcp: null, planning: pl("unset", 0, 2) }, dismissPatch(c, {}));
+  if (c?.fingerprint !== "v1" || quiet.length !== 0 || again.length !== 1) fail("planning: a dismissal must hold for this version and lapse when planning's VERSION moves");
+  else ok("planning: dismissed per planning version (more projects is not a new question)");
+}
+
 // ── 2. an offer's action is a DESTINATION, not a deed ──────────────────────
 // Every offer id, not just the first: a new offer whose deep link lands
 // nowhere is the same bug as the old one.
 const every = pendingOffers(
-  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off") }, {});
+  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off"), planning: pl("unset") }, {});
 const sheetSrc = read("../src/SettingsSheet.tsx");
 // The render of ONE category: from its `{cat === "x" && <>` to the next
 // category's. A data-focus found anywhere in src/ proves nothing about where
@@ -206,12 +226,12 @@ for (const o of every) {
   } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
   // dismissal, per offer
-  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off") },
+  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off"), planning: pl("unset") },
     dismissPatch(o, {})).some((x) => x.id === o.id)) fail(`${o.id}: dismissing it did not silence it`);
   else ok(`${o.id}: dismissal silences its own fingerprint (${JSON.stringify(o.fingerprint)})`);
 }
-if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills,agent-guidance,agent-guidance-changed,cross-project") {
-  fail(`expected all seven offers, got [${every.map((o) => o.id)}]`);
+if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills,agent-guidance,agent-guidance-changed,cross-project,planning") {
+  fail(`expected all eight offers, got [${every.map((o) => o.id)}]`);
 }
 // The skills fingerprint is the SET of unlinked skills: a new one is a new question.
 {
@@ -347,9 +367,20 @@ if (offersTitle(1) !== "1 thing to set up — open" || offersTitle(3) !== "3 thi
 // …and the CONTEXT: an offer whose input is never fed can never render. The two
 // Codex inputs must be the machine-level probes, not some project's status.
 const ctxCall = app.match(/pendingOffers\(\{([^}]*)\}/);
-if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1]) || !/\bguidance\b/.test(ctxCall[1]) || !/\bcrossProject\b/.test(ctxCall[1])) {
-  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp, userSkills, guidance and crossProject must all reach it`);
-} else ok("pendingOffers is fed mcp + codexMcp + piMcp + userSkills + guidance + crossProject");
+if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1]) || !/\bguidance\b/.test(ctxCall[1]) || !/\bcrossProject\b/.test(ctxCall[1]) || !/\bplanning\b/.test(ctxCall[1])) {
+  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp, userSkills, guidance, crossProject and planning must all reach it`);
+} else ok("pendingOffers is fed mcp + codexMcp + piMcp + userSkills + guidance + crossProject + planning");
+if (!/invoke<PlanningStatus>\("planning_status"\)\.then\(setPlanning\)/.test(app)) {
+  fail("App.tsx no longer probes planning_status straight into the offer input");
+} else ok("the planning offer input comes from a machine-level probe");
+{
+  const plSrc = read("../src/PlanningPanel.tsx");
+  if (!/offerPending/.test(plSrc) || !/onSilenceOffer/.test(plSrc) || !/<section[^>]*data-focus=\{focusId\}/.test(plSrc)) {
+    fail("PlanningSection must carry offerPending/onSilenceOffer and put data-focus on its section");
+  } else ok("Settings → Planning can end its suggestion on demand, and is a deep-link target");
+  if (!/planningOfferPending=\{!!planningOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the planning offer is pending");
+  else ok("Settings is told whether the planning offer is pending");
+}
 if (!/invoke<CrossProjectStatus>\("cross_project_status"\)\.then\(setCrossProject\)/.test(app)) {
   fail("App.tsx no longer probes cross_project_status straight into the offer input");
 } else ok("the cross-project offer input comes from a machine-level probe");

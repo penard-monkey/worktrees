@@ -26,6 +26,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   when they changed), framed as data, and prints nothing at any other level
   — re-checked on every call, so turning planning off silences running
   sessions on their next prompt.
+- **The app side of owned planning.** Updating offers it once ("Let Worktrees
+  keep your agents' plans"), which opens the new **Settings → Planning**: how
+  it works, what it changes in a repo (one local `info/exclude` line) and what
+  it never touches, your default (on for all projects, or choose per project),
+  and every project's level — off, show only with a path (read in each place
+  or from main's copy) or full. New project, Add existing and Clone ask too;
+  Add existing pre-sets full when the repo's `.worktrees.toml` has a `[plan]`
+  section, and Clone offers it after the clone. The Plan tab says how the plan
+  resolved ("active plan: …", "no plan yet — the session writes it in …",
+  "main's copy of …") for projects that opted in, and warns when your
+  worktrees CLI and the app are on different releases. At full, Claude
+  sessions Worktrees launches get the plan at start and whenever it changes,
+  through a second plugin that does not depend on agent guidance being on.
 - MCP `place_status.plan` gains `level`, `topic`, `plan_scope` and `reason`,
   and `how_resolved` gains `pending`, `invalid_pointer` and `show_path` —
   only on projects that opted in.

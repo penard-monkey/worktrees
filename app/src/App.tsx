@@ -33,6 +33,7 @@ import type { CodexMcpStatus } from "./CodexMcpPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import type { GuidanceStatus } from "./GuidancePanel";
 import type { CrossProjectStatus } from "./CrossProjectPanel";
+import { cliSkew, initialPick, pickToWrite, PlanningChoice, type PlanningPick, type PlanningStatus } from "./PlanningPanel";
 import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTodos";
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
@@ -295,7 +296,7 @@ type Workspace = { projects: ProjectView[] };
 /** `needs_confirm` (close only): core stopped because killing this session needs
  *  the user's word, and the string is the session that would die. Not a failure
  *  — a question, so it must never reach the error banner. */
-type DirProbe = { exists: boolean; is_git: boolean; has_commits: boolean };
+type DirProbe = { exists: boolean; is_git: boolean; has_commits: boolean; plan_suggested?: boolean };
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; needs_confirm?: string | null; warnings?: string[] };
 /** Last known `doctor` state for one project root. `slugs` decorates rows,
  * `issues` is the project-level count (placeless findings included, so it equals
@@ -3066,28 +3067,67 @@ function nameProblem(n: string): string {
  *  Module scope (CLAUDE.md): this component owns two text inputs — inside App()
  *  it would be a new identity on every 3s refresh tick, and typing would lose
  *  both its state and the focus ring. */
-function NewProjectDialog({ defaultLocation, busy, error, onBrowse, onCreate, onClose }: {
+/** "Add existing…" after the folder pick: the repo is on disk, so this is the
+ *  one dialog that can pre-set planning from the repo's own `[plan]` section
+ *  (owned-planning §2.3). The suggestion pre-sets the choice and says why; it
+ *  never applies itself. Module scope (CLAUDE.md): it owns a text input. */
+function AddProjectDialog({ dir, suggested, planningDefault, onAdd, onClose }: {
+  dir: string;
+  suggested: boolean;
+  planningDefault: PlanningStatus["default"] | undefined;
+  onAdd: (pick: PlanningPick) => void;
+  onClose: () => void;
+}) {
+  const [pick, setPick] = useState<PlanningPick>(() => initialPick(planningDefault, suggested));
+  const goRef = useRef<HTMLButtonElement | null>(null);
+  // preventScroll: `.sync-modal` hides its overflow (AGENTS.md).
+  useEffect(() => { goRef.current?.focus({ preventScroll: true }); }, []);
+  useEscape(onClose);
+  const ready = pick.level !== "show" || !!pick.path.trim();
+  return (
+    <div className="scrim scrim-center" onClick={onClose}>
+      <div className="sync-modal" role="dialog" aria-label="Add project" data-testid="add-project-dialog"
+        onClick={(e) => e.stopPropagation()}>
+        <header className="sync-h"><b>Add project</b></header>
+        <div className="sync-body">
+          <div className="np-path" data-testid="add-path">will add <code>{dir}</code></div>
+          <PlanningChoice value={pick} onChange={setPick} dflt={planningDefault} suggested={suggested} />
+        </div>
+        <footer className="sync-foot">
+          <button className="ctrl" onClick={onClose}>Cancel</button>
+          <button ref={goRef} className="enter-btn" data-testid="add-go" disabled={!ready} onClick={() => ready && onAdd(pick)}>Add</button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function NewProjectDialog({ defaultLocation, planningDefault, busy, error, onBrowse, onCreate, onClose }: {
   defaultLocation: string;
+  /** The global planning default the choice starts from. A fresh `git init`
+   *  has no `.worktrees.toml`, so there is no repo suggestion to read here. */
+  planningDefault: PlanningStatus["default"] | undefined;
   busy: boolean;
   /** The backend's refusal, verbatim (exists / not a name / mkdir failed). */
   error: string;
   /** Browse… fills the FIELD rather than submitting: the pick is one way to
    *  answer the question, not a second way to ask it. */
   onBrowse: () => Promise<string | null>;
-  onCreate: (location: string, name: string) => void;
+  onCreate: (location: string, name: string, pick: PlanningPick) => void;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
   const [loc, setLoc] = useState(defaultLocation);
+  const [pick, setPick] = useState<PlanningPick>(() => initialPick(planningDefault, false));
   const nameRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => { nameRef.current?.focus(); }, []);
   useEscape(() => { if (!busy) onClose(); });
   const trimmedName = name.trim();
   const trimmedLoc = loc.trim().replace(/\/+$/, "");
   const problem = nameProblem(trimmedName);
-  const ready = !!trimmedName && !!trimmedLoc && !problem && !busy;
+  const ready = !!trimmedName && !!trimmedLoc && !problem && !busy && (pick.level !== "show" || !!pick.path.trim());
   const full = `${trimmedLoc || "…"}/${trimmedName || "…"}`;
-  const submit = () => { if (ready) onCreate(trimmedLoc, trimmedName); };
+  const submit = () => { if (ready) onCreate(trimmedLoc, trimmedName, pick); };
   return (
     <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
       <div className="sync-modal" role="dialog" aria-label="New project" data-testid="new-project-dialog"
@@ -3117,6 +3157,7 @@ function NewProjectDialog({ defaultLocation, busy, error, onBrowse, onCreate, on
           <div className="np-path" data-testid="np-path">
             will create <code>{full}</code>
           </div>
+          <PlanningChoice value={pick} onChange={setPick} dflt={planningDefault} disabled={busy} />
           {problem && <div className="sync-err" data-testid="np-error">{problem}</div>}
           {!problem && error && <div className="sync-err" data-testid="np-error">{error}</div>}
         </div>
@@ -3145,8 +3186,11 @@ function NewProjectDialog({ defaultLocation, busy, error, onBrowse, onCreate, on
  *
  *  Module scope (CLAUDE.md): it owns three text inputs, and App re-renders on
  *  every refresh tick. */
-function CloneDialog({ defaultParent, running, cancelling, progress, error, note, onBrowse, onClone, onCancel, onClose }: {
+function CloneDialog({ defaultParent, planningDefault, running, cancelling, progress, error, note, onBrowse, onClone, onCancel, onClose }: {
   defaultParent: string;
+  /** The global planning default only: the repo does not exist until the
+   *  clone finishes, so a `[plan]` suggestion becomes a post-clone line. */
+  planningDefault: PlanningStatus["default"] | undefined;
   running: boolean;
   cancelling: boolean;
   progress: CloneProgress | null;
@@ -3155,11 +3199,12 @@ function CloneDialog({ defaultParent, running, cancelling, progress, error, note
   /** A non-error outcome to say (a cancelled clone). */
   note: string;
   onBrowse: () => Promise<string | null>;
-  onClone: (url: string, parent: string, name: string) => void;
+  onClone: (url: string, parent: string, name: string, pick: PlanningPick) => void;
   onCancel: () => void;
   onClose: () => void;
 }) {
   const [url, setUrl] = useState("");
+  const [pick, setPick] = useState<PlanningPick>(() => initialPick(planningDefault, false));
   const [parent, setParent] = useState(defaultParent);
   const [name, setName] = useState("");
   const urlRef = useRef<HTMLInputElement | null>(null);
@@ -3175,8 +3220,8 @@ function CloneDialog({ defaultParent, running, cancelling, progress, error, note
   const trimmedParent = parent.trim().replace(/\/+$/, "");
   // Only once something is typed: an empty field is a question, not an error.
   const problem = url.trim() && !srcOk ? src.error : nameBad;
-  const ready = srcOk && !!trimmedParent && !nameBad && !running;
-  const submit = () => { if (ready) onClone(src.url, trimmedParent, name.trim()); };
+  const ready = srcOk && !!trimmedParent && !nameBad && !running && (pick.level !== "show" || !!pick.path.trim());
+  const submit = () => { if (ready) onClone(src.url, trimmedParent, name.trim(), pick); };
   const pct = progress?.percent ?? null;
   return (
     <div className="scrim scrim-center" onClick={() => !running && onClose()}>
@@ -3214,6 +3259,7 @@ function CloneDialog({ defaultParent, running, cancelling, progress, error, note
           <div className="np-path" data-testid="clone-path">
             will create <code>{`${trimmedParent || "…"}/${folder || "…"}`}</code>
           </div>
+          <PlanningChoice value={pick} onChange={setPick} dflt={planningDefault} disabled={running} />
           {problem && <div className="sync-err" data-testid="clone-problem">{problem}</div>}
           {running && (
             <div className="sync-prog" data-testid="clone-prog">
@@ -3490,6 +3536,10 @@ function App() {
   const pendingSeq = useRef(0);
   // A picked folder that is not a repo yet, awaiting the `git init` offer.
   const [initAsk, setInitAsk] = useState<string | null>(null);
+  // Add existing's confirm step (planning choice), and Clone's post-clone
+  // planning line (owned-planning §2.3).
+  const [addAsk, setAddAsk] = useState<{ dir: string; suggested: boolean } | null>(null);
+  const [planHint, setPlanHint] = useState<{ root: string; name: string } | null>(null);
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
   // The armed Close needs one fact more than `confirmRm` can carry: WHICH tmux
@@ -4013,6 +4063,11 @@ function App() {
   // registered projects. Machine-level — the offer's input, the Settings
   // section's state, and what the nav drag consults before a foreign drop.
   const [crossProject, setCrossProject] = useState<CrossProjectStatus | null>(null);
+  // Owned planning (owned-planning §2): the global default, each project's
+  // level, and the plan hook's CLI version beside the app's. Machine-level —
+  // the `planning` offer's input, Settings → Planning's state, the Add dialogs'
+  // default and the Plan tab's version warning.
+  const [planning, setPlanning] = useState<PlanningStatus | null>(null);
   // Re-read when the SET of projects changes (added, removed, reordered in the
   // app): the drag consults it for names and `private`, and a project added
   // a moment ago must not read as unregistered.
@@ -4020,9 +4075,11 @@ function App() {
   useEffect(() => {
     if (!projectRoots) return;
     invoke<CrossProjectStatus>("cross_project_status").then(setCrossProject).catch(() => {});
+    invoke<PlanningStatus>("planning_status").then(setPlanning).catch(() => {});
   }, [projectRoots]);
   useEffect(() => {
     invoke<CrossProjectStatus>("cross_project_status").then(setCrossProject).catch(() => setCrossProject(null));
+    invoke<PlanningStatus>("planning_status").then(setPlanning).catch(() => setPlanning(null));
     invoke<CodexMcpStatus>("codex_mcp_status").then(setCodexMcp).catch(() => setCodexMcp(null));
     invoke<PiMcpStatus>("pi_mcp_status").then(setPiMcp).catch(() => setPiMcp(null));
     invoke<UserSkill[]>("agent_user_skills").then(setUserSkills).catch(() => setUserSkills(null));
@@ -4034,8 +4091,8 @@ function App() {
   // answer, which is how the Home card and the Settings panel came to disagree
   // about whether there was anything to say.
   const offers = useMemo(
-    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, userSkills, guidance, crossProject }, settings.offers_dismissed ?? {}),
-    [mcpStatus, codexMcp, piMcp, userSkills, guidance, crossProject, settings.offers_dismissed],
+    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, userSkills, guidance, crossProject, planning }, settings.offers_dismissed ?? {}),
+    [mcpStatus, codexMcp, piMcp, userSkills, guidance, crossProject, planning, settings.offers_dismissed],
   );
   const takeOffer = useCallback((o: Offer) => {
     setSettingsAt(o.to);
@@ -4057,6 +4114,7 @@ function App() {
   const guidanceOffer = offers.find((o) => o.id === "agent-guidance") ?? null;
   const guidanceChangeOffer = offers.find((o) => o.id === "agent-guidance-changed") ?? null;
   const crossProjectOffer = offers.find((o) => o.id === "cross-project") ?? null;
+  const planningOffer = offers.find((o) => o.id === "planning") ?? null;
 
   // The gear's dot means an UPDATE, and only that. Offers used to light it too
   // (purple when they were the only thing pending), but a dot on the gear leads
@@ -5202,7 +5260,38 @@ function App() {
         revealNav(false);
         return;
       }
-      commitWs(await invoke<Workspace>("add_project", { dir }));
+      setAddAsk({ dir, suggested: !!probe.plan_suggested });
+    } catch (e) { fail(e); }
+  };
+  /** The project a write just added: the root present now and not before. */
+  const newRoot = (before: Workspace | null, after: Workspace): string | null => {
+    const had = new Set((before?.projects ?? []).map((p) => p.root));
+    return after.projects.find((p) => !had.has(p.root))?.root ?? null;
+  };
+  /** Write a dialog's planning choice — only when it differs from the default
+   *  (`pickToWrite`), so inherit stays the common case. A refusal (full over a
+   *  tracked `.planning/`, a path outside the repo) is said, and the project
+   *  stays added at its default. */
+  const applyPick = async (root: string | null, pick: PlanningPick) => {
+    const w = pickToWrite(pick, planning?.default);
+    if (!root || !w) return;
+    try {
+      setPlanning(await invoke<PlanningStatus>("set_project_planning", {
+        root, level: w.level, planPath: w.level === "show" ? w.path : null, scope: w.level === "show" ? w.scope : null,
+      }));
+    } catch (e) {
+      setNotice(`Added at your default planning — the choice was refused: ${String((e as { message?: string })?.message ?? e)}`);
+    }
+  };
+  const confirmAdd = async (pick: PlanningPick) => {
+    const ask = addAsk;
+    if (!ask) return;
+    setAddAsk(null);
+    try {
+      const before = ws;
+      const after = await invoke<Workspace>("add_project", { dir: ask.dir });
+      commitWs(after);
+      await applyPick(newRoot(before, after), pick);
     } catch (e) { fail(e); }
   };
   const openNewProject = () => {
@@ -5224,13 +5313,16 @@ function App() {
    *  refuses an existing target, and reuses the same `init_repo` path the
    *  add-a-plain-folder offer runs). Errors stay IN the dialog: the fields that
    *  caused them are still on screen and still editable. */
-  const createProject = async (location: string, name: string) => {
+  const createProject = async (location: string, name: string, pick: PlanningPick) => {
     setNpBusy(true);
     setNpErr("");
     try {
       setErr("");
-      commitWs(await invoke<Workspace>("create_project", { location, name }));
+      const before = ws;
+      const after = await invoke<Workspace>("create_project", { location, name });
+      commitWs(after);
       setNpOpen(false);
+      await applyPick(newRoot(before, after), pick);
       // The folder that just worked is the next dialog's default — for this
       // one and for "Clone from URL…" alike (one remembered answer).
       updateSettings({ projects_parent: location });
@@ -5273,7 +5365,7 @@ function App() {
   };
   /** Clone, add, select. Every failure stays IN the dialog with the fields
    *  still editable; a cancel is not a failure and says so quietly. */
-  const runClone = async (url: string, parent: string, name: string) => {
+  const runClone = async (url: string, parent: string, name: string, pick: PlanningPick) => {
     const id = `clone-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setCloneId(id);
     setCloneCancelling(false);
@@ -5289,6 +5381,15 @@ function App() {
       commitWs(done.workspace);
       updateSettings({ projects_parent: parent });
       setCloneOpen(false);
+      await applyPick(done.root, pick);
+      // The repo exists only now, so its `[plan]` suggestion is a line AFTER
+      // the clone rather than a pre-set choice — and only while the project is
+      // not already at full.
+      const st = await invoke<PlanningStatus>("planning_status").catch(() => null);
+      if (st) setPlanning(st);
+      const eff = st?.projects.find((p) => p.root === done.root)?.effective;
+      if (eff !== "full" && await invoke<boolean>("planning_suggested", { root: done.root }).catch(() => false))
+        setPlanHint({ root: done.root, name: done.dir.split("/").filter(Boolean).pop() ?? done.dir });
       const pv = done.workspace.projects.find((p) => p.root === done.root);
       const main = pv?.snapshot?.places.find((p) => p.is_main);
       if (main) selectSlug(done.root, main.slug);
@@ -8211,6 +8312,7 @@ function App() {
                     mdZoom={eff.files_md_zoom}
                     onOpen={(p, at) => { openDockFile(p, at); updatePanels({ dock_tab: "files", dock_open: true }); }}
                     onPlanPath={setPlanPath}
+                    cliSkew={cliSkew(planning)}
                     onError={fail}
                   />
                 ) : eff.dock_tab === "docs" ? (
@@ -8401,7 +8503,7 @@ function App() {
           routinely arrive from the same drop, and as two fixed elements at the
           same coordinates the undo banner sat exactly on top of the note it
           was supposed to accompany. Undo first in DOM = above on screen. */}
-      {(err || notice || undo) && (
+      {(err || notice || undo || planHint) && (
         <div className="float-stack" style={bubbleLift !== null ? { bottom: bubbleLift } : undefined}>
           {/* One click back from a slip of the wrist — a drag rewrites declared
               state, and the row it moves can land in a collapsed group or a
@@ -8414,6 +8516,21 @@ function App() {
           )}
           {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
           {!err && notice && <div className="err err-float notice" title="dismiss" onClick={() => setNotice("")}>{notice}</div>}
+          {!err && !notice && planHint && (
+            <div className="err err-float notice plan-hint" data-testid="plan-hint">
+              <span>{planHint.name} uses worktrees planning — turn it on for this project?</span>
+              <button className="ctrl sm" data-testid="plan-hint-on" onClick={async () => {
+                const h = planHint;
+                setPlanHint(null);
+                // Written outright, not through `applyPick`: the user may have
+                // picked off in the dialog, and "full equals the default" must
+                // not swallow this.
+                try { setPlanning(await invoke<PlanningStatus>("set_project_planning", { root: h.root, level: "full", planPath: null, scope: null })); }
+                catch (e) { setNotice(`Planning was not turned on: ${String((e as { message?: string })?.message ?? e)}`); }
+              }}>Turn on</button>
+              <button className="ctrl sm" onClick={() => setPlanHint(null)}>Not now</button>
+            </div>
+          )}
         </div>
       )}
       {/* The dragged row's label, riding the pointer. Rendered at the app root
@@ -8523,7 +8640,9 @@ function App() {
         guidanceOfferPending={!!guidanceOffer} onSilenceGuidanceOffer={() => guidanceOffer && silenceOffer(guidanceOffer)}
         guidanceChangeOfferPending={!!guidanceChangeOffer} onSilenceGuidanceChangeOffer={() => guidanceChangeOffer && silenceOffer(guidanceChangeOffer)}
         crossProject={crossProject} onCrossProjectChanged={setCrossProject}
-        crossProjectOfferPending={!!crossProjectOffer} onSilenceCrossProjectOffer={() => crossProjectOffer && silenceOffer(crossProjectOffer)} />
+        crossProjectOfferPending={!!crossProjectOffer} onSilenceCrossProjectOffer={() => crossProjectOffer && silenceOffer(crossProjectOffer)}
+        planning={planning} onPlanningChanged={setPlanning}
+        planningOfferPending={!!planningOffer} onSilencePlanningOffer={() => planningOffer && silenceOffer(planningOffer)} />
 
       {codexInstallPrompt && <CodexInstallDialog onClose={() => setCodexInstallPrompt(false)} onReport={(m) => setNotice(m)} />}
       {agentSwitch && <AgentSwitchSheet pending={agentSwitch} defaultModels={settings.default_models}
@@ -8590,6 +8709,7 @@ function App() {
       {npOpen && (
         <NewProjectDialog
           defaultLocation={defaultLocation}
+          planningDefault={planning?.default}
           busy={npBusy}
           error={npErr}
           onBrowse={browseLocation}
@@ -8597,9 +8717,14 @@ function App() {
           onClose={() => { setNpOpen(false); setNpErr(""); }}
         />
       )}
+      {addAsk && (
+        <AddProjectDialog dir={addAsk.dir} suggested={addAsk.suggested} planningDefault={planning?.default}
+          onAdd={confirmAdd} onClose={() => setAddAsk(null)} />
+      )}
       {cloneOpen && (
         <CloneDialog
           defaultParent={defaultLocation}
+          planningDefault={planning?.default}
           running={cloneId !== null}
           cancelling={cloneCancelling}
           progress={cloneProg}

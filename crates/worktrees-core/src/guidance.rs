@@ -518,13 +518,26 @@ pub fn materialize_in(data_root: &Path, bin: Option<&Path>, skill: &str) -> Resu
         files.push(("claude-guard/skills/worktrees/SKILL.md".into(), skill.into()));
         files.push(("claude-guard/hooks/hooks.json".into(), hooks));
     }
-    let dir = data_root.join("agent").join(format!("{:016x}", fnv1a(&files)));
+    let dir = write_hashed(data_root, &files)?;
+    Ok(Materialized {
+        skill: dir.join("skills/worktrees"),
+        rules: dir.join("rules.md"),
+        claude_plugin: dir.join("claude"),
+        claude_guard_plugin: bin.map(|_| dir.join("claude-guard")),
+        dir,
+    })
+}
+
+/// Write `files` under `<data_root>/agent/<hash of them>/`, once. Content-
+/// addressed so a running session's `--plugin-dir` never changes under it.
+fn write_hashed(data_root: &Path, files: &[(String, String)]) -> Result<PathBuf, String> {
+    let dir = data_root.join("agent").join(format!("{:016x}", fnv1a(files)));
     if !dir.join(".complete").is_file() {
         // Build beside it and rename into place, so a reader never sees half a
         // plugin; losing the race to a parallel launch is fine — same content.
-        let tmp = data_root.join("agent").join(format!(".tmp-{}-{}", std::process::id(), fnv1a(&files)));
+        let tmp = data_root.join("agent").join(format!(".tmp-{}-{}", std::process::id(), fnv1a(files)));
         let _ = std::fs::remove_dir_all(&tmp);
-        for (rel, body) in &files {
+        for (rel, body) in files {
             let f = tmp.join(rel);
             if let Some(parent) = f.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -539,13 +552,38 @@ pub fn materialize_in(data_root: &Path, bin: Option<&Path>, skill: &str) -> Resu
             }
         }
     }
-    Ok(Materialized {
-        skill: dir.join("skills/worktrees"),
-        rules: dir.join("rules.md"),
-        claude_plugin: dir.join("claude"),
-        claude_guard_plugin: bin.map(|_| dir.join("claude-guard")),
-        dir,
-    })
+    Ok(dir)
+}
+
+/// The owned-planning plugin for Claude (owned-planning §3.3): a SECOND
+/// `--plugin-dir` (the flag is repeatable), so planning never multiplies the
+/// guidance plugin's variants, and its own hash directory, so turning planning
+/// on does not move the guidance plugin under a running session.
+///
+/// SessionStart and UserPromptSubmit only: their plain stdout reaches the
+/// model; a Stop hook's does not. `bin` is an absolute path to a CLI that has
+/// the plan hook (`plancmd::probe_cli`), so the hook never depends on PATH, and
+/// nothing a repo contains becomes argv (ADR 0001).
+pub fn materialize_plan_in(data_root: &Path, bin: &Path) -> Result<PathBuf, String> {
+    let q = crate::profile::shell_quote(&bin.to_string_lossy());
+    let plugin_json = serde_json::to_string_pretty(&serde_json::json!({
+        "name": "worktrees-planning",
+        "description": "Owned planning: this place's plan, as worktrees resolves it, at session start and when it changes.",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+    .map_err(|e| e.to_string())?;
+    let hooks = serde_json::to_string_pretty(&serde_json::json!({
+        "hooks": {
+            "SessionStart": [{ "matcher": "startup|resume|clear|compact", "hooks": [{ "type": "command", "command": format!("{q} plan hook session") }] }],
+            "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": format!("{q} plan hook prompt") }] }]
+        }
+    }))
+    .map_err(|e| e.to_string())?;
+    let files: Vec<(String, String)> = vec![
+        ("claude-plan/.claude-plugin/plugin.json".into(), plugin_json),
+        ("claude-plan/hooks/hooks.json".into(), hooks),
+    ];
+    Ok(write_hashed(data_root, &files)?.join("claude-plan"))
 }
 
 /// FNV-1a over every (path, content): stable across Rust versions, which

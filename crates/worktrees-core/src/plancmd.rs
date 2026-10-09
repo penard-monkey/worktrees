@@ -71,6 +71,9 @@ fn how_words(s: &PlanSummary) -> String {
         Some(Resolved::Root) if s.level == Level::Full => "root task_plan.md (the legacy location)".into(),
         Some(Resolved::Root) => "root task_plan.md".into(),
         Some(Resolved::Pending) => format!("not written yet — goes in .planning/{}/", s.topic.as_deref().unwrap_or("?")),
+        // The fix-it sentence is its own line in the hook output; with a root
+        // plan to fall back to, the Plan: line only says which file that is.
+        Some(Resolved::InvalidPointer) if s.plan_rel.is_some() => "root task_plan.md, shown because .active_plan is not usable".into(),
         Some(Resolved::InvalidPointer) => ".active_plan is not usable — fix or remove it".into(),
         Some(Resolved::ShowPath) => match (&s.plan_rel, &s.reason, s.plan_scope) {
             (Some(rel), _, Some(Scope::Main)) => format!("main's copy of {rel}"),
@@ -319,8 +322,16 @@ pub fn hook_output(event: &str, cwd: &Path, session_id: Option<&str>, cache: Opt
     }
 }
 
+/// What `plan hook --version` prints. The app reads it to find a CLI that HAS
+/// the hook and to compare that CLI's release with its own (§7 item 1).
+const HOOK_VERSION_PREFIX: &str = "worktrees plan hook v";
+
 fn cmd_hook(args: &[String]) -> i32 {
     let event = args.first().map(String::as_str).unwrap_or("");
+    if event == "--version" {
+        println!("{HOOK_VERSION_PREFIX}{}", version());
+        return 0;
+    }
     let input = read_hook_input();
     let cwd = input.cwd.map(PathBuf::from).or_else(|| std::env::current_dir().ok());
     if let Some(cwd) = cwd {
@@ -330,6 +341,23 @@ fn cmd_hook(args: &[String]) -> i32 {
     }
     // Always 0: a hook that fails must never block the session.
     0
+}
+
+/// The `worktrees` CLI the planning plugin's hooks would run, and its version
+/// — only when it HAS the plan hook (an older CLI on PATH would answer every
+/// prompt with an error). Run from `/` so no repo is involved. Same shape as
+/// `guidance::guard_bin`.
+pub fn probe_cli() -> Option<(PathBuf, String)> {
+    let bin = crate::profile::worktrees_bin()?;
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(["plan", "hook", "--version"]).current_dir("/").stdin(std::process::Stdio::null());
+    let out = crate::proc::run_deadline(cmd, 5).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v = text.lines().next()?.strip_prefix(HOOK_VERSION_PREFIX)?.trim().to_string();
+    (!v.is_empty()).then_some((bin, v))
 }
 
 fn resolve_json(root: &Path, s: &PlanSummary, eff: &planning::Effective) -> serde_json::Value {
@@ -507,6 +535,7 @@ mod tests {
         assert!(!t.contains(".planning/") || t.lines().all(|l| !l.contains("goes in")), "{t}");
         let t = session_text(&summary(Some(Resolved::InvalidPointer), Some("task_plan.md"), None));
         assert!(t.contains("Plan: `task_plan.md`"), "falls back to the root plan: {t}");
+        assert_eq!(t.matches("fix or remove it").count(), 1, "the fix-it wording once: {t}");
     }
 
     #[test]

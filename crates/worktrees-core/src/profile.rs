@@ -492,6 +492,12 @@ pub struct AiLaunch {
     /// is worktrees-managed and the harness takes guidance per launch. Filled
     /// by `ops::ai_launch_for`, emitted by `launch_cmd` for every adapter.
     pub guidance: Vec<String>,
+    /// Owned planning's Claude plugin (`--plugin-dir <claude-plan>`), already
+    /// shell-quoted. Its OWN field and its own branch in `ops::ai_launch_for`:
+    /// it must not ride the guidance gate, which drops every flag when the
+    /// user turns guidance off (owned-planning §3.3). Emitted right after
+    /// `guidance`.
+    pub planning: Vec<String>,
     /// The model the user chose for THIS launch, validated
     /// (`choice::validate_model`). Emitted by the adapter through the
     /// registry's `model_arg`, on a fresh launch only — never on a resume, which
@@ -565,6 +571,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         opener: base.opener.clone(),
         place_flags: Vec::new(),
         guidance: base.guidance.clone(),
+        planning: base.planning.clone(),
         model: base.model.clone(),
         resume: base.resume,
         resume_id: base.resume_id.clone(),
@@ -636,6 +643,7 @@ impl AiLaunch {
             opener: None,
             place_flags: Vec::new(),
             guidance: Vec::new(),
+            planning: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,
@@ -707,7 +715,7 @@ impl AiLaunch {
         let args = adapter.launch_args(self, session);
         let split = self.cmd.find(char::is_whitespace).unwrap_or(self.cmd.len());
         let mut cmd = self.cmd[..split].to_string();
-        for w in args.head.iter().chain(&self.guidance) {
+        for w in args.head.iter().chain(&self.guidance).chain(&self.planning) {
             cmd.push(' ');
             cmd.push_str(w);
         }
@@ -1705,6 +1713,7 @@ mod tests {
             opener: None,
             place_flags: Vec::new(),
             guidance: Vec::new(),
+            planning: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,
@@ -1740,6 +1749,7 @@ mod tests {
             opener: None,
             place_flags: Vec::new(),
             guidance: Vec::new(),
+            planning: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,
@@ -1784,6 +1794,7 @@ mod tests {
             opener: None,
             place_flags: Vec::new(),
             guidance: Vec::new(),
+            planning: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,
@@ -1809,6 +1820,20 @@ mod tests {
     }
 
     #[test]
+    fn the_planning_plugin_follows_guidance_on_the_launch_line() {
+        let mut l = AiLaunch::plain("claude");
+        l.guidance = vec!["--plugin-dir".into(), "'/g/claude'".into()];
+        l.planning = vec!["--plugin-dir".into(), "'/p/claude-plan'".into()];
+        let cmd = l.launch_cmd("repo-x");
+        let (g, p) = (cmd.find("/g/claude").unwrap(), cmd.find("/p/claude-plan").unwrap());
+        assert!(g < p, "{cmd}");
+        assert!(cmd.starts_with("claude --plugin-dir '/g/claude' --plugin-dir '/p/claude-plan'"), "{cmd}");
+        // with guidance off, planning still rides
+        l.guidance.clear();
+        assert!(l.launch_cmd("repo-x").starts_with("claude --plugin-dir '/p/claude-plan'"));
+    }
+
+    #[test]
     fn plain_launch_is_todays_behaviour_exactly() {
         let l = AiLaunch::plain("claude");
         assert!(l.env.is_empty());
@@ -1831,6 +1856,7 @@ mod tests {
             opener: None,
             place_flags: Vec::new(),
             guidance: Vec::new(),
+            planning: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,

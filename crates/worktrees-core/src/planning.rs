@@ -135,7 +135,8 @@ pub struct Effective {
 pub fn effective_from(entry: Option<&Entry>, g: &Global) -> Effective {
     if let Some(e) = entry {
         if let Some(level) = e.planning {
-            let path = e.plan_path.as_deref().map(crate::safepath::normalize_entered).filter(|p| !p.is_empty());
+            // As stored: entry already stripped the one trailing slash.
+            let path = e.plan_path.clone().filter(|p| !p.trim().is_empty());
             if level == Level::Show && path.is_none() {
                 return Effective { level: Level::Off, from: From::Project, plan_path: None, plan_scope: Scope::Place };
             }
@@ -196,6 +197,18 @@ pub fn tracked_planning(root: &str) -> bool {
 }
 
 pub const TRACKED_REFUSAL: &str = "`.planning/` holds tracked files in this repo, so worktrees cannot own it — full planning would write `.active_plan` and topic folders into a committed folder that info/exclude cannot hide. Choose show only to see your own plans instead.";
+
+/// Whether the repo at `root` suggests owned planning: a `[plan]` table in its
+/// `.worktrees.toml`. A suggestion only pre-sets the Add existing dialog
+/// (owned-planning §2.1, Q2) — it never changes the effective level.
+pub fn repo_suggests(root: &Path) -> bool {
+    let p = root.join(".worktrees.toml");
+    if !std::fs::symlink_metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(&p) else { return false };
+    text.parse::<toml::Table>().map(|t| t.get("plan").is_some_and(|v| v.is_table())).unwrap_or(false)
+}
 
 /// What a caller asks a project's planning to become. `None` = inherit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -318,10 +331,10 @@ mod tests {
     #[test]
     fn show_carries_its_path_and_scope_and_without_a_path_is_off() {
         let g = Global::default();
-        let e = entry(Some(Level::Show), Some("docs/plan/"), Some(Scope::Main));
+        let e = entry(Some(Level::Show), Some("docs/plan//"), Some(Scope::Main));
         let eff = effective_from(Some(&e), &g);
         assert_eq!(eff.level, Level::Show);
-        assert_eq!(eff.plan_path.as_deref(), Some("docs/plan"), "one trailing slash is stripped");
+        assert_eq!(eff.plan_path.as_deref(), Some("docs/plan//"), "read as stored — only entry normalises");
         assert_eq!(eff.plan_scope, Scope::Main);
         let e = entry(Some(Level::Show), None, None);
         assert_eq!(effective_from(Some(&e), &g).level, Level::Off);
@@ -341,6 +354,20 @@ mod tests {
         let g = save_global_at(&p, GlobalDefault::Full).unwrap();
         assert_eq!(read_global_at(&p), g);
         assert_eq!(g.version, VERSION);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_plan_table_in_the_repo_config_is_a_suggestion() {
+        let d = std::env::temp_dir().join(format!("wtplanning-s-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(!repo_suggests(&d));
+        std::fs::write(d.join(".worktrees.toml"), "[docs]\nindex = \"README.md\"\n").unwrap();
+        assert!(!repo_suggests(&d));
+        std::fs::write(d.join(".worktrees.toml"), "[plan]\nproject = \"docs/plan/goals.md\"\n").unwrap();
+        assert!(repo_suggests(&d));
+        std::fs::write(d.join(".worktrees.toml"), "plan = 1\n").unwrap();
+        assert!(!repo_suggests(&d), "a plan KEY is not a [plan] table");
         let _ = std::fs::remove_dir_all(&d);
     }
 

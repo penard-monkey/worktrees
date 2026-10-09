@@ -3176,6 +3176,18 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .plan-file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plan-errs, .plan-missing { color: var(--txt-dim); }
+/* Owned planning (show / full only): how the plan resolved, one line, and —
+ * at full — when the plan hook's CLI and this app are on different releases.
+ * Words stay in text tokens; the hue lives in the dot (accent tokens are
+ * fills, not text — see AGENTS.md). */
+.plan-resolved { margin-top: 2px; font-size: var(--fs-micro); color: var(--txt-dim); min-width: 0; }
+.plan-resolved-how { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-resolved-skew { color: var(--txt-hi); margin-top: 2px; }
+.plan-resolved-skew::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--warn); margin-right: 6px; vertical-align: middle;
+}
+.plan-empty-card .plan-resolved { margin: 0 0 var(--s2); }
 .plan-trunc { color: var(--txt-dim); font-size: var(--fs-micro); }
 .plan-body { min-width: 0; }
 .plan-note { padding: var(--s3) var(--s2); color: var(--txt-dim); font-size: var(--fs-meta); }
@@ -3583,3 +3595,21 @@ button.prs-group-head:hover { color: var(--txt-hi); }
 .feedback-mock { padding: var(--s5); display: grid; gap: var(--s3); width: min(30rem, calc(100vw - 2 * var(--s4))); }
 .feedback-mock label { display: grid; gap: var(--s2); }
 .feedback-mock textarea { min-height: 8rem; }
+
+/* Settings → Planning (PlanningPanel.tsx). */
+.planning-how { margin: var(--s1) 0 var(--s2) var(--s4); padding: 0; color: var(--txt-dim); font-size: var(--fs-meta); }
+.planning-how li { margin: 2px 0; }
+.planning-rows { display: flex; flex-direction: column; gap: var(--s2); margin: var(--s2) 0; }
+.planning-row-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+.planning-show { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s1); flex-wrap: wrap; }
+.planning-path { flex: 1 1 12em; min-width: 0; }
+.planning-err { color: var(--txt-hi); }
+.planning-err::before, .planning-skew::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--danger); margin-right: 6px; vertical-align: middle;
+}
+.planning-skew { color: var(--txt-hi); }
+.planning-skew::before { background: var(--warn); }
+.planning-choice .seg { width: fit-content; }
+.planning-choice .hint { font-size: var(--fs-meta); color: var(--txt-dim); }
+.plan-hint { display: flex; align-items: center; gap: var(--s2); }

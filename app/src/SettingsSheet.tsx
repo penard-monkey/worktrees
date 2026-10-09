@@ -5,6 +5,7 @@ import { McpSection, type McpStatus } from "./McpPanel";
 import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
 import { GuidanceSection, type GuidanceStatus } from "./GuidancePanel";
 import { CrossProjectSection, type CrossProjectStatus } from "./CrossProjectPanel";
+import { PlanningSection, type PlanningStatus } from "./PlanningPanel";
 import { QuotaSection } from "./QuotaPanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
@@ -111,6 +112,10 @@ const CATS = [
   // Its own category (decision Q8): it is about every agent, not one harness,
   // and not about AI profiles, which are per-profile and Claude-only.
   { id: "guidance", label: "Agent guidance" },
+  // Its own category (owned-planning §2.2), for the same reason as guidance:
+  // planning is about every harness, not one, and the offer needs a place
+  // whose whole job is to explain it before anything is turned on.
+  { id: "planning", label: "Planning" },
   { id: "behavior", label: "Behavior" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
@@ -366,6 +371,10 @@ export function SettingsSheet({
   onCrossProjectChanged,
   crossProjectOfferPending,
   onSilenceCrossProjectOffer,
+  planning,
+  onPlanningChanged,
+  planningOfferPending,
+  onSilencePlanningOffer,
 }: {
   open: boolean;
   /// Where the sheet was asked to open, when the caller had somewhere in mind —
@@ -426,6 +435,12 @@ export function SettingsSheet({
   onCrossProjectChanged: (s: CrossProjectStatus) => void;
   crossProjectOfferPending: boolean;
   onSilenceCrossProjectOffer: () => void;
+  /// Owned planning (offers.ts `planning`): App's machine-level probe; the
+  /// section re-reads on open and reports back so the offer follows it.
+  planning: PlanningStatus | null;
+  onPlanningChanged: (s: PlanningStatus) => void;
+  planningOfferPending: boolean;
+  onSilencePlanningOffer: () => void;
 }) {
   // Selected category — local, deliberately NOT persisted: the sheet opens on
   // Appearance so "where was I" never depends on last session.
@@ -875,6 +890,11 @@ export function SettingsSheet({
             changeOfferPending={guidanceChangeOfferPending} onSilenceChangeOffer={onSilenceGuidanceChangeOffer} />
           <CrossProjectSection data-focus="cross-project" status={crossProject} onStatus={onCrossProjectChanged} onReport={onReport}
             offerPending={crossProjectOfferPending} onSilenceOffer={onSilenceCrossProjectOffer} />
+          </>}
+
+          {cat === "planning" && <>
+          <PlanningSection data-focus="planning" status={planning} onStatus={onPlanningChanged} onReport={onReport}
+            offerPending={planningOfferPending} onSilenceOffer={onSilencePlanningOffer} />
           </>}
 
           {cat === "commands" && <>

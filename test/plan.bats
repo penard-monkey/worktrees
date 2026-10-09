@@ -72,6 +72,18 @@ put() { mkdir -p "$(dirname "$1/$2")"; printf '%s\n' "${3:-# plan}" > "$1/$2"; }
   [ "$(cat "$REPO/.worktrees/feat-x/.planning/.active_plan")" = chosen ]
 }
 
+@test "plan: a pre-existing pointer still gets /.planning/ into info/exclude" {
+  run_wt new feat-pre --no-tmux
+  mkdir -p "$REPO/.worktrees/feat-pre/.planning"
+  echo chosen > "$REPO/.worktrees/feat-pre/.planning/.active_plan"
+  ! grep -q '^/.planning/$' "$REPO/.git/info/exclude"
+  level full
+  run_wt new feat-pre --no-tmux
+  [ "$status" -eq 0 ]
+  [ "$(cat "$REPO/.worktrees/feat-pre/.planning/.active_plan")" = chosen ]
+  grep -q '^/.planning/$' "$REPO/.git/info/exclude"
+}
+
 @test "plan: full is refused at adoption where .planning/ holds tracked files, and new warns" {
   ( cd "$REPO" && mkdir -p .planning/orchestrator && echo '# goals' > .planning/orchestrator/task_plan.md \
       && git add -f .planning && git commit -qm tracked && git push -q origin main )
@@ -187,4 +199,41 @@ put() { mkdir -p "$(dirname "$1/$2")"; printf '%s\n' "${3:-# plan}" > "$1/$2"; }
   run bash -c 'cd "$1" && echo "{}" | "$2" plan hook session' _ "$REPO" "$WT_BIN"
   [ "$status" -eq 0 ]
   [[ "$output" == "[worktrees planning v"*"not instructions"* ]]
+}
+
+# ── the Claude plugin (part B) ───────────────────────────────────────────────
+
+@test "plan: at full a claude lane gets the planning plugin, even with guidance off" {
+  # common_setup turns agent guidance OFF; the planning plugin must not ride it.
+  level full
+  WORKTREES_AI_CMD=claude run_wt new feat-p
+  [ "$status" -eq 0 ]
+  cmd="$(tmux_pane0_cmd repo-feat-p)"
+  [[ "$cmd" == *"claude --plugin-dir "*"$HOME/.local/share/worktrees/agent/"*"/claude-plan"*" --name "* ]]
+  hooks="$(ls -d "$HOME"/.local/share/worktrees/agent/*/claude-plan)/hooks/hooks.json"
+  grep -q "plan hook session" "$hooks"
+  grep -q "plan hook prompt" "$hooks"
+  grep -q '"SessionStart"' "$hooks"
+  grep -q '"UserPromptSubmit"' "$hooks"
+  ! grep -q '"Stop"' "$hooks"
+  # the hook argv is an absolute path to this CLI, never a bare PATH lookup
+  grep -q "'/" "$hooks"
+}
+
+@test "plan: no planning plugin when off or show, and none for a non-claude agent" {
+  WORKTREES_AI_CMD=claude run_wt new feat-off
+  [[ "$(tmux_pane0_cmd repo-feat-off)" != *"claude-plan"* ]]
+  mkdir -p "$REPO/docs"; put "$REPO" docs/goals.md
+  level show docs/goals.md
+  WORKTREES_AI_CMD=claude run_wt new feat-show
+  [[ "$(tmux_pane0_cmd repo-feat-show)" != *"claude-plan"* ]]
+  level full
+  run_wt new feat-ai
+  [[ "$(tmux_pane0_cmd repo-feat-ai)" != *"claude-plan"* ]]
+}
+
+@test "plan: hook --version names the release the app compares against" {
+  run "$WT_BIN" plan hook --version
+  [ "$status" -eq 0 ]
+  [[ "$output" == "worktrees plan hook v"* ]]
 }

@@ -29,7 +29,10 @@ export type PlanPhase = { name: string; status: PlanPhaseStatus; done: number; t
 /** `worktrees_core::plan::PlanSummary`, field for field. */
 export type PlanSummary = {
   source: "plan" | "brief" | "none";
-  how_resolved: "active_plan" | "newest" | "root" | null;
+  /** A closed union in core too (`plan::Resolved`). `pending`,
+   *  `invalid_pointer` and `show_path` arrive only from a project that opted
+   *  into owned planning (`level` show/full). */
+  how_resolved: "active_plan" | "newest" | "root" | "pending" | "invalid_pointer" | "show_path" | null;
   plan_path: string | null;
   plan_rel: string | null;
   mtime_ms: number;
@@ -46,7 +49,39 @@ export type PlanSummary = {
   brief_lead: string | null;
   markdown: string | null;
   truncated: boolean;
+  /** The project's effective planning level when this was resolved. */
+  level: "off" | "show" | "full";
+  /** Full: the topic a VALID `.active_plan` names (an invalid one never arrives). */
+  topic: string | null;
+  /** Show only: `main` = the plan is MAIN's copy, never this place's own. */
+  plan_scope: "place" | "main" | null;
+  /** Show only, on failure: why nothing is shown. */
+  reason: string | null;
 };
+
+/** One line saying how the plan resolved — only for a project that opted in
+ *  (show / full). Off renders exactly as before, so this is null there. Every
+ *  `how_resolved` value has its own words; a value this does not know would be
+ *  a core change this file missed, and says so rather than guessing. */
+export function resolutionLine(p: Pick<PlanSummary, "level" | "how_resolved" | "topic" | "plan_rel" | "plan_scope" | "reason">): string | null {
+  if (p.level === "off") return null;
+  switch (p.how_resolved) {
+    case "active_plan": return `active plan: ${p.topic ?? "?"}`;
+    case "root": return p.topic
+      ? `root task_plan.md (the legacy location) — the active plan, ${p.topic}, is not written yet`
+      : "root task_plan.md (the legacy location)";
+    case "pending": return `no plan yet — the session writes it in .planning/${p.topic ?? "?"}/`;
+    case "invalid_pointer": return p.plan_rel
+      ? ".planning/.active_plan is not usable — fix or remove it · showing the root plan"
+      : ".planning/.active_plan is not usable — fix or remove it";
+    case "show_path":
+      if (!p.plan_rel) return `your plan path: ${p.reason ?? "unreadable"}`;
+      return p.plan_scope === "main" ? `main's copy of ${p.plan_rel}` : `your plan at ${p.plan_rel}`;
+    case "newest": return "newest plan folder (a guess)";
+    case null: return "no active plan";
+    default: return `resolved: ${String(p.how_resolved)}`;
+  }
+}
 
 /** The slice of App's `Place` the empty state renders — structural, like
  *  `DocsPlace`, so App passes its `Place` as is. Every fact here is already
@@ -78,6 +113,9 @@ export type PlanPaneProps = {
   /** The place itself, for the empty state's "what this place already
    *  knows" rows and for the session "Generate plan" pastes into. */
   place: PlanPlace;
+  /** `cliSkew(planning_status)`: the plan hook's CLI and this app on
+   *  different releases. Shown only at full, where the hook exists. */
+  cliSkew?: string | null;
   agentSession: string | null;
   agentProvider: Harness;
   /** When Claude last finished work here, epoch SECONDS (`workedAt`: the
@@ -309,7 +347,7 @@ function KnownRows({ place, workedEpoch, actItem, draftRow }: {
   );
 }
 
-export function PlanPane({ root, slug, place, agentSession, agentProvider, workedEpoch, reloadToken, pageVisible, activity, draft, mdZoom, onOpen, onPlanPath, onError }: PlanPaneProps) {
+export function PlanPane({ root, slug, place, agentSession, agentProvider, workedEpoch, reloadToken, pageVisible, activity, draft, mdZoom, onOpen, onPlanPath, onError, cliSkew }: PlanPaneProps) {
   const [plan, setPlan] = useState<PlanSummary | null>(null);
   const [failed, setFailed] = useState(false);
   // "Generate plan": `pasted` is the one-line confirmation, cleared by the next
@@ -428,6 +466,15 @@ export function PlanPane({ root, slug, place, agentSession, agentProvider, worke
     </>
   ) : null;
 
+  const resLine = plan ? resolutionLine(plan) : null;
+  const skewLine = plan?.level === "full" ? cliSkew ?? null : null;
+  const resolved = resLine || skewLine ? (
+    <div className="plan-resolved" data-testid="plan-resolved">
+      {resLine && <div className="plan-resolved-how" title={plan?.plan_path ?? undefined}>{resLine}</div>}
+      {skewLine && <div className="plan-resolved-skew" data-testid="plan-skew">{skewLine}</div>}
+    </div>
+  ) : null;
+
   if (!plan) {
     return (
       <div className="planpane">
@@ -445,6 +492,7 @@ export function PlanPane({ root, slug, place, agentSession, agentProvider, worke
         <div className="plan-empty">
           <div className="plan-empty-card">
             <div className="plan-empty-title">No plan or brief here yet</div>
+            {resolved}
             <KnownRows place={place} workedEpoch={workedEpoch ?? place.declared?.last_worked_epoch ?? 0} actItem={actItem} draftRow={draftRow} />
             <div className="plan-gen">
               <button
@@ -545,6 +593,7 @@ export function PlanPane({ root, slug, place, agentSession, agentProvider, worke
           )}
           <SepRow className="plan-meta-row" items={shorts} />
         </div>
+        {resolved}
         {plan.truncated && (
           <div className="plan-trunc">Only the first 512 KiB of this plan is shown.</div>
         )}
