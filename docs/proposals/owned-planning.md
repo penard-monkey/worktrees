@@ -870,12 +870,13 @@ adopt from the offer and have its agents and its Plan tab agree.
 
 - **Core**
   - `planning.json` (global default) and the registry entry's `planning`
-    (off / show / full) and `plan_path` fields (§2.5).
+    (off / show / full), `plan_path` and `plan_scope` fields (§2.5).
   - `planning::effective(project)`, read by the app, the CLI and the MCP
     server alike.
 - **Resolution**
   - `plan::resolve` made public with `Resolution` and a `Legacy | Owned |
-    Show { rel }` mode; `safe_under` moved to core for `Show` (§2.5.2).
+    Show { rel, scope }` mode; `safe_under` moved to core plus a
+    `safe_dir_under` sibling for `Show` (§2.5.2).
   - Owned mode has no newest-dir guess, step 1b's root-then-`Pending` rule,
     root still reported as `root`, and `invalid_pointer` (§3.2 case table).
   - `PlanSummary`: new fields `level`, `topic`; new `how_resolved` values
@@ -889,12 +890,14 @@ adopt from the offer and have its agents and its Plan tab agree.
   - bats: `new` writes `.active_plan` + the topic dir only when planning is
     on (and nothing when off); `plan resolve --json` for every row of the
     §3.2 case table, plus show-only: a file, a directory with and without
-    `task_plan.md`, and a path escaping through a symlink (must be refused).
+    `task_plan.md`, a trailing slash, a symlinked dir and a path escaping
+    through a symlink (both refused), and `main` scope reading main's copy
+    from a lane.
 - **`cmd_new`**
   - When the level is full, it writes `.active_plan` = slug and an empty
     topic dir. Show and off write nothing beyond today's brief.
-  - Full is refused for a project whose `.planning/` holds tracked files
-    (§2.5.3).
+  - Full is refused at adoption for a project whose `.planning/` holds
+    tracked files, and every `new` warns on tracked files there (§2.5.3).
   - An ignore check: if `.planning/` is not ignored, it appends to
     `info/exclude` (Q4). It is a no-op for cdv.
 - **Claude**
