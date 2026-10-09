@@ -24,17 +24,25 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 - **tmux -N: one extra `tmux -V` per CLI process.** The `-N` verdict costs one
   spawn on first use. Note it wherever spawn counts are measured or asserted
   (`spawn-count.sh`). See docs/sessions/2026-10-08-tmux-no-start/.
-- **Owned planning (option, not decided; cdv is the pilot).** worktrees owns
-  the planning layout (`.planning/<topic>/` + `.active_plan`), the resolution
-  and the agent hooks. It is opt-in globally or per project, from an
-  after-update offer and the Add/Clone dialogs, at three levels per project:
-  off, show only (your own planning files at a path you choose, read-only),
-  and full. Phase 1 is the cdv pilot plus show-only:
-  the setting and the offer, owned resolution with no stale-directory
-  guessing, `worktrees plan resolve|hook`, the pointer written by `new`, and
-  the Claude plugin. Nothing in cdv is moved. Phase 2 adds `[plan] project`
-  and `migrate` for valleos and this repo. Ten decisions for David in
-  [proposal §11](docs/proposals/owned-planning.md).
+- **Owned planning: phase 2 and 3 (phase 1 is being built in the
+  `owned-planning-p1` lane; cdv is the pilot).** Phase 2:
+  - `[plan] project` (goals read from main's copy, a `project` line on every
+    place);
+  - `worktrees plan migrate|show|archive`, and archive-on-remove;
+  - the Plan tab topic picker;
+  - `[plan] show` as a repo suggestion, the folder picker and the own-hooks
+    hint;
+  - the ProjectSheet section.
+
+  Phase 3:
+  - the pi extension, after a trust-modal probe;
+  - a Codex hook trust probe;
+  - a Stop reminder via JSON `additionalContext`, only after a probe shows it
+    reaching the model;
+  - the upstream issue on the planning-with-files skill's root-only hooks.
+
+  Open decisions are in [proposal §11](docs/proposals/owned-planning.md).
+  See [the session](docs/sessions/2026-10-09-owned-planning/summary.md).
 - **Nested lanes: shallow-tree implementation and remaining decisions.** #458
   merged the design only: opt-in hubs, first-class flat lanes, parent-aware
   Git/close-out and scoped worktrees mutations. Settle the open choices in
