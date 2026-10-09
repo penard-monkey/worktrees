@@ -40,14 +40,15 @@ config was written. No agent session was run. Claims are marked as follows:
 |---|---|
 | What does "on" mean? | Worktrees owns the **layout** (`.planning/<topic>/` + `.active_plan`), the **resolution** (one function, `plan::resolve`, used by the Plan tab, MCP, the CLI and every hook), the **pointer** (`worktrees new` writes `.active_plan`), and the **agent hooks** (shipped per launch, the way agent guidance already ships). Plan *content* is still written only by the session. |
 | What does "off" mean? | Exactly today's behaviour, byte for byte. The Plan tab reads whatever exists and nothing is written. The default is off. |
-| Where is the choice? | **User tier only.** A global default with three values (unset / on / off), and a per-project override (inherit / on / off) on the project's registry entry. A cloned repo cannot switch it on for you. |
+| Where is the choice? | **User tier only.** A global default (unset / full / off), and a per-project level on the project's registry entry: inherit / **off** / **show only** / **full**. A cloned repo cannot switch it on for you; it may only suggest. |
+| Bring your own (decided) | **Show only** points the Plan tab and MCP at the project's own planning files, at a path the user chooses: no hooks, no writes. It is the way to keep your own mechanism, or your own hooks, and still see the plan. It is read through the same `plan::resolve` with `safe_under`. The planning *folder* stays `.planning/` (the skill and the fixed brief opener depend on it). Show-only is the escape hatch, and full is refused where `.planning/` holds tracked files (§2.5). |
 | How is it offered? | One machine-level offer in `offers.ts`, `planning`, which opens Settings → Planning (the explanation lives there). A checkbox in Add existing / New project, and a post-clone line for Clone. Settings' per-project list for changing it later; a ProjectSheet section in phase 2. |
 | Relationship to planning-with-files | **Wrap, don't replace.** The skill stays the *method* for writing the three files. Worktrees takes over *where they live*, *which one is active* and *what gets injected*. The skill's root-only hooks then have nothing to fire on. Hooks are SessionStart and UserPromptSubmit only, because a Stop hook's stdout never reaches the model. |
 | `[plan] project` | `[plan] project = "docs/plan/goals.md"` in `.worktrees.toml`. A **path**, which is data, so ADR 0001 allows it. Validated like `[docs]`, read through `safe_under`. It retires the tracked-copy hack in valleos and in cdv #684. |
 | Stale-dir trap | When planning is **on**, the "newest directory" guess is **gone**. The order is `[plan] project` (main only), then `.active_plan`, then "no plan yet". A valid pointer whose plan is not written yet means "not written yet" (or the root plan, if one exists). An invalid one (not a plain name, or a symlink) is `invalid_pointer` and never tells anyone where to write. It never falls through to an old directory. When planning is off, nothing changes. |
 | Symlink bug | Hooks call `worktrees plan hook <event>`, which calls the same `plan::resolve` as the tab. There is no second resolver to drift **at the same version**. The app (in-process) and the CLI (`<bin>`) can still be on different releases, so the hook stamps its version. Parity is pinned by a test running valleos/cdv's scenarios through both entry points of one binary. The hook re-checks the setting on every call, so turning planning off silences running sessions at once. |
 | Codex / pi | **pi:** `--extension <path>` per launch, with `session_start` / `before_agent_start` / `agent_end` **[source]**. Buildable, but needs a probe. **Codex:** `hooks` is a stable feature in 0.161 **[observed]**, but `-c` hooks stop on a trust prompt (AGENTS.md). Phase 1 gives Codex the CLI verb and MCP only. |
-| Phase 1 = the cdv pilot | cdv adopts from the offer, as it stands today. Phase 1 contains: the setting, the offer, the Settings panel and the Add/New-project checkbox (`[plan]` pre-tick in Add existing only; post-clone line for Clone); owned resolution; `worktrees plan resolve|hook`; `new` writing the pointer; and the Claude plugin. Nothing in cdv is moved: main's `.planning/orchestrator/` stays its plan, and live root-layout lanes keep working (§8.1). `[plan] project` and `migrate` (valleos, this repo) are phase 2. |
+| Phase 1 = the cdv pilot | cdv adopts from the offer, as it stands today. Phase 1 contains: the setting, the offer, the Settings panel and the Add/New-project checkbox (`[plan]` pre-tick in Add existing only; post-clone line for Clone); owned resolution and show-only (read-only, cheap); `worktrees plan resolve|hook`; `new` writing the pointer; and the Claude plugin. Nothing in cdv is moved: main's `.planning/orchestrator/` stays its plan, and live root-layout lanes keep working (§8.1). `[plan] project` and `migrate` (valleos, this repo) are phase 2. |
 
 ---
 
@@ -106,11 +107,12 @@ even though no argv is involved: adopting changes what agents are *told* and
 which *hooks* run, so a cloned repo must not be able to switch it on.
 
 ```
-global   ~/.config/worktrees/planning.json   { "default": "unset" | "on" | "off", "version": N }
-project  projects.json Entry                 "planning": "on" | "off"     (absent = inherit)
+global   ~/.config/worktrees/planning.json   { "default": "unset" | "full" | "off", "version": N }
+project  projects.json Entry                 "planning": "off" | "show" | "full"   (absent = inherit)
+                                             "plan_path": "<rel>"                  (show only, §2.5)
 ```
 
-- **Effective value:** project ?? global ?? off. `unset` behaves as off; it
+- **Effective level:** project ?? global ?? off. "On" in the UI means `full`; `show` is per project only (§2.5). `unset` behaves as off; it
   differs only in that the offer is still pending.
 - **Every launcher reads the same file.** The app, the CLI and an MCP
   `create_worktree` all read it, and so do the per-launch delivery in
@@ -180,7 +182,7 @@ door: `add_project`. The dialogs in front of them (Add existing…, Clone…, Ne
 project…) gain one row:
 
 ```
-[x] Use Worktrees planning in this project   (your default: on · this repo uses it)
+Planning in this project:  ( ) off   ( ) show only: [ docs/plan/      ]   (•) full      (your default: full · this repo uses it)
 ```
 
 - It is pre-set from the effective global value. Only **Add existing** can
@@ -219,6 +221,165 @@ project…) gain one row:
     off. So turning planning off takes effect on the next prompt, not the next
     launch.
 
+### 2.5 Bring your own: three levels per project
+
+**Decided (David, 2026-10-09):** some users already have their own planning or
+docs mechanism. Worktrees must be able to *show* it without taking it over.
+So the per-project choice has three levels, not two.
+
+| Level | Plan tab / MCP `place_status.plan` | Hooks | Writes | Who it is for |
+|---|---|---|---|---|
+| **off** | today's behaviour exactly (the legacy resolution, including the newest-dir guess) | none | none | anyone who has not chosen |
+| **show only** | the plan at a **path the user chooses** (§2.5.2), and nothing else | **none** | **none**: no `.active_plan`, no topic dir, no `info/exclude` | a project with its own planning mechanism, its own hooks, or both |
+| **full** | the owned layout (§3) | session + prompt (§3.3) | `.active_plan` + an empty topic dir at `new`; `info/exclude` if needed | a project that wants worktrees to run planning |
+
+The **global** default stays two-valued (unset / off / full). "Show only"
+needs a path, and a path belongs to one project, so show-only exists only per
+project.
+
+#### 2.5.1 Where it is stored
+
+Everything is in the user tier, beside the existing per-project `private`
+flag:
+
+```
+projects.json Entry   "planning": "off" | "show" | "full"     (absent = inherit the global default)
+                      "plan_path": "<repo-relative path>"     (show only; ignored at other levels)
+```
+
+- **Not in `.worktrees.toml`.** The level decides whether hooks run and what
+  agents are told. A cloned repo must not decide that (§2.1).
+- **A repo may only *suggest*.** The suggestion is `[plan] show = "<path>"`
+  in `.worktrees.toml` (phase 2). In Add existing it pre-fills the path field
+  and labels it ("this repo suggests `docs/plan/`"). It never applies itself.
+  It has the same Layer A validation as `[plan] project`.
+- **The path is chosen in the UI.** Settings → Planning's per-project list
+  (and the ProjectSheet section, phase 2) gets a path field, with a picker
+  rooted at the project's main root. The picker refuses anything that
+  canonicalises outside it.
+
+#### 2.5.2 How show-only resolves: same function, same rules
+
+`plan::resolve(root, mode)` gains a third mode, `Show { rel }`, beside
+`Legacy` and `Owned`. The Plan tab, MCP and `worktrees plan resolve` all go
+through it. There is no second reader.
+
+- **`rel` is resolved per place**, against that place's root. A lane on its
+  own branch shows its own copy of the project's file, as every other tab
+  does.
+- **`rel` may name a file or a directory:**
+  - a **file** is the plan;
+  - a **directory** is shown through its `task_plan.md`. The tab says "no
+    `task_plan.md` in `<rel>`" when there is none, and the Docs tab lists the
+    directory anyway.
+
+  There is no guessing inside a directory (no newest file), for the §6
+  reason.
+- **Symlinks: the multi-component rule.** `rel` has several components, and
+  the repo controls what is on disk under them. So it goes through
+  `safe_under` (canonicalise, then require the result under the canonical
+  place root, then open with `O_NOFOLLOW`, then cap at `MAX_READ`). That is
+  the rule §4 already gives `[plan] project`, and it is why `safe_under`
+  moves to core in **phase 1** rather than 2.
+- **Failures are a state, never a fallback:**
+  - a path that fails `safe_under`, does not exist, or is neither a regular
+    file nor a directory gives `how_resolved: "show_path"` with
+    `plan_path: null` and a reason ("not found" / "outside the project" / "not
+    a file");
+  - it never falls back to `.planning/` and never says where to write.
+- **`how_resolved` gains `show_path`.** The earlier draft's `owned: bool`
+  becomes `level: "off" | "show" | "full"`, which says the same thing for
+  full and also covers show. It is listed with the TS union widening in
+  phase 1.
+
+#### 2.5.3 The planning folder stays `.planning/`, and show-only is the escape
+
+**The planning folder is not configurable.** Here is why, rather than making
+it a setting:
+
+1. **The skill hard-codes it.** planning-with-files' own scripts
+   (`resolve-plan-dir.sh`, `set-active-plan.sh`, `init-session.sh`) all use
+   `${PWD}/.planning`. "Full" wraps that skill (§3.4). A different folder
+   would make the skill's own commands write to a place worktrees no longer
+   reads, which is the drift this proposal exists to end.
+2. **The brief would have to move with it,** and the brief is fixed on
+   purpose. `ops::BRIEF_PATH` is `.planning/brief.md`, and `BRIEF_OPENER` is
+   the fixed text "Read .planning/brief.md and begin." It is "fixed, never
+   generated" so that what is pasted into a session is something the user
+   can read once and trust every time (`ops.rs`). A per-project folder turns
+   the opener into a template.
+3. **Every other surface keys on it:**
+   - `docs::walk` lists `.planning/` specially;
+   - the close-out tarball and the cdv/valleos `.gitignore`s use it;
+   - `cmd_new`'s ignore check (`ops.rs:862`) is on `BRIEF_PATH`.
+4. **The real need is covered without it.** "My plans live somewhere else" is
+   exactly show-only with `plan_path` pointing there. Because the folder is
+   fixed, the stale-dir rule (§6) and `invalid_pointer` (§3.2) need no
+   per-project variant. They only ever apply to `.planning/` in full mode,
+   and show-only has no pointer and no guessing to protect.
+
+**A repo that already uses `.planning/` for something unrelated.** This is
+true today, independent of this proposal: `worktrees new --brief` **always**
+writes `.planning/brief.md` (`write_brief`, `ops.rs:599`). If the repo does
+not ignore `.planning/`, its only protection is the warning at `ops.rs:862`.
+This proposal:
+
+- **leaves the brief where it is at every level.** The brief is part of
+  `new`, not of planning, and moving it would change `BRIEF_OPENER` for
+  every project.
+- **refuses "full" for a project whose `.planning/` holds tracked files**
+  (`git ls-files .planning` non-empty, valleos's tracked copy included until
+  it is deleted, §8.2). Settings says why and offers show-only. Full mode
+  would write `.active_plan` and topic dirs into someone else's tracked
+  folder, and `info/exclude` cannot hide what is tracked. This costs one git
+  call at adoption, in phase 1.
+- **upgrades the `ops.rs:862` warning** to name a tracked `.planning/` as a
+  conflict, so a brief written into it is not a surprise.
+- **records a user-tier brief location** as a later option (Q12), only if a
+  real repo needs one. None of the 41 places surveyed (§1.2) does.
+
+#### 2.5.4 A user's own hooks: show-only is the answer
+
+A project whose own hooks already inject a plan, such as valleos's
+`plan-context.sh` or cdv's port, would get the plan **twice** in full mode:
+once from its `.claude/settings.json` and once from worktrees' plugin.
+Worktrees cannot reliably see a user's hooks. They can live in user, project,
+local or managed settings, or in another plugin. And `~/.claude.json` and
+`~/.claude/settings.json` are someone else's live files (AGENTS.md). So the
+rule is a choice, not a detection:
+
+- **Want the tab without the injection? Choose show only.** Worktrees then
+  shows the plan and injects nothing. This is the documented way to tell it
+  not to inject.
+- **In full mode, a hint, not a block** (phase 2). Adopting reads the repo's
+  own `.claude/settings.json` as data. If a hook command mentions
+  `task_plan` or `.planning`, Settings says "this repo has its own plan
+  hooks: choose show only, or remove them". That covers the committed case
+  (valleos, cdv). Hooks in user scope stay the user's call.
+- **Moving from your hooks to full** is the §8 migration: delete the repo's
+  hooks in the same change that switches the level, so there is never a
+  window with both.
+
+#### 2.5.5 Which phase
+
+- **Phase 1 (the pilot):**
+  - the three-valued `planning` and `plan_path` fields;
+  - `Show { rel }` in `plan::resolve`, with `safe_under` moved to core;
+  - `how_resolved: "show_path"` and `level`;
+  - the path field (no picker yet: a text field validated by the same
+    `safe_under` call) in Settings → Planning's per-project list;
+  - the tracked-`.planning/` refusal for full.
+
+  Show-only is read-only and reuses code phase 1 already needs, so it is
+  cheap. The pilot itself (cdv) uses full.
+- **Phase 2:**
+  - `[plan] show` as a repo suggestion;
+  - the folder picker;
+  - the own-hooks hint;
+  - the ProjectSheet section.
+- **Later, only on demand:** a user-tier brief location (Q12).
+
+
 ---
 
 ## 3. What worktrees owns
@@ -250,7 +411,7 @@ project…) gain one row:
 | 0 | — | main only: `[plan] project` (§4; phase 2) |
 | 1 | `.active_plan` → `.planning/<id>/task_plan.md` | see the case table below |
 | 2 | newest `.planning/<dir>/` | **removed** (§6) |
-| 3 | root `task_plan.md` | root, still reported as `root`; `owned: true` says it is the legacy spot (and `migrate` is offered from phase 2, §8.2) |
+| 3 | root `task_plan.md` | root, still reported as `root`; `level: "full"` says it is the legacy spot (and `migrate` is offered from phase 2, §8.2) |
 
 **Owned mode, every case.** A pointer that is *missing its plan* is not the same
 as a pointer that is *invalid*. The first means "not written yet" and tells
@@ -288,13 +449,13 @@ There are four callers, and only one implementation:
 
 **The contract change, stated honestly.** `PlanSummary` is a contract with the
 frontend and MCP ("do not rename fields"). New *fields* are additive:
-`owned: bool`, `topic: Option<String>`, and `project: Option<{ rel, title,
+`level: "off" | "show" | "full"`, `topic: Option<String>`, and `project: Option<{ rel, title,
 current }>` (phase 2). New `how_resolved` *values* are **not** additive: the
 field is a closed union in `app/src/PlanPane.tsx:32` (`"active_plan" | "newest"
 | "root" | null`) and is matched by MCP clients. So:
 
 - existing values keep their meaning. Owned mode reports a root plan as
-  `root`, not as a renamed `legacy_root`; `owned: true` carries the
+  `root`, not as a renamed `legacy_root`; `level: "full"` carries the
   difference;
 - the new values are `pending` and `invalid_pointer` (phase 1) and
   `project_key` (phase 2). Widening the TS union and the frontend's handling
@@ -450,7 +611,7 @@ project = "docs/plan/goals.md"
 | Launch | guidance plugin | guidance plugin **+** `claude-plan` plugin (Claude); later the pi extension |
 | Working | session writes wherever the skill says | session writes `.planning/<topic>/`, guided by the `Pending` line, then reminded by `session`/`prompt` |
 | Plan dock tab | the summary; "Generate plan" | adds: how it resolved in words ("active plan: `<topic>`", "no plan yet", "project goals"); the project line; for a root plan in owned mode, "Move into `.planning/<topic>/`" (phase 2); a topic picker that rewrites `.active_plan` (Q5) |
-| MCP `place_status.plan` | as today | adds `owned`, `topic`, `project`, and the new `how_resolved` values (§3.2) |
+| MCP `place_status.plan` | as today | adds `level`, `topic`, `project`, and the new `how_resolved` values (§3.2, §2.5) |
 | Close-out / remove | user's own ritual; removing a place deletes its gitignored plans for good | `worktrees plan archive [<place>] [--to <dir>]` tars `.planning/` (brief + every topic) into `<dir>` (default `~/.cache/worktrees/<project>/plans/<slug>-<date>.tar.gz`); `remove_worktree` runs it first when planning is on (Q6) |
 
 **The `/close-out` skill should not ship with the app.** It is a personal
@@ -574,7 +735,7 @@ ships phase 1, accept the offer, and adopt for cdv. **Its state on 2026-10-09
 | What is there | After adopting (phase 1) | Moved or written? |
 |---|---|---|
 | main: `.active_plan` = `orchestrator` + `.planning/orchestrator/task_plan.md` | Resolves at step 1 (`active_plan`) to the same file the tab shows today. The difference is that the Claude hooks now inject it at start and on change, once main's session is relaunched. | **Nothing.** This IS main's plan now. Do not delete it or move it. |
-| A live lane with a root `task_plan.md` | Resolves `root` (`owned: true`), still shown as today. The hooks inject it too (§3.3), so a lane on the old layout loses nothing. It finishes and closes out the old way. | **Nothing.** Phase 1 has no automatic move and no `migrate` (it is phase 2). A move under a live session would race it. |
+| A live lane with a root `task_plan.md` | Resolves `root` (`level: "full"`), still shown as today. The hooks inject it too (§3.3), so a lane on the old layout loses nothing. It finishes and closes out the old way. | **Nothing.** Phase 1 has no automatic move and no `migrate` (it is phase 2). A move under a live session would race it. |
 | A live lane with a brief and no plan | No pointer, so owned resolution gives "no plan yet" and the brief, the same as today. Its session may create a root plan, which then shows as `root`. | **Nothing.** Adoption never writes into existing places. |
 | `chore-planning-convention` (`.active_plan` = `planning-convention`) | Step 1, unchanged. The `orchestrator/` copy beside it is no longer reachable by a guess (§6). | Nothing. |
 | A lane created AFTER adoption | `cmd_new` writes `.active_plan` = `<slug>` and an empty `.planning/<slug>/`. The session hook's `Pending` line says where the three files go. | Written by worktrees: the pointer and the empty dir only. |
@@ -672,16 +833,16 @@ adopt from the offer and have its agents and its Plan tab agree.
 
 - **Core**
   - `planning.json` (global default) and the registry entry's `planning`
-    field.
+    (off / show / full) and `plan_path` fields (§2.5).
   - `planning::effective(project)`, read by the app, the CLI and the MCP
     server alike.
 - **Resolution**
-  - `plan::resolve` made public with `Resolution` and an `Owned | Legacy`
-    mode.
+  - `plan::resolve` made public with `Resolution` and a `Legacy | Owned |
+    Show { rel }` mode; `safe_under` moved to core for `Show` (§2.5.2).
   - Owned mode has no newest-dir guess, step 1b's root-then-`Pending` rule,
     root still reported as `root`, and `invalid_pointer` (§3.2 case table).
-  - `PlanSummary`: new fields `owned`, `topic`; new `how_resolved` values
-    `pending`, `invalid_pointer`. Widen the closed union in
+  - `PlanSummary`: new fields `level`, `topic`; new `how_resolved` values
+    `pending`, `invalid_pointer`, `show_path`. Widen the closed union in
     `app/src/PlanPane.tsx:32` and handle each value.
 - **CLI**
   - `worktrees plan resolve [--json]` and `worktrees plan hook
@@ -690,10 +851,13 @@ adopt from the offer and have its agents and its Plan tab agree.
   - The parity test (§7, item 4), through one binary, shown red first.
   - bats: `new` writes `.active_plan` + the topic dir only when planning is
     on (and nothing when off); `plan resolve --json` for every row of the
-    §3.2 case table.
+    §3.2 case table, plus show-only: a file, a directory with and without
+    `task_plan.md`, and a path escaping through a symlink (must be refused).
 - **`cmd_new`**
-  - When planning is on, it writes `.active_plan` = slug and an empty topic
-    dir.
+  - When the level is full, it writes `.active_plan` = slug and an empty
+    topic dir. Show and off write nothing beyond today's brief.
+  - Full is refused for a project whose `.planning/` holds tracked files
+    (§2.5.3).
   - An ignore check: if `.planning/` is not ignored, it appends to
     `info/exclude` (Q4). It is a no-op for cdv.
 - **Claude**
@@ -705,10 +869,15 @@ adopt from the offer and have its agents and its Plan tab agree.
   - Settings → Planning: the explanation, the global choice, and the
     per-project list, which is how an already-registered project like cdv
     is adopted.
-  - The checkbox in Add existing / New project (pre-tick from `[plan]` in
-    Add existing only), and the post-clone line for Clone (§2.3).
-  - In owned mode only, one line in the Plan tab saying how the plan
-    resolved (off mode renders exactly as today).
+  - The level control (off / show only / full, plus the show-only path as a
+    validated text field) in Settings' per-project list, and the same control
+    in Add existing / New project (pre-set from `[plan]` in Add existing
+    only), plus the post-clone line for Clone (§2.3).
+  - The app-vs-CLI version comparison on the version the hook stamps
+    (§7, item 1).
+  - In show and full only, one line in the Plan tab saying how the plan
+    resolved ("your plan at `<rel>`", "active plan: `<topic>`"…). Off
+    renders exactly as today.
   - `offers-check.mjs` and mock harness entries.
 - **Proof**
   - The `adding-a-harness.md` surfaces, ticked by seeing them, for Claude.
@@ -722,6 +891,7 @@ adopt from the offer and have its agents and its Plan tab agree.
 - `migrate` (live root lanes finish the old way);
 - `plan archive` and archive-on-remove;
 - the topic picker;
+- `[plan] show`, the folder picker and the own-hooks hint (§2.5.5);
 - a ProjectSheet section (the Settings list covers changing it later);
 - pi and Codex.
 
@@ -766,6 +936,12 @@ which also ends the §1.3 hijack.
 
 ## 11. Open questions for David
 
+**Decided (David, 2026-10-09):** "bring your own" is in. Each project has three
+levels: off, show only (a user-chosen path, read-only, no hooks), and full.
+Show-only ships in phase 1 beside the cdv pilot's full mode. The planning
+folder stays `.planning/` (§2.5.3). The app-vs-CLI version check is in phase
+1 (§7).
+
 1. **Default when the global value is unset: off until chosen?**
    Recommended: yes. The offer asks once.
 2. **Whether a repo's `[plan]` section only pre-ticks the checkbox.**
@@ -793,3 +969,8 @@ which also ends the §1.3 hijack.
 10. **The default topic name.** Recommended: the place's slug. The
     alternatives are `YYYY-MM-DD-<slug>` (the skill's own `init-session.sh`
     shape) or asking.
+11. **A repo's `[plan] show` suggestion (phase 2): pre-fill only?**
+    Recommended: yes, the same rule as Q2.
+12. **A user-tier brief location** for a repo whose `.planning/` is taken by
+    something tracked. Recommended: not until a real repo needs it. Until
+    then, full is refused there and show-only works (§2.5.3).

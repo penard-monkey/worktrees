@@ -27,7 +27,9 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 - **Owned planning (option, not decided; cdv is the pilot).** worktrees owns
   the planning layout (`.planning/<topic>/` + `.active_plan`), the resolution
   and the agent hooks. It is opt-in globally or per project, from an
-  after-update offer and the Add/Clone dialogs. Phase 1 is the cdv pilot:
+  after-update offer and the Add/Clone dialogs, at three levels per project:
+  off, show only (your own planning files at a path you choose, read-only),
+  and full. Phase 1 is the cdv pilot plus show-only:
   the setting and the offer, owned resolution with no stale-directory
   guessing, `worktrees plan resolve|hook`, the pointer written by `new`, and
   the Claude plugin. Nothing in cdv is moved. Phase 2 adds `[plan] project`
