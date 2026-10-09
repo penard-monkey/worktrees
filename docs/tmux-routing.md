@@ -169,3 +169,17 @@ endpoint error; verify a stopped endpoint before manually removing that state.
   scripted input to the real app. Linux real-tmux behavior remains unmeasured.
 
 Phase 1b leases, startup serialization and socket recovery are not implemented.
+
+### Baseline renderer error
+
+The sandbox's xterm renderer-dimensions error also reproduces without routing
+integration on main `c360e08`. In the browser mock, Home → catalog-import →
+Enter throws `Cannot read properties of undefined (reading 'dimensions')` at
+`@xterm/xterm`'s `RenderService.dimensions` getter (bundled line 1843). The getter
+reads an absent renderer. This establishes baseline reproduction; the precise
+lifecycle cause remains uninvestigated. It does not replace the manual routing
+witness above.
+
+Foreign read-only MCP status/wait responses withhold absolute socket paths and
+paths embedded in diagnostics. Without tmux, activity remains unknown and an idle
+wait can time out; an unreachable endpoint is never reported as idle.
