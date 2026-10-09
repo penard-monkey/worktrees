@@ -182,7 +182,7 @@ door: `add_project`. The dialogs in front of them (Add existing…, Clone…, Ne
 project…) gain one row:
 
 ```
-Planning in this project:  ( ) off   ( ) show only: [ docs/plan/      ]   (•) full      (your default: full · this repo uses it)
+Planning in this project:  ( ) off   ( ) show only: [ docs/plan       ]  from: (•) this place ( ) main's copy   (•) full      (your default: full · this repo uses it)
 ```
 
 - It is pre-set from the effective global value. Only **Add existing** can
@@ -230,10 +230,10 @@ So the per-project choice has three levels, not two.
 | Level | Plan tab / MCP `place_status.plan` | Hooks | Writes | Who it is for |
 |---|---|---|---|---|
 | **off** | today's behaviour exactly (the legacy resolution, including the newest-dir guess) | none | none | anyone who has not chosen |
-| **show only** | the plan at a **path the user chooses** (§2.5.2), and nothing else | **none** | **none**: no `.active_plan`, no topic dir, no `info/exclude` | a project with its own planning mechanism, its own hooks, or both |
+| **show only** | the plan at a **path the user chooses** (§2.5.2), and nothing else | **none** | **none beyond the brief `new` already writes** (§2.5.3): no `.active_plan`, no topic dir, no `info/exclude` | a project with its own planning mechanism, its own hooks, or both |
 | **full** | the owned layout (§3) | session + prompt (§3.3) | `.active_plan` + an empty topic dir at `new`; `info/exclude` if needed | a project that wants worktrees to run planning |
 
-The **global** default stays two-valued (unset / off / full). "Show only"
+The **global** default stays two-valued: off / full, plus unset. "Show only"
 needs a path, and a path belongs to one project, so show-only exists only per
 project.
 
@@ -245,13 +245,14 @@ flag:
 ```
 projects.json Entry   "planning": "off" | "show" | "full"     (absent = inherit the global default)
                       "plan_path": "<repo-relative path>"     (show only; ignored at other levels)
+                      "plan_scope": "place" | "main"          (show only; absent = "place")
 ```
 
 - **Not in `.worktrees.toml`.** The level decides whether hooks run and what
   agents are told. A cloned repo must not decide that (§2.1).
 - **A repo may only *suggest*.** The suggestion is `[plan] show = "<path>"`
   in `.worktrees.toml` (phase 2). In Add existing it pre-fills the path field
-  and labels it ("this repo suggests `docs/plan/`"). It never applies itself.
+  and labels it ("this repo suggests `docs/plan`"). It never applies itself.
   It has the same Layer A validation as `[plan] project`.
 - **The path is chosen in the UI.** Settings → Planning's per-project list
   (and the ProjectSheet section, phase 2) gets a path field, with a picker
@@ -264,9 +265,22 @@ projects.json Entry   "planning": "off" | "show" | "full"     (absent = inherit 
 `Legacy` and `Owned`. The Plan tab, MCP and `worktrees plan resolve` all go
 through it. There is no second reader.
 
-- **`rel` is resolved per place**, against that place's root. A lane on its
-  own branch shows its own copy of the project's file, as every other tab
-  does.
+- **Where `rel` is read from: `plan_scope`.** Two real cases need opposite
+  answers, so the entry says which:
+  - **`place`** (the default): against each place's own root. This is right
+    for a mechanism that keeps per-lane files (a notes dir each lane writes
+    on its own branch). Each lane shows its own.
+  - **`main`**: against **main's** working copy, for every place. This is
+    right for a project goals file such as valleos's `docs/plan/goals.md`.
+    The orchestrator edits it in main, and a lane's checkout holds whatever
+    its branch had, which is the exact reason §4 reads `[plan] project` from
+    main. Read per place, a goals file would show each lane a stale copy.
+
+  With `main` scope, a lane's tab labels the plan "main's copy of `<rel>`",
+  and the summary carries `plan_scope: "main"`, so main's goals are never
+  presented as the lane's own plan (the §1.3 hijack, avoided by labelling).
+  A project that wants goals *beside* each lane's own plan is the phase 2
+  `[plan] project` case, not show-only.
 - **`rel` may name a file or a directory:**
   - a **file** is the plan;
   - a **directory** is shown through its `task_plan.md`. The tab says "no
@@ -275,12 +289,29 @@ through it. There is no second reader.
 
   There is no guessing inside a directory (no newest file), for the §6
   reason.
-- **Symlinks: the multi-component rule.** `rel` has several components, and
-  the repo controls what is on disk under them. So it goes through
-  `safe_under` (canonicalise, then require the result under the canonical
-  place root, then open with `O_NOFOLLOW`, then cap at `MAX_READ`). That is
-  the rule §4 already gives `[plan] project`, and it is why `safe_under`
-  moves to core in **phase 1** rather than 2.
+- **Symlinks: what `safe_under` actually does** (`docserver.rs:475–498`):
+  - it refuses an empty, `.`, `..` or absolute component, and therefore a
+    trailing slash (an empty last component);
+  - then it requires `symlink_metadata(candidate)` to be a **regular file**,
+    so a final-component symlink is refused even when it points inside the
+    root;
+  - then it canonicalises (which resolves intermediate symlinks) and
+    requires the result under the canonical root.
+
+  Three consequences:
+  - **Files** go through `safe_under` unchanged, then are opened with
+    `O_NOFOLLOW` and capped at `MAX_READ`.
+  - **Directories** need a sibling, `safe_dir_under`. It does the same
+    component checks, requires `symlink_metadata(dir).is_dir()` (so a
+    symlinked dir is refused), and canonicalises under the root. The plan is
+    then `safe_under(rel + "/task_plan.md")`, so both the dir and the file
+    pass. Both live in core from phase 1; the app's docserver keeps calling
+    the moved `safe_under`.
+  - **A trailing slash** is stripped once when the path is entered (UI, CLI
+    and the stored value), so `docs/plan/` and `docs/plan` mean the same
+    thing. Any other empty component is still refused.
+
+  This is the rule §4 already gives `[plan] project`.
 - **Failures are a state, never a fallback:**
   - a path that fails `safe_under`, does not exist, or is neither a regular
     file nor a directory gives `how_resolved: "show_path"` with
@@ -331,10 +362,16 @@ This proposal:
   (`git ls-files .planning` non-empty, valleos's tracked copy included until
   it is deleted, §8.2). Settings says why and offers show-only. Full mode
   would write `.active_plan` and topic dirs into someone else's tracked
-  folder, and `info/exclude` cannot hide what is tracked. This costs one git
-  call at adoption, in phase 1.
-- **upgrades the `ops.rs:862` warning** to name a tracked `.planning/` as a
-  conflict, so a brief written into it is not a surprise.
+  folder, and `info/exclude` cannot hide what is tracked. The refusal is
+  **adoption-time only**: one `git ls-files` when the level is set to full,
+  in phase 1. A tracked file committed under `.planning/` later is not
+  refused; it is caught as a warning by the check below.
+- **adds a tracked-files check at every `new`**, beside the existing
+  `check-ignore` warning (`ops.rs:862`). The same `git ls-files .planning`,
+  run on the new place, warns "`.planning/` holds tracked files: planning
+  (full) and the brief share a folder with committed content". That catches
+  a conflict committed after adoption. It warns rather than refuses, because
+  the brief is written there at every level.
 - **records a user-tier brief location** as a later option (Q12), only if a
   real repo needs one. None of the 41 places surveyed (§1.2) does.
 
