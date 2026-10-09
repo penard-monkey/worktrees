@@ -538,6 +538,9 @@ struct DirProbe {
     exists: bool,
     is_git: bool,
     has_commits: bool,
+    /// The repo's `.worktrees.toml` has a `[plan]` section: Add existing
+    /// pre-sets its planning choice to full. A suggestion, never applied.
+    plan_suggested: bool,
 }
 
 #[tauri::command]
@@ -545,7 +548,8 @@ async fn probe_dir(dir: String) -> Result<DirProbe, String> {
     let exists = Path::new(&dir).is_dir();
     let is_git = exists && git::git_ok(&dir, &["rev-parse", "--is-inside-work-tree"]);
     let has_commits = is_git && git::has_commits(&dir);
-    Ok(DirProbe { exists, is_git, has_commits })
+    let plan_suggested = is_git && worktrees_core::planning::repo_suggests(Path::new(&dir));
+    Ok(DirProbe { exists, is_git, has_commits, plan_suggested })
 }
 
 /// A project name becomes ONE path component under the chosen location, so it
@@ -1111,6 +1115,120 @@ async fn set_cross_project(level: String) -> Result<CrossProjectStatus, String> 
     worktrees_core::reach::set_user_level(l)?;
     applog("info", &format!("cross_project = {}", l.as_str()));
     Ok(cross_project_now())
+}
+
+// ── owned planning (owned-planning §2) ──────────────────────────────────────
+
+/// One registered project's planning, as Settings → Planning lists it.
+#[derive(Serialize)]
+struct PlanningProject {
+    root: String,
+    name: String,
+    /// `None` = inherits the default.
+    level: Option<worktrees_core::planning::Level>,
+    plan_path: Option<String>,
+    plan_scope: Option<worktrees_core::planning::Scope>,
+    effective: worktrees_core::planning::Level,
+}
+
+/// `planning_status`: machine-level, like `cross_project_status` — the global
+/// default, every registered project's own choice, and the CLI the plan hook
+/// runs beside this app's own version (owned-planning §7 item 1: two
+/// binaries, so two releases, and only then can the hook and the tab differ).
+#[derive(Serialize)]
+struct PlanningStatus {
+    default: worktrees_core::planning::GlobalDefault,
+    version: u32,
+    config_path: String,
+    projects: Vec<PlanningProject>,
+    cli_path: Option<String>,
+    cli_version: Option<String>,
+    app_version: String,
+}
+
+fn planning_now() -> PlanningStatus {
+    use worktrees_core::planning;
+    let g = planning::read_global();
+    let reg = worktrees_core::registry::read_lenient();
+    let projects = reg
+        .projects
+        .iter()
+        .map(|e| PlanningProject {
+            root: e.root.clone(),
+            name: e.name.clone(),
+            level: e.planning,
+            plan_path: e.plan_path.clone(),
+            plan_scope: e.plan_scope,
+            effective: planning::effective_from(Some(e), &g).level,
+        })
+        .collect();
+    let cli = worktrees_core::plancmd::probe_cli();
+    PlanningStatus {
+        default: g.default,
+        version: planning::VERSION,
+        config_path: planning::global_path().to_string_lossy().into_owned(),
+        projects,
+        cli_path: cli.as_ref().map(|(p, _)| p.to_string_lossy().into_owned()),
+        cli_version: cli.map(|(_, v)| v),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+#[tauri::command]
+async fn planning_status() -> Result<PlanningStatus, String> {
+    Ok(planning_now())
+}
+
+/// The user's act: the global default (`unset` / `full` / `off`). Any choice
+/// retires the `planning` offer.
+#[tauri::command]
+async fn set_planning_default(default: String) -> Result<PlanningStatus, String> {
+    use worktrees_core::planning::GlobalDefault;
+    let d = match default.as_str() {
+        "unset" => GlobalDefault::Unset,
+        "full" => GlobalDefault::Full,
+        "off" => GlobalDefault::Off,
+        other => return Err(format!("not a planning default: {other}")),
+    };
+    worktrees_core::planning::save_global(d)?;
+    applog("info", &format!("planning default = {default}"));
+    Ok(planning_now())
+}
+
+/// The user's act: one project's level (`None` = inherit), with show-only's
+/// path and scope. Core refuses full over a tracked `.planning/` and a path
+/// that leaves the project; the error is the row's own text.
+#[tauri::command]
+async fn set_project_planning(
+    root: String,
+    level: Option<String>,
+    plan_path: Option<String>,
+    scope: Option<String>,
+) -> Result<PlanningStatus, String> {
+    use worktrees_core::planning::{Choice, Level, Scope};
+    let level = match level.as_deref() {
+        None | Some("inherit") => None,
+        Some("off") => Some(Level::Off),
+        Some("show") => Some(Level::Show),
+        Some("full") => Some(Level::Full),
+        Some(other) => return Err(format!("not a planning level: {other}")),
+    };
+    let plan_scope = match scope.as_deref() {
+        None | Some("place") => None,
+        Some("main") => Some(Scope::Main),
+        Some(other) => return Err(format!("not a scope: {other}")),
+    };
+    let e = worktrees_core::planning::set_project(&root, &Choice { level, plan_path, plan_scope })?;
+    applog("info", &format!("planning {} = {}", e.name, e.planning.map(Level::as_str).unwrap_or("inherit")));
+    Ok(planning_now())
+}
+
+/// After a clone: does the new repo suggest owned planning (`[plan]` in its
+/// `.worktrees.toml`)? Clone's dialog cannot know before the clone exists, so
+/// the suggestion becomes a post-clone line (owned-planning §2.3).
+#[tauri::command]
+async fn planning_suggested(root: String) -> Result<bool, String> {
+    Ok(worktrees_core::planning::repo_suggests(Path::new(&root)))
 }
 
 /// Settings → Behavior → Plan limits: the user's `[quota]` launch-gate policy
@@ -8802,6 +8920,10 @@ pub fn run() {
             drop_reference,
             cross_project_status,
             set_cross_project,
+            planning_status,
+            set_planning_default,
+            set_project_planning,
+            planning_suggested,
             quota_settings,
             set_quota_settings,
             set_project_private,

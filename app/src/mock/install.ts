@@ -118,6 +118,13 @@ let mockPiMcp: Record<string, unknown> = (() => {
 // those registered projects private. Names are the root's basename, which is
 // what the registry seeds them with for these fixtures.
 let mockReach: string = new URLSearchParams(location.search).get("reach") ?? "off";
+// Owned planning (`planning_status`): `?planning=unset|full|off` is the global
+// default (unset by default, so the offer shows), `?planlevel=off|full|show`
+// stamps `place_plan`'s level, `?planskew=1` puts the hook's CLI on another
+// release than the app, `?plansuggest=1` makes a picked folder carry `[plan]`.
+let mockPlanningDefault: string = new URLSearchParams(location.search).get("planning") ?? "unset";
+const mockPlanLevel: string = new URLSearchParams(location.search).get("planlevel") ?? "off";
+const mockPlanProjects = new Map<string, { level: string | null; plan_path: string | null; plan_scope: string | null }>();
 const mockPrivate = new Set((new URLSearchParams(location.search).get("private") ?? "").split(",").filter(Boolean));
 const projectName = (root: string) => root.split("/").filter(Boolean).pop() ?? root;
 // The launch gate's `[quota]` policy (`quota_settings`): `?quota=off` starts
@@ -131,6 +138,19 @@ let mockQuota: { gate: boolean; weekly_warn_pct: number | null; problems: string
     ? ["[quota] weekly_warn_pct = 150 is not a whole number from 1 to 100 — ignored, the provider's own grade applies"] : [],
 };
 const mockQuotaNow = () => ({ ...mockQuota, config_path: "/Users/demo/.config/worktrees/config.toml" });
+function mockPlanning(): Record<string, unknown> {
+  const dflt = mockPlanningDefault === "full" ? "full" : "off";
+  return {
+    default: mockPlanningDefault, version: 1, config_path: "/Users/demo/.config/worktrees/planning.json",
+    projects: ws.projects.map((p) => {
+      const e = mockPlanProjects.get(p.root) ?? { level: null, plan_path: null, plan_scope: null };
+      return { root: p.root, name: projectName(p.root), ...e, effective: e.level ?? dflt };
+    }),
+    cli_path: MOCK_WT_BIN,
+    cli_version: new URLSearchParams(location.search).get("planskew") === "1" ? "0.39.0" : "0.41.0",
+    app_version: "0.41.0",
+  };
+}
 function mockCrossProject(): Record<string, unknown> {
   return {
     level: mockReach,
@@ -1203,7 +1223,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "probe_dir": {
       const dir: string = args.dir;
       const kind = dirKind(dir);
-      return { exists: true, is_git: kind !== "empty", has_commits: kind === "repo" };
+      return { exists: true, is_git: kind !== "empty", has_commits: kind === "repo",
+        plan_suggested: kind !== "empty" && new URLSearchParams(location.search).get("plansuggest") === "1" };
     }
     case "init_repo": {
       // git init + empty first commit → the dir is a normal repo from here on.
@@ -1364,6 +1385,29 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     }
     case "cross_project_status":
       return mockCrossProject();
+    case "planning_status":
+      return mockPlanning();
+    case "set_planning_default":
+      if (!["unset", "full", "off"].includes(String(args.default))) throw `not a planning default: ${args.default}`;
+      mockPlanningDefault = String(args.default);
+      return mockPlanning();
+    case "set_project_planning": {
+      // The real one is core's `planning::set_project`: it refuses show without
+      // a path and a path that leaves the repo; `?plantracked=1` makes full
+      // refuse the way a tracked `.planning/` does.
+      const level = (args.level as string | null) ?? null;
+      const path = typeof args.planPath === "string" ? args.planPath.trim().replace(/\/$/, "") : null;
+      if (level === "show" && !path) throw "show only needs a path";
+      if (level === "show" && path && (path.startsWith("/") || path.split("/").includes(".."))) throw `${path}: outside the project`;
+      if (level === "full" && new URLSearchParams(location.search).get("plantracked") === "1")
+        throw "`.planning/` holds tracked files in this repo, so worktrees cannot own it — choose show only to see your own plans instead.";
+      mockPlanProjects.set(String(args.root), {
+        level, plan_path: level === "show" ? path : null, plan_scope: level === "show" && args.scope === "main" ? "main" : null,
+      });
+      return mockPlanning();
+    }
+    case "planning_suggested":
+      return new URLSearchParams(location.search).get("plansuggest") === "1";
     case "set_cross_project":
       if (!["off", "read", "full"].includes(String(args.level))) throw `not a level: ${args.level}`;
       mockReach = String(args.level);
@@ -2109,6 +2153,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return { base, entries, truncated: false };
     }
     case "place_plan": {
+      // Show-only never reports a pointer step: core resolves the user's path
+      // and says `show_path`, so a `?planlevel=show` plan reads as that path —
+      // `?planscope=main` as main's copy.
+      const r = await mockInvoke("place_plan_raw", args) as Record<string, unknown>;
+      if (r.level !== "show" || r.how_resolved === "show_path") return r;
+      const scope = new URLSearchParams(location.search).get("planscope") === "main" ? "main" : "place";
+      return r.source === "plan" ? { ...r, how_resolved: "show_path", topic: null, plan_scope: scope } : { ...r, how_resolved: "show_path", plan_scope: scope, reason: "not found" };
+    }
+    case "place_plan_raw": {
       // `worktrees_core::plan::summarize`, in the shape the Plan tab reads —
       // NOT a re-implementation of it. Resolution (`.active_plan`, newest dir,
       // legacy root file), the symlink refusals, the 512 KiB cap and every
@@ -2152,8 +2205,16 @@ already writes.
         title: null, goal: null, current: null, checks_done: 0, checks_total: 0, phases: [],
         errors: 0, files: { task_plan: false, findings: false, progress: false },
         brief_path: null, brief_title: null, brief_lead: null, markdown: null, truncated: false,
+        // Owned planning: `?planlevel=full|show` (default off) stamps every
+        // shape below; the owned-only states are their own `?plan=` modes.
+        level: mockPlanLevel, topic: mockPlanLevel === "full" ? id : null,
+        plan_scope: mockPlanLevel === "show" ? "place" : null, reason: null,
       };
       if (mode === "none") return none;
+      // `pending` / `invalid` (full) and `showfail` / `showmain` (show).
+      if (mode === "pending") return { ...none, level: "full", how_resolved: "pending", topic: id, source: "brief", ...briefFields };
+      if (mode === "invalid") return { ...none, level: "full", how_resolved: "invalid_pointer", topic: null, source: "brief", ...briefFields };
+      if (mode === "showfail") return { ...none, level: "show", how_resolved: "show_path", plan_scope: "place", reason: "no task_plan.md in docs/plan", source: "brief", ...briefFields };
       if (mode === "brief") return { ...none, source: "brief", ...briefFields };
       const mtime = Date.now() - 7 * 60 * 1000;
       if (mode === "freeform") {

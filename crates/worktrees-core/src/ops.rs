@@ -95,7 +95,36 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
 pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
     let mut launch = ai_launch_inner(p, ui, wt, ai_cmd);
     launch.guidance = guidance_for(p, ui, wt, &launch);
+    launch.planning = planning_for(p, ui, &launch);
     launch
+}
+
+/// Owned planning's Claude plugin for one launch (owned-planning §3.3). Its
+/// own branch, keyed on `planning::effective` ONLY — not inside
+/// `guidance_for`, whose gate (guidance on, repo managed) would make it vanish
+/// for a user who turned guidance off. Claude only in phase 1, never on the
+/// fail-closed launch (its `cmd` is not the harness).
+fn planning_for(p: &Project, ui: &mut dyn Ui, launch: &crate::profile::AiLaunch) -> Vec<String> {
+    let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
+        return Vec::new();
+    };
+    if adapter.provider().id != crate::provider::CLAUDE.id {
+        return Vec::new();
+    }
+    if crate::planning::effective(&p.main_root).level != crate::planning::Level::Full {
+        return Vec::new();
+    }
+    let Some((bin, _)) = crate::plancmd::probe_cli() else {
+        ui.warn("planning: no worktrees CLI with the plan hook was found — Claude launches without plan reminders (install or update the CLI)");
+        return Vec::new();
+    };
+    match crate::guidance::materialize_plan_in(&crate::guidance::data_root(), &bin) {
+        Ok(dir) => vec!["--plugin-dir".into(), crate::profile::shell_quote(&dir.to_string_lossy())],
+        Err(e) => {
+            ui.warn(&format!("planning: plan hooks not delivered: {e}"));
+            Vec::new()
+        }
+    }
 }
 
 /// Agent guidance for one launch (agent-guidance §4.2): only in a
@@ -196,6 +225,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 opener: None,
                 place_flags: Vec::new(),
                 guidance: Vec::new(),
+                planning: Vec::new(),
                 model: None,
                 resume: false,
                 resume_id: None,
@@ -631,6 +661,11 @@ fn write_plan_pointer(p: &Project, ui: &mut dyn Ui, wt: &str, topic: &str) {
             return;
         }
     }
+    // The exclude is about the CLONE, not this pointer: a reused place, or one
+    // whose session already wrote `.active_plan`, still needs it.
+    if crate::planning::ensure_planning_excluded(&p.git_common, wt) {
+        ui.info("planning: added /.planning/ to .git/info/exclude (local, never committed)");
+    }
     let active = planning.join(".active_plan");
     if std::fs::symlink_metadata(&active).is_ok() {
         return;
@@ -657,9 +692,6 @@ fn write_plan_pointer(p: &Project, ui: &mut dyn Ui, wt: &str, topic: &str) {
     if let Err(e) = written {
         ui.warn(&format!("planning: could not write {PLANNING_DIR}/.active_plan: {e}"));
         return;
-    }
-    if crate::planning::ensure_planning_excluded(&p.git_common, wt) {
-        ui.info("planning: added /.planning/ to .git/info/exclude (local, never committed)");
     }
     ui.info(&format!("plan: {PLANNING_DIR}/{topic}/ (owned planning)"));
 }

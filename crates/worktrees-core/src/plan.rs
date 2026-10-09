@@ -399,13 +399,19 @@ fn resolve_show(root: &Path, rel: &str, scope: crate::planning::Scope, main_root
         crate::planning::Scope::Place => root,
         crate::planning::Scope::Main => {
             // A bare repo or a missing checkout has no working tree to read.
-            if !is_dir_nofollow(main_root) || kind(&main_root.join(".git")) != Kind::Dir {
+            // `.git` is a directory in an ordinary clone and a FILE in a
+            // submodule or a `--separate-git-dir` checkout; only a bare repo
+            // has neither.
+            if !is_dir_nofollow(main_root) || matches!(kind(&main_root.join(".git")), Kind::Absent | Kind::Other) {
                 return fail("main unreadable".into());
             }
             main_root
         }
     };
-    let rel = crate::safepath::normalize_entered(rel);
+    // Taken as stored: the trailing slash was stripped once, at ENTRY
+    // (`planning::validate_show_path`). Normalising again here would read a
+    // hand-edited `docs/plan//` as `docs/plan` while the setter refuses it.
+    let rel = rel.to_string();
     match classify(base, &rel) {
         Ok(Target::File(f)) => Resolution { how: Some(Resolved::ShowPath), rel: Some(rel), abs: Some(f), ..Default::default() },
         Ok(Target::Dir(_)) => {
@@ -813,6 +819,18 @@ fn text_lines(lines: &[Line]) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Every phase heading (H2/H3, `^phase\b`) with the end of its section, in
+/// document order. `extract` builds `phases` from this, and
+/// `current_phase_open` reads a phase's section by the same position — one
+/// walk, so the two cannot disagree about which heading is phase k.
+fn phase_sections<'a>(hs: &[(usize, usize, &'a str)], len: usize) -> Vec<((usize, usize, &'a str), usize)> {
+    hs.iter()
+        .enumerate()
+        .filter(|(_, h)| (2..=3).contains(&h.1) && is_phase_heading(h.2))
+        .map(|(k, h)| (*h, section_end(hs, k, len)))
+        .collect()
+}
+
 /// The pure extractor over a plan file's text. See the module note for why
 /// every rule is lenient; the contract is `plan-contract.md`'s extraction rules.
 pub fn extract(text: &str) -> Extracted {
@@ -847,12 +865,8 @@ pub fn extract(text: &str) -> Extracted {
     }
 
     // phases
-    for (k, h) in hs.iter().enumerate() {
-        if !(2..=3).contains(&h.1) || !is_phase_heading(h.2) {
-            continue;
-        }
+    for (h, end) in phase_sections(&hs, lines.len()) {
         let (name, tag) = split_tag(h.2);
-        let end = section_end(&hs, k, lines.len());
         let body = &lines[h.0 + 1..end];
         let (mut done, mut total, mut stated) = (0u32, 0u32, None);
         for t in text_lines(body) {
@@ -926,24 +940,13 @@ pub fn current_phase_open(text: &str, max: usize) -> Option<(String, Vec<String>
         .or_else(|| x.phases.iter().position(|p| p.status == PhaseStatus::InProgress))
         .or_else(|| x.phases.iter().position(|p| p.status != PhaseStatus::Complete))?;
     let name = x.phases[k].name.clone();
-    // the k-th phase heading, in the same order `extract` pushed them
-    let mut seen = 0;
-    for (i, h) in hs.iter().enumerate() {
-        if !(2..=3).contains(&h.1) || !is_phase_heading(h.2) {
-            continue;
-        }
-        if seen == k {
-            let end = section_end(&hs, i, lines.len());
-            let open: Vec<String> = text_lines(&lines[h.0 + 1..end])
-                .filter(|t| checkbox(t) == Some(false))
-                .filter_map(|t| clamp(t.trim(), CURRENT_MAX))
-                .take(max)
-                .collect();
-            return Some((clamp(&name, CURRENT_MAX).unwrap_or(name), open));
-        }
-        seen += 1;
-    }
-    None
+    let (h, end) = *phase_sections(&hs, lines.len()).get(k)?;
+    let open: Vec<String> = text_lines(&lines[h.0 + 1..end])
+        .filter(|t| checkbox(t) == Some(false))
+        .filter_map(|t| clamp(t.trim(), CURRENT_MAX))
+        .take(max)
+        .collect();
+    Some((clamp(&name, CURRENT_MAX).unwrap_or(name), open))
 }
 
 /// The pure extractor over a brief: its H1 and the first prose paragraph after
@@ -1553,9 +1556,13 @@ The real goal.
         let s = show(r, "docs/goals.md", Place, r);
         assert_eq!((s.how_resolved, s.plan_rel.as_deref(), s.title.as_deref()), (Some(Resolved::ShowPath), Some("docs/goals.md"), Some("goals")));
         assert_eq!((s.level, s.plan_scope), (crate::planning::Level::Show, Some(Place)));
-        for rel in ["docs/plan", "docs/plan/"] {
-            let s = show(r, rel, Place, r);
-            assert_eq!(s.plan_rel.as_deref(), Some("docs/plan/task_plan.md"), "{rel}");
+        let s = show(r, "docs/plan", Place, r);
+        assert_eq!(s.plan_rel.as_deref(), Some("docs/plan/task_plan.md"));
+        // the read path takes the stored value as is: entry strips the one
+        // trailing slash, so a hand-edited `docs/plan//` (or `docs/plan/`) is
+        // refused here exactly as the setter would refuse it
+        for rel in ["docs/plan/", "docs/plan//"] {
+            assert_eq!(show(r, rel, Place, r).reason.as_deref(), Some("outside the project"), "{rel}");
         }
         let s = show(r, "docs/empty", Place, r);
         assert_eq!((s.how_resolved, s.plan_path.as_deref(), s.reason.as_deref()), (Some(Resolved::ShowPath), None, Some("no task_plan.md in docs/empty")));
@@ -1585,8 +1592,12 @@ The real goal.
         assert_eq!(s.title.as_deref(), Some("main's goals (uncommitted edit)"));
         assert_eq!(s.plan_scope, Some(Main));
         assert_eq!(s.plan_path, Some(fs::canonicalize(main.join("docs/goals.md")).unwrap().to_string_lossy().into_owned()));
-        // a bare or missing main
+        // a `.git` FILE (submodule, --separate-git-dir) is still a checkout
         fs::remove_dir_all(main.join(".git")).unwrap();
+        fs::write(main.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert_eq!(show(&lane, "docs/goals.md", Main, main).reason, None);
+        // a bare or missing main
+        fs::remove_file(main.join(".git")).unwrap();
         assert_eq!(show(&lane, "docs/goals.md", Main, main).reason.as_deref(), Some("main unreadable"));
         assert_eq!(show(&lane, "docs/goals.md", Main, &main.join("gone")).reason.as_deref(), Some("main unreadable"));
     }

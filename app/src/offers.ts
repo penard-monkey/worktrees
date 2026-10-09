@@ -52,9 +52,10 @@ import type { PiMcpStatus } from "./PiMcpPanel";
 import type { UserSkill } from "./AgentSetup";
 import type { GuidanceStatus } from "./GuidancePanel";
 import type { CrossProjectStatus } from "./CrossProjectPanel";
+import type { PlanningStatus } from "./PlanningPanel";
 import type { CatId } from "./SettingsSheet";
 
-export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "agent-guidance" | "agent-guidance-changed" | "cross-project";
+export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "agent-guidance" | "agent-guidance-changed" | "cross-project" | "planning";
 
 export type Offer = {
   id: OfferId;
@@ -91,6 +92,8 @@ export type OfferCtx = {
   guidance?: GuidanceStatus | null;
   /** `cross_project_status` — the user's level and the registered projects. */
   crossProject?: CrossProjectStatus | null;
+  /** `planning_status` — machine-level: the global default. */
+  planning?: PlanningStatus | null;
 };
 
 /** The pending offers, in the order they should be listed.
@@ -223,6 +226,23 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
       cta: "Review…",
       to: { cat: "guidance", focus: "cross-project" },
       fingerprint: "off",
+    });
+  }
+  // Owned planning (owned-planning §2.2). Shown while the global default is
+  // UNSET, and nothing else: a fact about the machine. Neither "a project is
+  // selected" nor "a project is registered" may become a precondition (the
+  // v0.25.0 lesson) — with no projects the choice still sets the default every
+  // later Add inherits. Any global choice retires it; a dismissal holds until
+  // core's `planning::VERSION` says the question is worth asking again.
+  const pl = ctx.planning;
+  if (pl && pl.default === "unset") {
+    out.push({
+      id: "planning",
+      title: "Let Worktrees keep your agents' plans",
+      body: "One plan folder per place, the active plan always the one you see in the Plan tab, and agents reminded of it as they work.",
+      cta: "Review…",
+      to: { cat: "planning", focus: "planning" },
+      fingerprint: `v${pl.version}`,
     });
   }
   return out.filter((o) => dismissed[o.id] !== o.fingerprint);
