@@ -92,6 +92,16 @@ impl Project {
         format!("{}-{}", self.prefix, slug).replace('.', "-")
     }
 
+    /// One endpoint inventory, shared by all places in this project snapshot.
+    pub fn tmux_inventory(&self) -> std::result::Result<crate::tmux_route::Inventory, String> {
+        Ok(crate::tmux_route::Routes::discover(Path::new(&self.git_common))?.snapshot())
+    }
+
+    pub fn lane_panes(&self, slug: &str, path: &str) -> std::result::Result<tmux::PaneList, String> {
+        self.tmux_inventory()?.lane(&self.session_name(slug), path,
+            if slug == "(main)" { Some(&self.wt_root) } else { None })
+    }
+
     /// The claude config dir in effect for THIS repo — the bound profile's, or
     /// `~/.claude`. Every probe of claude's on-disk state goes through here;
     /// see `profile::claude_config_dir_for_repo` for why that matters.
@@ -234,6 +244,7 @@ impl Project {
         }
         let now = now_epoch();
         let reg = self.registrations();
+        let inventory = self.tmux_inventory();
         let mut rows = Vec::new();
         for d in &dirs {
             let slug = basename(d);
@@ -259,10 +270,11 @@ impl Project {
                 let cepoch = self.commit_epoch(d);
                 let age = if cepoch > 0 { self.clock.ago(cepoch, now) } else { "-".to_string() };
                 let bcol = if branch.replace('/', "-") != slug { render::CYAN } else { "" };
-                let tmux_cell = if tmux::session_exists(&self.session_name(&slug)) {
-                    format!("{}●{}", render::GREEN, render::NC)
-                } else {
-                    "○".to_string()
+                let tmux_cell = match inventory.as_ref().map_err(Clone::clone)
+                    .and_then(|i| i.lane(&self.session_name(&slug), d, None)) {
+                    Ok(panes) if panes.has_session(&self.session_name(&slug)) => format!("{}●{}", render::GREEN, render::NC),
+                    Ok(_) => "○".to_string(),
+                    Err(_) => format!("{}?{}", render::YELLOW, render::NC),
                 };
                 let git_cell = if self.dirty(d) {
                     format!("{}dirty{}", render::YELLOW, render::NC)
@@ -280,13 +292,17 @@ impl Project {
     /// Typed snapshot — the app consumes this directly (core-as-lib); the CLI
     /// serializes it via `ls_json`.
     pub fn ls(&self) -> LsJson {
+        self.ls_with_inventory(&self.tmux_inventory())
+    }
+
+    pub fn ls_with_inventory(&self, inventory: &std::result::Result<crate::tmux_route::Inventory, String>) -> LsJson {
         let list = self.worktree_list();
         let reg: HashSet<String> = list.iter().map(|(p, _)| p.clone()).collect();
         let strays = strays_from(&list, &self.main_root, &self.wt_root);
         // Prefetch the live tmux panes ONCE per snapshot (one `list-panes -a`),
         // so place_json can detect an ADOPTED (foreign-named) session per place
         // without shelling out per place — the app polls this every ~3s.
-        let panes = tmux::PaneList::fetch();
+
         let ai_word = adopt_ai_word();
         // Which claude config dir this repo's places actually use — `~/.claude`,
         // or the bound profile's dir. Resolved once per snapshot alongside
@@ -302,7 +318,7 @@ impl Project {
         let tasks: Vec<(String, bool)> = std::iter::once((self.main_root.clone(), true))
             .chain(self.worktree_dirs().into_iter().map(|d| (d, false)))
             .collect();
-        let mut computed = self.place_json_par(&tasks, &reg, panes.as_ref(), &ai_word, &base_ref, &claude_root);
+        let mut computed = self.place_json_par(&tasks, &reg, inventory, &ai_word, &base_ref, &claude_root);
         let main = computed.remove(0);
         computed.sort_by(|a, b| recency_key(b).cmp(&recency_key(a))); // stable desc, glob-order ties
         let mut places = Vec::with_capacity(computed.len() + 1);
@@ -322,6 +338,21 @@ impl Project {
         // serde_json compact = same shape/order as the bash emitter; add the
         // trailing newline the bash `printf ']}\n'` produced.
         format!("{}\n", serde_json::to_string(&self.ls()).unwrap_or_default())
+    }
+
+    fn routed_place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, inventory: &std::result::Result<crate::tmux_route::Inventory, String>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Place {
+        let slug = if is_main { "(main)".to_string() } else { basename(dir) };
+        let panes = inventory.as_ref().map_err(Clone::clone).and_then(|i| i.lane(
+            &self.session_name(&slug), dir, if is_main { Some(&self.wt_root) } else { None }));
+        let mut place = self.place_json(dir, is_main, reg, panes.as_ref().ok(), ai_word, base_ref, claude_root);
+        match panes {
+            Ok(panes) => {
+                place.tmux_session.server = Some(panes.server.socket_path().to_string_lossy().into_owned());
+                place.tmux_session.namespace = panes.server.namespace().map(str::to_string);
+            },
+            Err(e) => { place.tmux_session.error = Some(e); place.lifecycle_effective = "unknown".into(); }
+        }
+        place
     }
 
     fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Place {
@@ -374,7 +405,7 @@ impl Project {
             created_epoch: Some(bepoch),
             last_commit_epoch: None,
             last_commit_subject: None,
-            tmux_session: TmuxSession { name: session, up: tmux_up },
+            tmux_session: TmuxSession { name: session, up: tmux_up, server: None, namespace: None, error: None },
             claude_session_present: cpresent,
             claude_session_dir: Some(cdir),
             install_cmd: None,
@@ -426,7 +457,7 @@ impl Project {
     /// (status / divergence / last-commit); running them concurrently turns a
     /// sum-of-latencies into ~max. `LANES` caps concurrent git processes so a repo
     /// with many worktrees can't thrash. Order is preserved (caller keeps main first).
-    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Vec<Place> {
+    fn place_json_par(&self, tasks: &[(String, bool)], reg: &HashSet<String>, inventory: &std::result::Result<crate::tmux_route::Inventory, String>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Vec<Place> {
         const LANES: usize = 16;
         let mut out = Vec::with_capacity(tasks.len());
         for chunk in tasks.chunks(LANES) {
@@ -435,7 +466,7 @@ impl Project {
                     .iter()
                     .map(|(dir, is_main)| {
                         let is_main = *is_main;
-                        s.spawn(move || self.place_json(dir, is_main, reg, panes, ai_word, base_ref, claude_root))
+                        s.spawn(move || self.routed_place_json(dir, is_main, reg, inventory, ai_word, base_ref, claude_root))
                     })
                     .collect();
                 for h in handles {
@@ -485,11 +516,11 @@ impl Project {
         if p.registered {
             reg.insert(p.path.clone());
         }
-        self.place_json(
+        self.routed_place_json(
             &p.path,
             p.is_main,
             &reg,
-            tmux::PaneList::fetch().as_ref(),
+            &self.tmux_inventory(),
             &adopt_ai_word(),
             &self.base_ref(),
             &self.claude_config_root(),

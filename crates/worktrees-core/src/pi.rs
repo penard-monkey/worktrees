@@ -634,15 +634,15 @@ pub fn pi_state(turn: Option<&PiTurn>, screen: Option<PiScreen>) -> (State, Opti
 
 /// What pi's pane in `session` shows right now (`capture`): the Plan tab asks
 /// before pasting, because Enter on pi's trust modal trusts the repo.
-pub fn screen_of(session: &str) -> Option<PiScreen> {
-    capture(session)
+pub fn screen_of(server: &crate::tmux_server::TmuxServer, session: &str) -> Option<PiScreen> {
+    capture(server, session)
 }
 
 /// Capture one pi pane: its current command, then its screen, in ONE `tmux`
 /// call. `None` when tmux could not answer.
-fn capture(session: &str) -> Option<PiScreen> {
+fn capture(server: &crate::tmux_server::TmuxServer, session: &str) -> Option<PiScreen> {
     let target = format!("={session}:");
-    let out = tmux::tmux(&[
+    let out = tmux::tmux(server, &[
         "display-message", "-p", "-t", &target, "#{pane_current_command}", ";", "capture-pane", "-p", "-t", &target,
     ])
     .ok()?;
@@ -675,8 +675,8 @@ pub fn at_composer(screen: PiScreen, text: &str) -> bool {
 
 /// The nav tick's capture of many pi panes: ONE `tmux` call for all of them
 /// (`activity::capture_chain`), each read as (key, screen, at composer).
-pub fn pi_panes(sessions: &str, targets: &[(String, String)]) -> Vec<(String, PiScreen, bool)> {
-    activity::capture_chain(sessions, targets).into_iter().map(|(k, cmd, text)| pane_reading(k, &cmd, &text)).collect()
+pub fn pi_panes(server: &crate::tmux_server::TmuxServer, sessions: &str, targets: &[(String, String)]) -> Vec<(String, PiScreen, bool)> {
+    activity::capture_chain(server, sessions, targets).into_iter().map(|(k, cmd, text)| pane_reading(k, &cmd, &text)).collect()
 }
 
 /// `pi_panes`'s parse, for the tests.
@@ -724,7 +724,7 @@ pub fn pi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Optio
         return None;
     }
     let turn = current_session(&session_dir(path), path).and_then(|s| session_tail(&s.path).1);
-    let (state, last_done) = pi_state(turn.as_ref(), capture(&name));
+    let (state, last_done) = pi_state(turn.as_ref(), capture(&panes.server, &name));
     Some(Activity { provider: Some("pi"), state, last_done, session: Some(name), reason: None })
 }
 

@@ -20,9 +20,9 @@
 #
 # HOW THIS AVOIDS IT
 #
-#   A per-branch tmux prefix, so sessions can never collide — with your app, or
-#   with a sandbox from another branch. That prefix is also how you tell them
-#   apart in `tmux ls`.
+#   A user-only per-branch tmux namespace gives every sandbox project its own
+#   server, and disables discovery of the user's legacy endpoints. A readable
+#   session prefix also distinguishes sandbox lanes in terminal titles.
 #   Isolated XDG dirs, so profiles and the skill store are the branch's own.
 #   For --app, a distinct bundle identifier and product name, so the sandbox app
 #   gets its own config dir and its own name in the window title.
@@ -52,8 +52,27 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$MODE" = clean ]; then
-  for s in $(tmux ls -F '#{session_name}' 2>/dev/null | grep "^$PREFIX-" || true); do
-    tmux kill-session -t "$s" 2>/dev/null || true
+  # Keys are local immutable identity claims, never session-prefix matches
+  # against the user's shared server. A namespace owns only these endpoints.
+  keys="$(python3 - "$SBX/config/worktrees/tmux" "$PREFIX" <<'PYKEYS'
+import json, pathlib, re, sys
+for path in pathlib.Path(sys.argv[1]).glob('wt-*.json'):
+    value = json.loads(path.read_text())
+    key = value.get('key', '')
+    if value.get('namespace') == sys.argv[2] and re.fullmatch(r'wt-[a-zA-Z0-9-]+', key):
+        print(key)
+PYKEYS
+)"
+  for key in $keys; do
+    if ! sessions="$(env -u TMUX TMUX_TMPDIR=/tmp tmux -L "$key" -N list-sessions -F '#{session_name}' 2>&1)"; then
+      echo "cannot inspect sandbox tmux endpoint $key: $sessions" >&2
+      echo "sandbox state retained at $SBX; verify the endpoint is stopped before removing its state" >&2
+      exit 1
+    fi
+    while IFS= read -r session; do
+      [ -n "$session" ] || continue
+      env -u TMUX TMUX_TMPDIR=/tmp tmux -L "$key" -N kill-session -t "=$session"
+    done <<< "$sessions"
   done
   rm -rf "$SBX"
   echo "sandbox for '$BRANCH' removed ($SBX)" >&2
@@ -80,7 +99,7 @@ else
   fi
 fi
 
-export XDG_CONFIG_HOME="$SBX/config" XDG_DATA_HOME="$SBX/data" WORKTREES_PREFIX="$PREFIX"
+export XDG_CONFIG_HOME="$SBX/config" XDG_DATA_HOME="$SBX/data" WORKTREES_PREFIX="$PREFIX" WORKTREES_TMUX_NAMESPACE="$PREFIX"
 
 if [ "$MODE" = app ]; then
   # MCP setup from this app must register the branch under test, not a possibly
@@ -107,6 +126,7 @@ cat <<EOF
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
 export XDG_DATA_HOME="$XDG_DATA_HOME"
 export WORKTREES_PREFIX="$PREFIX"
+export WORKTREES_TMUX_NAMESPACE="$PREFIX"
 export PATH="$(dirname "$BIN"):\$PATH"
 cd "$REPO"
 EOF
@@ -119,8 +139,7 @@ EOF
   echo "  binary    $BIN  ($("$BIN" --version 2>/dev/null || echo '?'))"
   echo "  sessions  $PREFIX-<slug>     ← yours keep their own prefix"
   echo
-  echo "  tmux ls | grep $PREFIX     # this sandbox"
-  echo "  tmux ls | grep -v sbx-     # yours, untouched"
+  echo "  worktrees ls --json       # includes each place endpoint"
   echo
   echo "tear down:  $0 --clean"
 } >&2

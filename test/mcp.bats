@@ -580,8 +580,8 @@ print(a["provider"], a.get("session"), *[g["provider"] + "@" + str(g["tmux"]) fo
   printf '??           1     1 /sbin/launchd\ntty-repo-feat-h  501   777 /bin/zsh\ntty-repo-feat-h  777   777 pi\n' > "$BATS_TEST_TMPDIR/ps.out"
   mcp_in "$REPO" "" "$q"
   [ "$(jq_out "$pick")" = "pi repo-feat-h pi@repo-feat-h" ]
-  # One ps per pane snapshot, never one per question asked of it.
-  [ "$(grep -c '^ps ' "$BATS_TEST_TMPDIR/ps.log")" -eq "$(grep -c 'list-panes -a' "$TMUX_LOG")" ]
+  # One ps per populated project snapshot, never per question or empty legacy probe.
+  [ "$(grep -c '^ps ' "$BATS_TEST_TMPDIR/ps.log")" -eq "$(grep -c -- "-L $(cat "$TMUX_STATE.primary") .*|list-panes" "$TMUX_LOG.globals")" ]
   # …and only over the ttys that want naming, as ps spells them.
   [ "$(sort -u "$BATS_TEST_TMPDIR/ps.log")" = "ps -t tty-repo-feat-h -o tty=,pid=,tpgid=,comm=" ]
 }

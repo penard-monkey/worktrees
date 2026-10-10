@@ -233,7 +233,7 @@ pub fn codex_tail(path: &Path) -> (Option<String>, Option<Turn>) {
 /// still attributes what it did print. `=name:` is the session's current window
 /// and active pane. Harness-neutral: codex and pi each read the screens their
 /// own way (`codex_panes`, `pi::pi_panes`).
-pub fn capture_chain(sessions: &str, targets: &[(String, String)]) -> Vec<(String, String, String)> {
+pub fn capture_chain(server: &crate::tmux_server::TmuxServer, sessions: &str, targets: &[(String, String)]) -> Vec<(String, String, String)> {
     let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
     let targets: Vec<(&String, String)> = targets
         .iter()
@@ -253,7 +253,7 @@ pub fn capture_chain(sessions: &str, targets: &[(String, String)]) -> Vec<(Strin
         args.extend(["display-message", "-p", "-t", target, "#{pane_current_command}", ";"]);
         args.extend(["capture-pane", "-p", "-t", target]);
     }
-    let Ok(out) = tmux::tmux(&args) else {
+    let Ok(out) = tmux::tmux(server, &args) else {
         return Vec::new();
     };
     let cwds: Vec<&str> = targets.iter().map(|(c, _)| c.as_str()).collect();
@@ -283,8 +283,8 @@ pub fn chain_blocks_in(text: &str, cwds: &[&str]) -> Vec<(String, String, String
 /// Capture the codex panes in `targets` (cwd, tmux session) in one `tmux` call
 /// (`capture_chain`). `=name:` is codex unless the user split the window —
 /// then the screen shows no codex footer and the place simply reads busy.
-pub fn codex_panes(sessions: &str, targets: &[(String, String)]) -> Vec<(String, CodexPane)> {
-    capture_chain(sessions, targets).into_iter().map(|(cwd, cmd, screen)| (cwd, codex_pane(&cmd, &screen))).collect()
+pub fn codex_panes(server: &crate::tmux_server::TmuxServer, sessions: &str, targets: &[(String, String)]) -> Vec<(String, CodexPane)> {
+    capture_chain(server, sessions, targets).into_iter().map(|(cwd, cmd, screen)| (cwd, codex_pane(&cmd, &screen))).collect()
 }
 
 /// `codex_panes`'s parse, for the tests: `chain_blocks_in`, read as codex.
@@ -329,7 +329,7 @@ pub fn codex_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Op
     }
     let turn = codex::latest_rollout(path).and_then(|r| codex_tail(&r).1);
     let pane = if matches!(turn, Some(Turn::Busy)) {
-        codex_panes(&name, &[(path.to_string(), name.clone())]).into_iter().next().map(|(_, p)| p)
+        codex_panes(&panes.server, &name, &[(path.to_string(), name.clone())]).into_iter().next().map(|(_, p)| p)
     } else {
         None
     };
@@ -374,7 +374,10 @@ pub fn place_answer(readings: impl IntoIterator<Item = Activity>, panes: Option<
 /// `wait` give, and the same derivation the app's dots use.
 pub fn place_activity(project: &Project, slug: &str, path: &str) -> Activity {
     let probes = agent::live_probes();
-    let panes = tmux::PaneList::fetch();
+    let panes = match project.lane_panes(slug, path) {
+        Ok(panes) => Some(panes),
+        Err(reason) => return Activity { provider: None, state: State::Unknown, last_done: None, session: None, reason: Some(reason) },
+    };
     let scan = crate::harness::Scan { probes: &probes, panes: panes.as_ref() };
     let readings = crate::harness::place_activities(project, slug, path, &scan);
     place_answer(readings.into_iter().map(|(_, x)| x), panes.as_ref(), &project.session_name(slug))

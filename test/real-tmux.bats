@@ -20,6 +20,7 @@ load 'helpers/common'
 setup() {
   common_setup
   unset TMUX
+  export WORKTREES_TMUX_NAMESPACE="bats-$BATS_TEST_NUMBER-$$"
   remove_fake_tmux                        # fall through to the real tmux binary
   REAL_TMUX="$(command -v tmux || true)"
   RT_DIR="$(mktemp -d /tmp/wtrt.XXXXXX)"

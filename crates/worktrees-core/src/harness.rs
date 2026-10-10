@@ -513,7 +513,7 @@ impl Adapter for Codex {
         // Ownership by what the pane IS, not by its session's name: in this
         // place, and running codex. No fallback.
         let word = self.provider().match_word;
-        let Some(pane) = tmux::agent_pane(&codex, req.path, req.exclude, word) else {
+        let Some(pane) = tmux::agent_pane(&req.panes.server, &codex, req.path, req.exclude, word) else {
             return Delivery::Refused(format!(
                 "{codex} has no pane running codex in {}; send only types into this \
                  project's own Codex pane. Use report instead.",
@@ -725,7 +725,7 @@ impl Adapter for Pi {
         // runs there. pi runs as `node`, which `agent_pane` counts as an
         // agent: in the session pi was found in, that pane is pi.
         let session = crate::activity::pi_session_for(req.panes, req.canonical);
-        let Some(pane) = tmux::agent_pane(&session, req.path, req.exclude, self.provider().match_word) else {
+        let Some(pane) = tmux::agent_pane(&req.panes.server, &session, req.path, req.exclude, self.provider().match_word) else {
             return Delivery::Refused(format!(
                 "{session} has no pane running pi in {}; send only types into this project's own pi pane. \
                  Use report instead.",

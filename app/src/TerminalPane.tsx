@@ -94,11 +94,11 @@ type Transport = {
   wheel?(lines: number): Promise<unknown>;
 };
 
-const tmuxTransport = (session: string): Transport => {
+const tmuxTransport = (root: string, session: string): Transport => {
   let id: number | null = null;
   return {
     async open(cols, rows, onBytes) {
-      id = await invoke<number>("term_open", { session, cols, rows, onBytes });
+      id = await invoke<number>("term_open", { root, session, cols, rows, onBytes });
       return { replay: 0, replayCols: null };
     },
     write: (data) => { if (id != null) invoke("term_write", { id, data }); },
@@ -923,14 +923,14 @@ export type PaneLinkProps = {
   onError?: (e: unknown) => void;
 };
 
-export function TerminalPane({ session, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, root, onOpenPath, onError, ...find }: {
-  session: string; provider?: Harness; termVersion?: number; focusToken?: number; focusEnabled?: boolean;
+export function TerminalPane({ session, endpoint, provider = "claude", termVersion = 0, focusToken = 0, focusEnabled = true, root, onOpenPath, onError, ...find }: {
+  session: string; endpoint?: string; provider?: Harness; termVersion?: number; focusToken?: number; focusEnabled?: boolean;
 } & PaneLinkProps & TermFindProps) {
   // The tmux pane resolves against its active pane's LIVE cwd, then the place
   // root (where claude, codex and pi start). The backend reads the cwd.
   const links = root && onOpenPath ? { root, session, onOpen: onOpenPath, onError } : undefined;
   return (
-    <TermSurface makeTransport={() => tmuxTransport(session)} tkey={session}
+    <TermSurface makeTransport={() => tmuxTransport(root ?? "", session)} tkey={`${root}|${endpoint}|${session}`}
       termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider ? "mention" : undefined} dropProvider={provider}
       links={links} {...find} />
   );

@@ -100,7 +100,7 @@ session_count() {
   ! tmux_session_exists repo-feat-x
   [ "$(session_count)" -eq 1 ]
   tmux_session_exists other-sess
-  grep -q "attach -t other-sess" "$TMUX_LOG"
+  grep -q "attach -t =other-sess" "$TMUX_LOG"
 }
 
 @test "open nonexistent name errors with the Create-it hint" {
@@ -240,9 +240,12 @@ session_count() {
 @test "open on a tty inside tmux still switches the client" {
   make_worktree feat-x
   : > "$TMUX_LOG"
-  TMUX=/tmp/fake,1,0 run_wt_tty open feat-x
+  run_wt ls --json
+  local socket
+  socket="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["places"][0]["tmux_session"]["server"])')"
+  TMUX="$socket,1,0" run_wt_tty open feat-x
   [ "$status" -eq 0 ]
-  grep -q 'switch-client -t repo-feat-x' "$TMUX_LOG"
+  grep -q 'switch-client -t =repo-feat-x' "$TMUX_LOG"
 }
 
 @test "open on a tty outside tmux still attaches" {
@@ -250,7 +253,7 @@ session_count() {
   : > "$TMUX_LOG"
   run_wt_tty open feat-x
   [ "$status" -eq 0 ]
-  grep -q 'attach -t repo-feat-x' "$TMUX_LOG"
+  grep -q 'attach -t =repo-feat-x' "$TMUX_LOG"
 }
 
 @test "codex resume names only this place's user thread despite newer sibling and subagent rollouts" {
@@ -291,14 +294,14 @@ session_count() {
   : > "$TMUX_LOG.globals"
   run_wt_tty open feat-x --spare
   [ "$status" -eq 0 ]
-  grep -qx '|new-session' "$TMUX_LOG.globals"
+  grep -Eq '^-L wt-[^ ]+\|new-session$' "$TMUX_LOG.globals"
   for sub in list-sessions list-panes split-window select-pane set-option attach; do
-    grep -qx -- "-N|$sub" "$TMUX_LOG.globals" || { echo "no -N on $sub"; cat "$TMUX_LOG.globals"; false; }
+    grep -Eq -- "^-[LS] [^ ]+ -N\|$sub$" "$TMUX_LOG.globals" || { echo "no -N on $sub"; cat "$TMUX_LOG.globals"; false; }
   done
   # Nothing but new-session runs without it.
-  [ "$(grep -v '^-N|' "$TMUX_LOG.globals" | grep -vcx '|new-session')" -eq 0 ]
+  [ "$(grep -v ' -N|' "$TMUX_LOG.globals" | grep -vcE '^-L wt-[^ ]+\|new-session$')" -eq 0 ]
   # And the subcommand log reads exactly as it did before.
-  grep -q 'attach -t repo-feat-x' "$TMUX_LOG"
+  grep -q 'attach -t =repo-feat-x' "$TMUX_LOG"
   grep -q '^tmux new-session -d -s repo-feat-x' "$TMUX_LOG"
 }
 
@@ -308,6 +311,6 @@ session_count() {
   FAKE_TMUX_VERSION=3.1c run_wt_tty open feat-x --spare
   [ "$status" -eq 0 ]
   tmux_session_exists repo-feat-x
-  grep -qx '|attach' "$TMUX_LOG.globals"
+  grep -Eq '^-L wt-[^ ]+\|attach$' "$TMUX_LOG.globals"
   ! grep -q -- '-N' "$TMUX_LOG.globals"
 }
