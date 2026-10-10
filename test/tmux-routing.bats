@@ -1,10 +1,15 @@
 #!/usr/bin/env bats
 load 'helpers/common'
-setup() { common_setup; }
+setup() {
+  common_setup
+  # Own the legacy socket directory too: a runner need not have /tmp/tmux-UID.
+  export TMUX_TMPDIR="$BATS_TEST_TMPDIR/legacy-root"
+  mkdir -p "$TMUX_TMPDIR/tmux-$(id -u)"
+  TMUX_TMPDIR="$(cd "$TMUX_TMPDIR" && pwd -P)"
+}
 
 legacy_state() {
-  local socket="/tmp/tmux-$(id -u)/default"
-  [ ! -d /private/tmp ] || socket="/private${socket}"
+  local socket="$TMUX_TMPDIR/tmux-$(id -u)/default"
   local key
   key="$(printf '%s' "$socket" | cksum | cut -d ' ' -f1)"
   printf '%s.endpoints/legacy-%s' "$TMUX_STATE" "$key"
