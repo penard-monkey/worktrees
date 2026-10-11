@@ -6,7 +6,7 @@ close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
 - **Automations — removed 2026-10-10; revisit later.** Built in v0.29.0
-  (#325, #326), removed by #PR: "it hasn't been very useful and it is
+  (#325, #326), removed by #477: "it hasn't been very useful and it is
   confusing". Design kept in
   [docs/proposals/automations.md](docs/proposals/automations.md). What
   confused, read off the code and UI before deleting them: (1) **the schedule
