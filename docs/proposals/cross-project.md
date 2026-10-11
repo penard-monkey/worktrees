@@ -103,7 +103,7 @@ The review also changed three parts of the design:
 | `initialize` instructions | The role line names `{root}`. `MESSAGE_NOTE` says *"another place of this project"*. | Wording. Both change with the feature (§9). |
 | `managed()` | Its comment says *"the app's project list is not readable from here"*. | A gap the registry closes (§2). |
 | `hub_copy_refusal` | Checked against the SERVER's own main root before any non-read-only tool. | Must be checked against the **target** project as well. A foreign target that is a hub copy is exactly as dangerous as a local one. |
-| `HIDDEN_IN_RUN` | Six tools vanish inside an automation run, among them `send` and `remove_worktree` (the other four are the automation tools themselves). | Design, and it stays. A run gets no cross-project reach at all (§5.1). |
+| `HIDDEN_IN_RUN` | Six tools vanish inside an automation run, among them `send` and `remove_worktree` (the other four are the automation tools themselves). | Design, and it stayed — until it was removed with automations (#477), together with the in-run reach rule (§5.1). |
 
 ### 1.2 Core **[source]**
 
