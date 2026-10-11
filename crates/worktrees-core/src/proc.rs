@@ -1,10 +1,11 @@
 //! Subprocess helpers that need a HARD deadline.
 //!
-//! Moved here from the app (`lib.rs::run_deadline`) when the automation runner
-//! needed the same thing: a headless `claude -p` has no pane to Ctrl-C and no
+//! Moved here from the app (`lib.rs::run_deadline`) when a second headless
+//! caller needed the same thing: a `claude -p` has no pane to Ctrl-C and no
 //! one watching it, so "kill it at N seconds" is the only thing standing
 //! between a wedged login profile and a process that runs until the machine is
-//! rebooted. Two callers, one answer — the same reason `status_of`'s parse and
+//! rebooted. Its callers now are the app's headless calls, pi's model probes and
+//! guidance's git calls — one answer, the same reason `status_of`'s parse and
 //! the profile seam live in core rather than in whichever surface needed them
 //! first.
 

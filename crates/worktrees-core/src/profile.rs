@@ -596,10 +596,10 @@ fn basename(p: &str) -> String {
 
 /// Is this launch really claude, and was it really prepared?
 ///
-/// Moved here from the app (`lib.rs`) when the automation runner needed the
-/// identical guard: both are HEADLESS `claude -p` paths, neither has a pane a
-/// person can look at, and a second copy of this reasoning would be a second
-/// answer to "may we run this".
+/// Lives in core because the guard is about HEADLESS `claude -p` paths, which
+/// have no pane a person can look at; any surface that adds one must use this
+/// rather than a second copy of the reasoning about "may we run this". (The
+/// automation runner was the second caller until automations were removed.)
 ///
 /// ⚠ NOT `ai.match_word`. `ops::ai_launch_for` fails CLOSED when a profile
 /// cannot be materialized: it replaces `cmd` with a `printf '…' >&2` sentinel

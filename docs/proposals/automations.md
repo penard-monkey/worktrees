@@ -4,6 +4,12 @@ title: "Proposal — project automations"
 
 # Proposal — project automations
 
+> **Status: built in v0.29.0, removed in v0.41.0** (David, 2026-10-10: not
+> useful enough, and confusing). Kept as the record for a later revisit; the
+> code is in git history (#325 core, #326 app; removed by #477). See the
+> ROADMAP item "Automations — removed 2026-10-10; revisit later" for what
+> confused.
+
 **Status:** design, 2026-09-22. Nothing built. Decisions taken so far: variant
 B (an automation is a **brief on a schedule**, no recipe vocabulary — §2),
 project scope (§3), a fourth dock tab as the surface (§7), and the brief

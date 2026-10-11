@@ -5,6 +5,27 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Automations — removed 2026-10-10; revisit later.** Built in v0.29.0
+  (#325, #326), removed by #477: "it hasn't been very useful and it is
+  confusing". Design kept in
+  [docs/proposals/automations.md](docs/proposals/automations.md). What
+  confused, read off the code and UI before deleting them: (1) **the schedule
+  never ran.** The editor offered "Every morning" / "Weekly" and rows read
+  "every morning · 08:00", over a hint that "scheduled runs arrive in the next
+  version" — phase 2 (the clock) was never built in eleven releases, so the
+  only trigger was a Run button and the headline promise was false. (2) **A
+  project-wide thing in a per-place surface.** It was a dock tab beside Files
+  and Plan, whose contents follow the selected place, but its list was the
+  same for every place and its runs deliberately ran in no place at all. (3)
+  **Too much vocabulary for one verb:** brief, scope, tier (with exactly one
+  value, `report`), run, finding, proposal, dropped, applied — before anyone
+  had seen it produce a finding worth acting on. (4) Its output overlapped
+  surfaces that already answer "what needs attention" (health verdicts, MCP
+  `place_status`, the status check's "Ask Claude"). If it comes back: ship the
+  trigger it advertises or advertise none, put it where project-scope things
+  live, and start from one concrete sweep someone keeps asking for rather than
+  a general brief runner.
+
 - **`~/.cache/worktrees` scratch has no retention.** Agents write
   `<project>/<tree>/` scratch by convention and nothing deletes it, including
   `remove_worktree`: 12G on 2026-10-08 (85 worktrees dirs vs 10 live places).
