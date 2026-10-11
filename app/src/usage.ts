@@ -29,7 +29,6 @@ export type Surface =
   | "dock.terminal"
   | "dock.docs"
   | "dock.plan"
-  | "dock.automations"
   | "dock.prs"
   | "read"          // reading mode (a rendered file over the whole pane)
   | "home"          // the briefing
@@ -200,7 +199,6 @@ export function surfaceOf(t: Element): Surface | null {
     if (t.closest(".termtabs, .term-host")) return "dock.terminal";
     if (t.closest(".docspane")) return "dock.docs";
     if (t.closest(".planpane")) return "dock.plan";
-    if (t.closest(".autopane")) return "dock.automations";
     if (t.closest(".prs-pane, .prs-empty")) return "dock.prs";
     return "dock.files";
   }

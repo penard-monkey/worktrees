@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Removed
+- **Automations** (added in v0.29.0) are gone: the app's Automations dock tab,
+  the `worktrees automations` / `auto` verbs, and the MCP tools
+  `list_automations`, `get_automation`, `upsert_automation`,
+  `delete_automation`, `run_automation`, `list_runs`, `get_run` and
+  `apply_proposal`. They were not useful enough to justify how confusing they
+  were; the design stays in `docs/proposals/automations.md` for a later
+  revisit. Nothing of yours is deleted, it is just no longer read:
+  definitions stay in `<repo>/.worktrees.automations.json`, and the run ledger
+  (reports, findings, transcripts) stays under
+  `~/.local/state/worktrees/runs/` (`$XDG_STATE_HOME/worktrees/runs/` if you
+  set it). No schedule ever ran, so there is no launchd or cron entry to
+  clean up. A dock that was left on Automations opens on Files. An agent
+  session started before you upgrade keeps its old `worktrees mcp` and may
+  still list the tools until it is restarted.
+
 ### Added
 - **Worktrees can own a project's planning, opt-in** (phase 1 of
   `docs/proposals/owned-planning.md`; the app's side follows). Each project

@@ -1,4 +1,4 @@
-// Checks the DOCK RAIL's two mirrors, and the one the Automations tab adds.
+// Checks the DOCK RAIL's mirrors, and that a REMOVED tab cannot be restored.
 //
 //   node app/scripts/dockrail-check.mjs        # exits non-zero on failure
 //
@@ -18,10 +18,12 @@
 //     fall back. A tab missing from BOTH is worse: the rail renders it, the
 //     ternary in the dock body shows it, and `pickDockTab` writes a value the
 //     type says cannot exist.
-//  3. **`PROPOSAL_TOOLS` drifting from `runs.rs`.** `automations.ts` mirrors the
-//     closed set so the run view can label a button without a second parse.
-//     The frontend's copy has no tests of its own that would notice — the same
-//     shape as `dnd-check.mjs`'s mirror, and the same fix.
+//  3. **A persisted tab that no longer exists.** `dock_tab` lives in
+//     ui-state.json, globally and per place, so removing a tab (Automations,
+//     after 0.40.1) leaves values the union says cannot exist. Unsanitised,
+//     the dock body's ternary falls through to the Terminal with no rail
+//     button lit. `loadSettings` maps them to Files through `DOCK_TABS`, and
+//     this drives the REAL `loadSettings` with such a blob.
 //
 // Like `dnd-check.mjs`, this slices the REAL sources rather than a paraphrase,
 // and it refuses to guess: a source that no longer matches its pattern is a
@@ -33,8 +35,6 @@ import { transformWithEsbuild } from "vite";
 
 const APP = fileURLToPath(new URL("../src/App.tsx", import.meta.url));
 const SETTINGS = fileURLToPath(new URL("../src/settings.ts", import.meta.url));
-const AUTOMATIONS = fileURLToPath(new URL("../src/automations.ts", import.meta.url));
-const RUNS_RS = fileURLToPath(new URL("../../crates/worktrees-core/src/runs.rs", import.meta.url));
 
 let failed = 0;
 const eq = (name, got, want) => {
@@ -86,47 +86,53 @@ const unions = [...settings.matchAll(/^\s*dock_tab:\s*([^;\n]+);/gm)].map((m) =>
 eq("dock_tab is declared exactly twice in settings.ts", unions.length, 2);
 unions.forEach((u, i) => eq(`dock_tab union #${i + 1} == DOCK_RAIL keys`, u, railKeys));
 
-// ── 3. PROPOSAL_TOOLS mirrors runs.rs ───────────────────────────────────────
-const js = (await transformWithEsbuild(fs.readFileSync(AUTOMATIONS, "utf8"), "automations.ts", {
-  loader: "ts", format: "esm",
-})).code;
-const A = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+// ── 3. a removed tab persisted in ui-state.json lands on Files ─────────────
+const m = /export const DOCK_TABS = \[([^\]]+)\] as const;/.exec(settings);
+ok("settings.ts still declares `export const DOCK_TABS = [...] as const`", !!m);
+if (m) eq("DOCK_TABS == DOCK_RAIL keys", m[1].split(",").map((x) => x.trim().replace(/"/g, "")).filter(Boolean).sort(), railKeys);
 
-const runsRs = fs.readFileSync(RUNS_RS, "utf8");
-// `mod tests` is sliced off first: its fixtures name these tools too, and a
-// match in there would be asserting against a test's idea of the set.
-const prod = runsRs.split(/\n#\[cfg\(test\)\]/)[0];
-const m = /PROPOSAL_TOOLS:\s*\[&str;\s*(\d+)\]\s*=\s*\[([^\]]+)\]/.exec(prod);
-ok("runs.rs still declares PROPOSAL_TOOLS", !!m);
-if (m) {
-  const tools = m[2].split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
-  // The declared arity and the literal must agree — a `[&str; 4]` holding five
-  // entries does not compile, but reading both is what makes the count below
-  // mean something.
-  eq("PROPOSAL_TOOLS arity matches its literal", tools.length, Number(m[1]));
-  eq("automations.ts PROPOSAL_TOOLS mirrors runs.rs", [...A.PROPOSAL_TOOLS].sort(), [...tools].sort());
-  // Stated separately from the equality above, because this is the rule and
-  // that is only its mechanism: `remove_worktree` is the one path in this
-  // codebase that can destroy commits, and it is never a proposal.
-  ok("remove_worktree is not a proposal tool", !tools.includes("remove_worktree"));
-}
+// Load the real module, as `zoom-check.mjs` does: its relative imports are
+// inlined (a data: URL has no base to resolve them against) and the Tauri
+// bridge answers `get_settings` with the blob under test.
+const read = (rel) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+const inline = (rel) => read(rel).replace(/^export /gm, "") + "\n";
+const stripImport = (src, mod) => {
+  const re = new RegExp(`^import \\{[^}]*\\} from "\\./${mod}";$`, "m");
+  ok(`settings.ts imports from ./${mod} as expected (the inlining is not stale)`, re.test(src));
+  return src.replace(re, "");
+};
+const src =
+  inline("../src/afterglow.ts") + inline("../src/harness.ts") +
+  stripImport(stripImport(settings, "afterglow"), "harness")
+    .replace(/^import \{ invoke \}.*$/m, "const invoke = (cmd) => Promise.resolve(cmd === \"get_settings\" ? globalThis.__blob : undefined);");
+const js = (await transformWithEsbuild(src, "settings.ts", { loader: "ts", format: "esm" })).code;
+const S = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
 
-// ── the starters exist and are prose ────────────────────────────────────────
-// Not decoration: a starter is the first thing a new user reads, and the design
-// decision it carries is that the thing you edit is a PARAGRAPH (proposal §2).
-// A starter that had been trimmed into a one-line command would teach the
-// opposite, and nothing else would notice.
-ok("three starters", A.STARTERS?.length === 3, `found ${A.STARTERS?.length}`);
-for (const s of A.STARTERS ?? []) {
-  ok(`starter "${s.name}" has a name`, !!s.name?.trim());
-  const sentences = s.brief.split(/\.\s/).filter(Boolean).length;
-  ok(`starter "${s.name}" is 3-5 sentences of prose`, sentences >= 3 && sentences <= 5, `${sentences} sentences`);
-  for (const t of A.PROPOSAL_TOOLS)
-    ok(`starter "${s.name}" names no tool (${t})`, !s.brief.includes(t));
+globalThis.__blob = {
+  // A current revision, so `migrate` has nothing to do and saves nothing.
+  settings_rev: 999,
+  dock_tab: "automations",
+  place_panels: {
+    "/r|old": { dock_open: true, dock_tab: "automations", dock_width: 400 },
+    "/r|kept": { dock_open: true, dock_tab: "plan", dock_width: 400 },
+    "/r|bare": { dock_open: true, dock_width: 400 },
+  },
+};
+const s = await S.loadSettings();
+eq("a persisted global dock_tab of a removed tab loads as files", s.dock_tab, "files");
+eq("a place left on a removed tab loads as files", s.place_panels["/r|old"].dock_tab, "files");
+eq("a place on a live tab keeps it", s.place_panels["/r|kept"].dock_tab, "plan");
+// Absent stays absent: filling it in would freeze the global seed into a place
+// that never set it (the `place_panels` seed trap in CLAUDE.md).
+eq("a place with no dock_tab is not given one", "dock_tab" in s.place_panels["/r|bare"], false);
+eq("panelsFor hands the old place Files", S.panelsFor(s, "/r|old").dock_tab, "files");
+for (const t of S.DOCK_TABS) {
+  globalThis.__blob = { settings_rev: 999, dock_tab: t };
+  eq(`a live tab "${t}" survives a load`, (await S.loadSettings()).dock_tab, t);
 }
 
 if (failed) {
   console.log(`\n${failed} failure(s)`);
   process.exit(1);
 }
-console.log("ok — dock rail, dock_tab unions and PROPOSAL_TOOLS all agree");
+console.log("ok — dock rail, dock_tab unions and DOCK_TABS agree; a removed tab loads as Files");

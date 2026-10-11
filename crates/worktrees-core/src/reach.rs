@@ -12,8 +12,7 @@
 //! **Identity comes from the registry, never from the caller.** A session's own
 //! project name is the registry entry whose root equals its canonical main
 //! root. An unregistered repo has no cross-project identity and gets no reach;
-//! a private project gets none either (both directions, §5.2); neither does an
-//! automation run.
+//! a private project gets none either (both directions, §5.2).
 //!
 //! **Addresses.** A bare slug is the session's own project, byte for byte as
 //! before. `<name>:<slug>` names a place in the registered project called
@@ -142,7 +141,6 @@ pub struct Inputs<'a> {
     pub user: Level,
     /// `--cross-project` on the server's argv (a profile's narrowing).
     pub flag: Option<Level>,
-    pub in_run: bool,
     pub registry: Registry,
 }
 
@@ -150,9 +148,7 @@ impl Reach {
     pub fn new(i: Inputs) -> Reach {
         let me = i.registry.by_root(i.main_root).cloned();
         let level = i.user.min(i.flag.unwrap_or(Level::Full));
-        let why_off = if i.in_run {
-            Some("an automation run never reaches other projects".to_string())
-        } else if level == Level::Off {
+        let why_off = if level == Level::Off {
             Some(if i.user == Level::Off {
                 HOW_TO_ENABLE.to_string()
             } else {
@@ -297,8 +293,8 @@ mod tests {
         }
     }
 
-    fn reach(root: &str, user: Level, flag: Option<Level>, in_run: bool) -> Reach {
-        Reach::new(Inputs { main_root: root, user, flag, in_run, registry: reg() })
+    fn reach(root: &str, user: Level, flag: Option<Level>) -> Reach {
+        Reach::new(Inputs { main_root: root, user, flag, registry: reg() })
     }
 
     #[test]
@@ -370,7 +366,7 @@ mod tests {
         assert_eq!(level_from(None), Level::Off);
         assert_eq!(level_from(Some("yes")), Level::Off);
         assert_eq!(level_from(Some("read")), Level::Read);
-        let r = reach("/w/alpha", Level::Off, None, false);
+        let r = reach("/w/alpha", Level::Off, None);
         assert!(!r.on());
         assert!(r.entries().is_empty());
         assert!(r.parse("beta:x").unwrap_err().contains("config.toml"));
@@ -378,23 +374,22 @@ mod tests {
 
     #[test]
     fn a_profile_narrows_and_never_widens() {
-        assert_eq!(reach("/w/alpha", Level::Full, Some(Level::Read), false).level, Level::Read);
-        assert_eq!(reach("/w/alpha", Level::Read, Some(Level::Full), false).level, Level::Read);
-        let r = reach("/w/alpha", Level::Read, Some(Level::Off), false);
+        assert_eq!(reach("/w/alpha", Level::Full, Some(Level::Read)).level, Level::Read);
+        assert_eq!(reach("/w/alpha", Level::Read, Some(Level::Full)).level, Level::Read);
+        let r = reach("/w/alpha", Level::Read, Some(Level::Off));
         assert!(!r.on());
         assert!(r.parse("beta:x").unwrap_err().contains("profile"));
     }
 
     #[test]
-    fn no_reach_from_a_run_an_unregistered_repo_or_a_private_project() {
-        assert!(reach("/w/alpha", Level::Read, None, true).parse("beta:x").unwrap_err().contains("automation run"));
-        assert!(reach("/w/elsewhere", Level::Read, None, false).parse("beta:x").unwrap_err().contains("not a registered"));
-        assert!(reach("/w/client", Level::Read, None, false).parse("beta:x").unwrap_err().contains("private"));
+    fn no_reach_from_an_unregistered_repo_or_a_private_project() {
+        assert!(reach("/w/elsewhere", Level::Read, None).parse("beta:x").unwrap_err().contains("not a registered"));
+        assert!(reach("/w/client", Level::Read, None).parse("beta:x").unwrap_err().contains("private"));
     }
 
     #[test]
     fn addresses_resolve() {
-        let r = reach("/w/alpha", Level::Read, None, false);
+        let r = reach("/w/alpha", Level::Read, None);
         assert_eq!(r.parse("lane").unwrap(), Addr::Local("lane".into()));
         // Self-qualified, even with reach on, is local.
         assert_eq!(r.parse("alpha:(main)").unwrap(), Addr::Local("(main)".into()));
@@ -412,7 +407,7 @@ mod tests {
 
     #[test]
     fn self_qualification_works_with_reach_off() {
-        let r = reach("/w/alpha", Level::Off, None, false);
+        let r = reach("/w/alpha", Level::Off, None);
         assert_eq!(r.parse("alpha:lane").unwrap(), Addr::Local("lane".into()));
     }
 
@@ -420,7 +415,7 @@ mod tests {
     fn a_duplicate_name_from_a_hand_edit_is_refused_not_guessed() {
         let mut g = reg();
         g.projects.push(Entry { root: "/w/beta2".into(), name: "beta".into(), ..Default::default() });
-        let r = Reach::new(Inputs { main_root: "/w/alpha", user: Level::Read, flag: None, in_run: false, registry: g });
+        let r = Reach::new(Inputs { main_root: "/w/alpha", user: Level::Read, flag: None, registry: g });
         let e = r.parse("beta:x").unwrap_err();
         assert!(e.contains("ambiguous"), "{e}");
         assert!(!e.contains("/w/"), "no root in the message: {e}");
@@ -431,7 +426,7 @@ mod tests {
     /// registry gave it.
     #[test]
     fn the_callers_name_is_the_registry_entry_for_its_root() {
-        assert_eq!(reach("/w/beta", Level::Read, None, false).my_name(), Some("beta"));
-        assert_eq!(reach("/w/unknown", Level::Read, None, false).my_name(), None);
+        assert_eq!(reach("/w/beta", Level::Read, None).my_name(), Some("beta"));
+        assert_eq!(reach("/w/unknown", Level::Read, None).my_name(), None);
     }
 }

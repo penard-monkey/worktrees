@@ -18,9 +18,8 @@ const STORE_FILE: &str = ".worktrees.places.json";
 /// The declared lifecycle vocabulary — the closed set `set_lifecycle` accepts.
 ///
 /// Here rather than in whichever surface needed it first: the MCP server
-/// validates a model's argument against it, and `runs::apply_proposal`
-/// validates a *run's* proposal against it, and two lists would be two answers
-/// to the same question. (The app keeps its own copy in `lib.rs` because
+/// validates a model's argument against it, and a second list would be a
+/// second answer to the same question. (The app keeps its own copy in `lib.rs` because
 /// `dnd-check.mjs` mirrors that one into the frontend.)
 pub const LIFECYCLE_LABELS: [&str; 4] = ["closed", "saved", "archived", "abandoned"];
 
@@ -164,16 +163,20 @@ fn store_path(repo: &str) -> PathBuf {
 
 /// The first time this repo gets a store, teach the repo to ignore it.
 ///
-/// `.worktrees.places.json`, `.worktrees.automations.json`, `.worktrees/` and
+/// `.worktrees.places.json`, `.worktrees/` and
 /// `.worktrees-sync/` (the backups a pull leaves behind) are per-MACHINE state
 /// — `sync` ferries them between machines out-of-band, and excludes its own
 /// directory from the transfer — so a repo that just acquired one should not
 /// answer `git status` with an untracked file the tool itself wrote.
 ///
-/// ONE function and ONE list for every sidecar this tool writes, called by
-/// `store::edit` and by `automation::write` alike: two of these would mean two
-/// headers in the same file, and whichever sidecar was created second would
-/// append its own block below the first.
+/// ONE function and ONE list for every sidecar this tool writes: two of these
+/// would mean two headers in the same file, and whichever sidecar was created
+/// second would append its own block below the first.
+///
+/// `/.worktrees.automations.json` was on this list while automations existed
+/// (v0.29.0 until their removal). It is not any more because nothing writes
+/// that file now; a repo that has one keeps its exclude line, since this
+/// function only ever appends.
 /// `.git/info/exclude` rather than `.gitignore` because the choice is this
 /// checkout's, not the project's: it is never committed, and it never hides a
 /// TRACKED file, so a user who deliberately committed the store is unaffected.
@@ -196,7 +199,6 @@ pub(crate) fn exclude_app_state(base: &Path) {
     let existing = fs::read_to_string(&path).unwrap_or_default();
     let missing: Vec<&str> = [
         "/.worktrees.places.json",
-        "/.worktrees.automations.json",
         "/.worktrees/",
         "/.worktrees-sync/",
     ]
@@ -212,8 +214,7 @@ pub(crate) fn exclude_app_state(base: &Path) {
     }
     // The header is written ONCE per file. A repo whose exclude block predates a
     // new entry gains the entry and not a second header — which is what a repo
-    // upgraded across this change actually meets, and what a second writer
-    // (`automation.rs`) would otherwise produce on its own first write.
+    // upgraded across this change actually meets.
     if !out.lines().any(|l| l == HEADER) {
         out.push_str(HEADER);
         out.push('\n');
@@ -475,10 +476,6 @@ mod tests {
             "the store itself must be excluded: {after_first}"
         );
         assert!(
-            after_first.lines().any(|l| l == "/.worktrees.automations.json"),
-            "the automations sidecar must be excluded too — same class of file,              written by the same tool, and `git status` names it the same way: {after_first}"
-        );
-        assert!(
             after_first.lines().any(|l| l == "/.worktrees/"),
             "the worktrees dir must be excluded: {after_first}"
         );
@@ -491,6 +488,10 @@ mod tests {
         assert!(
             !after_first.contains("/task_plan.md"),
             "planning docs are a personal workflow, not app state: {after_first}"
+        );
+        assert!(
+            !after_first.contains("automations"),
+            "automations were removed; nothing writes their sidecar any more: {after_first}"
         );
 
         edit(&repo, "beta", |d| d.pinned = Some(true)).unwrap();
@@ -517,7 +518,6 @@ mod tests {
         assert!(body.starts_with("# git ls-files"), "existing content stays first: {body}");
         assert!(body.lines().any(|l| l == "*.swp"), "the user's own rule survives: {body}");
         assert!(body.lines().any(|l| l == "/.worktrees.places.json"), "{body}");
-        assert!(body.lines().any(|l| l == "/.worktrees.automations.json"), "{body}");
         assert!(body.lines().any(|l| l == "/.worktrees/"), "{body}");
         assert!(body.lines().any(|l| l == "/.worktrees-sync/"), "{body}");
     }
@@ -540,7 +540,6 @@ mod tests {
         assert_eq!(count("/.worktrees.places.json"), 1, "no duplicate: {body}");
         assert_eq!(count("/.worktrees/"), 1, "no duplicate: {body}");
         assert_eq!(count("/.worktrees-sync/"), 1, "the one it lacked, once: {body}");
-        assert_eq!(count("/.worktrees.automations.json"), 1, "the other one it lacked: {body}");
     }
 
     /// The shape a repo UPGRADED across a new sidecar meets: the block is
@@ -555,7 +554,7 @@ mod tests {
         let exclude = t.0.join(".git/info/exclude");
         fs::write(
             &exclude,
-            "# worktrees — per-machine app state (moved by `worktrees sync`, not git)\n             /.worktrees.places.json\n/.worktrees/\n/.worktrees-sync/\n",
+            "# worktrees — per-machine app state (moved by `worktrees sync`, not git)\n/.worktrees.places.json\n/.worktrees/\n",
         )
         .unwrap();
 
@@ -568,7 +567,7 @@ mod tests {
             "exactly one header: {body}"
         );
         assert_eq!(
-            body.lines().filter(|l| *l == "/.worktrees.automations.json").count(),
+            body.lines().filter(|l| *l == "/.worktrees-sync/").count(),
             1,
             "{body}"
         );

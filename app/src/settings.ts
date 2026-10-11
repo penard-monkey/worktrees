@@ -60,13 +60,14 @@ export type PlacePanels = {
    *  build holds `"files"` or `"terminal"`, both still legal — nothing to
    *  migrate. The reverse is the one to know about: a place left on `"docs"`
    *  (or `"plan"`) and then opened by an older build falls through that
-   *  build's ternary and shows the Terminal. Survivable, and the price of not
-   *  adding a sanitiser that would have to know every future tab.
+   *  build's ternary and shows the Terminal. Survivable on its own; a tab
+   *  that is REMOVED is not, which is why `loadSettings` now sanitises this
+   *  key against `DOCK_TABS` (see there).
    *
    *  This union is MIRRORED by `DOCK_RAIL` in App.tsx, and `dockrail-check.mjs`
    *  asserts the two sets are equal — in BOTH places below, since a tab added
    *  to one and not the other type-checks perfectly and then cannot persist. */
-  dock_tab: "files" | "terminal" | "docs" | "plan" | "automations" | "prs";
+  dock_tab: "files" | "terminal" | "docs" | "plan" | "prs";
   dock_width: number;
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
@@ -91,6 +92,13 @@ export type PlacePanels = {
    *  and then spread that stale value back over the global. */
   files_diff?: boolean;
 };
+
+/** Every tab the dock can show, as a VALUE — the unions above are types and
+ *  vanish at runtime. `dockrail-check.mjs` pins it to `DOCK_RAIL` and to both
+ *  unions. */
+export const DOCK_TABS = ["files", "terminal", "docs", "plan", "prs"] as const;
+const isDockTab = (t: unknown): t is Settings["dock_tab"] =>
+  typeof t === "string" && (DOCK_TABS as readonly string[]).includes(t);
 
 /** Key for the per-place records in `Settings` (`place_panels`,
  *  `term_tab_names`). A place is identified by the PAIR — slugs are only unique
@@ -199,7 +207,7 @@ export type Settings = {
   pull_requests: boolean;
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
-  dock_tab: "files" | "terminal" | "docs" | "plan" | "automations" | "prs"; // last-used dock tab
+  dock_tab: "files" | "terminal" | "docs" | "plan" | "prs"; // last-used dock tab
   // Files tab: how the tree and the viewer sit relative to each other.
   // "auto" flips to side-by-side once the dock is at least SPLIT_AT wide — a
   // narrow dock has no room for two columns, a wide one wastes half its width
@@ -704,6 +712,18 @@ export async function loadSettings(): Promise<Settings> {
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     if (!CODEX_PERMISSIONS.includes(s.codex_permissions)) s.codex_permissions = "auto-review";
     if (!PI_PROJECT_TRUST.includes(s.pi_project_trust)) s.pi_project_trust = "never";
+    // A tab that no longer exists must land on Files, globally AND per place.
+    // Without this, `"automations"` (the tab removed after 0.40.1) persisted in
+    // ui-state.json fell through the dock body's ternary to the Terminal with
+    // no rail button lit, and `panelsFor` would keep handing it back forever.
+    if (!isDockTab(s.dock_tab)) s.dock_tab = "files";
+    if (s.place_panels && typeof s.place_panels === "object") {
+      for (const p of Object.values(s.place_panels)) {
+        // Only a value that IS there and is wrong: an absent one is left absent
+        // rather than filled in (the seed trap on `place_panels`, CLAUDE.md).
+        if (p && typeof p === "object" && p.dock_tab !== undefined && !isDockTab(p.dock_tab)) p.dock_tab = "files";
+      }
+    }
     // A hand-edited model string must still be data before it can reach argv.
     // Read into a scroll position and a row index, so it must be numbers.
     s.files_open_at = Object.fromEntries(Object.entries(s.files_open_at && typeof s.files_open_at === "object" ? s.files_open_at : {})

@@ -15,7 +15,6 @@ import { cloneSource, dirNameProblem, isCloneError, type CloneProgress } from ".
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
-import { AutomationsPane } from "./AutomationsPane";
 import { FilesPane, FileView, type DockAt } from "./FilesPane";
 import { FeedbackRailButton } from "./FeedbackSection";
 import { RELEASES_URL, SettingsSheet } from "./SettingsSheet";
@@ -329,9 +328,8 @@ const EXIT_LAUNCH_REFUSED = 5;
  *  `DocsPane` derives a `Set` from it with `useMemo`, and a new identity every
  *  render would rebuild that set on every keystroke in the filter box. */
 const EMPTY_PATHS: string[] = [];
-/** The same frozen-empty trick for a project whose snapshot has not arrived:
- *  `AutomationsPane` memoises a slug→place Map off this array, and a fresh `[]`
- *  per render would rebuild it on every poll tick. */
+/** The same frozen-empty trick for a project whose snapshot has not arrived,
+ *  so a lookup against it allocates nothing per render. */
 const EMPTY_PLACES: Place[] = [];
 
 // ⌘1..N nav targets, in the nav's displayed top-to-bottom order. Two entries
@@ -7492,7 +7490,6 @@ function App() {
     { key: "terminal" as Settings["dock_tab"], track: "dock.terminal", icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
     { key: "docs" as Settings["dock_tab"], track: "dock.docs", icon: <Icons.BookText size={17} />, title: "Docs" },
     { key: "plan" as Settings["dock_tab"], track: "dock.plan", icon: <Icons.ListChecks size={17} />, title: "Plan" },
-    { key: "automations" as Settings["dock_tab"], track: "dock.automations", icon: <Icons.Zap size={17} />, title: "Automations" },
     // Rendered only for a project that resolved to GitHub (`prsOn`) — see the
     // rail's map below. A GitLab or local-only project gets no icon at all.
     { key: "prs" as Settings["dock_tab"], track: "dock.prs", icon: <Icons.GitPullRequest size={17} />, title: "Pull requests" },
@@ -8275,24 +8272,6 @@ function App() {
                     // to Files, or the first answer for this project lands
                     <div className="prs-empty" data-testid="prs-empty" data-state="none" />
                   )
-                ) : eff.dock_tab === "automations" ? (
-                  // Keyed on the PROJECT, not the place: what this tab shows is
-                  // the project's — the same two lists from any of its places —
-                  // so a switch between places of one project must NOT remount
-                  // it and throw away an open run (proposal §7.1).
-                  <AutomationsPane
-                    key={sel.repo}
-                    repo={sel.repo}
-                    projectName={basename(sel.repo)}
-                    places={ws?.projects.find((pv) => pv.root === sel.repo)?.snapshot?.places ?? EMPTY_PLACES}
-                    pageVisible={pageVisible}
-                    reloadToken={placesToken}
-                    mdZoom={eff.files_md_zoom}
-                    onSelectPlace={(slug) => selectSlug(sel.repo, slug)}
-                    onPatchDeclared={(slug, patch, effective) => patchDeclared(sel.repo, slug, patch, effective)}
-                    onRefresh={refresh}
-                    onError={fail}
-                  />
                 ) : eff.dock_tab === "plan" ? (
                   // Keyed on the place like DocsPane: a switch remounts, so no
                   // previous place's plan can paint under the new place's name.
