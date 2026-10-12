@@ -67,6 +67,15 @@ close-out ritual (global `/close-out` skill; this repo's settings in
     path + mtime if it ever shows in a trace.
   - `PlanningChoice` reads "(your default: off)" while the default is unset —
     say "not chosen yet".
+  - The on-open `planning_status` re-read can land AFTER a write made while
+    it was in flight and overwrite App's newer state with the older one. Add
+    a generation guard (drop a read that started before the latest write) in
+    BOTH `ProjectSheet.tsx`'s `PlanningSheetSection` and the identical
+    pre-existing read in `PlanningPanel.tsx` (`PlanningSection`'s mount
+    effect). From #479's review.
+  - `PlanningSheetSection`'s `open` prop and its `if (!open) return` are
+    dead: it renders only inside an open sheet that is remounted per root.
+    Drop them the next time the file is touched.
 
   See [the build session](docs/sessions/2026-10-09-owned-planning-p1/summary.md).
 - **Owned planning: phase 2 and 3 (phase 1 shipped in #471 and #475; cdv is
