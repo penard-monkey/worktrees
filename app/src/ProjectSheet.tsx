@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ProfilesInfo } from "./ProfilesPanel";
 import { AgentFixButton, AgentSetupSection, openPr, useAgentSetup, type AgentSetupStatus } from "./AgentSetup";
 import { projectTodos, type Remedies, type Todo, type TodoHealth } from "./projectTodos";
+import { LEVEL_WORDS, ProjectRow, writeProjectPlanning, type PlanningStatus } from "./PlanningPanel";
 
 // Right-side slide-over for ONE project (proposal §10). It stays a sheet:
 // unlike Settings, it is about the thing selected in the tree behind it.
@@ -163,8 +164,17 @@ export function ProjectSheet({
   health = null,
   agentStatus = null,
   onAgentLoaded,
+  planning = null,
+  onPlanningChanged,
+  onOpenPlanningSettings,
 }: {
   open: boolean;
+  /** App's `planning_status` — the ONE copy Settings → Planning also shows,
+   *  so a change in either is a change in both. */
+  planning?: PlanningStatus | null;
+  onPlanningChanged: (s: PlanningStatus) => void;
+  /** Settings → Planning: the global default and the explanation live there. */
+  onOpenPlanningSettings: () => void;
   /** Opened from "Repair / upgrade…" or the header's to-do badge: bring the
    *  To do list into view (it is the first section, so this is belt-and-braces
    *  for a sheet that was already scrolled). */
@@ -632,6 +642,9 @@ export function ProjectSheet({
 
           <AgentSetupSection ctl={agent} onError={logError} />
 
+          <PlanningSheetSection root={root} open={open} status={planning} onStatus={onPlanningChanged}
+            onOpenSettings={onOpenPlanningSettings} onError={logError} />
+
           {canSuggest && suggestion && (
             <section className="setting">
               <label>Suggested config<span className="upd-tag warn">init</span></label>
@@ -665,6 +678,50 @@ export function ProjectSheet({
       </aside>
     </div>
   );
+}
+
+/** The sheet's Planning section (owned-planning §2.2): this project's row from
+ *  Settings → Planning — the same `ProjectRow`, so the control, the show-only
+ *  path and a refused full's text cannot drift — plus what is in effect and
+ *  why. Module scope: `ProjectRow` owns a half-typed path. */
+function PlanningSheetSection({ root, open, status, onStatus, onOpenSettings, onError }: {
+  root: string;
+  open: boolean;
+  status: PlanningStatus | null;
+  onStatus: (s: PlanningStatus) => void;
+  onOpenSettings: () => void;
+  onError: (m: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  // Re-read on open, as Settings → Planning does: `worktrees plan level` may
+  // have changed it. One read, into App's state — not a second poll.
+  useEffect(() => {
+    if (!open) return;
+    invoke<PlanningStatus | null>("planning_status")
+      .then((s) => { if (s) onStatus(s); })
+      .catch((e) => onError(`planning_status: ${String(e)}`));
+  }, [open]);
+  const p = status?.projects.find((x) => x.root === root) ?? null;
+  const dflt = status?.default === "full" ? "full" : "off";
+  const why = !p ? "" : p.level !== null ? "set for this project"
+    : `inherits your default: ${status?.default === "unset" ? "not chosen yet" : status?.default}`;
+  return <section className="setting" data-testid="project-planning">
+    <label>Planning</label>
+    {!status ? <div className="hint">Checking…</div>
+      : !p ? <div className="hint">This project is not in your planning settings yet.</div>
+      : <>
+        <ProjectRow p={p} dflt={dflt} busy={busy} label="This project" onSet={async (level, path, scope) => {
+          setBusy(true);
+          try { return await writeProjectPlanning(root, level, path, scope, onStatus); }
+          finally { setBusy(false); }
+        }} />
+        <div className="hint" data-testid="project-planning-effective">In effect: <b>{LEVEL_WORDS[p.effective]}</b> — {why}.</div>
+      </>}
+    <div className="ver-actions">
+      <button className="ctrl sm" data-testid="project-planning-settings" onClick={onOpenSettings}>Default &amp; how it works…</button>
+    </div>
+    <div className="hint">Your default for every project, and what planning writes, are in Settings → Planning.</div>
+  </section>;
 }
 
 // The §9 passive nudge, in the nav under a qualifying project's header. Box

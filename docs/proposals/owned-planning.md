@@ -44,7 +44,7 @@ config was written. No agent session was run. Claims are marked as follows:
 | What does "off" mean? | Exactly today's behaviour, byte for byte. The Plan tab reads whatever exists and nothing is written. The default is off. |
 | Where is the choice? | **User tier only.** A global default (unset / full / off), and a per-project level on the project's registry entry: inherit / **off** / **show only** / **full**. A cloned repo cannot switch it on for you; it may only suggest. |
 | Bring your own (decided) | **Show only** points the Plan tab and MCP at the project's own planning files, at a path the user chooses: no hooks, no writes. It is the way to keep your own mechanism, or your own hooks, and still see the plan. It is read through the same `plan::resolve` with `safe_under`. The planning *folder* stays `.planning/` (the skill and the fixed brief opener depend on it). Show-only is the escape hatch, and full is refused where `.planning/` holds tracked files (§2.5). |
-| How is it offered? | One machine-level offer in `offers.ts`, `planning`, which opens Settings → Planning (the explanation lives there). A checkbox in Add existing / New project, and a post-clone line for Clone. Settings' per-project list for changing it later; a ProjectSheet section in phase 2. |
+| How is it offered? | One machine-level offer in `offers.ts`, `planning`, which opens Settings → Planning (the explanation lives there). A checkbox in Add existing / New project, and a post-clone line for Clone. Settings' per-project list for changing it later, and the same row in Project settings… (shipped ahead of phase 2). |
 | Relationship to planning-with-files | **Wrap, don't replace.** The skill stays the *method* for writing the three files. Worktrees takes over *where they live*, *which one is active* and *what gets injected*. The skill's root-only hooks then have nothing to fire on. Hooks are SessionStart and UserPromptSubmit only, because a Stop hook's stdout never reaches the model. |
 | `[plan] project` | `[plan] project = "docs/plan/goals.md"` in `.worktrees.toml`. A **path**, which is data, so ADR 0001 allows it. Validated like `[docs]`, read through `safe_under`. It retires the tracked-copy hack in valleos and in cdv #684. |
 | Stale-dir trap | When planning is **on**, the "newest directory" guess is **gone**. The order is `[plan] project` (main only), then `.active_plan`, then "no plan yet". A valid pointer whose plan is not written yet means "not written yet" (or the root plan, if one exists). An invalid one (not a plain name, or a symlink) is `invalid_pointer` and never tells anyone where to write. It never falls through to an old directory. When planning is off, nothing changes. |
@@ -201,7 +201,9 @@ Planning in this project:  ( ) off   ( ) show only: [ docs/plan       ]  from: (
   later still means something.
 - **ProjectSheet → Planning** is where the choice is changed later. It sits
   beside the existing sections and holds the same toggle plus the migrate
-  button.
+  button. *Shipped ahead of phase 2* as Settings → Planning's own row
+  (`ProjectRow`, shared), the level in effect and its source, and a button to
+  Settings → Planning; the migrate button waits for `migrate`.
 - **Not a project to-do.** `projectTodos.ts` counts what a button can *fix*.
   An unadopted feature is not broken, so it gets no badge. The only nag is the
   machine-level offer, once.
@@ -257,7 +259,7 @@ projects.json Entry   "planning": "off" | "show" | "full"     (absent = inherit 
   and labels it ("this repo suggests `docs/plan`"). It never applies itself.
   It has the same Layer A validation as `[plan] project`.
 - **The path is chosen in the UI.** Settings → Planning's per-project list
-  (and the ProjectSheet section, phase 2) gets a path field, with a picker
+  (and the ProjectSheet section, which shares its row) gets a path field, with a picker
   rooted at the project's main root. The picker refuses anything that
   canonicalises outside it.
 
@@ -422,7 +424,7 @@ rule is a choice, not a detection:
   - `[plan] show` as a repo suggestion;
   - the folder picker;
   - the own-hooks hint;
-  - the ProjectSheet section.
+  - ~~the ProjectSheet section~~ — shipped ahead of phase 2 (v0.41.0).
 - **Later, only on demand:** a user-tier brief location (Q12).
 
 
@@ -961,7 +963,8 @@ adopt from the offer and have its agents and its Plan tab agree.
 - `plan archive` and archive-on-remove;
 - the topic picker;
 - `[plan] show`, the folder picker and the own-hooks hint (§2.5.5);
-- a ProjectSheet section (the Settings list covers changing it later);
+- a ProjectSheet section (the Settings list covers changing it later) —
+  added right after, in v0.41.0, as that list's own row;
 - pi and Codex.
 
 **Phase 2: valleos and this repo.**
@@ -971,7 +974,8 @@ adopt from the offer and have its agents and its Plan tab agree.
 - `worktrees plan migrate` and `plan show`.
 - `plan archive` + archive-on-remove (Q6).
 - The Plan tab's topic picker (Q5) and migrate button.
-- The ProjectSheet → Planning section.
+- ~~The ProjectSheet → Planning section~~ — shipped in v0.41.0; its migrate
+  button comes with `migrate`.
 
 valleos then deletes `sync-goals.sh`, `plan-context.sh` and the tracked copy,
 which also ends the §1.3 hijack.

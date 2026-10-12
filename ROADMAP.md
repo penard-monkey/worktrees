@@ -77,7 +77,8 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   - the Plan tab topic picker;
   - `[plan] show` as a repo suggestion, the folder picker and the own-hooks
     hint;
-  - the ProjectSheet section.
+  - the ProjectSheet section's migrate button (the section itself shipped
+    in v0.41.0, sharing Settings → Planning's row).
 
   Phase 3:
   - the pi extension, after a trust-modal probe;

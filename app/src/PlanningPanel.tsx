@@ -49,13 +49,29 @@ const GLOBAL: { id: "full" | "off"; label: string; hint: string }[] = [
   { id: "off", label: "Choose per project", hint: "Off unless you turn it on for a project below, or when you add one." },
 ];
 
-const LEVEL_WORDS: Record<PlanningLevel, string> = { off: "off", show: "show only", full: "full" };
+export const LEVEL_WORDS: Record<PlanningLevel, string> = { off: "off", show: "show only", full: "full" };
+
+/** The one write of a project's level, shared by Settings → Planning and the
+ *  project sheet. Errors come back as the row's own text: a refused full or a
+ *  bad path is something the user fixes right there. */
+export async function writeProjectPlanning(root: string, level: PlanningLevel | null, planPath: string | null,
+  scope: PlanningScope | null, onStatus: (s: PlanningStatus) => void): Promise<string | null> {
+  try {
+    onStatus(await invoke<PlanningStatus>("set_project_planning", { root, level, planPath, scope }));
+    return null;
+  } catch (e) {
+    return String((e as { message?: string })?.message ?? e);
+  }
+}
 
 /** One project's row: inherit / off / show only / full, and show-only's path.
  *  At module scope (a component defined inside another remounts every render
- *  and loses the half-typed path). */
-function ProjectRow({ p, dflt, busy, onSet }: {
+ *  and loses the half-typed path). Also the project sheet's control. */
+export function ProjectRow({ p, dflt, busy, onSet, label = p.name }: {
   p: PlanningStatus["projects"][number];
+  /** The row's heading: the project's name, except where the surface already
+   *  names it (the project sheet). */
+  label?: string;
   dflt: PlanningLevel;
   busy: boolean;
   onSet: (level: PlanningLevel | null, path: string | null, scope: PlanningScope | null) => Promise<string | null>;
@@ -76,7 +92,7 @@ function ProjectRow({ p, dflt, busy, onSet }: {
   const dirty = choice === "show" && (path !== (p.plan_path ?? "") || scope !== (p.plan_scope ?? "place") || p.level !== "show");
   return <div className="planning-row" data-project={p.name}>
     <div className="planning-row-head">
-      <b>{p.name}</b>
+      <b>{label}</b>
       <select value={choice} disabled={busy} aria-label={`Planning in ${p.name}`}
         onChange={(e) => {
           const c = e.currentTarget.value as PlanningLevel | "inherit";
@@ -131,16 +147,10 @@ export function PlanningSection({ status, onStatus, onReport, offerPending = fal
     catch (e) { onReport(`set_planning_default: ${String(e)}`); }
     finally { setBusy(false); }
   };
-  /** Errors come back as the row's own text: a refused full or a bad path is
-   *  something the user fixes right there. */
   const setProject = async (root: string, level: PlanningLevel | null, planPath: string | null, scope: PlanningScope | null) => {
     setBusy(true);
-    try {
-      onStatus(await invoke<PlanningStatus>("set_project_planning", { root, level, planPath, scope }));
-      return null;
-    } catch (e) {
-      return String((e as { message?: string })?.message ?? e);
-    } finally { setBusy(false); }
+    try { return await writeProjectPlanning(root, level, planPath, scope, onStatus); }
+    finally { setBusy(false); }
   };
   const dflt: PlanningLevel = status?.default === "full" ? "full" : "off";
   const skew = cliSkew(status);
