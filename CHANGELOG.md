@@ -58,6 +58,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - MCP `place_status.plan` gains `level`, `topic`, `plan_scope` and `reason`,
   and `how_resolved` gains `pending`, `invalid_pointer` and `show_path` —
   only on projects that opted in.
+- **Project settings… has a Planning section.** Right-click a project to see
+  and change its planning level there — the same control, path field and
+  refusal as Settings → Planning's row, with what is in effect and why
+  ("inherits your default: off"). A change in either place shows in the
+  other at once.
 
 ## [0.40.1] - 2026-10-08
 

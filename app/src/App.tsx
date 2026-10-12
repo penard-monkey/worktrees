@@ -8550,6 +8550,9 @@ function App() {
         // menu agree with the sheet at once. (User skills are machine-wide and
         // live in Settings.)
         onAgentLoaded={(root, st) => setAgentSetup((m) => ({ ...m, [root]: st }))}
+        planning={planning}
+        onPlanningChanged={setPlanning}
+        onOpenPlanningSettings={() => { setProjSheet(null); setProjSheetTodo(false); openSettings({ cat: "planning", focus: "planning" }); }}
       />
 
       {/* Per-place status check (right-click a worktree → Status check…, or the
