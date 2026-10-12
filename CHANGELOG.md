@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-12
+
 ### Removed
 - **Automations** (added in v0.29.0) are gone: the app's Automations dock tab,
   the `worktrees automations` / `auto` verbs, and the MCP tools
