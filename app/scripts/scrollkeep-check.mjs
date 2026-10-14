@@ -29,6 +29,10 @@
 //   keeps the block being read at the same offset, a stub read mid-write does
 //   not lose the place, a remount comes back to where it was, another file in
 //   the same box starts at its top, and an unchanged render touches nothing.
+//   Plus the review's cases: duplicate text (a plan's repeated status line)
+//   and empty blocks (<hr>) do not match the wrong twin, a pixel fallback
+//   that landed re-anchors, and a StrictMode remount keeps the listener.
+//   PlanPane's call is pinned by source, since half 1 only runs FileView.
 //
 // The mock harness alone cannot see this — its read_file answers in a
 // microtask — and bats never reaches the frontend. Half 1 fails on the
@@ -93,9 +97,17 @@ function runtime() {
       const k = i++;
       const s = slots[k];
       if (!s || depsMoved(s.deps, deps)) {
-        slots[k] = { deps, cleanup: s?.cleanup };
+        slots[k] = { deps, cleanup: s?.cleanup, effect: true };
         pending.push(() => { slots[k].cleanup?.(); const c = fn(); slots[k].cleanup = typeof c === "function" ? c : undefined; });
       }
+      slots[k].fn = fn;
+    },
+    /** React 18+/19 StrictMode in dev: every effect's cleanup runs, then every
+     *  effect runs again, on the SAME instance (refs and state survive). */
+    strictRemount() {
+      const fx = slots.filter((x) => x?.effect);
+      for (const x of fx) { x.cleanup?.(); x.cleanup = undefined; }
+      for (const x of fx) { const c = x.fn(); x.cleanup = typeof c === "function" ? c : undefined; }
     },
     useSyncExternalStore(_sub, get) { return get(); },
     render(fn, props) {
@@ -202,7 +214,10 @@ const readsBefore = reads;
 trees = await settle({ ...props, reloadToken: 1 });
 ok(reads === readsBefore + 1, "a refresh re-reads the file");
 ok(trees.every((t) => scrollerOf(t)), "the scroller never leaves the tree on a refresh (no 'loading…' frame)");
-ok(rt.renders - before === 1, `unchanged bytes cost no extra render (${rt.renders - before} renders, want 1: the prop change itself)`);
+// FileView ALONE: `useDocPathLinks` is a stub here, and the real one may set
+// state of its own on a refresh. What this pins is that the READ path costs
+// nothing for identical bytes — not that the app re-renders nothing.
+ok(rt.renders - before === 1, `unchanged bytes cost FileView no extra render (${rt.renders - before} renders, want 1: the prop change itself)`);
 
 // Refresh, new bytes on disk.
 disk.content = "# Title\n\nINSERTED\n\npara one\n\npara two\n";
@@ -242,7 +257,7 @@ function fakeBox(texts, h = 30) {
     },
     set(ts) {
       box.blocks = ts.map((t, i) => ({
-        textContent: t,
+        textContent: t, tagName: t === "" ? "HR" : "P",
         getBoundingClientRect: () => ({ top: i * h - top, bottom: (i + 1) * h - top }),
       }));
       // Layout: a shorter document clamps the box, and says so with an event.
@@ -274,7 +289,7 @@ const commit = async (texts, content) => { if (texts) ref.current.set(texts); kr
 await commit(null, "v1");
 await scrollTo(box, 20 * 30 + 12); // reading block 20, 12px of it scrolled past
 const a = K.captureAnchor(box, ".md > *");
-ok(a.idx === 20 && a.sig === "block 20" && a.off === -12, `anchor is the top-visible block and its offset (${JSON.stringify(a)})`);
+ok(a.idx === 20 && a.sig === "P:block 20" && a.prev === "P:block 19" && a.off === -12, `anchor is the top-visible block and its offset (${JSON.stringify(a)})`);
 
 const t0 = box.scrollTop;
 await commit(null, "v1");
@@ -317,6 +332,80 @@ ok(box2.scrollTop === 0, `a different document in a reused box starts at the top
 key = "k1";
 await commit(box.blocks.map((b) => b.textContent), "v3");
 ok(box2.blocks[25].getBoundingClientRect().top === -5, "switching back to the first document restores its place");
+
+// Duplicate text is the norm in a plan: planning-with-files puts the same
+// `**Status:** pending` line under every phase. A phase inserted above moves
+// the block being read DOWN by three, and the twin three ABOVE it has the same
+// text — the nearest-first search must not settle for it.
+{
+  const phases = (from, n) => Array.from({ length: n }, (_, j) => [`Phase ${from + j}`, "Status: pending", `list ${from + j}`]).flat();
+  const b = fakeBox(phases(1, 12));
+  ref.current = b; key = "twins";
+  await commit(null, "t1");
+  await scrollTo(b, 13 * 30 + 7); // Phase 5's status line (idx 13), 7px scrolled past
+  await commit(["Phase 0", "Status: pending", "list 0", ...phases(1, 12)], "t2");
+  const at = b.blocks.findIndex((x, i) => x.textContent === "Status: pending" && b.blocks[i - 1]?.textContent === "Phase 5");
+  const got = b.blocks[at].getBoundingClientRect().top;
+  ok(got === -7, `duplicate text: the reader stays on Phase 5's status line, not the twin a phase up (${got}px, want -7)`);
+}
+
+// Blocks with no text (an <hr>, an image-only paragraph) all look alike. An
+// anchor on one must not match a different one near the old index.
+{
+  const rule = Array.from({ length: 30 }, (_, i) => (i % 2 ? "" : `para ${i}`));
+  const b = fakeBox(rule);
+  ref.current = b; key = "rules";
+  await commit(null, "r1");
+  await scrollTo(b, 21 * 30 + 12); // an <hr> (idx 21) at the top edge
+  const was = b.blocks[22].getBoundingClientRect().top; // the paragraph under it
+  await commit(["new a", "", ...rule], "r2");
+  const got = b.blocks[24].getBoundingClientRect().top; // same paragraph, two blocks later
+  ok(got === was, `an empty block is not an anchor that matches every other one (para at ${got}px, want ${was})`);
+}
+
+// A pixel fallback that LANDED is a fresh start: the anchor is re-taken there,
+// so the next edit above is followed instead of drifting by its height.
+{
+  const b = fakeBox(doc);
+  ref.current = b; key = "stale";
+  await commit(null, "s1");
+  await scrollTo(b, 10 * 30);
+  const once = doc.map((t, i) => (i === 10 ? "rewritten" : t));
+  await commit(once, "s2"); // the anchored block is the one edited: pixel holds
+  const was = b.blocks[12].getBoundingClientRect().top;
+  await commit(["new a", "new b", "new c", ...once], "s3");
+  const got = b.blocks[15].getBoundingClientRect().top;
+  ok(got === was, `after a pixel fallback the next edit above is still followed (block 12 at ${got}px, want ${was})`);
+}
+
+// StrictMode runs every effect's cleanup and then the effect again on the same
+// instance. A scroller that exists on the first commit must still be listened
+// to afterwards, or the reader's scrolling is never recorded.
+{
+  const srt = runtime();
+  const SK = kbuild({ useLayoutEffect: (...a) => srt.useLayoutEffect(...a), useRef: (...a) => srt.useRef(...a) });
+  const b = fakeBox(doc);
+  const r = { current: b };
+  const H = ({ content }) => { SK.useScrollKeep(r, "strict", content, ".md > *"); return null; };
+  srt.render(H, { content: "x1" });
+  srt.strictRemount();
+  await scrollTo(b, 20 * 30 + 12);
+  b.set(["new a", "new b", "new c", ...doc]);
+  srt.render(H, { content: "x2" });
+  await flush();
+  const got = topOf(b, "block 20");
+  ok(got === -12, `after a StrictMode remount the scroller is still followed (block 20 at ${got}px, want -12)`);
+}
+
+// PlanPane's wiring, which half 1 does not reach: the hook on the plan body's
+// own ref, anchoring on rendered markdown blocks.
+{
+  const plan = fs.readFileSync(new URL("../src/PlanPane.tsx", import.meta.url).pathname, "utf8");
+  const call = /useScrollKeep\(\s*bodyRef\s*,[^;]*\bbody\s*,\s*"\.md > \*"\s*\)/.test(plan);
+  const host = /<div\b[^>]*\bref=\{bodyRef\}[^>]*className="scroll plan-body"|<div\b[^>]*className="scroll plan-body"[^>]*\bref=\{bodyRef\}/.test(plan);
+  ok(call, "PlanPane hands useScrollKeep its body ref, the drawn body, and the markdown block selector");
+  ok(host, "PlanPane's bodyRef is the .scroll plan-body box");
+}
 
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log("\nall ok");

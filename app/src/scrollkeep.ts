@@ -20,8 +20,9 @@
 // Blocks are matched by text, NOT by DOM identity: Markdown keys its children
 // by INDEX, so a paragraph inserted at the top makes React rewrite every node
 // below it in place — the element you were reading still exists, holding the
-// text of the one above it. The anchor therefore carries the block's text and
-// its index, and a restore searches outward from the old index for that text.
+// text of the one above it. The anchor therefore carries the block's text, the
+// text of the block before it, and its index, and a restore searches outward
+// from the old index for that pair (see `restoreAnchor` for why the pair).
 //
 // `scrollkeep-check.mjs` drives the real file under DOM stubs.
 import { useLayoutEffect, useRef, type RefObject } from "react";
@@ -31,8 +32,11 @@ export type Anchor = {
   top: number;
   /** index of the anchor block among `blocks`, -1 when there were none */
   idx: number;
-  /** its text, clipped — what a restore looks for */
+  /** its tag and text, clipped — what a restore looks for */
   sig: string;
+  /** the sig of the nearest anchorable block BEFORE it ("" at the top): what
+   *  tells two blocks with the same text apart */
+  prev: string;
   /** its top edge minus the scroller's, in px (≤ 0 when partly scrolled past) */
   off: number;
 };
@@ -57,7 +61,20 @@ export function recallAnchor(key: string): Anchor | null {
   return saved.get(key) ?? null;
 }
 
-const sigOf = (el: Element) => (el.textContent ?? "").slice(0, SIG_LEN);
+/** A block's identity for matching, or "" for one that has none. A block with
+ *  no text (an <hr>, an image-only paragraph) is NOT anchorable: every other
+ *  one near it would match, so the anchor moves to the next block that says
+ *  something. The tag keeps a heading and a paragraph of the same words apart. */
+const sigOf = (el: Element) => {
+  const text = (el.textContent ?? "").slice(0, SIG_LEN);
+  return text ? `${el.tagName}:${text}` : "";
+};
+
+/** The sig of the nearest anchorable block before `i`. */
+function prevOf(blocks: Element[], i: number): string {
+  for (let j = i - 1; j >= 0; j--) { const s = sigOf(blocks[j]); if (s) return s; }
+  return "";
+}
 
 function blocksOf(box: HTMLElement, sel: string | null): Element[] {
   return sel ? Array.from(box.querySelectorAll(sel)) : [];
@@ -67,8 +84,9 @@ function blocksOf(box: HTMLElement, sel: string | null): Element[] {
 export function captureAnchor(box: HTMLElement, sel: string | null): Anchor {
   const top = box.scrollTop;
   const blocks = blocksOf(box, sel);
-  if (!blocks.length) return { top, idx: -1, sig: "", off: 0 };
-  const edge = box.getBoundingClientRect().top;
+  const none: Anchor = { top, idx: -1, sig: "", prev: "", off: 0 };
+  if (!blocks.length) return none;
+  const { top: edge, bottom } = box.getBoundingClientRect();
   // Top-level blocks are laid out in order, so their bottoms are monotonic:
   // binary-search the first one still (partly) below the top edge.
   let lo = 0, hi = blocks.length - 1;
@@ -77,26 +95,47 @@ export function captureAnchor(box: HTMLElement, sel: string | null): Anchor {
     if (blocks[mid].getBoundingClientRect().bottom > edge) hi = mid;
     else lo = mid + 1;
   }
-  const b = blocks[lo];
-  return { top, idx: lo, sig: sigOf(b), off: b.getBoundingClientRect().top - edge };
+  // Skip blocks with nothing to match on, as far as the visible part of the
+  // box goes. None on screen at all: the pixel is all there is to keep.
+  for (let i = lo; i < blocks.length; i++) {
+    const r = blocks[i].getBoundingClientRect();
+    if (r.top >= bottom) break;
+    const sig = sigOf(blocks[i]);
+    if (sig) return { top, idx: i, sig, prev: prevOf(blocks, i), off: r.top - edge };
+  }
+  return none;
 }
 
 /** Scroll `box` so the anchor's block is back at its offset. Falls back to the
  *  old scrollTop when the block's text is gone. Answers whether it got there
- *  EXACTLY — the block found and at its offset, not clamped short. */
+ *  EXACTLY — the block at its offset, or the fallback pixel reached — rather
+ *  than clamped short.
+ *
+ *  The search runs nearest-first from the old index, but a match on text alone
+ *  is only a fallback: duplicate text is ordinary (planning-with-files writes
+ *  the same `**Status:** pending` under every phase), and an insert of k blocks
+ *  above puts the true block at idx+k with a twin at idx−k that is checked
+ *  first. A candidate whose PREVIOUS block also matches wins outright. */
 export function restoreAnchor(box: HTMLElement, sel: string | null, a: Anchor): boolean {
   const blocks = a.idx >= 0 ? blocksOf(box, sel) : [];
   let hit: Element | null = null;
-  if (blocks.length) {
+  let loose: Element | null = null;
+  if (blocks.length && a.sig) {
     for (let d = 0; d <= SEARCH && !hit; d++) {
       for (const i of d === 0 ? [a.idx] : [a.idx - d, a.idx + d]) {
-        if (i >= 0 && i < blocks.length && sigOf(blocks[i]) === a.sig) { hit = blocks[i]; break; }
+        if (i < 0 || i >= blocks.length || sigOf(blocks[i]) !== a.sig) continue;
+        if (prevOf(blocks, i) === a.prev) { hit = blocks[i]; break; }
+        loose ??= blocks[i];
       }
     }
   }
+  hit ??= loose;
   if (!hit) {
+    // Landing exactly on the old pixel is a success: the caller re-anchors
+    // there, so the next edit above is followed. A clamp short of it (a stub
+    // document) is not, and the anchor is kept for the read that has it.
     box.scrollTop = a.top;
-    return a.idx < 0 && Math.abs(box.scrollTop - a.top) < 1;
+    return Math.abs(box.scrollTop - a.top) < 1;
   }
   const at = () => hit!.getBoundingClientRect().top - box.getBoundingClientRect().top;
   box.scrollTop += at() - a.off;
@@ -183,5 +222,13 @@ export function useScrollKeep(
     // Nothing scrolled yet: the top is the right place to stay.
     if (s.anchor) restore(s.anchor);
   });
-  useLayoutEffect(() => () => { st.current.off?.(); }, []);
+  // Forget the element as well as the listener. StrictMode runs this cleanup
+  // and then the effects again on the same instance; with `el` still set, the
+  // re-run would see "same element" and never re-attach the listener.
+  useLayoutEffect(() => () => {
+    const s = st.current;
+    s.off?.();
+    s.off = null;
+    s.el = null;
+  }, []);
 }
