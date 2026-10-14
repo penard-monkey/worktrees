@@ -235,7 +235,7 @@ So the per-project choice has three levels, not two.
 |---|---|---|---|---|
 | **off** | today's behaviour exactly (the legacy resolution, including the newest-dir guess) | none | none | anyone who has not chosen |
 | **show only** | the plan at a **path the user chooses** (§2.5.2), and nothing else | **none** | **none beyond the brief `new` already writes** (§2.5.3): no `.active_plan`, no topic dir, no `info/exclude` | a project with its own planning mechanism, its own hooks, or both |
-| **full** | the owned layout (§3) | session + prompt (§3.3) | `.active_plan` + an empty topic dir at `new`; `info/exclude` if needed | a project that wants worktrees to run planning |
+| **full** | the owned layout (§3) | session + prompt (§3.3) | `.active_plan` + an empty topic dir at `new`; `info/exclude` if needed — written when the project becomes full and re-checked at each launch (#483) | a project that wants worktrees to run planning |
 
 The **global** default stays two-valued: off / full, plus unset. "Show only"
 needs a path, and a path belongs to one project, so show-only exists only per
