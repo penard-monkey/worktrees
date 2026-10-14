@@ -95,7 +95,7 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
 pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crate::profile::AiLaunch {
     let mut launch = ai_launch_inner(p, ui, wt, ai_cmd);
     launch.guidance = guidance_for(p, ui, wt, &launch);
-    launch.planning = planning_for(p, ui, &launch);
+    launch.planning = planning_for(p, ui, wt, &launch);
     launch
 }
 
@@ -104,14 +104,21 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
 /// `guidance_for`, whose gate (guidance on, repo managed) would make it vanish
 /// for a user who turned guidance off. Claude only in phase 1, never on the
 /// fail-closed launch (its `cmd` is not the harness).
-fn planning_for(p: &Project, ui: &mut dyn Ui, launch: &crate::profile::AiLaunch) -> Vec<String> {
+///
+/// Every launch at full also makes sure `/.planning/` is excluded, whatever
+/// the harness: a project set to full before the setting itself wrote the
+/// line (or whose exclude was hand-edited since) heals on its next launch,
+/// (main)'s included — and (main) is where `.planning/orchestrator/` is
+/// written before any place exists.
+fn planning_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile::AiLaunch) -> Vec<String> {
+    if crate::planning::effective(&p.main_root).level != crate::planning::Level::Full {
+        return Vec::new();
+    }
+    report_exclude(ui, &crate::planning::ensure_planning_excluded(&p.git_common, wt));
     let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
         return Vec::new();
     };
     if adapter.provider().id != crate::provider::CLAUDE.id {
-        return Vec::new();
-    }
-    if crate::planning::effective(&p.main_root).level != crate::planning::Level::Full {
         return Vec::new();
     }
     let Some((bin, _)) = crate::plancmd::probe_cli() else {
@@ -638,6 +645,17 @@ fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
     std::fs::write(path, body)
 }
 
+/// Say what an exclude write came to — only when it wrote or failed; an
+/// already-ignored `.planning/` is the normal case after the first time.
+fn report_exclude(ui: &mut dyn Ui, x: &crate::planning::Exclude) {
+    use crate::planning::Exclude;
+    match x {
+        Exclude::Added => ui.info(&x.words()),
+        Exclude::Failed { .. } => ui.warn(&x.words()),
+        Exclude::Ignored | Exclude::Listed | Exclude::Tracked => {}
+    }
+}
+
 /// Full planning's write at `new`: `.planning/.active_plan` = the topic (the
 /// place's slug) and an empty `.planning/<topic>/`. Never through a link —
 /// every component is lstat'd first, and the pointer is created with
@@ -663,9 +681,7 @@ fn write_plan_pointer(p: &Project, ui: &mut dyn Ui, wt: &str, topic: &str) {
     }
     // The exclude is about the CLONE, not this pointer: a reused place, or one
     // whose session already wrote `.active_plan`, still needs it.
-    if crate::planning::ensure_planning_excluded(&p.git_common, wt) {
-        ui.info("planning: added /.planning/ to .git/info/exclude (local, never committed)");
-    }
+    report_exclude(ui, &crate::planning::ensure_planning_excluded(&p.git_common, wt));
     let active = planning.join(".active_plan");
     if std::fs::symlink_metadata(&active).is_ok() {
         return;

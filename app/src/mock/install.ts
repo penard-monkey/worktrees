@@ -138,13 +138,22 @@ let mockQuota: { gate: boolean; weekly_warn_pct: number | null; problems: string
     ? ["[quota] weekly_warn_pct = 150 is not a whole number from 1 to 100 — ignored, the provider's own grade applies"] : [],
 };
 const mockQuotaNow = () => ({ ...mockQuota, config_path: "/Users/demo/.config/worktrees/config.toml" });
-function mockPlanning(): Record<string, unknown> {
+// Roots whose info/exclude already has `/.planning/`: the first full write
+// answers "added", every later one "ignored" — the real core's idempotence.
+const mockExcluded = new Set<string>();
+const mockExclude = (root: string) => {
+  if (mockExcluded.has(root)) return { outcome: "ignored" };
+  mockExcluded.add(root);
+  return { outcome: "added" };
+};
+function mockPlanning(excluded: Map<string, unknown> = new Map()): Record<string, unknown> {
   const dflt = mockPlanningDefault === "full" ? "full" : "off";
   return {
     default: mockPlanningDefault, version: 1, config_path: "/Users/demo/.config/worktrees/planning.json",
     projects: ws.projects.map((p) => {
       const e = mockPlanProjects.get(p.root) ?? { level: null, plan_path: null, plan_scope: null };
-      return { root: p.root, name: projectName(p.root), ...e, effective: e.level ?? dflt };
+      const x = excluded.get(p.root);
+      return { root: p.root, name: projectName(p.root), ...e, effective: e.level ?? dflt, ...(x ? { exclude: x } : {}) };
     }),
     cli_path: MOCK_WT_BIN,
     cli_version: new URLSearchParams(location.search).get("planskew") === "1" ? "0.39.0" : "0.41.0",
@@ -1237,7 +1246,10 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "set_planning_default":
       if (!["unset", "full", "off"].includes(String(args.default))) throw `not a planning default: ${args.default}`;
       mockPlanningDefault = String(args.default);
-      return mockPlanning();
+      // `planning::set_global`: a full default sweeps every project it makes full.
+      return mockPlanning(new Map(mockPlanningDefault !== "full" ? [] : ws.projects
+        .filter((p) => (mockPlanProjects.get(p.root)?.level ?? "full") === "full")
+        .map((p) => [p.root, mockExclude(p.root)])));
     case "set_project_planning": {
       // The real one is core's `planning::set_project`: it refuses show without
       // a path and a path that leaves the repo; `?plantracked=1` makes full
@@ -1251,7 +1263,9 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       mockPlanProjects.set(String(args.root), {
         level, plan_path: level === "show" ? path : null, plan_scope: level === "show" && args.scope === "main" ? "main" : null,
       });
-      return mockPlanning();
+      const root = String(args.root);
+      const full = (level ?? (mockPlanningDefault === "full" ? "full" : "off")) === "full";
+      return mockPlanning(new Map(full ? [[root, mockExclude(root)]] : []));
     }
     case "planning_suggested":
       return new URLSearchParams(location.search).get("plansuggest") === "1";

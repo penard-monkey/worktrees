@@ -51,6 +51,49 @@ put() { mkdir -p "$(dirname "$1/$2")"; printf '%s\n' "${3:-# plan}" > "$1/$2"; }
   [ "$(resolved "$REPO/.worktrees/feat-full")" = "pending|-|feat-full|-" ]
 }
 
+@test "plan: level full excludes .planning/ at once, before any place exists" {
+  run grep -q '^/.planning/$' "$REPO/.git/info/exclude"
+  [ "$status" -ne 0 ]
+  run_wt plan level full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"planning: added /.planning/ to .git/info/exclude"* ]]
+  [ "$(grep -c '^/.planning/$' "$REPO/.git/info/exclude")" -eq 1 ]
+  # idempotent, and says why nothing was written
+  run_wt plan level full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"git already ignores .planning/"* ]]
+  [ "$(grep -c '^/.planning/$' "$REPO/.git/info/exclude")" -eq 1 ]
+}
+
+@test "plan: level full leaves a repo whose .gitignore covers .planning/ alone" {
+  printf '.planning/\n' > "$REPO/.gitignore"
+  run_wt plan level full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"git already ignores .planning/"* ]]
+  run grep -q 'planning' "$REPO/.git/info/exclude"
+  [ "$status" -ne 0 ]
+}
+
+@test "plan: default full excludes .planning/ in every project it makes full" {
+  run_wt plan default full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"planning: added /.planning/ to .git/info/exclude"* ]]
+  [ "$(grep -c '^/.planning/$' "$REPO/.git/info/exclude")" -eq 1 ]
+}
+
+@test "plan: a launch at full heals a missing exclude line" {
+  level full
+  run_wt new feat-h --no-install --no-attach
+  [ "$status" -eq 0 ]
+  # a project set to full before the setting wrote the line, or hand-edited
+  rm "$REPO/.git/info/exclude"
+  run_wt close feat-h
+  run_wt open feat-h --no-attach
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"planning: added /.planning/ to .git/info/exclude"* ]]
+  [ "$(grep -c '^/.planning/$' "$REPO/.git/info/exclude")" -eq 1 ]
+}
+
 @test "plan: the global default reaches new; a project's off beats it" {
   run_wt plan default full
   [ "$status" -eq 0 ]

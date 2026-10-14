@@ -98,6 +98,34 @@ pub fn save_global(d: GlobalDefault) -> Result<Global, String> {
     save_global_at(&global_path(), d)
 }
 
+/// The user's act on the global default: save it, then — when it is full —
+/// make sure every registered project it now makes full has `/.planning/`
+/// excluded. A project that is unreachable or holds a tracked `.planning/`
+/// is REPORTED, never a reason to refuse the setting: the default is about
+/// the machine, and one stale registry entry must not block it. Only projects
+/// whose effective level is full are touched (an explicit off/show keeps
+/// them out of the sweep).
+pub fn set_global(d: GlobalDefault) -> Result<(Global, Vec<(Entry, Exclude)>), String> {
+    set_global_at(&global_path(), &crate::registry::path(), d)
+}
+
+pub fn set_global_at(path: &Path, reg_path: &Path, d: GlobalDefault) -> Result<(Global, Vec<(Entry, Exclude)>), String> {
+    let g = save_global_at(path, d)?;
+    if g.default != GlobalDefault::Full {
+        return Ok((g, Vec::new()));
+    }
+    let swept = crate::registry::read_lenient_at(reg_path)
+        .projects
+        .into_iter()
+        .filter(|e| effective_from(Some(e), &g).level == Level::Full)
+        .map(|e| {
+            let x = exclude_for_root(&e.root);
+            (e, x)
+        })
+        .collect();
+    Ok((g, swept))
+}
+
 pub fn save_global_at(path: &Path, d: GlobalDefault) -> Result<Global, String> {
     let g = Global { default: d, version: VERSION };
     if let Some(dir) = path.parent() {
@@ -238,11 +266,25 @@ pub fn validate_show_path(main_root: &Path, rel: &str, scope: Scope) -> Result<S
 /// Set (or clear) a project's planning. Full is refused where `.planning/`
 /// holds tracked files — one `git ls-files`, at adoption only. A show-only
 /// path is validated by the same `safepath` the resolver reads it with.
-pub fn set_project(key: &str, choice: &Choice) -> Result<Entry, String> {
-    set_project_at(&crate::registry::path(), key, choice)
+///
+/// When the project ends up FULL — chosen, or inherited from a full default —
+/// `/.planning/` goes into the clone's info/exclude right after the registry
+/// write, and the outcome comes back with the entry. Before this the only
+/// writer was `worktrees new`, so (main)'s own session could write
+/// `.planning/orchestrator/` untracked and unignored before any place existed.
+pub fn set_project(key: &str, choice: &Choice) -> Result<Set, String> {
+    set_project_at(&crate::registry::path(), &read_global(), key, choice)
 }
 
-pub fn set_project_at(reg_path: &Path, key: &str, choice: &Choice) -> Result<Entry, String> {
+/// What [`set_project`] did: the stored entry, and the exclude outcome when
+/// the project is now effectively full (`None` otherwise).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Set {
+    pub entry: Entry,
+    pub exclude: Option<Exclude>,
+}
+
+pub fn set_project_at(reg_path: &Path, g: &Global, key: &str, choice: &Choice) -> Result<Set, String> {
     let key = crate::registry::resolve_key(key);
     let root = crate::registry::read_lenient_at(reg_path)
         .find(&key)
@@ -261,7 +303,7 @@ pub fn set_project_at(reg_path: &Path, key: &str, choice: &Choice) -> Result<Ent
         }
         _ => None,
     };
-    crate::registry::edit_at(reg_path, |reg| {
+    let entry = crate::registry::edit_at(reg_path, |reg| {
         let e = reg.projects.iter_mut().find(|e| e.root == root).ok_or_else(|| format!("no registered project: {key}"))?;
         e.planning = choice.level;
         e.plan_path = path.clone();
@@ -270,23 +312,79 @@ pub fn set_project_at(reg_path: &Path, key: &str, choice: &Choice) -> Result<Ent
             _ => None,
         };
         Ok(e.clone())
-    })
+    })?;
+    let exclude = (effective_from(Some(&entry), g).level == Level::Full).then(|| exclude_for_root(&entry.root));
+    Ok(Set { entry, exclude })
+}
+
+/// What making sure `.planning/` is ignored came to.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Exclude {
+    /// `/.planning/` was appended to info/exclude.
+    Added,
+    /// git already ignores `.planning/` here (a `.gitignore`, the exclude
+    /// file, or a global excludes file) — nothing written.
+    Ignored,
+    /// info/exclude already has the line, yet git does not ignore
+    /// `.planning/` — a negation somewhere wins over it. Nothing written.
+    Listed,
+    /// `.planning/` holds tracked files: an exclude line cannot hide them.
+    Tracked,
+    /// The repo could not be read or the file not written.
+    Failed { reason: String },
+}
+
+impl Exclude {
+    /// The one line the CLI prints (and the app logs) for it.
+    pub fn words(&self) -> String {
+        match self {
+            Exclude::Added => "planning: added /.planning/ to .git/info/exclude (local, never committed)".into(),
+            Exclude::Ignored => "planning: git already ignores .planning/ here — nothing written".into(),
+            Exclude::Listed => "planning: .git/info/exclude lists /.planning/, but another ignore rule un-ignores it".into(),
+            Exclude::Tracked => "planning: .planning/ holds tracked files — an exclude line cannot hide them".into(),
+            Exclude::Failed { reason } => format!("planning: could not exclude .planning/: {reason}"),
+        }
+    }
+}
+
+/// [`ensure_planning_excluded`] for a project known only by its main root:
+/// resolves the clone's git common dir, and reports a tracked `.planning/`
+/// instead of writing a line that could not hide it.
+pub fn exclude_for_root(root: &str) -> Exclude {
+    if root.is_empty() || !Path::new(root).is_dir() {
+        return Exclude::Failed { reason: format!("{root}: not a directory") };
+    }
+    let Some(raw) = crate::git::git_out(root, &["rev-parse", "--git-common-dir"]) else {
+        return Exclude::Failed { reason: format!("{root}: not a git repository") };
+    };
+    let raw = PathBuf::from(raw.trim());
+    let common = if raw.is_absolute() { raw } else { Path::new(root).join(raw) };
+    if tracked_planning(root) {
+        return Exclude::Tracked;
+    }
+    ensure_planning_excluded(&common.to_string_lossy(), root)
 }
 
 /// In full mode, make sure `.planning/` is ignored: append `/.planning/` to
 /// the clone's `info/exclude` (shared by every worktree of it) when git does
 /// not already ignore it in `wt`. Local and never committed; nothing else in
-/// the repo is written. Returns whether it wrote.
-pub fn ensure_planning_excluded(git_common: &str, wt: &str) -> bool {
+/// the repo is written. Called when a project BECOMES full ([`set_project`],
+/// [`set_global`]), at every full launch, and at `new` as a backstop.
+pub fn ensure_planning_excluded(git_common: &str, wt: &str) -> Exclude {
     let probe = format!("{}/{}", crate::ops::PLANNING_DIR, ".active_plan");
     if crate::git::git_ok(wt, &["check-ignore", "-q", "--no-index", "--", &probe]) {
-        return false;
+        return Exclude::Ignored;
     }
     let excl = Path::new(git_common).join("info/exclude");
     let line = "/.planning/";
-    let existing = std::fs::read_to_string(&excl).unwrap_or_default();
+    let existing = match std::fs::read_to_string(&excl) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Exclude::Failed { reason: format!("{}: {e}", excl.display()) },
+    };
     if existing.lines().any(|l| l.trim() == line) {
-        return false;
+        return Exclude::Listed;
     }
     if let Some(dir) = excl.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -297,7 +395,10 @@ pub fn ensure_planning_excluded(git_common: &str, wt: &str) -> bool {
     }
     body.push_str(line);
     body.push('\n');
-    std::fs::write(&excl, body).is_ok()
+    match std::fs::write(&excl, body) {
+        Ok(()) => Exclude::Added,
+        Err(e) => Exclude::Failed { reason: format!("{}: {e}", excl.display()) },
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +479,145 @@ mod tests {
         assert_eq!(main_root_of(&d.join(".worktrees/lane")), d);
         assert_eq!(main_root_of(&d), d);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A scratch repo under the temp dir, and git run ONLY there: a path that
+    /// came back empty or outside $TMP would make `git -C` mean the live tree.
+    struct Scratch {
+        dir: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+            let dir = tmp.join(format!("wtplanning-x-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("repo")).unwrap();
+            let s = Scratch { dir };
+            s.git(&["init", "-q"]);
+            // Repo config beats the user's: no global excludes file on this
+            // machine can make `.planning/` read as already ignored.
+            s.git(&["config", "core.excludesFile", "/dev/null"]);
+            s
+        }
+        fn repo(&self) -> PathBuf {
+            self.dir.join("repo")
+        }
+        fn git(&self, args: &[&str]) {
+            let repo = self.repo();
+            let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+            assert!(!repo.as_os_str().is_empty() && repo.starts_with(&tmp), "refusing git outside $TMP: {}", repo.display());
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.excludesFile=/dev/null"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        }
+        /// A registry holding just this repo, beside it (never ~/.config).
+        fn registry(&self) -> PathBuf {
+            let reg = self.dir.join("projects.json");
+            let root = self.repo().to_string_lossy().into_owned();
+            crate::registry::edit_at(&reg, |r| {
+                r.projects.push(Entry { root, name: "repo".into(), ..Default::default() });
+                Ok(())
+            })
+            .unwrap();
+            reg
+        }
+        fn exclude_lines(&self) -> usize {
+            std::fs::read_to_string(self.repo().join(".git/info/exclude"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.trim() == "/.planning/")
+                .count()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn choose(level: Option<Level>) -> Choice {
+        Choice { level, plan_path: None, plan_scope: None }
+    }
+
+    #[test]
+    fn setting_full_excludes_planning_once_and_says_so() {
+        let x = Scratch::new("full");
+        let reg = x.registry();
+        let root = x.repo().to_string_lossy().into_owned();
+        let unset = Global::default();
+        let set = set_project_at(&reg, &unset, &root, &choose(Some(Level::Off))).unwrap();
+        assert_eq!(set.exclude, None, "off writes nothing");
+        assert_eq!(x.exclude_lines(), 0);
+        let set = set_project_at(&reg, &unset, &root, &choose(Some(Level::Full))).unwrap();
+        assert_eq!(set.exclude, Some(Exclude::Added));
+        assert_eq!(x.exclude_lines(), 1);
+        let set = set_project_at(&reg, &unset, &root, &choose(Some(Level::Full))).unwrap();
+        assert_eq!(set.exclude, Some(Exclude::Ignored), "idempotent: the line now ignores it");
+        assert_eq!(x.exclude_lines(), 1);
+    }
+
+    #[test]
+    fn inheriting_a_full_default_is_full_too() {
+        let x = Scratch::new("inherit");
+        let reg = x.registry();
+        let root = x.repo().to_string_lossy().into_owned();
+        let full = Global { default: GlobalDefault::Full, version: VERSION };
+        let set = set_project_at(&reg, &full, &root, &choose(None)).unwrap();
+        assert_eq!(set.exclude, Some(Exclude::Added));
+        assert_eq!(x.exclude_lines(), 1);
+    }
+
+    #[test]
+    fn a_gitignore_that_covers_planning_is_left_alone() {
+        let x = Scratch::new("ignored");
+        std::fs::write(x.repo().join(".gitignore"), ".planning/\n").unwrap();
+        let reg = x.registry();
+        let root = x.repo().to_string_lossy().into_owned();
+        let set = set_project_at(&reg, &Global::default(), &root, &choose(Some(Level::Full))).unwrap();
+        assert_eq!(set.exclude, Some(Exclude::Ignored));
+        assert_eq!(x.exclude_lines(), 0, "info/exclude untouched");
+    }
+
+    #[test]
+    fn the_full_default_sweeps_inheriting_projects_and_reports_the_rest() {
+        let x = Scratch::new("sweep");
+        let reg = x.registry();
+        // an unreachable entry and an explicit-off one beside it
+        crate::registry::edit_at(&reg, |r| {
+            r.projects.push(Entry { root: x.dir.join("gone").to_string_lossy().into_owned(), name: "gone".into(), ..Default::default() });
+            r.projects.push(Entry { root: x.dir.join("off").to_string_lossy().into_owned(), name: "off".into(), planning: Some(Level::Off), ..Default::default() });
+            Ok(())
+        })
+        .unwrap();
+        let gpath = x.dir.join("planning.json");
+        let (_, swept) = set_global_at(&gpath, &reg, GlobalDefault::Off).unwrap();
+        assert!(swept.is_empty(), "off sweeps nothing");
+        assert_eq!(x.exclude_lines(), 0);
+        let (g, swept) = set_global_at(&gpath, &reg, GlobalDefault::Full).unwrap();
+        assert_eq!(g.default, GlobalDefault::Full, "an unreachable project never refuses the setting");
+        let names: Vec<_> = swept.iter().map(|(e, _)| e.name.as_str()).collect();
+        assert_eq!(names, ["repo", "gone"], "the explicit off is not swept");
+        assert_eq!(swept[0].1, Exclude::Added);
+        assert!(matches!(swept[1].1, Exclude::Failed { .. }), "{:?}", swept[1].1);
+        assert_eq!(x.exclude_lines(), 1);
+    }
+
+    #[test]
+    fn a_tracked_planning_dir_is_reported_not_written() {
+        let x = Scratch::new("tracked");
+        std::fs::create_dir_all(x.repo().join(".planning/o")).unwrap();
+        std::fs::write(x.repo().join(".planning/o/task_plan.md"), "# g\n").unwrap();
+        x.git(&["add", "-f", ".planning"]);
+        x.git(&["commit", "-qm", "t"]);
+        assert_eq!(exclude_for_root(&x.repo().to_string_lossy()), Exclude::Tracked);
+        assert_eq!(x.exclude_lines(), 0);
     }
 }

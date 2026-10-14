@@ -22,6 +22,10 @@ export type PlanningStatus = {
     plan_path: string | null;
     plan_scope: PlanningScope | null;
     effective: PlanningLevel;
+    /** What the write that returned THIS status did about `/.planning/` in
+     *  `.git/info/exclude`, for each project it left full. Absent on a plain
+     *  read: it reports an act, not the repo. */
+    exclude?: PlanningExclude;
   }[];
   /** The CLI the plan hook runs, and this app's own version: two binaries,
    *  so two releases (owned-planning §7 item 1). `cli_version` null = no
@@ -30,6 +34,22 @@ export type PlanningStatus = {
   cli_version: string | null;
   app_version: string;
 };
+
+/** `planning::Exclude` (core). */
+export type PlanningExclude =
+  | { outcome: "added" | "ignored" | "listed" | "tracked" }
+  | { outcome: "failed"; reason: string };
+
+/** One project's exclude outcome, as its row says it. */
+export function excludeWords(x: PlanningExclude): string {
+  switch (x.outcome) {
+    case "added": return "Added /.planning/ to .git/info/exclude — local, never committed.";
+    case "ignored": return "git already ignores .planning/ here — nothing written.";
+    case "listed": return ".git/info/exclude lists /.planning/, but another ignore rule un-ignores it — check this repo's .gitignore.";
+    case "tracked": return ".planning/ holds tracked files here, so an exclude line cannot hide them.";
+    case "failed": return `Could not exclude .planning/: ${x.reason}`;
+  }
+}
 
 /** The words for "the hook and the tab may disagree", or null when they run
  *  the same release. Shared by this panel and the Plan tab. */
@@ -121,6 +141,8 @@ export function ProjectRow({ p, dflt, busy, onSet, label = p.name }: {
     </div>}
     {choice === "show" && <div className="hint">A file is the plan; a folder is shown through its <code>task_plan.md</code>. "Main's copy" reads main's working tree for every place — right for a goals file the orchestrator edits. The path is checked against main when you apply it, whichever you choose: one missing from main is fine for "each place", but one that is a link in main is refused even if lanes have a real folder there.</div>}
     {err && <div className="hint planning-err" role="alert">{err}</div>}
+    {!err && p.exclude && <div className={`hint${p.exclude.outcome === "failed" || p.exclude.outcome === "tracked" ? " planning-err" : ""}`}
+      data-testid="planning-exclude">{excludeWords(p.exclude)}</div>}
   </div>;
 }
 
@@ -164,7 +186,7 @@ export function PlanningSection({ status, onStatus, onReport, offerPending = fal
       <li>Claude sessions Worktrees launches get the current phase at start and when the plan changes.</li>
       <li>Nothing is committed, and <code>.planning/</code> stays out of git.</li>
     </ul>
-    <div className="hint"><b>What changes in a repo:</b> <code>.git/info/exclude</code> gains <code>/.planning/</code> if git does not already ignore it. It is local and never committed; no other file in your repo is written.</div>
+    <div className="hint"><b>What changes in a repo:</b> <code>.git/info/exclude</code> gains <code>/.planning/</code> the moment a project becomes full, unless git already ignores it — and again at each launch if the line has gone. It is local and never committed; no other file in your repo is written.</div>
     <div className="hint"><b>What is not changed:</b> your plans' content, your <code>.gitignore</code>, your <code>.claude/settings.json</code>, and any skill. Already have your own planning files or hooks? Choose <b>show only</b> for that project: the Plan tab shows your file, and nothing is injected or written.</div>
     {!status ? <div className="hint">Checking…</div> : <>
       <div className="seg" role="radiogroup" aria-label="Planning default">
