@@ -410,9 +410,20 @@ fn cmd_default(ui: &mut dyn crate::Ui, args: &[String]) -> i32 {
             return 2;
         }
     };
-    match planning::save_global(want) {
-        Ok(_) => {
+    match planning::set_global(want) {
+        Ok((_, swept)) => {
             ui.info(&format!("planning default: {}", args[0]));
+            // Every project the default now makes full, said only where
+            // something happened or could not: an already-ignored one is quiet.
+            for (e, x) in &swept {
+                match x {
+                    planning::Exclude::Added => ui.info(&format!("{}: {}", e.name, x.words())),
+                    planning::Exclude::Tracked | planning::Exclude::Failed { .. } => {
+                        ui.warn(&format!("{}: {}", e.name, x.words()))
+                    }
+                    planning::Exclude::Ignored | planning::Exclude::Listed => {}
+                }
+            }
             0
         }
         Err(e) => {
@@ -474,8 +485,15 @@ fn cmd_level(ui: &mut dyn crate::Ui, args: &[String]) -> i32 {
     }
     let choice = planning::Choice { level, plan_path: pos.get(1).map(|s| s.to_string()), plan_scope: scope };
     match planning::set_project(&main_s, &choice) {
-        Ok(e) => {
+        Ok(set) => {
+            let e = &set.entry;
             ui.info(&format!("'{}': planning {}", e.name, e.planning.map(Level::as_str).unwrap_or("inherits your default")));
+            match &set.exclude {
+                Some(x @ planning::Exclude::Added) => ui.info(&x.words()),
+                Some(x @ (planning::Exclude::Tracked | planning::Exclude::Failed { .. })) => ui.warn(&x.words()),
+                Some(x @ (planning::Exclude::Ignored | planning::Exclude::Listed)) => ui.plain(&x.words()),
+                None => {}
+            }
             0
         }
         Err(e) => {

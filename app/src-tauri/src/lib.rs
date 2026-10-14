@@ -1129,6 +1129,11 @@ struct PlanningProject {
     plan_path: Option<String>,
     plan_scope: Option<worktrees_core::planning::Scope>,
     effective: worktrees_core::planning::Level,
+    /// What the write that produced THIS status did about `/.planning/` in
+    /// info/exclude, for the projects it made (or found) full. Absent on a
+    /// plain read: it is the result of an act, not a property of the repo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclude: Option<worktrees_core::planning::Exclude>,
 }
 
 /// `planning_status`: machine-level, like `cross_project_status` — the global
@@ -1147,6 +1152,11 @@ struct PlanningStatus {
 }
 
 fn planning_now() -> PlanningStatus {
+    planning_after(&[])
+}
+
+/// [`planning_now`], carrying the exclude outcomes of the write just made.
+fn planning_after(excluded: &[(String, worktrees_core::planning::Exclude)]) -> PlanningStatus {
     use worktrees_core::planning;
     let g = planning::read_global();
     let reg = worktrees_core::registry::read_lenient();
@@ -1160,6 +1170,7 @@ fn planning_now() -> PlanningStatus {
             plan_path: e.plan_path.clone(),
             plan_scope: e.plan_scope,
             effective: planning::effective_from(Some(e), &g).level,
+            exclude: excluded.iter().find(|(r, _)| *r == e.root).map(|(_, x)| x.clone()),
         })
         .collect();
     let cli = worktrees_core::plancmd::probe_cli();
@@ -1190,9 +1201,13 @@ async fn set_planning_default(default: String) -> Result<PlanningStatus, String>
         "off" => GlobalDefault::Off,
         other => return Err(format!("not a planning default: {other}")),
     };
-    worktrees_core::planning::save_global(d)?;
+    let (_, swept) = worktrees_core::planning::set_global(d)?;
     applog("info", &format!("planning default = {default}"));
-    Ok(planning_now())
+    for (e, x) in &swept {
+        applog("info", &format!("{}: {}", e.name, x.words()));
+    }
+    let swept: Vec<_> = swept.into_iter().map(|(e, x)| (e.root, x)).collect();
+    Ok(planning_after(&swept))
 }
 
 /// The user's act: one project's level (`None` = inherit), with show-only's
@@ -1218,9 +1233,14 @@ async fn set_project_planning(
         Some("main") => Some(Scope::Main),
         Some(other) => return Err(format!("not a scope: {other}")),
     };
-    let e = worktrees_core::planning::set_project(&root, &Choice { level, plan_path, plan_scope })?;
+    let set = worktrees_core::planning::set_project(&root, &Choice { level, plan_path, plan_scope })?;
+    let e = &set.entry;
     applog("info", &format!("planning {} = {}", e.name, e.planning.map(Level::as_str).unwrap_or("inherit")));
-    Ok(planning_now())
+    let excluded: Vec<_> = set.exclude.iter().map(|x| (e.root.clone(), x.clone())).collect();
+    if let Some(x) = &set.exclude {
+        applog("info", &format!("{}: {}", e.name, x.words()));
+    }
+    Ok(planning_after(&excluded))
 }
 
 /// After a clone: does the new repo suggest owned planning (`[plan]` in its
@@ -3761,6 +3781,11 @@ async fn ai_status_report(repo: String, slug: String) -> Result<AiStatusReport, 
     // the ONLY trace, and it deliberately points at this log.
     for w in ui.warnings() {
         applog("warn", &format!("ai_status_report repo={repo} slug={slug}: {w}"));
+    }
+    // And what it DID: at full the seam can write `/.planning/` to
+    // info/exclude, and a write nobody hears of is a write nobody can trace.
+    for (_, m) in ui.events.iter().filter(|(s, _)| *s == worktrees_core::diag::Severity::Info) {
+        applog("info", &format!("ai_status_report repo={repo} slug={slug}: {m}"));
     }
     if let Err(msg) = claude_launch_check(&ai.cmd, &ai.match_word) {
         applog("error", &format!("ai_status_report repo={repo} slug={slug}: {msg}"));

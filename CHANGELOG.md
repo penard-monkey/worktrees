@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **Setting a project's planning to full now writes `/.planning/` to
+  `.git/info/exclude` at once**, as Settings → Planning always said it did.
+  Until now only `worktrees new` wrote it, so (main)'s own session could
+  create `.planning/orchestrator/` untracked and unignored before any place
+  existed, ready for a `git add -A` to commit. `worktrees plan level full`,
+  the app's Planning control, and turning full on for all projects
+  (`worktrees plan default full`, which checks every project it makes full)
+  all write it now and say what happened — or that git already ignores
+  `.planning/`, or why it could not. A project set to full before this
+  release is healed the next time a session launches in it.
+
 ## [0.41.0] - 2026-10-12
 
 ### Removed
