@@ -343,6 +343,15 @@ const mockListDelayMs = (() => {
   const m = /[?&]slowlist(?:=(\d+))?/.exec(location.search);
   return m ? Number(m[1] ?? 1500) : 0;
 })();
+// `read_file` answers in a microtask here, which is faster than React paints:
+// a viewer that flips to "loading…" for a refresh never shows that frame, so a
+// scroller that unmounts on every refresh looks perfectly steady in this
+// harness while the real app (IPC + a disk read) throws the document back to
+// its top each time. `?slowread` (default 300ms) or `?slowread=<ms>`.
+const mockReadDelayMs = (() => {
+  const m = /[?&]slowread(?:=(\d+))?/.exec(location.search);
+  return m ? Number(m[1] ?? 300) : 0;
+})();
 // "Clone from URL…" (lib.rs clone_project / clone_cancel). The failure a clone
 // meets is chosen by the URL itself, so one harness load can drive every kind:
 // a URL containing `private` fails auth, `missing` not-found, `hostkey` an
@@ -2281,6 +2290,7 @@ Phase 3: Frontend pane and mock harness
       return `${base}#/${encodeURIComponent(rel).replace(/%2F/g, "/")}`;
     }
     case "read_file": {
+      await sleep(mockReadDelayMs);
       const f = fsFile(args.path as string);
       if (!f) return { content: `// ${args.path}\n`, truncated: false, binary: false, mtime: 0, size: 0 };
       // `size` mirrors the backend: bytes ON DISK, not the length of `content`
@@ -3309,6 +3319,20 @@ const healthyConfigs: Record<string, MockCfg> = {};
     emitEvent("places:changed", {});
     return path;
   },
+  /** Rewrite a file the way an agent working in the place would, then fire
+   * places:changed — the backend poll's refresh, which every FileView re-reads
+   * on. With no `content`, only the event fires: an unchanged-bytes refresh,
+   * the case that used to throw a rendered document back to its top. Only the
+   * real backend emits that event on a timer, so this is how to drive it. */
+  editFile(path: string, content?: string) {
+    if (content != null) {
+      const f = fsFile(path);
+      if (!f) throw new Error(`not a file: ${path}`);
+      fsFiles.set(path, { ...f, content, mtime: Date.now() });
+    }
+    emitEvent("places:changed", {});
+    return path;
+  },
   /** A Claude session asking the app to show a document — the `app:open-doc`
    * event `drain_inbox` emits after it has validated a request from
    * `~/.cache/worktrees/inbox`. Unreachable by clicking: the whole point is
@@ -3373,4 +3397,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/finishTask/syncFail/syncLive/release/uiEvents)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/editFile/finishTask/syncFail/syncLive/release/uiEvents)");

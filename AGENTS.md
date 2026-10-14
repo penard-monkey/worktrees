@@ -452,6 +452,19 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   which reads exactly like whatever chord you just pressed having cleared the
   selection. A whole debugging detour came from that. Launch it as a real
   background task and check `lsof` before believing any harness result.
+- **A reused `<div>` keeps its scroll offset through a class flip — the reset
+  came from a CLAMP.** FileView flipped its `.scroll` box to a "loading…" note
+  on every refresh, which looks like the obvious cause of "the document jumps
+  to the top". It was not: React reuses the same div, and Chrome and WebKit
+  (headless and headed) both kept scrollTop through the flip. What reset it
+  was a refresh that read the file mid-write: a stub document clamps
+  scrollTop, the clamp fires a `scroll` event of its own, and anything that
+  trusts every scroll event records the clamp as the reader's position — so
+  the full file comes back at the top. `scrollkeep.ts` anchors to the block
+  being read and ignores scroll events it (or a clamp of its restore) caused;
+  `scrollkeep-check.mjs` pins both. Reproduce with `?slowread[=ms]` (the
+  mock's `read_file` otherwise answers before React paints) and
+  `__mock.editFile(path, content?)`, in Playwright WebKit.
 - **xterm's search addon fails only once you SEARCH.** Its decorations need
   `allowProposedApi: true` on the `Terminal` — without it `registerDecoration`
   throws on the first ⌘F, from inside an effect, taking the pane down with it;

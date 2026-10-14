@@ -41,6 +41,7 @@ import { useDocPathLinks } from "./useDocPathLinks";
 import { basename, fileInfo, humanSize, relPath, revealsThrough, treePath, type FileKind } from "./filekind";
 import { MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom, type Settings } from "./settings";
 import { applyMd, spliceRange, type MdAction } from "./mdedit";
+import { useScrollKeep } from "./scrollkeep";
 
 // `link` is the symlink target as written (relative stays relative);
 // `link_block` is why the backend will not follow it — absent when it will.
@@ -581,6 +582,12 @@ function FindInFile({ bodyRef, token, onClose, contentKey, editable = false }: {
   );
 }
 
+/** Two reads of the same file that would draw the same thing. */
+function sameRead(a: FileRead | null, b: FileRead) {
+  return !!a && a.content === b.content && a.mtime === b.mtime && a.size === b.size &&
+    a.truncated === b.truncated && a.binary === b.binary;
+}
+
 // ── unsaved edits ────────────────────────────────────────────────────────
 
 /** An edit in progress, keyed by ABSOLUTE path.
@@ -830,14 +837,26 @@ export function FileView(props: FileViewProps) {
   const marking = !!at && diffable;
   const showDiff = diff && diffable && !marking;
 
+  // Which path `read` (or its failure) belongs to. `loading` is a property of
+  // a PATH, not of a read: the first read of a file shows "loading…", a
+  // REFRESH of the same file must not. The note takes the `.scroll` box's place
+  // for a frame on every `places:changed`, emptying the document under the
+  // reader; browsers happen to keep the reused div's offset through that, but
+  // it is a whole-body re-render per tick for nothing, and the viewport is
+  // then one engine quirk away from the top. The jump users actually saw is
+  // the stub-read clamp `scrollkeep.ts` describes. `scrollkeep-check.mjs`
+  // pins both.
+  const readFor = useRef<string | null>(null);
   useEffect(() => {
-    if (isImage) { setRead(null); setLoading(false); return; }
+    if (isImage) { setRead(null); setLoading(false); readFor.current = path; return; }
     let alive = true;
-    setLoading(true);
+    if (readFor.current !== path) setLoading(true);
     invoke<FileRead>("read_file", { path })
-      .then((r) => { if (alive) setRead(r); })
+      // The same bytes back keep the SAME object, so an unchanged file costs
+      // no render at all — not of FileView, and not of a 1 MB Markdown body.
+      .then((r) => { if (alive) setRead((prev) => (sameRead(prev, r) ? prev : r)); })
       .catch((e) => { if (alive) { setRead(null); onError(e); } })
-      .finally(() => { if (alive) setLoading(false); });
+      .finally(() => { if (alive) { readFor.current = path; setLoading(false); } });
     return () => { alive = false; };
     // reloadToken re-reads from disk unconditionally, unsaved buffer or not.
     // That is safe because `read` is only ever the BASELINE — what is on disk —
@@ -975,6 +994,14 @@ export function FileView(props: FileViewProps) {
     setSelfToken((t) => t + 1);
   }, [path]);
 
+  // The document's viewport: kept across a refresh that changed the file
+  // (anchored to the block being read, so an edit above it shifts nothing) and
+  // restored when this view of this file is shown again. Not on the marked
+  // view — CodeBlock scrolls to the line itself, and a restore would fight it.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const preview = info.kind === "markdown" && !mdSource;
+  useScrollKeep(scrollRef, `${path}\0${preview ? "preview" : "source"}`, text, preview ? ".md > *" : null);
+
   const size = isImage ? null : read?.size;
   const pct = clampMdZoom(mdZoom);
   const zoom = String(pct / 100);
@@ -994,7 +1021,7 @@ export function FileView(props: FileViewProps) {
     // one "show me the markup" affordance, not two).
     if (isImage) {
       return mdSource
-        ? <div className="scroll"><CodeBlock src={read?.content ?? ""} lang="xml" wrap={wrap} /></div>
+        ? <div className="scroll" ref={scrollRef}><CodeBlock src={read?.content ?? ""} lang="xml" wrap={wrap} /></div>
         : <ImageView path={path} mime={info.mime} onError={onError} />;
     }
     if (!read) return <div className="tree-note">could not read this file</div>;
@@ -1021,7 +1048,7 @@ export function FileView(props: FileViewProps) {
       // it mid-edit shows what you have written rather than a ghost of the file
       // as it was before you started.
       return (
-        <div className="scroll" style={{ "--md-zoom": zoom } as CSSProperties}>
+        <div className="scroll" ref={scrollRef} style={{ "--md-zoom": zoom } as CSSProperties}>
           <Markdown src={text} onLink={onLink} renderImage={renderImage} pathLinks={pathLinks} />
           {pathMenu}
         </div>
@@ -1030,7 +1057,7 @@ export function FileView(props: FileViewProps) {
     // own scroll box, and a scroller inside a scroller gives the file two
     // scrollbars and a caret that can be scrolled out of sight.
     if (editing) return <SourceEditor text={text} wrap={wrap} onChange={onEdit} onSave={() => save(false)} />;
-    return <div className="scroll"><CodeBlock src={text} lang={info.lang} wrap={wrap} /></div>;
+    return <div className="scroll" ref={scrollRef}><CodeBlock src={text} lang={info.lang} wrap={wrap} /></div>;
   }
 
   const hasPreview = info.kind === "markdown" || info.mime === "image/svg+xml";

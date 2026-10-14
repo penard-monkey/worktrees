@@ -17,6 +17,7 @@
 // Every string in the payload is session-written free text. It is rendered as
 // text nodes only; `Markdown` already renders raw HTML as inert text.
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useScrollKeep } from "./scrollkeep";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Markdown } from "./markdown";
@@ -432,6 +433,11 @@ export function PlanPane({ root, slug, place, agentSession, agentProvider, worke
   // can be 512 KiB and the pane re-renders on every activity flip.
   const raw = plan?.source === "plan" ? plan.markdown : plan?.source === "brief" ? brief : null;
   const body = useMemo(() => (raw == null ? null : withoutComments(raw)), [raw]);
+  // A refresh with the same text already leaves the body alone (`body` is the
+  // same string, Markdown is memoised). This adds the other two: a plan that
+  // CHANGED while you read it keeps the block you were on, and flipping dock
+  // tabs or places and back returns to it (scrollkeep.ts).
+  useScrollKeep(bodyRef, docPath ? `${docPath}\0plan` : null, body, ".md > *");
 
   // Mirrors the terminal's mention drop target (App.tsx `dropTargetAt`): a
   // session that is UP is a target, and `paste_to_ai` answers honestly when no

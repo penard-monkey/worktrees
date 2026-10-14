@@ -44,6 +44,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   all write it now and say what happened — or that git already ignores
   `.planning/`, or why it could not. A project set to full before this
   release is healed the next time a session launches in it.
+- A rendered document in the Files tab no longer jumps back to its top while
+  you read it. A refresh that caught the file mid-write (an agent saving it)
+  drew a stub for a moment, the stub pulled the view to the top, and the whole
+  file then came back there. The viewer now keeps the paragraph you were
+  reading in place across refreshes — including an edit above it — and the
+  Files and Plan tabs return to where you were after switching tabs, views or
+  places and back.
 
 ## [0.41.0] - 2026-10-12
 
