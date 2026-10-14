@@ -360,17 +360,25 @@ pub fn exclude_for_root(root: &str) -> Exclude {
     };
     let raw = PathBuf::from(raw.trim());
     let common = if raw.is_absolute() { raw } else { Path::new(root).join(raw) };
-    if tracked_planning(root) {
+    heal(&common.to_string_lossy(), root)
+}
+
+/// The one guarded write every caller uses — the settings, a launch and `new`
+/// alike: a `.planning/` with tracked files in `wt` is reported, never given
+/// an exclude line it cannot honour (and that the settings row already said
+/// was not written).
+pub fn heal(git_common: &str, wt: &str) -> Exclude {
+    if tracked_planning(wt) {
         return Exclude::Tracked;
     }
-    ensure_planning_excluded(&common.to_string_lossy(), root)
+    ensure_planning_excluded(git_common, wt)
 }
 
 /// In full mode, make sure `.planning/` is ignored: append `/.planning/` to
 /// the clone's `info/exclude` (shared by every worktree of it) when git does
 /// not already ignore it in `wt`. Local and never committed; nothing else in
-/// the repo is written. Called when a project BECOMES full ([`set_project`],
-/// [`set_global`]), at every full launch, and at `new` as a backstop.
+/// the repo is written. Callers go through [`heal`], which refuses a tracked
+/// `.planning/` first.
 pub fn ensure_planning_excluded(git_common: &str, wt: &str) -> Exclude {
     let probe = format!("{}/{}", crate::ops::PLANNING_DIR, ".active_plan");
     if crate::git::git_ok(wt, &["check-ignore", "-q", "--no-index", "--", &probe]) {
@@ -607,6 +615,19 @@ mod tests {
         assert_eq!(names, ["repo", "gone"], "the explicit off is not swept");
         assert_eq!(swept[0].1, Exclude::Added);
         assert!(matches!(swept[1].1, Exclude::Failed { .. }), "{:?}", swept[1].1);
+        assert_eq!(x.exclude_lines(), 1);
+    }
+
+    #[test]
+    fn a_listed_line_that_a_negation_overrides_is_not_written_twice() {
+        let x = Scratch::new("listed");
+        // A .gitignore outranks info/exclude, so its negation un-ignores
+        // `.planning/` even with our line present: the probe says "not
+        // ignored", and only the line check stops a second append.
+        std::fs::create_dir_all(x.repo().join(".git/info")).unwrap();
+        std::fs::write(x.repo().join(".git/info/exclude"), "/.planning/\n").unwrap();
+        std::fs::write(x.repo().join(".gitignore"), "!/.planning/\n").unwrap();
+        assert_eq!(exclude_for_root(&x.repo().to_string_lossy()), Exclude::Listed);
         assert_eq!(x.exclude_lines(), 1);
     }
 

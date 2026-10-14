@@ -114,7 +114,7 @@ fn planning_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile:
     if crate::planning::effective(&p.main_root).level != crate::planning::Level::Full {
         return Vec::new();
     }
-    report_exclude(ui, &crate::planning::ensure_planning_excluded(&p.git_common, wt));
+    report_exclude(ui, &crate::planning::heal(&p.git_common, wt));
     let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
         return Vec::new();
     };
@@ -646,7 +646,9 @@ fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
 }
 
 /// Say what an exclude write came to — only when it wrote or failed; an
-/// already-ignored `.planning/` is the normal case after the first time.
+/// already-ignored `.planning/` is the normal case after the first time. A
+/// tracked one is quiet here because it is said elsewhere: by the setting that
+/// made the project full, and by `new`'s own tracked-files warning.
 fn report_exclude(ui: &mut dyn Ui, x: &crate::planning::Exclude) {
     use crate::planning::Exclude;
     match x {
@@ -681,7 +683,7 @@ fn write_plan_pointer(p: &Project, ui: &mut dyn Ui, wt: &str, topic: &str) {
     }
     // The exclude is about the CLONE, not this pointer: a reused place, or one
     // whose session already wrote `.active_plan`, still needs it.
-    report_exclude(ui, &crate::planning::ensure_planning_excluded(&p.git_common, wt));
+    report_exclude(ui, &crate::planning::heal(&p.git_common, wt));
     let active = planning.join(".active_plan");
     if std::fs::symlink_metadata(&active).is_ok() {
         return;

@@ -94,6 +94,21 @@ put() { mkdir -p "$(dirname "$1/$2")"; printf '%s\n' "${3:-# plan}" > "$1/$2"; }
   [ "$(grep -c '^/.planning/$' "$REPO/.git/info/exclude")" -eq 1 ]
 }
 
+@test "plan: a tracked .planning/ never gets the exclude line, from the default, new or a launch" {
+  ( cd "$REPO" && mkdir -p .planning/orchestrator && echo '# goals' > .planning/orchestrator/task_plan.md \
+      && git add -f .planning && git commit -qm tracked && git push -q origin main )
+  run_wt plan default full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"holds tracked files"* ]]
+  run_wt new feat-t --no-install --no-attach
+  [ "$status" -eq 0 ]
+  run_wt close feat-t
+  run_wt open feat-t --no-attach
+  [ "$status" -eq 0 ]
+  run grep -q 'planning' "$REPO/.git/info/exclude"
+  [ "$status" -ne 0 ]
+}
+
 @test "plan: the global default reaches new; a project's off beats it" {
   run_wt plan default full
   [ "$status" -eq 0 ]

@@ -3782,6 +3782,11 @@ async fn ai_status_report(repo: String, slug: String) -> Result<AiStatusReport, 
     for w in ui.warnings() {
         applog("warn", &format!("ai_status_report repo={repo} slug={slug}: {w}"));
     }
+    // And what it DID: at full the seam can write `/.planning/` to
+    // info/exclude, and a write nobody hears of is a write nobody can trace.
+    for (_, m) in ui.events.iter().filter(|(s, _)| *s == worktrees_core::diag::Severity::Info) {
+        applog("info", &format!("ai_status_report repo={repo} slug={slug}: {m}"));
+    }
     if let Err(msg) = claude_launch_check(&ai.cmd, &ai.match_word) {
         applog("error", &format!("ai_status_report repo={repo} slug={slug}: {msg}"));
         return Err(msg);

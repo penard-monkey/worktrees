@@ -140,8 +140,13 @@ let mockQuota: { gate: boolean; weekly_warn_pct: number | null; problems: string
 const mockQuotaNow = () => ({ ...mockQuota, config_path: "/Users/demo/.config/worktrees/config.toml" });
 // Roots whose info/exclude already has `/.planning/`: the first full write
 // answers "added", every later one "ignored" — the real core's idempotence.
+// `?planexclude=tracked|failed` makes every write answer that instead, so the
+// rows' error styling can be seen.
 const mockExcluded = new Set<string>();
+const mockExcludeForced = new URLSearchParams(location.search).get("planexclude");
 const mockExclude = (root: string) => {
+  if (mockExcludeForced === "tracked") return { outcome: "tracked" };
+  if (mockExcludeForced === "failed") return { outcome: "failed", reason: `${root}: not a git repository` };
   if (mockExcluded.has(root)) return { outcome: "ignored" };
   mockExcluded.add(root);
   return { outcome: "added" };
