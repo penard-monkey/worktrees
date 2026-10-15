@@ -121,7 +121,7 @@ fn basename(path: &str) -> &str {
     path.rsplit_once('/').map(|(_, b)| b).unwrap_or(path)
 }
 
-fn join(dir: &str, name: &str) -> String {
+pub(crate) fn join(dir: &str, name: &str) -> String {
     if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") }
 }
 
@@ -216,7 +216,7 @@ pub fn report_from(reference: &str, dirs: Vec<DirState>, skills: Vec<SkillState>
 
 // ── git plumbing ─────────────────────────────────────────────────────────────
 
-fn git_env(root: &str, index: Option<&Path>, args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
+pub(crate) fn git_env(root: &str, index: Option<&Path>, args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
     let mut c = Command::new("git");
     c.arg("-C").arg(root).args(args);
     if let Some(ix) = index {
@@ -397,38 +397,33 @@ pub struct FixOutcome {
     pub notes: Vec<String>,
 }
 
-fn has_origin(root: &str) -> bool {
+pub(crate) fn has_origin(root: &str) -> bool {
     crate::git::git_out(root, &["remote"]).map(|r| r.lines().any(|l| l == "origin")).unwrap_or(false)
 }
 
-/// Build the fix as a commit on `FIX_BRANCH`, push it, and open a PR.
+/// Build the fix as a commit on `FIX_BRANCH` and, with `push`, push it and
+/// open a PR.
+///
+/// Local by default (decision 2026-10-14): the app stays read-only toward
+/// GitHub unless the user asks, and the branch is reviewed as a place
+/// (`worktrees new agent-instructions`) before anything leaves the machine.
 ///
 /// Refuses when `FIX_BRANCH` already exists locally or on origin — a previous
 /// fix is waiting to be merged (or was abandoned), and a second one would race
 /// it. The message names both ways out.
-pub fn fix(p: &crate::project::Project) -> Result<FixOutcome, String> {
-    // `WORKTREES_GH_BIN` is a seam for the bats suite, which must not reach GitHub.
-    let gh = std::env::var("WORKTREES_GH_BIN").unwrap_or_else(|_| "gh".into());
-    fix_with(p, &gh)
+pub fn fix(p: &crate::project::Project, push: bool) -> Result<FixOutcome, String> {
+    fix_with(p, &gh_bin(), push)
 }
 
-pub fn fix_with(p: &crate::project::Project, gh_bin: &str) -> Result<FixOutcome, String> {
-    let root = p.main_root.as_str();
-    // Here, not in the CLI wrapper: the app calls this in-process and never
-    // passes through the CLI's dispatch, and a hub copy is exactly the tree
-    // that must never push.
-    if let Some(msg) = crate::sync::hub_copy_refusal(Path::new(root)) {
-        return Err(msg);
-    }
-    let origin = has_origin(root);
-    if origin {
-        // Judge and build against what the remote has NOW, not the last fetch.
-        // A failed fetch is not fatal (offline): the last fetch is still a ref.
-        let _ = git_net(root, &["fetch", "--quiet", "origin"]);
-    }
-    let report = inspect(p)?;
+/// `WORKTREES_GH_BIN` is a seam for the bats suite, which must not reach GitHub.
+pub(crate) fn gh_bin() -> String {
+    std::env::var("WORKTREES_GH_BIN").unwrap_or_else(|_| "gh".into())
+}
+
+pub fn fix_with(p: &crate::project::Project, gh_bin: &str, push: bool) -> Result<FixOutcome, String> {
+    let report = prepare(p)?;
     let mut out = FixOutcome { branch: FIX_BRANCH.into(), base: report.reference.clone(), ..Default::default() };
-    out.left_alone = report.dirs.iter().filter(|d| d.kind == DirKind::Diverged).map(|d| join(&d.dir, CLAUDE)).collect();
+    out.left_alone = left_alone(&report);
     let changes = plan(&report.dirs, &report.skills);
     if changes.is_empty() {
         out.notes.push(format!("{} already has its agent instructions set up.", report.reference));
@@ -437,16 +432,70 @@ pub fn fix_with(p: &crate::project::Project, gh_bin: &str) -> Result<FixOutcome,
         }
         return Ok(out);
     }
+    let pr = Pr {
+        message: commit_message(&report, &changes),
+        title: "Agent instructions: AGENTS.md for every agent".into(),
+        body: pr_body(&report, &changes, &out.left_alone),
+    };
+    publish(p, &report, &changes, &pr, push, gh_bin, &mut out)?;
+    for f in &out.left_alone {
+        out.notes.push(format!("{f} and its AGENTS.md differ — left alone; merge them by hand."));
+    }
+    Ok(out)
+}
+
+pub(crate) fn left_alone(report: &Report) -> Vec<String> {
+    report.dirs.iter().filter(|d| d.kind == DirKind::Diverged).map(|d| join(&d.dir, CLAUDE)).collect()
+}
+
+/// Everything a fix does before it decides what to change: refuse a hub
+/// copy, fetch, inspect, and refuse while a previous fix is pending.
+pub(crate) fn prepare(p: &crate::project::Project) -> Result<Report, String> {
+    let root = p.main_root.as_str();
+    // Here, not in the CLI wrapper: the app calls this in-process and never
+    // passes through the CLI's dispatch, and a hub copy is exactly the tree
+    // that must never push.
+    if let Some(msg) = crate::sync::hub_copy_refusal(Path::new(root)) {
+        return Err(msg);
+    }
+    if has_origin(root) {
+        // Judge and build against what the remote has NOW, not the last fetch.
+        // A failed fetch is not fatal (offline): the last fetch is still a ref.
+        let _ = git_net(root, &["fetch", "--quiet", "origin"]);
+    }
+    let report = inspect(p)?;
     let local = format!("refs/heads/{FIX_BRANCH}");
     let remote = format!("refs/remotes/origin/{FIX_BRANCH}");
     if crate::git::git_ok(root, &["show-ref", "--verify", "-q", &local])
         || crate::git::git_ok(root, &["show-ref", "--verify", "-q", &remote])
     {
         return Err(format!(
-            "a branch named '{FIX_BRANCH}' already exists — merge its PR first. If that PR was merged or closed and there is still something to fix, delete the branch and run the fix again: git branch -D {FIX_BRANCH}; git push origin --delete {FIX_BRANCH}"
+            "a branch named '{FIX_BRANCH}' already exists — merge it first. If it was merged or abandoned and there is still something to fix, delete the branch and run again: git branch -D {FIX_BRANCH} (and git push origin --delete {FIX_BRANCH} if it was pushed)"
         ));
     }
+    Ok(report)
+}
 
+/// What a fix says about itself.
+pub(crate) struct Pr {
+    pub message: String,
+    pub title: String,
+    pub body: String,
+}
+
+/// Commit `changes` on `FIX_BRANCH` off `report.reference` with plumbing (no
+/// working tree), then — only with `push` — push it and open a PR.
+pub(crate) fn publish(
+    p: &crate::project::Project,
+    report: &Report,
+    changes: &[Change],
+    pr: &Pr,
+    push: bool,
+    gh_bin: &str,
+    out: &mut FixOutcome,
+) -> Result<(), String> {
+    let root = p.main_root.as_str();
+    let local = format!("refs/heads/{FIX_BRANCH}");
     // A private index seeded from the base tree: nothing any checkout uses.
     // Unique per CALL, not per second: two fixes in one process inside the same
     // second (the unit tests run them in parallel) shared one index file and
@@ -461,7 +510,7 @@ pub fn fix_with(p: &crate::project::Project, gh_bin: &str) -> Result<FixOutcome,
     ));
     let result = (|| -> Result<String, String> {
         git_env(root, Some(&ix), &["read-tree", &report.reference], None)?;
-        for c in &changes {
+        for c in changes {
             match c {
                 Change::Rename { from, to } => {
                     let line = git_env(root, Some(&ix), &["ls-files", "-s", "--", from], None)?;
@@ -485,9 +534,8 @@ pub fn fix_with(p: &crate::project::Project, gh_bin: &str) -> Result<FixOutcome,
             }
         }
         let tree = git_env(root, Some(&ix), &["write-tree"], None)?;
-        let msg = commit_message(&report, &changes);
         let parent = git_env(root, None, &["rev-parse", &format!("{}^{{commit}}", report.reference)], None)?;
-        let commit = git_env(root, None, &["commit-tree", &tree, "-p", &parent, "-F", "-"], Some(msg.as_bytes()))?;
+        let commit = git_env(root, None, &["commit-tree", &tree, "-p", &parent, "-F", "-"], Some(pr.message.as_bytes()))?;
         // Create-only: the zero old-value makes update-ref refuse if the branch
         // appeared since the check above.
         git_env(root, None, &["update-ref", &local, &commit, "0000000000000000000000000000000000000000"], None)?;
@@ -498,21 +546,26 @@ pub fn fix_with(p: &crate::project::Project, gh_bin: &str) -> Result<FixOutcome,
     out.commit = Some(commit.clone());
     out.notes.push(format!("Committed {} on branch '{FIX_BRANCH}' (off {}).", &commit[..commit.len().min(7)], report.reference));
 
-    if !origin {
+    if !push {
+        out.notes.push(format!(
+            "Nothing was pushed. Review it as a place (`worktrees new {FIX_BRANCH}`), then push it and open a PR — or run again with --push to have worktrees do that."
+        ));
+        return Ok(());
+    }
+    if !has_origin(root) {
         out.notes.push("No 'origin' remote — merge the branch into your default branch yourself.".into());
-        return Ok(out);
+        return Ok(());
     }
     match git_net(root, &["push", "--quiet", "-u", "origin", &format!("{local}:{local}")]) {
         Ok(_) => out.pushed = true,
         Err(e) => {
             out.notes.push(format!("Push failed: {e}. The branch is committed locally; push it and open a PR yourself."));
-            return Ok(out);
+            return Ok(());
         }
     }
     let base_branch = report.reference.strip_prefix("origin/").unwrap_or(&report.reference).to_string();
-    let body = pr_body(&report, &changes, &out.left_alone);
     let mut gh = Command::new(gh_bin);
-    gh.current_dir(root).args(["pr", "create", "--base", &base_branch, "--head", FIX_BRANCH, "--title", "Agent instructions: AGENTS.md for every agent", "--body", &body]);
+    gh.current_dir(root).args(["pr", "create", "--base", &base_branch, "--head", FIX_BRANCH, "--title", &pr.title, "--body", &pr.body]);
     match run_net(gh, "gh pr create") {
         Ok(stdout) => {
             let url = stdout.lines().rev().find(|l| l.starts_with("http")).map(str::to_string);
@@ -526,13 +579,10 @@ pub fn fix_with(p: &crate::project::Project, gh_bin: &str) -> Result<FixOutcome,
         }
         Err(e) => out.notes.push(format!("Pushed '{FIX_BRANCH}', but {e} — open the PR yourself.")),
     }
-    for f in &out.left_alone {
-        out.notes.push(format!("{f} and its AGENTS.md differ — left alone; merge them by hand."));
-    }
-    Ok(out)
+    Ok(())
 }
 
-fn describe(c: &Change) -> String {
+pub(crate) fn describe(c: &Change) -> String {
     match c {
         Change::Rename { from, to } => format!("- move `{from}` to `{to}`"),
         Change::Write { path, .. } => format!("- add `{path}` as a stub that imports AGENTS.md"),
@@ -663,7 +713,7 @@ fn kind_line(d: &DirState) -> String {
     format!("  {dir}: {what}")
 }
 
-/// `worktrees agent-setup [status|fix|link-skills] [--json]`.
+/// `worktrees agent-setup [status|fix [--push]|link-skills] [--json]`.
 pub fn cmd_agent_setup(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, rest: &[String]) -> i32 {
     let json = rest.iter().any(|a| a == "--json");
     let verb = rest.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("status");
@@ -710,7 +760,8 @@ pub fn cmd_agent_setup(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, 
         }
         "fix" => {
             // `fix` carries the hub-copy guard itself (the app calls it too).
-            match fix(p) {
+            // Local unless asked: `--push` pushes and opens the PR.
+            match fix(p, rest.iter().any(|a| a == "--push")) {
                 Ok(o) => {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&o).unwrap_or_default());
@@ -909,7 +960,7 @@ mod tests {
         assert!(before.fixable && !before.conflicts);
         let head_before = sh(&repo, &["rev-parse", "HEAD"]);
 
-        let out = fix_with(&p, fake_gh.to_str().unwrap()).unwrap();
+        let out = fix_with(&p, fake_gh.to_str().unwrap(), true).unwrap();
         assert!(out.pushed, "{:?}", out.notes);
         assert_eq!(out.pr_url.as_deref(), Some("https://example.invalid/pr/1"));
         let argv = std::fs::read_to_string(&gh_log).unwrap();
@@ -932,7 +983,7 @@ mod tests {
         assert_eq!(after.pending.as_deref(), Some(FIX_BRANCH));
         assert!(after.pending_on_origin, "the push reached origin");
         // A second run refuses rather than racing the open PR.
-        assert!(fix_with(&p, fake_gh.to_str().unwrap()).unwrap_err().contains("already exists"));
+        assert!(fix_with(&p, fake_gh.to_str().unwrap(), true).unwrap_err().contains("already exists"));
         let _ = std::fs::remove_dir_all(&t);
     }
 
@@ -956,7 +1007,7 @@ mod tests {
         let before = inspect(&p).unwrap();
         assert!(before.pending.is_none() && !before.pending_on_origin);
         // gh is never reached without an origin; a path that cannot run proves it.
-        let out = fix_with(&p, "/nonexistent/gh").unwrap();
+        let out = fix_with(&p, "/nonexistent/gh", true).unwrap();
         assert!(out.commit.is_some() && !out.pushed && out.pr_url.is_none(), "{:?}", out.notes);
         let after = inspect(&p).unwrap();
         assert_eq!(after.pending.as_deref(), Some(FIX_BRANCH));

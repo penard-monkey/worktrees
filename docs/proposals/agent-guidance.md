@@ -416,6 +416,10 @@ Rules, taken from the ones `offers.ts` already states:
   It is per repo, it shows up as churn in every repo's history, it is stale
   the day the tool changes, and it does not reach untrusted pi. The paradigm
   belongs to the tool, not the repo.
+  *Superseded 2026-10-14 by ADR 0002: `worktrees rules apply` writes a
+  managed, versioned block (plus the close-out skill) as an opt-in floor for
+  sessions worktrees did not launch. The `worktrees` skill itself still stays
+  out of repositories.*
 - **MCP `prompts`.** They are user-invoked slash commands, so they do not
   help an agent that does not know it should ask.
 - **MCP resources** (a `worktrees://guide`). The model must decide to read
