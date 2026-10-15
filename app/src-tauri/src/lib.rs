@@ -4288,6 +4288,26 @@ struct AgentSetupStatus {
     rules: Option<worktrees_core::rules::Status>,
 }
 
+/// How long one `gh pr view` answer stands for a project.
+const PR_MERGED_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+static PR_MERGED: Mutex<Option<HashMap<String, (std::time::Instant, bool)>>> = Mutex::new(None);
+
+fn pr_merged_cached(root: &str) -> bool {
+    {
+        let g = PR_MERGED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, merged)) = g.as_ref().and_then(|m| m.get(root)) {
+            if at.elapsed() < PR_MERGED_TTL {
+                return *merged;
+            }
+        }
+    }
+    // Asked outside the lock: a slow gh must not stall another project's read.
+    let merged = worktrees_core::review::pr_state(root).as_deref() == Some("MERGED");
+    let mut g = PR_MERGED.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(HashMap::new).insert(root.to_string(), (std::time::Instant::now(), merged));
+    merged
+}
+
 #[tauri::command]
 async fn agent_setup_status(repo: String) -> Result<AgentSetupStatus, String> {
     let p = project_at(&repo, "agent_setup_status")?;
@@ -4301,10 +4321,12 @@ async fn agent_setup_status(repo: String) -> Result<AgentSetupStatus, String> {
     let mut report = report;
     // A pushed branch whose review place is still open: has its PR merged?
     // Asked of GitHub — a squash merge leaves the branch looking unmerged, and
-    // a matching subject proves nothing. Only in this one state, because it is
-    // a network call on the slow sweep.
+    // a matching subject proves nothing. Only in this one state, and cached
+    // (`PR_MERGED_TTL`): it is a network call, and the sheet re-reads on every
+    // open. A stale "not yet" costs a few minutes; a stale "merged" costs
+    // nothing, because `rules_lane_remove` asks GitHub again before it acts.
     if report.pending_on_origin && report.pending_place.is_some() {
-        report.pending_merged = worktrees_core::review::pr_state(&p.main_root).as_deref() == Some("MERGED");
+        report.pending_merged = pr_merged_cached(&p.main_root);
     }
     Ok(AgentSetupStatus { repo: report, user_skills: worktrees_core::agentfiles::user_skills(), rules })
 }

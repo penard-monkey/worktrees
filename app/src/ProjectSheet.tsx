@@ -436,7 +436,7 @@ export function ProjectSheet({
                           )}
                           {t.action === "remove-lane" && (
                             <button className="ctrl sm" data-testid="todo-remove-lane" disabled={laneBusy}
-                              title="the PR is merged: remove the review place and the branch (GitHub is asked again first)"
+                              title="the PR is merged: remove the review place and the branch (GitHub is asked again first; a place with uncommitted changes is refused)"
                               onClick={async () => {
                                 setLaneBusy(true);
                                 try { await onRemoveLane(root); } finally { await agent.load(); setLaneBusy(false); }

@@ -2922,6 +2922,9 @@ Phase 3: Frontend pane and mock harness
       // branch. Anything but MERGED removes nothing.
       const root = args.repo as string;
       const slug = mockLanePlace(root);
+      if (slug && findProject(root)?.snapshot?.places.find((p) => p.slug === slug)?.dirty) {
+        return { ok: false, code: 1, output: "the review place has uncommitted changes — commit or discard them there first; nothing was removed:\n M README.md", warnings: [] };
+      }
       if (!mockPrMerged[root]) return { ok: false, code: 1, output: "the pull request for 'agent-instructions' is OPEN, not merged — nothing was removed", warnings: [] };
       const pv = findProject(root);
       if (pv?.snapshot && slug) pv.snapshot.places = pv.snapshot.places.filter((p) => p.slug !== slug);

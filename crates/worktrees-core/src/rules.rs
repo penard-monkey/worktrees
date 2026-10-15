@@ -733,20 +733,10 @@ pub fn cmd_rules(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, rest: 
             }
             0
         }
+        // A local commit gets its review lane; `--review` also starts the
+        // agent there and then.
         "apply" => match apply(p, has("--push"), has("--force")) {
-            Ok(o) => {
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&o).unwrap_or_default());
-                } else {
-                    for n in &o.notes { ui.info(n); }
-                }
-                // A local commit gets its review lane; `--review` also starts
-                // the agent there and then.
-                if o.commit.is_some() && !o.pushed {
-                    return crate::review::cli_lane(p, ui, has("--review"));
-                }
-                0
-            }
+            Ok(o) => crate::review::cli_outcome(p, ui, &o, json, has("--review")),
             Err(e) => { ui.error(&e); 1 }
         },
         // The lane for a branch that already exists (`--review`: start the agent).

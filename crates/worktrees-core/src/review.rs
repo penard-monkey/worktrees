@@ -45,13 +45,15 @@ pub struct FileNote {
     pub path: String,
     /// The old path of a rename.
     pub from: Option<String>,
+    /// The new side's git mode (`100644`, `120000` for a symlink, …).
+    pub mode: String,
     /// What it is, in worktrees' words; `None` = not a file worktrees writes.
     pub what: Option<&'static str>,
 }
 
-/// What worktrees writes at `path`, from a fixed table. Anything else on the
-/// branch was not written by worktrees.
-fn what_is(status: &str, path: &str, from: Option<&str>) -> Option<&'static str> {
+/// What worktrees writes at `path` (with git `mode`), from a fixed table.
+/// Anything else on the branch was not written by worktrees.
+fn what_is(status: &str, mode: &str, path: &str, from: Option<&str>) -> Option<&'static str> {
     let base = path.rsplit('/').next().unwrap_or(path);
     let renamed_from_claude = from.is_some_and(|f| f.rsplit('/').next() == Some(agentfiles::CLAUDE));
     match (status, base) {
@@ -61,7 +63,10 @@ fn what_is(status: &str, path: &str, from: Option<&str>) -> Option<&'static str>
         ("A" | "M", "AGENTS.md") if path == agentfiles::AGENTS => Some("the agent instructions; the worktrees rules block is at its end"),
         ("A" | "M", "AGENTS.md") => Some("the agent instructions for this folder"),
         ("A" | "M", "CLAUDE.md") => Some("a stub that imports AGENTS.md, so Claude reads the same words"),
-        ("A", _) if path.starts_with(".agents/skills/") => Some("a link so Codex sees the repository skill of the same name"),
+        // A LINK only: worktrees never writes a regular file under a skills
+        // dir, and an instruction file someone added there is exactly what
+        // the foreign count exists to show.
+        ("A", _) if path.starts_with(".agents/skills/") && mode == "120000" => Some("a link so Codex sees the repository skill of the same name"),
         _ => None,
     }
 }
@@ -71,21 +76,26 @@ fn tame(path: &str) -> String {
     path.chars().map(|c| if c.is_control() || c == '`' { '?' } else { c }).collect()
 }
 
-/// The files `agent-instructions` changes against the base, per git.
+/// The files `agent-instructions` changes against the base, per git. `--raw`
+/// rather than `--name-status`, for the mode: a symlink and a regular file at
+/// the same path are different claims.
 pub fn changed_files(root: &str, base: &str, branch: &str) -> Result<Vec<FileNote>, String> {
-    let out = agentfiles::git_env(root, None, &["diff", "--name-status", "-z", "-M", &format!("{base}...{branch}")], None)?;
+    let out = agentfiles::git_env(root, None, &["diff", "--raw", "-z", "-M", &format!("{base}...{branch}")], None)?;
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut v = Vec::new();
-    while let Some(st) = fields.next() {
-        let status: String = st.chars().take(1).collect();
+    while let Some(meta) = fields.next() {
+        // ":<src mode> <dst mode> <src sha> <dst sha> <status>"
+        let cols: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        let mode = cols.get(1).copied().unwrap_or_default().to_string();
+        let status: String = cols.get(4).copied().unwrap_or_default().chars().take(1).collect();
         let (from, path) = if status == "R" || status == "C" {
             let from = fields.next().unwrap_or_default().to_string();
             (Some(from), fields.next().unwrap_or_default().to_string())
         } else {
             (None, fields.next().unwrap_or_default().to_string())
         };
-        let what = what_is(&status, &path, from.as_deref());
-        v.push(FileNote { status, path, from, what });
+        let what = what_is(&status, &mode, &path, from.as_deref());
+        v.push(FileNote { status, path, from, mode, what });
     }
     Ok(v)
 }
@@ -135,24 +145,32 @@ pub fn brief(p: &Project) -> Result<String, String> {
         )
     };
     let abandon_remote = if origin { " (and its copy on origin, if it is the same commit)" } else { "" };
+    // `{files}` LAST: it is the one value carrying repository text, and a
+    // path literally named `{apply}` must not be filled in after it.
     Ok(BRIEF
         .replace("{root}", root)
         .replace("{base}", &base)
         .replace("{default}", &default)
         .replace("{commits}", &commits)
         .replace("{remote}", &remote)
-        .replace("{files}", list.trim_end())
         .replace("{foreign}", &foreign)
         .replace("{apply}", &apply)
-        .replace("{abandon_remote}", abandon_remote))
+        .replace("{abandon_remote}", abandon_remote)
+        .replace("{files}", list.trim_end()))
 }
 
-/// The place that holds the branch, if any. Only a place under `.worktrees/`
-/// counts: the branch checked out in the root is never removed from here.
+/// The place that holds the branch, if any. `wt_for_branch` only answers
+/// for places under `.worktrees/`, so the root is never one.
 pub fn lane_place(p: &Project) -> Option<String> {
-    let wt = p.wt_for_branch(FIX_BRANCH)?;
-    let under = format!("{}/", p.wt_root_dir());
-    wt.starts_with(&under).then_some(wt)
+    p.wt_for_branch(FIX_BRANCH)
+}
+
+/// The review place's uncommitted tracked changes, if any. Tracked only: the
+/// brief lives in an untracked `.planning/`, ignored or not by the repository.
+fn place_dirty(p: &Project) -> Option<String> {
+    let wt = lane_place(p)?;
+    let dirty = git::git_out(&wt, &["status", "--porcelain", "--untracked-files=no"]).unwrap_or_default();
+    (!dirty.is_empty()).then_some(dirty)
 }
 
 /// Open the review lane: a place on `agent-instructions` with the brief.
@@ -201,6 +219,32 @@ pub fn cli_lane(p: &Project, ui: &mut dyn Ui, launch: bool) -> i32 {
     rc
 }
 
+/// What `rules apply` / `agent-setup fix` print after the commit, lane
+/// included. With `--json`, stdout stays ONE object: the lane's own messages
+/// are captured and carried in it as `lane` instead of following it.
+pub fn cli_outcome(p: &Project, ui: &mut dyn Ui, o: &agentfiles::FixOutcome, json: bool, launch: bool) -> i32 {
+    let lane = o.commit.is_some() && !o.pushed;
+    if !json {
+        for n in &o.notes {
+            ui.info(n);
+        }
+        return if lane { cli_lane(p, ui, launch) } else { 0 };
+    }
+    let mut v = serde_json::to_value(o).unwrap_or_default();
+    let mut rc = 0;
+    if lane {
+        // git's own passthrough output (`worktree add`) goes to stderr too.
+        // One-way, and this process prints nothing but the object after it.
+        git::set_stdout_is_protocol();
+        let mut cap = crate::ui::CaptureUi::default();
+        rc = cli_lane(p, &mut cap, launch);
+        let slug = p.resolve_new_slug(FIX_BRANCH, None);
+        v["lane"] = serde_json::json!({ "slug": slug, "rc": rc, "launched": launch && rc == 0, "output": cap.lines });
+    }
+    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    rc
+}
+
 /// What GitHub says about the branch's pull request: `OPEN`, `MERGED`,
 /// `CLOSED`, or `None` (no PR, no gh, offline). Asked, never inferred: a
 /// squash merge leaves the branch looking unmerged, and a subject that matches
@@ -227,9 +271,11 @@ fn own_session() -> Option<String> {
 }
 
 /// End `sessions`, this process's own session LAST — killing it ends us.
-fn kill_last(sessions: Vec<String>) {
-    let own = own_session();
-    let (mine, others): (Vec<_>, Vec<_>) = sessions.into_iter().partition(|s| Some(s) == own.as_ref());
+/// `own` is read before anything is removed: by now the caller's cwd may be
+/// a directory `git worktree remove` deleted, and no tmux client should be
+/// started from there.
+fn kill_last(sessions: Vec<String>, own: Option<&String>) {
+    let (mine, others): (Vec<_>, Vec<_>) = sessions.into_iter().partition(|s| Some(s) == own);
     for s in others {
         crate::tmux::kill_session(&s);
     }
@@ -240,16 +286,25 @@ fn kill_last(sessions: Vec<String>) {
 
 /// Remove the place, delete the branch (`-D` when `force`), optionally the
 /// origin branch, then end the sessions. Every git step first; the kill last.
-/// `farewell` is printed between the two — the last thing the agent sees.
-fn retire(p: &Project, ui: &mut dyn Ui, force: bool, delete_origin: bool, farewell: &str) -> i32 {
+/// The final line — `summary` plus what actually happened to the place and to
+/// the caller's session — is printed between the two, the last thing the
+/// agent sees. `moved` is set when a ref already moved before this ran (a
+/// fast-forward), so a refusal here does not claim nothing changed.
+fn retire(p: &Project, ui: &mut dyn Ui, force: bool, delete_origin: bool, summary: &str, moved: Option<&str>) -> i32 {
     let root = p.main_root.as_str();
+    let own = own_session();
     let tip = git::git_out(root, &["rev-parse", "--verify", "-q", &format!("refs/heads/{FIX_BRANCH}")]);
-    let sessions = match lane_place(p) {
+    let (removed, sessions) = match lane_place(p) {
         Some(wt) => match crate::ops::remove_tree(p, ui, &wt) {
-            Ok(s) => s,
-            Err(rc) => return rc,
+            Ok(s) => (true, s),
+            Err(rc) => {
+                if let Some(m) = moved {
+                    ui.error(&format!("{m}, but the review place was not removed — run `worktrees rules land` again"));
+                }
+                return rc;
+            }
         },
-        None => Vec::new(),
+        None => (false, Vec::new()),
     };
     let mut done = Vec::new();
     if tip.is_some() {
@@ -261,26 +316,49 @@ fn retire(p: &Project, ui: &mut dyn Ui, force: bool, delete_origin: bool, farewe
         }
     }
     if delete_origin {
-        let remote = git::git_out(root, &["rev-parse", "--verify", "-q", &format!("refs/remotes/origin/{FIX_BRANCH}")]);
+        let tracking = format!("refs/remotes/origin/{FIX_BRANCH}");
+        let remote = git::git_out(root, &["rev-parse", "--verify", "-q", &tracking]);
         match (remote, &tip) {
             (Some(r), Some(t)) if &r == t => match agentfiles::git_net(root, &["push", "--quiet", "origin", "--delete", FIX_BRANCH]) {
                 Ok(_) => done.push(format!("deleted origin/{FIX_BRANCH}")),
+                // GitHub's "automatically delete head branches" got there
+                // first. The goal is met — but our tracking ref survives a
+                // failed push, and `pending_state` reads exactly that ref, so
+                // the project would stay "waiting to merge" for a branch that
+                // is gone. Drop it.
+                Err(e) if e.contains("remote ref does not exist") => {
+                    let _ = git::git_ok(root, &["update-ref", "-d", &tracking]);
+                    done.push(format!("origin/{FIX_BRANCH} was already deleted"));
+                }
                 Err(e) => ui.warn(&format!("origin/{FIX_BRANCH} was not deleted: {e}")),
             },
             (Some(_), _) => ui.warn(&format!("origin/{FIX_BRANCH} is a different commit from the local branch — left alone")),
             (None, _) => {}
         }
+        // A push that deleted the branch updates the tracking ref itself; one
+        // that did not is handled above. Belt and braces for the first.
+        if done.iter().any(|d| d.starts_with("deleted origin/")) {
+            let _ = git::git_ok(root, &["update-ref", "-d", &tracking]);
+        }
     }
     for d in &done {
         ui.info(d);
     }
-    ui.info(farewell);
-    kill_last(sessions);
+    let ends = own.as_ref().is_some_and(|o| sessions.contains(o));
+    let mut farewell = summary.to_string();
+    if removed {
+        farewell.push_str(" The review place is removed.");
+    }
+    if ends {
+        farewell.push_str(" This session ends now.");
+    }
+    ui.info(&farewell);
+    kill_last(sessions, own.as_ref());
     0
 }
 
-/// Refuse unless the branch is reviewable from here: it exists, and any place
-/// holding it is a place (not the root).
+/// Refuse unless the branch is reviewable from here: it exists, and the root
+/// does not have it checked out.
 fn scoped(p: &Project, ui: &mut dyn Ui) -> Result<(), i32> {
     if let Some(msg) = crate::sync::hub_copy_refusal(std::path::Path::new(&p.main_root)) {
         ui.error(&msg);
@@ -291,8 +369,8 @@ fn scoped(p: &Project, ui: &mut dyn Ui) -> Result<(), i32> {
         return Err(1);
     }
     let root_head = git::git_out(&p.main_root, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
-    if root_head == FIX_BRANCH || (p.wt_for_branch(FIX_BRANCH).is_some() && lane_place(p).is_none()) {
-        ui.error(&format!("'{FIX_BRANCH}' is checked out in the repository root (or outside .worktrees/) — switch the root back to its default branch first"));
+    if root_head == FIX_BRANCH {
+        ui.error(&format!("'{FIX_BRANCH}' is checked out in the repository root — switch the root back to its default branch first"));
         return Err(1);
     }
     Ok(())
@@ -314,15 +392,10 @@ pub fn land_with(p: &Project, ui: &mut dyn Ui, gh: &str) -> i32 {
     }
     let root = p.main_root.as_str();
     let default = p.default_base();
-    if let Some(wt) = lane_place(p) {
-        // Tracked changes only: the brief itself lives in an untracked
-        // `.planning/`, ignored or not depending on the repository.
-        let dirty = git::git_out(&wt, &["status", "--porcelain", "--untracked-files=no"]).unwrap_or_default();
-        if !dirty.is_empty() {
-            ui.error("the review place has uncommitted changes — commit them on the branch (or discard them) first:");
-            ui.plain(&dirty);
-            return 1;
-        }
+    if let Some(dirty) = place_dirty(p) {
+        ui.error("the review place has uncommitted changes — commit them on the branch (or discard them) first:");
+        ui.plain(&dirty);
+        return 1;
     }
     let local = git::git_ok(root, &["show-ref", "--verify", "-q", &format!("refs/heads/{FIX_BRANCH}")]);
     if !agentfiles::has_origin(root) {
@@ -340,19 +413,31 @@ pub fn land_with(p: &Project, ui: &mut dyn Ui, gh: &str) -> i32 {
             ui.error(&format!("the repository root has uncommitted changes — commit or stash them, then run this again:\n{changes}"));
             return 1;
         }
-        let same = git::git_out(root, &["rev-parse", &default]) == git::git_out(root, &["rev-parse", FIX_BRANCH]);
-        if same || !git::git_ok(root, &["merge-base", "--is-ancestor", &default, FIX_BRANCH]) {
+        // One SHA, read once, is what gets checked AND merged: a commit landing
+        // on the branch in between is never merged unexamined.
+        let Some(tip) = git::git_out(root, &["rev-parse", "--verify", "-q", &format!("refs/heads/{FIX_BRANCH}^{{commit}}")]) else {
+            ui.error(&format!("there is no local '{FIX_BRANCH}' branch to merge"));
+            return 1;
+        };
+        let main_at = git::git_out(root, &["rev-parse", &default]).unwrap_or_default();
+        if main_at == tip {
+            // Already applied (a previous land fast-forwarded and then could
+            // not remove the place): finish the job.
+            return retire(p, ui, false, false, &format!("{default} already has {FIX_BRANCH}."), None);
+        }
+        if !git::git_ok(root, &["merge-base", "--is-ancestor", &default, &tip]) {
             ui.error(&format!(
                 "'{FIX_BRANCH}' is not strictly ahead of '{default}' — {default} moved since it was built. Abandon it (`worktrees rules abandon --yes`) and apply the rules again"
             ));
             return 1;
         }
-        if let Err(e) = git::git_status_captured(root, &["merge", "--ff-only", "--quiet", FIX_BRANCH]) {
+        if let Err(e) = git::git_status_captured(root, &["merge", "--ff-only", "--quiet", &tip]) {
             ui.error(&format!("git merge --ff-only refused: {e}"));
             return 1;
         }
-        ui.info(&format!("fast-forwarded {default} to {FIX_BRANCH}"));
-        return retire(p, ui, false, false, &format!("Applied to {default}. The review place is removed; this session ends now."));
+        let moved = format!("fast-forwarded {default} to {FIX_BRANCH}");
+        ui.info(&moved);
+        return retire(p, ui, false, false, &format!("Applied to {default}."), Some(&moved));
     }
     let pushed = git::git_ok(root, &["show-ref", "--verify", "-q", &format!("refs/remotes/origin/{FIX_BRANCH}")]);
     if pushed {
@@ -417,6 +502,13 @@ pub fn retire_merged_with(p: &Project, ui: &mut dyn Ui, gh: &str) -> i32 {
     if let Err(rc) = scoped(p, ui) {
         return rc;
     }
+    // Never discard work silently: `land` and `abandon --yes` both stand
+    // between the user and a dirty tree, and so does this.
+    if let Some(dirty) = place_dirty(p) {
+        ui.error("the review place has uncommitted changes — commit or discard them there first; nothing was removed:");
+        ui.plain(&dirty);
+        return 1;
+    }
     match pr_state_with(&p.main_root, gh).as_deref() {
         Some("MERGED") => retire_merged_unchecked(p, ui),
         Some(s) => {
@@ -431,7 +523,7 @@ pub fn retire_merged_with(p: &Project, ui: &mut dyn Ui, gh: &str) -> i32 {
 }
 
 fn retire_merged_unchecked(p: &Project, ui: &mut dyn Ui) -> i32 {
-    retire(p, ui, true, true, "The pull request is merged. The review place is removed; this session ends now.")
+    retire(p, ui, true, true, "The pull request is merged.", None)
 }
 
 /// `worktrees rules abandon --yes`: delete the branch (force: it is unmerged
@@ -447,7 +539,7 @@ pub fn abandon(p: &Project, ui: &mut dyn Ui, yes: bool) -> i32 {
         ));
         return 1;
     }
-    retire(p, ui, true, true, &format!("Abandoned {FIX_BRANCH}; redo it any time from Project settings → Worktrees rules. This session ends now."))
+    retire(p, ui, true, true, &format!("Abandoned {FIX_BRANCH}; redo it any time from Project settings → Worktrees rules."), None)
 }
 
 #[cfg(test)]
@@ -456,14 +548,15 @@ mod tests {
 
     #[test]
     fn the_table_names_what_worktrees_writes_and_nothing_else() {
-        assert!(what_is("M", "AGENTS.md", None).unwrap().contains("rules block"));
-        assert!(what_is("R", "AGENTS.md", Some("CLAUDE.md")).unwrap().contains("moved"));
-        assert!(what_is("A", "docs/CLAUDE.md", None).unwrap().contains("stub"));
-        assert!(what_is("A", crate::rules::CONFIG_PATH, None).unwrap().contains("GENERIC"));
-        assert!(what_is("A", crate::rules::SKILL_PATH, None).is_some());
-        assert!(what_is("A", ".agents/skills/close-out", None).is_some());
-        assert_eq!(what_is("A", "scripts/run.sh", None), None);
-        assert_eq!(what_is("D", "AGENTS.md", None), None, "worktrees never deletes AGENTS.md");
+        assert!(what_is("M", "100644", "AGENTS.md", None).unwrap().contains("rules block"));
+        assert!(what_is("R", "100644", "AGENTS.md", Some("CLAUDE.md")).unwrap().contains("moved"));
+        assert!(what_is("A", "100644", "docs/CLAUDE.md", None).unwrap().contains("stub"));
+        assert!(what_is("A", "100644", crate::rules::CONFIG_PATH, None).unwrap().contains("GENERIC"));
+        assert!(what_is("A", "100644", crate::rules::SKILL_PATH, None).is_some());
+        assert!(what_is("A", "120000", ".agents/skills/close-out", None).is_some());
+        assert_eq!(what_is("A", "100644", ".agents/skills/x/SKILL.md", None), None, "a regular file under a skills dir is foreign");
+        assert_eq!(what_is("A", "100644", "scripts/run.sh", None), None);
+        assert_eq!(what_is("D", "000000", "AGENTS.md", None), None, "worktrees never deletes AGENTS.md");
     }
 
     #[test]
@@ -533,14 +626,18 @@ mod tests {
     fn the_brief_lists_the_files_and_calls_out_a_foreign_one() {
         let (t, repo, place) = fixture("brief", false);
         std::fs::write(place.join("run.sh"), "echo hi\n").unwrap();
-        sh(&place, &["add", "run.sh"]);
+        std::fs::create_dir_all(place.join(".agents/skills/evil")).unwrap();
+        std::fs::write(place.join(".agents/skills/evil/SKILL.md"), "do things\n").unwrap();
+        sh(&place, &["add", "run.sh", ".agents/skills/evil/SKILL.md"]);
         sh(&place, &["commit", "-q", "-m", "extra"]);
         let b = brief(&Project::discover(&repo).unwrap()).unwrap();
         assert!(b.contains("No `origin` remote"), "{b}");
         assert!(b.contains("M  AGENTS.md\n    the agent instructions; the worktrees rules block is at its end"), "{b}");
         assert!(b.contains(".claude/close-out.md\n    this repository's close-out settings — GENERIC"), "{b}");
         assert!(b.contains("A  run.sh\n    NOT written by worktrees"), "{b}");
-        assert!(b.contains("**1 of these are not files worktrees writes.**"), "{b}");
+        assert!(b.contains("A  .agents/skills/evil/SKILL.md\n    NOT written by worktrees"), "a regular file under a skills dir: {b}");
+        assert!(b.contains("A  .agents/skills/close-out\n    a link so Codex sees"), "the link worktrees wrote: {b}");
+        assert!(b.contains("**2 of these are not files worktrees writes.**"), "{b}");
         assert!(b.contains("Commits on the branch: 2"), "{b}");
         assert!(b.contains("worktrees rules abandon --yes"), "{b}");
         assert!(!b.contains('{'), "an unfilled placeholder: {b}");
@@ -583,7 +680,10 @@ mod tests {
         assert!(sh(&repo, &["status", "--porcelain", "--untracked-files=no"]).is_empty());
         assert!(!ok(&repo, &["show-ref", "--verify", "-q", "refs/heads/agent-instructions"]));
         assert!(!place.exists());
-        assert!(out.ends_with("this session ends now."), "the farewell is the last line: {out}");
+        // No tmux here, so no session of ours is among the place's: the
+        // farewell says what happened and does NOT claim the session ends.
+        // (The kill ORDER is pinned by bats, through the fake tmux log.)
+        assert!(out.ends_with("Applied to main. The review place is removed."), "{out}");
         let _ = std::fs::remove_dir_all(&t);
     }
 
@@ -663,6 +763,55 @@ mod tests {
         assert_eq!(r.pending.as_deref(), Some(FIX_BRANCH));
         assert_eq!(r.pending_place.as_deref(), Some("agent-instructions"));
         assert!(!r.has_origin && !r.pending_merged);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// Run from (main) with no review place: nothing is removed and no session
+    /// ends, so the last line must not say either.
+    #[test]
+    fn land_with_no_place_does_not_claim_a_session_ends() {
+        let (t, repo, place) = fixture("noplace", false);
+        sh(&repo, &["worktree", "remove", "--force", place.to_str().unwrap()]);
+        let p = Project::discover(&repo).unwrap();
+        let mut ui = crate::ui::CaptureUi::default();
+        assert_eq!(land_with(&p, &mut ui, "/nonexistent/gh"), 0, "{:?}", ui.lines);
+        assert_eq!(ui.lines.last().map(String::as_str), Some("Applied to main."), "{:?}", ui.lines);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// GitHub auto-deleted the head branch on merge: our push --delete fails
+    /// with "remote ref does not exist", and the stale tracking ref must go
+    /// anyway — `pending_state` reads it, and a surviving one leaves the
+    /// project "waiting to merge" for a branch that is gone.
+    #[test]
+    fn a_branch_github_already_deleted_does_not_stay_pending() {
+        let (t, repo, place) = fixture("autodel", true);
+        let p = Project::discover(&repo).unwrap();
+        let (gh, state) = fake_gh(&t);
+        let mut ui = crate::ui::CaptureUi::default();
+        assert_eq!(land_with(&p, &mut ui, &gh), 0, "{:?}", ui.lines);
+        sh(&t, &["-C", t.join("origin.git").to_str().unwrap(), "branch", "-D", "agent-instructions"]);
+        std::fs::write(&state, "MERGED\n").unwrap();
+        let mut ui = crate::ui::CaptureUi::default();
+        assert_eq!(retire_merged_with(&p, &mut ui, &gh), 0, "{:?}", ui.lines);
+        assert!(!place.exists());
+        assert_eq!(agentfiles::pending_state(repo.to_str().unwrap()), None, "{:?}", ui.lines);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// The app's "Remove the place" never discards uncommitted work.
+    #[test]
+    fn retire_merged_refuses_a_dirty_place() {
+        let (t, repo, place) = fixture("dirtyretire", true);
+        let p = Project::discover(&repo).unwrap();
+        let (gh, state) = fake_gh(&t);
+        let mut ui = crate::ui::CaptureUi::default();
+        assert_eq!(land_with(&p, &mut ui, &gh), 0);
+        std::fs::write(&state, "MERGED\n").unwrap();
+        std::fs::write(place.join("README.md"), "unsaved\n").unwrap();
+        let mut ui = crate::ui::CaptureUi::default();
+        assert_eq!(retire_merged_with(&p, &mut ui, &gh), 1);
+        assert!(place.exists() && ui.lines.join("").contains("uncommitted"), "{:?}", ui.lines);
         let _ = std::fs::remove_dir_all(&t);
     }
 

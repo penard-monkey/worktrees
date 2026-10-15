@@ -776,17 +776,7 @@ pub fn cmd_agent_setup(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, 
             // Local unless asked: `--push` pushes and opens the PR. A local
             // commit gets its review lane (`--review` also starts the agent).
             match fix(p, rest.iter().any(|a| a == "--push")) {
-                Ok(o) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&o).unwrap_or_default());
-                    } else {
-                        for n in &o.notes { ui.info(n); }
-                    }
-                    if o.commit.is_some() && !o.pushed {
-                        return crate::review::cli_lane(p, ui, rest.iter().any(|a| a == "--review"));
-                    }
-                    0
-                }
+                Ok(o) => crate::review::cli_outcome(p, ui, &o, json, rest.iter().any(|a| a == "--review")),
                 Err(e) => { ui.error(&e); 1 }
             }
         }

@@ -557,6 +557,7 @@ write_config() {
   run "$WT_BIN" open agent-instructions --no-attach
   [ "$status" -eq 0 ]
   local own; own=$(ls "$TMUX_STATE" | grep -v '^\.' | head -1)
+  local place="$REPO/.worktrees/agent-instructions"
   [ -n "$own" ]
   : > "$TMUX_STATE/$own~term"   # a dock shell of the same place
   # Every git call lands in the same log as tmux's, so the order is visible.
@@ -564,16 +565,29 @@ write_config() {
   chmod +x "$SHIMS/git"
   local tip; tip=$(git -C "$REPO" rev-parse agent-instructions)
   : > "$TMUX_LOG"
+  # From INSIDE the place, as its agent runs it: the cwd is deleted under us
+  # by `git worktree remove`, before the kills.
+  cd "$place"
   TMUX=/fake TMUX_PANE=%0 FAKE_TMUX_OWN="$own" run "$WT_BIN" rules land
+  cd "$REPO"
   [ "$status" -eq 0 ]
   [ "$(git -C "$REPO" rev-parse main)" = "$tip" ]
   [ ! -d "$REPO/.worktrees/agent-instructions" ]
-  [[ "${lines[${#lines[@]}-1]}" == *"this session ends now."* ]]
+  [[ "${lines[${#lines[@]}-1]}" == *"The review place is removed. This session ends now." ]]
   local kills; kills=$(grep -n 'kill-session' "$TMUX_LOG" | cut -d: -f1 | tr '\n' ' ')
   local last_git; last_git=$(grep -n '^git ' "$TMUX_LOG" | tail -1 | cut -d: -f1)
   [ -n "$kills" ]
   for k in $kills; do [ "$k" -gt "$last_git" ] || { cat "$TMUX_LOG"; return 1; }; done
   tail -1 "$TMUX_LOG" | grep -q "kill-session -t =$own\$" || { cat "$TMUX_LOG"; return 1; }
+}
+
+@test "rules apply --json keeps stdout one JSON object, the lane inside it" {
+  cd "$REPO"
+  printf '# ours\n' > "$REPO/AGENTS.md"
+  git -C "$REPO" add AGENTS.md && git -C "$REPO" commit -qm rules && git -C "$REPO" push -q origin main
+  "$WT_BIN" rules apply --json > "$BATS_TEST_TMPDIR/out.json" 2>/dev/null
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["lane"]["slug"]=="agent-instructions" and d["lane"]["rc"]==0, d' "$BATS_TEST_TMPDIR/out.json"
+  [ -d "$REPO/.worktrees/agent-instructions" ]
 }
 
 @test "rules abandon needs --yes, then deletes the branch and its place" {
