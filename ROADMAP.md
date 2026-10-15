@@ -5,7 +5,7 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
-- **Before v0.42.0: drive #482 (scroll keep) in the real app.** Only the
+- ~~**Before v0.42.0: drive #482 (scroll keep) in the real app.**~~ Done 2026-10-15: David ran it in the sandbox, worked fine. Only the
   mock was measured, and AGENTS.md says refresh timing needs the real app.
   Run `app/scripts/sandbox.sh --app` by hand (no scripted input), open a long
   markdown file in the dock Files tab, and scroll to the middle. Then:

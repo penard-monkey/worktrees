@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-15
+
 ### Added
 - **`worktrees rules apply`: the worktrees way of working, written into a
   repository.** Sessions worktrees launches already learn places and lanes;
