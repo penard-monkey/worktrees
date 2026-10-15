@@ -193,7 +193,10 @@ export function projectTodos(
           id: "rules-damaged", label: "The worktrees rules' markers are damaged — fix them by hand",
           action: null, section: "rules", n: 0, sev: "warn",
         });
-      } else if (rules.block.state === "outdated" || rules.skill.state === "outdated") {
+      } else if ((!rules.blocked && rules.block.state === "outdated") || rules.skill.state === "outdated") {
+        // A blocked root's block is judged but never written (core
+        // `applicable`, the sheet's `rulesTodo`), so it is not an update Apply
+        // can make — and Repair would land on a disabled button.
         out.push({
           id: "rules-outdated", label: `The worktrees rules are from an older worktrees — Apply updates them to v${rules.version}`,
           action: null, section: "rules", n: 0, sev: "info",

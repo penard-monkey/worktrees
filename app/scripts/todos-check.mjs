@@ -212,6 +212,15 @@ const count = (h, a) => todoCount(projectTodos(h, a));
   else ok("outdated rules → an update row that counts 0");
   if (todoCount(old) !== 0 || !needsRepair(old)) fail("outdated rules must offer Repair / upgrade without counting");
   else ok("outdated rules offer Repair, with no count");
+  // A blocked root's block is judged but never written (core `applicable`, the
+  // sheet's `rulesTodo`): with the skill current, Apply is disabled, so an
+  // outdated block there must not send you to it.
+  const blockedOld = projectTodos(null, withRules(rules({ blocked: "CLAUDE.md and AGENTS.md differ", block: found("outdated", 0), skill: found("current", 1), config: true, applicable: false })));
+  if (blockedOld.some((t) => t.id === "rules-outdated") || needsRepair(blockedOld)) fail(`blocked root + outdated block: ${JSON.stringify(blockedOld)} — Repair would land on a disabled Apply`);
+  else ok("a blocked root's outdated block offers no update row and no Repair");
+  const blockedSkill = projectTodos(null, withRules(rules({ blocked: "CLAUDE.md and AGENTS.md differ", block: found("outdated", 0), skill: found("outdated", 0), config: true })));
+  if (!blockedSkill.some((t) => t.id === "rules-outdated") || !needsRepair(blockedSkill)) fail("blocked root + outdated SKILL: Apply can still update the skill — the row and Repair must stay");
+  else ok("a blocked root with an outdated skill still offers the update");
   const damaged = projectTodos(null, withRules(rules({ block: found("malformed") })));
   if (!damaged.some((t) => t.id === "rules-damaged") || needsRepair(damaged)) fail("damaged markers are fixed by hand — they must not surface Repair");
   else ok("damaged rules stay manual: no Repair");
