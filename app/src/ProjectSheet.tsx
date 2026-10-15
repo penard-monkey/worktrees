@@ -167,8 +167,18 @@ export function ProjectSheet({
   planning = null,
   onPlanningChanged,
   onOpenPlanningSettings,
+  onReviewLane,
+  onOpenLane,
+  onRemoveLane,
 }: {
   open: boolean;
+  /** Open the `agent-instructions` branch's review lane (a place + an agent on
+   *  a brief). Also called by the sheet itself after a LOCAL Fix / Apply. */
+  onReviewLane: (root: string) => void;
+  /** Go to the place already reviewing the branch. */
+  onOpenLane: (root: string, slug: string) => void;
+  /** Remove a review place whose PR GitHub calls merged (core re-asks). */
+  onRemoveLane: (root: string) => Promise<void>;
   /** App's `planning_status` — the ONE copy Settings → Planning also shows,
    *  so a change in either is a change in both. */
   planning?: PlanningStatus | null;
@@ -229,7 +239,8 @@ export function ProjectSheet({
 
   // The agent-setup state, owned here so the To do row and the Agent setup
   // section press ONE Fix with one arm (see `useAgentSetup`).
-  const agent = useAgentSetup(root, open, onAgentLoaded, logError);
+  const agent = useAgentSetup(root, open, onAgentLoaded, logError, onReviewLane);
+  const [laneBusy, setLaneBusy] = useState(false);
   // Set when a To do row ran something, so that row's output shows beside it
   // instead of only in the section further down.
   const [todoRan, setTodoRan] = useState(false);
@@ -410,6 +421,29 @@ export function ProjectSheet({
                             </button>
                           )}
                           {firstFix && <AgentFixButton ctl={agent} onPress={() => setTodoRan(true)} />}
+                          {t.action === "review" && (
+                            <button className="ctrl sm" data-testid="todo-review" disabled={agent.running}
+                              title="open a place on agent-instructions with an agent that explains it and applies or abandons it on your word"
+                              onClick={() => onReviewLane(root)}>
+                              Review
+                            </button>
+                          )}
+                          {t.action === "open-lane" && agent.status?.repo.pending_place && (
+                            <button className="ctrl sm" data-testid="todo-open-lane"
+                              onClick={() => onOpenLane(root, agent.status!.repo.pending_place!)}>
+                              Open
+                            </button>
+                          )}
+                          {t.action === "remove-lane" && (
+                            <button className="ctrl sm" data-testid="todo-remove-lane" disabled={laneBusy}
+                              title="the PR is merged: remove the review place and the branch (GitHub is asked again first; a place with uncommitted changes is refused)"
+                              onClick={async () => {
+                                setLaneBusy(true);
+                                try { await onRemoveLane(root); } finally { await agent.load(); setLaneBusy(false); }
+                              }}>
+                              {laneBusy ? "Removing…" : "Remove the place"}
+                            </button>
+                          )}
                           {t.id === "agent-pending" && agent.outcome?.pr_url && (
                             <button className="ctrl sm" onClick={() => openPr(agent.outcome!.pr_url!, logError)}>
                               Open PR <Icons.ExternalLink size={12} />

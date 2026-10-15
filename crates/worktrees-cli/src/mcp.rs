@@ -1289,7 +1289,9 @@ impl Server {
                  managed block at the end of AGENTS.md, the close-out skill, and \
                  .claude/close-out.md. Committed with plumbing on the local branch \
                  agent-instructions off the default branch: no working tree changes, nothing is \
-                 pushed. The user reviews it (`worktrees new agent-instructions`) and pushes. \
+                 pushed, and no review lane is opened (you are the reviewer): tell the user what \
+                 it changes, then on their explicit word run `worktrees rules land` (merge, or \
+                 push + PR) or `worktrees rules abandon --yes`. \
                  force: true replaces a block or skill someone EDITED by hand — needs confirm: true \
                  too; ask the user first.",
                 serde_json::json!({
@@ -1424,8 +1426,22 @@ impl Server {
                 }
                 let p = self.proj()?;
                 // Never --push from here: what leaves the machine is the user's call.
+                // No review lane from here (the app and the CLI open one): the
+                // caller is already an agent with the user, and a second agent
+                // explaining the first one's commit is redundant cost. The
+                // notes carry what the lane's brief would: the two verbs, and
+                // that they wait for the user's word.
                 match worktrees_core::rules::apply(p, false, force) {
-                    Ok(o) => Ok(text_ok(&serde_json::to_string_pretty(&o).unwrap_or_default())),
+                    Ok(mut o) => {
+                        if o.commit.is_some() {
+                            o.notes.push(
+                                "Tell the user what the branch changes (`git diff <base>...agent-instructions`). \
+                                 Run `worktrees rules land` or `worktrees rules abandon --yes` only when they name one."
+                                    .into(),
+                            );
+                        }
+                        Ok(text_ok(&serde_json::to_string_pretty(&o).unwrap_or_default()))
+                    }
                     Err(e) => Ok(text_err(&e)),
                 }
             }
@@ -3546,6 +3562,11 @@ mod tests {
         let out: serde_json::Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(out["pushed"], json!(false));
         assert!(out["commit"].is_string(), "{out}");
+        // No review lane from an agent's call: no place on the branch, and the
+        // notes hand the caller the two verbs and the wait for the user.
+        assert!(!root.join(".worktrees").join("agent-instructions").exists(), "apply_rules must not open a lane");
+        let notes = out["notes"].to_string();
+        assert!(notes.contains("worktrees rules land") && notes.contains("only when they name one"), "{notes}");
         let r = server.call(&json!({ "name": "rules_status", "arguments": {} })).unwrap();
         let st: serde_json::Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(st["pending"], json!("agent-instructions"));

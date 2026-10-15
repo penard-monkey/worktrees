@@ -29,6 +29,13 @@ export type AgentReport = {
    *  set means it was committed locally and never pushed (no origin, a failed
    *  push): there is nothing to wait for. */
   pending_on_origin: boolean;
+  /** The repository has an `origin` remote (without one, applying merges locally). */
+  has_origin?: boolean;
+  /** The place holding the pending branch — its review lane. */
+  pending_place?: string | null;
+  /** GitHub says the pending branch's PR is merged (asked only for a pushed
+   *  branch that still has a place). */
+  pending_merged?: boolean;
 };
 export type UserSkill = { name: string; status: "linked" | "missing" | "conflict" };
 /** `rules::State` — one managed piece of the worktrees rules (ADR 0002). */
@@ -114,7 +121,16 @@ export type AgentSetupCtl = {
  *  sheet's read is fresher than App's 5-minute sweep, and the header badge,
  *  the menu and the sheet's own To do list must agree the moment it lands —
  *  the doctor side already hands its report up the same way (`onReport`). */
-export function useAgentSetup(root: string, open: boolean, onLoaded: (root: string, s: AgentSetupStatus) => void, onError: (msg: string) => void): AgentSetupCtl {
+/** `onCommitted` runs after Fix / Apply committed LOCALLY: the branch's review
+ *  lane opens there (App's `reviewLane`), so it is never a branch nothing
+ *  points at. A pushed commit has a PR instead and gets no lane. */
+export function useAgentSetup(
+  root: string,
+  open: boolean,
+  onLoaded: (root: string, s: AgentSetupStatus) => void,
+  onError: (msg: string) => void,
+  onCommitted?: (root: string) => void,
+): AgentSetupCtl {
   const [status, setStatus] = useState<AgentSetupStatus | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<"fix" | "rules" | null>(null);
@@ -129,6 +145,8 @@ export function useAgentSetup(root: string, open: boolean, onLoaded: (root: stri
   // it would re-run the open effect (and re-probe) on every render it causes.
   const cb = useRef(onLoaded);
   cb.current = onLoaded;
+  const committed = useRef(onCommitted);
+  committed.current = onCommitted;
 
   const load = useCallback(async () => {
     setArmed(null);
@@ -167,9 +185,11 @@ export function useAgentSetup(root: string, open: boolean, onLoaded: (root: stri
     setRan(which);
     setOutcome(null);
     setLog("");
+    let lane = false;
     try {
       const o = await invoke<AgentFixOutcome | null>(cmd, { repo: root, push: push[which], ...args });
       setOutcome(o ?? null);
+      lane = !!o?.commit && !o.pushed;
     } catch (e) {
       setLog(`✗ ${String(e)}`);
       onError(`${cmd} ${root}: ${String(e)}`);
@@ -180,6 +200,7 @@ export function useAgentSetup(root: string, open: boolean, onLoaded: (root: stri
       await load();
       setBusy(null);
     }
+    if (lane) committed.current?.(root);
   };
   const fix = () => commit("fix", "agent_setup_fix", {});
   const applyRules = (force: boolean) => commit("rules", "rules_apply", { force });
@@ -224,18 +245,24 @@ export function PushToggle({ ctl, which }: { ctl: AgentSetupCtl; which: "fix" | 
   );
 }
 
-/** The pending branch, in words: a PR to merge, or a local branch to review. */
-export function PendingHint({ pending, onOrigin }: { pending: string; onOrigin: boolean }) {
+/** The pending branch, in words: a PR to merge, or a local branch to review
+ *  in its lane. `place` is the place holding it, when there is one. */
+export function PendingHint({ pending, onOrigin, place = null, hasOrigin = true }: { pending: string; onOrigin: boolean; place?: string | null; hasOrigin?: boolean }) {
+  const lane = place
+    ? <>Its review place is <code>{place}</code>: the agent there explains the change and applies or abandons it on your word.</>
+    : <>Review opens a place for it with an agent that explains the change and applies or abandons it on your word.</>;
   return onOrigin ? (
     <div className="hint">
-      Branch <code>{pending}</code> is waiting: merge its PR to finish. If that PR was closed, delete the
-      branch (locally and on origin) to commit again.
+      Branch <code>{pending}</code> is waiting: merge its PR to finish. If that PR was closed,{" "}
+      <code>worktrees rules abandon --yes</code> deletes the branch so you can commit again. {lane}
     </div>
   ) : (
     <div className="hint">
-      Branch <code>{pending}</code> is committed on this machine and not pushed. Review it as a place
-      (<code>worktrees new {pending}</code>, or New worktree → that branch), then push it and open a PR
-      — or delete it (<code>git branch -D {pending}</code>) to commit again.
+      Branch <code>{pending}</code> is committed on this machine and not pushed.{" "}
+      {hasOrigin
+        ? <>Applying it pushes it and opens a PR (<code>worktrees rules land</code>).</>
+        : <>There is no origin remote, so applying it merges it into the default branch here (<code>worktrees rules land</code>).</>}{" "}
+      {lane}
     </div>
   );
 }
@@ -298,7 +325,7 @@ export function AgentSetupSection({ ctl, onError }: { ctl: AgentSetupCtl; onErro
         <button className="ctrl sm" disabled={ctl.running} onClick={ctl.load}>Re-check</button>
       </div>
       <PushToggle ctl={ctl} which="fix" />
-      {repo?.pending && !outcome && !(ctl.ran === "rules" && ctl.outcome) && <PendingHint pending={repo.pending} onOrigin={repo.pending_on_origin} />}
+      {repo?.pending && !outcome && !(ctl.ran === "rules" && ctl.outcome) && <PendingHint pending={repo.pending} onOrigin={repo.pending_on_origin} place={repo.pending_place} hasOrigin={repo.has_origin} />}
       <div className="hint">
         AGENTS.md becomes the one instruction file — Codex and other agents read it directly — and
         CLAUDE.md a one-line <code>@AGENTS.md</code> import, so Claude reads the same words. Judged
@@ -423,7 +450,7 @@ export function RulesSection({ ctl, onError }: { ctl: AgentSetupCtl; onError: (m
         </label>
       )}
       <PushToggle ctl={ctl} which="rules" />
-      {rules?.pending && !(ctl.ran === "rules" && ctl.outcome) && <PendingHint pending={rules.pending} onOrigin={rules.pending_on_origin} />}
+      {rules?.pending && !(ctl.ran === "rules" && ctl.outcome) && <PendingHint pending={rules.pending} onOrigin={rules.pending_on_origin} place={ctl.status?.repo.pending_place} hasOrigin={ctl.status?.repo.has_origin} />}
       <div className="hint">
         Teaches every agent in this repository — including one worktrees did not start, and a
         teammate's — how it is worked on here: places, spinning up a lane with a brief, which worktrees

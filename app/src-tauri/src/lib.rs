@@ -4288,6 +4288,26 @@ struct AgentSetupStatus {
     rules: Option<worktrees_core::rules::Status>,
 }
 
+/// How long one `gh pr view` answer stands for a project.
+const PR_MERGED_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+static PR_MERGED: Mutex<Option<HashMap<String, (std::time::Instant, bool)>>> = Mutex::new(None);
+
+fn pr_merged_cached(root: &str) -> bool {
+    {
+        let g = PR_MERGED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, merged)) = g.as_ref().and_then(|m| m.get(root)) {
+            if at.elapsed() < PR_MERGED_TTL {
+                return *merged;
+            }
+        }
+    }
+    // Asked outside the lock: a slow gh must not stall another project's read.
+    let merged = worktrees_core::review::pr_state(root).as_deref() == Some("MERGED");
+    let mut g = PR_MERGED.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(HashMap::new).insert(root.to_string(), (std::time::Instant::now(), merged));
+    merged
+}
+
 #[tauri::command]
 async fn agent_setup_status(repo: String) -> Result<AgentSetupStatus, String> {
     let p = project_at(&repo, "agent_setup_status")?;
@@ -4298,6 +4318,16 @@ async fn agent_setup_status(repo: String) -> Result<AgentSetupStatus, String> {
     let rules = worktrees_core::rules::status(&p)
         .map_err(|e| applog("error", &format!("agent_setup_status rules repo={repo}: {e}")))
         .ok();
+    let mut report = report;
+    // A pushed branch whose review place is still open: has its PR merged?
+    // Asked of GitHub — a squash merge leaves the branch looking unmerged, and
+    // a matching subject proves nothing. Only in this one state, and cached
+    // (`PR_MERGED_TTL`): it is a network call, and the sheet re-reads on every
+    // open. A stale "not yet" costs a few minutes; a stale "merged" costs
+    // nothing, because `rules_lane_remove` asks GitHub again before it acts.
+    if report.pending_on_origin && report.pending_place.is_some() {
+        report.pending_merged = pr_merged_cached(&p.main_root);
+    }
     Ok(AgentSetupStatus { repo: report, user_skills: worktrees_core::agentfiles::user_skills(), rules })
 }
 
@@ -4339,6 +4369,39 @@ async fn rules_apply(app: AppHandle, repo: String, push: Option<bool>, force: Op
             Err(e)
         }
     }
+}
+
+/// Open the review lane for the `agent-instructions` branch: a place with a
+/// brief and the default agent on it. Called right after Apply / Fix commit
+/// locally, and from the To do row's Review button for a branch that already
+/// exists. A launch the machine guard refuses comes back as
+/// `EXIT_LAUNCH_REFUSED` with the place ready — the frontend asks "Launch
+/// anyway?"; nothing is forced here.
+#[tauri::command]
+async fn rules_review(repo: String, provider: Option<String>, model: Option<String>) -> Result<CmdResult, String> {
+    let provider = provider.unwrap_or_else(|| harness::default_adapter().provider().id.into());
+    known_harness(&provider)?.installed()?;
+    let model = model.filter(|m| !m.trim().is_empty());
+    if let Some(m) = &model {
+        worktrees_core::choice::validate_model(m)?;
+    }
+    let mut slug = None;
+    let mut r = run_op("rules review", &repo, |p, ui| {
+        let (rc, s) = worktrees_core::review::open_lane(p, ui, true, Some(&provider), model.as_deref());
+        slug = Some(s);
+        rc
+    })?;
+    r.slug = slug;
+    Ok(r)
+}
+
+/// The To do row's "Remove the place" once the branch's PR is MERGED. Core
+/// re-asks GitHub before it deletes anything.
+#[tauri::command]
+async fn rules_lane_remove(app: AppHandle, repo: String) -> Result<CmdResult, String> {
+    let r = run_op("rules lane remove", &repo, |p, ui| worktrees_core::review::retire_merged(p, ui))?;
+    let _ = app.emit("places:changed", ());
+    Ok(r)
 }
 
 /// The user's own skills alone — machine-level, no repo. What Settings → Codex
@@ -8805,6 +8868,8 @@ pub fn run() {
             agent_setup_status,
             agent_setup_fix,
             rules_apply,
+            rules_review,
+            rules_lane_remove,
             agent_link_skills,
             agent_user_skills,
             set_codex_permissions,

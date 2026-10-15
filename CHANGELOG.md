@@ -11,7 +11,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Apply is one menu item away instead of buried in Project settings. The rules
   stay opt-in: they never add to the project's count or badge. Damaged markers
   (fixed by hand), an outdated block in a root worktrees cannot write to, and a
-  pending `agent-instructions` branch do not offer it.
+  pending `agent-instructions` branch do not offer it (that branch has its own
+  row — see below).
+
+### Added
+- **Applying the worktrees rules or the agent-setup Fix now opens a review
+  lane for the `agent-instructions` branch**: a place on it, with an agent
+  whose brief explains what the branch changes — each file, the AGENTS.md
+  block, the close-out skill, and the seeded `.claude/close-out.md`, which is
+  generic and wants this repository's real gates. It then waits for you to say
+  **apply** or **abandon**. Applying is `worktrees rules land`: in a repository
+  with no remote it fast-forwards the default branch in the root checkout (only
+  when that is clean and the branch is strictly ahead), and with an origin it
+  pushes and opens a PR. Abandoning is `worktrees rules abandon --yes`, which
+  deletes the branch and its place. Both do every git step first and end the
+  place's session last, so the agent that runs them is not cut off halfway. The
+  brief is a fixed template filled with facts worktrees computed, and it flags
+  any file on the branch that worktrees did not write. From the CLI,
+  `rules apply` / `agent-setup fix` create the place and the brief without
+  starting an agent (`worktrees open agent-instructions` starts it; `--review`
+  starts it at once). The MCP `apply_rules` opens no lane, since its caller is
+  already an agent talking to you. A branch that already exists with no place
+  brings "Repair / upgrade…" back, with a **Review** button on its To do row,
+  and no longer tells a repository with no remote to push it. Once GitHub says
+  the branch's PR is merged, the row offers **Remove the place**.
 
 ## [0.42.0] - 2026-10-15
 

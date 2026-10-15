@@ -23,6 +23,22 @@ this repo's settings in `.claude/close-out.md`).
   `/model` selector → "couldn't read (main)'s prompt"; (4) (main) at a shell
   → disabled tooltip. See docs/sessions/2026-10-15-plan-ask-main/.
 
+- **Drive the `agent-instructions` review lane (#502) once in the real app.**
+  Only the mock and real git in unit/bats tests were driven. Use a scratch repo
+  under the cache dir in `app/scripts/sandbox.sh --app`, by hand: Apply rules →
+  the lane opens and its agent explains; say "apply" (no remote: main
+  fast-forwards and the session ends last); repeat and say "abandon"; and with an
+  origin, land → PR → merge → To do "Remove the place".
+
+- **`ops::write_brief` writes through a TRACKED `.planning` symlink.**
+  `std::fs::write(wt/.planning/brief.md)` follows a `.planning -> elsewhere`
+  committed in the repo, so a cloned repo picks where the brief lands. It
+  pre-dates #502 (every `--brief` does it; see the `[docs]` symlink item
+  below), but #502 makes the write automatic on Apply / Fix from the app.
+  Fix shape: lstat `.planning` and refuse (or write beside it) when it is a
+  link, the same constant-path gate the docs walk got.
+  _From: #502 review (fable, 2026-10-15)_
+
 - **Drop AGENTS.md's "personal copy outranks" paragraph.** The global
   `~/.claude/skills/close-out` is retired (claude-skills #1, link removed by
   its `install.sh`), so the paragraph under "Close-out ritual" that says the
