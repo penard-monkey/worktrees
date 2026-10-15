@@ -55,6 +55,23 @@ another.** An agent typed into a pane:
   resume of that place (`worktrees open <slug> --ai pi -r`, the app's reopen)
   opens the conversation it is still writing: two pi on one session file.
 
+## Heavy work: gates, builds, full test runs
+
+Every lane on this machine shares its cores and memory, across every project.
+Seven lanes starting the same monorepo gate at once have locked a machine up.
+
+- Wrap anything heavy in a slot: `worktrees run --slot gate -- <cmd>` (for
+  example `worktrees run --slot gate -- pnpm gate`). It runs the command once
+  one of the machine's gate slots is free (two by default) and passes its
+  exit code back.
+- `waiting for slot gate (2/2 held by …)` is expected, not an error. Run the
+  command in the background or with a long timeout, and wait. Never drop the
+  wrapper to get past the queue. `--timeout <secs>` gives up with exit 75
+  and runs nothing; `worktrees slots` shows who holds and who waits.
+- When you lead lanes, nudge or launch at most three at a time, and let their
+  heavy work finish before the next batch. Talk to a lane with `send` or
+  `SendMessage`, never a `tmux send-keys` loop.
+
 ## Talking between places
 
 - `list_places` shows every place; `place_status <slug>` shows one, including

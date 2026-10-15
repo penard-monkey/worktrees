@@ -46,6 +46,9 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees clone <url> [--into <dir>] [--name <folder>]  clone a repo and register it (no repo needed)
   worktrees sync push|pull [name]       courier-sync this project to/from an SSD hub (rsync)
   worktrees sync status                 hub + project sync state (--json; no repo needed)
+  worktrees run --slot <name> -- <cmd>  run a heavy job (gate, build, full tests) in one of N
+                                        machine-wide slots; waits while all are held (--slots N --timeout S)
+  worktrees slots [--json]              who holds and who waits for each slot (no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
                                         (--cross-project off|read|full: narrow the user's cross_project, never widen)
   worktrees mcp --status [--json] [--ai codex|pi]    check Claude, Codex or pi MCP setup (no repo needed)
@@ -96,6 +99,10 @@ fn run() -> i32 {
         // Owned planning. Ahead of the guards for `guard`'s reason: `plan hook`
         // is Claude's SessionStart/UserPromptSubmit hook and must answer (with
         // nothing) from anywhere; the other verbs find their repo themselves.
+        // Machine-wide, not about the cwd's repo: a gate may run anywhere, and
+        // the slots span every project (`slots.rs`).
+        Some("run") => return worktrees_core::slots::cmd_run(args.get(1..).unwrap_or(&[])),
+        Some("slots") => return worktrees_core::slots::cmd_slots(args.get(1..).unwrap_or(&[])),
         Some("plan") => return worktrees_core::plancmd::cmd_plan(args.get(1..).unwrap_or(&[])),
         // Also ahead of the guards: a `pull` that ADOPTS a project, and a
         // hub-level `status`, both run on a machine that does not have the repo

@@ -35,6 +35,13 @@ pub const HEAD: &str = "Managed by worktrees: every branch lives in its own PLAC
 under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new \
 <branch>`. Never `git worktree add`; never switch branches in (main).";
 
+/// The shared-machine rule (resource-guard). NOT part of `HEAD`: that has to
+/// stand alone inside Codex's 247-char cut, and this would push the place
+/// rule out of it. It rides after `HEAD` in every channel that has room —
+/// `rules_text()` and the MCP server's managed instructions.
+pub const HEAVY: &str = "Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` \
+(the machine is shared with every lane); nudge or launch lanes at most three at a time.";
+
 /// The `worktrees` skill (tier b). Repo-agnostic: a repository's own
 /// AGENTS.md still carries its specifics, and the skill says so.
 pub const SKILL_MD: &str = include_str!("guidance/SKILL.md");
@@ -44,14 +51,15 @@ pub const SKILL_MD: &str = include_str!("guidance/SKILL.md");
 /// `agent-guidance` offer fingerprints on it). A wording fix does not bump it.
 /// 3: the "Across projects" section (cross-project P1b).
 /// 4: start agents only through a launch, and why; what `unknown` means.
-pub const VERSION: u32 = 4;
+/// 5: heavy jobs in machine-wide slots; lanes nudged and launched in batches.
+pub const VERSION: u32 = 5;
 
 /// The rule plus where the how-to lives, for the channels that take a prompt
 /// rather than a skill (pi's `--append-system-prompt`, Codex's
 /// `developer_instructions`). One line, so it survives any first-line cut.
 pub fn rules_text() -> String {
     format!(
-        "{HEAD} For the how-to (handing work to another agent, messaging between places, finishing \
+        "{HEAD} {HEAVY} For the how-to (handing work to another agent, messaging between places, finishing \
          and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`."
     )
 }
@@ -1186,6 +1194,17 @@ mod tests {
         let r = rules_text();
         assert!(r.starts_with(HEAD) && !r.contains('\n'), "{r}");
         assert!(r.contains("worktrees guide"), "{r}");
+    }
+
+    /// The prompt channels (pi, Codex) carry the shared-machine rule too —
+    /// a lane that never loads the skill is exactly the one running the gate.
+    #[test]
+    fn the_rules_line_carries_the_slot_rule() {
+        let r = rules_text();
+        assert!(r.contains("worktrees run --slot gate --"), "{r}");
+        assert!(r.contains("at most three at a time"), "{r}");
+        assert!(!r.contains('\n'), "{r}");
+        assert!(SKILL_MD.contains("## Heavy work"), "the skill has the how-to");
     }
 
     #[test]

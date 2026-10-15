@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **`worktrees run --slot gate -- <cmd>`: machine-wide slots for heavy jobs.**
+  A gate, build or full test run wrapped this way waits until one of the
+  machine's slots is free (two by default), runs, and frees the slot when it
+  ends — on exit, crash or `kill -9` alike — so seven lanes asked to "keep
+  going" at once no longer start seven monorepo gates at once. Slots are shared
+  across every project on the machine. A waiting job says who holds the slot
+  (`waiting for slot gate (2/2 held by valleos:photo-order 3m12s, …)`), and
+  `worktrees slots` lists holders and waiters. Capacity is yours to set in
+  `config.toml` (`[slots] gate = 2`, `default = 2`); a repository cannot set
+  it. MCP `place_status` shows a place's held or awaited slot, and the agent
+  guidance now tells every lane to run its gates this way and to nudge or
+  launch lanes at most three at a time.
+
 ### Fixed
 - **Setting a project's planning to full now writes `/.planning/` to
   `.git/info/exclude` at once**, as Settings → Planning always said it did.
