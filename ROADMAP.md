@@ -23,6 +23,23 @@ this repo's settings in `.claude/close-out.md`).
   `/model` selector → "couldn't read (main)'s prompt"; (4) (main) at a shell
   → disabled tooltip. See docs/sessions/2026-10-15-plan-ask-main/.
 
+- **Drop AGENTS.md's "personal copy outranks" paragraph.** The global
+  `~/.claude/skills/close-out` is retired (claude-skills #1, link removed by
+  its `install.sh`), so the paragraph under "Close-out ritual" that says the
+  personal copy wins on this machine is now false. It says to drop it at
+  retirement; it is an AGENTS.md edit, so it needs David's OK.
+  _From: [2026-10-15 project-rules](docs/sessions/2026-10-15-project-rules/summary.md)_
+
+- **A drift check between the menu's Repair and the sheet's Apply.**
+  `projectTodos.ts`'s `UNCOUNTED_REPAIR` (and the `rules-outdated` gate)
+  decide by row id whether "Repair / upgrade…" leads to a working button;
+  the button's enablement lives separately in `AgentSetup.tsx`
+  (`writable` / `rulesTodo` / `can`). #500 shipped a mismatch between them
+  (a blocked root's outdated block) that review caught. `todos-check.mjs`
+  already slices `remedies()` out of ProjectSheet; slice `rulesTodo` the same
+  way, and assert every `rules-*` fixture gets the same answer from both.
+  _From: [2026-10-15 project-rules](docs/sessions/2026-10-15-project-rules/summary.md)_
+
 - **Rules block v2: say `tmux -L <name>` under "Never touch".** The managed
   block (`crates/worktrees-core/src/guidance/rules-block.md`) lists another
   place's tree, a shared branch, `~/.claude.json` and a running app, but not
