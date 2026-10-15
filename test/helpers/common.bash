@@ -48,6 +48,11 @@ common_setup() {
   # which is the fail-open answer; the tests that exercise the gate point this
   # at a fixture instead (test/quota.bats).
   export WORKTREES_USAGE_PROBE=off
+  # The launch guard's memory reading (guard.rs) for the same reason: a busy
+  # developer machine must not refuse the suite's launches. `off` reads
+  # nothing, which also leaves the RAM-derived agent cap off; test/guard.bats
+  # points it at a fixture.
+  export WORKTREES_GUARD_PROBE=off
   # XDG_STATE_HOME for the same reason as XDG_CONFIG_HOME: `init`'s once-only
   # hint marker lives under it, and a developer who exports it would have the
   # suite writing into (and reading back) their real state dir between runs.
@@ -222,6 +227,10 @@ case "$sub" in
     done
     exit $found ;;
   new-session)
+    # Opt-in (test/guard.bats): a slow server, and a session that reads as an
+    # agent in list-panes the moment it exists — what the live-agent cap counts.
+    [ -n "${FAKE_TMUX_NEW_DELAY:-}" ] && sleep "$FAKE_TMUX_NEW_DELAY"
+    [ -n "${FAKE_TMUX_NEW_CMD:-}" ] && printf '%s' "$FAKE_TMUX_NEW_CMD" > "$TMUX_STATE/$session.cmd"
     printf 'cwd=%s\ncmd0=%s\n' "$cwd" "${positional[0]:-}" > "$TMUX_STATE/$session"
     printf '%s' "$session" > "$TMUX_STATE/.last"
     echo "%0" ;;

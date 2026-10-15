@@ -70,6 +70,9 @@ const USER_ONLY_KEYS: &[&str] = &[
     // How many heavy jobs may run at once on THIS machine (`slots.rs`). A
     // repo raising its own share would defeat the point.
     "slots",
+    // How many agents may run on THIS machine, and on how little memory
+    // (`guard.rs`). A repo raising its own allowance would defeat the point.
+    "limits",
 ];
 
 // ── errors ───────────────────────────────────────────────────────────────────

@@ -450,6 +450,22 @@ impl PaneList {
         found
     }
 
+    /// Every session on this server with an agent pane, wherever it runs —
+    /// the machine-wide count the live-agent cap reads (`guard`). The SAME
+    /// test as `agents_in`, minus the path filter, so the cap and the nav dots
+    /// never disagree about what an agent is.
+    pub fn agent_sessions(&self) -> Vec<(String, &'static str)> {
+        let mut found: Vec<(String, &'static str)> = Vec::new();
+        for pane in &self.panes {
+            if pane.session.is_empty() || is_shell_sidecar(&pane.session) { continue; }
+            let Some(provider) = crate::provider::for_pane(&pane.session, pane.program()) else { continue };
+            if !found.iter().any(|(name, _)| name == &pane.session) {
+                found.push((pane.session.clone(), provider.id));
+            }
+        }
+        found
+    }
+
     /// Same selection as `worktree_session_excluding` but over the prefetched panes: a
     /// pane cwd'd in `wt` (exact or a subdir), preferring one whose command
     /// looks like the AI CLI (`ai_word`) or `node`, else the first match.

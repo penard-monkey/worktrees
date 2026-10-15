@@ -26,8 +26,9 @@
 //! What it is, honestly: "do not start another one on a nearly-spent window".
 //! The lag-free signal for a burst is CONCURRENCY — busy lanes per provider
 //! right now, which `tmux::PaneList::agents_in` and `activity` already derive.
-//! A user-settable cap there, plus a line in the agent guidance, is the thing
-//! that would have caught the incident; see ROADMAP.
+//! That cap now exists: `guard` counts live agents machine-wide (and reads
+//! memory) under a launch lock, on this same refusal path and ahead of this
+//! gate, so the cheap local checks run before any keychain or network probe.
 //!
 //! # Where it sits, and why that is `Adapter::prepare`
 //!

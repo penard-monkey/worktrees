@@ -18,6 +18,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   it. MCP `place_status` shows a place's held or awaited slot, and the agent
   guidance now tells every lane to run its gates this way and to nudge or
   launch lanes at most three at a time.
+- **A launch is refused when the machine already runs too many agents, or is
+  short of memory.** Every agent session costs about a gigabyte before it does
+  any work, and a Mac with ~35 of them locked up. A new launch now counts the
+  live agent sessions on the whole machine — every project, plus Claude
+  sessions started outside tmux — and refuses at half your RAM in GB (18 on a
+  36 GB Mac), or when less than 20% of memory is free. Like the plan-usage
+  check, the place and its brief are still created and only the agent waits:
+  `worktrees open <slug> --force`, the app's "Launch anyway", or MCP
+  `force: true` starts it anyway, and the refusal names the sessions it
+  counted. Launches from different processes now take turns, so eight
+  started at once count each other. Set your own numbers under `[limits]` in
+  `config.toml` (`max_live_agents`, `max_live = { claude = 12 }`,
+  `min_free_memory_pct`, `max_swap_used_pct`; 0 turns one off); a repository
+  cannot set them.
 
 ### Fixed
 - **Setting a project's planning to full now writes `/.planning/` to

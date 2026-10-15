@@ -286,10 +286,37 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
     } else { None };
     let place_slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+    let soft_refusal = |ui: &mut dyn Ui, why: &str| -> i32 {
+        let again = if place_slug == "(main)" {
+            "re-run with --force (the app: Launch anyway)".to_string()
+        } else {
+            format!("worktrees open {place_slug} --force")
+        };
+        ui.error(&format!("{why}. The place is ready; to launch anyway: {again}"));
+        crate::diag::EXIT_LAUNCH_REFUSED
+    };
+    // Held from the live-agent count until `new-session` returns, so parallel
+    // launches from any process count each other's sessions (`guard`).
+    let mut machine_lock: Option<std::fs::File> = None;
     // The harness's last word on a launch that will CREATE its session — before
     // the other agent is closed below, so a refused launch (pi's model host is
     // down, its node is too old) leaves whatever was running exactly as it was.
     if !ai_cmd.is_empty() && !tmux::session_exists(session_in) {
+        // The machine's word first: too many agents, too little memory. Every
+        // harness, including one added tomorrow — memory is spent per session.
+        // The sessions this place already has are the ones this launch reuses
+        // or replaces, so they do not count against it.
+        machine_lock = crate::guard::launch_lock();
+        let canonical = p.session_name(&place_slug);
+        let mut mine: Vec<String> = crate::provider::PROVIDERS.iter().map(|pr| pr.sidecar_name(&canonical)).collect();
+        mine.push(canonical);
+        mine.push(session_in.to_string());
+        let provider = crate::provider::by_word(&ai_word).map(|pr| pr.id);
+        if let Err(crate::harness::Refusal::Soft(why) | crate::harness::Refusal::Hard(why)) =
+            crate::guard::admit(provider, ai.force, &mine)
+        {
+            return soft_refusal(ui, &why);
+        }
         if let Some(adapter) = crate::harness::by_word(&ai_word) {
             match adapter.prepare(p, &place_slug, wt, &mut ai) {
                 Ok(()) => {}
@@ -297,15 +324,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
                     ui.error(&format!("{} not started: {why}", adapter.provider().label));
                     return 1;
                 }
-                Err(crate::harness::Refusal::Soft(why)) => {
-                    let again = if place_slug == "(main)" {
-                        "re-run with --force (the app: Launch anyway)".to_string()
-                    } else {
-                        format!("worktrees open {place_slug} --force")
-                    };
-                    ui.error(&format!("{why}. The place is ready; to launch anyway: {again}"));
-                    return crate::diag::EXIT_LAUNCH_REFUSED;
-                }
+                Err(crate::harness::Refusal::Soft(why)) => return soft_refusal(ui, &why),
             }
         }
     }
@@ -471,7 +490,9 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
     }
     // The critical section ends once the target exists. A CLI attach may stay
-    // open for hours and must not hold the lock against a later switch.
+    // open for hours and must not hold the lock against a later switch — nor
+    // the machine's launch lock against every other launch.
+    drop(machine_lock);
     drop(_switch_lock);
     if !do_attach {
         ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
