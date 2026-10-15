@@ -16,6 +16,24 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   paragraph you were reading. See
   docs/sessions/2026-10-15-md-scroll-keep/.
 
+- **Drive "Ask (main)" (#489) once in the real app.** Only the mock was
+  driven. By hand in `app/scripts/sandbox.sh --app`, on a place with a brief:
+  (1) (main) idle at an empty prompt → the prompt lands, the app switches, and
+  Enter sends it; (2) half-typed text in (main) → refused; (3) (main) on a
+  `/model` selector → "couldn't read (main)'s prompt"; (4) (main) at a shell
+  → disabled tooltip. See docs/sessions/2026-10-15-plan-ask-main/.
+
+- **pi has no composer reader, so "Ask (main)" on a pi orchestrator checks
+  only the trust modal.** A draft in pi's box would have the prompt glued
+  onto it. A `pi::composer_on_screen` (Empty / Text / unknown → refuse),
+  captured from real pi fixtures as `docs/pi-manual-checks.md` does, would
+  close it for `plan_ask_main` and `plan_prompt` alike.
+
+- **`ops::plan_update_prompt`'s slug filter refuses legal branch names**
+  (`fix+retry`, `issue#12`, non-ASCII), because `slugify` maps only `/`. The
+  refusal is honest. Widen it to `+#@` if anyone hits it; none of those mean
+  anything to a composer.
+
 - **Automations — removed 2026-10-10; revisit later.** Built in v0.29.0
   (#325, #326), removed by #477: "it hasn't been very useful and it is
   confusing". Design kept in
