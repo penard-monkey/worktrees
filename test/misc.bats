@@ -480,7 +480,7 @@ write_config() {
   [[ "$output" == *'"pending": null'* ]]
 }
 
-@test "agent-setup fix commits on its own branch, pushes, and leaves main alone" {
+@test "agent-setup fix --push commits on its own branch, pushes, and leaves main alone" {
   # `fix` PUSHES to origin. From any cwd but the fixture it would push the REAL
   # repo's branch to its real remote (it did, once). Refuse unless we are in
   # the fixture and its origin is the fixture's bare repo.
@@ -491,7 +491,7 @@ write_config() {
   install_fake_cmd gh
   export WORKTREES_GH_BIN="$SHIMS/gh"
   local before; before=$(git -C "$REPO" rev-parse main)
-  run "$WT_BIN" agent-setup fix
+  run "$WT_BIN" agent-setup fix --push
   [ "$status" -eq 0 ]
   [ "$(git -C "$REPO" rev-parse main)" = "$before" ]
   [ "$(git -C "$REPO" show agent-instructions:AGENTS.md)" = "# rules" ]
@@ -500,4 +500,44 @@ write_config() {
   run "$WT_BIN" agent-setup fix
   [ "$status" -ne 0 ]
   [[ "$output" == *"already exists"* ]]
+}
+
+@test "agent-setup fix without --push commits locally and pushes nothing" {
+  cd "$REPO"
+  [ "$(git remote get-url origin)" = "$ORIGIN" ] || { echo "not the fixture origin"; return 1; }
+  echo "# rules" > "$REPO/CLAUDE.md"
+  git -C "$REPO" add CLAUDE.md && git -C "$REPO" commit -qm rules && git -C "$REPO" push -q origin main
+  run "$WT_BIN" agent-setup fix
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Nothing was pushed"* ]]
+  [ "$(git -C "$REPO" show agent-instructions:AGENTS.md)" = "# rules" ]
+  run git -C "$ORIGIN" rev-parse --verify -q agent-instructions
+  [ "$status" -ne 0 ]
+}
+
+@test "rules apply writes the block, the close-out skill and its settings on a local branch" {
+  cd "$REPO"
+  [ "$(git remote get-url origin)" = "$ORIGIN" ] || { echo "not the fixture origin"; return 1; }
+  printf '# ours\nbe kind\n' > "$REPO/AGENTS.md"
+  git -C "$REPO" add AGENTS.md && git -C "$REPO" commit -qm rules && git -C "$REPO" push -q origin main
+  run "$WT_BIN" rules status --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"applicable": true'* ]]
+  local before; before=$(git -C "$REPO" rev-parse main)
+  run "$WT_BIN" rules apply
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$REPO" rev-parse main)" = "$before" ]
+  [ -z "$(git -C "$REPO" status --porcelain)" ]
+  git -C "$REPO" show agent-instructions:AGENTS.md > "$BATS_TEST_TMPDIR/agents.md"
+  head -1 "$BATS_TEST_TMPDIR/agents.md" | grep -qx '# ours'
+  grep -q '^<!-- worktrees:rules v[0-9]* sha=' "$BATS_TEST_TMPDIR/agents.md"
+  grep -qx '<!-- worktrees:rules end -->' "$BATS_TEST_TMPDIR/agents.md"
+  git -C "$REPO" show agent-instructions:.claude/skills/close-out/SKILL.md > "$BATS_TEST_TMPDIR/skill.md"
+  head -2 "$BATS_TEST_TMPDIR/skill.md" | grep -qx 'name: close-out'
+  git -C "$REPO" show agent-instructions:.claude/close-out.md > /dev/null
+  run git -C "$ORIGIN" rev-parse --verify -q agent-instructions
+  [ "$status" -ne 0 ]
+  run "$WT_BIN" guide --close-out
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"# Close-out ritual"* ]]
 }

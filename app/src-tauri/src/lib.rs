@@ -4296,7 +4296,7 @@ async fn agent_setup_status(repo: String) -> Result<AgentSetupStatus, String> {
 #[tauri::command]
 async fn agent_setup_fix(app: AppHandle, repo: String) -> Result<worktrees_core::agentfiles::FixOutcome, String> {
     let p = project_at(&repo, "agent_setup_fix")?;
-    let out = worktrees_core::agentfiles::fix(&p);
+    let out = worktrees_core::agentfiles::fix(&p, true);
     // A new local branch (and maybe a fetch) either way — re-pull the snapshot.
     let _ = app.emit("places:changed", ());
     match out {

@@ -262,8 +262,16 @@ ai_resume_arg = resume
 - Every Codex launch also passes `-c project_doc_fallback_filenames=["CLAUDE.md"]`,
   so a CLAUDE.md-only project briefs Codex without a repo change.
   `worktrees agent-setup` checks the default branch and can make AGENTS.md the
-  one instruction file (CLAUDE.md becomes an `@AGENTS.md` stub) via a PR, and
-  link your `~/.claude/skills` into `~/.agents/skills` where Codex looks.
+  one instruction file (CLAUDE.md becomes an `@AGENTS.md` stub) on a local
+  `agent-instructions` branch (`fix --push` also pushes it and opens the PR),
+  and link your `~/.claude/skills` into `~/.agents/skills` where Codex looks.
+- `worktrees rules apply` writes the worktrees way of working into the repo,
+  for every agent including ones worktrees did not start: a managed block at
+  the end of AGENTS.md (places, lanes, the MCP tools, planning, finishing), the
+  `close-out` skill, and a `.claude/close-out.md` that is the repo's to edit.
+  Same local branch, same layout fix; `rules status` says whether it is
+  current, and a re-apply updates the block in place without touching
+  anything outside its markers. MCP: `rules_status`, `apply_rules`.
 
 Examples: `--ai claude`, `--ai "claude --model opus"`, `--ai codex`,
 `--ai opencode`, `--ai none`.

@@ -404,15 +404,21 @@ impl Drop for Scratch {
 /// through an external tool or force colour, and either would hand the parser
 /// something that is not a patch.
 pub fn diff_texts(old: &str, new: &str) -> Result<String, String> {
-    diff_texts_env(old, new, &[])
+    diff_texts_env(old, new, &[], "--unified=1000000")
+}
+
+/// [`diff_texts`] with git's usual three lines of context, for a terminal
+/// (`worktrees rules diff` over a long AGENTS.md).
+pub fn diff_texts_brief(old: &str, new: &str) -> Result<String, String> {
+    diff_texts_env(old, new, &[], "--unified=3")
 }
 
 /// [`diff_texts`] under an `inherited` environment — the test seam for a
 /// hostile user git config (see [`git_isolated`]).
-fn diff_texts_env(old: &str, new: &str, inherited: &[(&str, &Path)]) -> Result<String, String> {
+fn diff_texts_env(old: &str, new: &str, inherited: &[(&str, &Path)], unified: &str) -> Result<String, String> {
     let s = Scratch::new(&[("old", old), ("new", new)])?;
     let mut cmd = git_isolated(&s.0, inherited);
-    cmd.args(["diff", "--no-index", "--no-ext-diff", "--no-color", "--unified=1000000", "--", "old", "new"])
+    cmd.args(["diff", "--no-index", "--no-ext-diff", "--no-color", unified, "--", "old", "new"])
         ;
     let out = crate::proc::run_deadline(cmd, 10).map_err(|e| format!("git diff: {e}"))?;
     match out.status.code() {
@@ -1063,9 +1069,15 @@ pub fn status() -> Status {
 /// question about the cwd's repository.
 pub fn cmd_guide(args: &[String]) -> i32 {
     let has = |f: &str| args.iter().any(|a| a == f);
-    if let Some(bad) = args.iter().find(|a| !["--status", "--json", "--rules", "--default"].contains(&a.as_str())) {
-        eprintln!("worktrees guide: unknown argument '{bad}' (expected --status, --json, --rules, --default)");
+    if let Some(bad) = args.iter().find(|a| !["--status", "--json", "--rules", "--default", "--close-out"].contains(&a.as_str())) {
+        eprintln!("worktrees guide: unknown argument '{bad}' (expected --status, --json, --rules, --default, --close-out)");
         return 1;
+    }
+    if has("--close-out") {
+        // The close-out ritual moved into worktrees (rules pack): this is
+        // where a harness that lost its old copy finds it.
+        print!("{}", crate::rules::CLOSE_OUT_SKILL);
+        return 0;
     }
     if has("--rules") {
         println!("{}", rules_text());
@@ -1445,7 +1457,7 @@ mod tests {
         // The DEFAULT attributes file needs no config at all.
         std::fs::write(home.join(".config/git/attributes"), "* -diff\n").unwrap();
         let env: &[(&str, &Path)] = &[("HOME", &home), ("XDG_CONFIG_HOME", &home.join(".config"))];
-        let patch = diff_texts_env(OLD, NEW, env).unwrap();
+        let patch = diff_texts_env(OLD, NEW, env, "--unified=1000000").unwrap();
         assert!(patch.contains("\n-Two.\n+Two, improved.\n"), "{patch}");
         assert!(!patch.contains("CONVERTED") && !patch.contains("Binary"), "{patch}");
         let clash = OLD.replace("Two.", "Two, mine.");

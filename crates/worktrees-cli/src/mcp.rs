@@ -1022,6 +1022,16 @@ impl Server {
                 false,
             ),
             tool(
+                "rules_status",
+                "Whether this repository carries the worktrees rules (the managed AGENTS.md \
+                 block and the close-out skill) and whether they are current, outdated, edited \
+                 by hand, or waiting on the agent-instructions branch. Read from the default \
+                 branch, not a checkout.",
+                serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                true,
+                false,
+            ),
+            tool(
                 "set_note",
                 "Set (or clear) the human note on a place. Metadata only — nothing on disk changes.",
                 serde_json::json!({
@@ -1273,6 +1283,26 @@ impl Server {
                 false,
                 true,
             ));
+            t.push(tool(
+                "apply_rules",
+                "Write the worktrees rules into THIS repository (what `rules_status` reports): a \
+                 managed block at the end of AGENTS.md, the close-out skill, and \
+                 .claude/close-out.md. Committed with plumbing on the local branch \
+                 agent-instructions off the default branch: no working tree changes, nothing is \
+                 pushed. The user reviews it (`worktrees new agent-instructions`) and pushes. \
+                 force: true replaces a block or skill someone EDITED by hand — needs confirm: true \
+                 too; ask the user first.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "force": { "type": "boolean", "description": "Replace hand-edited managed text. Default false." },
+                        "confirm": { "type": "boolean", "description": "Required with force." }
+                    },
+                    "additionalProperties": false
+                }),
+                false,
+                false,
+            ));
         }
         t
     }
@@ -1377,6 +1407,28 @@ impl Server {
             }
             "list_projects" => Ok(text_ok(&serde_json::to_string_pretty(&self.list_projects()).unwrap_or_default())),
             "doctor" => Ok(self.run_op(|p, ui| ops::cmd_doctor(p, ui, &[]))),
+            "rules_status" => {
+                let p = self.proj()?;
+                match worktrees_core::rules::status(p) {
+                    Ok(st) => Ok(text_ok(&serde_json::to_string_pretty(&st).unwrap_or_default())),
+                    Err(e) => Ok(text_err(&e)),
+                }
+            }
+            "apply_rules" => {
+                let force = a.get("force").and_then(|v| v.as_bool()) == Some(true);
+                if force && a.get("confirm").and_then(|v| v.as_bool()) != Some(true) {
+                    return Ok(text_err(
+                        "apply_rules with force replaces text someone edited by hand and needs confirm: true. \
+                         Ask the user before retrying.",
+                    ));
+                }
+                let p = self.proj()?;
+                // Never --push from here: what leaves the machine is the user's call.
+                match worktrees_core::rules::apply(p, false, force) {
+                    Ok(o) => Ok(text_ok(&serde_json::to_string_pretty(&o).unwrap_or_default())),
+                    Err(e) => Ok(text_err(&e)),
+                }
+            }
             "set_note" => {
                 let (root, slug) = match self.mutable_target(&s("slug"), name) {
                     Ok((p, sl, _)) => (p.main_root.clone(), sl),
@@ -3461,6 +3513,45 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.base);
         }
     }
+    /// `apply_rules` is a `--mutations` tool, commits locally only, and needs
+    /// confirm before it may replace hand-edited text; `rules_status` then
+    /// sees the branch it left.
+    #[test]
+    fn apply_rules_is_gated_local_and_force_needs_confirm() {
+        use serde_json::json;
+        let sc = scratch("rules");
+        let root = sc.root.clone();
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git").arg("-C").arg(&root).args(args).output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        std::fs::write(root.join("AGENTS.md"), "# ours\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let names = |m: bool| -> Vec<String> {
+            server_at(&root, m).tools().iter().map(|t| t["name"].as_str().unwrap_or_default().to_string()).collect()
+        };
+        assert!(names(false).contains(&"rules_status".to_string()));
+        assert!(!names(false).contains(&"apply_rules".to_string()), "a read-only server must not offer it");
+        assert!(names(true).contains(&"apply_rules".to_string()));
+
+        let mut server = server_at(&root, true);
+        let r = server.call(&json!({ "name": "apply_rules", "arguments": { "force": true } })).unwrap();
+        assert_eq!(r["isError"], json!(true));
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("confirm: true"));
+        let r = server.call(&json!({ "name": "apply_rules", "arguments": {} })).unwrap();
+        assert_eq!(r["isError"], json!(false), "{}", r["content"][0]["text"]);
+        let out: serde_json::Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(out["pushed"], json!(false));
+        assert!(out["commit"].is_string(), "{out}");
+        let r = server.call(&json!({ "name": "rules_status", "arguments": {} })).unwrap();
+        let st: serde_json::Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(st["pending"], json!("agent-instructions"));
+        assert_eq!(st["block"]["state"], json!("absent"), "the default branch has not moved");
+    }
+
     fn scratch(tag: &str) -> Scratch {
         // A panicking test poisons the mutex; taking the inner value anyway
         // keeps one failure from cascading into "every other test hung".

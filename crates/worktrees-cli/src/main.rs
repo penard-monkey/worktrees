@@ -33,12 +33,16 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees status <name>               health verdict for one worktree (--json)
   worktrees show <file>[:line] [--line N]  ask the worktrees app to open a file (at a line)
   worktrees guide [--status] [--json]   what agents are told about places (--rules: the one-line rule;
-                                        --default: the shipped skill, ignoring your edit)
+                                        --default: the shipped skill, ignoring your edit;
+                                        --close-out: the close-out skill `rules apply` writes)
   worktrees plan [resolve] [--json]     how this place's plan resolves (owned planning; --json stamps the version)
   worktrees plan default [unset|full|off]  your default for owned planning, every project
   worktrees plan level [inherit|off|full|show <path> [--scope place|main]]  this project's planning
   worktrees plan hook session|prompt    Claude's plan hook (prints nothing unless planning is full)
-  worktrees agent-setup [status|fix|link-skills]  CLAUDE.md/AGENTS.md + skills for every agent (--json)
+  worktrees agent-setup [status|fix|link-skills]  CLAUDE.md/AGENTS.md + skills for every agent (--json;
+                                        fix commits locally, --push pushes and opens the PR)
+  worktrees rules [status|diff|apply]   the worktrees way of working, written into this repo: a managed
+                                        AGENTS.md block + the close-out skill (apply: --push, --force)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
@@ -215,9 +219,12 @@ fn run() -> i32 {
         "show" => worktrees_core::inbox::cmd_show(&project, &mut ui, rest),
         "init" => ops::cmd_init(&project, &mut ui, rest),
         // Not in MUTATING: `status` is read-only and must work on a hub copy.
-        // `fix` pushes, and `agentfiles::fix` refuses a hub copy itself — the
-        // app calls it in-process, past this dispatch.
+        // `fix` commits (and with --push pushes), and `agentfiles::prepare`
+        // refuses a hub copy itself — the app calls it in-process, past this
+        // dispatch.
         "agent-setup" => worktrees_core::agentfiles::cmd_agent_setup(&project, &mut ui, rest),
+        // Same shape as `agent-setup`: `apply` goes through the same guard.
+        "rules" => worktrees_core::rules::cmd_rules(&project, &mut ui, rest),
         // Not in MUTATING: it writes the USER's config.toml, never the repo —
         // and it is the user's act by construction (the MCP server has no path
         // to it).

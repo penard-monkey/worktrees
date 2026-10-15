@@ -6,6 +6,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **`worktrees rules apply`: the worktrees way of working, written into a
+  repository.** Sessions worktrees launches already learn places and lanes;
+  a `claude` started by hand, or a teammate's, did not. Apply writes a short
+  managed section at the end of AGENTS.md — places, spinning up a lane with a
+  brief, which MCP tool to use when, planning, finishing and close-out — plus
+  the `close-out` skill (now shipped with worktrees; `worktrees guide
+  --close-out` prints it) and a `.claude/close-out.md` that is the repo's to
+  edit. It is committed on a local `agent-instructions` branch, with the
+  AGENTS.md layout fix if the repo needs it; nothing is pushed unless you add
+  `--push`. `worktrees rules status` says whether the section is current,
+  outdated or edited by hand; a re-apply updates it in place and never touches
+  text outside its markers or a close-out skill worktrees did not write. MCP
+  gains `rules_status` and, on a `--mutations` server, `apply_rules`, which
+  never pushes. See ADR 0002. `worktrees agent-setup fix` follows the same
+  rule now: it commits locally, and `--push` pushes and opens the PR as it
+  used to (the app's button still pushes).
 - **`worktrees run --slot gate -- <cmd>`: machine-wide slots for heavy jobs.**
   A gate, build or full test run wrapped this way waits until one of the
   machine's slots is free (two by default), runs, and frees the slot when it
