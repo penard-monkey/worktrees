@@ -627,9 +627,27 @@ export const DOCK_UPPER_MIN_H = 160;
 export const DOCK_LOWER_MIN_H = 140;
 export const clampLowerFrac = (v: number) =>
   Number.isFinite(v) ? Math.min(DOCK_LOWER_FRAC_MAX, Math.max(DOCK_LOWER_FRAC_MIN, v)) : DEFAULTS.dock_lower_frac;
-/** Can a column `h` px tall hold both halves at this split? */
-export const lowerFits = (h: number, frac: number) =>
-  h * (1 - clampLowerFrac(frac)) >= DOCK_UPPER_MIN_H && h * clampLowerFrac(frac) >= DOCK_LOWER_MIN_H;
+/** The splits at which a column `h` px tall holds both halves, or null when
+ *  none does. The splitter is clamped to THIS range, never the global one —
+ *  at the 560px window minimum the column is ~490px and 0.25 of it is under
+ *  the lower floor, so a drag clamped only to 0.25..0.6 could release onto a
+ *  split that turns the slot into a tab, with no control left to undo it. */
+export const lowerRange = (h: number): [number, number] | null => {
+  if (!(h > 0)) return null;
+  const lo = Math.max(DOCK_LOWER_FRAC_MIN, DOCK_LOWER_MIN_H / h);
+  const hi = Math.min(DOCK_LOWER_FRAC_MAX, 1 - DOCK_UPPER_MIN_H / h);
+  return lo <= hi ? [lo, hi] : null;
+};
+/** Can a column `h` px tall hold both halves at all? Only the WINDOW can
+ *  make this false — a stored split that does not fit is drawn moved into
+ *  range (`lowerFracFor`), not turned into a tab. */
+export const lowerFits = (h: number) => lowerRange(h) !== null;
+/** The split drawn in a column `h` px tall: the stored one, moved into range. */
+export const lowerFracFor = (h: number, frac: number) => {
+  const f = clampLowerFrac(frac);
+  const r = lowerRange(h);
+  return r ? Math.min(r[1], Math.max(r[0], f)) : f;
+};
 /** The tab the UPPER half shows: never the section that has the lower slot. */
 export const upperTab = (tab: Settings["dock_tab"], lower: Settings["dock_lower"]): Settings["dock_tab"] =>
   lower !== null && tab === lower ? "files" : tab;

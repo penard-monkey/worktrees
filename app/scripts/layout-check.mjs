@@ -291,8 +291,62 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
     fail("upperTab lets the upper half show the section in the lower slot");
   } else ok("the upper half never shows the section in the lower slot");
   // The 560px window minimum: header + strip leave a ~490px column.
-  if (!S.lowerFits(490, S.DEFAULTS.dock_lower_frac)) fail("the default split does not fit the column at the 560px window minimum");
-  if (S.lowerFits(250, S.DEFAULTS.dock_lower_frac)) fail("lowerFits accepts a 250px column — the Terminal must fall back to a tab there");
+  if (!S.lowerFits(490)) fail("the slot does not fit the ~490px column at the 560px window minimum");
+  if (S.lowerFits(250)) fail("lowerFits accepts a 250px column — the Terminal must fall back to a tab there");
+  // The splitter's range is the COLUMN's, not the global 0.25..0.6: every
+  // split it can release onto must hold both floors, so a drag can never be
+  // what turns the slot into a tab (there is no control to bring it back).
+  for (const h of [300, 490, 560, 800, 1400]) {
+    const r = S.lowerRange(h);
+    if (!r) { fail(`lowerRange(${h}) is empty, but lowerFits(${h}) is ${S.lowerFits(h)}`); continue; }
+    for (const f of [r[0], r[1], (r[0] + r[1]) / 2]) {
+      if (h * f < S.DOCK_LOWER_MIN_H - 1e-9 || h * (1 - f) < S.DOCK_UPPER_MIN_H - 1e-9) fail(`lowerRange(${h}) allows ${f.toFixed(3)}, which breaks a floor`);
+    }
+    for (const stored of [0, 0.25, 0.4, 0.6, 1]) {
+      const d = S.lowerFracFor(h, stored);
+      if (d < r[0] - 1e-9 || d > r[1] + 1e-9) fail(`a stored ${stored} is drawn at ${d.toFixed(3)} in a ${h}px column, outside ${r.map((x) => x.toFixed(3)).join("..")}`);
+    }
+  }
+  const split = app.slice(app.indexOf("const onLowerSplit"), app.indexOf("// ── row ──"));
+  if (!/const range = lowerRange\(r\.height\);/.test(split) || /clampLowerFrac\(/.test(split)) fail("the splitter is clamped to the global range, not the column's (`lowerRange`) — a release at the window minimum can hide the slot");
+  else if (!bad) ok("the splitter can only release onto splits the column holds; a stored split is drawn in range");
+
+  // The derivation, EVALUATED (navwire-check's shape). Over every
+  // lowerSet × dockShown × fits × session state with a stored "terminal" tab:
+  // the shells are never in both hosts, the slot is on screen only where it
+  // fits and has shells, and wherever it is not, the Terminal is a TAB again.
+  {
+    const a = app.indexOf("  const lowerSet = settings.dock_lower");
+    const b = app.indexOf("\n", app.indexOf("  const shownTab = upperTab(", a));
+    if (a < 0 || b < 0) fail("App.tsx: `const lowerSet = …` … `const shownTab = …` is gone — this check evaluates it");
+    else {
+      const block = app.slice(a, b).replace(/<[A-Za-z|"\[\] ]+>/g, "").replace(/: Settings\["dock_lower"\]/g, "").replace(/\(el: HTMLElement \| null\)/g, "(el)");
+      const js = (await transformWithEsbuild(`export function build(env) { const { settings, dockShown, selected, eff, lowerFits, upperTab, useState, useRef, useCallback, ResizeObserver } = env;\n${block}\n return { lowerOn, shownTab, dockLower }; }`, "derive.ts", { loader: "ts", format: "esm" })).code;
+      const { build } = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+      const wrong = [];
+      for (const lowerSet of [false, true]) for (const dockShown of [false, true]) for (const fits of [false, true]) for (const up of [false, true]) {
+        const h = fits ? 490 : 250;
+        const r = build({
+          settings: { dock_lower: lowerSet ? "terminal" : null }, dockShown, selected: { tmux_session: { up } }, eff: { dock_tab: "terminal" },
+          lowerFits: S.lowerFits, upperTab: S.upperTab, useState: () => [h, () => {}], useRef: () => ({ current: null }), useCallback: (f) => f, ResizeObserver: class {},
+        });
+        const tag = `set=${lowerSet} shown=${dockShown} fits=${fits} up=${up}`;
+        if (r.lowerOn && r.shownTab === "terminal") wrong.push(`${tag}: shells in BOTH hosts`);
+        if (r.lowerOn !== (lowerSet && dockShown && fits && up)) wrong.push(`${tag}: lowerOn=${r.lowerOn}`);
+        if (dockShown && !r.lowerOn && r.shownTab !== "terminal") wrong.push(`${tag}: the Terminal is in neither host (upper shows ${r.shownTab})`);
+      }
+      if (wrong.length) fail(`the lower-slot derivation: ${wrong.join("; ")}`);
+      else ok("the lower-slot derivation (evaluated, 16 states): one host at a time, and the Terminal is never lost");
+    }
+  }
+  // Only the stored-value bookkeeping may read `eff.dock_tab`; everything that
+  // asks "what is on screen" reads `shownTab` (the reader's guard once read
+  // the preference instead, and kept a reader up over the Terminal tab).
+  const readers = app.split("\n").map((l, i) => [l, i]).filter(([l]) => /eff\.dock_tab/.test(l));
+  const allowed = (l) => /const shownTab = upperTab\(eff\.dock_tab/.test(l) || /prsGone/.test(l) || /d\.tab !== eff\.dock_tab/.test(l);
+  const stray = readers.filter(([l]) => !allowed(l));
+  if (stray.length) fail(`App.tsx reads the STORED tab where it means the shown one: ${stray.map(([l, i]) => `${i + 1}: ${l.trim()}`).join(" | ")}`);
+  else ok("only shownTab's definition and the stored-tab bookkeeping read eff.dock_tab");
 
   const body = (() => {
     const a = app.indexOf('<div className="dock-body">');
@@ -313,6 +367,11 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
     if (!/findOpen=\{findOn === "lower"\}/.test(lower)) fail("the lower shells answer the DOCK's find bar — ⌘F would open two bars");
     if (!/focusToken=\{termFocus \+ lowerFocus\}/.test(lower)) fail("the lower shells cannot be focused on their own (the rail icon's click)");
     if (!bad) ok("the lower slot hosts the one other TerminalTabs, on its own find surface and focus token");
+  }
+  // The reader covers the whole column, lower slot included: opening it must
+  // close the lower shell's find bar too, or two bars are live at once.
+  if (!/useEffect\(\(\) => \{ if \(reading\) setFindOn\(\(f\) => \(f === "dock" \|\| f === "lower" \? null : f\)\); \}, \[reading\]\);/.test(app)) {
+    fail("opening the reader does not close the lower shell's find bar");
   }
   if (!/const stripUp = dockShown && \(shownTab === "terminal" \|\| lowerOn\);/.test(app)) fail("navHistory's `stripUp` ignores the lower strip — a location would record no front shell");
   // The notice stack's corner would be the lower shell's prompt with the

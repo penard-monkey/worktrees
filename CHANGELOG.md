@@ -71,10 +71,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Drag the line between the two to resize (the split is applied when you let
   go, so the shell redraws once); ⌘J hides both; the Terminal icon and ⌘T
   bring the column back with the shells below. In a window too short for both
-  halves the Terminal is a tab again until there is room. ⌘J in a window too
-  narrow for the reference panels now says so instead of doing nothing.
+  halves the Terminal is a tab again until there is room.
 
 ### Changed
+- **⌘J in a window too narrow for the reference panels says so** instead of
+  doing nothing, and names the way out (widen the window, or unpin Places).
 - **`worktrees agent-setup fix` commits locally and pushes nothing unless you
   add `--push`**, the same rule as `rules apply`; `--push` pushes the branch
   and opens the PR as it used to. The app's Fix follows the same rule: pushing

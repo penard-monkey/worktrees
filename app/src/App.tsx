@@ -38,7 +38,7 @@ import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
-import { applySettings, applyZoom, clampDock, clampLowerFrac, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
@@ -420,7 +420,7 @@ function findTarget(s: {
   if (s.last === "lower" && lowerOk) return "lower";
   if (s.last === "dock" && dockOk) return "dock";
   if (s.mainTermUp) return "main";
-  return dockOk ? "dock" : lowerOk ? "lower" : null;
+  return dockOk ? "dock" : null;
 }
 
 /** Where a find bar can open. "lower" is the dock's lower slot: inside `.dock`
@@ -3874,16 +3874,10 @@ function App() {
     return () => { alive = false; };
   }, [sel?.repo, sel?.slug, hydratedTick]);
   useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
-  // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
-  // make that a lie. Same for flipping the dock to the Terminal tab.
-  // `upperTab`: with the Terminal in the lower slot a stored "terminal" tab
-  // shows Files above it.
-  const filesDockShown = eff.dock_open && upperTab(eff.dock_tab, settings.dock_lower) === "files";
   // The file the Plan tab is showing, reported UP by `PlanPane` so the dock
   // header's "open" button can hand it to the Files tab. Null while the tab is
   // not mounted (the pane clears it on unmount) or the place has no plan.
   const [planPath, setPlanPath] = useState<string | null>(null);
-  useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
   // ⌘⇧T bumps this → the dock's Terminal tab adds a shell (if mounted/visible).
   const [newTermToken, setNewTermToken] = useState(0);
   // ⌘F — which surface owns the find bar. Exactly ONE at a time app-wide: the
@@ -5151,29 +5145,39 @@ function App() {
   // ⌘J that can't visibly do anything is at least honest about why.
   const dockFits = fitLayout({ ...eff, dock_open: true }, dockEligible, vw).dockShown;
 
-  // ── the dock's lower slot (Settings → Layout → Terminal) ──
+  // ── the dock's lower slot (Settings → Navigation → Terminal) ──
   // `lowerSet` is the preference; `lowerOn` is whether it is ON SCREEN — the
-  // dock shown and tall enough for both halves. Too short (a high app zoom on
-  // a small window), the Terminal renders as a tab again and the setting is
-  // left alone, the same way `fit` degrades the dock without touching
-  // `dock_open`. Unmeasured counts as fitting: flipping a shell between slots
-  // costs a ring replay, so it must not happen on the first frame.
+  // dock shown, the place's session up (with it down there are no shells, and
+  // an empty strip would hold 40% of the column on every dormant place), and
+  // the column tall enough for both halves. Too short (a high app zoom on a
+  // small window), the Terminal renders as a tab again and the setting is left
+  // alone, the same way `fit` degrades the dock without touching `dock_open`.
+  //
+  // The height is `.space-body`'s, which the dock column always equals and
+  // which is mounted from launch — so it is MEASURED before the dock first
+  // opens. Measuring the dock itself meant guessing on its first frame, and a
+  // wrong guess moved the shells between hosts: two attaches, two replays.
   const lowerSet = settings.dock_lower === "terminal";
-  const [dockH, setDockH] = useState(0);
-  const dockRO = useRef<ResizeObserver | null>(null);
-  const dockRef = useCallback((el: HTMLElement | null) => {
-    dockRO.current?.disconnect();
-    dockRO.current = null;
+  const [spaceH, setSpaceH] = useState(0);
+  const spaceRO = useRef<ResizeObserver | null>(null);
+  const spaceRef = useCallback((el: HTMLElement | null) => {
+    spaceRO.current?.disconnect();
+    spaceRO.current = null;
     if (!el) return;
-    const ro = new ResizeObserver(() => setDockH(el.clientHeight));
+    const ro = new ResizeObserver(() => setSpaceH(el.clientHeight));
     ro.observe(el);
-    dockRO.current = ro;
-    setDockH(el.clientHeight);
+    spaceRO.current = ro;
+    setSpaceH(el.clientHeight);
   }, []);
-  const lowerOn = lowerSet && dockShown && (dockH === 0 || lowerFits(dockH, settings.dock_lower_frac));
+  const lowerOn = lowerSet && dockShown && !!selected?.tmux_session.up && lowerFits(spaceH);
   const dockLower: Settings["dock_lower"] = lowerOn ? "terminal" : null;
   // What the UPPER half shows: never the section in the lower slot.
   const shownTab = upperTab(eff.dock_tab, dockLower);
+  // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
+  // make that a lie. Same for flipping the dock to the Terminal tab. Keyed on
+  // `shownTab` (what is ON SCREEN), like every other reader of the tab.
+  const filesDockShown = eff.dock_open && shownTab === "files";
+  useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
 
   // A find bar cannot outlive the thing it is searching. Closing the dock,
   // flipping its tab, leaving reading mode or switching place all unmount the
@@ -5185,7 +5189,7 @@ function App() {
   useEffect(() => { if (!reading) setFindOn((f) => (f === "read" ? null : f)); }, [reading]);
   // The reader covers the dock, so a dock bar opened behind it is invisible —
   // and its highlights would sit painted on a file nobody can see.
-  useEffect(() => { if (reading) setFindOn((f) => (f === "dock" ? null : f)); }, [reading]);
+  useEffect(() => { if (reading) setFindOn((f) => (f === "dock" || f === "lower" ? null : f)); }, [reading]);
   // The main pane unmounts when the session goes down. Without this `findOn`
   // stays "main", and the next TerminalPane — a brand new session — mounts
   // with a find bar already open on it.
@@ -7333,7 +7337,11 @@ function App() {
     const dock = (e.currentTarget as HTMLElement).closest(".dock");
     if (!dock) return;
     const r = dock.getBoundingClientRect();
-    const fracAt = (y: number) => clampLowerFrac((r.bottom - y) / r.height);
+    // Clamped to what THIS column can hold (`lowerRange`), so a release can
+    // never turn the slot into a tab — there is no control to bring it back.
+    const range = lowerRange(r.height);
+    if (!range) return;
+    const fracAt = (y: number) => Math.min(range[1], Math.max(range[0], (r.bottom - y) / r.height));
     const guideAt = (y: number) => setLowerGuide(Math.round(r.height * (1 - fracAt(y))));
     guideAt(e.clientY);
     const move = (ev: MouseEvent) => guideAt(ev.clientY);
@@ -8189,7 +8197,7 @@ function App() {
             `position: relative` lives here now (it used to be on `.main`) so it
             anchors the reading overlay — which therefore reaches across the
             dock for free, instead of needing a negative inline offset. */}
-        <div className="space-body">
+        <div className="space-body" ref={spaceRef}>
           <main className="main">
             {selected && sel ? (
               <>
@@ -8377,7 +8385,7 @@ function App() {
               `position: absolute; inset: 0` against `.space-body`, so it keeps
               covering terminal and dock together either way round. */}
           {dockShown && selected && sel && (
-            <aside ref={dockRef} className={"dock" + (lowerOn ? " has-lower" : "")} style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
+            <aside className="dock" style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
               <div className="dock-resizer" onMouseDown={onDockResize} />
               {/* the rail owns tab selection AND collapse, so this is a title, not
                   a control strip */}
@@ -8659,7 +8667,7 @@ function App() {
                   <div className="dock-lower-split" role="separator" aria-orientation="horizontal"
                     aria-label="Resize the terminal below the panel" onMouseDown={onLowerSplit} />
                   {lowerGuide !== null && <div className="dock-lower-guide" style={{ top: lowerGuide }} />}
-                  <div className="dock-lower" style={{ flexBasis: `${clampLowerFrac(settings.dock_lower_frac) * 100}%` }}>
+                  <div className="dock-lower" style={{ flexBasis: `${lowerFracFor(spaceH, settings.dock_lower_frac) * 100}%` }}>
                       <TerminalTabs key={sel.repo + "|" + sel.slug}
                         repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
                         termVersion={termVersion} focusToken={termFocus + lowerFocus} addToken={newTermToken}

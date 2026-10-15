@@ -1743,7 +1743,7 @@ body.dragging .menu-catch { pointer-events: none; }
 
 .dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .dock-body .term-host { border-radius: 0; }
-/* The lower slot (Settings → Layout → Terminal: below the reference panel).
+/* The lower slot (Settings → Navigation → Terminal: below the reference panel).
    A column flex item, so `min-height: 0` — the vertical twin of the
    `.term-host` ratchet: without it the slot's floor is the grid xterm is
    painting NOW and it never gives height back. Its basis is inline (a share of
