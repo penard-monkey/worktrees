@@ -786,6 +786,15 @@ mod tests {
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].1.pid, 11);
         drop(a);
+        // Not the instant after: this is a multi-threaded test process, and a
+        // subprocess another test forks in that instant shares the open file
+        // description — and with it the lock — until its exec closes the
+        // CLOEXEC fd. Seen once in ~7 full-suite runs. `worktrees run` forks
+        // only its own child, so production has no such window.
+        let start = Instant::now();
+        while !holders_in(&d).is_empty() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(holders_in(&d).is_empty(), "dropping releases");
         let _ = fs::remove_dir_all(&d);
     }
