@@ -1355,6 +1355,32 @@ export function SettingsSheet({
             </div>
           </section>
 
+          {/* The reference column's lower slot. Terminal only — see
+              `dock_lower` in settings.ts for why the other sections are not
+              offered here yet. */}
+          <section className="setting">
+            <label>Terminal</label>
+            <div className="seg seg-plain">
+              {([
+                [null, "In the panel's tabs"],
+                ["terminal", "Below the reference panel"],
+              ] as const).map(([lower, label]) => (
+                <button
+                  key={label}
+                  data-testid={`dock-lower-${lower ?? "tab"}`}
+                  className={settings.dock_lower === lower ? "on" : ""}
+                  onClick={() => onChange({ dock_lower: lower })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="hint">
+              Below the panel, your shells stay on screen under Files, Docs or Plan — the same shells
+              as the Terminal tab. Drag the line between them to resize; ⌘J hides both.
+            </div>
+          </section>
+
           <section className="setting">
             <label>Nav width <span className="val">{settings.nav_width}px</span></label>
             <input

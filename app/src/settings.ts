@@ -218,6 +218,22 @@ export type Settings = {
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal" | "docs" | "plan" | "prs"; // last-used dock tab
+  // The reference column's LOWER slot: a section that stays on screen under
+  // whichever tab is showing, instead of being one of the tabs. Only the
+  // Terminal can take it — `"terminal" | null` rather than every tab, because
+  // each other section owns state and polls of its own, so widening this is a
+  // lifecycle job, not a type change. While it is set the Terminal leaves the
+  // tab set (no section is ever on screen twice: a pty has ONE size, and two
+  // xterms on one shell would SIGWINCH each other) and the upper half shows
+  // `dock_tab`, or Files when `dock_tab` is the terminal.
+  //
+  // Global, like the sides: it is how the person works, not how a repo is
+  // laid out, and a per-place slot would re-mount shells on every nav click.
+  dock_lower: "terminal" | null;
+  // The lower slot's share of the column's height. A FRACTION, not px: the
+  // column follows the window, and a px split would need re-clamping on every
+  // resize. Clamped to DOCK_LOWER_FRAC_MIN..MAX; written on splitter release.
+  dock_lower_frac: number;
   // Files tab: how the tree and the viewer sit relative to each other.
   // "auto" flips to side-by-side once the dock is at least SPLIT_AT wide — a
   // narrow dock has no room for two columns, a wide one wastes half its width
@@ -449,6 +465,8 @@ export const DEFAULTS: Settings = {
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
+  dock_lower: null,
+  dock_lower_frac: 0.4,
   files_layout: "auto",
   files_split_pct: 32,
   files_stack_pct: 40,
@@ -599,6 +617,22 @@ export const MAIN_MIN = 420; // center-pane floor: below it the topbar can't lay
 export const NAV_MIN = 220;
 export const NAV_MAX = 460;
 export const DOCK_MIN = 240;
+// The lower slot's split, and the heights below which the column cannot hold
+// both halves (the upper tab needs its header + a usable body, the lower shell
+// its strip + five rows at 13px). Under them the Terminal renders as a tab
+// again WITHOUT touching the setting — see `lowerFits`.
+export const DOCK_LOWER_FRAC_MIN = 0.25;
+export const DOCK_LOWER_FRAC_MAX = 0.6;
+export const DOCK_UPPER_MIN_H = 160;
+export const DOCK_LOWER_MIN_H = 140;
+export const clampLowerFrac = (v: number) =>
+  Number.isFinite(v) ? Math.min(DOCK_LOWER_FRAC_MAX, Math.max(DOCK_LOWER_FRAC_MIN, v)) : DEFAULTS.dock_lower_frac;
+/** Can a column `h` px tall hold both halves at this split? */
+export const lowerFits = (h: number, frac: number) =>
+  h * (1 - clampLowerFrac(frac)) >= DOCK_UPPER_MIN_H && h * clampLowerFrac(frac) >= DOCK_LOWER_MIN_H;
+/** The tab the UPPER half shows: never the section that has the lower slot. */
+export const upperTab = (tab: Settings["dock_tab"], lower: Settings["dock_lower"]): Settings["dock_tab"] =>
+  lower !== null && tab === lower ? "files" : tab;
 
 /** Usable width for the columns. clientWidth, not innerWidth: innerWidth counts
  * the scrollbar gutter, which silently eats MAIN_MIN's reserve (~15px) in a
@@ -767,6 +801,10 @@ export async function loadSettings(): Promise<Settings> {
     // layout nobody chose.
     if (s.places_side !== "right") s.places_side = "left";
     if (s.dock_side !== "left") s.dock_side = "right";
+    // Terminal-only until widened (see `dock_lower`): anything else, including
+    // a tab an older or newer build might have written, means "no lower slot".
+    if (s.dock_lower !== "terminal") s.dock_lower = null;
+    s.dock_lower_frac = clampLowerFrac(s.dock_lower_frac);
     if (s.place_panels && typeof s.place_panels === "object") {
       for (const p of Object.values(s.place_panels)) {
         // Only a value that IS there and is wrong: an absent one is left absent

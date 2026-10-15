@@ -142,7 +142,7 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   }
   if (!reads.some(([k]) => k === "railRight")) fail("App.tsx no longer orders the dock rail with ord.railRight");
   // The dock's own side inside `.space`: a flex `order`, keyed on dock_side.
-  if (!/<aside className="dock" style=\{\{ order: dockLeft \? -1 : 0/.test(app)) {
+  if (!/<aside [^>]*className=\{?"dock"[^>]*style=\{\{ order: dockLeft \? -1 : 0/.test(app)) {
     fail("App.tsx: `.dock`'s order is not `dockLeft ? -1 : 0` — the dock no longer follows dock_side");
   } else ok("the dock's position inside .space follows dock_side");
   if (!/const dockLeft = settings\.dock_side === "left";/.test(app) || !/const merged = railsMerged\(settings\);/.test(app)) {
@@ -264,6 +264,63 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
     if (placesKeyed || !dockKeyed) fail(`App.css: \`${sel.replace(" {", "")}\` is keyed on ${placesKeyed ? "data-places-side" : "nothing"} — the dock half follows data-dock-side`);
   }
   if (!bad) ok("the dock's border, resizer and rail rules key on data-dock-side");
+}
+
+// ── 5. the lower slot (phase 2) ──────────────────────────────────────────────
+// The Terminal can sit under the reference panel instead of being a tab. The
+// rule that matters: the same shells are NEVER mounted twice (a pty has one
+// size; two xterms on it SIGWINCH each other), so the upper half must not be
+// able to show the section the lower slot holds.
+{
+  for (const [blob, want, why] of [
+    [{ dock_lower: "terminal", settings_rev: 4 }, "terminal", "the Terminal in the lower slot loads"],
+    [{ dock_lower: "docs", settings_rev: 4 }, null, "a section the slot does not take yet loads as no slot"],
+    [{ settings_rev: 3 }, null, "an older install has no lower slot"],
+  ]) {
+    stored = blob;
+    const s = await S.loadSettings();
+    if (s.dock_lower !== want) fail(`${why}: ${JSON.stringify(blob)} loaded dock_lower=${JSON.stringify(s.dock_lower)}`);
+    else ok(why);
+  }
+  for (const [frac, want] of [[2, S.DOCK_LOWER_FRAC_MAX], [0, S.DOCK_LOWER_FRAC_MIN], ["x", S.DEFAULTS.dock_lower_frac], [0.5, 0.5]]) {
+    stored = { dock_lower_frac: frac, settings_rev: 4 };
+    const s = await S.loadSettings();
+    if (s.dock_lower_frac !== want) fail(`dock_lower_frac ${JSON.stringify(frac)} loaded as ${s.dock_lower_frac}, want ${want}`);
+  }
+  if (S.upperTab("terminal", "terminal") !== "files" || S.upperTab("docs", "terminal") !== "docs" || S.upperTab("terminal", null) !== "terminal") {
+    fail("upperTab lets the upper half show the section in the lower slot");
+  } else ok("the upper half never shows the section in the lower slot");
+  // The 560px window minimum: header + strip leave a ~490px column.
+  if (!S.lowerFits(490, S.DEFAULTS.dock_lower_frac)) fail("the default split does not fit the column at the 560px window minimum");
+  if (S.lowerFits(250, S.DEFAULTS.dock_lower_frac)) fail("lowerFits accepts a 250px column — the Terminal must fall back to a tab there");
+
+  const body = (() => {
+    const a = app.indexOf('<div className="dock-body">');
+    const b = app.indexOf("{/* ── the lower slot", a);
+    return a < 0 || b < 0 ? "" : app.slice(a, b);
+  })();
+  const lower = (() => {
+    const a = app.indexOf('<div className="dock-lower"');
+    return a < 0 ? "" : app.slice(a, app.indexOf("</div>", a));
+  })();
+  const terms = [...app.matchAll(/<TerminalTabs /g)].length;
+  if (!body || !lower) fail("App.tsx: the dock body or the `.dock-lower` slot is gone — renamed?");
+  else {
+    if (terms !== 2 || !body.includes("<TerminalTabs ") || !lower.includes("<TerminalTabs ")) fail(`TerminalTabs renders ${terms} times — want one in the tab chain, one in the lower slot`);
+    if (/eff\.dock_tab/.test(body)) fail("the dock body branches on `eff.dock_tab` — with the Terminal below, a stored \"terminal\" tab would mount the shells twice; branch on `shownTab`");
+    if (!/const shownTab = upperTab\(eff\.dock_tab, dockLower\);/.test(app)) fail("`shownTab` is not `upperTab(eff.dock_tab, dockLower)`");
+    if (!/\{lowerOn && \(/.test(app.slice(app.indexOf("{/* ── the lower slot"), app.indexOf('<div className="dock-lower"')))) fail("the lower slot is not gated on `lowerOn`");
+    if (!/findOpen=\{findOn === "lower"\}/.test(lower)) fail("the lower shells answer the DOCK's find bar — ⌘F would open two bars");
+    if (!/focusToken=\{termFocus \+ lowerFocus\}/.test(lower)) fail("the lower shells cannot be focused on their own (the rail icon's click)");
+    if (!bad) ok("the lower slot hosts the one other TerminalTabs, on its own find surface and focus token");
+  }
+  if (!/const stripUp = dockShown && \(shownTab === "terminal" \|\| lowerOn\);/.test(app)) fail("navHistory's `stripUp` ignores the lower strip — a location would record no front shell");
+  // The notice stack's corner would be the lower shell's prompt with the
+  // column on the left; `leftOfMain` (checked above, all 16 shapes) already
+  // puts it past an open left-hand column, which is every case with a slot.
+  const lowerCss = css.match(/\.dock-lower \{[^}]*\}/)?.[0] ?? "";
+  if (!/min-height: 0/.test(lowerCss)) fail("App.css: `.dock-lower` has no `min-height: 0` — the shell's grid becomes a floor the slot never gives back");
+  else ok("`.dock-lower` can shrink (min-height: 0)");
 }
 
 console.log(bad ? `\nlayout-check: ${bad} failure(s)` : "\nlayout-check: all good");

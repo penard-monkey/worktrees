@@ -38,7 +38,7 @@ import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
-import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, applyZoom, clampDock, clampLowerFrac, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
@@ -395,7 +395,9 @@ const onlySettingsOpen = () =>
 function findTarget(s: {
   reading: boolean; dockFile: string | null; dockShown: boolean;
   dockTab: Settings["dock_tab"]; mainTermUp: boolean; last: Surface;
-}): null | "main" | "dock" | "read" {
+  /** The Terminal is in the dock's LOWER slot (Settings → Layout), on screen. */
+  lowerUp: boolean;
+}): null | Surface {
   if (s.reading && s.dockFile) return "read";
   // The Terminal tab renders NO shell when the place's session is down (dock
   // shells are swept with it), and a target that mounts no bar is worse than
@@ -413,12 +415,17 @@ function findTarget(s: {
       : s.dockTab === "docs" ? true
       : s.dockTab === "plan" ? false
       : !!s.dockFile);
+  // The lower slot's shells live and die with the session, like the tab's.
+  const lowerOk = s.lowerUp && s.mainTermUp;
+  if (s.last === "lower" && lowerOk) return "lower";
   if (s.last === "dock" && dockOk) return "dock";
   if (s.mainTermUp) return "main";
-  return dockOk ? "dock" : null;
+  return dockOk ? "dock" : lowerOk ? "lower" : null;
 }
 
-type Surface = "main" | "dock" | "read";
+/** Where a find bar can open. "lower" is the dock's lower slot: inside `.dock`
+ *  but a surface of its own, since the upper tab is ALSO on screen. */
+type Surface = "main" | "dock" | "read" | "lower";
 
 const LIVE_TIERS = ["pinned", "active", "idle"] as const;
 const DORMANT_TIERS = ["saved", "closed", "archived", "abandoned"] as const;
@@ -496,11 +503,14 @@ type DockRailItem = { key: Settings["dock_tab"]; track: string; icon: React.Reac
  *  (`railsMerged`) — and a component defined inside App would remount on every
  *  render. `layout-check.mjs` pins that App renders it exactly twice, under
  *  complementary `merged` conditions. */
-function DockRailGroup({ items, shown, tab, why, prsView, onPick }: {
+function DockRailGroup({ items, shown, tab, lower, why, prsView, onPick }: {
   items: DockRailItem[];
   /** The dock is on screen (`fit.dockShown`), so the current tab's icon is lit. */
   shown: boolean;
   tab: Settings["dock_tab"];
+  /** The section in the lower slot, ON SCREEN — lit with the column, and its
+   *  click focuses it rather than collapsing anything. */
+  lower: Settings["dock_lower"];
   /** Why every button is disabled, or null when they are live. */
   why: string | null;
   prsView: { attention_count: number; open_count: number } | null | undefined;
@@ -510,7 +520,8 @@ function DockRailGroup({ items, shown, tab, why, prsView, onPick }: {
   return (
     <>
       {items.map((d) => {
-        const on = shown && tab === d.key;
+        const below = shown && lower === d.key;
+        const on = shown && (tab === d.key || below);
         return (
           <button
             key={d.key}
@@ -520,7 +531,7 @@ function DockRailGroup({ items, shown, tab, why, prsView, onPick }: {
             // ternary here files any tab it does not name under another
             // tab's key, silently. See `DOCK_RAIL`.
             data-track={d.track}
-            title={why ? `${d.title} — ${why}` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
+            title={why ? `${d.title} — ${why}` : below ? `${d.title} — below the panel; click to focus it` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
             onClick={() => onPick(d.key, on)}
           >
             {d.icon}
@@ -3865,7 +3876,9 @@ function App() {
   useEffect(() => { if (!dockFile) setReading(false); }, [dockFile]);
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab.
-  const filesDockShown = eff.dock_open && eff.dock_tab === "files";
+  // `upperTab`: with the Terminal in the lower slot a stored "terminal" tab
+  // shows Files above it.
+  const filesDockShown = eff.dock_open && upperTab(eff.dock_tab, settings.dock_lower) === "files";
   // The file the Plan tab is showing, reported UP by `PlanPane` so the dock
   // header's "open" button can hand it to the Files tab. Null while the tab is
   // not mounted (the pane clears it on unmount) or the place has no plan.
@@ -3877,7 +3890,7 @@ function App() {
   // file side paints through the global CSS highlight registry, so two live
   // bars would overwrite each other's hits, and a bar left open behind the
   // reader would be highlighting a file nobody can see.
-  const [findOn, setFindOn] = useState<null | "main" | "dock" | "read">(null);
+  const [findOn, setFindOn] = useState<null | Surface>(null);
   // bumps on every ⌘F so a second press re-focuses and selects the field
   const [findToken, setFindToken] = useState(0);
   const closeFind = useCallback(() => setFindOn(null), []);
@@ -3895,6 +3908,7 @@ function App() {
       const t = e.target;
       if (!(t instanceof Element)) return;
       if (t.closest(".reading")) lastSurface.current = "read";
+      else if (t.closest(".dock-lower")) lastSurface.current = "lower";
       else if (t.closest(".dock")) lastSurface.current = "dock";
       else if (t.closest(".main")) lastSurface.current = "main";
     };
@@ -5137,12 +5151,37 @@ function App() {
   // ⌘J that can't visibly do anything is at least honest about why.
   const dockFits = fitLayout({ ...eff, dock_open: true }, dockEligible, vw).dockShown;
 
+  // ── the dock's lower slot (Settings → Layout → Terminal) ──
+  // `lowerSet` is the preference; `lowerOn` is whether it is ON SCREEN — the
+  // dock shown and tall enough for both halves. Too short (a high app zoom on
+  // a small window), the Terminal renders as a tab again and the setting is
+  // left alone, the same way `fit` degrades the dock without touching
+  // `dock_open`. Unmeasured counts as fitting: flipping a shell between slots
+  // costs a ring replay, so it must not happen on the first frame.
+  const lowerSet = settings.dock_lower === "terminal";
+  const [dockH, setDockH] = useState(0);
+  const dockRO = useRef<ResizeObserver | null>(null);
+  const dockRef = useCallback((el: HTMLElement | null) => {
+    dockRO.current?.disconnect();
+    dockRO.current = null;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setDockH(el.clientHeight));
+    ro.observe(el);
+    dockRO.current = ro;
+    setDockH(el.clientHeight);
+  }, []);
+  const lowerOn = lowerSet && dockShown && (dockH === 0 || lowerFits(dockH, settings.dock_lower_frac));
+  const dockLower: Settings["dock_lower"] = lowerOn ? "terminal" : null;
+  // What the UPPER half shows: never the section in the lower slot.
+  const shownTab = upperTab(eff.dock_tab, dockLower);
+
   // A find bar cannot outlive the thing it is searching. Closing the dock,
   // flipping its tab, leaving reading mode or switching place all unmount the
   // surface — without this the state would say "open" against nothing, and the
   // next ⌘F on that surface would look like a no-op (same value, no re-render).
-  useEffect(() => { if (!dockShown) setFindOn((f) => (f === "dock" ? null : f)); }, [dockShown]);
-  useEffect(() => { setFindOn((f) => (f === "dock" ? null : f)); }, [eff.dock_tab]);
+  useEffect(() => { if (!dockShown) setFindOn((f) => (f === "dock" || f === "lower" ? null : f)); }, [dockShown]);
+  useEffect(() => { setFindOn((f) => (f === "dock" ? null : f)); }, [shownTab]);
+  useEffect(() => { if (!lowerOn) setFindOn((f) => (f === "lower" ? null : f)); }, [lowerOn]);
   useEffect(() => { if (!reading) setFindOn((f) => (f === "read" ? null : f)); }, [reading]);
   // The reader covers the dock, so a dock bar opened behind it is invisible —
   // and its highlights would sit painted on a file nobody can see.
@@ -6586,12 +6625,26 @@ function App() {
   };
   // Right rail → dock tab. Clicking the ACTIVE tab collapses the dock (VS Code's
   // model), which is why the topbar no longer carries its own dock toggle.
-  const pickDockTab = (tab: Settings["dock_tab"]) =>
+  //
+  // The section in the LOWER slot is not a tab: its icon focuses it, opening
+  // the column first when ⌘J had closed it, and never collapses anything (⌘J
+  // does). It writes no `dock_tab`, so the upper half keeps what it showed.
+  // `!dockShown || lowerOn` rather than `lowerSet` alone: a column too short
+  // for both halves shows the Terminal as a plain tab, and there the icon is
+  // a plain tab's.
+  const [lowerFocus, setLowerFocus] = useState(0);
+  const pickDockTab = (tab: Settings["dock_tab"]) => {
+    if (tab === settings.dock_lower && (!dockShown || lowerOn)) {
+      if (!eff.dock_open) updatePanels({ dock_open: true });
+      setLowerFocus((v) => v + 1);
+      return;
+    }
     updatePanels(
-      eff.dock_open && eff.dock_tab === tab
+      eff.dock_open && shownTab === tab
         ? { dock_open: false }
         : { dock_tab: tab, dock_open: true },
     );
+  };
   // right dock (Files / Terminal) — remembered per place, with the global value
   // as the seed. Stable useCallback (updatePanels reads the place from a ref),
   // so the keydown effect still registers once.
@@ -6606,8 +6659,8 @@ function App() {
   // the keydown listener stays stable (registered once, no per-render churn).
   // The history step, for the chord handler below (stable effect, live function).
   const navStepRef = useRef<(dir: -1 | 1) => void>(() => {});
-  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface });
-  const filesTabOpen = eff.dock_open && eff.dock_tab === "files";
+  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface, lowerUp: false, lowerSet: false, dockOpen: false, dockEligible: false, dockFits: true, navPinned: false });
+  const filesTabOpen = eff.dock_open && shownTab === "files";
   keyRef.current = {
     selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
     filesTabOpen,
@@ -6621,7 +6674,10 @@ function App() {
     // App zoom is global by nature — one window, one page zoom.
     appZoom: settings.app_zoom,
     // ⌘F: which surfaces can take the bar, and which one already has it.
-    dockShown, dockTab: eff.dock_tab, mainTermUp: !!selected?.tmux_session.up, findOn,
+    dockShown, dockTab: shownTab, mainTermUp: !!selected?.tmux_session.up, findOn,
+    lowerUp: lowerOn, lowerSet,
+    // ⌘J's "no room" notice.
+    dockOpen: eff.dock_open, dockEligible, dockFits, navPinned: settings.nav_pinned,
   };
   const newWorktreeRef = useRef<() => void>(() => {});
   newWorktreeRef.current = () => {
@@ -6817,6 +6873,15 @@ function App() {
         // the embedded terminal, like ⌘B.
         e.preventDefault();
         toggleDock();
+        // Opening a dock the window has no room for changes nothing on
+        // screen; the rail's tooltip was the only place that said why, and
+        // with the reference panels beside Places a silent ⌘J reads as broken.
+        const kr = keyRef.current;
+        if (!kr.dockOpen && kr.dockEligible && !kr.dockFits) {
+          setNotice(kr.navPinned
+            ? "The window is too narrow for the reference panels — widen it, or unpin Places (⌘B)."
+            : "The window is too narrow for the reference panels — widen it to show them.");
+        }
       } else if (e.metaKey && k === "t") {
         // ⌘T — new terminal, macOS Terminal's chord and the ADVERTISED one now
         // (⌘⇧T, handled above, stays as a silent alias). ⌘-only like ⌘J, so
@@ -6833,8 +6898,12 @@ function App() {
         // does nothing; this branch doesn't fight that, it relies on it.
         e.preventDefault();
         const kr = keyRef.current;
-        if (kr.dockShown && kr.dockTab === "terminal") setNewTermToken((v) => v + 1);
-        else {
+        if (kr.dockShown && (kr.dockTab === "terminal" || kr.lowerUp)) setNewTermToken((v) => v + 1);
+        else if (kr.lowerSet && !kr.dockShown) {
+          // The Terminal lives in the lower slot: bring the column back
+          // rather than turning the upper half into a Terminal tab.
+          updatePanels({ dock_open: true });
+        } else {
           // The same write the right rail makes (pickDockTab) — one
           // updatePanels carrying only the two fields this act chose, so no
           // seeded value gets frozen into a place that never set it.
@@ -7007,7 +7076,8 @@ function App() {
   const frontHere = sel && termFront?.key === placeKey(sel.repo, sel.slug) ? termFront.id : undefined;
   // Is there a tab strip on screen to report a front shell? Only the open dock
   // on its Terminal tab mounts one (the `<aside className="dock">` condition).
-  const stripUp = dockShown && eff.dock_tab === "terminal";
+  // The lower slot is a strip too, under any upper tab.
+  const stripUp = dockShown && (shownTab === "terminal" || lowerOn);
   // With the strip up but still restoring, the front shell is not known yet —
   // not "none" — so the observation waits rather than recording a location
   // that was never on screen. With NO strip there is nothing to wait for: the
@@ -7020,7 +7090,7 @@ function App() {
   const navLoc: Loc | null = !sel ? { place: null } : !selected ? null : stripUp && frontHere === undefined ? null : {
     place: { repo: sel.repo, slug: sel.slug },
     dock: {
-      tab: eff.dock_tab,
+      tab: shownTab,
       ...(dockFile ? { file: { path: dockFile, line: dockAt?.line, col: dockAt?.col } } : {}),
       // The shell in front (see `shellHere`).
       ...(shellHere != null ? { shell: shellHere } : {}),
@@ -7249,6 +7319,31 @@ function App() {
         dock_width: clampDock(startW + (dockLeft ? ev.clientX - startX : startX - ev.clientX), fit.navShown ? fit.navW : 0, window.innerWidth, railsWidth(settings)),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  // ── lower-slot splitter: a GUIDE line follows the pointer and the split is
+  //    written once, on release. Live writes would refit the shell per pause
+  //    (the 80ms settle coalesces a steady drag, not a hesitant one), and every
+  //    distinct grid is a SIGWINCH and a reprinted prompt. ──
+  const [lowerGuide, setLowerGuide] = useState<number | null>(null);
+  const onLowerSplit = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const dock = (e.currentTarget as HTMLElement).closest(".dock");
+    if (!dock) return;
+    const r = dock.getBoundingClientRect();
+    const fracAt = (y: number) => clampLowerFrac((r.bottom - y) / r.height);
+    const guideAt = (y: number) => setLowerGuide(Math.round(r.height * (1 - fracAt(y))));
+    guideAt(e.clientY);
+    const move = (ev: MouseEvent) => guideAt(ev.clientY);
+    const up = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      setLowerGuide(null);
+      const frac = Math.round(fracAt(ev.clientY) * 100) / 100;
+      if (frac !== settings.dock_lower_frac) updateSettings({ dock_lower_frac: frac });
+    };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
@@ -7715,7 +7810,7 @@ function App() {
             <div className="rail-group">
               {/* Inside the group, so the hairline is not a hover edge either. */}
               <div className="rail-sep" />
-              <DockRailGroup items={dockRailItems} shown={dockShown} tab={eff.dock_tab} why={dockWhy}
+              <DockRailGroup items={dockRailItems} shown={dockShown} tab={shownTab} lower={dockLower} why={dockWhy}
                 prsView={prs.reply?.view} onPick={onDockRailPick} />
             </div>
           </>
@@ -8282,14 +8377,14 @@ function App() {
               `position: absolute; inset: 0` against `.space-body`, so it keeps
               covering terminal and dock together either way round. */}
           {dockShown && selected && sel && (
-            <aside className="dock" style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
+            <aside ref={dockRef} className={"dock" + (lowerOn ? " has-lower" : "")} style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
               <div className="dock-resizer" onMouseDown={onDockResize} />
               {/* the rail owns tab selection AND collapse, so this is a title, not
                   a control strip */}
               <div className="dock-tabs">
-                <span className="dock-title">{DOCK_RAIL.find((d) => d.key === eff.dock_tab)?.title ?? "Files"}</span>
+                <span className="dock-title">{DOCK_RAIL.find((d) => d.key === shownTab)?.title ?? "Files"}</span>
                 <span className="dock-spacer" />
-                {eff.dock_tab === "files" && (
+                {shownTab === "files" && (
                   <>
                     <button
                       className="ctrl sm icon-only"
@@ -8349,7 +8444,7 @@ function App() {
                     </button>
                   </>
                 )}
-                {eff.dock_tab === "docs" && (
+                {shownTab === "docs" && (
                   <button
                     className="ctrl sm icon-only"
                     aria-label="Refresh the documentation index"
@@ -8360,7 +8455,7 @@ function App() {
                     ↻
                   </button>
                 )}
-                {eff.dock_tab === "prs" && prs.reply?.state === "ok" && (
+                {shownTab === "prs" && prs.reply?.state === "ok" && (
                   <button
                     className="ctrl sm prs-refresh"
                     aria-label="Refresh pull requests"
@@ -8373,7 +8468,7 @@ function App() {
                     ↻ {prs.reply.fetched_at ? ageOf(new Date(prs.reply.fetched_at).toISOString()) : ""}
                   </button>
                 )}
-                {eff.dock_tab === "plan" && (
+                {shownTab === "plan" && (
                   <>
                     {planPath && (
                       <button
@@ -8426,7 +8521,7 @@ function App() {
                 )}
               </div>
               <div className="dock-body">
-                {eff.dock_tab === "prs" ? (
+                {shownTab === "prs" ? (
                   // Keyed on the project: the list is the project's, the same
                   // from any of its places, so a place switch keeps its open
                   // groups.
@@ -8447,7 +8542,7 @@ function App() {
                     // to Files, or the first answer for this project lands
                     <div className="prs-empty" data-testid="prs-empty" data-state="none" />
                   )
-                ) : eff.dock_tab === "plan" ? (
+                ) : shownTab === "plan" ? (
                   // Keyed on the place like DocsPane: a switch remounts, so no
                   // previous place's plan can paint under the new place's name.
                   <PlanPane
@@ -8469,7 +8564,7 @@ function App() {
                     cliSkew={cliSkew(planning)}
                     onError={fail}
                   />
-                ) : eff.dock_tab === "docs" ? (
+                ) : shownTab === "docs" ? (
                   // Keyed on the place: the index, the filter and the selection
                   // are all per place, and remounting is cheaper than five
                   // reset effects that each have to remember to exist.
@@ -8499,7 +8594,7 @@ function App() {
                     findToken={findToken}
                     onFindClose={closeFind}
                   />
-                ) : eff.dock_tab === "files" ? (
+                ) : shownTab === "files" ? (
                   <FilesPane
                     root={selected.path}
                     openPath={dockFile}
@@ -8551,6 +8646,38 @@ function App() {
                     findOpen={findOn === "dock"} findToken={findToken} onFindClose={closeFind} />
                 )}
               </div>
+
+              {/* ── the lower slot: the SAME shells as the Terminal tab (same
+                  repo/slug, same backend sessions and rings), never a second
+                  instance — a pty has one size, and two xterms on one shell
+                  would SIGWINCH each other. Moving the Terminal between tab and
+                  slot is an unmount + mount, i.e. one ring replay: what a tab
+                  click has always cost. The agent's box is untouched by any of
+                  it; the splitter resizes the SHELL, once, on release. */}
+              {lowerOn && (
+                <>
+                  <div className="dock-lower-split" role="separator" aria-orientation="horizontal"
+                    aria-label="Resize the terminal below the panel" onMouseDown={onLowerSplit} />
+                  {lowerGuide !== null && <div className="dock-lower-guide" style={{ top: lowerGuide }} />}
+                  <div className="dock-lower" style={{ flexBasis: `${clampLowerFrac(settings.dock_lower_frac) * 100}%` }}>
+                      <TerminalTabs key={sel.repo + "|" + sel.slug}
+                        repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
+                        termVersion={termVersion} focusToken={termFocus + lowerFocus} addToken={newTermToken}
+                        hydratedTick={hydratedTick}
+                        names={(settings.term_tab_names ?? {})[sel.repo + "|" + sel.slug] ?? {}}
+                        onRename={(index, name) => renameTermTab(sel.repo, sel.slug, index, name)}
+                        tabs={(settings.term_tabs ?? {})[sel.repo + "|" + sel.slug] ?? []}
+                        onTabs={(ids) => setTermTabs(sel.repo, sel.slug, ids)}
+                        activeTab={(settings.term_tab_active ?? {})[sel.repo + "|" + sel.slug] ?? null}
+                        onActiveTab={(index) => setTermTab(sel.repo, sel.slug, index)}
+                        goto={navShellGoto}
+                        onFront={onTermFront}
+                        onError={fail}
+                        root={selected.path} onOpenPath={openPathFromTerm}
+                        findOpen={findOn === "lower"} findToken={findToken} onFindClose={closeFind} />
+                  </div>
+                </>
+              )}
             </aside>
           )}
 
@@ -8602,7 +8729,7 @@ function App() {
           edge it is not rendered: its buttons are in `.rail` above. */}
       {!merged && (
         <nav className="rail rail-right" style={{ order: ord.railRight }}>
-          <DockRailGroup items={dockRailItems} shown={dockShown} tab={eff.dock_tab} why={dockWhy}
+          <DockRailGroup items={dockRailItems} shown={dockShown} tab={shownTab} lower={dockLower} why={dockWhy}
             prsView={prs.reply?.view} onPick={onDockRailPick} />
           {/* Offers at the foot of the dock rail, because that end is empty in
               every layout. Gated on the offers and nothing else. */}
