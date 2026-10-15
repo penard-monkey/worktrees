@@ -452,6 +452,14 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   which reads exactly like whatever chord you just pressed having cleared the
   selection. A whole debugging detour came from that. Launch it as a real
   background task and check `lsof` before believing any harness result.
+- **A reused `<div>` keeps its scroll offset through a class flip — the reset
+  came from a CLAMP.** The "loading…" flip on every refresh looked like the
+  cause of "the document jumps to the top"; React reuses the div and scrollTop
+  survived it (Playwright Chrome + WebKit against the mock; not measured in the
+  app's WKWebView). A read that caught the file mid-write did it: the stub
+  clamps scrollTop, the clamp fires its own `scroll` event, and a hook that
+  trusts every scroll event records 0. Reproduce with `?slowread[=ms]` and
+  `__mock.editFile(path, content?)`; `scrollkeep-check.mjs` pins it.
 - **xterm's search addon fails only once you SEARCH.** Its decorations need
   `allowProposedApi: true` on the `Terminal` — without it `registerDecoration`
   throws on the first ⌘F, from inside an effect, taking the pane down with it;
