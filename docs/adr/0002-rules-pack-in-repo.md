@@ -41,15 +41,24 @@ in any session in a managed repo without the agent relearning it.
 
 - The repo copy is **data worktrees writes**. Reading it back parses two
   markers and hashes the body; nothing in it becomes argv, a launch prompt, or
-  per-launch delivery. `guidance::materialize` never reads the repository.
+  per-launch delivery — `guidance::materialize` takes no repository at all
+  (its inputs are the binary's text and the user's own edit under
+  `~/.config/worktrees/guidance/`), so the per-launch skill cannot pick the
+  repo copy up. The one thing repo data DOES steer is a verdict: the version
+  and hash parsed from the markers decide what `rules status` reports and
+  whether the app suggests an apply. That is a read of data into a state,
+  never into a command.
 - `.claude/close-out.md` lists gate commands as **text for an agent to read**,
   like AGENTS.md always has. worktrees never runs or parses them; `rules` must
   never grow a "run the gates" verb.
 - The `worktrees` skill itself is NOT written into repositories: a launched
   Claude already has it from the per-launch plugin, and a second copy would be
   a second, older skill beside it.
-- Nothing outside the markers is ever touched; a `close-out` skill worktrees
-  did not write is never overwritten, not even with `--force`.
+- In AGENTS.md, nothing outside the markers is ever touched. The same commit
+  may also carry the layout fix (rename CLAUDE.md, write the stub, link
+  skills for Codex), the close-out skill and `.claude/close-out.md`; a
+  `close-out` skill worktrees did not write, or a symlink on its path, is
+  never written over or through, not even with `--force`.
 - Nothing leaves the machine unless the user asks (`--push`); MCP
   `apply_rules` never pushes.
 

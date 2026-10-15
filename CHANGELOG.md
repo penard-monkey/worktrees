@@ -19,9 +19,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   outdated or edited by hand; a re-apply updates it in place and never touches
   text outside its markers or a close-out skill worktrees did not write. MCP
   gains `rules_status` and, on a `--mutations` server, `apply_rules`, which
-  never pushes. See ADR 0002. `worktrees agent-setup fix` follows the same
-  rule now: it commits locally, and `--push` pushes and opens the PR as it
-  used to (the app's button still pushes).
+  never pushes. See ADR 0002.
 - **`worktrees run --slot gate -- <cmd>`: machine-wide slots for heavy jobs.**
   A gate, build or full test run wrapped this way waits until one of the
   machine's slots is free (two by default), runs, and frees the slot when it
@@ -48,6 +46,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `config.toml` (`max_live_agents`, `max_live = { claude = 12 }`,
   `min_free_memory_pct`, `max_swap_used_pct`; 0 turns one off); a repository
   cannot set them.
+
+### Changed
+- **`worktrees agent-setup fix` commits locally and pushes nothing unless you
+  add `--push`**, the same rule as `rules apply`; `--push` pushes the branch
+  and opens the PR as it used to. The app's Fix button still pushes.
 
 ### Fixed
 - **Setting a project's planning to full now writes `/.planning/` to

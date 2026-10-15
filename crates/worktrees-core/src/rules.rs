@@ -96,16 +96,30 @@ fn parse_stamp(rest: &str) -> Option<(u32, String)> {
     sha.chars().all(|c| c.is_ascii_hexdigit()).then(|| (v, sha.to_string()))
 }
 
+/// Version FIRST: a block a newer worktrees wrote stays `Newer` even after a
+/// hand edit (the edit does not touch the marker's version), so `--force`,
+/// which replaces EDITED text, can never downgrade it. Line endings are
+/// compared as LF: a repository that commits CRLF has not edited anything.
 fn judge(version: u32, recorded: &str, body: &str, shipped: &str) -> State {
-    if hash(body) != recorded {
-        State::Edited
-    } else if version > VERSION {
+    let body = lf(body);
+    if version > VERSION {
         State::Newer
+    } else if hash(&body) != recorded {
+        State::Edited
     } else if version == VERSION && body == shipped {
         State::Current
     } else {
         State::Outdated
     }
+}
+
+fn lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+/// `text` in the line endings of `like`: CRLF when `like` uses them.
+fn eol_like(text: &str, like: &str) -> String {
+    if like.contains("\r\n") { lf(text).replace('\n', "\r\n") } else { text.to_string() }
 }
 
 /// The block exactly as apply writes it.
@@ -171,11 +185,15 @@ pub fn block_state(text: Option<&str>) -> Found {
 /// `text` with the current block in it: replacing the one there, or appended
 /// after the user's own text. Only call it for a state apply may write.
 pub fn with_block(text: &str) -> String {
+    let ours = eol_like(&block(), text);
     match find_block(text) {
-        Ok(Some(s)) => format!("{}{}{}", &text[..s.start], block(), &text[s.end..]),
+        Ok(Some(s)) => format!("{}{ours}{}", &text[..s.start], &text[s.end..]),
         _ => {
-            let own = text.trim_end();
-            if own.is_empty() { block() } else { format!("{own}\n\n{}", block()) }
+            // Only the trailing NEWLINES: trailing spaces on the last line
+            // can be a markdown hard break, which is content.
+            let own = text.trim_end_matches(['\n', '\r']);
+            let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+            if own.trim().is_empty() { ours } else { format!("{own}{nl}{nl}{ours}") }
         }
     }
 }
@@ -258,6 +276,7 @@ pub struct Status {
 }
 
 /// Where the block goes, from the root's layout. `Err` = nowhere safe.
+#[derive(Clone)]
 enum Target {
     /// Write into this existing file.
     File(String),
@@ -266,6 +285,21 @@ enum Target {
     Renamed,
     /// No instruction file at the root: create AGENTS.md (+ the stub).
     New,
+}
+
+/// A link target as a sibling file name: `./AGENTS.md` is `AGENTS.md`.
+fn bare(target: &str) -> &str {
+    let t = target.trim();
+    t.strip_prefix("./").unwrap_or(t)
+}
+
+/// The first tracked symlink on `path`'s way down (itself included): the
+/// repository's own layout, which apply never writes through.
+fn link_on_path<'a>(entries: &'a [Entry], path: &str) -> Option<&'a str> {
+    let ends = path.match_indices('/').map(|(i, _)| i).chain(std::iter::once(path.len()));
+    ends.map(|i| &path[..i])
+        .find_map(|prefix| entries.iter().find(|e| e.path == prefix && e.mode == "120000"))
+        .map(|e| e.path.as_str())
 }
 
 fn link_target(entries: &[Entry], path: &str, read: &dyn Fn(&str) -> Option<String>) -> Option<String> {
@@ -293,8 +327,8 @@ fn target(entries: &[Entry], root_kind: Option<&DirKind>, read: &dyn Fn(&str) ->
             let a = link_target(entries, agentfiles::AGENTS, read);
             let has = |p: &str| entries.iter().any(|e| e.path == p && e.mode != "120000");
             match (c.as_deref(), a.as_deref()) {
-                (Some(t), None) if t.trim() == agentfiles::AGENTS && has(agentfiles::AGENTS) => Ok(Target::File(agentfiles::AGENTS.into())),
-                (None, Some(t)) if t.trim() == agentfiles::CLAUDE && has(agentfiles::CLAUDE) => Ok(Target::File(agentfiles::CLAUDE.into())),
+                (Some(t), None) if bare(t) == agentfiles::AGENTS && has(agentfiles::AGENTS) => Ok(Target::File(agentfiles::AGENTS.into())),
+                (None, Some(t)) if bare(t) == agentfiles::CLAUDE && has(agentfiles::CLAUDE) => Ok(Target::File(agentfiles::CLAUDE.into())),
                 _ => Err("the root's CLAUDE.md / AGENTS.md are symlinks to somewhere else — point one at the other first".into()),
             }
         }
@@ -309,6 +343,7 @@ fn blob(root: &str, spec: &str) -> Option<String> {
 }
 
 /// Everything status and apply need, read from the ref.
+#[derive(Clone)]
 struct Inspected {
     report: Report,
     status: Status,
@@ -319,10 +354,38 @@ struct Inspected {
     /// nothing is there yet, `.agents/skills` is not one link, and the
     /// layout fix will not add it (it only links skills already on the ref).
     needs_link: bool,
+    /// A symlink on `.claude/close-out.md`'s path: the config is not written.
+    config_link: Option<String>,
 }
+
+/// Per (repo, tree id), like `agentfiles::inspect`'s cache: the app asks on
+/// every sweep and every sheet open, and a tree id fixes everything here but
+/// the pending branch, which is patched in fresh on every read.
+static INSPECTED: std::sync::Mutex<Vec<(String, String, Inspected)>> = std::sync::Mutex::new(Vec::new());
 
 fn inspect_with(p: &crate::project::Project) -> Result<Inspected, String> {
     let report = agentfiles::inspect(p)?;
+    let tree_id = crate::git::git_out(&p.main_root, &["rev-parse", "--verify", "-q", &format!("{}^{{tree}}", report.reference)]);
+    if let Some(t) = &tree_id {
+        let g = INSPECTED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, i)) = g.iter().find(|(r, id, _)| *r == p.main_root && id == t) {
+            let mut i = i.clone();
+            i.status.pending = report.pending.clone();
+            i.status.pending_on_origin = report.pending_on_origin;
+            i.report = report;
+            return Ok(i);
+        }
+    }
+    let i = inspect_fresh(p, report)?;
+    if let Some(t) = tree_id {
+        let mut g = INSPECTED.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|(r, _, _)| *r != p.main_root);
+        g.push((p.main_root.clone(), t, i.clone()));
+    }
+    Ok(i)
+}
+
+fn inspect_fresh(p: &crate::project::Project, report: Report) -> Result<Inspected, String> {
     let root = p.main_root.as_str();
     let entries = agentfiles::tree(root, &report.reference)?;
     let read_blob = |sha: &str| blob(root, sha);
@@ -348,12 +411,18 @@ fn inspect_with(p: &crate::project::Project) -> Result<Inspected, String> {
         block_state(text.as_deref())
     };
     let skill_on_ref = entries.iter().find(|e| e.path == SKILL_PATH);
-    let skill = match skill_on_ref {
-        Some(e) if e.mode == "120000" => Found::new(State::Foreign, None),
-        Some(e) => managed_state(read_blob(&e.sha).as_deref(), CLOSE_OUT_SKILL),
-        None => Found::new(State::Absent, None),
+    let skill = match (link_on_path(&entries, SKILL_PATH), skill_on_ref) {
+        (Some(l), _) => Found {
+            state: State::Foreign,
+            version: None,
+            detail: Some(format!("`{l}` is a symlink; worktrees does not write through it")),
+        },
+        (None, Some(e)) => managed_state(read_blob(&e.sha).as_deref(), CLOSE_OUT_SKILL),
+        (None, None) => Found::new(State::Absent, None),
     };
     let config = entries.iter().any(|e| e.path == CONFIG_PATH);
+    // `.claude` itself a link: the config cannot be written either.
+    let config_link = if config { None } else { link_on_path(&entries, CONFIG_PATH).map(str::to_string) };
     let needs_link = skill_on_ref.is_none()
         && !entries.iter().any(|e| {
             e.path == ".agents/skills/close-out"
@@ -361,8 +430,10 @@ fn inspect_with(p: &crate::project::Project) -> Result<Inspected, String> {
                 || (e.mode == "120000" && (e.path == ".agents/skills" || e.path == ".agents"))
         });
     let writable = |f: &Found| matches!(f.state, State::Absent | State::Outdated);
-    let applicable =
-        report.fixable || (blocked.is_none() && writable(&block)) || writable(&skill) || (!config && skill.state != State::Foreign);
+    let applicable = report.fixable
+        || (blocked.is_none() && writable(&block))
+        || writable(&skill)
+        || (!config && config_link.is_none() && skill.state != State::Foreign);
     let status = Status {
         reference: report.reference.clone(),
         version: VERSION,
@@ -375,7 +446,7 @@ fn inspect_with(p: &crate::project::Project) -> Result<Inspected, String> {
         pending: report.pending.clone(),
         pending_on_origin: report.pending_on_origin,
     };
-    Ok(Inspected { report, status, target, text, needs_link })
+    Ok(Inspected { report, status, target, text, needs_link, config_link })
 }
 
 pub fn status(p: &crate::project::Project) -> Result<Status, String> {
@@ -387,17 +458,29 @@ pub fn status(p: &crate::project::Project) -> Result<Status, String> {
 /// The changes apply makes on top of the layout fix. `force` replaces an
 /// EDITED block or skill (never a foreign skill, never a newer or malformed
 /// one). Returns the changes and what it left alone, in words.
-fn rules_changes(i: &Inspected, project: &str, force: bool) -> (Vec<Change>, Vec<String>) {
-    let mut v = Vec::new();
-    let mut left = Vec::new();
-    let may = |f: &Found| matches!(f.state, State::Absent | State::Outdated) || (force && f.state == State::Edited);
-    let why = |what: &str, f: &Found| match f.state {
+/// Whether apply writes a piece in this state (`force` adds EDITED).
+fn may(f: &Found, force: bool) -> bool {
+    matches!(f.state, State::Absent | State::Outdated) || (force && f.state == State::Edited)
+}
+
+/// Why apply leaves a piece alone — the same line for `apply` and `diff`.
+fn why(what: &str, f: &Found) -> String {
+    match f.state {
         State::Edited => format!("{what} was edited by hand — left alone (`worktrees rules diff` shows it; --force replaces it)"),
         State::Newer => format!("{what} was written by a newer worktrees (v{}) — left alone; upgrade worktrees", f.version.unwrap_or(0)),
         State::Malformed => format!("{what}: {} — left alone; fix the markers by hand", f.detail.clone().unwrap_or_default()),
-        State::Foreign => format!("{what} is not one worktrees wrote — left alone"),
+        State::Foreign => match &f.detail {
+            Some(d) => format!("{what}: {d} — left alone"),
+            None => format!("{what} is not one worktrees wrote — left alone"),
+        },
         _ => String::new(),
-    };
+    }
+}
+
+fn rules_changes(i: &Inspected, project: &str, force: bool) -> (Vec<Change>, Vec<String>) {
+    let mut v = Vec::new();
+    let mut left = Vec::new();
+    let may = |f: &Found| may(f, force);
     let s = &i.status;
     match (&i.target, &s.blocked) {
         (_, Some(b)) => left.push(format!("the rules block: {b}")),
@@ -422,7 +505,9 @@ fn rules_changes(i: &Inspected, project: &str, force: bool) -> (Vec<Change>, Vec
     } else if s.skill.state != State::Current {
         left.push(why(SKILL_PATH, &s.skill));
     }
-    if !s.config && s.skill.state != State::Foreign {
+    if let Some(l) = &i.config_link {
+        left.push(format!("{CONFIG_PATH}: `{l}` is a symlink; worktrees does not write through it — left alone"));
+    } else if !s.config && s.skill.state != State::Foreign {
         v.push(Change::Write { path: CONFIG_PATH.into(), content: CLOSE_OUT_CONFIG.replace("{project}", project) });
     }
     (v, left)
@@ -440,6 +525,11 @@ pub fn apply_with(p: &crate::project::Project, gh_bin: &str, push: bool, force: 
     let mut out = FixOutcome { branch: agentfiles::FIX_BRANCH.into(), base: i.report.reference.clone(), ..Default::default() };
     out.left_alone = agentfiles::left_alone(&i.report);
     let project = std::path::Path::new(&p.main_root).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // One commit: the layout fix, then the rules. For a CLAUDE.md-only root
+    // the fix's rename is followed by the block written over AGENTS.md, so a
+    // short CLAUDE.md can fall under git's 50% similarity and `log --follow`
+    // reads delete + add. Accepted: one commit to review and revert beats a
+    // rename that survives `--follow`, and the old text is still in history.
     let mut changes = agentfiles::plan(&i.report.dirs, &i.report.skills);
     let (ours, left) = rules_changes(&i, &project, force);
     changes.extend(ours);
@@ -449,42 +539,52 @@ pub fn apply_with(p: &crate::project::Project, gh_bin: &str, push: bool, force: 
         return Ok(out);
     }
     let pr = agentfiles::Pr {
-        message: message(&i.report, &changes),
+        message: message(&i.report, &i.status, &changes),
         title: "Apply the worktrees rules".into(),
-        body: body(&i.report, &changes, &left),
+        body: body(&i.report, &i.status, &changes, &left),
     };
     agentfiles::publish(p, &i.report, &changes, &pr, push, gh_bin, &mut out)?;
     out.notes.extend(left);
     Ok(out)
 }
 
-fn describe(c: &Change) -> String {
+/// What a write does to a managed piece, in the words a reviewer of the
+/// branch reads: an add, an update from an older version, or a replacement.
+fn verb(f: &Found) -> String {
+    match (&f.state, f.version) {
+        (State::Outdated, Some(v)) => format!("update (v{v} → v{VERSION})"),
+        (State::Edited, _) => format!("replace the hand-edited (with v{VERSION})"),
+        _ => format!("add (v{VERSION})"),
+    }
+}
+
+fn describe(c: &Change, s: &Status) -> String {
     match c {
-        Change::Write { path, .. } if path == SKILL_PATH => format!("- write the `close-out` skill (`{path}`)"),
+        Change::Write { path, .. } if path == SKILL_PATH => format!("- `close-out` skill (`{path}`): {}", verb(&s.skill)),
         Change::Write { path, .. } if path == CONFIG_PATH => format!("- add `{path}`, this repository's close-out settings (yours to edit)"),
-        Change::Write { path, content } if content.contains(END) => format!("- add the worktrees rules block to `{path}` (v{VERSION})"),
+        Change::Write { path, content } if content.contains(END) => format!("- worktrees rules block in `{path}`: {}", verb(&s.block)),
         c => agentfiles::describe(c),
     }
 }
 
-fn message(r: &Report, changes: &[Change]) -> String {
+fn message(r: &Report, s: &Status, changes: &[Change]) -> String {
     let mut m = String::from("chore: apply the worktrees rules\n\n");
     m.push_str("How this repository is worked on with worktrees — places, lanes, the MCP\n");
     m.push_str("tools, planning, finishing and close-out — for every agent that reads\n");
     m.push_str("AGENTS.md, including sessions worktrees did not start.\n\n");
     for c in changes {
-        m.push_str(&describe(c));
+        m.push_str(&describe(c, s));
         m.push('\n');
     }
     m.push_str(&format!("\nBuilt against {} by worktrees.\n", r.reference));
     m
 }
 
-fn body(r: &Report, changes: &[Change], left: &[String]) -> String {
+fn body(r: &Report, s: &Status, changes: &[Change], left: &[String]) -> String {
     let mut b = String::from("Writes the **worktrees rules** into this repository, so every agent — including one worktrees did not launch — knows how places, lanes and close-out work here.\n\n");
     b.push_str("The block in AGENTS.md is managed: `worktrees rules apply` updates it in place and leaves everything outside its markers alone. `.claude/close-out.md` is this repository's to edit.\n\n## Changes\n");
     for c in changes {
-        b.push_str(&describe(c));
+        b.push_str(&describe(c, s));
         b.push('\n');
     }
     if !left.is_empty() {
@@ -499,27 +599,53 @@ fn body(r: &Report, changes: &[Change], left: &[String]) -> String {
 
 // ── diff ─────────────────────────────────────────────────────────────────────
 
+/// One file `rules diff` would show: what is there (under `old_path`, which
+/// differs from `new_path` when the layout fix renames CLAUDE.md) and what
+/// apply would write.
+pub struct Proposal {
+    pub old_path: String,
+    pub new_path: String,
+    pub old: String,
+    pub new: String,
+}
+
 /// What apply would write vs what is there, per managed piece, for `rules
-/// diff`: `(path, current text or "", proposed text)`.
-pub fn proposals(p: &crate::project::Project) -> Result<Vec<(String, String, String)>, String> {
+/// diff`, plus the why-lines for the pieces it would leave alone.
+pub fn proposals(p: &crate::project::Project) -> Result<(Vec<Proposal>, Vec<String>), String> {
     let i = inspect_with(p)?;
+    let s = &i.status;
     let mut v = Vec::new();
-    if let (Some(file), None) = (&i.status.file, &i.status.blocked) {
-        let cur = i.text.clone().unwrap_or_default();
-        let new = with_block(&cur);
-        if cur != new {
-            v.push((file.clone(), cur, new));
+    let mut left = Vec::new();
+    // `may(…, true)`: the diff is what `--force` would write too, which is
+    // the point of looking at an edited block. Anything else — newer,
+    // malformed, foreign — gets the line apply would print, never a patch
+    // apply would refuse (with_block on a damaged block APPENDS a second one).
+    match (&s.file, &s.blocked) {
+        (_, Some(b)) => left.push(format!("the rules block: {b}")),
+        (Some(file), None) if may(&s.block, true) => {
+            let old_path = match i.target {
+                Some(Target::Renamed) => agentfiles::CLAUDE.to_string(),
+                _ => file.clone(),
+            };
+            let cur = i.text.clone().unwrap_or_default();
+            let new = with_block(&cur);
+            if cur != new {
+                v.push(Proposal { old_path, new_path: file.clone(), old: cur, new });
+            }
         }
+        _ if s.block.state != State::Current => left.push(why("the rules block", &s.block)),
+        _ => {}
     }
-    if i.status.skill.state != State::Foreign {
-        let root = p.main_root.as_str();
-        let cur = blob(root, &format!("{}:{SKILL_PATH}", i.report.reference)).unwrap_or_default();
+    if may(&s.skill, true) {
+        let cur = blob(&p.main_root, &format!("{}:{SKILL_PATH}", i.report.reference)).unwrap_or_default();
         let new = managed_file(CLOSE_OUT_SKILL);
         if cur != new {
-            v.push((SKILL_PATH.to_string(), cur, new));
+            v.push(Proposal { old_path: SKILL_PATH.into(), new_path: SKILL_PATH.into(), old: cur, new });
         }
+    } else if s.skill.state != State::Current {
+        left.push(why(SKILL_PATH, &s.skill));
     }
-    Ok(v)
+    Ok((v, left))
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -537,11 +663,11 @@ fn state_words(f: &Found) -> String {
 }
 
 /// A scratch diff's headers (`a/old`, `b/new`) renamed to the real path.
-fn relabel(diff: &str, path: &str) -> String {
+fn relabel(diff: &str, old_path: &str, new_path: &str) -> String {
     diff.split_inclusive('\n')
         .map(|l| {
             if l.starts_with("diff --git ") || l.starts_with("--- ") || l.starts_with("+++ ") {
-                l.replace("a/old", &format!("a/{path}")).replace("b/new", &format!("b/{path}"))
+                l.replace("a/old", &format!("a/{old_path}")).replace("b/new", &format!("b/{new_path}"))
             } else {
                 l.to_string()
             }
@@ -579,22 +705,30 @@ pub fn cmd_rules(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, rest: 
                     ui.plain(&format!("  branch '{b}' is committed locally — review it (`worktrees new {b}`), push it and open a PR"));
                 }
             } else if s.applicable {
-                ui.plain("  `worktrees rules apply` commits the rest on its own branch");
+                let rules_todo = [&s.block, &s.skill].iter().any(|f| matches!(f.state, State::Absent | State::Outdated)) || !s.config;
+                ui.plain(if rules_todo {
+                    "  `worktrees rules apply` commits the rest on its own branch"
+                } else {
+                    "  the rules are current; `worktrees rules apply` would commit only the AGENTS.md layout fix (see `worktrees agent-setup`)"
+                });
             }
             0
         }
         "diff" => {
-            let v = match proposals(p) {
+            let (v, why) = match proposals(p) {
                 Ok(v) => v,
                 Err(e) => { ui.error(&e); return 1; }
             };
-            if v.is_empty() {
+            if v.is_empty() && why.is_empty() {
                 ui.info("Nothing to change.");
             }
-            for (path, cur, new) in v {
-                match crate::guidance::diff_texts_brief(&cur, &new) {
-                    Ok(d) => print!("{}", relabel(&d, &path)),
-                    Err(e) => { ui.error(&format!("{path}: {e}")); return 1; }
+            for w in &why {
+                ui.info(w);
+            }
+            for d in v {
+                match crate::guidance::diff_texts_brief(&d.old, &d.new) {
+                    Ok(text) => print!("{}", relabel(&text, &d.old_path, &d.new_path)),
+                    Err(e) => { ui.error(&format!("{}: {e}", d.new_path)); return 1; }
                 }
             }
             0
@@ -651,11 +785,45 @@ mod tests {
         assert_eq!(block_state(Some(&text)).state, State::Edited);
     }
 
+    /// The other direction of the hand-edit rule: text the user writes
+    /// OUTSIDE the markers is theirs and never makes the block "edited".
+    #[test]
+    fn an_edit_outside_a_current_block_keeps_it_current() {
+        let text = format!("{}\n## Mine\nmore of our own rules\n", with_block("# R\n"));
+        assert_eq!(block_state(Some(&text)).state, State::Current);
+        assert_eq!(with_block(&text), text, "a re-apply leaves the user's text alone");
+    }
+
+    /// A repository that commits AGENTS.md with CRLF: what we wrote reads
+    /// current, and a re-apply keeps the file's own line endings.
+    #[test]
+    fn crlf_files_read_current_and_stay_crlf() {
+        let crlf = with_block("# R\n").replace('\n', "\r\n");
+        assert_eq!(block_state(Some(&crlf)).state, State::Current);
+        let applied = with_block("# R\r\nbe kind\r\n");
+        assert!(applied.starts_with("# R\r\nbe kind\r\n\r\n<!-- worktrees:rules"), "{applied:?}");
+        assert!(!applied.replace("\r\n", "").contains('\n'), "no bare LF in a CRLF file: {applied:?}");
+        assert_eq!(block_state(Some(&applied)).state, State::Current);
+        let skill = managed_file(CLOSE_OUT_SKILL).replace('\n', "\r\n");
+        assert_eq!(managed_state(Some(&skill), CLOSE_OUT_SKILL).state, State::Current);
+    }
+
+    /// Only the trailing NEWLINES go: a markdown hard break (two trailing
+    /// spaces) on the user's last line is content.
+    #[test]
+    fn appending_keeps_the_users_last_line_intact() {
+        assert!(with_block("# R\nlast line  \n\n\n").starts_with("# R\nlast line  \n\n<!-- worktrees:rules"));
+    }
+
     #[test]
     fn a_newer_block_and_unpaired_markers_are_not_ours_to_write() {
         let body = "x\n";
         let newer = format!("{BEGIN}v{} sha={} -->\n{body}{END}\n", VERSION + 1, hash(body));
         assert_eq!(block_state(Some(&newer)).state, State::Newer);
+        // Edited by hand AFTER a newer worktrees wrote it: still newer, so
+        // --force (which replaces EDITED text) can never downgrade it.
+        let newer_edited = newer.replace("x\n", "y\n");
+        assert_eq!(block_state(Some(&newer_edited)).state, State::Newer);
         let lone = format!("# R\n{BEGIN}v1 sha=00 -->\nx\n");
         let f = block_state(Some(&lone));
         assert_eq!(f.state, State::Malformed);
@@ -711,7 +879,11 @@ mod tests {
         for (path, text) in files {
             let f = repo.join(path);
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
-            std::fs::write(f, text).unwrap();
+            // "-> target" commits a symlink.
+            match text.strip_prefix("-> ") {
+                Some(t) => std::os::unix::fs::symlink(t, &f).unwrap(),
+                None => std::fs::write(f, text).unwrap(),
+            }
         }
         std::fs::write(repo.join("README.md"), "hi\n").unwrap();
         sh(&repo, &["add", "-A"]);
@@ -733,11 +905,20 @@ mod tests {
         assert_eq!(before.skill.state, State::Absent);
         assert!(!before.config && before.applicable);
         let head = sh(&repo, &["rev-parse", "HEAD"]);
+        // A DIRTY checkout — an edit and an untracked file — must come out
+        // exactly as it went in: apply works on a private index, never here.
+        std::fs::write(repo.join("README.md"), "hi, edited\n").unwrap();
+        std::fs::write(repo.join("scratch.txt"), "mine\n").unwrap();
+        let dirty = sh(&repo, &["status", "--porcelain"]);
+        assert!(!dirty.is_empty());
 
         let out = apply_with(&p, "/nonexistent/gh", false, false).unwrap();
         assert!(out.commit.is_some() && !out.pushed && out.pr_url.is_none(), "{:?}", out.notes);
         assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), head);
-        assert_eq!(sh(&repo, &["status", "--porcelain"]), "");
+        assert_eq!(sh(&repo, &["status", "--porcelain"]), dirty);
+        assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "hi, edited\n");
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        std::fs::remove_file(repo.join("scratch.txt")).unwrap();
         assert!(sh(&repo, &["ls-remote", "origin", "agent-instructions"]).is_empty(), "nothing was pushed");
         let b = "agent-instructions";
         let agents = sh(&repo, &["show", &format!("{b}:AGENTS.md")]);
@@ -786,6 +967,8 @@ mod tests {
         let forced = apply_with(&p, "/nonexistent/gh", false, true).unwrap();
         assert!(forced.commit.is_some(), "{:?}", forced.notes);
         let b = "agent-instructions";
+        // The reviewer of the branch is told it REPLACES their edit.
+        assert!(sh(&repo, &["log", "-1", "--format=%B", b]).contains("worktrees rules block in `AGENTS.md`: replace the hand-edited"));
         assert_eq!(block_state(Some(&sh(&repo, &["show", &format!("{b}:AGENTS.md")]))).state, State::Current);
         assert!(sh(&repo, &["show", &format!("{b}:{SKILL_PATH}")]).ends_with("mine"));
         assert_eq!(sh(&repo, &["show", &format!("{b}:{CONFIG_PATH}")]), "our settings");
@@ -811,6 +994,56 @@ mod tests {
         let out = apply_with(&p, "/nonexistent/gh", false, false).unwrap();
         assert!(sh(&repo, &["show", &format!("{b}:AGENTS.md")]) == "codex", "the diverged file is untouched");
         assert!(out.notes.iter().any(|n| n.contains("rules block")), "{:?}", out.notes);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// `rules diff` shows only what `apply` would write: a damaged block gets
+    /// its reason, never a patch adding a second block; and a CLAUDE.md that
+    /// the layout fix renames is labelled as the rename it is.
+    #[test]
+    fn diff_proposes_only_what_apply_would_write() {
+        let damaged = format!("{}{END}\n", with_block("# R\n"));
+        let (t, repo) = fixture("diff-bad", &[("AGENTS.md", &damaged), ("CLAUDE.md", agentfiles::STUB)]);
+        let p = crate::project::Project::discover(&repo).unwrap();
+        let (v, why) = proposals(&p).unwrap();
+        assert!(v.iter().all(|d| d.new_path != "AGENTS.md"), "a malformed block must not be re-proposed: {:?}", v.iter().map(|d| &d.new_path).collect::<Vec<_>>());
+        assert!(why.iter().any(|w| w.contains("do not pair up")), "{why:?}");
+        let _ = std::fs::remove_dir_all(&t);
+
+        let (t, repo) = fixture("diff-rename", &[("CLAUDE.md", "# ours\n")]);
+        let p = crate::project::Project::discover(&repo).unwrap();
+        let (v, _) = proposals(&p).unwrap();
+        let d = v.iter().find(|d| d.new_path == "AGENTS.md").expect("the block is proposed");
+        assert_eq!(d.old_path, "CLAUDE.md", "the old text is CLAUDE.md's");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// A tracked symlink anywhere on the skill's path is the repository's own
+    /// layout: never written through (git would refuse it as a D/F clash
+    /// anyway, with a message naming nothing). The rest still applies.
+    #[test]
+    fn a_symlinked_skills_dir_is_left_alone_and_the_rest_applies() {
+        for (name, link) in [("lnk-skills", ".claude/skills"), ("lnk-skill", ".claude/skills/close-out"), ("lnk-claude", ".claude")] {
+            let (t, repo) = fixture(name, &[("AGENTS.md", "# ours\n"), ("CLAUDE.md", agentfiles::STUB), (link, "-> ../elsewhere")]);
+            let p = crate::project::Project::discover(&repo).unwrap();
+            let s = status(&p).unwrap();
+            assert_eq!(s.skill.state, State::Foreign, "{link}: {s:?}");
+            assert!(s.skill.detail.as_deref().unwrap_or("").contains("symlink"), "{link}: {s:?}");
+            let out = apply_with(&p, "/nonexistent/gh", false, false).unwrap_or_else(|e| panic!("{link}: {e}"));
+            assert!(out.commit.is_some(), "{link}: {:?}", out.notes);
+            assert_eq!(block_state(Some(&sh(&repo, &["show", "agent-instructions:AGENTS.md"]))).state, State::Current, "{link}");
+            let _ = std::fs::remove_dir_all(&t);
+        }
+    }
+
+    /// `CLAUDE.md -> ./AGENTS.md` is the same layout as `-> AGENTS.md`.
+    #[test]
+    fn a_dot_slash_link_is_the_same_link() {
+        let (t, repo) = fixture("dotslash", &[("AGENTS.md", "# ours\n"), ("CLAUDE.md", "-> ./AGENTS.md")]);
+        let p = crate::project::Project::discover(&repo).unwrap();
+        let s = status(&p).unwrap();
+        assert!(s.blocked.is_none(), "{s:?}");
+        assert_eq!(s.file.as_deref(), Some("AGENTS.md"));
         let _ = std::fs::remove_dir_all(&t);
     }
 }
