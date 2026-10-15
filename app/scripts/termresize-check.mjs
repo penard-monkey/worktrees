@@ -486,6 +486,35 @@ async function settled(opts) {
   }
 }
 
+// ── 8. drag to arrange: the gesture BUDGET (a smoke test, like case 7) ──────
+// A drag paints zones over the window and writes nothing until the drop, so
+// the pane's box does not change for the whole gesture: 0 resizes however
+// many frames it takes. The drop is one settings write — a size step of one
+// rail at most — so 1. Whether the real gesture keeps its hands off the box
+// is App's to prove: layout-check drives the grip handlers (no write during
+// moves), and arrange-browser counts term_resize at the bridge (0 during the
+// drag, ≤1 per pane on the drop) in Chromium and WebKit.
+{
+  const settingsSrc = fs.readFileSync(fileURLToPath(new URL("../src/settings.ts", import.meta.url)), "utf8");
+  const railW = Number(/export const RAIL_W = (\d+);/.exec(settingsSrc)?.[1] ?? NaN);
+  const m = await settled({ w: 1000, h: 900 });
+  let before = m.resizes().length;
+  for (let i = 0; i < 60; i++) { m.setSize(1000, 900); m.clock.advance(FRAME); }   // the drag: the box holds still
+  m.clock.advance(PAST);
+  await tick();
+  const during = m.resizes().length - before;
+  if (during === 0) ok("a 60-frame drag over the zones costs the pane 0 resizes");
+  else fail(`a drag that leaves the box alone sent ${during} resize(s)`);
+  before = m.resizes().length;
+  m.setSize(1000 + railW, 900);                                                      // the drop merged the rails
+  m.clock.advance(PAST);
+  await tick();
+  const drop = m.resizes().length - before;
+  if (drop === 1) ok("the drop that changes the pane's width costs exactly 1");
+  else fail(`the drop sent ${drop} resizes, expected 1`);
+  m.dispose();
+}
+
 // ── the restored ring is laid out at the width it was RECORDED at ────────────
 // A saved ring is raw bytes wrapped for a grid that no longer exists, and after
 // a restart it usually does not: the window moved, the dock changed width, the

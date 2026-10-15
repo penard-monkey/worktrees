@@ -72,6 +72,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   go, so the shell redraws once); ⌘J hides both; the Terminal icon and ⌘T
   bring the column back with the shells below. In a window too short for both
   halves the Terminal is a tab again until there is room.
+- **Drag to arrange.** Places, the reference panels, the agent and the
+  Terminal below the panel each have a grip in their header: drag it and the
+  window shows where it can go; drop, and it moves once — nothing resizes
+  while you drag. Esc cancels. Clicking the grip (or Enter on it) opens the
+  same choices as a menu. Every move has an Undo, and Settings → Navigation →
+  Layout has Reset layout.
 
 ### Changed
 - **⌘J in a window too narrow for the reference panels says so** instead of

@@ -18,7 +18,8 @@ import ProfilesPanel from "./ProfilesPanel";
 import PiPanel from "./PiPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import type { LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
-import { clampNav, clampRem, clampTerm, clampZoom, LAYOUT_TILES, railsMerged, railsWidth, THEMES, ZOOM_STEPS } from "./settings";
+import { LAYOUT_KEYS } from "./arrange";
+import { clampNav, clampRem, clampTerm, clampZoom, DEFAULTS, LAYOUT_TILES, railsMerged, railsWidth, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
 import { humanSize } from "./filekind";
 import { HARNESSES, HARNESS_LABEL } from "./harness";
@@ -398,6 +399,7 @@ export function SettingsSheet({
   onCheckUpdate,
   onCatShown,
   onShowNotes,
+  onResetLayout,
   onReset,
   repo,
   onReport,
@@ -447,6 +449,11 @@ export function SettingsSheet({
    *  been seen — `at` alone only knows where the sheet was OPENED. */
   onCatShown?: (cat: CatId) => void;
   onShowNotes: () => void;
+  /** Settings → Layout → Reset: App writes the layout defaults through the
+   *  same commit a drag makes (arrange.ts) and hands back its undo, which the
+   *  sheet draws beside the button — the app's Undo banner is under this
+   *  sheet's scrim. Null when nothing changed. */
+  onResetLayout: () => (() => void) | null;
   onReset: () => void;
   /// The project in focus — AI profiles can be bound per repo, so the panel
   /// needs to know which one to report as effective. Empty is fine (global view).
@@ -539,6 +546,9 @@ export function SettingsSheet({
   // pushed a header 34px out of view once already. `scrollIntoView` with
   // `block: "nearest"` moves nothing when the section is on screen.
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  // Reset layout's way back, for as long as the sheet stays open.
+  const [resetUndo, setResetUndo] = useState<(() => void) | null>(null);
+  useEffect(() => { if (!open) setResetUndo(null); }, [open]);
   useEffect(() => {
     if (!open || !at?.focus) return;
     // After the category switch has painted — the section does not exist until
@@ -1351,7 +1361,21 @@ export function SettingsSheet({
             <div className="hint">
               Applies to all places. Places and the reference panels (Files, Terminal, Docs, Plan) each
               take an edge; on the same edge their rails become one. Widths, ⌘B and ⌘J are unchanged.
-              Tab still walks the panels in their classic order.
+              Tab still walks the panels in their classic order. You can also drag a section by the
+              grip in its header, or click the grip for a menu.
+            </div>
+            <div style={{ display: "flex", gap: "var(--s2)", marginTop: "var(--s2)" }}>
+              <button className="ctrl sm" data-testid="layout-reset"
+                disabled={LAYOUT_KEYS.every((k) => settings[k] === DEFAULTS[k])}
+                onClick={() => { const u = onResetLayout(); setResetUndo(() => u); }}>
+                Reset layout
+              </button>
+              {resetUndo && (
+                <button className="ctrl sm" data-testid="layout-reset-undo"
+                  onClick={() => { resetUndo(); setResetUndo(null); }}>
+                  Undo
+                </button>
+              )}
             </div>
           </section>
 

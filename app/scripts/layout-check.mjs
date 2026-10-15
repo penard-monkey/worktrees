@@ -382,5 +382,143 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   else ok("`.dock-lower` can shrink (min-height: 0)");
 }
 
+// ── 6. drag to arrange (phase 3) ────────────────────────────────────────────
+// arrange.ts is pure (type-only imports), so it loads on its own. What can go
+// wrong: a destination writing a field Undo/Reset do not know, two zones under
+// one pointer, the agent's grip writing its OWN side backwards, and a drag that
+// writes settings while it moves (a live reflow resizes the agent per frame).
+{
+  const asrc = read("../src/arrange.ts");
+  const ajs = (await transformWithEsbuild(asrc, "arrange.ts", { loader: "ts", format: "esm" })).code;
+  const A = await import("data:text/javascript;base64," + Buffer.from(ajs).toString("base64"));
+  const grips = ["places", "reference", "agent", "terminal"];
+  const geo = { app: { left: 0, top: 0, right: 1280, bottom: 800 }, space: { left: 344, top: 50, right: 1280, bottom: 800 }, dock: { left: 344, top: 50, right: 704, bottom: 800 } };
+  for (const g of grips) {
+    const ds = A.destinations(g);
+    if (ds.length !== 2) fail(`${g}: ${ds.length} destinations, want 2`);
+    for (const d of ds) {
+      const extra = Object.keys(d.patch).filter((k) => !A.LAYOUT_KEYS.includes(k));
+      if (extra.length) fail(`${g} → ${d.id} writes ${extra.join(", ")}, which Undo and Reset do not cover`);
+      const z = A.zoneOf(d.id, geo);
+      if (!z) { fail(`${g} → ${d.id} has no zone with the column open`); continue; }
+      const cx = (z.left + z.right) / 2, cy = (z.top + z.bottom) / 2;
+      if (A.destAt(g, geo, cx, cy)?.id !== d.id) fail(`${g}: the centre of ${d.id}'s zone resolves to ${A.destAt(g, geo, cx, cy)?.id}`);
+    }
+    const [a, b] = ds.map((d) => A.zoneOf(d.id, geo));
+    if (a && b && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) fail(`${g}: its two zones overlap`);
+  }
+  if (A.zoneOf("term-below", { ...geo, dock: null }) !== null) fail("the Terminal's zones exist with the column closed");
+  // The agent's grip writes the REFERENCE side, inverted.
+  const ag = Object.fromEntries(A.destinations("agent").map((d) => [d.id, d.patch.dock_side]));
+  if (ag["agent-left"] !== "right" || ag["agent-right"] !== "left") fail(`dragging the agent writes dock_side backwards (${JSON.stringify(ag)})`);
+  // Where the agent zone sits must agree with what the patch produces: the
+  // agent dropped in the LEFT half means the reference is on the right.
+  const cur = { places_side: "left", dock_side: "left", dock_lower: null };
+  const here = A.destinations("agent").filter((d) => A.isCurrent(d, cur)).map((d) => d.id);
+  if (JSON.stringify(here) !== '["agent-right"]') fail(`with reference left, the agent's current zone reads as ${JSON.stringify(here)}`);
+  const u = A.undoOf({ dock_side: "right", dock_lower: "terminal" }, cur);
+  if (JSON.stringify(u) !== JSON.stringify({ dock_side: "left", dock_lower: null })) fail(`undoOf captured ${JSON.stringify(u)}`);
+  const r = A.resetPatch(S.DEFAULTS);
+  if (JSON.stringify(r) !== JSON.stringify({ places_side: "left", dock_side: "right", dock_lower: null })) fail(`resetPatch is ${JSON.stringify(r)}, not the defaults of the three layout keys`);
+  if (!bad) ok("arrange.ts: two destinations per grip, disjoint zones, layout keys only, agent inverted, undo/reset exact");
+
+  // App: four grips; the drag paints and never writes until the drop.
+  const gripUses = [...app.matchAll(/\{\.\.\.gripProps\("(\w+)"\)\}/g)].map((m) => m[1]).sort();
+  if (JSON.stringify(gripUses) !== JSON.stringify([...grips].sort())) fail(`grips rendered: ${gripUses.join(", ")} — want one each for ${grips.join(", ")}`);
+  // The gesture, EVALUATED (race-check's shape): the real arrange block from
+  // App.tsx, re-"rendered" after every event the way React would, under stubs
+  // that count what reaches the pointer API and the settings store. A text
+  // test passed with pointer capture commented out and with a settings write
+  // added in an effect; these cannot.
+  {
+    const from = app.indexOf("  const [arrange, setArrange] = useState");
+    const toLine = app.indexOf("  const resetLayout = ", from);
+    const to = toLine < 0 ? -1 : app.indexOf("\n", toLine);
+    if (from < 0 || to < 0) fail("App.tsx: the arrange block (`const [arrange, setArrange]` … `const resetLayout`) is gone — this check drives it");
+    else {
+      const body = app.slice(from, to);
+      const names = ["useState", "useRef", "useEffect", "useEscape", "window", "document", "destAt", "destinations", "isCurrent", "undoOf", "resetPatch", "DEFAULTS", "GRIP_LABEL",
+        "settings", "updateSettings", "setUndo", "dockShown", "selected", "lowerFits", "spaceH"];
+      const ajs2 = (await transformWithEsbuild(`export function build(env) { const { ${names.join(", ")} } = env;\n${body}\n return { gripProps, closeMoveMenu, moveMenu, arrange, arranged }; }`, "arrange-block.ts", { loader: "ts", format: "esm" })).code;
+      const { build } = await import("data:text/javascript;base64," + Buffer.from(ajs2).toString("base64"));
+      const rects = { ".app": { left: 0, top: 0, right: 1280, bottom: 800 }, ".space-body": { left: 344, top: 50, right: 1280, bottom: 800 }, ".dock": { left: 344, top: 50, right: 704, bottom: 800 } };
+      const makeApp = () => {
+        const states = [], refs = [], timers = [], writes = [], captures = [], deps = [];
+        let si = 0, ri = 0, ei = 0, escape = null, undo = null, pending = [];
+        const settings = { places_side: "left", dock_side: "left", dock_lower: null };
+        const env = {
+          useState: (init) => { const i = si++; if (!(i in states)) states[i] = init; return [states[i], (v) => { states[i] = typeof v === "function" ? v(states[i]) : v; }]; },
+          useRef: (init) => { const i = ri++; if (!(i in refs)) refs[i] = { current: init }; return refs[i]; },
+          // Effects run after the "commit", when their deps moved — so an effect
+          // that writes while the drag is live is caught by behaviour too.
+          useEffect: (fn, d) => { const i = ei++; const k = JSON.stringify(d); if (deps[i] !== k) { deps[i] = k; pending.push(fn); } },
+          useEscape: (fn, active) => { escape = active ? fn : null; },
+          window: { setTimeout: (f) => { timers.push(f); return timers.length; } },
+          document: { querySelector: (q) => (rects[q] ? { getBoundingClientRect: () => rects[q] } : null), body: { classList: { add() {}, remove() {} } } },
+          destAt: A.destAt, destinations: A.destinations, isCurrent: A.isCurrent, undoOf: A.undoOf, resetPatch: A.resetPatch, DEFAULTS: S.DEFAULTS, GRIP_LABEL: A.GRIP_LABEL,
+          settings, updateSettings: (p) => writes.push(p), setUndo: (u) => { undo = u; }, dockShown: true, selected: { tmux_session: { up: true } }, lowerFits: S.lowerFits, spaceH: 750,
+        };
+        const render = () => {
+          si = 0; ri = 0; ei = 0;
+          const out = build(env);
+          const run = pending; pending = [];
+          for (const fn of run) fn();
+          return out;
+        };
+        const el = { setPointerCapture: (id) => captures.push(id), getBoundingClientRect: () => ({ left: 400, bottom: 70 }) };
+        const ev = (x, y) => ({ button: 0, clientX: x, clientY: y, pointerId: 7, stopPropagation() {}, currentTarget: el });
+        const flush = () => { while (timers.length) timers.shift()(); };
+        return { render, ev, writes, captures, flush, esc: () => escape?.(), undo: () => undo };
+      };
+      const drag = (app_, { esc = false } = {}) => {
+        app_.render().gripProps("reference").onPointerDown(app_.ev(500, 300));
+        let duringMoves = -1;
+        for (const x of [505, 520, 600, 700, 800, 900, 1000, 1100]) app_.render().gripProps("reference").onPointerMove(app_.ev(x, 300));
+        duringMoves = app_.writes.length;
+        const mid = app_.render().arrange;
+        if (esc) app_.esc();
+        const p = app_.render().gripProps("reference");
+        p.onPointerUp(app_.ev(1100, 300));
+        app_.render().gripProps("reference").onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 400, bottom: 70 }) } });
+        const menuAfter = app_.render().moveMenu;
+        app_.flush();
+        return { duringMoves, mid, menuAfter };
+      };
+      const wrong = [];
+      let a1, r1;
+      try { a1 = makeApp(); r1 = drag(a1); } catch (e) { fail(`the arrange block no longer runs under the check's stubs (${String(e).split("\n")[0]}) — a new dependency needs a stub`); }
+      if (a1 && r1) {
+      if (JSON.stringify(a1.captures) !== "[7]") wrong.push(`pointer capture: ${JSON.stringify(a1.captures)} (want [7]) — without it a drag across an xterm loses its moves`);
+      if (r1.duringMoves !== 0) wrong.push(`${r1.duringMoves} settings write(s) DURING the drag — a live reflow resizes the agent's pty per frame`);
+      if (!r1.mid || r1.mid.hover !== "ref-right") wrong.push(`mid-drag the overlay hovers ${r1.mid?.hover ?? "nothing"}, want ref-right`);
+      if (a1.writes.length !== 1 || a1.writes[0]?.dock_side !== "right") wrong.push(`the drop wrote ${JSON.stringify(a1.writes)}, want one {dock_side:"right"}`);
+      if (r1.menuAfter) wrong.push("the click derived from the drop opened the Move menu");
+      if (!a1.undo()) wrong.push("the drop left no Undo");
+      const a2 = makeApp(), r2 = drag(a2, { esc: true });
+      if (a2.writes.length !== 0) wrong.push(`Esc mid-drag still wrote ${JSON.stringify(a2.writes)}`);
+      if (r2.menuAfter) wrong.push("the release after Esc opened the Move menu");
+      // A plain press, no movement: the click DOES open the menu.
+      const a3 = makeApp();
+      a3.render().gripProps("reference").onPointerDown(a3.ev(500, 300));
+      a3.render().gripProps("reference").onPointerUp(a3.ev(500, 300));
+      a3.render().gripProps("reference").onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 400, bottom: 70 }) } });
+      if (!a3.render().moveMenu || a3.writes.length) wrong.push("a press without a drag does not open the Move menu (or wrote something)");
+      }
+      if (wrong.length) fail(`the grip gesture (evaluated): ${wrong.join("; ")}`);
+      else ok("the grip gesture, evaluated: capture on press, 0 writes over 8 moves, 1 on the drop, Esc writes nothing, menus only on a plain click");
+    }
+    // An effect that writes while a drag is live is the other way to build a
+    // live reflow ("preview the layout on hover"). No effect keyed on the drag
+    // state may write settings.
+    const effects = [...app.matchAll(/useEffect\(\(\) => \{([\s\S]*?)\}, \[([^\]]*)\]\);/g)].filter((m) => /\barrange\b/.test(m[2]));
+    const writing = effects.filter((m) => /update(Settings|Panels)|commitLayout/.test(m[1]));
+    if (writing.length) fail(`an effect keyed on the drag writes settings: ${writing.map((m) => m[0].slice(0, 80)).join(" | ")}`);
+    else ok("no effect keyed on the drag state writes settings");
+  }
+  const catchCss = css.match(/\.arrange-catch \{[^}]*\}/)?.[0] ?? "";
+  if (!/pointer-events: none/.test(catchCss)) fail("`.arrange-catch` takes pointer events — it would sit between the captured grip and its own hit test");
+  if (!bad) ok("four grips and an inert overlay");
+}
+
 console.log(bad ? `\nlayout-check: ${bad} failure(s)` : "\nlayout-check: all good");
 process.exit(bad ? 1 : 0);

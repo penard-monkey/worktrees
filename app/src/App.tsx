@@ -11,6 +11,7 @@ import { clampSteps, doneBounds, doneOpacity, doneTierSeen, isUnread, seenEpoch 
 import * as Icons from "./icons";
 import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
+import { destAt, destinations, GRIP_LABEL, isCurrent, resetPatch, undoOf, zoneOf, type Dest, type Geometry, type Grip, type LayoutPatch } from "./arrange";
 import { cloneSource, dirNameProblem, isCloneError, type CloneProgress } from "./clone";
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { DocsPane } from "./DocsPane";
@@ -567,6 +568,32 @@ function OffersRailButton({ count, onOpen }: { count: number; onOpen: () => void
       <Icons.Sparkles size={17} />
       <span className="rail-count">{count}</span>
     </button>
+  );
+}
+
+/** Drag to arrange: the drop zones, painted over the window while a grip is
+ *  held. NOTHING moves until the drop — no live reflow, so no pane is resized
+ *  mid-drag (every distinct grid is a SIGWINCH). Pointer-transparent: the grip
+ *  holds pointer capture, and App hit-tests the zones itself (`destAt`), so
+ *  nothing underneath — an xterm, the nav overlay — can steal the gesture. */
+function ArrangeOverlay({ grip, geo, hover, current }: {
+  grip: Grip; geo: Geometry; hover: string | null; current: (d: Dest) => boolean;
+}) {
+  return (
+    <div className="arrange-catch" data-testid="arrange-overlay" aria-hidden="true">
+      {destinations(grip).map((d) => {
+        const r = zoneOf(d.id, geo);
+        if (!r) return null;
+        const here = current(d);
+        return (
+          <div key={d.id} data-zone={d.id}
+            className={"arrange-zone" + (here ? " here" : hover === d.id ? " hover" : "")}
+            style={{ left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top }}>
+            <span className="arrange-zone-label">{here ? `${d.label} — already here` : d.label}</span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -7327,6 +7354,136 @@ function App() {
     window.addEventListener("mouseup", up);
   };
 
+  // ── drag to arrange (arrange.ts) ──
+  // A grip in a section header: drag it over the zones and drop, or press it
+  // (click / Enter) for a Move… menu of the same destinations — the keyboard
+  // path. Either way ONE settings write, an Undo banner, and an aria-live line.
+  // The grip takes pointer capture on press, so a drag that crosses an xterm
+  // or the nav overlay stays the grip's; App hit-tests the zones itself.
+  const [arrange, setArrange] = useState<{ grip: Grip; geo: Geometry; hover: string | null } | null>(null);
+  const arrangeRef = useRef(arrange);
+  arrangeRef.current = arrange;
+  const [moveMenu, setMoveMenu] = useState<{ grip: Grip; x: number; y: number; el: HTMLElement } | null>(null);
+  // The aria-live line. Keyed on a counter so the same words twice (Undo,
+  // then Undo again) are announced twice — a live region only speaks on change.
+  const [arranged, setArranged] = useState({ text: "", n: 0 });
+  const announce = (text: string) => setArranged((a) => ({ text, n: a.n + 1 }));
+  // `started`: the threshold was crossed and the overlay asked for, but React
+  // has not rendered it yet (`arrangeRef` is still null) — moves in that gap
+  // must not re-measure and re-start.
+  const dragFrom = useRef<{ x: number; y: number; id: number; started: boolean } | null>(null);
+  // Set when a release ENDS a drag, so the click the browser derives from that
+  // same release does not also open the menu. Cleared on the next task too:
+  // a drop that unmounts its own grip (the Terminal's, moved into the tabs)
+  // gets no click at all, and a flag left standing would eat the next one.
+  const suppressGripClick = useRef(false);
+  const suppressNextGripClick = () => {
+    suppressGripClick.current = true;
+    window.setTimeout(() => { suppressGripClick.current = false; }, 0);
+  };
+  const measureGeo = (): Geometry | null => {
+    const r = (q: string) => {
+      const b = document.querySelector(q)?.getBoundingClientRect();
+      return b ? { left: b.left, top: b.top, right: b.right, bottom: b.bottom } : null;
+    };
+    const app = r(".app"), space = r(".space-body");
+    return app && space ? { app, space, dock: r(".dock") } : null;
+  };
+  /** One write, one announcement, and the way back. Returns the undo (null
+   *  when nothing changed). `banner: false` is for Settings → Reset, whose
+   *  Undo is drawn beside the button: the float-stack is under the sheet's
+   *  scrim, and its 8s clock would run out unseen. */
+  const commitLayout = (patch: LayoutPatch, done: string, { banner = true } = {}): (() => void) | null => {
+    const prev = undoOf(patch, settings);
+    if (Object.keys(patch).every((k) => patch[k as keyof LayoutPatch] === prev[k as keyof LayoutPatch])) return null;
+    // The Terminal below the panel is a preference; whether it is ON SCREEN
+    // also needs the column open, a live session and the height. Saying it
+    // "moved" when none of that holds would be a lie the screen contradicts.
+    let said = done;
+    if (patch.dock_lower === "terminal") {
+      const why = !dockShown ? "when you open the reference panels (⌘J)"
+        : !selected?.tmux_session.up ? "while this place's session is running"
+        : !lowerFits(spaceH) ? "once the window is tall enough"
+        : null;
+      if (why) said = `Terminal set to sit below the reference panel — it shows there ${why}`;
+    }
+    updateSettings(patch);
+    announce(said);
+    const run = () => { updateSettings(prev); setUndo(null); announce("Layout restored"); };
+    if (banner) setUndo({ text: said, run });
+    return run;
+  };
+  const endArrange = () => {
+    dragFrom.current = null;
+    setArrange(null);
+    document.body.classList.remove("dragging");
+  };
+  // Esc cancels a drag in flight. The release that follows still produces a
+  // click on the captured grip; it must not open the menu.
+  // The button is usually still held then, so the suppression waits for the
+  // release (`dragCancelled`) rather than starting now.
+  const dragCancelled = useRef(false);
+  useEscape(() => { dragCancelled.current = true; endArrange(); }, !!arrange);
+  const gripProps = (g: Grip) => ({
+    className: "grip",
+    "data-grip": g,
+    title: `Move ${GRIP_LABEL[g]} — drag, or click for a menu`,
+    // No `aria-haspopup="menu"`: the Move… list is a group of buttons (Tab
+    // walks it), not an ARIA menu with arrow keys, and it must not say it is.
+    "aria-label": `Move ${GRIP_LABEL[g]}…`,
+    onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      dragCancelled.current = false;
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      dragFrom.current = { x: e.clientX, y: e.clientY, id: e.pointerId, started: false };
+    },
+    onPointerMove: (e: React.PointerEvent<HTMLButtonElement>) => {
+      const f = dragFrom.current;
+      if (!f || f.id !== e.pointerId) return;
+      const a = arrangeRef.current;
+      if (!a) {
+        if (f.started || Math.hypot(e.clientX - f.x, e.clientY - f.y) < 5) return;
+        const geo = measureGeo();
+        if (!geo) return;
+        f.started = true;
+        document.body.classList.add("dragging");
+        setArrange({ grip: g, geo, hover: destAt(g, geo, e.clientX, e.clientY)?.id ?? null });
+        return;
+      }
+      const hover = destAt(a.grip, a.geo, e.clientX, e.clientY)?.id ?? null;
+      if (hover !== a.hover) setArrange({ ...a, hover });
+    },
+    onPointerUp: () => {
+      const a = arrangeRef.current;
+      dragFrom.current = null;
+      if (dragCancelled.current) { dragCancelled.current = false; suppressNextGripClick(); return; }
+      if (!a) return; // a press without a drag: the click opens the menu
+      suppressNextGripClick();
+      endArrange();
+      const d = destinations(a.grip).find((x) => x.id === a.hover);
+      if (d && !isCurrent(d, settings)) commitLayout(d.patch, d.done);
+    },
+    onPointerCancel: () => endArrange(),
+    onClick: (e: React.MouseEvent<HTMLButtonElement>) => {
+      if (suppressGripClick.current) { suppressGripClick.current = false; return; }
+      const r = e.currentTarget.getBoundingClientRect();
+      setMoveMenu({ grip: g, x: r.left, y: r.bottom + 4, el: e.currentTarget });
+    },
+  });
+  const closeMoveMenu = () => {
+    const el = moveMenu?.el;
+    setMoveMenu(null);
+    // Back to the grip, as a menu opened from a button does — not into the
+    // terminal, which would take the next keystroke as input. A move can
+    // unmount the grip it came from (the Terminal's, into the tabs): then the
+    // reference panels' grip, which carries the Terminal's places from there.
+    const back = el?.isConnected ? el : document.querySelector<HTMLElement>('[data-grip="reference"]');
+    // After the commit's render, or the reference grip may not exist yet.
+    window.setTimeout(() => (back?.isConnected ? back : document.querySelector<HTMLElement>('[data-grip="reference"]'))?.focus({ preventScroll: true }), 0);
+  };
+  const resetLayout = () => commitLayout(resetPatch(DEFAULTS), "Layout reset to Classic", { banner: false });
+
   // ── lower-slot splitter: a GUIDE line follows the pointer and the split is
   //    written once, on release. Live writes would refit the shell per pause
   //    (the 80ms settle coalesces a steady drag, not a hesitant one), and every
@@ -7865,6 +8022,7 @@ function App() {
           <HomeIcon /> Home
         </button>
         <div className="nav-head">
+          <button {...gripProps("places")}><Icons.GripVertical size={13} /></button>
           <span className="nav-title">PLACES</span>
           {/* Attention is a FILTER here, not a lens of its own: the count is the
               whole answer most of the time, and the rows it would list are the
@@ -8215,6 +8373,10 @@ function App() {
                     {([planProvider] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => (
                       <div className="agent-cell" key={provider} onFocusCapture={() => setActiveProvider(provider)}>
                         <div className="agent-label">
+                          {/* Only beside an open reference column: with it closed there
+                              is nothing to be left or right of, and a drop would move
+                              something nobody can see. */}
+                          {dockShown && <button {...gripProps("agent")}><Icons.GripVertical size={12} /></button>}
                           <span className="agent-name">
                             {HARNESS_LABEL[provider]}
                             {selectedAgents?.[provider].model && (
@@ -8390,6 +8552,7 @@ function App() {
               {/* the rail owns tab selection AND collapse, so this is a title, not
                   a control strip */}
               <div className="dock-tabs">
+                <button {...gripProps("reference")}><Icons.GripVertical size={13} /></button>
                 <span className="dock-title">{DOCK_RAIL.find((d) => d.key === shownTab)?.title ?? "Files"}</span>
                 <span className="dock-spacer" />
                 {shownTab === "files" && (
@@ -8668,6 +8831,9 @@ function App() {
                     aria-label="Resize the terminal below the panel" onMouseDown={onLowerSplit} />
                   {lowerGuide !== null && <div className="dock-lower-guide" style={{ top: lowerGuide }} />}
                   <div className="dock-lower" style={{ flexBasis: `${lowerFracFor(spaceH, settings.dock_lower_frac) * 100}%` }}>
+                    {/* Over the strip's empty right end rather than a row of
+                        its own: the slot is already short. */}
+                    <button {...gripProps("terminal")}><Icons.GripVertical size={12} /></button>
                       <TerminalTabs key={sel.repo + "|" + sel.slug}
                         repo={sel.repo} slug={sel.slug} sessionUp={selected.tmux_session.up}
                         termVersion={termVersion} focusToken={termFocus + lowerFocus} addToken={newTermToken}
@@ -8749,6 +8915,28 @@ function App() {
           )}
         </nav>
       )}
+
+      {arrange && <ArrangeOverlay grip={arrange.grip} geo={arrange.geo} hover={arrange.hover} current={(d) => isCurrent(d, settings)} />}
+      {moveMenu && (
+        <CtxMenu x={moveMenu.x} y={moveMenu.y} onClose={closeMoveMenu}>
+          <div className="pop-head">Move {GRIP_LABEL[moveMenu.grip]}</div>
+          {/* The reference panels' menu also carries the Terminal's two
+              places while it is a TAB — then it has no grip of its own. */}
+          {[...destinations(moveMenu.grip),
+            ...(moveMenu.grip === "reference" && !lowerOn ? destinations("terminal").map((d) => ({ ...d, label: `Terminal: ${d.label.toLowerCase()}` })) : [])]
+            .map((d, i) => {
+              const here = isCurrent(d, settings);
+              return (
+                <button key={d.id} className="pop-item" disabled={here} autoFocus={i === destinations(moveMenu.grip).findIndex((x) => !isCurrent(x, settings))}
+                  data-dest={d.id}
+                  onClick={() => { closeMoveMenu(); commitLayout(d.patch, d.done); }}>
+                  {d.label}{here && <span className="pop-dim"> — already here</span>}
+                </button>
+              );
+            })}
+        </CtxMenu>
+      )}
+      <div className="sr-only" aria-live="polite" data-testid="arrange-live"><span key={arranged.n}>{arranged.text}</span></div>
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only
           mode. ONE bottom-anchored stack: the undo banner and the landing note
@@ -8876,7 +9064,7 @@ function App() {
         }}
       />
 
-      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onChange={(patch) => {
+      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onResetLayout={resetLayout} onChange={(patch) => {
         updateSettings(patch);
         if (patch.default_provider === "codex") void ensureCodexCli("codex");
       }} onClose={() => setSettingsAt(null)}
