@@ -5,6 +5,17 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (global `/close-out` skill; this repo's settings in
 `.claude/close-out.md`).
 
+- **Before v0.42.0: drive #482 (scroll keep) in the real app.** Only the
+  mock was measured, and AGENTS.md says refresh timing needs the real app.
+  Run `app/scripts/sandbox.sh --app` by hand (no scripted input), open a long
+  markdown file in the dock Files tab, and scroll to the middle. Then:
+  (1) leave it through three `places:changed` ticks; (2) have a Claude lane
+  append above the fold; (3) have it rewrite the file with the Write tool
+  (the truncate-then-write stub); (4) flip Files → Plan → Files, switch
+  place and back; (5) repeat once in ⌘⇧E reading mode. Each should keep the
+  paragraph you were reading. See
+  docs/sessions/2026-10-15-md-scroll-keep/.
+
 - **Automations — removed 2026-10-10; revisit later.** Built in v0.29.0
   (#325, #326), removed by #477: "it hasn't been very useful and it is
   confusing". Design kept in
