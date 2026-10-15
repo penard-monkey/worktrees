@@ -2,8 +2,8 @@
 
 Parking lot for work we've decided to keep but not do now. Each item links
 the session summary that spawned it (see docs/sessions/). Groomed during the
-close-out ritual (global `/close-out` skill; this repo's settings in
-`.claude/close-out.md`).
+close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
+this repo's settings in `.claude/close-out.md`).
 
 - ~~**Before v0.42.0: drive #482 (scroll keep) in the real app.**~~ Done 2026-10-15: David ran it in the sandbox, worked fine. Only the
   mock was measured, and AGENTS.md says refresh timing needs the real app.
@@ -22,6 +22,27 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   Enter sends it; (2) half-typed text in (main) → refused; (3) (main) on a
   `/model` selector → "couldn't read (main)'s prompt"; (4) (main) at a shell
   → disabled tooltip. See docs/sessions/2026-10-15-plan-ask-main/.
+
+- **Rules block v2: say `tmux -L <name>` under "Never touch".** The managed
+  block (`crates/worktrees-core/src/guidance/rules-block.md`) lists another
+  place's tree, a shared branch, `~/.claude.json` and a running app, but not
+  the user's tmux server. Inside a lane `$TMUX` is set, so a bare `tmux …`
+  (or `TMUX_TMPDIR` "isolation") talks to the real server; one probe's bare
+  `kill-server` took every session down (AGENTS.md, the `-L` note). Launched
+  sessions get it from the per-launch `worktrees` skill; a hand-started
+  session reading only the block does not. Bumping the block's text is a
+  version bump: every repo carrying v1 reads `outdated` until re-applied.
+  _From: review of #496 (2026-10-15)._
+
+- **Rules block v2: one wording for where planning files live.** The block
+  says plans are in `.planning/` inside each place; this repo's AGENTS.md
+  ("Planning docs") and `.claude/close-out.md` say the three ROOT files,
+  which is what `planning-with-files` writes. Both are gitignored and the
+  close-out skill tars whichever exists, so nothing breaks, but two
+  documents in one file now name two places. The block should say "either
+  layout" (or the generator should pick the one `planning-with-files`
+  uses). Same version-bump cost as above; do both in one v2.
+  _From: review of #496 (2026-10-15)._
 
 - **pi has no composer reader, so "Ask (main)" on a pi orchestrator checks
   only the trust modal.** A draft in pi's box would have the prompt glued
@@ -988,7 +1009,13 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   worse than the warning.
   _From: [2026-09-20 terminal-history](docs/sessions/2026-09-20-terminal-history/summary.md)_
 
-- **The personal skills repo has no remote, and that already cost it once.**
+- ~~**The personal skills repo has no remote, and that already cost it once.**~~
+  Resolved for THIS repo by #496 (2026-10-15): the close-out skill is now
+  tracked here at `.claude/skills/close-out`, written by `worktrees rules
+  apply`, so losing `~/workspace/claude-skills` no longer loses it. That repo
+  also has a remote now (`penard-monkey/claude-skills`), and its global copy
+  is due to be retired once the other repos carry the pack.
+  Original note:
   `~/workspace/claude-skills` — which CLAUDE.md and `.claude/close-out.md`
   both point at — was gone from the machine. The 2026-08-10 session that
   created it recorded the gap in its own follow-ups ("it exists on this

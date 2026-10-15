@@ -1,7 +1,9 @@
 # close-out overrides — worktrees
 
-Project config for the global `close-out` skill (`~/workspace/claude-skills`).
-Only the deltas from that skill's defaults live here.
+Project config for the `close-out` skill (`.claude/skills/close-out`, written
+by `worktrees rules apply`). Only the deltas from that skill's defaults live
+here. A personal `~/.claude/skills/close-out` outranks the repo's copy until it
+is retired (AGENTS.md, "Close-out ritual").
 
 | Setting | This repo |
 | --- | --- |
@@ -20,6 +22,7 @@ make test
 make lint
 cargo test -p worktrees-core
 cargo test -p worktrees-cli
+cargo test -p app --lib                  # `check`/`build` do NOT compile `mod tests`
 cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 ```
 
@@ -29,7 +32,7 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
   refuses paths outside the roots) — move them to the scratch dir in step 2.
 - `_tmp/` is a user symlink (iCloud) for screenshots under review; not repo
   scratch, leave it alone.
-- Repo-wide conventions and the "hard-won rules" that belong in CLAUDE.md go
+- Repo-wide conventions and the "hard-won rules" that belong in AGENTS.md go
   in the archive PR alongside the summary.
 - **Two worktrees on one branch ⇒ phantom staged changes.** Whichever tree moves
   the shared ref wins; the other keeps a stale working copy, and its index then

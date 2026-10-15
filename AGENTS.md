@@ -1144,14 +1144,23 @@ the cache dir before close-out.
 ## Close-out ritual
 
 When a work stream is done and the session is about to be `/clear`ed, run
-the `/close-out` skill — GLOBAL since 2026-08-10, source in
-`~/workspace/claude-skills` (symlinked into `~/.claude/skills`). This repo's
-paths, gates, index and branch naming live in `.claude/close-out.md`, which
-the skill reads; edit that file, not the skill. Short version: scratch →
-`~/.cache/worktrees/…`, session summary + planning tarball →
-`docs/sessions/<date>-<slug>/` + a row in `docs/sessions/index.md`
-(committed), stragglers → `ROADMAP.md`, one squash-merged PR, then a fresh
-branch off origin/main.
+the `/close-out` skill. It lives IN the repo at
+`.claude/skills/close-out/SKILL.md` (linked for Codex at
+`.agents/skills/close-out`), written by `worktrees rules apply` since #496;
+`worktrees rules status` says whether it is current. Do not hand-edit it — an
+edit makes it stop updating. This repo's paths, gates, index and branch naming
+live in `.claude/close-out.md`, which the skill reads; edit THAT file. Short
+version: scratch → `~/.cache/worktrees/…`, session summary + planning tarball
+→ `docs/sessions/<date>-<slug>/` + a row in `docs/sessions/index.md`
+(committed), stragglers → `ROADMAP.md`, one squash-merged PR, then park the
+place on its own `<place>-next` idle base (place = worktree here; the notes
+below say `<tree>-next` for the same thing).
+
+**A personal `~/.claude/skills/close-out` outranks the repo's copy.** Claude
+Code resolves a name clash personal-over-project, so while the 2026-08-10
+global copy (linked from `~/workspace/claude-skills`) is still installed, THAT
+is what `/close-out` runs on this machine, and the repo copy is what every
+other machine and session runs. Drop this paragraph once it is retired.
 
 **A matching commit SUBJECT is not a merge check.** Squash-merge rewrites the
 SHA, so `git rev-list --count origin/main..<branch>` reports every merged side
