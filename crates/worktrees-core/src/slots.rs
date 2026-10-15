@@ -26,9 +26,18 @@
 //! which happens on every kind of death — exit, crash, SIGKILL — so a held
 //! slot cannot outlive its process and there is nothing to clean up. The
 //! holder's details are written INTO the lock file for display only; a file
-//! that can be locked is free whatever it still says. Pid liveness is needed
-//! for exactly one thing: the waiter files (`wait/<pid>.json`), which are not
-//! locks and are dropped once their pid is gone.
+//! that can be locked is free whatever it still says.
+//!
+//! The QUEUE works the same way. A waiter's `wait/<pid>.json` is held with
+//! `flock(LOCK_EX)` from before it is renamed into place until the waiter
+//! takes a slot or dies, so a file nobody holds is a dead waiter's, however
+//! alive its pid looks. It used to be judged by pid, and a waiter killed
+//! while waiting left a file whose pid was later reused by a long-lived
+//! process: an "older live waiter" that never took anything, in front of a
+//! FREE slot, for everyone (review of #485).
+//!
+//! Not for a networked `$XDG_STATE_HOME`: flock over NFS is not reliable, and
+//! a state dir is local by definition.
 //!
 //! # The descriptor must not be inherited
 //!
@@ -36,15 +45,21 @@
 //! child inherited the lock fd, the first such daemon would hold the slot
 //! until reboot. Rust opens files `O_CLOEXEC`; `held_fd_is_cloexec` pins it.
 //! The price is that SIGKILLing `worktrees run` itself frees the slot while
-//! its child runs on — a kill aimed at a process GROUP (a terminal's ^C, an
-//! agent's tool timeout) reaches both, which is the common case.
+//! its child runs on. A kill aimed at the process GROUP — a terminal's ^C —
+//! reaches both. Measured with Claude Code on macOS (2026-10-14): its Bash
+//! tool does not kill a command that outlives the call's timeout, it moves it
+//! to the background, where it keeps running and keeps its slot; stopping
+//! that background task took the wrapped child with it and freed the slot.
 //!
 //! # Waiting is first come, first served
 //!
 //! Waiters poll every `POLL`. Without an order, seven pollers race for each
 //! freed slot and one can lose for the whole afternoon, so a waiter takes a
 //! free slot only when fewer live waiters are older than it than there are
-//! free slots.
+//! free slots. That is bounded overtaking, not a strict queue: two newcomers
+//! polling in the same instant can both take a slot an elder was about to,
+//! delaying it one round — after which it is strictly first. Nobody starves,
+//! and making it strict would need a ticket server; do not "fix" it.
 
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -159,15 +174,6 @@ fn flock(f: &File, op: libc::c_int) -> bool {
     unsafe { libc::flock(f.as_raw_fd(), op) == 0 }
 }
 
-fn pid_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    // SAFETY: signal 0 only checks for existence and permission.
-    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
 fn read_record(f: &mut File) -> Option<Record> {
     let mut s = String::new();
     f.seek(std::io::SeekFrom::Start(0)).ok()?;
@@ -200,15 +206,18 @@ fn lock_path(dir: &Path, k: u32) -> PathBuf {
     dir.join(format!("{k}.lock"))
 }
 
-/// Try slot `k`: on success write `me` into it and hand it back.
+/// Try slot `k`: on success write `me` into it — stamped with the moment it
+/// was TAKEN, so ages read as "running for", not "around for" — and hand it
+/// back.
 fn try_take(dir: &Path, k: u32, me: &Record) -> Option<Held> {
     let mut f = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(lock_path(dir, k)).ok()?;
     if !flock(&f, libc::LOCK_EX | libc::LOCK_NB) {
         return None;
     }
+    let took = Record { since_ms: now_ms(), ..me.clone() };
     let _ = f.set_len(0);
     let _ = f.seek(std::io::SeekFrom::Start(0));
-    let _ = f.write_all(serde_json::to_string(me).unwrap_or_default().as_bytes());
+    let _ = f.write_all(serde_json::to_string(&took).unwrap_or_default().as_bytes());
     let _ = f.flush();
     Some(Held { file: f, index: k })
 }
@@ -234,29 +243,44 @@ pub fn holders_in(dir: &Path) -> Vec<(u32, Record)> {
     out
 }
 
-/// Live waiters under `dir`, oldest first. A waiter whose pid is gone is
-/// deleted on sight — the one place pid liveness matters here.
+/// Live waiters under `dir`, oldest first. A wait file nobody holds a lock
+/// on is a dead waiter's, and is deleted on sight.
 pub fn waiters_in(dir: &Path) -> Vec<Record> {
+    use std::os::unix::fs::MetadataExt;
     let mut out = Vec::new();
     let Ok(rd) = fs::read_dir(dir.join("wait")) else { return out };
     for e in rd.flatten() {
-        let Ok(text) = fs::read_to_string(e.path()) else { continue };
-        let Ok(rec) = serde_json::from_str::<Record>(&text) else {
-            let _ = fs::remove_file(e.path());
-            continue;
-        };
-        if !pid_alive(rec.pid) {
-            let _ = fs::remove_file(e.path());
+        if e.file_name().to_string_lossy().starts_with('.') {
+            continue; // a waiter's file before its rename
+        }
+        let Ok(mut f) = File::open(e.path()) else { continue };
+        if flock(&f, libc::LOCK_SH | libc::LOCK_NB) {
+            // Nobody holds it: dead. Delete only if the path still names the
+            // file we probed — a new waiter reusing the pid may have renamed
+            // its own (locked) file over it since.
+            let same = match (f.metadata(), fs::metadata(e.path())) {
+                (Ok(a), Ok(b)) => a.ino() == b.ino() && a.dev() == b.dev(),
+                _ => false,
+            };
+            if same {
+                let _ = fs::remove_file(e.path());
+            }
             continue;
         }
-        out.push(rec);
+        // Held, so live; skip one whose record does not parse rather than
+        // guess at it.
+        if let Some(rec) = read_record(&mut f) {
+            out.push(rec);
+        }
     }
     out.sort_by_key(|r| (r.since_ms, r.pid));
     out
 }
 
-/// A registered waiter; dropping it removes the file.
-struct Waiting(PathBuf);
+/// A registered waiter: its file, and the lock on it that says it is alive.
+/// Dropping it removes the file and then closes the descriptor; a death
+/// skips the removal, and the closed descriptor is what tells a reader.
+struct Waiting(PathBuf, #[allow(dead_code)] File);
 
 impl Drop for Waiting {
     fn drop(&mut self) {
@@ -264,14 +288,20 @@ impl Drop for Waiting {
     }
 }
 
+/// Locked BEFORE the rename, so the file is never visible unlocked: the lock
+/// lives on the inode and survives the rename.
 fn register_wait(dir: &Path, me: &Record) -> Option<Waiting> {
     let wd = dir.join("wait");
     fs::create_dir_all(&wd).ok()?;
     let path = wd.join(format!("{}.json", me.pid));
     let tmp = wd.join(format!(".{}.tmp", me.pid));
-    fs::write(&tmp, serde_json::to_string(me).ok()?).ok()?;
+    let mut f = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&tmp).ok()?;
+    if !flock(&f, libc::LOCK_EX | libc::LOCK_NB) {
+        return None;
+    }
+    f.write_all(serde_json::to_string(me).ok()?.as_bytes()).ok()?;
     fs::rename(&tmp, &path).ok()?;
-    Some(Waiting(path))
+    Some(Waiting(path, f))
 }
 
 /// What a waiting caller is told on each change.
@@ -575,17 +605,34 @@ fn parse_run(args: &[String]) -> Result<RunArgs, String> {
     Ok(RunArgs { slot, slots, timeout, cmd })
 }
 
-static CHILD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+
+static CHILD: AtomicI32 = AtomicI32::new(0);
+/// A signal that arrived before the child existed, to pass on once it does.
+static PENDING: AtomicI32 = AtomicI32::new(0);
+static INTS: AtomicU32 = AtomicU32::new(0);
 
 /// TERM and HUP are passed on to the child, and we keep waiting for it: the
-/// slot is freed when the WORK stops, not when we are asked to. INT is not
-/// passed on — a terminal's ^C already went to the whole process group, and a
-/// second one makes some tools (pnpm, turbo) abandon their own cleanup.
+/// slot is freed when the WORK stops, not when we are asked to. The FIRST INT
+/// is not passed on — a terminal's ^C already went to the whole process
+/// group, and a second one makes some tools (pnpm, turbo) abandon their own
+/// cleanup. A SECOND ^C means the child is ignoring them, so it gets a TERM:
+/// otherwise a child that traps INT makes `run` impossible to interrupt.
 extern "C" fn forward(sig: libc::c_int) {
-    let pid = CHILD.load(std::sync::atomic::Ordering::SeqCst);
-    if pid > 0 && sig != libc::SIGINT {
+    let sig = if sig == libc::SIGINT {
+        if INTS.fetch_add(1, Ordering::SeqCst) == 0 {
+            return;
+        }
+        libc::SIGTERM
+    } else {
+        sig
+    };
+    let pid = CHILD.load(Ordering::SeqCst);
+    if pid > 0 {
         // SAFETY: kill is async-signal-safe.
         unsafe { libc::kill(pid, sig) };
+    } else {
+        PENDING.store(sig, Ordering::SeqCst);
     }
 }
 
@@ -641,15 +688,6 @@ pub fn cmd_run(args: &[String]) -> i32 {
     if waited {
         eprintln!("worktrees: got slot {} ({}/{}) after {}", ra.slot, held.index + 1, cap, age(now_ms() - me.since_ms));
     }
-    // Rewrite the record with the moment it was TAKEN, so ages read as "has
-    // been running for", not "has been around for".
-    let took = Record { since_ms: now_ms(), ..me };
-    {
-        let mut f = &held.file;
-        let _ = held.file.set_len(0);
-        let _ = f.seek(std::io::SeekFrom::Start(0));
-        let _ = f.write_all(serde_json::to_string(&took).unwrap_or_default().as_bytes());
-    }
     // SAFETY: installing a handler that only calls kill(2).
     unsafe {
         libc::signal(libc::SIGTERM, forward as *const () as libc::sighandler_t);
@@ -663,7 +701,14 @@ pub fn cmd_run(args: &[String]) -> i32 {
             return 127;
         }
     };
-    CHILD.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
+    CHILD.store(child.id() as i32, Ordering::SeqCst);
+    // A TERM that landed between the handlers going in and the line above
+    // found no child to pass on to; it is owed now.
+    let owed = PENDING.swap(0, Ordering::SeqCst);
+    if owed != 0 {
+        // SAFETY: signalling the child we just spawned.
+        unsafe { libc::kill(child.id() as libc::pid_t, owed) };
+    }
     let status = loop {
         match child.wait() {
             Ok(s) => break s,
@@ -785,9 +830,14 @@ mod tests {
 
     #[test]
     fn a_dead_waiter_is_dropped_and_does_not_block() {
+        // A waiter killed while waiting leaves its file, and its pid can be
+        // reused by a live process (review B1). Liveness must come from the
+        // waiter's LOCK, not its pid: plant a file naming a LIVE pid (our
+        // parent) that nobody holds a lock on.
         let d = tmp("dead");
-        let ghost = Record { pid: i32::MAX as u32 - 7, since_ms: 1, ..rec(0, 0) };
-        std::mem::forget(register_wait(&d, &ghost).unwrap());
+        let ghost = Record { pid: std::os::unix::process::parent_id(), since_ms: 1, ..rec(0, 0) };
+        fs::create_dir_all(d.join("wait")).unwrap();
+        fs::write(d.join("wait").join(format!("{}.json", ghost.pid)), serde_json::to_string(&ghost).unwrap()).unwrap();
         let me = rec(std::process::id(), now_ms());
         assert!(acquire_in(&d, "t", 1, &me, Some(Duration::from_millis(50)), |_| {}).is_ok());
         assert!(!d.join("wait").join(format!("{}.json", ghost.pid)).exists());

@@ -692,8 +692,11 @@ print(len(s), s[0]["state"] if s else "-", s[0]["name"] if s else "-", s[0]["cmd
   [ "$(jq_out "$pick")" = "0 - - -" ]           # absent when it holds nothing
   ( cd "$wt" && exec "$WT_BIN" run --slot gate -- sleep 30 ) >/dev/null 2>&1 3>&- &
   local holder=$! i
+  disown "$holder"   # no "Killed" job line when it is kill -9'd below
+  # To a file, then grep: `| grep -q` under pipefail reads a match as failure.
   for i in $(seq 1 50); do
-    "$WT_BIN" slots | grep -q 'holds  repo:feat-sl' && break
+    "$WT_BIN" slots > "$BATS_TEST_TMPDIR/slots.out"
+    grep -q 'holds  repo:feat-sl' "$BATS_TEST_TMPDIR/slots.out" && break
     sleep 0.1
   done
   local child; child="$(pgrep -P "$holder" || true)"

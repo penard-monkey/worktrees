@@ -23,6 +23,7 @@ teardown() {
 bg_run() {
   ( cd "$REPO" && exec "$WT_BIN" run "$@" ) >/dev/null 2>&1 3>&- &
   BG=$!
+  disown "$BG"   # no "Killed" job line when teardown kill -9s it
   KILL_ME="${KILL_ME:-} $BG"
 }
 
@@ -140,6 +141,34 @@ assert h["place"] == "repo:(main)" and h["cmd"] == "sleep 30" and h["slots"] == 
   [[ "$output" == *"--slot <name> is required"* ]]
   run_wt run --slot ../x -- true
   [ "$status" -eq 2 ]
+}
+
+@test "run: a dead waiter's file does not block a free slot, even if its pid lives" {
+  # Review of #485, B1: a waiter killed while waiting leaves wait/<pid>.json,
+  # and the pid can be reused. Plant one naming THIS shell (alive, older,
+  # holding no lock): a free slot must still be taken at once.
+  local d="$HOME/.local/state/worktrees/slots/z/wait"
+  mkdir -p "$d"
+  printf '{"pid":%s,"place":"ghost","cmd":"old gate","since_ms":1,"slots":1}' "$$" > "$d/$$.json"
+  run_wt run --slot z --slots 1 --timeout 2 -- echo RAN
+  [ "$status" -eq 0 ]
+  [ "$output" = RAN ]
+  [ ! -e "$d/$$.json" ]
+}
+
+@test "run: a second ^C reaches a child that ignores the first" {
+  bg_run --slot i -- sh -c 'trap "" INT; sleep 30'
+  local run_pid="$BG"
+  wait_held 1 i
+  kill -INT "$run_pid"
+  sleep 0.5
+  kill -0 "$run_pid"                 # the first INT is the group's business
+  kill -INT "$run_pid"
+  local n
+  for n in $(seq 1 30); do kill -0 "$run_pid" 2>/dev/null || break; sleep 0.1; done
+  ! kill -0 "$run_pid" 2>/dev/null   # the second became a TERM; run is gone
+  run "$WT_BIN" slots
+  [ "$output" = "no slots in use" ]
 }
 
 @test "run and slots work outside any repository" {
