@@ -38,7 +38,7 @@ import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
-import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
@@ -7652,6 +7652,18 @@ function App() {
   // column: the overlay covers the terminal rather than sharing the row with
   // it, so there is nothing to reserve width away from.
   const navOverlayW = clampNav(settings.nav_width, 0, vw, railsWidth(settings));
+  // The notice stack (errors, undo, notices, the plan hint) sits at the
+  // bottom-left of the AGENT, in every layout. It used to be the window's
+  // bottom-left beside the rail — which, with the reference panels on the
+  // left, is the dock's Terminal prompt line or its last Files rows; mirrored,
+  // it was already over the dock. Everything left of `.main` is a track this
+  // component sized, so the offset is arithmetic, not a measurement: the rail
+  // on that edge (none when the merged strip is on the right), a pinned nav on
+  // the left, and the dock when it is on the left and open. An overlaid nav
+  // owns no track and floats above the stack's z-order anyway.
+  const leftOfMain = (!mirrored || !merged ? RAIL_W : 0)
+    + (!mirrored && fit.navShown ? fit.navW : 0)
+    + (dockLeft && dockShown ? fit.dockW : 0);
 
   return (
     <div className="appwrap">
@@ -7700,8 +7712,9 @@ function App() {
             The same component the dock's own rail renders below, never both. */}
         {merged && (
           <>
-            <div className="rail-sep" />
             <div className="rail-group">
+              {/* Inside the group, so the hairline is not a hover edge either. */}
+              <div className="rail-sep" />
               <DockRailGroup items={dockRailItems} shown={dockShown} tab={eff.dock_tab} why={dockWhy}
                 prsView={prs.reply?.view} onPick={onDockRailPick} />
             </div>
@@ -8608,7 +8621,7 @@ function App() {
           same coordinates the undo banner sat exactly on top of the note it
           was supposed to accompany. Undo first in DOM = above on screen. */}
       {(err || notice || undo || planHint) && (
-        <div className="float-stack" style={bubbleLift !== null ? { bottom: bubbleLift } : undefined}>
+        <div className="float-stack" style={{ left: `calc(${leftOfMain}px + var(--s3))`, ...(bubbleLift !== null ? { bottom: bubbleLift } : null) }}>
           {/* One click back from a slip of the wrist — a drag rewrites declared
               state, and the row it moves can land in a collapsed group or a
               hidden tier, i.e. out of sight of the gesture that moved it. */}

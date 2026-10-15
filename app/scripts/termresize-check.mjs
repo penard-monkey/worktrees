@@ -452,13 +452,14 @@ async function settled(opts) {
   m.dispose();
 }
 
-// ── 7. Settings → Layout: what a flip costs the agent ────────────────────────
-// A layout flip is ONE render: the grid changes and the dock changes edge in a
-// single commit, so the agent's host sees at most one new size. Classic ⇄
-// Mirrored (and the two merged shapes ⇄ each other) keep every width — zero
-// resizes. A flip that merges or splits the rails gives the center one rail
-// (RAIL_W, read from settings.ts) — exactly one resize after the settle, which
-// is the number the layout proposal promises and Settings does not warn about.
+// ── 7. Settings → Layout: the flip BUDGET (a smoke test, not a guard) ───────
+// Say it plainly: this case does not touch App's grid and passes on a build
+// without Settings → Layout. It pins the arithmetic the layout's resize budget
+// rests on — a same-size "flip" costs 0, one size step of RAIL_W costs exactly
+// 1 after the settle — so that a change to the coalescing cannot quietly make
+// a merge flip cost two. Whether a real flip IS one size step (one commit, no
+// remount, no width-bearing rule landing a frame later) is the real app's to
+// say: ROADMAP's "Before v0.42.0" item has the hand check and its count.
 {
   const settingsSrc = fs.readFileSync(fileURLToPath(new URL("../src/settings.ts", import.meta.url)), "utf8");
   const railW = Number(/export const RAIL_W = (\d+);/.exec(settingsSrc)?.[1] ?? NaN);

@@ -17,8 +17,8 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import PiPanel from "./PiPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
-import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
-import { clampNav, clampRem, clampTerm, clampZoom, LAYOUT_TILES, railsMerged, THEMES, ZOOM_STEPS } from "./settings";
+import type { LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
+import { clampNav, clampRem, clampTerm, clampZoom, LAYOUT_TILES, railsMerged, railsWidth, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
 import { humanSize } from "./filekind";
 import { HARNESSES, HARNESS_LABEL } from "./harness";
@@ -331,6 +331,10 @@ function UsagePanel() {
 // app calls Settings). Presentational: App owns the Settings state and does the
 // apply-live + persist + terminal-refit on each change. Esc / scrim closes.
 // The Version section owns its own update-run state (log/progress) locally.
+/** What the tile captions call each region — the names the rest of the UI
+ *  uses, not the code's (`nav` is "Places" everywhere a person reads it). */
+const REGION_LABEL: Record<LayoutTile["order"][number], string> = { nav: "Places", agent: "Agent", reference: "Reference" };
+
 /** Settings → Layout. A radio group with a roving tabindex: Tab lands on the
  *  current tile, arrows move AND select (the WAI-ARIA radio pattern), so the
  *  keyboard reaches every layout without a separate commit key. */
@@ -373,7 +377,7 @@ function LayoutTiles({ places, dock, onPick }: {
               {(t.places === "right" || !merged) && <i className="sch-rail" />}
             </span>
             <span className="layout-name">{t.name}</span>
-            <span className="layout-order">{t.order.join(" · ")}</span>
+            <span className="layout-order">{t.order.map((r) => REGION_LABEL[r]).join(" · ")}</span>
           </button>
         );
       })}
@@ -1355,7 +1359,7 @@ export function SettingsSheet({
             <label>Nav width <span className="val">{settings.nav_width}px</span></label>
             <input
               type="range" min={220} max={460} step={10} value={settings.nav_width}
-              onChange={(e) => onChange({ nav_width: clampNav(+e.currentTarget.value) })}
+              onChange={(e) => onChange({ nav_width: clampNav(+e.currentTarget.value, 0, undefined, railsWidth(settings)) })}
             />
           </section>
 

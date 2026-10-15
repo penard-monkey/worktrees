@@ -35,6 +35,12 @@ button { cursor: pointer; }
   /* Fallback only — App.tsx always sets this inline (the nav column disappears
      on ⌘B). Four columns: rail, nav, .space (terminal + dock), rail. */
   grid-template-columns: var(--rail-w) var(--nav-w) minmax(0, 1fr) var(--rail-w);
+  /* ONE row, as tall as the window and never taller. Left implicit, the row is
+     `auto` and grows to its tallest child's content — so under page zoom a
+     merged rail (Places + the dock group + the footer) made the whole grid
+     taller than the window and pushed the gear off the bottom, with nothing
+     to scroll. Bounded, the rail's `.rail-group` takes the squeeze instead. */
+  grid-template-rows: minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
   background: var(--bg-abyss);
@@ -99,22 +105,32 @@ html[data-dock-side="left"] .dock-resizer { left: auto; right: -2px; }
 
 /* ── activity rail ── */
 .rail {
-  display: flex; flex-direction: column; align-items: center;
+  display: flex; flex-direction: column; align-items: center; min-height: 0;
   gap: var(--s1); padding: var(--s2) 0;
   background: var(--bg-abyss);
   border-right: 1px solid var(--line);
 }
 .rail-spacer { flex: 1; }
 /* The merged strip (Places and the dock on one edge): a hairline between the
-   Places toggle and the dock group. Nothing in the strip scrolls: an overflow
-   box would clip the active bar, which hangs past the button's own edge, and
-   the whole strip fits the 560px window minimum with room to spare (measured
-   in the harness with the real usage tile). */
+   Places toggle and the dock group — the group's first child, so it is outside
+   the nav's hover edge with the rest of the group. */
 .rail-sep { flex: none; width: calc(100% - 2 * var(--s2)); height: 1px; margin: var(--s1) 0; background: var(--line); }
 /* The dock's buttons inside the merged strip. Full width (`stretch`) so the
-   whole band is excluded from the nav's hover edge, gaps included, and so the
-   active bar — which hangs past each button — stays inside it. */
-.rail-group { display: flex; flex-direction: column; align-items: center; align-self: stretch; gap: var(--s1); }
+   whole band is excluded from the nav's hover edge, gaps included. It is the
+   one part of the strip that may SCROLL: under page zoom (⌘+ to 1.75× on the
+   560px minimum window is a 320px-tall viewport) the strip outgrows the
+   window, and then the group gives way while the Places toggle and the footer
+   — usage, add project, feedback, the gear — stay on screen. `overflow-y:
+   auto` forces the x axis to clip as well, so the active bar (which hangs past
+   its button) is pulled in by a pixel on the inner side, below. */
+.rail-group {
+  display: flex; flex-direction: column; align-items: center; align-self: stretch; gap: var(--s1);
+  flex: 0 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: none;
+}
+.rail-group::-webkit-scrollbar { display: none; }
+.rail-group .rail-icon { flex: none; }
+.rail-group .rail-icon.active::before { left: -5px; }
+html[data-places-side="right"] .rail-group .rail-icon.active::before { left: auto; right: -5px; }
 .rail-icon {
   position: relative; width: 32px; height: 32px;
   display: grid; place-items: center;
@@ -1243,6 +1259,8 @@ body.dragging .menu-catch { pointer-events: none; }
    of the landing note from the same drop. Children go static; DOM order is
    screen order, undo above, err/notice at the edge. */
 .float-stack {
+  /* `left` is inline: the agent's bottom-left, whichever layout (App.tsx
+     `leftOfMain`). This is the fallback before the first render. */
   position: fixed; left: calc(var(--rail-w) + var(--s3)); bottom: var(--s3);
   z-index: 80; display: flex; flex-direction: column; gap: var(--s2);
   align-items: flex-start;

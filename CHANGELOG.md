@@ -61,7 +61,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Agent left. When Places and the reference panels share an edge their two
   rails become one, and the agent gets that rail's width back. Applies to all
   places; widths, ⌘B and ⌘J are unchanged, and a mirrored install keeps the
-  layout it had.
+  layout it had. Notices and Undo now appear at the agent's bottom-left in
+  every layout, so they no longer cover a panel's terminal prompt.
 
 ### Changed
 - **`worktrees agent-setup fix` commits locally and pushes nothing unless you

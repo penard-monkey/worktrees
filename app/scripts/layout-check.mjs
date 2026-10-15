@@ -153,6 +153,36 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   } else ok("the dock resizer's sign follows dock_side");
 }
 
+// ── the notice stack sits over the AGENT in every layout ─────────────────────
+// `leftOfMain` is evaluated against the grid this file just checked: the
+// tracks before `space`, plus the dock when it is on the left and open.
+{
+  const m = app.match(/const leftOfMain = ([\s\S]*?);\n/);
+  const from = app.indexOf("  const navTrack: [string, string | null]");
+  const to = app.indexOf("  const ord = Object.fromEntries(shell", from);
+  if (!m || from < 0) fail("App.tsx: `const leftOfMain = …;` is gone — where does the notice stack anchor?");
+  else if (!/left: `calc\(\$\{leftOfMain\}px \+ var\(--s3\)\)`/.test(app)) fail("`.float-stack` does not read leftOfMain");
+  else {
+    const block = app.slice(from, to).replace(/: \[string, string \| null\]/g, "").replace(/: \[key: string, track: string \| null\]\[\]/, "");
+    // eslint-disable-next-line no-new-func
+    const build = new Function("merged", "mirrored", "fit", `${block}; return shell;`);
+    // eslint-disable-next-line no-new-func
+    const left = new Function("mirrored", "merged", "fit", "dockLeft", "dockShown", "RAIL_W", `return ${m[1]};`);
+    const wrong = [];
+    for (const t of S.LAYOUT_TILES) for (const navShown of [false, true]) for (const dockShown of [false, true]) {
+      const merged = t.places === t.dock, mirrored = t.places === "right", dockLeft = t.dock === "left";
+      const fit = { navShown, navW: 300, dockW: 360 };
+      const shell = build(merged, mirrored, fit);
+      const tracks = shell.slice(0, shell.findIndex(([k]) => k === "space")).reduce((a, [, tr]) => a + (tr === "var(--rail-w)" ? S.RAIL_W : tr ? parseInt(tr) : 0), 0);
+      const want = tracks + (dockLeft && dockShown ? 360 : 0);
+      const got = left(mirrored, merged, fit, dockLeft, dockShown, S.RAIL_W);
+      if (got !== want) wrong.push(`${t.name} nav ${navShown ? "pinned" : "hidden"} dock ${dockShown ? "open" : "shut"}: ${got} vs ${want}`);
+    }
+    if (wrong.length) fail(`the notice stack is not at the agent's left edge: ${wrong.join("; ")}`);
+    else ok("the notice stack sits at the agent's bottom-left in all 16 shapes");
+  }
+}
+
 // ── 3. one dock group, two hosts, complementary conditions ──────────────────
 // Sliced by HOST rather than by a window of characters before each call: the
 // Places rail (`<nav className="rail"` … its `</nav>`) and the dock's own rail,
@@ -179,19 +209,48 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
       }
       // In the Places rail it must be gated on `merged` (no `!`): the nearest
       // opening brace's condition, read back from the call.
-      const before = app.slice(places[0], inPlaces[0]);
+      // JSX comments are braces too; they gate nothing.
+      const before = app.slice(places[0], inPlaces[0]).replace(/\{\/\*[\s\S]*?\*\/\}/g, "");
       const gate = before.slice(before.lastIndexOf("{") + 1);
       if (!/^merged &&/.test(gate.trim())) fail(`${name} in the Places rail is gated on \`${gate.trim().slice(0, 60)}\`, not \`merged && …\``);
     }
     // Merged, the dock's buttons sit in the auto-hide nav's hover edge. They
-    // must be wrapped in `.rail-group` and the rail must skip that band, or
-    // reaching for Terminal slides Places over the reference panel.
+    // must be wrapped in `.rail-group` (hairline included) and the rail's
+    // handler must skip that band — or reaching for Terminal slides Places
+    // over the reference panel. The handler is EVALUATED, not read: a version
+    // that never calls `navPointer` (hover-reveal dead for the whole rail)
+    // reads exactly like a correct one.
     const placesRail = app.slice(places[0], places[1]);
-    const head = app.slice(places[0], app.indexOf(">\n", places[0] + 20));
-    if (!/<div className="rail-group">\s*<DockRailGroup /.test(placesRail)) fail("the merged DockRailGroup is not wrapped in `.rail-group` — the hover edge cannot tell it apart");
-    else if (!/closest\("\.rail-group"\)/.test(head) || /onPointerEnter=\{\(\) => navPointer\("rail", true\)\}/.test(head)) {
-      fail("the Places rail reveals the nav on ANY pointer entry — hovering a merged dock button would slide Places over the reference panel");
-    } else ok("the merged dock group is outside the nav's hover edge");
+    if (!/<div className="rail-group">[\s\S]*?<div className="rail-sep" \/>\s*<DockRailGroup /.test(placesRail)) {
+      fail("the merged DockRailGroup (and its hairline) are not inside `.rail-group` — the hover edge cannot tell them apart");
+    }
+    const hAt = placesRail.indexOf("onPointerOver={(e) => {");
+    const hEnd = hAt < 0 ? -1 : placesRail.indexOf("\n        }}", hAt);
+    if (hAt < 0 || hEnd < 0) fail("the Places rail has no `onPointerOver={(e) => { … }}` — what decides the hover edge now?");
+    else {
+      const body = placesRail.slice(hAt + "onPointerOver={(e) => {".length, hEnd);
+      const ElementStub = class {};
+      const el = (inGroup) => Object.assign(new ElementStub(), { closest: (q) => (q === ".rail-group" && inGroup ? {} : null) });
+      // eslint-disable-next-line no-new-func
+      const handler = new Function("Element", "navOver", "navPointer", "e", body);
+      const run = (inGroup, railBefore) => {
+        const calls = [];
+        const navOver = { current: { rail: railBefore, nav: false } };
+        // The real navPointer records the flag first (App.tsx); mirror that.
+        const navPointer = (which, inside) => { calls.push(`${which}:${inside}`); navOver.current[which] = inside; };
+        handler(ElementStub, navOver, navPointer, { target: el(inGroup) });
+        return calls.join(",");
+      };
+      const cases = [
+        [false, false, "rail:true", "entering the rail (outside the group) reveals"],
+        [true, true, "rail:false", "moving into the dock group leaves the hover edge"],
+        [true, false, "", "inside the group, nothing re-arms"],
+        [false, true, "", "moving within the edge does not re-reveal per element"],
+      ];
+      const wrong = cases.filter(([g, r, want]) => run(g, r) !== want);
+      if (wrong.length) fail(`the rail's hover handler: ${wrong.map(([g, r, want, why]) => `${why} — got "${run(g, r)}", want "${want}"`).join("; ")}`);
+      else ok("the rail's hover handler reveals outside the dock group and only there (evaluated)");
+    }
     if (!bad) ok("DockRailGroup and the offers button render in exactly one rail for any layout");
   }
 }
