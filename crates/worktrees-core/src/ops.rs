@@ -3122,17 +3122,36 @@ pub fn cmd_init(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             print_config(ui, &text, sug.truncated);
             return 0;
         }
-        // Exit 0 and say so plainly: "this repo needs no config" is a healthy
-        // answer, not a failure.
-        ui.info("Nothing to configure — no gitignored credential file, no compose stack publishing ports.");
-        ui.info(&format!(
-            "A repo with no {} behaves exactly as it does today. Re-run this after adding one.",
-            projcfg::CONFIG_FILE
-        ));
-        if sug.truncated {
-            ui.warn(TRUNCATED);
+        // Asked for, not merely offered: `-y`/`--force` carries consent, so write
+        // the all-comments template and fall through to the normal write path.
+        //
+        // This case is the one the app's "Write .worktrees.toml" button exists
+        // for. That button was added for a repo with no credential files, no
+        // ports and no compose — the exact repo the To-do sends you here about —
+        // and it reached this branch, got exit 0 with nothing written, and
+        // reported success: the button greyed out, came back, and nothing had
+        // happened. The sheet's own hint promises "a documented template that
+        // changes no behaviour until you fill it in", which is precisely what
+        // `--print` emits three lines above. The UI half shipped without the
+        // core half.
+        //
+        // Without consent nothing changes: "this repo needs no config" is a
+        // healthy answer, not a failure, so a bare `init` still exits 0 having
+        // written nothing — it just now says how to get the template anyway,
+        // because being told "nothing to configure" and wanting one anyway was
+        // previously a dead end outside `--print`.
+        if !yes {
+            ui.info("Nothing to configure — no gitignored credential file, no compose stack publishing ports.");
+            ui.info(&format!(
+                "A repo with no {} behaves exactly as it does today. Re-run this after adding one, \
+                 or write the documented template anyway: worktrees init -y",
+                projcfg::CONFIG_FILE
+            ));
+            if sug.truncated {
+                ui.warn(TRUNCATED);
+            }
+            return 0;
         }
-        return 0;
     }
 
     // `--print` emits the FILE and nothing else — no header, no commentary — so

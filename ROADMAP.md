@@ -16,6 +16,29 @@ this repo's settings in `.claude/close-out.md`).
   paragraph you were reading. See
   docs/sessions/2026-10-15-md-scroll-keep/.
 
+- **A Project-sheet action prints its result in a different section.**
+  `ProjectSheet.tsx` has one `log` for every `run()` (relink, force, provision,
+  init) and renders it once, at the bottom of the `health` section — about 160
+  lines below the Config section's "Write .worktrees.toml" button. So that
+  button's output, including the reason it did nothing, appears somewhere the
+  eye does not connect to the press: the reported symptom was "the button goes
+  disabled and then reappears with seemingly no effect", and the explanation
+  was on screen the whole time, in another panel. Render each action's result
+  next to the control that started it (or key the existing block to the action
+  that ran). The underlying `init` bug is fixed; this is why it could not be
+  seen.
+  _From: 2026-10-15, fix/init-template-write_
+- **572 of the bats suite's 755 `[[ ]]` assertions are inert.** A standalone
+  `[[ ]]` does not trip bats' errexit (measured on 1.12.0: a false `[ 1 -eq 2 ]`
+  in mid-test aborts, a false `[[ ... ]]` does not), so only the 183 that happen
+  to be a test's last line decide anything. They are almost all `$output` string
+  checks, which is the suite's main way of asserting behaviour — a test written
+  this way passes with the feature deleted. Convert them to
+  `grep -qF "x" <<<"$output"`, or wire up the `bats-assert` submodule already
+  vendored at `test/lib/bats-assert` and unused. Mechanical but large, and worth
+  doing in one pass so the suite's green means something; expect real failures
+  to surface as it lands.
+  _From: 2026-10-15, fix/init-template-write_
 - **Drive "Ask (main)" (#489) once in the real app.** Only the mock was
   driven. By hand in `app/scripts/sandbox.sh --app`, on a place with a brief:
   (1) (main) idle at an empty prompt → the prompt lands, the app switches, and

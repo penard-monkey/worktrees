@@ -36,6 +36,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and no longer tells a repository with no remote to push it. Once GitHub says
   the branch's PR is merged, the row offers **Remove the place**.
 
+### Fixed
+- **"Write .worktrees.toml" in Project settings now writes the file.** In a
+  repo with nothing to suggest — no gitignored credential file, no ports, no
+  compose — the button greyed out, came back, and nothing appeared: `init`
+  treated "nothing to configure" as a reason to write nothing at all, and
+  reported success. That is the exact repo the button exists for, and the
+  panel already promises "a documented template that changes no behaviour
+  until you fill it in". `worktrees init -y` now writes that template too
+  (the same all-comments file `--print` has always emitted, which `doctor`
+  reads back clean). Without `-y` nothing changes, except that the message
+  now says how to ask for the template anyway.
+
 ## [0.42.0] - 2026-10-15
 
 ### Added
