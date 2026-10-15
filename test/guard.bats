@@ -45,7 +45,7 @@ memory_fixture() {
 
 @test "guard: below the cap launches, and shells and editors are not agents" {
   limits 'max_live_agents = 2'
-  plant other-a; plant notes vim; plant build bash
+  plant other-a; plant notes vim; plant build bash; plant dev node
   run_wt new feat-ok
   [ "$status" -eq 0 ]
   tmux_session_exists repo-feat-ok
@@ -108,4 +108,59 @@ memory_fixture() {
   run_wt doctor
   [ "$status" -ne 0 ]
   [[ "$output" == *"limits may not be set by a project"* ]]
+}
+
+# Hold the machine launch lock from another process for $1 seconds.
+hold_launch_lock() {
+  local lock="$HOME/.local/state/worktrees/launch.lock" ready="$BATS_TEST_TMPDIR/held"
+  mkdir -p "$(dirname "$lock")"; rm -f "$ready"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX); open(sys.argv[2], "w").close(); time.sleep(float(sys.argv[3]))' \
+    "$lock" "$ready" "$1" >/dev/null 2>&1 3>&- &
+  HOLDER=$!
+  disown "$HOLDER"
+  local i; for i in $(seq 1 50); do [ -e "$ready" ] && return 0; sleep 0.1; done
+  return 1
+}
+
+@test "guard: a harness's own probe runs without the machine lock (review of #486, B2)" {
+  # The quota gate (Adapter::prepare) refuses this launch. Its probes can take
+  # 15s on a slow network, so they must not run under the machine-wide lock:
+  # with the lock held elsewhere, the refusal still comes back at once.
+  export WORKTREES_AI_CMD=claude
+  printf '{"claude":[{"label":"5h","percent":95,"severity":"warning","resets_at":%s}]}' "$(( $(date +%s) + 3600 ))" > "$BATS_TEST_TMPDIR/usage.json"
+  export WORKTREES_USAGE_PROBE="$BATS_TEST_TMPDIR/usage.json"
+  hold_launch_lock 4
+  local t0=$SECONDS
+  run_wt new feat-q
+  kill "$HOLDER" 2>/dev/null || true
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"95% of its 5h window"* ]]
+  [ $((SECONDS - t0)) -lt 3 ]
+}
+
+@test "guard: a launch that waits for the machine lock says so" {
+  hold_launch_lock 1
+  run_wt new feat-wait
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"waiting for another launch to finish"* ]]
+  tmux_session_exists repo-feat-wait
+}
+
+@test "guard: a launch that only adopts a session already in the place is not refused" {
+  limits 'max_live_agents = 1'
+  run_wt new feat-ad --no-tmux
+  # A hand-made agent session in the place: `open` adopts it, starting nothing.
+  printf 'cwd=%s\ncmd0=x\n' "$REPO/.worktrees/feat-ad" > "$TMUX_STATE/handmade"
+  printf 'claude' > "$TMUX_STATE/handmade.cmd"
+  run_wt open feat-ad --no-attach
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"'handmade' already in this worktree"* ]]
+}
+
+@test "guard: a [limits] problem is said at launch" {
+  limits 'max_live = { cluade = 2 }'
+  run_wt new feat-typo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"max_live.cluade: no such provider"* ]]
 }

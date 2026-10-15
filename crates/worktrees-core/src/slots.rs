@@ -44,6 +44,10 @@
 //! A gate starts daemons (turbo's, metro, gradle) that outlive it. Had the
 //! child inherited the lock fd, the first such daemon would hold the slot
 //! until reboot. Rust opens files `O_CLOEXEC`; `held_fd_is_cloexec` pins it.
+//! CLOEXEC acts at EXEC: a process forked by another thread shares the lock
+//! until it execs, which every spawn here does at once. Never add a fork that
+//! does not exec (a detached helper) while a slot or launch-lock `File` may be
+//! alive on another thread.
 //! The price is that SIGKILLing `worktrees run` itself frees the slot while
 //! its child runs on. A kill aimed at the process GROUP — a terminal's ^C —
 //! reaches both. Measured with Claude Code on macOS (2026-10-14): its Bash

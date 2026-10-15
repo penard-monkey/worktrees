@@ -424,6 +424,14 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   inside one `worktrees mcp` process remain. See
   [nested-lanes close-out](docs/sessions/2026-10-08-nested-lanes/summary.md).
 
+- **Settings → "Limits" for `[limits]` and `[slots]` (resource-guard P4).**
+  Both are config-only today: the live-agent cap, the memory floor and slot
+  capacities live in `config.toml`, and the app shows only the refusal
+  ("Launch anyway"). Wanted: a Limits group writing through
+  `config::USER_CONFIG_LOCK` like `[quota]`, showing the RAM-derived default
+  and the current count, plus the "waiting for slot" chip on a place's status
+  row and the `slots` fields in `ls --json`.
+
 - **`--ai auto`: pick the provider by headroom.** The data is now in core and
   in one shape (`quota::Window`, `harness::Adapter::usage`), so "start this on
   whichever installed agent has the most window left" is a small step from the

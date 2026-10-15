@@ -295,28 +295,40 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         ui.error(&format!("{why}. The place is ready; to launch anyway: {again}"));
         crate::diag::EXIT_LAUNCH_REFUSED
     };
-    // Held from the live-agent count until `new-session` returns, so parallel
-    // launches from any process count each other's sessions (`guard`).
+    // Held from the deciding live-agent count until `new-session` returns, so
+    // parallel launches from any process count each other's sessions (`guard`).
     let mut machine_lock: Option<std::fs::File> = None;
     // The harness's last word on a launch that will CREATE its session — before
     // the other agent is closed below, so a refused launch (pi's model host is
     // down, its node is too old) leaves whatever was running exactly as it was.
     if !ai_cmd.is_empty() && !tmux::session_exists(session_in) {
-        // The machine's word first: too many agents, too little memory. Every
+        // The machine's word: too many agents, too little memory. Every
         // harness, including one added tomorrow — memory is spent per session.
         // The sessions this place already has are the ones this launch reuses
-        // or replaces, so they do not count against it.
-        machine_lock = crate::guard::launch_lock();
+        // or replaces, so they do not count against it; and a launch that will
+        // only ADOPT a session already in the worktree starts nothing at all.
+        let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
+        let adopts = !crate::provider::is_sidecar(session_in)
+            && tmux::worktree_session_excluding(wt, &ai_word, exclude).is_some();
         let canonical = p.session_name(&place_slug);
         let mut mine: Vec<String> = crate::provider::PROVIDERS.iter().map(|pr| pr.sidecar_name(&canonical)).collect();
         mine.push(canonical);
         mine.push(session_in.to_string());
         let provider = crate::provider::by_word(&ai_word).map(|pr| pr.id);
-        if let Err(crate::harness::Refusal::Soft(why) | crate::harness::Refusal::Hard(why)) =
-            crate::guard::admit(provider, ai.force, &mine)
-        {
-            return soft_refusal(ui, &why);
+        // 1. A cheap, UNLOCKED first look: refuses before any keychain or
+        //    network probe the harness would make.
+        if !adopts {
+            match crate::guard::admit(provider, ai.force, &mine) {
+                Ok(problems) => {
+                    for pr in problems {
+                        ui.warn(&pr);
+                    }
+                }
+                Err(crate::harness::Refusal::Soft(why) | crate::harness::Refusal::Hard(why)) => return soft_refusal(ui, &why),
+            }
         }
+        // 2. The harness's own probes, with no machine lock held: they can wait
+        //    15s on a network, and every launch on the machine would wait too.
         if let Some(adapter) = crate::harness::by_word(&ai_word) {
             match adapter.prepare(p, &place_slug, wt, &mut ai) {
                 Ok(()) => {}
@@ -325,6 +337,16 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
                     return 1;
                 }
                 Err(crate::harness::Refusal::Soft(why)) => return soft_refusal(ui, &why),
+            }
+        }
+        // 3. The count that decides, under the machine lock, which is held only
+        //    from here across `new-session`.
+        if !adopts {
+            machine_lock = crate::guard::launch_lock(|| ui.info("waiting for another launch to finish…"));
+            if let Err(crate::harness::Refusal::Soft(why) | crate::harness::Refusal::Hard(why)) =
+                crate::guard::admit(provider, ai.force, &mine)
+            {
+                return soft_refusal(ui, &why);
             }
         }
     }

@@ -453,14 +453,21 @@ impl PaneList {
     /// Every session on this server with an agent pane, wherever it runs —
     /// the machine-wide count the live-agent cap reads (`guard`). The SAME
     /// test as `agents_in`, minus the path filter, so the cap and the nav dots
-    /// never disagree about what an agent is.
-    pub fn agent_sessions(&self) -> Vec<(String, &'static str)> {
-        let mut found: Vec<(String, &'static str)> = Vec::new();
+    /// never disagree about what an agent is — with one flag: `true` when the
+    /// only evidence is the `node` wrapper rule. Inside a worktree a `node`
+    /// pane is almost surely claude; machine-wide it is as likely a bundler or
+    /// a dev server, so the caller must corroborate it (review of #486).
+    pub fn agent_sessions(&self) -> Vec<(String, &'static str, bool)> {
+        let mut found: Vec<(String, &'static str, bool)> = Vec::new();
         for pane in &self.panes {
             if pane.session.is_empty() || is_shell_sidecar(&pane.session) { continue; }
-            let Some(provider) = crate::provider::for_pane(&pane.session, pane.program()) else { continue };
-            if !found.iter().any(|(name, _)| name == &pane.session) {
-                found.push((pane.session.clone(), provider.id));
+            let program = pane.program();
+            let Some(provider) = crate::provider::for_pane(&pane.session, program) else { continue };
+            let only_node = program == "node" && !pane.session.contains(crate::provider::SIDECAR_MARKER);
+            match found.iter_mut().find(|(name, _, _)| name == &pane.session) {
+                // Any pane with real evidence settles it for the session.
+                Some(f) => f.2 = f.2 && only_node,
+                None => found.push((pane.session.clone(), provider.id, only_node)),
             }
         }
         found

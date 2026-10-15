@@ -24,11 +24,14 @@
 //! # Counting is race-free because it happens under a machine lock
 //!
 //! Eight parallel `create_worktree` calls would otherwise all count the same
-//! N and all launch. `ops::launch` holds `launch_lock()` (an flock in the
-//! user's state dir, shared by every CLI, MCP server and the app) from before
-//! the count until `new-session` has returned, so the next caller counts the
-//! session the previous one just made. The reservation IS the lock: nothing
-//! to expire, nothing to reconcile.
+//! N and all launch. `ops::launch` counts twice: once unlocked, as a cheap
+//! early refusal, then — after the harness's own probes, which can wait 15s on
+//! a network and must not hold up every launch on the machine — under
+//! `launch_lock()` (an flock in the user's state dir, shared by every CLI, MCP
+//! server and the app), held from before that SECOND count until
+//! `new-session` has returned, so the next caller counts the session the
+//! previous one just made. The reservation IS the lock: nothing to expire,
+//! nothing to reconcile.
 //!
 //! # It FAILS OPEN
 //!
@@ -104,6 +107,11 @@ pub fn limits_from(text: &str, ram_bytes: Option<u64>) -> (Limits, Vec<String>) 
             "max_live" => match v.as_table() {
                 Some(pt) => {
                     for (prov, n) in pt {
+                        if !crate::provider::PROVIDERS.iter().any(|p| p.id == prov) {
+                            let known: Vec<&str> = crate::provider::PROVIDERS.iter().map(|p| p.id).collect();
+                            problems.push(format!("[limits] max_live.{prov}: no such provider ({}) — ignored", known.join(", ")));
+                            continue;
+                        }
                         match int(n, 0, 1000) {
                             Some(0) => {}
                             Some(n) => {
@@ -229,10 +237,19 @@ pub struct Live {
 /// Every live agent on the machine: tmux sessions with an agent pane, plus
 /// Claude sessions whose probe names no session in that list (started in a
 /// terminal, an IDE, another tmux server) — they cost the same memory.
+/// A session whose only evidence is a bare `node` pane counts only when a
+/// claude probe names it: a metro bundler is not an agent (review of #486).
 /// `exclude` are the sessions the launch itself would replace or reuse.
 pub fn live_agents(panes: Option<&crate::tmux::PaneList>, probes: &[crate::agent::ClaudeProbe], exclude: &[String]) -> Vec<Live> {
     let mut out: Vec<Live> = Vec::new();
-    let in_tmux: Vec<(String, &'static str)> = panes.map(|p| p.agent_sessions()).unwrap_or_default();
+    let named: Vec<&str> = probes.iter().filter_map(|p| p.tmux.as_deref().and_then(crate::agent::session_name)).collect();
+    let in_tmux: Vec<(String, &'static str)> = panes
+        .map(|p| p.agent_sessions())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(name, _, only_node)| !*only_node || named.contains(&name.as_str()))
+        .map(|(name, provider, _)| (name, provider))
+        .collect();
     for (name, provider) in &in_tmux {
         if !exclude.contains(name) {
             out.push(Live { label: name.clone(), provider: provider.to_string() });
@@ -320,35 +337,46 @@ pub fn user_limits(mem: &Memory) -> (Limits, Vec<String>) {
     limits_from(&text, mem.ram_bytes)
 }
 
-/// The gate `ops::launch` calls, under `launch_lock()`. `exclude`: the
-/// sessions this launch replaces or reuses.
-pub fn admit(provider: Option<&str>, force: bool, exclude: &[String]) -> Result<(), crate::harness::Refusal> {
+/// The gate `ops::launch` calls — twice: once unlocked, as a cheap early
+/// refusal before the harness's own (network) probes, and once under
+/// `launch_lock()`, which is the count that decides. `exclude`: the sessions
+/// this launch replaces or reuses. `Ok` carries `[limits]` problems for the
+/// caller to show.
+pub fn admit(provider: Option<&str>, force: bool, exclude: &[String]) -> Result<Vec<String>, crate::harness::Refusal> {
     if force {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let mem = memory();
-    let (limits, _) = user_limits(&mem);
+    let (limits, problems) = user_limits(&mem);
     if limits.max_live.is_none() && limits.per_provider.is_empty() && limits.min_free_pct == 0 && limits.max_swap_pct == 0 {
-        return Ok(()); // all off: pay for no tmux listing
+        return Ok(problems); // all off: pay for no tmux listing
     }
     let panes = crate::tmux::PaneList::fetch();
     let probes = crate::agent::live_probes();
     let live = live_agents(panes.as_ref(), &probes, exclude);
     match decide(provider, &live, &mem, &limits, &how_to_change()) {
         Some(why) => Err(crate::harness::Refusal::Soft(format!("Not started: {why}"))),
-        None => Ok(()),
+        None => Ok(problems),
     }
 }
 
 /// The machine-wide launch lock: an exclusive flock on
-/// `$XDG_STATE_HOME/worktrees/launch.lock`, held by the caller until its
-/// session exists. `None` when there is no state dir or the lock cannot be
-/// taken — fail open, an unlocked launch is today's behaviour.
-pub fn launch_lock() -> Option<File> {
+/// `$XDG_STATE_HOME/worktrees/launch.lock`, held by the caller from the count
+/// that decides until its session exists — never across a network probe.
+/// `on_wait` is told when another launch holds it, so a stuck holder is not
+/// a silent stall for every launch on the machine. `None` when there is no
+/// state dir or the lock cannot be taken — fail open, an unlocked launch is
+/// the behaviour before this existed.
+pub fn launch_lock(on_wait: impl FnOnce()) -> Option<File> {
     let dir = crate::init::state_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
     let f = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(dir.join("launch.lock")).ok()?;
     // SAFETY: flock on a live descriptor owned by `f`.
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Some(f);
+    }
+    on_wait();
+    // SAFETY: as above.
     (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0).then_some(f)
 }
 
@@ -389,6 +417,9 @@ mod tests {
         let (l, p) = limits_from("[limits]\nmax_live_agents = \"many\"\nwat = 1\n", Some(36 * GIB));
         assert_eq!(l.max_live, Some(18), "a typo keeps the default");
         assert_eq!(p.len(), 2, "{p:?}");
+        let (l, p) = limits_from("[limits]\nmax_live = { cluade = 2 }\n", Some(36 * GIB));
+        assert!(l.per_provider.is_empty());
+        assert!(p.len() == 1 && p[0].contains("no such provider"), "a misspelt provider is said, not dropped: {p:?}");
     }
 
     #[test]
@@ -461,5 +492,22 @@ mod tests {
         let labels: Vec<&str> = got.iter().map(|l| l.label.as_str()).collect();
         assert_eq!(labels, ["repo-a", "repo-b", "claude pid 11 (/x)", "claude pid 12 (/x)"]);
         assert_eq!(got[1].provider, "codex");
+    }
+
+    /// Review of #486, B1: `node` is claude only where something says so. A
+    /// bare `node` session (a bundler, a dev server) with no claude probe
+    /// naming it is not an agent; one a probe names is, once.
+    #[test]
+    fn a_bare_node_session_counts_only_when_a_claude_probe_names_it() {
+        let panes = crate::tmux::PaneList::from_rows(vec![
+            ("dev-vite".into(), "/x".into(), "node".into()),
+            ("lane".into(), "/l".into(), "node".into()),
+            ("repo-x~agent~codex".into(), "/r".into(), "node".into()),
+        ]);
+        let probe: crate::agent::ClaudeProbe =
+            serde_json::from_value(serde_json::json!({"pid": 9, "cwd": "/l", "status": "idle", "tmux": "lane:@1.%2"})).unwrap();
+        let got = live_agents(Some(&panes), &[probe], &[]);
+        let labels: Vec<&str> = got.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, ["lane", "repo-x~agent~codex"], "dev-vite is a dev server, lane is claude once, a sidecar is ours");
     }
 }
