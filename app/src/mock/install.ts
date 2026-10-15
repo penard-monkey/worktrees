@@ -243,7 +243,7 @@ function mockGuidance(): Record<string, unknown> {
     skill_hash: mockHash(MOCK_SKILL_DEFAULT),
     skill_edit: mockSkillEdit,
     edit_path: "/Users/demo/.config/worktrees/guidance/SKILL.md",
-    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
+    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` (the machine is shared with every lane); nudge or launch lanes at most three at a time. For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
   };
 }
 let mockMcp: Record<string, unknown> = (() => {

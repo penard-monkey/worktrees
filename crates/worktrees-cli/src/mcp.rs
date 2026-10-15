@@ -971,8 +971,9 @@ impl Server {
                 ),
                 Some(p) => format!(
                     "{GUIDANCE_HEAD} {} list_places shows every place; agents in different \
-                     places talk through report / messages / wait. {}{}",
+                     places talk through report / messages / wait. {} {}{}",
                     role_line(&self.role(p), &p.main_root),
+                    worktrees_core::guidance::HEAVY,
                     if self.mutations {
                         "Mutating tools are enabled; destructive ones need confirm: true."
                     } else {
@@ -1359,6 +1360,14 @@ impl Server {
                         let mut v = serde_json::to_value(p).unwrap_or_default();
                         add_agent_status(&mut v, self.proj()?, &p.slug, &p.path);
                         v["plan"] = plan_json(&p.path);
+                        // Heavy jobs this place holds a machine-wide slot for,
+                        // or is queued behind (`worktrees run --slot`). Absent
+                        // when none: a lane that looks idle while its gate
+                        // waits is otherwise indistinguishable from a stuck one.
+                        let slots = worktrees_core::slots::for_worktree(&p.path);
+                        if !slots.is_empty() {
+                            v["slots"] = serde_json::to_value(&slots).unwrap_or_default();
+                        }
                         let mut out = text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default());
                         self.say_capability(&mut out);
                         Ok(out)
@@ -4054,6 +4063,18 @@ mod tests {
         for needle in ["PLACE", "create_worktree", "worktrees new", "Never `git worktree add`", "never switch branches in (main)"] {
             assert!(head.contains(needle), "{needle:?} must be inside the first 250 chars:\n{head}");
         }
+    }
+
+    /// The shared-machine rule rides after the place rule in a managed repo's
+    /// instructions — after it, so the first 247 chars stay the place rule.
+    #[test]
+    fn managed_instructions_carry_the_slot_rule_after_the_place_rule() {
+        let sc = scratch("guidance-heavy");
+        git_in(&sc.root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git_in(&sc.root, &["worktree", "add", "-q", ".worktrees/lane", "-b", "lane"]);
+        let text = instructions_at(&sc.root, &sc.root);
+        let at = text.find("worktrees run --slot gate --").expect(&text);
+        assert!(at > 247, "must not push the place rule out of Codex's cut: {text}");
     }
 
     /// §3.1's role lines: the server knows where it runs, so it says so. The

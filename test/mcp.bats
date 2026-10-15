@@ -677,3 +677,30 @@ for r in results:
     printf '%s' "$line" | python3 -c 'import sys, json; json.loads(sys.stdin.read())' || { echo "not JSON: $line"; return 1; }
   done < "$BATS_TEST_TMPDIR/out.jsonl"
 }
+
+@test "place_status shows a slot the place holds (worktrees run --slot)" {
+  run_wt new feat-sl --no-tmux
+  local wt="$REPO/.worktrees/feat-sl"
+  local q='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"feat-sl"}}}'
+  local pick='
+import sys, json
+frames = [json.loads(l) for l in sys.stdin.read().splitlines() if l.strip()]
+p = json.loads(frames[-1]["result"]["content"][0]["text"])
+s = p.get("slots", [])
+print(len(s), s[0]["state"] if s else "-", s[0]["name"] if s else "-", s[0]["cmd"] if s else "-")'
+  mcp "" "$q"
+  [ "$(jq_out "$pick")" = "0 - - -" ]           # absent when it holds nothing
+  ( cd "$wt" && exec "$WT_BIN" run --slot gate -- sleep 30 ) >/dev/null 2>&1 3>&- &
+  local holder=$! i
+  disown "$holder"   # no "Killed" job line when it is kill -9'd below
+  # To a file, then grep: `| grep -q` under pipefail reads a match as failure.
+  for i in $(seq 1 50); do
+    "$WT_BIN" slots > "$BATS_TEST_TMPDIR/slots.out"
+    grep -q 'holds  repo:feat-sl' "$BATS_TEST_TMPDIR/slots.out" && break
+    sleep 0.1
+  done
+  local child; child="$(pgrep -P "$holder" || true)"
+  mcp "" "$q"
+  kill -9 "$holder" $child 2>/dev/null || true
+  [ "$(jq_out "$pick")" = "1 holding gate sleep 30" ]
+}

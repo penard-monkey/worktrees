@@ -67,6 +67,9 @@ const USER_ONLY_KEYS: &[&str] = &[
     // The launch gate's policy (`quota.rs`): whether an agent may start on a
     // nearly spent plan. Spending the user's allowance is the user's call.
     "quota",
+    // How many heavy jobs may run at once on THIS machine (`slots.rs`). A
+    // repo raising its own share would defeat the point.
+    "slots",
 ];
 
 // ── errors ───────────────────────────────────────────────────────────────────
@@ -1221,7 +1224,7 @@ mod tests {
             assert!(e.message.contains("may not be set by a project"), "{k}: {e}");
             assert_eq!(e.line, Some(1), "{k}");
         }
-        for t in ["[hooks]\npost_create = \"x\"\n", "[infra]\nup = \"docker compose up\"\n"] {
+        for t in ["[hooks]\npost_create = \"x\"\n", "[infra]\nup = \"docker compose up\"\n", "[slots]\ngate = 9\n"] {
             let e = parse(t).unwrap_err();
             assert!(e.message.contains("may not be set by a project"), "{t}: {e}");
             assert_eq!(e.line, Some(1));

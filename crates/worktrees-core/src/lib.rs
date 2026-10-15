@@ -52,6 +52,7 @@ pub mod registry;
 pub mod render;
 pub mod safepath;
 pub mod skillstore;
+pub mod slots;
 pub mod store;
 pub mod sync;
 pub mod sysclock;
