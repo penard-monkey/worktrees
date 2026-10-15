@@ -65,8 +65,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   places; widths, ⌘B and ⌘J are unchanged, and a mirrored install keeps the
   layout it had. Notices and Undo now appear at the agent's bottom-left in
   every layout, so they no longer cover a panel's terminal prompt.
+- **The Terminal can sit below the reference panel.** Settings → Navigation
+  → Terminal → "Below the reference panel" keeps your shells on screen under
+  Files, Docs or Plan — the same shells as the Terminal tab, not new ones.
+  Drag the line between the two to resize (the split is applied when you let
+  go, so the shell redraws once); ⌘J hides both; the Terminal icon and ⌘T
+  bring the column back with the shells below. In a window too short for both
+  halves the Terminal is a tab again until there is room.
 
 ### Changed
+- **⌘J in a window too narrow for the reference panels says so** instead of
+  doing nothing, and names the way out (widen the window, or unpin Places).
 - **`worktrees agent-setup fix` commits locally and pushes nothing unless you
   add `--push`**, the same rule as `rules apply`; `--push` pushes the branch
   and opens the PR as it used to. The app's Fix follows the same rule: pushing

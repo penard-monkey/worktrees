@@ -40,7 +40,7 @@ const a = at("const frontHere =");
 const b = at("const navKey =", a);
 if (a < 0 || b < 0) { console.log("not ok — App.tsx: `const frontHere =` … `const navKey =` markers are gone"); process.exit(1); }
 const LOC = lines.slice(a, b).join("\n");
-const ENV1 = ["sel", "selected", "eff", "dockShown", "dockFile", "dockAt", "termFront", "settings", "placeKey", "navSeenFront"];
+const ENV1 = ["sel", "selected", "eff", "dockShown", "dockFile", "dockAt", "termFront", "settings", "placeKey", "navSeenFront", "shownTab", "lowerOn"];
 const { build: buildLoc } = await load(`
 export function build(env: any) {
   const { ${ENV1.join(", ")} } = env;
@@ -56,6 +56,10 @@ const navLoc = (o) => buildLoc({
   ...o,
   eff: { dock_open: o.open, dock_tab: o.tab },
   dockShown: o.open,
+  // Settings → Layout's lower slot: the upper half's tab (`upperTab`), and
+  // whether the Terminal strip is on screen below it.
+  shownTab: o.shown ?? o.tab,
+  lowerOn: !!o.lowerOn,
 });
 const front = (id) => ({ key: placeKey(P1.repo, P1.slug), id });
 
@@ -81,6 +85,14 @@ eq("dock open on Terminal with the session down (no tabs) is a location without 
 eq("dock closed on Files is a location",
   navLoc({ open: false, tab: "files" })?.dock, { tab: "files" });
 eq("Home", navLoc({ sel: null, open: false, tab: "files" }), { place: null });
+// The Terminal below the reference panel: a strip is up under ANY upper tab,
+// so the location carries its front shell — and the upper tab it is under.
+eq("Terminal below, Docs above: the location is Docs + the lower strip's shell",
+  navLoc({ open: true, tab: "docs", lowerOn: true, termFront: front(3) })?.dock, { tab: "docs", shell: 3 });
+eq("Terminal below while its strip restores: not known yet, so not recorded",
+  navLoc({ open: true, tab: "docs", lowerOn: true, termFront: front(undefined) }), null);
+eq("a stored \"terminal\" tab with the Terminal below records what is ON SCREEN above it (Files)",
+  navLoc({ open: true, tab: "terminal", shown: "files", lowerOn: true, termFront: front(1) })?.dock, { tab: "files", shell: 1 });
 
 // ── 2. the parked apply's async file landing ────────────────────────────────
 const e0 = at("const loc = navPending;");

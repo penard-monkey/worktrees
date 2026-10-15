@@ -1743,6 +1743,31 @@ body.dragging .menu-catch { pointer-events: none; }
 
 .dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .dock-body .term-host { border-radius: 0; }
+/* The lower slot (Settings → Navigation → Terminal: below the reference panel).
+   A column flex item, so `min-height: 0` — the vertical twin of the
+   `.term-host` ratchet: without it the slot's floor is the grid xterm is
+   painting NOW and it never gives height back. Its basis is inline (a share of
+   the column, `dock_lower_frac`). `.term-host` itself is not restyled here. */
+.dock-lower {
+  flex-grow: 0; flex-shrink: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  border-top: 1px solid var(--line);
+}
+.dock-lower .term-host { border-radius: 0; }
+/* A 6px hit band straddling the seam; zero layout height, so it moves
+   nothing. The guide is what the pointer moves — the split itself changes on
+   release only (see `onLowerSplit`). */
+.dock-lower-split {
+  position: relative; flex: none; height: 0; z-index: 5;
+}
+.dock-lower-split::before {
+  content: ""; position: absolute; left: 0; right: 0; top: -3px; height: 6px; cursor: row-resize;
+}
+.dock-lower-split:hover::before { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+.dock-lower-guide {
+  position: absolute; left: 0; right: 0; height: 2px; margin-top: -1px; z-index: 6;
+  background: var(--accent); pointer-events: none;
+}
 
 /* Terminal tab: several shells behind a tab strip */
 .termtabs { flex: 1; min-height: 0; display: flex; flex-direction: column; }
