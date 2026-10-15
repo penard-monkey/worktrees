@@ -1227,7 +1227,7 @@ mod tests {
             assert!(e.message.contains("may not be set by a project"), "{k}: {e}");
             assert_eq!(e.line, Some(1), "{k}");
         }
-        for t in ["[hooks]\npost_create = \"x\"\n", "[infra]\nup = \"docker compose up\"\n", "[slots]\ngate = 9\n"] {
+        for t in ["[hooks]\npost_create = \"x\"\n", "[infra]\nup = \"docker compose up\"\n", "[slots]\ngate = 9\n", "[limits]\nmax_live_agents = 500\n"] {
             let e = parse(t).unwrap_err();
             assert!(e.message.contains("may not be set by a project"), "{t}: {e}");
             assert_eq!(e.line, Some(1));
