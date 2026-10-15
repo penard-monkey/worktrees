@@ -149,15 +149,16 @@ export function projectTodos(
   const repo = agent?.repo;
   if (repo) {
     if (repo.pending) {
-      // `pending` only says the branch EXISTS. Whether there is anything to
-      // wait for depends on where: a push that failed (or no origin, no gh)
-      // leaves a local branch and no PR at all.
+      // `pending` only says the branch EXISTS. On origin it is a PR to merge;
+      // local only is the DEFAULT result of Fix / Apply (they push only when
+      // asked), so it reads as the next step, at info — not as a failed push.
+      // No "Fix" in the noun: Apply rules writes the same branch.
       out.push({
         id: "agent-pending",
         label: repo.pending_on_origin
-          ? `Fix PR waiting to merge (branch ${repo.pending})`
-          : `Fix branch '${repo.pending}' was committed but never pushed — push it, or delete it to redo`,
-        action: null, section: "agent", n: 0, sev: repo.pending_on_origin ? "info" : "warn",
+          ? `PR waiting to merge (branch ${repo.pending})`
+          : `Branch '${repo.pending}' is committed locally — review it as a place, then push it and open a PR`,
+        action: null, section: "agent", n: 0, sev: "info",
       });
     } else if (repo.fixable) {
       const claudeOnly = repo.dirs.filter((d) => d.kind === "claude-only").length;

@@ -2851,7 +2851,7 @@ Phase 3: Frontend pane and mock harness
       const root = args.repo as string;
       const r = mockAgentRepos[root];
       emitEvent("places:changed", {});
-      if (r?.pending) throw new Error("a branch named 'agent-instructions' already exists — merge its PR first");
+      if (r?.pending) throw new Error("a branch named 'agent-instructions' already exists — merge it first");
       if (!r?.fixable) {
         return { branch: "agent-instructions", base: "origin/main", commit: null, pushed: false, pr_url: null, left_alone: [],
           notes: ["origin/main already has its agent instructions set up."] };

@@ -94,11 +94,15 @@ const count = (h, a) => todoCount(projectTodos(h, a));
   if (!/waiting to merge/.test(rows.find((r) => r.id === "agent-pending")?.label ?? "")) fail("a pushed fix must read as a PR waiting to merge");
   else ok("pending on origin → 'waiting to merge'");
   // A branch that never left the machine has NO PR — never say one is waiting.
+  // And since Fix/Apply commit locally BY DEFAULT, it is the normal result,
+  // not a failed push: worded as a next step, at info, never as an error.
   const local = projectTodos(null, agent({ ...fixable.repo, pending: "agent-instructions", pending_on_origin: false }));
   const lrow = local.find((r) => r.id === "agent-pending");
-  if (!lrow || /waiting to merge/.test(lrow.label) || !/never pushed/.test(lrow.label)) {
-    fail(`local-only pending branch reads "${lrow?.label}" — it must say it was never pushed, not that a PR waits`);
-  } else ok("pending locally only → 'never pushed'");
+  if (!lrow || /waiting to merge/.test(lrow.label) || !/committed locally/.test(lrow.label) || /never pushed|failed/.test(lrow.label)) {
+    fail(`local-only pending branch reads "${lrow?.label}" — it must say it is committed locally (a next step), not that a PR waits or that a push failed`);
+  } else ok("pending locally only → 'committed locally'");
+  if (lrow && lrow.sev !== "info") fail(`local-only pending branch is "${lrow.sev}" — the default result of Fix/Apply is not a warning`);
+  else ok("a local-only pending branch is info, not a warning");
   if (todoCount(local) !== 0) fail("a local-only pending branch must still count 0 (Fix would refuse: the branch exists)");
   else ok("a local-only pending branch counts 0");
 }

@@ -94,10 +94,11 @@ export type AgentSetupCtl = {
   busy: "fix" | "rules" | null;
   /** Which button is armed. One arm for both: they write the same branch. */
   armed: "fix" | "rules" | null;
-  /** Push the branch and open a PR too. Off by default: both commit locally,
-   *  and what leaves the machine is the user's call (decision 2026-10-14). */
-  push: boolean;
-  setPush: (v: boolean) => void;
+  /** Push the branch and open a PR too — one switch PER BUTTON, each beside
+   *  its own button, so ticking one never shows up ticked somewhere else.
+   *  Off by default: what leaves the machine is the user's call (2026-10-14). */
+  push: { fix: boolean; rules: boolean };
+  setPush: (which: "fix" | "rules", v: boolean) => void;
   outcome: AgentFixOutcome | null;
   /** Which button produced `outcome`/`log`, so only its section shows them. */
   ran: "fix" | "rules" | null;
@@ -119,7 +120,8 @@ export function useAgentSetup(root: string, open: boolean, onLoaded: (root: stri
   const [busy, setBusy] = useState<"fix" | "rules" | null>(null);
   const running = busy !== null;
   const [armed, setArmed] = useState<"fix" | "rules" | null>(null);
-  const [push, setPush] = useState(false);
+  const [push, setPushState] = useState({ fix: false, rules: false });
+  const setPush = (which: "fix" | "rules", v: boolean) => setPushState((p) => ({ ...p, [which]: v }));
   const [outcome, setOutcome] = useState<AgentFixOutcome | null>(null);
   const [ran, setRan] = useState<"fix" | "rules" | null>(null);
   const [log, setLog] = useState("");
@@ -166,7 +168,7 @@ export function useAgentSetup(root: string, open: boolean, onLoaded: (root: stri
     setOutcome(null);
     setLog("");
     try {
-      const o = await invoke<AgentFixOutcome | null>(cmd, { repo: root, push, ...args });
+      const o = await invoke<AgentFixOutcome | null>(cmd, { repo: root, push: push[which], ...args });
       setOutcome(o ?? null);
     } catch (e) {
       setLog(`✗ ${String(e)}`);
@@ -194,6 +196,7 @@ const runningWords = (push: boolean) => (push ? "Pushing…" : "Committing…");
 export function AgentFixButton({ ctl, disabled = false, onPress }: { ctl: AgentSetupCtl; disabled?: boolean; onPress?: () => void }) {
   const repo = ctl.status?.repo;
   const armed = ctl.armed === "fix";
+  const push = ctl.push.fix;
   const where = `on 'agent-instructions' off ${repo?.reference ?? "the default branch"}`;
   return (
     <button
@@ -201,23 +204,22 @@ export function AgentFixButton({ ctl, disabled = false, onPress }: { ctl: AgentS
       data-testid="agent-setup-fix"
       disabled={disabled || ctl.running || !repo?.fixable || !!repo?.pending}
       title={armed
-        ? (ctl.push ? "click again to commit, push the branch and open a PR" : "click again to commit the fix on a local branch")
-        : ctl.push ? `commit the fix ${where}, push it and open a PR` : `commit the fix ${where} — nothing is pushed`}
+        ? (push ? "click again to commit, push the branch and open a PR" : "click again to commit the fix on a local branch")
+        : push ? `commit the fix ${where}, push it and open a PR` : `commit the fix ${where} — nothing is pushed`}
       onClick={() => { onPress?.(); ctl.fix(); }}
     >
-      {ctl.busy === "fix" ? runningWords(ctl.push) : armed ? commitWords(ctl.push) : "Fix…"}
+      {ctl.busy === "fix" ? runningWords(push) : armed ? commitWords(push) : "Fix…"}
     </button>
   );
 }
 
-/** The one switch for both buttons: they write the same branch, so they share
- *  where it goes. */
-export function PushToggle({ ctl }: { ctl: AgentSetupCtl }) {
+/** The push switch for ONE button (its own state; see `AgentSetupCtl.push`). */
+export function PushToggle({ ctl, which }: { ctl: AgentSetupCtl; which: "fix" | "rules" }) {
   return (
     <label className="tier-toggle setting-check" title="Without it, the branch stays on this machine for you to review and push.">
-      <input type="checkbox" data-testid="agent-push" checked={ctl.push} disabled={ctl.running}
-        onChange={(e) => ctl.setPush(e.currentTarget.checked)} />
-      Also push the branch and open a PR
+      <input type="checkbox" data-testid={`push-${which}`} checked={ctl.push[which]} disabled={ctl.running}
+        onChange={(e) => ctl.setPush(which, e.currentTarget.checked)} />
+      {which === "fix" ? "Fix also pushes the branch and opens a PR" : "Apply also pushes the branch and opens a PR"}
     </label>
   );
 }
@@ -295,7 +297,7 @@ export function AgentSetupSection({ ctl, onError }: { ctl: AgentSetupCtl; onErro
         <AgentFixButton ctl={ctl} />
         <button className="ctrl sm" disabled={ctl.running} onClick={ctl.load}>Re-check</button>
       </div>
-      <PushToggle ctl={ctl} />
+      <PushToggle ctl={ctl} which="fix" />
       {repo?.pending && !outcome && !(ctl.ran === "rules" && ctl.outcome) && <PendingHint pending={repo.pending} onOrigin={repo.pending_on_origin} />}
       <div className="hint">
         AGENTS.md becomes the one instruction file — Codex and other agents read it directly — and
@@ -345,13 +347,31 @@ export function RulesSection({ ctl, onError }: { ctl: AgentSetupCtl; onError: (m
   const [force, setForce] = useState(false);
   const rules = ctl.status?.rules;
   const armed = ctl.armed === "rules";
-  const edited = rules ? [rules.block, rules.skill].some((f) => f.state === "edited") : false;
-  const can = !!rules && !rules.pending && (rules.applicable || (force && edited));
+  const push = ctl.push.rules;
+  const editedPieces = rules
+    ? [rules.block.state === "edited" ? `the ${rules.file ?? "AGENTS.md"} block` : null, rules.skill.state === "edited" ? "the close-out skill" : null].filter((x): x is string => !!x)
+    : [];
+  const edited = editedPieces.length > 0;
+  // A hidden checkbox must not keep sending `true`: a Re-check can clear
+  // `edited` (the edit was reverted upstream) while `force` is still set.
+  useEffect(() => { if (!edited) setForce(false); }, [edited]);
+  const replacing = force && edited;
+  // What THIS section shows as to do — not `applicable`, which also covers
+  // the layout fix that Agent setup's own button makes. With every line
+  // green, Apply has nothing of its own to write.
+  const writable = (f: RulesFound) => f.state === "absent" || f.state === "outdated";
+  const rulesTodo = !!rules && ((!rules.blocked && writable(rules.block)) || writable(rules.skill) || (!rules.config && rules.skill.state !== "foreign"));
+  const can = !!rules && !rules.pending && (rulesTodo || replacing);
+  // Order matters: the tag must never contradict the rows under it.
   const tag = !rules ? null
-    : rules.pending ? <span className="upd-tag">{rules.pending_on_origin ? "PR waiting" : "not pushed"}</span>
-    : rules.block.state === "current" && rules.skill.state !== "absent" ? <span className="upd-tag">v{rules.version}</span>
-    : rules.applicable ? <span className="upd-tag warn">{rules.block.state === "outdated" ? "outdated" : "not applied"}</span>
+    : rules.pending ? <span className="upd-tag">{rules.pending_on_origin ? "PR waiting" : "committed locally"}</span>
+    : rulesTodo ? <span className="upd-tag warn">{[rules.block, rules.skill].some((f) => f.state === "outdated") ? "outdated" : "not applied"}</span>
+    : edited ? <span className="upd-tag">edited</span>
+    : rules.block.state === "current" ? <span className="upd-tag">v{rules.version}</span>
     : null;
+  const armedWords = replacing
+    ? (push ? "Replace edited text, commit + push" : "Replace edited text + commit")
+    : commitWords(push);
   const lines = rules ? [
     rules.blocked
       ? { sev: "error" as const, glyph: "✗", text: `${rules.file ?? "AGENTS.md"} block: ${rules.blocked}` }
@@ -364,7 +384,9 @@ export function RulesSection({ ctl, onError }: { ctl: AgentSetupCtl; onError: (m
   return (
     <section className="setting" data-testid="project-rules">
       <label>Worktrees rules{tag}</label>
-      {!ctl.status ? (
+      {ctl.loadErr ? (
+        <div className="hint">Could not check this project — the error is under Agent setup above.</div>
+      ) : !ctl.status ? (
         <div className="hint">Checking…</div>
       ) : !rules ? (
         <div className="hint">Could not read the rules on the default branch — see Settings → Logs.</div>
@@ -384,11 +406,13 @@ export function RulesSection({ ctl, onError }: { ctl: AgentSetupCtl; onError: (m
           data-testid="rules-apply"
           disabled={ctl.running || !can}
           title={armed
-            ? (ctl.push ? "click again to commit, push the branch and open a PR" : "click again to commit on a local branch")
-            : `commit the rules on 'agent-instructions' off ${rules?.reference ?? "the default branch"}${ctl.push ? ", push it and open a PR" : " — nothing is pushed"}`}
-          onClick={() => ctl.applyRules(force)}
+            ? `click again to ${replacing ? `REPLACE your edits to ${editedPieces.join(" and ")}, then ` : ""}commit${push ? ", push the branch and open a PR" : " on a local branch"}`
+            : !rulesTodo && !replacing && rules && !rules.pending
+              ? (edited ? "your edits are kept — tick Replace to overwrite them with this version" : "the rules are current — nothing to apply")
+            : `commit the rules on 'agent-instructions' off ${rules?.reference ?? "the default branch"}${push ? ", push it and open a PR" : " — nothing is pushed"}`}
+          onClick={() => ctl.applyRules(replacing)}
         >
-          {ctl.busy === "rules" ? runningWords(ctl.push) : armed ? commitWords(ctl.push) : "Apply rules…"}
+          {ctl.busy === "rules" ? runningWords(push) : armed ? armedWords : "Apply rules…"}
         </button>
       </div>
       {edited && (
@@ -398,7 +422,7 @@ export function RulesSection({ ctl, onError }: { ctl: AgentSetupCtl; onError: (m
           Replace the hand-edited text with this version's
         </label>
       )}
-      <PushToggle ctl={ctl} />
+      <PushToggle ctl={ctl} which="rules" />
       {rules?.pending && !(ctl.ran === "rules" && ctl.outcome) && <PendingHint pending={rules.pending} onOrigin={rules.pending_on_origin} />}
       <div className="hint">
         Teaches every agent in this repository — including one worktrees did not start, and a
