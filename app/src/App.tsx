@@ -8259,7 +8259,9 @@ function App() {
                         disabled={!mainSession || askingMain}
                         title={mainSession && mainHarness
                           ? `Put a fixed prompt at (main)'s ${HARNESS_LABEL[mainHarness]} prompt asking it to review this place's progress and update its brief and plan. Switches to (main); nothing is sent until you press Enter there.`
-                          : "(main) has no agent session — open it first"}
+                          : mainOfSel.tmux_session.up
+                            ? "(main)'s session is up but no agent is running in it — start an agent session in (main) first"
+                            : "(main) has no session — open it first"}
                         onClick={() => {
                           if (!mainSession || askingMain) return;
                           setAskingMain(true);

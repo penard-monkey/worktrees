@@ -5714,17 +5714,21 @@ async fn plan_ask_main(app: AppHandle, root: String, session: String, provider: 
     } else {
         String::new()
     };
-    let claude_waiting = prov.id == provider::CLAUDE.id && {
-        let main = canon(Path::new(&project.main_root));
-        worktrees_core::agent::live_probes().iter().any(|p| {
-            canon(Path::new(&p.cwd)) == main && worktrees_core::agent::effective_state(p) == "waiting"
-        })
-    };
+    // Keyed on the PANE being pasted into (the probe's `tmux` carries its
+    // `%id`), or on the peer name pane-0 claude is launched with — never on
+    // the repo-root cwd, which a claude in some other terminal shares.
+    let claude_waiting = prov.id == provider::CLAUDE.id
+        && worktrees_core::agent::live_probes().iter().any(|p| {
+            let here = p.tmux.as_deref().and_then(worktrees_core::agent::pane_id) == Some(pane.as_str())
+                || p.name.as_deref() == Some(session.as_str());
+            here && worktrees_core::agent::effective_state(p) == "waiting"
+        });
     let pi_screen = (prov.id == provider::PI.id).then(|| worktrees_core::pi::screen_of(&session));
     if let Some(why) = ask_main_refusal(prov.id, &plain, &styled, claude_waiting, pi_screen) {
         return Err(why);
     }
-    tmux::paste_to_ai(&session, prov.match_word, &prompt)?;
+    // The pane that was read, not a second lookup that could find another.
+    tmux::paste_into(&pane, &prompt)?;
     applog("info", &format!("plan_ask_main: pasted into {session} for {slug}"));
     Ok(())
 }
@@ -5742,19 +5746,28 @@ fn ask_main_refusal(
 ) -> Option<String> {
     const DRAFT: &str = "(main) has unsent text at its prompt — send or clear it there first, then ask again.";
     const MODAL: &str = "(main) is asking you something — answer it there first, then ask again.";
+    // An input box this reader does not recognise is NOT an empty one: a
+    // selector, a dialog or a new layout would take the paste as input.
+    const UNREAD: &str = "couldn't read (main)'s prompt — is a menu or dialog open there?";
     if provider_id == provider::CLAUDE.id {
         if claude_waiting {
             return Some(MODAL.into());
+        }
+        if !worktrees_core::agent::prompt_box_on_screen(styled) {
+            return Some(UNREAD.into());
         }
         if worktrees_core::agent::draft_from_screen(styled).is_some() {
             return Some(DRAFT.into());
         }
     } else if provider_id == provider::CODEX.id {
+        use worktrees_core::codex::Composer;
         if worktrees_core::codex::waiting_on_screen(plain) {
             return Some(MODAL.into());
         }
-        if matches!(worktrees_core::codex::composer_on_screen(plain), Some(worktrees_core::codex::Composer::Text(_))) {
-            return Some(DRAFT.into());
+        match worktrees_core::codex::composer_on_screen(plain) {
+            None => return Some(UNREAD.into()),
+            Some(Composer::Text(_)) => return Some(DRAFT.into()),
+            Some(Composer::Empty) => {}
         }
     } else if provider_id == provider::PI.id {
         use worktrees_core::pi::PiScreen;
@@ -8899,11 +8912,20 @@ mod tests {
         assert_eq!(ask_main_refusal("claude", empty, empty, false, None), None);
         assert!(ask_main_refusal("claude", typed, typed, false, None).unwrap().contains("unsent text"));
         assert!(ask_main_refusal("claude", empty, empty, true, None).unwrap().contains("asking you"));
+        // Claude's own DIM suggestion is not typing — only the `-e` capture
+        // can tell, so plain and styled differ here on purpose.
+        let sugg_plain = "─────\n❯\u{a0}suggested\n─────\n";
+        let sugg_styled = "─────\n\u{1b}[2m❯\u{a0}suggested\u{1b}[0m\n─────\n";
+        assert_eq!(ask_main_refusal("claude", sugg_plain, sugg_styled, false, None), None);
+        // No input box at all (a selector, the trust prompt) is not "empty".
+        let selector = "Do you trust this folder?\n\n❯ No, exit\n  Yes, I trust this folder\n";
+        assert!(ask_main_refusal("claude", selector, selector, false, None).unwrap().contains("couldn't read"));
 
         let c_empty = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/empty.txt");
         let c_typed = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/typed.txt");
         assert_eq!(ask_main_refusal("codex", c_empty, "", false, None), None);
         assert!(ask_main_refusal("codex", c_typed, "", false, None).unwrap().contains("unsent text"));
+        assert!(ask_main_refusal("codex", "not a codex screen", "", false, None).unwrap().contains("couldn't read"));
         let c_modal = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/probe-approval.txt");
         assert!(ask_main_refusal("codex", c_modal, "", false, None).unwrap().contains("asking you"));
 
