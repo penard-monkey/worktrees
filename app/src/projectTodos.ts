@@ -29,7 +29,8 @@
 // The worktrees RULES (ADR 0002) are a row with n = 0 even though Apply can
 // clear them: they are opt-in, every project starts without them, and counting
 // them would badge every project the moment this shipped. The row is the
-// per-project suggestion; the number stays what is BROKEN.
+// per-project suggestion, and it puts "Repair / upgrade…" in the project menu
+// (with no number) so Apply is reachable; the number stays what is BROKEN.
 //
 // The USER'S own skills (~/.claude/skills) are machine-wide and deliberately NOT
 // here: a per-project to-do about them would stand under every project at once.
@@ -221,8 +222,15 @@ export function todoCount(todos: Todo[]): number {
   return todos.reduce((a, t) => a + t.n, 0);
 }
 
-/** Whether "Repair / upgrade…" belongs in the menu: something to fix, or a
- *  doctor that could not run (the one uncounted row that still needs you). */
+/** Rows that put "Repair / upgrade…" in the menu without adding to its
+ *  number: a doctor that could not run (it needs you), and the worktrees rules
+ *  Apply can write or update — the menu is how that button is reached, but
+ *  they are opt-in, so they never badge. `rules-damaged` is not here: its fix
+ *  is by hand, and nothing behind Repair can do it. */
+const UNCOUNTED_REPAIR: ReadonlySet<TodoId> = new Set(["doctor-error", "rules-apply", "rules-outdated"]);
+
+/** Whether "Repair / upgrade…" belongs in the menu: something a button can
+ *  change, or one of the uncounted rows above. */
 export function needsRepair(todos: Todo[]): boolean {
-  return todoCount(todos) > 0 || todos.some((t) => t.id === "doctor-error");
+  return todoCount(todos) > 0 || todos.some((t) => UNCOUNTED_REPAIR.has(t.id));
 }

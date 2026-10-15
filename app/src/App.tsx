@@ -9367,8 +9367,10 @@ function App() {
             {pv?.ok && (() => {
               // "Repair / upgrade…": everything a button can change here —
               // doctor findings PLUS the agent-setup items the Fix PR carries
-              // (`projectTodos`). Offered only when there is something, or when
-              // doctor could not run (that row is uncounted but needs you).
+              // (`projectTodos`). Offered only when there is something, or for
+              // an uncounted row that still needs this sheet (`needsRepair`: a
+              // doctor that could not run, rules to apply or update) — those
+              // show the item with no number.
               const todos = projectTodos(health[ctx.root], agentSetup[ctx.root]);
               if (!needsRepair(todos)) return null;
               const n = todoCount(todos);
