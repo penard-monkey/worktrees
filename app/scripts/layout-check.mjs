@@ -382,5 +382,61 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   else ok("`.dock-lower` can shrink (min-height: 0)");
 }
 
+// ── 6. drag to arrange (phase 3) ────────────────────────────────────────────
+// arrange.ts is pure (type-only imports), so it loads on its own. What can go
+// wrong: a destination writing a field Undo/Reset do not know, two zones under
+// one pointer, the agent's grip writing its OWN side backwards, and a drag that
+// writes settings while it moves (a live reflow resizes the agent per frame).
+{
+  const asrc = read("../src/arrange.ts");
+  const ajs = (await transformWithEsbuild(asrc, "arrange.ts", { loader: "ts", format: "esm" })).code;
+  const A = await import("data:text/javascript;base64," + Buffer.from(ajs).toString("base64"));
+  const grips = ["places", "reference", "agent", "terminal"];
+  const geo = { app: { left: 0, top: 0, right: 1280, bottom: 800 }, space: { left: 344, top: 50, right: 1280, bottom: 800 }, dock: { left: 344, top: 50, right: 704, bottom: 800 } };
+  for (const g of grips) {
+    const ds = A.destinations(g);
+    if (ds.length !== 2) fail(`${g}: ${ds.length} destinations, want 2`);
+    for (const d of ds) {
+      const extra = Object.keys(d.patch).filter((k) => !A.LAYOUT_KEYS.includes(k));
+      if (extra.length) fail(`${g} → ${d.id} writes ${extra.join(", ")}, which Undo and Reset do not cover`);
+      const z = A.zoneOf(d.id, geo);
+      if (!z) { fail(`${g} → ${d.id} has no zone with the column open`); continue; }
+      const cx = (z.left + z.right) / 2, cy = (z.top + z.bottom) / 2;
+      if (A.destAt(g, geo, cx, cy)?.id !== d.id) fail(`${g}: the centre of ${d.id}'s zone resolves to ${A.destAt(g, geo, cx, cy)?.id}`);
+    }
+    const [a, b] = ds.map((d) => A.zoneOf(d.id, geo));
+    if (a && b && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) fail(`${g}: its two zones overlap`);
+  }
+  if (A.zoneOf("term-below", { ...geo, dock: null }) !== null) fail("the Terminal's zones exist with the column closed");
+  // The agent's grip writes the REFERENCE side, inverted.
+  const ag = Object.fromEntries(A.destinations("agent").map((d) => [d.id, d.patch.dock_side]));
+  if (ag["agent-left"] !== "right" || ag["agent-right"] !== "left") fail(`dragging the agent writes dock_side backwards (${JSON.stringify(ag)})`);
+  // Where the agent zone sits must agree with what the patch produces: the
+  // agent dropped in the LEFT half means the reference is on the right.
+  const cur = { places_side: "left", dock_side: "left", dock_lower: null };
+  const here = A.destinations("agent").filter((d) => A.isCurrent(d, cur)).map((d) => d.id);
+  if (JSON.stringify(here) !== '["agent-right"]') fail(`with reference left, the agent's current zone reads as ${JSON.stringify(here)}`);
+  const u = A.undoOf({ dock_side: "right", dock_lower: "terminal" }, cur);
+  if (JSON.stringify(u) !== JSON.stringify({ dock_side: "left", dock_lower: null })) fail(`undoOf captured ${JSON.stringify(u)}`);
+  const r = A.resetPatch(S.DEFAULTS);
+  if (JSON.stringify(r) !== JSON.stringify({ places_side: "left", dock_side: "right", dock_lower: null })) fail(`resetPatch is ${JSON.stringify(r)}, not the defaults of the three layout keys`);
+  if (!bad) ok("arrange.ts: two destinations per grip, disjoint zones, layout keys only, agent inverted, undo/reset exact");
+
+  // App: four grips; the drag paints and never writes until the drop.
+  const gripUses = [...app.matchAll(/\{\.\.\.gripProps\("(\w+)"\)\}/g)].map((m) => m[1]).sort();
+  if (JSON.stringify(gripUses) !== JSON.stringify([...grips].sort())) fail(`grips rendered: ${gripUses.join(", ")} — want one each for ${grips.join(", ")}`);
+  const gp = app.slice(app.indexOf("const gripProps = (g: Grip) => ({"), app.indexOf("const closeMoveMenu"));
+  const mv = gp.slice(gp.indexOf("onPointerMove:"), gp.indexOf("onPointerUp:"));
+  if (!mv || /update(Settings|Panels)|commitLayout/.test(mv)) fail("the grip's pointermove writes settings — a live reflow resizes the agent's pty on every frame of the drag");
+  else ok("nothing is written while a grip is dragged; the drop commits once");
+  if (!/setPointerCapture/.test(gp)) fail("the grip does not take pointer capture — a drag across an xterm loses its moves");
+  if (!/useEscape\([^\n]*!!arrange\)/.test(app)) fail("Esc does not cancel a drag in flight (no useEscape gated on `arrange`)");
+  const cl = app.slice(app.indexOf("const commitLayout"), app.indexOf("const endArrange"));
+  if (!/setUndo\(/.test(cl) || !/setArranged\(/.test(cl)) fail("commitLayout leaves no Undo banner or no aria-live announcement");
+  const catchCss = css.match(/\.arrange-catch \{[^}]*\}/)?.[0] ?? "";
+  if (!/pointer-events: none/.test(catchCss)) fail("`.arrange-catch` takes pointer events — it would sit between the captured grip and its own hit test");
+  if (!bad) ok("four grips, pointer capture, Esc, Undo + announcement, an inert overlay");
+}
+
 console.log(bad ? `\nlayout-check: ${bad} failure(s)` : "\nlayout-check: all good");
 process.exit(bad ? 1 : 0);

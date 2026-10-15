@@ -1040,6 +1040,11 @@ html[data-guides="off"] .kids > .places::after { display: none; }
    othermac"). Not a .pop-item: there is nothing to click. */
 .pop-note { padding: var(--s1) var(--s2); font-size: var(--fs-micro); color: var(--txt-mute); }
 .pop-note.warn { color: var(--warn); white-space: normal; max-width: 22em; }
+/* A menu's own title row (Move Reference panels), and a dim aside on an item. */
+.pop-head { padding: var(--s1) var(--s2); font-size: var(--fs-micro); color: var(--txt-dim); font-weight: var(--fw-bold); }
+.pop-item:disabled { color: var(--txt-mute); cursor: default; }
+.pop-item:disabled:hover { background: transparent; color: var(--txt-mute); }
+.pop-dim { color: var(--txt-mute); }
 .pop-item.danger { color: var(--danger); }
 .pop-item.danger.armed { background: color-mix(in srgb, var(--danger) 18%, transparent); font-weight: var(--fw-bold); }
 
@@ -3457,3 +3462,45 @@ button.prs-group-head:hover { color: var(--txt-hi); }
 .planning-choice .seg { width: fit-content; }
 .planning-choice .hint { font-size: var(--fs-meta); color: var(--txt-dim); }
 .plan-hint { display: flex; align-items: center; gap: var(--s2); }
+
+/* ── drag to arrange (arrange.ts) ──
+   A grip in each movable section's header. Quiet until hovered — it is in
+   four headers that are read far more often than they are rearranged. */
+.grip {
+  flex: none; display: inline-grid; place-items: center;
+  width: 18px; height: 18px; padding: 0; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--txt-mute); cursor: grab; touch-action: none;
+}
+.grip:hover, .grip:focus-visible { color: var(--txt-hi); background: var(--bg-elev); }
+.grip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+body.dragging .grip { cursor: grabbing; }
+.dock-tabs .grip { margin-right: calc(-1 * var(--s1)); }
+.agent-label .agent-name { margin-right: auto; }
+.agent-label .grip { margin-right: var(--s1); }
+/* The lower slot has no header of its own: the grip sits over the right end
+   of its tab strip, which is empty unless the strip overflows. */
+.dock-lower { position: relative; }
+.dock-lower > .grip { position: absolute; top: 4px; right: var(--s2); z-index: 2; }
+/* The zones. Above the nav overlay (30), below menus (60) and the notice stack
+   (80). `pointer-events: none` on all of it: the grip holds pointer capture and
+   App hit-tests the zones, so nothing here may take an event. */
+.arrange-catch { position: fixed; inset: 0; z-index: 35; pointer-events: none; }
+.arrange-zone {
+  position: fixed; display: grid; place-items: center;
+  border: 2px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  transition: background var(--dur-fast), border-color var(--dur-fast);
+}
+.arrange-zone.hover { border-style: solid; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.arrange-zone.here { border-color: var(--line-strong); background: color-mix(in srgb, var(--bg-abyss) 40%, transparent); }
+.arrange-zone-label {
+  padding: var(--s1) var(--s3); border-radius: var(--r-full);
+  background: var(--bg-panel); border: 1px solid var(--line-strong);
+  color: var(--txt-hi); font-size: var(--fs-label);
+}
+.arrange-zone.here .arrange-zone-label { color: var(--txt-dim); }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}

@@ -398,6 +398,7 @@ export function SettingsSheet({
   onCheckUpdate,
   onCatShown,
   onShowNotes,
+  onResetLayout,
   onReset,
   repo,
   onReport,
@@ -447,6 +448,9 @@ export function SettingsSheet({
    *  been seen — `at` alone only knows where the sheet was OPENED. */
   onCatShown?: (cat: CatId) => void;
   onShowNotes: () => void;
+  /** Settings → Layout → Reset: App writes the layout defaults with an Undo
+   *  banner, the same commit a drag makes (arrange.ts). */
+  onResetLayout: () => void;
   onReset: () => void;
   /// The project in focus — AI profiles can be bound per repo, so the panel
   /// needs to know which one to report as effective. Empty is fine (global view).
@@ -1351,8 +1355,14 @@ export function SettingsSheet({
             <div className="hint">
               Applies to all places. Places and the reference panels (Files, Terminal, Docs, Plan) each
               take an edge; on the same edge their rails become one. Widths, ⌘B and ⌘J are unchanged.
-              Tab still walks the panels in their classic order.
+              Tab still walks the panels in their classic order. You can also drag a section by the
+              grip in its header, or click the grip for a menu.
             </div>
+            <button className="ctrl sm" data-testid="layout-reset" style={{ marginTop: "var(--s2)" }}
+              disabled={settings.places_side === "left" && settings.dock_side === "right" && settings.dock_lower === null}
+              onClick={onResetLayout}>
+              Reset layout
+            </button>
           </section>
 
           {/* The reference column's lower slot. Terminal only — see

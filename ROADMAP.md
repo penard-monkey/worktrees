@@ -53,7 +53,11 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   right → Classic, in the Web Inspector console:
   `[...document.querySelectorAll('.main .term-host, .dock')].map(e => e.getBoundingClientRect().right|0)`
   — the host's right edge must not pass the dock's left. Unhook with
-  `tmux set-hook -u -t <session> client-resized`.
+  `tmux set-hook -u -t <session> client-resized`. While it is hooked, also
+  (#495) drag each section's grip once — the log must gain nothing DURING a
+  drag and at most one line per drop — and, in Agent right with the nav on
+  auto-hide, drag a place row from the revealed nav across the reference
+  panel into the agent: the hover-hide timing is real-app only.
 
 - **Automations — removed 2026-10-10; revisit later.** Built in v0.29.0
   (#325, #326), removed by #477: "it hasn't been very useful and it is
