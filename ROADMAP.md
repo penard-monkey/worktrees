@@ -34,30 +34,21 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   refusal is honest. Widen it to `+#@` if anyone hits it; none of those mean
   anything to a composer.
 
-- **Before v0.42.0: flip the layout by hand in the real app (#490).** The
-  mock counted one agent `term_resize` per merge/split flip and none for
-  Classic ⇄ Mirrored, and the agent's `.term-host` right edge met the dock's
-  left edge exactly after Agent right → Classic — but the mock answers
-  instantly, and only WKWebView with a real pty can say a flip is ONE resize.
-  `term_resize` writes nothing to app.log, so count at tmux instead. By hand,
-  no scripted input: run `app/scripts/sandbox.sh --app`, open a place with a
-  live agent, and in another terminal hook that place's session (the name is
-  `sbx-<branch>-<slug>`, see `tmux ls | grep sbx-`):
-  `tmux set-hook -t <session> client-resized 'run-shell "echo #{client_width}x#{client_height} >> /tmp/wt-flip.log"'`.
-  Then in Settings → Navigation → Layout click Classic → Agent right → Classic
-  → Mirrored → Classic → Agent left → Classic, pausing a few seconds after
-  each, and run `cat -n /tmp/wt-flip.log`: expect 1, 1, 0, 0, 1, 1 new lines
-  (6 in all, alternating two widths 44px apart) — a flip that adds two lines is
-  a second SIGWINCH. Do it with the nav pinned and again on auto-hide (the
-  merged strip on/off is the 44px). Finally, with the dock open on Agent
-  right → Classic, in the Web Inspector console:
-  `[...document.querySelectorAll('.main .term-host, .dock')].map(e => e.getBoundingClientRect().right|0)`
-  — the host's right edge must not pass the dock's left. Unhook with
-  `tmux set-hook -u -t <session> client-resized`. While it is hooked, also
-  (#495) drag each section's grip once — the log must gain nothing DURING a
-  drag and at most one line per drop — and, in Agent right with the nav on
-  auto-hide, drag a place row from the revealed nav across the reference
-  panel into the agent: the hover-hide timing is real-app only.
+- ~~**Before v0.42.0: flip the layout by hand in the real app (#490, #495).**~~
+  **Done 2026-10-15** — David ran the layout flips (one agent resize per
+  merge/split flip, none for Classic ⇄ Mirrored, counted with a tmux
+  `client-resized` hook) and the #495 drags (nothing during a drag, at most one
+  per drop, a place row dragged from the hover-revealed nav) in
+  `sandbox.sh --app`; the app behaved. The procedure is in
+  docs/sessions/2026-10-15-dock-side-mix/ for the next time the grid changes.
+
+- **A v0.41 downgrade turns "Agent right" back into Classic.** `dock_side`
+  rides on settings rev 4 (migration keyed `from < 4`); a v0.41 build re-saves
+  rev 3 but keeps the key, so the next v0.42 launch re-derives the side from
+  `places_side`. Only after a downgrade, so left as is in #490 (review item 7).
+  Fix if it is ever reported: derive only when the RAW stored blob lacks
+  `dock_side` (it is merged over DEFAULTS before `migrate` runs, so test
+  before the merge), not on the rev. See docs/sessions/2026-10-15-dock-side-mix/.
 
 - **Automations — removed 2026-10-10; revisit later.** Built in v0.29.0
   (#325, #326), removed by #477: "it hasn't been very useful and it is
