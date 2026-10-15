@@ -452,6 +452,39 @@ async function settled(opts) {
   m.dispose();
 }
 
+// ── 7. Settings → Layout: what a flip costs the agent ────────────────────────
+// A layout flip is ONE render: the grid changes and the dock changes edge in a
+// single commit, so the agent's host sees at most one new size. Classic ⇄
+// Mirrored (and the two merged shapes ⇄ each other) keep every width — zero
+// resizes. A flip that merges or splits the rails gives the center one rail
+// (RAIL_W, read from settings.ts) — exactly one resize after the settle, which
+// is the number the layout proposal promises and Settings does not warn about.
+{
+  const settingsSrc = fs.readFileSync(fileURLToPath(new URL("../src/settings.ts", import.meta.url)), "utf8");
+  const railW = Number(/export const RAIL_W = (\d+);/.exec(settingsSrc)?.[1] ?? NaN);
+  if (!Number.isFinite(railW)) fail("settings.ts: no `export const RAIL_W = <n>;` — the layout case cannot size a merge");
+  else {
+    const m = await settled({ w: 1000, h: 900 });
+    let before = m.resizes().length;
+    m.setSize(1000, 900);                    // Classic -> Mirrored: same box, other edge
+    m.clock.advance(PAST);
+    await tick();
+    const flip = m.resizes().length - before;
+    if (flip === 0) ok("a side flip that keeps the agent's width costs 0 pty resizes");
+    else fail(`a same-width layout flip sent ${flip} resize(s)`);
+    before = m.resizes().length;
+    m.setSize(1000 + railW, 900);            // Classic -> Agent right: the rails merge
+    m.clock.advance(PAST);
+    await tick();
+    const merge = m.resizes().length - before;
+    if (merge === 1) ok(`a flip that merges the rails (+${railW}px) costs exactly 1 pty resize`);
+    else fail(`merging the rails (+${railW}px) sent ${merge} resizes, expected exactly 1`);
+    if (same(m.ptyGrid(), gridFor(1000 + railW, 900))) ok("…and the pty lands on the merged width");
+    else fail(`after the merge the pty is on ${show(m.ptyGrid())}, not ${show(gridFor(1000 + railW, 900))}`);
+    m.dispose();
+  }
+}
+
 // ── the restored ring is laid out at the width it was RECORDED at ────────────
 // A saved ring is raw bytes wrapped for a grid that no longer exists, and after
 // a restart it usually does not: the window moved, the dock changed width, the

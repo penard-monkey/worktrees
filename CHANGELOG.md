@@ -54,6 +54,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Enter there. It refuses rather than paste when `(main)` already has unsent
   text at its prompt or is asking you something, and says so when `(main)`
   has no agent running.
+- **The reference panels can sit on the left, beside Places, with the agent
+  on the right.** Settings → Navigation → Layout replaces "Sides" with four
+  layouts drawn as tiles: Classic, Agent right (Places and the reference
+  panels on the left, the agent at the window's right edge), Mirrored, and
+  Agent left. When Places and the reference panels share an edge their two
+  rails become one, and the agent gets that rail's width back. Applies to all
+  places; widths, ⌘B and ⌘J are unchanged, and a mirrored install keeps the
+  layout it had.
 
 ### Changed
 - **`worktrees agent-setup fix` commits locally and pushes nothing unless you

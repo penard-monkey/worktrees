@@ -10,8 +10,8 @@
 //
 // What it holds, and why each needs a browser rather than updatepoll-check.mjs:
 //   - geometry: the bubble sits beside the gear with its tail on the gear's
-//     centre, on whichever side the rail is (mirrored Places), at 900 and
-//     1280px, and every button is REACHABLE (elementFromPoint, not a rect);
+//     centre, on whichever side the rail is (mirrored Places), merged with
+//     the dock's rail or not (Settings → Layout), at 900 and 1280px, and every button is REACHABLE (elementFromPoint, not a rect);
 //   - the error/undo float-stack, which anchors at the same bottom-left
 //     corner, is lifted above the bubble instead of painting over it;
 //   - dismissal per VERSION across reloads; "Update…" and visiting Settings →
@@ -56,21 +56,24 @@ for (const [engine, type] of Object.entries({ chromium, webkit })) {
   const browser = await type.launch({ headless: true });
 
   // ── geometry, both sides, two widths ──
-  for (const [w, side] of [[1280, "left"], [900, "left"], [1280, "right"], [900, "right"]]) {
+  // [width, places_side, dock_side]: all four layouts at 1280, the two
+  // merged strips (the tallest rails) at 900 too.
+  for (const [w, side, dock] of [[1280, "left", "right"], [900, "left", "right"], [1280, "right", "left"], [900, "right", "left"],
+    [1280, "left", "left"], [900, "left", "left"], [1280, "right", "right"], [900, "right", "right"]]) {
     const ctx = await browser.newContext({ viewport: { width: w, height: 800 } });
     const page = await ctx.newPage();
-    await page.addInitScript((side) => {
-      if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify({ places_side: side }));
-    }, side);
+    await page.addInitScript(([side, dock]) => {
+      if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify({ places_side: side, dock_side: dock, settings_rev: 4 }));
+    }, [side, dock]);
     await page.goto(`${BASE}/?latest=v9.9.9&cli=0.1.0`);
     await page.waitForSelector(BUBBLE, { timeout: 10000 });
     await page.waitForTimeout(400); // the pop animation
     const m = await geometry(page);
     const gap = side === "left" ? m.b.l - m.g.r : m.g.l - m.b.r;
-    ok(gap > 4 && gap < 16, `${w} ${side}: bubble beside the gear (gap ${gap.toFixed(1)}px)`);
-    ok(Math.abs(m.tailMid - m.g.mid) <= 1.5, `${w} ${side}: tail on the gear's centre (${m.tailMid.toFixed(1)} vs ${m.g.mid.toFixed(1)})`);
-    ok(m.b.l >= 0 && m.b.r <= m.vw, `${w} ${side}: inside the viewport`);
-    ok(m.reach, `${w} ${side}: every button reachable (elementFromPoint)`);
+    ok(gap > 4 && gap < 16, `${w} ${side}/${dock}: bubble beside the gear (gap ${gap.toFixed(1)}px)`);
+    ok(Math.abs(m.tailMid - m.g.mid) <= 1.5, `${w} ${side}/${dock}: tail on the gear's centre (${m.tailMid.toFixed(1)} vs ${m.g.mid.toFixed(1)})`);
+    ok(m.b.l >= 0 && m.b.r <= m.vw, `${w} ${side}/${dock}: inside the viewport`);
+    ok(m.reach, `${w} ${side}/${dock}: every button reachable (elementFromPoint)`);
     await ctx.close();
   }
 

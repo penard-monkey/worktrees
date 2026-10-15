@@ -140,7 +140,9 @@ for(const [engine,type] of Object.entries({chromium,webkit})) {
   results.push({engine,hostWidth:width,...m});
  }
  await page.locator('.usage-strip').evaluate(e=>e.style.width='');
- for(const settings of [{usage_place:'footer'},{usage_place:'rail',places_side:'left'},{usage_place:'rail',places_side:'right'}]) {
+ for(const settings of [{usage_place:'footer'},{usage_place:'rail',places_side:'left'},{usage_place:'rail',places_side:'right'},
+  // The merged strips (Settings → Layout, rev 4): the tile shares its rail with the dock group.
+  {usage_place:'rail',places_side:'left',dock_side:'left',settings_rev:4},{usage_place:'rail',places_side:'right',dock_side:'right',settings_rev:4}]) {
   await page.evaluate(s=>sessionStorage.setItem('wt-mock-ui-state',JSON.stringify({...s,nav_pinned:true})),settings);
   await page.reload();await page.bringToFront();
   if(settings.usage_place==='footer'){ if(!await page.locator('li.row[data-slug]:visible').count()) await page.locator('[data-testid="places-rail"]').click(); await page.locator('li.row[data-slug]:visible').first().click(); }

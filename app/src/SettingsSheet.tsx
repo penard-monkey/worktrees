@@ -18,7 +18,7 @@ import ProfilesPanel from "./ProfilesPanel";
 import PiPanel from "./PiPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import type { Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
-import { clampNav, clampRem, clampTerm, clampZoom, THEMES, ZOOM_STEPS } from "./settings";
+import { clampNav, clampRem, clampTerm, clampZoom, LAYOUT_TILES, railsMerged, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
 import { humanSize } from "./filekind";
 import { HARNESSES, HARNESS_LABEL } from "./harness";
@@ -331,6 +331,56 @@ function UsagePanel() {
 // app calls Settings). Presentational: App owns the Settings state and does the
 // apply-live + persist + terminal-refit on each change. Esc / scrim closes.
 // The Version section owns its own update-run state (log/progress) locally.
+/** Settings → Layout. A radio group with a roving tabindex: Tab lands on the
+ *  current tile, arrows move AND select (the WAI-ARIA radio pattern), so the
+ *  keyboard reaches every layout without a separate commit key. */
+function LayoutTiles({ places, dock, onPick }: {
+  places: Settings["places_side"]; dock: Settings["dock_side"];
+  onPick: (places: Settings["places_side"], dock: Settings["dock_side"]) => void;
+}) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const cur = LAYOUT_TILES.findIndex((t) => t.places === places && t.dock === dock);
+  const move = (i: number) => {
+    const n = (i + LAYOUT_TILES.length) % LAYOUT_TILES.length;
+    onPick(LAYOUT_TILES[n].places, LAYOUT_TILES[n].dock);
+    refs.current[n]?.focus();
+  };
+  return (
+    <div className="layout-tiles" role="radiogroup" aria-labelledby="layout-label">
+      {LAYOUT_TILES.map((t, i) => {
+        const on = i === cur;
+        const merged = railsMerged({ places_side: t.places, dock_side: t.dock });
+        return (
+          <button
+            key={t.name}
+            ref={(el) => { refs.current[i] = el; }}
+            className={"layout-tile" + (on ? " on" : "")}
+            role="radio"
+            aria-checked={on}
+            tabIndex={on || (cur < 0 && i === 0) ? 0 : -1}
+            data-testid={`layout-${t.places}-${t.dock}`}
+            onClick={() => onPick(t.places, t.dock)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); move(i + 1); }
+              else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); move(i - 1); }
+            }}
+          >
+            {/* The schematic: rails as slivers (one when merged), then the
+                regions in window order. Decorative — the caption says it. */}
+            <span className="layout-sch" aria-hidden="true">
+              {(t.places === "left" || !merged) && <i className="sch-rail" />}
+              {t.order.map((r) => <i key={r} className={"sch-" + r} />)}
+              {(t.places === "right" || !merged) && <i className="sch-rail" />}
+            </span>
+            <span className="layout-name">{t.name}</span>
+            <span className="layout-order">{t.order.join(" · ")}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function SettingsSheet({
   open,
   at,
@@ -1287,30 +1337,17 @@ export function SettingsSheet({
             </div>
           </section>
 
-          {/* One control for BOTH halves of the shell. See `places_side` in
-              settings.ts for why it is a mirror rather than a side per panel:
-              the nav and the dock are not interchangeable hosts, so the thing
-              that can move is which edge each of them owns. */}
+          {/* Both halves' sides as ONE control: four tiles that show the result,
+              rather than two segmented controls that make you compose it in
+              your head. See `places_side` / `dock_side` in settings.ts. */}
           <section className="setting">
-            <label>Sides</label>
-            <div className="seg seg-plain">
-              {([
-                ["left", "Places left"],
-                ["right", "Places right"],
-              ] as const).map(([side, label]) => (
-                <button
-                  key={side}
-                  className={settings.places_side === side ? "on" : ""}
-                  onClick={() => onChange({ places_side: side })}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <label id="layout-label">Layout</label>
+            <LayoutTiles places={settings.places_side} dock={settings.dock_side}
+              onPick={(places, dock) => onChange({ places_side: places, dock_side: dock })} />
             <div className="hint">
-              Which window edge each half of the app owns. The Places rail and sidebar take the side
-              you pick; the Files / Terminal / Docs rail and panel take the other one. Widths, ⌘B and
-              ⌘J are unchanged — only the sides move, and each resizer moves with its panel.
+              Applies to all places. Places and the reference panels (Files, Terminal, Docs, Plan) each
+              take an edge; on the same edge their rails become one. Widths, ⌘B and ⌘J are unchanged.
+              Tab still walks the panels in their classic order.
             </div>
           </section>
 
