@@ -676,6 +676,29 @@ pub fn resume_plan(p: &Project, ai_cmd: &str, wt: &str) -> (bool, Option<String>
 /// one on purpose, so the prompt waits at claude's input for the user's Enter.
 pub const PLAN_PROMPT: &str = "Use the planning-with-files skill to capture the work already in flight in this place as a plan: task_plan.md, findings.md and progress.md, wherever that skill keeps them here. Record what is actually underway — the goal, what is done, what is next, what has been learned and any errors hit — starting from .planning/brief.md if there is one. If nothing is in flight, say so rather than inventing phases.";
 
+/// The Plan tab's "Ask (main)": the prompt pasted into `(main)`'s agent asking
+/// the orchestrator to bring what it steers for one place up to date.
+///
+/// Fixed text with ONE hole, `{slug}`, filled only by `plan_update_prompt` from
+/// the place's own directory name — never from anything the frontend typed.
+/// It names what main may write (the lane's brief, which main wrote and which
+/// is untracked) and forbids the rest of the lane's tree: the plan files are
+/// the lane SESSION's, so main reads them and does not edit them. No trailing
+/// newline, for the same reason as `PLAN_PROMPT`: the user sends it.
+pub const PLAN_UPDATE_PROMPT: &str = "Update your plan for the place {slug}. Read where it actually is: its place_status, its task_plan.md, progress.md and findings.md, and its branch's commits. Bring your own plan for it up to date, and if its .planning/brief.md is stale, rewrite that brief to match the work; touch nothing else in its tree. Then message its agent saying what changed, or say here that nothing needed to.";
+
+/// `PLAN_UPDATE_PROMPT` for `slug`, or `None` when the slug is not a plain
+/// directory name. A slug is pasted into another agent's prompt, so anything
+/// outside `[A-Za-z0-9._-]` (spaces, quotes, newlines, `/`, `(main)`'s
+/// parentheses) is refused rather than escaped.
+pub fn plan_update_prompt(slug: &str) -> Option<String> {
+    let plain = !slug.is_empty()
+        && slug.len() <= 128
+        && !slug.starts_with('.')
+        && slug.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    plain.then(|| PLAN_UPDATE_PROMPT.replace("{slug}", slug))
+}
+
 fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
     let path = Path::new(wt).join(BRIEF_PATH);
     if let Some(dir) = path.parent() {
@@ -3370,6 +3393,32 @@ mod tests {
     fn plan_prompt_has_no_trailing_newline() {
         assert!(!PLAN_PROMPT.ends_with('\n') && !PLAN_PROMPT.ends_with('\r'));
         assert!(!PLAN_PROMPT.contains('\n'), "PLAN_PROMPT is one line of fixed text");
+    }
+
+    /// The ask-main prompt is one line with exactly one hole, and the hole is
+    /// the only thing that varies: the filled prompt is still one line.
+    #[test]
+    fn plan_update_prompt_is_one_line_with_one_slug_hole() {
+        assert!(!PLAN_UPDATE_PROMPT.contains('\n') && !PLAN_UPDATE_PROMPT.contains('\r'));
+        assert_eq!(PLAN_UPDATE_PROMPT.matches("{slug}").count(), 1);
+        let filled = plan_update_prompt("plan-ask-main").unwrap();
+        assert!(filled.contains("the place plan-ask-main."), "{filled}");
+        assert!(!filled.contains('{') && !filled.ends_with('\n') && !filled.contains('\n'));
+        // Main may write the brief and nothing else in the lane's tree.
+        assert!(filled.contains(".planning/brief.md") && filled.contains("touch nothing else"));
+    }
+
+    /// The slug lands in another agent's prompt, so only a plain directory
+    /// name is accepted — never escaped, refused.
+    #[test]
+    fn plan_update_prompt_refuses_a_slug_that_is_not_a_plain_name() {
+        for bad in ["", "(main)", "a b", "a\nb", "a/b", "..", ".hidden", "x\"; rm", "é"] {
+            assert!(plan_update_prompt(bad).is_none(), "accepted {bad:?}");
+        }
+        for ok in ["fix-1", "ui_tweaks", "v0.42.0"] {
+            assert!(plan_update_prompt(ok).is_some(), "refused {ok:?}");
+        }
+        assert!(plan_update_prompt(&"a".repeat(129)).is_none());
     }
 
     #[test]

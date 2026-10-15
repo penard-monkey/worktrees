@@ -1302,6 +1302,21 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       console.info("[mock] plan_prompt", args.session);
       return null;
     }
+    // The Plan tab's "Ask (main)". The real one derives the slug from `root`,
+    // reads (main)'s composer and pastes `ops::plan_update_prompt`; here,
+    // record the place and the session (`__mock.askMain()`), refuse (main)
+    // itself the way the real one refuses a root that is not under
+    // `.worktrees/`, and a session that is not up like `paste_to_ai` does.
+    case "plan_ask_main": {
+      const owner = ws.projects.find((pv) => pv.snapshot?.places.some((p) => p.path === args.root));
+      const place = owner?.snapshot?.places.find((p) => p.path === args.root);
+      if (!place || place.is_main) throw "only a place under .worktrees/ can ask (main) about its plan";
+      const up = owner?.snapshot?.places.some((p) => p.is_main && p.tmux_session.name === args.session && p.tmux_session.up);
+      if (!up) throw `no claude running in (main)'s session ${args.session}`;
+      mockAskMain.push({ slug: place.slug, session: args.session, provider: args.provider ?? null });
+      console.info("[mock] plan_ask_main", place.slug, args.session);
+      return null;
+    }
     case "set_title":
       editPlace(args.repo, args.slug, (p) => {
         p.declared = { ...(p.declared ?? {}), title: args.title?.trim() || undefined };
@@ -3257,6 +3272,9 @@ const mockCopies: string[] = [];
 /** Every `plan_prompt` this session recorded — the session each "Generate
  *  plan" press would have pasted into. */
 const mockPlanPrompts: { session: string }[] = [];
+/** Every `plan_ask_main` this session recorded — which place's plan each
+ *  "Ask (main)" press asked about, and the (main) session it pasted into. */
+const mockAskMain: { slug: string; session: string; provider: string | null }[] = [];
 
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
@@ -3268,6 +3286,8 @@ const healthyConfigs: Record<string, MockCfg> = {};
   copies: () => mockCopies.slice(),
   /** What "Generate plan" pasted, and into which session, newest last. */
   planPrompts: () => mockPlanPrompts.slice(),
+  /** What "Ask (main)" asked, newest last. */
+  askMain: () => mockAskMain.slice(),
   /** Replace the unsent-prompt set and push it, exactly as the poll thread
    *  does — including the transition to EMPTY (`__mock.setDrafts([])`), which
    *  is the case a sent prompt produces and the one that must clear the glyph,
