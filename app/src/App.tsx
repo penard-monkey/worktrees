@@ -38,7 +38,7 @@ import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
-import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
@@ -488,6 +488,77 @@ function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onLi
     </span>
   );
 }
+/** One entry of `DOCK_RAIL` (declared inside App, which owns the icons). */
+type DockRailItem = { key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
+
+/** The dock's tab buttons. Module scope because it renders in ONE of two hosts
+ *  — its own `.rail-right`, or the Places rail when both halves share an edge
+ *  (`railsMerged`) — and a component defined inside App would remount on every
+ *  render. `layout-check.mjs` pins that App renders it exactly twice, under
+ *  complementary `merged` conditions. */
+function DockRailGroup({ items, shown, tab, why, prsView, onPick }: {
+  items: DockRailItem[];
+  /** The dock is on screen (`fit.dockShown`), so the current tab's icon is lit. */
+  shown: boolean;
+  tab: Settings["dock_tab"];
+  /** Why every button is disabled, or null when they are live. */
+  why: string | null;
+  prsView: { attention_count: number; open_count: number } | null | undefined;
+  /** `on`: the button was lit when pressed, i.e. the press collapses the dock. */
+  onPick: (key: Settings["dock_tab"], on: boolean) => void;
+}) {
+  return (
+    <>
+      {items.map((d) => {
+        const on = shown && tab === d.key;
+        return (
+          <button
+            key={d.key}
+            className={"rail-icon" + (on ? " active" : "")}
+            disabled={!!why}
+            // The entry's own key, not an either/or over two of them: a
+            // ternary here files any tab it does not name under another
+            // tab's key, silently. See `DOCK_RAIL`.
+            data-track={d.track}
+            title={why ? `${d.title} — ${why}` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
+            onClick={() => onPick(d.key, on)}
+          >
+            {d.icon}
+            {/* Open PRs, dim; red and counting only the ones that NEED you
+                (failing, changes requested, conflicting, merged while its
+                place exists) once any do. On the icon, not the nav rows:
+                the nav's dot is agent activity, and a second dot there would
+                have to be read by colour alone (proposal §7). */}
+            {d.key === "prs" && prsView && (prsView.attention_count > 0 || prsView.open_count > 0) && (
+              <span
+                className={"rail-count prs-count" + (prsView.attention_count > 0 ? " attn" : "")}
+                data-testid="prs-count"
+              >
+                {prsView.attention_count > 0 ? prsView.attention_count : prsView.open_count}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
+/** Pending setup offers — the way BACK to the release notes' band, and the
+ *  only mark offers make anywhere outside it. It travels with the dock group
+ *  (foot of the dock rail, or of the merged strip), and the CALLER gates it on
+ *  `offers.length > 0` and nothing else (offers-check.mjs): no place, no
+ *  project, no screen, which is the v0.25.0 lesson. */
+function OffersRailButton({ count, onOpen }: { count: number; onOpen: () => void }) {
+  return (
+    <button className="rail-icon rail-offers" data-track="offers" title={offersTitle(count)}
+      onClick={() => onOpen()}>
+      <Icons.Sparkles size={17} />
+      <span className="rail-count">{count}</span>
+    </button>
+  );
+}
+
 const bucketOf = (p: Place) => (p.declared?.pinned ? "pinned" : p.lifecycle_effective);
 /** Worth a look. `behind` counts only for `(main)`, where the base ref IS
  *  origin/main and ↓ means "pull" — on a worktree it only says the base moved
@@ -5051,6 +5122,12 @@ function App() {
   // `fit` itself is deliberately NOT one of them: the widths are symmetric, so
   // mirroring changes where the columns sit and never how wide they are.
   const mirrored = settings.places_side === "right";
+  // The dock's own edge (settings rev 4). Independent of `mirrored`: reference
+  // left with the agent on the right is `places_side: "left"` + this. Same
+  // edge as Places ⇒ the two rails are one strip (`railsMerged`), which is
+  // what `fit` and the grid below both have to know.
+  const dockLeft = settings.dock_side === "left";
+  const merged = railsMerged(settings);
 
   // Dock only makes sense with a place selected (Files/Terminal need a worktree).
   const dockEligible = !!selected && !!sel;
@@ -7150,7 +7227,7 @@ function App() {
         // The dock is only reserved against while the sidebar is a COLUMN. As an
         // overlay it covers the terminal rather than sharing the row with it, so
         // reserving would cap the drag against width nothing is competing for.
-        nav_width: clampNav(startW + (mirrored ? startX - ev.clientX : ev.clientX - startX), settings.nav_pinned && dockShown ? eff.dock_width : 0, window.innerWidth),
+        nav_width: clampNav(startW + (mirrored ? startX - ev.clientX : ev.clientX - startX), settings.nav_pinned && dockShown ? eff.dock_width : 0, window.innerWidth, railsWidth(settings)),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
@@ -7158,16 +7235,18 @@ function App() {
   };
 
   // ── dock resizer (drag the dock's inner edge — moving AWAY from its window
-  //    edge GROWS it). Unmirrored that is the dock's left edge and leftward;
-  //    mirrored the dock is the left-hand panel, so it is the right edge and
-  //    rightward. Same pairing as the nav above: sign here, handle in CSS. ──
+  //    edge GROWS it). On the right (the default) that is the dock's left edge
+  //    and leftward; with `dock_side: "left"` the dock is the left-hand panel
+  //    beside the agent, so it is the right edge and rightward. Keyed on the
+  //    DOCK's side, not on `mirrored`: the two are independent since rev 4.
+  //    Same pairing as the nav above: sign here, handle in CSS. ──
   const onDockResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startW = eff.dock_width;
     const move = (ev: MouseEvent) =>
       updatePanels({
-        dock_width: clampDock(startW + (mirrored ? ev.clientX - startX : startX - ev.clientX), fit.navShown ? fit.navW : 0, window.innerWidth),
+        dock_width: clampDock(startW + (dockLeft ? ev.clientX - startX : startX - ev.clientX), fit.navShown ? fit.navW : 0, window.innerWidth, railsWidth(settings)),
       });
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
@@ -7508,6 +7587,13 @@ function App() {
     // rail's map below. A GitLab or local-only project gets no icon at all.
     { key: "prs" as Settings["dock_tab"], track: "dock.prs", icon: <Icons.GitPullRequest size={17} />, title: "Pull requests" },
   ];
+  // What `DockRailGroup` renders, wherever it is hosted (see there).
+  const dockRailItems: DockRailItem[] = DOCK_RAIL.filter((d) => d.key !== "prs" || prsOn);
+  const dockWhy = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
+  const onDockRailPick = (key: Settings["dock_tab"], on: boolean) => {
+    if (key === "prs" && !on) prs.refresh(TAB_MAX_AGE_S);
+    pickDockTab(key);
+  };
 
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
   // shrink below the center pane's content and pushes the fixed columns off the
@@ -7535,25 +7621,49 @@ function App() {
   // A hidden nav contributes no track (it is `display: none` or, revealed,
   // absolutely positioned) and simply leaves a gap in the numbering. Orders
   // only have to be MONOTONIC, never contiguous, so nothing else has to know.
-  const shell: [key: string, track: string | null][] = mirrored
-    ? [
-      ["railRight", "var(--rail-w)"], // the mirrored shell leads with the dock's rail
-      ["space", "minmax(0, 1fr)"], // terminal + dock, under one header
-      ["nav", fit.navShown ? `${fit.navW}px` : null],
-      ["rail", "var(--rail-w)"], // Places' rail, now against the window's right edge
-    ]
-    : [
-      ["rail", "var(--rail-w)"],
-      ["nav", fit.navShown ? `${fit.navW}px` : null],
-      ["space", "minmax(0, 1fr)"], // terminal + dock, under one header
-      ["railRight", "var(--rail-w)"], // right rail — permanent, like the left one
-    ];
+  //
+  // FOUR shapes, the 2×2 of `places_side` × `dock_side`. When both halves share
+  // an edge the dock's rail is not rendered at all — its buttons join `.rail`
+  // — so that shape has three tracks, and `railRight` has no entry for its
+  // (absent) child to read. Where the DOCK sits inside `.space` is not here
+  // either: it is a flex `order` on `.dock` (see there).
+  const navTrack: [string, string | null] = ["nav", fit.navShown ? `${fit.navW}px` : null];
+  const spaceTrack: [string, string | null] = ["space", "minmax(0, 1fr)"]; // terminal + dock, under one header
+  const shell: [key: string, track: string | null][] = merged
+    ? mirrored
+      ? [spaceTrack, navTrack, ["rail", "var(--rail-w)"]] // agent left: one strip at the right edge
+      : [["rail", "var(--rail-w)"], navTrack, spaceTrack] // reference left: one strip at the left edge
+    : mirrored
+      ? [
+        ["railRight", "var(--rail-w)"], // the mirrored shell leads with the dock's rail
+        spaceTrack,
+        navTrack,
+        ["rail", "var(--rail-w)"], // Places' rail, now against the window's right edge
+      ]
+      : [
+        ["rail", "var(--rail-w)"],
+        navTrack,
+        spaceTrack,
+        ["railRight", "var(--rail-w)"], // right rail — permanent, like the left one
+      ];
   const ord = Object.fromEntries(shell.map(([k], i) => [k, i + 1])) as Record<string, number>;
   const gridCols = shell.map(([, t]) => t).filter(Boolean).join(" ");
   // The overlay's width. `clampNav` with NO dock reservation, unlike the pinned
   // column: the overlay covers the terminal rather than sharing the row with
   // it, so there is nothing to reserve width away from.
-  const navOverlayW = clampNav(settings.nav_width, 0, vw);
+  const navOverlayW = clampNav(settings.nav_width, 0, vw, railsWidth(settings));
+  // The notice stack (errors, undo, notices, the plan hint) sits at the
+  // bottom-left of the AGENT, in every layout. It used to be the window's
+  // bottom-left beside the rail — which, with the reference panels on the
+  // left, is the dock's Terminal prompt line or its last Files rows; mirrored,
+  // it was already over the dock. Everything left of `.main` is a track this
+  // component sized, so the offset is arithmetic, not a measurement: the rail
+  // on that edge (none when the merged strip is on the right), a pinned nav on
+  // the left, and the dock when it is on the left and open. An overlaid nav
+  // owns no track and floats above the stack's z-order anyway.
+  const leftOfMain = (!mirrored || !merged ? RAIL_W : 0)
+    + (!mirrored && fit.navShown ? fit.navW : 0)
+    + (dockLeft && dockShown ? fit.dockW : 0);
 
   return (
     <div className="appwrap">
@@ -7569,7 +7679,17 @@ function App() {
       <nav
         className="rail"
         style={{ order: ord.rail }}
-        onPointerEnter={() => navPointer("rail", true)}
+        // The rail is the auto-hide nav's hot edge — EXCEPT the dock's buttons
+        // when they share the strip (`.rail-group`): reaching for Terminal must
+        // not slide Places over the reference panel you are about to open.
+        // `pointerover` rather than `pointerenter`, because enter fires once for
+        // the whole rail and cannot tell which part the pointer is on; the
+        // guard keeps it to transitions, so moving between buttons re-arms
+        // nothing.
+        onPointerOver={(e) => {
+          const inside = !(e.target instanceof Element && e.target.closest(".rail-group"));
+          if (navOver.current.rail !== inside) navPointer("rail", inside);
+        }}
         onPointerLeave={() => navPointer("rail", false)}
       >
         {/* `active` while the sidebar is on screen either way, `remembered`
@@ -7588,12 +7708,27 @@ function App() {
         >
           <Icons.ListTree size={17} />
         </button>
+        {/* Merged strip: the dock's buttons follow Places, under a hairline.
+            The same component the dock's own rail renders below, never both. */}
+        {merged && (
+          <>
+            <div className="rail-group">
+              {/* Inside the group, so the hairline is not a hover edge either. */}
+              <div className="rail-sep" />
+              <DockRailGroup items={dockRailItems} shown={dockShown} tab={eff.dock_tab} why={dockWhy}
+                prsView={prs.reply?.view} onPick={onDockRailPick} />
+            </div>
+          </>
+        )}
         <div className="rail-spacer" />
+        {merged && offers.length > 0 && <OffersRailButton count={offers.length} onOpen={showReleaseNotes} />}
         {/* The same three-way menu as the footer's: with the sidebar hidden this
             is the ONLY way in, and a shortcut that silently answers one of the
             three questions is the inconsistency the menu exists to remove. */}
         {/* Usage, when the rail is its host. Above the two buttons, so the
-            rail's actions stay together at the very bottom. */}
+            rail's actions stay together at the very bottom. Its popover side
+            follows `places_side` alone: the tile never leaves the Places rail,
+            merged strip or not, so the Places edge IS this rail's edge. */}
         {settings.usage_place === "rail" && usage.info && (
           <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="tile" side={mirrored ? "left" : "right"}
             status={statusOnTile} onError={fail} />
@@ -8141,13 +8276,13 @@ function App() {
               column of its own. That is what puts it under the space header
               instead of beside it.
 
-              And it is why the mirror reaches it with an `order` of its own
+              And it is why `dock_side` reaches it with an `order` of its own
               rather than through `shell` above: that array orders the GRID's
               children, and the dock is not one of them. `.reading` is
               `position: absolute; inset: 0` against `.space-body`, so it keeps
               covering terminal and dock together either way round. */}
           {dockShown && selected && sel && (
-            <aside className="dock" style={{ order: mirrored ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
+            <aside className="dock" style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
               <div className="dock-resizer" onMouseDown={onDockResize} />
               {/* the rail owns tab selection AND collapse, so this is a title, not
                   a control strip */}
@@ -8460,62 +8595,25 @@ function App() {
         </div>
       </div>
 
-      {/* ── right rail: mirrors the left one. Permanent, so the dock always has
-          a visible affordance; the active icon collapses the dock. Disabled
-          with no place selected — Files/Terminal both need a worktree. */}
-      <nav className="rail rail-right" style={{ order: ord.railRight }}>
-        {DOCK_RAIL.filter((d) => d.key !== "prs" || prsOn).map((d) => {
-          const on = dockShown && eff.dock_tab === d.key;
-          const why = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
-          return (
-            <button
-              key={d.key}
-              className={"rail-icon" + (on ? " active" : "")}
-              disabled={!!why}
-              // The entry's own key, not an either/or over two of them: a
-              // ternary here files any tab it does not name under another
-              // tab's key, silently. See `DOCK_RAIL`.
-              data-track={d.track}
-              title={why ? `${d.title} — ${why}` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
-              onClick={() => {
-                if (d.key === "prs" && !on) prs.refresh(TAB_MAX_AGE_S);
-                pickDockTab(d.key);
-              }}
-            >
-              {d.icon}
-              {/* Open PRs, dim; red and counting only the ones that NEED you
-                  (failing, changes requested, conflicting, merged while its
-                  place exists) once any do. On the icon, not the nav rows:
-                  the nav's dot is agent activity, and a second dot there would
-                  have to be read by colour alone (proposal §7). */}
-              {d.key === "prs" && prs.reply?.view && (prs.reply.view.attention_count > 0 || prs.reply.view.open_count > 0) && (
-                <span
-                  className={"rail-count prs-count" + (prs.reply.view.attention_count > 0 ? " attn" : "")}
-                  data-testid="prs-count"
-                >
-                  {prs.reply.view.attention_count > 0 ? prs.reply.view.attention_count : prs.reply.view.open_count}
-                </span>
-              )}
-            </button>
-          );
-        })}
-        {/* Pending setup offers — the way BACK to the release notes' band, and
-            the only mark offers make anywhere outside it. Gated on the offers
-            and nothing else (offers-check.mjs): no place, no project, no
-            screen, which is the v0.25.0 lesson. Foot of the dock rail because
-            that end is empty in every layout, and it is the window's
-            bottom-right corner unless Places is mirrored onto that side. */}
-        {offers.length > 0 && (
-          <>
-            <div className="rail-spacer" />
-            <button className="rail-icon rail-offers" data-track="offers" title={offersTitle(offers.length)}
-              onClick={() => showReleaseNotes()}>
-              <Icons.Sparkles size={17} />
-              <span className="rail-count">{offers.length}</span>
-            </button>
-          </>
-        )}
-      </nav>
+      {/* ── the dock's rail: mirrors the Places one. Permanent while the two
+          halves sit on opposite edges, so the dock always has a visible
+          affordance; the active icon collapses the dock. Disabled with no
+          place selected — Files/Terminal both need a worktree. On the SAME
+          edge it is not rendered: its buttons are in `.rail` above. */}
+      {!merged && (
+        <nav className="rail rail-right" style={{ order: ord.railRight }}>
+          <DockRailGroup items={dockRailItems} shown={dockShown} tab={eff.dock_tab} why={dockWhy}
+            prsView={prs.reply?.view} onPick={onDockRailPick} />
+          {/* Offers at the foot of the dock rail, because that end is empty in
+              every layout. Gated on the offers and nothing else. */}
+          {offers.length > 0 && (
+            <>
+              <div className="rail-spacer" />
+              <OffersRailButton count={offers.length} onOpen={showReleaseNotes} />
+            </>
+          )}
+        </nav>
+      )}
 
       {/* error surface lives OUTSIDE the nav — must stay visible in rail-only
           mode. ONE bottom-anchored stack: the undo banner and the landing note
@@ -8523,7 +8621,7 @@ function App() {
           same coordinates the undo banner sat exactly on top of the note it
           was supposed to accompany. Undo first in DOM = above on screen. */}
       {(err || notice || undo || planHint) && (
-        <div className="float-stack" style={bubbleLift !== null ? { bottom: bubbleLift } : undefined}>
+        <div className="float-stack" style={{ left: `calc(${leftOfMain}px + var(--s3))`, ...(bubbleLift !== null ? { bottom: bubbleLift } : null) }}>
           {/* One click back from a slip of the wrist — a drag rewrites declared
               state, and the row it moves can land in a collapsed group or a
               hidden tier, i.e. out of sight of the gesture that moved it. */}

@@ -452,6 +452,40 @@ async function settled(opts) {
   m.dispose();
 }
 
+// ── 7. Settings → Layout: the flip BUDGET (a smoke test, not a guard) ───────
+// Say it plainly: this case does not touch App's grid and passes on a build
+// without Settings → Layout. It pins the arithmetic the layout's resize budget
+// rests on — a same-size "flip" costs 0, one size step of RAIL_W costs exactly
+// 1 after the settle — so that a change to the coalescing cannot quietly make
+// a merge flip cost two. Whether a real flip IS one size step (one commit, no
+// remount, no width-bearing rule landing a frame later) is the real app's to
+// say: ROADMAP's "Before v0.42.0" item has the hand check and its count.
+{
+  const settingsSrc = fs.readFileSync(fileURLToPath(new URL("../src/settings.ts", import.meta.url)), "utf8");
+  const railW = Number(/export const RAIL_W = (\d+);/.exec(settingsSrc)?.[1] ?? NaN);
+  if (!Number.isFinite(railW)) fail("settings.ts: no `export const RAIL_W = <n>;` — the layout case cannot size a merge");
+  else {
+    const m = await settled({ w: 1000, h: 900 });
+    let before = m.resizes().length;
+    m.setSize(1000, 900);                    // Classic -> Mirrored: same box, other edge
+    m.clock.advance(PAST);
+    await tick();
+    const flip = m.resizes().length - before;
+    if (flip === 0) ok("a side flip that keeps the agent's width costs 0 pty resizes");
+    else fail(`a same-width layout flip sent ${flip} resize(s)`);
+    before = m.resizes().length;
+    m.setSize(1000 + railW, 900);            // Classic -> Agent right: the rails merge
+    m.clock.advance(PAST);
+    await tick();
+    const merge = m.resizes().length - before;
+    if (merge === 1) ok(`a flip that merges the rails (+${railW}px) costs exactly 1 pty resize`);
+    else fail(`merging the rails (+${railW}px) sent ${merge} resizes, expected exactly 1`);
+    if (same(m.ptyGrid(), gridFor(1000 + railW, 900))) ok("…and the pty lands on the merged width");
+    else fail(`after the merge the pty is on ${show(m.ptyGrid())}, not ${show(gridFor(1000 + railW, 900))}`);
+    m.dispose();
+  }
+}
+
 // ── the restored ring is laid out at the width it was RECORDED at ────────────
 // A saved ring is raw bytes wrapped for a grid that no longer exists, and after
 // a restart it usually does not: the window moved, the dock changed width, the

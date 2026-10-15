@@ -3050,10 +3050,20 @@ Phase 3: Frontend pane and mock harness
       }
       try {
         const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY);
-        return raw ? JSON.parse(raw) : null;
-      } catch {
-        return null;
+        if (raw) return JSON.parse(raw);
+      } catch { /* private mode */ }
+      // ?layout=<places>-<dock> (e.g. left-left: reference left, agent right) —
+      // a fresh tab in one of Settings → Layout's four shapes. Only while
+      // nothing is stored, so a later pick in the sheet still sticks. Stamped
+      // rev 4 so `migrate` keeps the pair rather than deriving the dock's side.
+      // ?layout=legacy-right is a pre-rev-4 mirrored install (rev 3), which
+      // must come back as Mirrored, not merged.
+      {
+        const m = /layout=(left|right|legacy)-(left|right)/.exec(location.search);
+        if (m && m[1] === "legacy") return { places_side: m[2], settings_rev: 3 };
+        if (m) return { places_side: m[1], dock_side: m[2], settings_rev: 4 };
       }
+      return null;
     }
     case "set_settings":
       try { sessionStorage.setItem(MOCK_SETTINGS_KEY, JSON.stringify(args.settings)); } catch { /* private mode */ }

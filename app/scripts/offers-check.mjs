@@ -337,21 +337,37 @@ if (!feed) {
 // Taking an offer closes the notes, so something outside them must reopen the
 // band — on every screen, with or without a project, exactly while offers exist.
 {
-  const at = app.indexOf('<nav className="rail rail-right"');
-  const rail = at < 0 ? "" : app.slice(at, app.indexOf("</nav>", at));
-  if (!rail) fail("App.tsx has no dock rail (`rail rail-right`) to host the offers button");
+  // The button is `OffersRailButton` (module scope) and travels with the dock
+  // group: the foot of the dock's own rail, or of the merged strip when Places
+  // and the dock share an edge. So: the component opens the band and shows the
+  // count, and EVERY call site is gated on offers alone — two hosts are two
+  // places to slip a `sel &&` in, which is the v0.25.0 bug on a new surface.
+  const at = app.indexOf("function OffersRailButton(");
+  const comp = at < 0 ? "" : app.slice(at, app.indexOf("\n}\n", at));
+  if (!comp) fail("App.tsx has no `OffersRailButton` — nothing reopens the band once an offer is taken");
   else {
-    const gate = rail.match(/\{([^{}]*)&& \(\s*<>\s*<div className="rail-spacer" \/>\s*<button className="rail-icon rail-offers"/);
-    if (!gate) fail("the dock rail has no `rail-offers` button behind a spacer — nothing reopens the band once an offer is taken");
-    else if (gate[1].trim() !== "offers.length > 0") {
-      fail(`the offers button is gated on \`${gate[1].trim()}\` — offers alone, or it is the v0.25.0 bug on a new surface`);
-    } else ok("the dock rail's offers button is gated on offers alone");
-    const btn = rail.slice(rail.indexOf("rail-offers"));
-    if (!/onClick=\{\(\) => showReleaseNotes\(\)\}/.test(btn)) fail("the offers button does not open the release notes (the band)");
-    else ok("the offers button opens the notes, whose band lists every offer");
-    if (!/\{offers\.length\}/.test(btn)) fail("the offers button shows no count");
+    if (!/className="rail-icon rail-offers"/.test(comp)) fail("OffersRailButton is not a `rail-offers` rail icon");
+    if (!/onClick=\{\(\) => onOpen\(\)\}/.test(comp)) fail("OffersRailButton does not call its onOpen");
+    else ok("OffersRailButton opens what it is handed");
+    if (!/\{count\}/.test(comp)) fail("the offers button shows no count");
     else ok("the offers button carries the count");
   }
+  const calls = [...app.matchAll(/<OffersRailButton ([^>]*)\/>/g)];
+  if (calls.length !== 2) fail(`App.tsx renders OffersRailButton ${calls.length} times — expected 2 (dock rail, merged strip)`);
+  for (const c of calls) {
+    if (!/count=\{offers\.length\}/.test(c[1]) || !/onOpen=\{showReleaseNotes\}/.test(c[1])) {
+      fail(`OffersRailButton call \`${c[1].trim()}\` — must pass count={offers.length} onOpen={showReleaseNotes}`);
+    }
+    // The gate: the nearest `&&` chain ending at this call, read back to its `{`.
+    const before = app.slice(0, c.index);
+    const open = before.lastIndexOf("{");
+    const gate = before.slice(open + 1).replace(/\(\s*<>\s*<div className="rail-spacer" \/>\s*$/, "").trim().replace(/&&$/, "").trim();
+    const terms = gate.split("&&").map((t) => t.trim()).filter(Boolean);
+    const extra = terms.filter((t) => t !== "offers.length > 0" && t !== "merged");
+    if (!terms.includes("offers.length > 0")) fail(`an OffersRailButton is gated on \`${gate}\` — it must include offers.length > 0`);
+    else if (extra.length) fail(`an OffersRailButton is gated on \`${gate}\` — offers alone (plus which host), or it is the v0.25.0 bug on a new surface`);
+  }
+  if (calls.length === 2) ok("both offers buttons are gated on offers alone (plus which rail hosts them)");
   // One mark per fact: the gear's dot is the UPDATE's again.
   const ra = app.match(/const railAlert = ([^;]*);/);
   if (!ra) fail("App.tsx has no `railAlert`");
@@ -456,8 +472,12 @@ if (!mig) {
   else if (!/offers_dismissed\["mcp-server"\]\s*=/.test(m)) fail("the from<3 migration never writes offers_dismissed[\"mcp-server\"]");
   else ok("an old `mcp_nudge_dismissed: true` carries over to offers_dismissed");
 }
-if (!/SETTINGS_REV = 3/.test(set)) fail("SETTINGS_REV must be 3 or the migration never runs");
-else ok("SETTINGS_REV bumped to 3");
+{
+  // At least 3: a later rev (4 split `dock_side` off) still runs the from<3 step.
+  const rev = Number(/export const SETTINGS_REV = (\d+);/.exec(set)?.[1]);
+  if (!(rev >= 3)) fail(`SETTINGS_REV is ${rev} — it must be at least 3 or the migration never runs`);
+  else ok(`SETTINGS_REV is ${rev} (≥ 3)`);
+}
 
 console.log(bad ? `\n${bad} failure(s)` : "\nall good");
 process.exit(bad ? 1 : 0);

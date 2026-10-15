@@ -311,21 +311,21 @@ if (tcFrom < 0 || tcTo < 0 || tcTo < tcFrom) {
     // (a) each entry carries its OWN literal key, and the button renders that
     //     key rather than choosing between two of them
     const tracks = [...rail.matchAll(/key:\s*"([a-z0-9-]+)"[^}]*?track:\s*"([a-z0-9.\-_]+)"/g)];
-    // The opening tag WITHOUT its `>`: the element takes attributes now (an
-    // inline `order`, so the shell can mirror without moving any DOM node), and
-    // anchoring on the exact tag made every new attribute report as "the button
-    // has no data-track" — a true statement about the wrong element, because a
-    // missed `indexOf` is -1 and `slice(-1)` is one character of the file.
-    const railRightAt = APP.indexOf('<nav className="rail rail-right"');
-    const btn = railRightAt < 0 ? "" : APP.slice(railRightAt);
+    // The dock's buttons live in `DockRailGroup` (module scope), which renders
+    // in the dock's own rail OR in the merged strip — one component, so one
+    // button to read. Anchored on the declaration rather than a host tag: a
+    // missed `indexOf` is -1 and `slice(-1)` is one character of the file,
+    // which reads as "the button has no data-track" about the wrong element.
+    const groupAt = APP.indexOf("function DockRailGroup(");
+    const btn = groupAt < 0 ? "" : APP.slice(groupAt, APP.indexOf("\n}\n", groupAt));
     const track = btn.match(/data-track=\{([^}]*)\}/);
-    if (railRightAt < 0) {
-      fail("App.tsx: the right rail's `<nav className=\"rail rail-right\"` is gone — renamed? this check reads its button from there");
+    if (groupAt < 0) {
+      fail("App.tsx: `function DockRailGroup(` is gone — renamed? this check reads the dock rail's button from there");
     } else if (!track) {
-      fail("App.tsx: the right rail's button has no `data-track` — its key would come from a title, and that title interpolates the tab name");
+      fail("App.tsx: the dock rail's button has no `data-track` — its key would come from a title, and that title interpolates the tab name");
     } else if (/\?/.test(track[1])) {
       fail(
-        `App.tsx: the right rail's data-track is a ternary (${track[1].trim()}) over a rail of ` +
+        `App.tsx: the dock rail's data-track is a ternary (${track[1].trim()}) over a rail of ` +
           `${keys.length} tabs — a tab it does not name reports as another tab's key. ` +
           "Give each DOCK_RAIL entry a literal `track` and render that.",
       );

@@ -174,11 +174,10 @@ export type Settings = {
   nav_hover_reveal: boolean;
   // ── which edge each half of the shell owns ──────────────────────────────
   // "left" is the shape the app shipped with: the Places rail + sidebar on the
-  // left, the dock's rail + panel on the right. "right" MIRRORS the whole
-  // shell — both rails, both panels, both resizers and the overlay's anchor
-  // swap edges together.
+  // left. "right" moves the Places rail, the sidebar, its resizer and the
+  // overlay's anchor to the right edge. The dock's edge is `dock_side`.
   //
-  // ONE flag rather than a side per panel, because the two halves are not
+  // A side per HALF rather than per panel, because the two halves are not
   // interchangeable hosts. The nav is a grid column that can lift out into an
   // overlay; the dock is a flex sibling of `main` INSIDE `.space`, so the space
   // header crowns terminal and dock together. Mirroring keeps each panel in the
@@ -188,6 +187,17 @@ export type Settings = {
   // Global, like the rest of the nav's state and unlike the dock's: it is how
   // you LEAVE a space, so it must not move under you when you arrive somewhere.
   places_side: "left" | "right";
+  // Which edge the dock (user-facing: "Reference panels") sits on, beside the
+  // agent. Independent of `places_side` since rev 4, so `nav | dock | agent`
+  // — reference left, agent at the window's right edge — is reachable; until
+  // then mirroring the nav dragged the dock with it. When both name the SAME
+  // edge the two rails merge into one strip (`railsMerged`): Places first, then
+  // the dock group. The nav stays at an outer edge in every layout; the dock
+  // never leaves `.space`, so the space header still crowns dock + agent.
+  //
+  // Global for the same reason as `places_side`: a per-place side would move
+  // the agent on every nav click.
+  dock_side: "left" | "right";
   // ── where account plan usage lives ─────────────────────────────────────
   // They used to be sidebar-only, which the auto-hiding sidebar turned into
   // "usually not on screen". Three hosts now, all of them always visible:
@@ -413,7 +423,7 @@ export type Settings = {
 };
 
 /** Current settings revision. Bump ONLY together with a step in `migrate`. */
-export const SETTINGS_REV = 3;
+export const SETTINGS_REV = 4;
 
 export const DEFAULTS: Settings = {
   ui_rem: 15,
@@ -431,6 +441,7 @@ export const DEFAULTS: Settings = {
   nav_pinned: false,
   nav_hover_reveal: true,
   places_side: "left",
+  dock_side: "right",
   usage_place: "strip",
   usage_claude: true,
   usage_codex: true,
@@ -560,9 +571,30 @@ export function stepMdZoom(v: number, dir: 1 | -1): number {
 // when fullscreen) or overflows a small one, which is what made the topbar's
 // flex children pile on top of each other.
 export const RAIL_W = 44; // keep in sync with --rail-w (tokens.css)
-// Both rails are permanent columns — the left one holds Places, the right one
-// picks the dock tab — so the elastic center is short two of them, always.
+// Both rails are permanent columns — one holds Places, the other picks the
+// dock tab — so the elastic center is short two of them. Unless both halves
+// share an edge: then they are ONE strip (`railsMerged`) and the center gets
+// the second 44px back. Every geometry helper below takes the rail total.
 export const RAILS_W = RAIL_W * 2;
+
+/** Places and the dock on the same edge render as one rail. */
+export const railsMerged = (s: Pick<Settings, "places_side" | "dock_side">) => s.places_side === s.dock_side;
+/** The four layouts Settings → Layout offers: the 2×2 of the two sides, in
+ *  the order the tiles show them. GENERATED, not listed, so there is no second
+ *  copy of the sides to drift from what App builds; `order` names the regions
+ *  left to right for the tile's caption and schematic. */
+export type LayoutTile = { places: "left" | "right"; dock: "left" | "right"; name: string; order: ("nav" | "agent" | "reference")[] };
+export const LAYOUT_TILES: LayoutTile[] = (["left", "right"] as const).flatMap((places) =>
+  ([places === "left" ? "right" : "left", places] as const).map((dock): LayoutTile => {
+    const core: LayoutTile["order"] = dock === "left" ? ["reference", "agent"] : ["agent", "reference"];
+    return {
+      places, dock,
+      name: places === "left" ? (dock === "right" ? "Classic" : "Agent right") : (dock === "left" ? "Mirrored" : "Agent left"),
+      order: places === "left" ? ["nav", ...core] : [...core, "nav"],
+    };
+  }));
+/** Total rail width for a layout: one strip when merged, two otherwise. */
+export const railsWidth = (s: Pick<Settings, "places_side" | "dock_side">) => (railsMerged(s) ? RAIL_W : RAILS_W);
 export const MAIN_MIN = 420; // center-pane floor: below it the topbar can't lay out
 export const NAV_MIN = 220;
 export const NAV_MAX = 460;
@@ -576,16 +608,16 @@ export const viewportWidth = () =>
 const viewport = viewportWidth;
 
 /** Widest the nav may be while `dockW` of dock is on screen. */
-export const navCeiling = (dockW = 0, w = viewport()) =>
-  Math.max(NAV_MIN, Math.min(NAV_MAX, w - RAILS_W - MAIN_MIN - dockW));
+export const navCeiling = (dockW = 0, w = viewport(), railsW = RAILS_W) =>
+  Math.max(NAV_MIN, Math.min(NAV_MAX, w - railsW - MAIN_MIN - dockW));
 /** Widest the dock may be while `navW` of nav is on screen. */
-export const dockCeiling = (navW = 0, w = viewport()) =>
-  Math.max(DOCK_MIN, w - RAILS_W - navW - MAIN_MIN);
+export const dockCeiling = (navW = 0, w = viewport(), railsW = RAILS_W) =>
+  Math.max(DOCK_MIN, w - railsW - navW - MAIN_MIN);
 
-export const clampNav = (v: number, dockW = 0, w = viewport()) =>
-  Math.max(NAV_MIN, Math.min(navCeiling(dockW, w), v));
-export const clampDock = (v: number, navW = 0, w = viewport()) =>
-  Math.max(DOCK_MIN, Math.min(dockCeiling(navW, w), v));
+export const clampNav = (v: number, dockW = 0, w = viewport(), railsW = RAILS_W) =>
+  Math.max(NAV_MIN, Math.min(navCeiling(dockW, w, railsW), v));
+export const clampDock = (v: number, navW = 0, w = viewport(), railsW = RAILS_W) =>
+  Math.max(DOCK_MIN, Math.min(dockCeiling(navW, w, railsW), v));
 
 /** What the columns actually render as right now. Preferences in `Settings` are
  * INTENT and are never rewritten by fitting — a window that gets too narrow
@@ -602,21 +634,22 @@ export type Fit = { navShown: boolean; navW: number; dockShown: boolean; dockW: 
 export const MAIN_TIGHT = 560;
 
 export function fitLayout(s: Settings, dockEligible: boolean, w = viewport()): Fit {
+  const railsW = railsWidth(s);
   // Only a PINNED sidebar is a column. Unpinned it is an overlay App draws
   // over the terminal, so it owns no track and takes no width from anything.
   const navShown = s.nav_pinned;
   let dockShown = s.dock_open && dockEligible;
   // reserve the dock's floor while sizing the nav, so the two can't both win
-  let navW = navShown ? clampNav(s.nav_width, dockShown ? DOCK_MIN : 0, w) : 0;
-  let dockW = dockShown ? clampDock(s.dock_width, navW, w) : 0;
-  if (dockShown && w - RAILS_W - navW - dockW < MAIN_MIN) {
+  let navW = navShown ? clampNav(s.nav_width, dockShown ? DOCK_MIN : 0, w, railsW) : 0;
+  let dockW = dockShown ? clampDock(s.dock_width, navW, w, railsW) : 0;
+  if (dockShown && w - railsW - navW - dockW < MAIN_MIN) {
     // both floors together don't fit (possible at the 900px minWidth) — the
     // dock yields, and the nav reclaims the width it lent to the reservation
     dockShown = false;
     dockW = 0;
-    navW = navShown ? clampNav(s.nav_width, 0, w) : 0;
+    navW = navShown ? clampNav(s.nav_width, 0, w, railsW) : 0;
   }
-  const mainW = w - RAILS_W - navW - dockW;
+  const mainW = w - railsW - navW - dockW;
   return { navShown, navW, dockShown, dockW, mainW, tight: mainW + dockW < MAIN_TIGHT };
 }
 
@@ -636,6 +669,9 @@ export function applySettings(s: Settings) {
   // set to a value no rule matches, which reads as the unmirrored layout but
   // with `settings.places_side` still saying something App.tsx has to guess at.
   root.dataset.placesSide = s.places_side === "right" ? "right" : "left";
+  // The dock's border and resizer edge key on this, not on `placesSide`:
+  // since rev 4 the two are independent.
+  root.dataset.dockSide = s.dock_side === "left" ? "left" : "right";
 }
 
 // Pre-theme installs persisted theme:"dark"; unknown ids (downgrades) reset too.
@@ -663,7 +699,15 @@ function normalizePair(t: unknown, appearance: "light" | "dark", fallback: Theme
  *  auto-hide is the shape the app is now designed around, not a preference an
  *  old install gets to keep. The two dead keys are DELETED rather than left to
  *  rot — `loadSettings` merges the stored blob over DEFAULTS, so anything not
- *  removed here is copied forward into ui-state.json on the next save forever. */
+ *  removed here is copied forward into ui-state.json on the next save forever.
+ *
+ *  rev 4 — `dock_side` split off `places_side`, which used to move BOTH halves.
+ *  An install from before it gets the dock opposite its nav, i.e. exactly the
+ *  layout it had. Keyed on the REVISION, never on the key being absent: the
+ *  stored blob is merged over DEFAULTS before this runs, so `dock_side` is
+ *  always present here — a presence test would hand every mirrored install
+ *  the default "right", put its dock beside its nav and merge its rails.
+ *  `layout-check.mjs` pins that. */
 function migrate(s: Settings, from: number): boolean {
   if (from >= SETTINGS_REV) return false;
   if (from < 1) s.files_show_ignored = DEFAULTS.files_show_ignored;
@@ -683,6 +727,7 @@ function migrate(s: Settings, from: number): boolean {
     if (legacy === true) s.offers_dismissed["mcp-server"] = "absent";
     delete (s as Partial<Settings> & { mcp_nudge_dismissed?: unknown }).mcp_nudge_dismissed;
   }
+  if (from < 4) s.dock_side = s.places_side === "right" ? "left" : "right";
   s.settings_rev = SETTINGS_REV;
   return true;
 }
@@ -717,6 +762,11 @@ export async function loadSettings(): Promise<Settings> {
     // ui-state.json fell through the dock body's ternary to the Terminal with
     // no rail button lit, and `panelsFor` would keep handing it back forever.
     if (!isDockTab(s.dock_tab)) s.dock_tab = "files";
+    // Both sides normalised BEFORE `migrate`, whose rev-4 step reads
+    // `places_side` to derive `dock_side`: a junk value must not turn into a
+    // layout nobody chose.
+    if (s.places_side !== "right") s.places_side = "left";
+    if (s.dock_side !== "left") s.dock_side = "right";
     if (s.place_panels && typeof s.place_panels === "object") {
       for (const p of Object.values(s.place_panels)) {
         // Only a value that IS there and is wrong: an absent one is left absent
