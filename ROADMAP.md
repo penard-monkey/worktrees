@@ -421,8 +421,14 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   quota-burn signal, and `activity` already derives it), and account/provider
   budgets that span hubs and machines, with a conservative provider bucket
   when account identity is unavailable. The quota gate's 120s usage caches
-  inside one `worktrees mcp` process remain. See
-  [nested-lanes close-out](docs/sessions/2026-10-08-nested-lanes/summary.md).
+  inside one `worktrees mcp` process remain. A smaller hole, from #486's
+  review: `agent::live_probes` trusts `kill(pid, 0)`, so a probe file left by a
+  claude that died hard, whose pid now belongs to something long-lived, counts
+  as one agent. It is visible (the refusal names `claude pid N (cwd)`); if it
+  bites, keep a probe only when `proc_pidpath` (macOS) or `/proc/<pid>/comm`
+  names node/claude. See
+  [nested-lanes close-out](docs/sessions/2026-10-08-nested-lanes/summary.md)
+  and [resource-guard close-out](docs/sessions/2026-10-15-resource-guard/summary.md).
 
 - **Settings → "Limits" for `[limits]` and `[slots]` (resource-guard P4).**
   Both are config-only today: the live-agent cap, the memory floor and slot
@@ -431,6 +437,19 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   `config::USER_CONFIG_LOCK` like `[quota]`, showing the RAM-derived default
   and the current count, plus the "waiting for slot" chip on a place's status
   row and the `slots` fields in `ls --json`.
+
+- **Spacing out a fan-out: launch and send gaps (resource-guard P3), waiting
+  on David.** Proposed: a shared stamp file per action
+  (`$XDG_STATE_HOME/worktrees/fanout/{launch,send}.stamp`, flock + last epoch-ms)
+  so N parallel `create_worktree`/`new`/`open` or MCP `send` calls from ANY
+  process come out `gap` seconds apart (`[fanout] launch_gap_secs = 5`,
+  `send_gap_secs = 3`, 0 = off). David: app clicks skip the launch gap. Be
+  honest about what it buys: the 2026-10-14 nudge was a raw `tmux send-keys`
+  loop, which no gap sees, and seven multi-minute gates spread over 30 seconds
+  still overlap — slots (#485) are the fix for that shape, the gap is hygiene.
+  `max_in_flight` for sends was considered and dropped: "in flight" after a
+  send only means "busy", which is a busy-lane cap (above), not a gap. See
+  [resource-guard close-out](docs/sessions/2026-10-15-resource-guard/summary.md).
 
 - **`--ai auto`: pick the provider by headroom.** The data is now in core and
   in one shape (`quota::Window`, `harness::Adapter::usage`), so "start this on
