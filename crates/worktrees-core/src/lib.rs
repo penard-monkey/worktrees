@@ -20,6 +20,7 @@ pub mod diag;
 pub mod docs;
 pub mod error;
 pub mod git;
+pub mod guard;
 pub mod github;
 pub mod guidance;
 pub mod harness;

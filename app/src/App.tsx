@@ -188,7 +188,7 @@ type LaunchRefused = { repo: string; slug: string; provider: Harness; model: str
  *  tail is the CLI's instruction — the dialog's button is this surface's. */
 function refusalLine(output: string): string {
   const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-  const line = lines.find((l) => l.includes("not started")) ?? lines[lines.length - 1] ?? "";
+  const line = lines.find((l) => l.toLowerCase().includes("not started")) ?? lines[lines.length - 1] ?? "";
   // "Ask the user before overriding" is core speaking to an AGENT caller; in
   // this dialog the reader is the user, and the button is the asking.
   return line.split(". The place is ready")[0].split(" Ask the user before overriding")[0].replace(/\.$/, "");

@@ -70,6 +70,9 @@ const USER_ONLY_KEYS: &[&str] = &[
     // How many heavy jobs may run at once on THIS machine (`slots.rs`). A
     // repo raising its own share would defeat the point.
     "slots",
+    // How many agents may run on THIS machine, and on how little memory
+    // (`guard.rs`). A repo raising its own allowance would defeat the point.
+    "limits",
 ];
 
 // ── errors ───────────────────────────────────────────────────────────────────
@@ -1224,7 +1227,7 @@ mod tests {
             assert!(e.message.contains("may not be set by a project"), "{k}: {e}");
             assert_eq!(e.line, Some(1), "{k}");
         }
-        for t in ["[hooks]\npost_create = \"x\"\n", "[infra]\nup = \"docker compose up\"\n", "[slots]\ngate = 9\n"] {
+        for t in ["[hooks]\npost_create = \"x\"\n", "[infra]\nup = \"docker compose up\"\n", "[slots]\ngate = 9\n", "[limits]\nmax_live_agents = 500\n"] {
             let e = parse(t).unwrap_err();
             assert!(e.message.contains("may not be set by a project"), "{t}: {e}");
             assert_eq!(e.line, Some(1));

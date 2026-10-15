@@ -44,6 +44,10 @@
 //! A gate starts daemons (turbo's, metro, gradle) that outlive it. Had the
 //! child inherited the lock fd, the first such daemon would hold the slot
 //! until reboot. Rust opens files `O_CLOEXEC`; `held_fd_is_cloexec` pins it.
+//! CLOEXEC acts at EXEC: a process forked by another thread shares the lock
+//! until it execs, which every spawn here does at once. Never add a fork that
+//! does not exec (a detached helper) while a slot or launch-lock `File` may be
+//! alive on another thread.
 //! The price is that SIGKILLing `worktrees run` itself frees the slot while
 //! its child runs on. A kill aimed at the process GROUP — a terminal's ^C —
 //! reaches both. Measured with Claude Code on macOS (2026-10-14): its Bash
@@ -786,6 +790,15 @@ mod tests {
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].1.pid, 11);
         drop(a);
+        // Not the instant after: this is a multi-threaded test process, and a
+        // subprocess another test forks in that instant shares the open file
+        // description — and with it the lock — until its exec closes the
+        // CLOEXEC fd. Seen once in ~7 full-suite runs. `worktrees run` forks
+        // only its own child, so production has no such window.
+        let start = Instant::now();
+        while !holders_in(&d).is_empty() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(holders_in(&d).is_empty(), "dropping releases");
         let _ = fs::remove_dir_all(&d);
     }

@@ -413,25 +413,24 @@ close-out ritual (global `/close-out` skill; this repo's settings in
   the stall. A real fix needs a deadline parameter threaded into both
   readers, one that does not write a timeout into the shared backoff.
 
-- **A concurrency cap is the signal the quota gate cannot be.** The launch
-  gate (`quota`) reads the plan window, and a window is a LAGGING signal: lanes
-  bill after their first turns, so eight started inside a minute are all
-  admitted and the gate first speaks once the allowance is already spent. It
-  stops the next one, not the burst — which is the incident that prompted it.
-  The lag-free signal is how many lanes are busy on a provider RIGHT NOW, which
-  the tool already derives (`tmux::PaneList::agents_in`, `activity`). Wanted: a
-  user-settable cap per provider, plus a line in the agent-guidance instructions
-  ("at most N lanes per provider unless the user says otherwise"), since
-  #385 the MCP instructions actively tell an orchestrator to open a place per
-  piece of work. Two shared caches make the gate weaker still inside one
-  long-lived `worktrees mcp` process: `codex_usage::CACHE` and
-  `claude_usage::USAGE_CACHE` are 120s, so N parallel `create_worktree` calls
-  all read the same figure.
-  Nested-lane fan-out also needs cross-process launch reservations with expiry
-  and reconciliation: simultaneous MCP servers can all observe spare capacity.
-  Account/provider budgets must span hubs and projects, with a conservative
-  provider bucket when account identity is unavailable. See
+- **What the live-agent cap does not cover yet.** `guard` (resource-guard P2)
+  caps LIVE agents per machine and per provider, and reads memory, under a
+  machine-wide launch lock — so parallel launches from any process count each
+  other, which was the "cross-process launch reservation" this item asked for.
+  Still open: a cap on BUSY lanes (live is the memory signal; busy is the
+  quota-burn signal, and `activity` already derives it), and account/provider
+  budgets that span hubs and machines, with a conservative provider bucket
+  when account identity is unavailable. The quota gate's 120s usage caches
+  inside one `worktrees mcp` process remain. See
   [nested-lanes close-out](docs/sessions/2026-10-08-nested-lanes/summary.md).
+
+- **Settings → "Limits" for `[limits]` and `[slots]` (resource-guard P4).**
+  Both are config-only today: the live-agent cap, the memory floor and slot
+  capacities live in `config.toml`, and the app shows only the refusal
+  ("Launch anyway"). Wanted: a Limits group writing through
+  `config::USER_CONFIG_LOCK` like `[quota]`, showing the RAM-derived default
+  and the current count, plus the "waiting for slot" chip on a place's status
+  row and the `slots` fields in `ls --json`.
 
 - **`--ai auto`: pick the provider by headroom.** The data is now in core and
   in one shape (`quota::Window`, `harness::Adapter::usage`), so "start this on
