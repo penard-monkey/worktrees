@@ -3478,11 +3478,13 @@ body.dragging .grip { cursor: grabbing; }
 .agent-label .agent-name { margin-right: auto; }
 .agent-label .grip { margin-right: var(--s1); }
 /* The lower slot has no header of its own: the grip sits over the right end
-   of its tab strip, which is empty unless the strip overflows. */
+   of its tab strip — RESERVED there, so a strip that wraps (four shells in a
+   360px column) cannot put its `+` or a tab's × under the grip. */
 .dock-lower { position: relative; }
 .dock-lower > .grip { position: absolute; top: 4px; right: var(--s2); z-index: 2; }
-/* The zones. Above the nav overlay (30), below menus (60) and the notice stack
-   (80). `pointer-events: none` on all of it: the grip holds pointer capture and
+.dock-lower .termtab-strip { padding-right: calc(18px + 2 * var(--s2)); }
+/* The zones. Above the nav overlay (30), below the menu catch (40), menus
+   (60) and the notice stack (80). `pointer-events: none` on all of it: the grip holds pointer capture and
    App hit-tests the zones, so nothing here may take an event. */
 .arrange-catch { position: fixed; inset: 0; z-index: 35; pointer-events: none; }
 .arrange-zone {
