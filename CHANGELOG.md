@@ -19,7 +19,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   outdated or edited by hand; a re-apply updates it in place and never touches
   text outside its markers or a close-out skill worktrees did not write. MCP
   gains `rules_status` and, on a `--mutations` server, `apply_rules`, which
-  never pushes. See ADR 0002.
+  never pushes. See ADR 0002. In the app, Project settings has a **Worktrees
+  rules** section beside Agent setup, and a project without them shows one
+  suggestion in its To do list (it never adds to the project's count).
 - **`worktrees run --slot gate -- <cmd>`: machine-wide slots for heavy jobs.**
   A gate, build or full test run wrapped this way waits until one of the
   machine's slots is free (two by default), runs, and frees the slot when it
@@ -50,7 +52,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Changed
 - **`worktrees agent-setup fix` commits locally and pushes nothing unless you
   add `--push`**, the same rule as `rules apply`; `--push` pushes the branch
-  and opens the PR as it used to. The app's Fix button still pushes.
+  and opens the PR as it used to. The app's Fix follows the same rule: pushing
+  and opening the PR is a checkbox beside it.
 
 ### Fixed
 - **Setting a project's planning to full now writes `/.planning/` to

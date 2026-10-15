@@ -4273,14 +4273,19 @@ async fn init_write(repo: String) -> Result<CmdResult, String> {
 // ── agent setup (AGENTS.md for every agent, skills Codex can see) ────────────
 // The app half of `worktrees agent-setup`. `status` reads the project's
 // DEFAULT-BRANCH ref (never a checkout) plus the user's ~/.claude/skills;
-// `fix` is outward-facing — it pushes a branch and opens a PR — so the sheet
-// arms it. The frontend probes `status` on the same slow sweep as
+// `fix` and `rules_apply` commit on a local branch, and push + open a PR only
+// when the user ticks it (decision 2026-10-14: read-only toward GitHub unless
+// asked) — so the sheet arms them. The frontend probes `status` on the same slow sweep as
 // `init_suggest`, never on the 3s poll.
 
 #[derive(Serialize)]
 struct AgentSetupStatus {
     repo: worktrees_core::agentfiles::Report,
     user_skills: Vec<worktrees_core::agentfiles::UserSkill>,
+    /// The worktrees rules (ADR 0002), from the same ref. `None` when they
+    /// could not be read — logged, and the sheet says so rather than offering
+    /// an apply it cannot judge.
+    rules: Option<worktrees_core::rules::Status>,
 }
 
 #[tauri::command]
@@ -4290,13 +4295,16 @@ async fn agent_setup_status(repo: String) -> Result<AgentSetupStatus, String> {
         applog("error", &format!("agent_setup_status repo={repo}: {e}"));
         e
     })?;
-    Ok(AgentSetupStatus { repo: report, user_skills: worktrees_core::agentfiles::user_skills() })
+    let rules = worktrees_core::rules::status(&p)
+        .map_err(|e| applog("error", &format!("agent_setup_status rules repo={repo}: {e}")))
+        .ok();
+    Ok(AgentSetupStatus { repo: report, user_skills: worktrees_core::agentfiles::user_skills(), rules })
 }
 
 #[tauri::command]
-async fn agent_setup_fix(app: AppHandle, repo: String) -> Result<worktrees_core::agentfiles::FixOutcome, String> {
+async fn agent_setup_fix(app: AppHandle, repo: String, push: Option<bool>) -> Result<worktrees_core::agentfiles::FixOutcome, String> {
     let p = project_at(&repo, "agent_setup_fix")?;
-    let out = worktrees_core::agentfiles::fix(&p, true);
+    let out = worktrees_core::agentfiles::fix(&p, push.unwrap_or(false));
     // A new local branch (and maybe a fetch) either way — re-pull the snapshot.
     let _ = app.emit("places:changed", ());
     match out {
@@ -4306,6 +4314,28 @@ async fn agent_setup_fix(app: AppHandle, repo: String) -> Result<worktrees_core:
         }
         Err(e) => {
             applog("error", &format!("agent_setup_fix repo={repo}: {e}"));
+            Err(e)
+        }
+    }
+}
+
+/// `worktrees rules apply`: the layout fix plus the worktrees rules, one commit
+/// on `agent-instructions`. Local unless `push`; `force` replaces a block or
+/// skill someone edited by hand (never a close-out skill worktrees did not
+/// write).
+#[tauri::command]
+async fn rules_apply(app: AppHandle, repo: String, push: Option<bool>, force: Option<bool>) -> Result<worktrees_core::agentfiles::FixOutcome, String> {
+    let p = project_at(&repo, "rules_apply")?;
+    let (push, force) = (push.unwrap_or(false), force.unwrap_or(false));
+    let out = worktrees_core::rules::apply(&p, push, force);
+    let _ = app.emit("places:changed", ());
+    match out {
+        Ok(o) => {
+            applog("info", &format!("rules_apply repo={repo} push={push} force={force}: commit={:?} pushed={} pr={:?}", o.commit, o.pushed, o.pr_url));
+            Ok(o)
+        }
+        Err(e) => {
+            applog("error", &format!("rules_apply repo={repo}: {e}"));
             Err(e)
         }
     }
@@ -8663,6 +8693,7 @@ pub fn run() {
             init_write,
             agent_setup_status,
             agent_setup_fix,
+            rules_apply,
             agent_link_skills,
             agent_user_skills,
             set_codex_permissions,

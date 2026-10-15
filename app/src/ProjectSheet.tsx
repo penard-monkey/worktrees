@@ -3,7 +3,7 @@ import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProfilesInfo } from "./ProfilesPanel";
-import { AgentFixButton, AgentSetupSection, openPr, useAgentSetup, type AgentSetupStatus } from "./AgentSetup";
+import { AgentFixButton, AgentSetupSection, RulesSection, openPr, useAgentSetup, type AgentSetupStatus } from "./AgentSetup";
 import { projectTodos, type Remedies, type Todo, type TodoHealth } from "./projectTodos";
 import { LEVEL_WORDS, ProjectRow, writeProjectPlanning, type PlanningStatus } from "./PlanningPanel";
 
@@ -356,6 +356,7 @@ export function ProjectSheet({
   const show = (section: Todo["section"]) => {
     const sel = section === "health" ? '[data-section="health"]'
       : section === "strays" ? '[data-section="strays"]'
+      : section === "rules" ? '[data-testid="project-rules"]'
       : '[data-testid="agent-setup"]';
     bodyRef.current?.querySelector<HTMLElement>(sel)?.scrollIntoView({ block: "start", behavior: "smooth" });
   };
@@ -377,9 +378,9 @@ export function ProjectSheet({
               ) : (
                 <div className="todo-list">
                   {todos.map((t, i) => {
-                    // The Fix PR carries the dirs AND the skills: its button
+                    // The Fix commit carries the dirs AND the skills: its button
                     // shows once, on the first row that uses it, and the other
-                    // row's label already says "same PR".
+                    // row's label already says "same commit".
                     const firstFix = t.action === "agent-fix" && todos.findIndex((x) => x.action === "agent-fix") === i;
                     return (
                       <div className="todo-row" key={t.id} data-todo={t.id}>
@@ -641,6 +642,8 @@ export function ProjectSheet({
           </section>
 
           <AgentSetupSection ctl={agent} onError={logError} />
+
+          <RulesSection ctl={agent} onError={logError} />
 
           <PlanningSheetSection root={root} open={open} status={planning} onStatus={onPlanningChanged}
             onOpenSettings={onOpenPlanningSettings} onError={logError} />
