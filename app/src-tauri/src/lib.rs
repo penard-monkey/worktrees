@@ -4298,6 +4298,14 @@ async fn agent_setup_status(repo: String) -> Result<AgentSetupStatus, String> {
     let rules = worktrees_core::rules::status(&p)
         .map_err(|e| applog("error", &format!("agent_setup_status rules repo={repo}: {e}")))
         .ok();
+    let mut report = report;
+    // A pushed branch whose review place is still open: has its PR merged?
+    // Asked of GitHub — a squash merge leaves the branch looking unmerged, and
+    // a matching subject proves nothing. Only in this one state, because it is
+    // a network call on the slow sweep.
+    if report.pending_on_origin && report.pending_place.is_some() {
+        report.pending_merged = worktrees_core::review::pr_state(&p.main_root).as_deref() == Some("MERGED");
+    }
     Ok(AgentSetupStatus { repo: report, user_skills: worktrees_core::agentfiles::user_skills(), rules })
 }
 
@@ -4339,6 +4347,39 @@ async fn rules_apply(app: AppHandle, repo: String, push: Option<bool>, force: Op
             Err(e)
         }
     }
+}
+
+/// Open the review lane for the `agent-instructions` branch: a place with a
+/// brief and the default agent on it. Called right after Apply / Fix commit
+/// locally, and from the To do row's Review button for a branch that already
+/// exists. A launch the machine guard refuses comes back as
+/// `EXIT_LAUNCH_REFUSED` with the place ready — the frontend asks "Launch
+/// anyway?"; nothing is forced here.
+#[tauri::command]
+async fn rules_review(repo: String, provider: Option<String>, model: Option<String>) -> Result<CmdResult, String> {
+    let provider = provider.unwrap_or_else(|| harness::default_adapter().provider().id.into());
+    known_harness(&provider)?.installed()?;
+    let model = model.filter(|m| !m.trim().is_empty());
+    if let Some(m) = &model {
+        worktrees_core::choice::validate_model(m)?;
+    }
+    let mut slug = None;
+    let mut r = run_op("rules review", &repo, |p, ui| {
+        let (rc, s) = worktrees_core::review::open_lane(p, ui, true, Some(&provider), model.as_deref());
+        slug = Some(s);
+        rc
+    })?;
+    r.slug = slug;
+    Ok(r)
+}
+
+/// The To do row's "Remove the place" once the branch's PR is MERGED. Core
+/// re-asks GitHub before it deletes anything.
+#[tauri::command]
+async fn rules_lane_remove(app: AppHandle, repo: String) -> Result<CmdResult, String> {
+    let r = run_op("rules lane remove", &repo, |p, ui| worktrees_core::review::retire_merged(p, ui))?;
+    let _ = app.emit("places:changed", ());
+    Ok(r)
 }
 
 /// The user's own skills alone — machine-level, no repo. What Settings → Codex
@@ -8805,6 +8846,8 @@ pub fn run() {
             agent_setup_status,
             agent_setup_fix,
             rules_apply,
+            rules_review,
+            rules_lane_remove,
             agent_link_skills,
             agent_user_skills,
             set_codex_permissions,

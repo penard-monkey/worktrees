@@ -6506,6 +6506,36 @@ function App() {
       setPendingNew((v) => v.filter((x) => x.id !== id));
     }
   };
+  // The `agent-instructions` branch's review lane: a place with core's brief
+  // and the default agent, which explains the change and lands or abandons it
+  // on the user's word. Opened after a LOCAL Fix / Apply and from the To do
+  // row. A refused launch leaves the place ready and asks "Launch anyway?" —
+  // nothing is forced behind the user's back.
+  const reviewLane = async (repo: string) => {
+    const provider = settings.default_provider;
+    const model = settings.default_models[provider] ?? "";
+    if (!(await ensureCodexCli(provider))) return;
+    setProjSheet(null);
+    setProjSheetTodo(false);
+    const r = await runCmd("rules_review", { repo, provider, model: model || null });
+    if (r?.slug && (r.ok || r.code === EXIT_LAUNCH_REFUSED)) {
+      setActiveProvider(provider);
+      setSel({ repo, slug: r.slug });
+      setTermFocus((v) => v + 1);
+    }
+    if (r?.slug) noteRefusal(r, repo, r.slug, provider, model);
+    probeAgentSetup(repo);
+  };
+  const openLane = (repo: string, slug: string) => {
+    setProjSheet(null);
+    setProjSheetTodo(false);
+    setSel({ repo, slug });
+    setTermFocus((v) => v + 1);
+  };
+  const removeLane = async (repo: string) => {
+    await runCmd("rules_lane_remove", { repo });
+    await probeAgentSetup(repo);
+  };
   // The switcher owns its own text now; this just runs the op and reports.
   const doSwitch = async (branch: string) => {
     if (!sel) return false;
@@ -9014,6 +9044,9 @@ function App() {
         planning={planning}
         onPlanningChanged={setPlanning}
         onOpenPlanningSettings={() => { setProjSheet(null); setProjSheetTodo(false); openSettings({ cat: "planning", focus: "planning" }); }}
+        onReviewLane={(root) => { void reviewLane(root); }}
+        onOpenLane={openLane}
+        onRemoveLane={removeLane}
       />
 
       {/* Per-place status check (right-click a worktree → Status check…, or the

@@ -17,8 +17,8 @@
 // - doctor findings only an edit clears (`.worktrees.toml`, or by hand). A
 //   count under no button is a nag, and a count under the WRONG button is a
 //   lie: `shadowed` under Relink promised a repair relink refuses by design.
-// - a fix branch already made (on origin: a PR to merge; local only: a push
-//   that never happened, which is a different sentence). The default branch does not move until it merges, so
+// - a fix branch already made (on origin: a PR to merge; local only: a branch
+//   to review in its lane, which is a different sentence). The default branch does not move until it merges, so
 //   the report keeps saying `fixable` — counting it would badge a project whose
 //   only remaining step is someone else's review, forever.
 // - diverged dirs. Only a person can merge two instruction files; a count that
@@ -54,7 +54,7 @@ export type TodoId =
   | "rules-damaged";
 
 /** What the row's own button does. `null`: the row only points at its section. */
-export type TodoAction = "relink" | "force" | "provision" | "agent-fix" | null;
+export type TodoAction = "relink" | "force" | "provision" | "agent-fix" | "review" | "open-lane" | "remove-lane" | null;
 
 export type Todo = {
   id: TodoId;
@@ -65,6 +65,10 @@ export type Todo = {
   /** What this row adds to the project's count. 0 = informational. */
   n: number;
   sev: "error" | "warn" | "info";
+  /** Puts "Repair / upgrade…" in the menu without adding to the count (see
+   *  `needsRepair`) — for a row whose state, not whose id, makes it a next
+   *  step. */
+  repair?: boolean;
 };
 
 /** Doctor's actionable findings by the command that clears them. Built by
@@ -154,13 +158,31 @@ export function projectTodos(
       // local only is the DEFAULT result of Fix / Apply (they push only when
       // asked), so it reads as the next step, at info — not as a failed push.
       // No "Fix" in the noun: Apply rules writes the same branch.
-      out.push({
-        id: "agent-pending",
-        label: repo.pending_on_origin
-          ? `PR waiting to merge (branch ${repo.pending})`
-          : `Branch '${repo.pending}' is committed locally — review it as a place, then push it and open a PR`,
-        action: null, section: "agent", n: 0, sev: "info",
-      });
+      //
+      // The branch's review lane (a place + an agent on a brief) is where it is
+      // applied or abandoned. A local branch with NO place is a branch nothing
+      // points at, so it puts Repair in the menu (uncounted) and its row opens
+      // the lane; once a place holds it, the row only leads there. A merged
+      // PR's place is done with — GitHub said so (`pending_merged`), never a
+      // subject match — and that is a next step again.
+      const b = repo.pending;
+      const place = repo.pending_place ?? null;
+      const row = (label: string, action: TodoAction, repair = false): Todo =>
+        ({ id: "agent-pending", label, action, section: "agent", n: 0, sev: "info", repair });
+      if (repo.pending_merged && place) {
+        out.push(row(`PR merged — remove its review place '${place}'`, "remove-lane", true));
+      } else if (place) {
+        out.push(row(repo.pending_on_origin
+          ? `PR waiting to merge (branch ${b}) — under review in place '${place}'`
+          : `Branch '${b}' is under review in place '${place}' — its agent applies or abandons it on your word`, "open-lane"));
+      } else if (repo.pending_on_origin) {
+        out.push(row(`PR waiting to merge (branch ${b})`, "review"));
+      } else {
+        // No origin: "push it and open a PR" is impossible advice there.
+        out.push(row(repo.has_origin
+          ? `Branch '${b}' is committed locally — review it, then push it and open a PR, or abandon it`
+          : `Branch '${b}' is committed locally — review it, then apply it to the default branch or abandon it`, "review", true));
+      }
     } else if (repo.fixable) {
       const claudeOnly = repo.dirs.filter((d) => d.kind === "claude-only").length;
       const agentsOnly = repo.dirs.filter((d) => d.kind === "agents-only").length;
@@ -233,7 +255,9 @@ export function todoCount(todos: Todo[]): number {
 const UNCOUNTED_REPAIR: ReadonlySet<TodoId> = new Set(["doctor-error", "rules-apply", "rules-outdated"]);
 
 /** Whether "Repair / upgrade…" belongs in the menu: something a button can
- *  change, or one of the uncounted rows above. */
+ *  change, or one of the uncounted rows above, or a row flagged `repair`
+ *  (an agent-instructions branch with no review place, or a merged one whose
+ *  place can go). */
 export function needsRepair(todos: Todo[]): boolean {
-  return todoCount(todos) > 0 || todos.some((t) => UNCOUNTED_REPAIR.has(t.id));
+  return todoCount(todos) > 0 || todos.some((t) => UNCOUNTED_REPAIR.has(t.id) || t.repair === true);
 }

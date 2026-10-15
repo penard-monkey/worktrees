@@ -97,6 +97,15 @@ pub struct Report {
     /// so a surface that says "waiting to merge" about it is lying. Kept beside
     /// `pending` rather than replacing it so older readers keep working.
     pub pending_on_origin: bool,
+    /// The repository has an `origin` remote. Without one, "push it and open a
+    /// PR" is impossible advice: the review lane merges locally instead.
+    pub has_origin: bool,
+    /// The slug of the place holding the pending branch — its review lane.
+    pub pending_place: Option<String>,
+    /// GitHub says the pending branch's PR is MERGED, so the review place is
+    /// done with. Asked of `gh` by the app only (a network call), and only for
+    /// a pushed branch that still has a place; `false` everywhere else.
+    pub pending_merged: bool,
 }
 
 /// One tracked entry from `git ls-tree -r`.
@@ -211,7 +220,7 @@ pub fn report_from(reference: &str, dirs: Vec<DirState>, skills: Vec<SkillState>
     let fixable = dirs.iter().any(|d| matches!(d.kind, DirKind::ClaudeOnly | DirKind::AgentsOnly))
         || skills.iter().any(|s| s.kind == SkillKind::Missing);
     let conflicts = dirs.iter().any(|d| d.kind == DirKind::Diverged);
-    Report { reference: reference.to_string(), dirs, skills, fixable, conflicts, pending: None, pending_on_origin: false }
+    Report { reference: reference.to_string(), dirs, skills, fixable, conflicts, pending: None, pending_on_origin: false, has_origin: false, pending_place: None, pending_merged: false }
 }
 
 // ── git plumbing ─────────────────────────────────────────────────────────────
@@ -243,7 +252,7 @@ pub(crate) fn git_env(root: &str, index: Option<&Path>, args: &[&str], input: Op
 /// no terminal, so a credential or host-key prompt must fail instead of
 /// hanging, and a wedged remote must not hold the sheet on "Pushing…" until TCP
 /// gives up. From a terminal the CLI keeps git's prompts.
-fn run_net(mut c: Command, what: &str) -> Result<String, String> {
+pub(crate) fn run_net(mut c: Command, what: &str) -> Result<String, String> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         c.env("GIT_TERMINAL_PROMPT", "0").env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes").env("GH_PROMPT_DISABLED", "1");
@@ -273,7 +282,7 @@ fn run_net(mut c: Command, what: &str) -> Result<String, String> {
 
 const NET_DEADLINE_SECS: u64 = 60;
 
-fn git_net(root: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git_net(root: &str, args: &[&str]) -> Result<String, String> {
     let mut c = Command::new("git");
     c.arg("-C").arg(root).args(args);
     run_net(c, &format!("git {}", args.first().unwrap_or(&"")))
@@ -343,9 +352,11 @@ pub fn inspect(p: &crate::project::Project) -> Result<Report, String> {
         }
     };
     let mut r = report_from(&reference, dirs, skills);
+    r.has_origin = has_origin(&p.main_root);
     if let Some((b, on_origin)) = pending_state(&p.main_root) {
         r.pending = Some(b);
         r.pending_on_origin = on_origin;
+        r.pending_place = crate::review::lane_place(p).map(|wt| wt.rsplit('/').next().unwrap_or_default().to_string());
     }
     Ok(r)
 }
@@ -406,7 +417,7 @@ pub(crate) fn has_origin(root: &str) -> bool {
 ///
 /// Local by default (decision 2026-10-14): the app stays read-only toward
 /// GitHub unless the user asks, and the branch is reviewed as a place
-/// (`worktrees new agent-instructions`) before anything leaves the machine.
+/// (its review lane: `review::open_lane`) before anything leaves the machine.
 ///
 /// Refuses when `FIX_BRANCH` already exists locally or on origin — a previous
 /// fix is waiting to be merged (or was abandoned), and a second one would race
@@ -547,9 +558,11 @@ pub(crate) fn publish(
     out.notes.push(format!("Committed {} on branch '{FIX_BRANCH}' (off {}).", &commit[..commit.len().min(7)], report.reference));
 
     if !push {
-        out.notes.push(format!(
-            "Nothing was pushed. Review it as a place (`worktrees new {FIX_BRANCH}`), then push it and open a PR — or run again with --push to have worktrees do that."
-        ));
+        out.notes.push(if has_origin(root) {
+            "Nothing was pushed. Review it in its place: `worktrees rules land` pushes it and opens a PR, `worktrees rules abandon --yes` deletes it.".to_string()
+        } else {
+            format!("Nothing was pushed (there is no origin remote). Review it in its place: `worktrees rules land` merges it into {}, `worktrees rules abandon --yes` deletes it.", p.default_base())
+        });
         return Ok(());
     }
     if !has_origin(root) {
@@ -734,7 +747,7 @@ pub fn cmd_agent_setup(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, 
                 if r.pending_on_origin {
                     ui.plain(&format!("  a fix is waiting on branch '{b}' — merge its PR"));
                 } else {
-                    ui.plain(&format!("  branch '{b}' was committed but never pushed — push it, or delete it to fix again"));
+                    ui.plain(&format!("  branch '{b}' is committed locally — review it (`worktrees rules review`), then `worktrees rules land` or `worktrees rules abandon --yes`"));
                 }
             }
             if r.dirs.is_empty() {
@@ -760,13 +773,17 @@ pub fn cmd_agent_setup(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, 
         }
         "fix" => {
             // `fix` carries the hub-copy guard itself (the app calls it too).
-            // Local unless asked: `--push` pushes and opens the PR.
+            // Local unless asked: `--push` pushes and opens the PR. A local
+            // commit gets its review lane (`--review` also starts the agent).
             match fix(p, rest.iter().any(|a| a == "--push")) {
                 Ok(o) => {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&o).unwrap_or_default());
                     } else {
                         for n in &o.notes { ui.info(n); }
+                    }
+                    if o.commit.is_some() && !o.pushed {
+                        return crate::review::cli_lane(p, ui, rest.iter().any(|a| a == "--review"));
                     }
                     0
                 }

@@ -236,8 +236,39 @@ const count = (h, a) => todoCount(projectTodos(h, a));
   const pend = projectTodos(null, withRules(rules({ pending: "agent-instructions" }), { pending: "agent-instructions", pending_on_origin: false }));
   if (pend.some((t) => t.id.startsWith("rules-"))) fail("pending agent-instructions: a rules row would offer an apply that refuses");
   else ok("a pending agent-instructions branch suppresses the rules rows");
-  if (needsRepair(pend)) fail("pending agent-instructions: Repair would open on an Apply that refuses");
-  else ok("a pending agent-instructions branch does not surface Repair");
+  // A local branch with NO review place is a branch nothing points at: it
+  // surfaces Repair (uncounted) and its row opens the lane. Once a place holds
+  // it, the row only leads there and Repair goes quiet.
+  if (!needsRepair(pend) || todoCount(pend) !== 0) fail("a local agent-instructions branch with no place must surface Repair, uncounted");
+  else ok("a local branch with no review place surfaces Repair (count 0)");
+  if (pend.find((t) => t.id === "agent-pending")?.action !== "review") fail("a branch with no place must offer Review");
+  else ok("a branch with no place offers Review");
+}
+
+// ── 4b. the review lane ────────────────────────────────────────────────────
+{
+  const base = { ...fixable.repo, pending: "agent-instructions" };
+  const noOrigin = projectTodos(null, agent({ ...base, pending_on_origin: false, has_origin: false }));
+  const nlabel = noOrigin.find((t) => t.id === "agent-pending")?.label ?? "";
+  if (/push|PR/.test(nlabel)) fail(`no-origin repo told to push / open a PR: "${nlabel}"`);
+  else ok("a repo with no origin is never told to push");
+  const withOrigin = projectTodos(null, agent({ ...base, pending_on_origin: false, has_origin: true }));
+  if (!/push it and open a PR/.test(withOrigin.find((t) => t.id === "agent-pending")?.label ?? "")) fail("a repo with origin should still be told push + PR");
+  else ok("a repo with origin keeps push + PR");
+  const placed = projectTodos(null, agent({ ...base, pending_on_origin: false, pending_place: "agent-instructions" }));
+  const prow = placed.find((t) => t.id === "agent-pending");
+  if (prow?.action !== "open-lane" || needsRepair(placed)) fail(`a branch under review: ${JSON.stringify(prow)} — it should lead to its place, without Repair`);
+  else ok("a branch under review leads to its place, no Repair");
+  const open = projectTodos(null, agent({ ...base, pending_on_origin: true, pending_place: "agent-instructions", pending_merged: false }));
+  if (needsRepair(open)) fail("an open PR with its place must not surface Repair");
+  else ok("an open PR under review does not surface Repair");
+  const merged = projectTodos(null, agent({ ...base, pending_on_origin: true, pending_place: "agent-instructions", pending_merged: true }));
+  const mrow = merged.find((t) => t.id === "agent-pending");
+  if (mrow?.action !== "remove-lane" || !needsRepair(merged) || todoCount(merged) !== 0) fail(`a merged PR: ${JSON.stringify(mrow)} — it should offer Remove the place via uncounted Repair`);
+  else ok("a merged PR offers to remove its place (uncounted Repair)");
+  const mergedNoPlace = projectTodos(null, agent({ ...base, pending_on_origin: true, pending_merged: true }));
+  if (mergedNoPlace.some((t) => t.action === "remove-lane")) fail("merged with no place: nothing to remove");
+  else ok("merged with no place offers no removal");
 }
 
 // ── 5. the surfaces read this module, not their own arithmetic ─────────────

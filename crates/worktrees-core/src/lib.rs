@@ -50,6 +50,7 @@ pub mod provision;
 pub mod quota;
 pub mod reach;
 pub mod registry;
+pub mod review;
 pub mod rules;
 pub mod render;
 pub mod safepath;

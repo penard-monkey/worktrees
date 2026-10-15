@@ -242,7 +242,10 @@ case "$sub" in
   display-message)
     # The codex pane sample (activity::codex_panes): one chained call per
     # target, `@@ 0 @@`, the pane's command, then its screen. One target only.
+    # `#{session_name}` answers $FAKE_TMUX_OWN: the session the caller runs in
+    # (review::own_session).
     case "$all" in
+      *"#{session_name}"*) [ -n "${FAKE_TMUX_OWN:-}" ] && echo "$FAKE_TMUX_OWN" ;;
       *"@@ 0 @@"*capture-pane*)
         t="${target%:}"
         echo "@@ 0 @@"

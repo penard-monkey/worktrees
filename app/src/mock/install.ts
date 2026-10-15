@@ -461,6 +461,7 @@ type MockAgentReport = {
   conflicts: boolean;
   pending: string | null;
   pending_on_origin: boolean;
+  has_origin?: boolean;
 };
 const mockAgentRepos: Record<string, MockAgentReport> = {
   [CDV_ROOT]: {
@@ -505,6 +506,29 @@ function mockRulesStatus(root: string, repo: MockAgentReport) {
     pending: repo.pending, pending_on_origin: repo.pending_on_origin,
   };
 }
+// The review lane (`review.rs`): `pending_place` is DERIVED from the snapshot
+// (the place on `agent-instructions`), as core derives it from git; the PR's
+// merged state is a fixture flag, as the real one is GitHub's word.
+// `?noorigin` gives worktrees no origin remote (the no-push wording);
+// `?prmerged` makes its pending branch a pushed PR GitHub calls merged.
+const mockPrMerged: Record<string, boolean> = {};
+{
+  const q = new URLSearchParams(location.search);
+  if (q.has("noorigin")) mockAgentRepos[WT_ROOT].has_origin = false;
+  if (q.has("prmerged")) { mockAgentRepos[WT_ROOT].pending_on_origin = true; mockPrMerged[WT_ROOT] = true; }
+}
+function mockLanePlace(root: string): string | null {
+  return findProject(root)?.snapshot?.places.find((p) => p.branch === "agent-instructions" && !p.is_main)?.slug ?? null;
+}
+function mockAgentReport(root: string, repo: MockAgentReport) {
+  const place = repo.pending ? mockLanePlace(root) : null;
+  return {
+    ...repo,
+    has_origin: repo.has_origin ?? true,
+    pending_place: place,
+    pending_merged: !!(repo.pending && repo.pending_on_origin && place && mockPrMerged[root]),
+  };
+}
 /** The outcome both mock commits share — the real ones share `publish`. */
 function mockCommitOutcome(root: string, push: boolean) {
   const r = mockAgentRepos[root] ?? { reference: "origin/main", dirs: [], skills: [], fixable: false, conflicts: false, pending: null, pending_on_origin: false };
@@ -512,7 +536,9 @@ function mockCommitOutcome(root: string, push: boolean) {
   const commit = "3f9a1c2d4e5b6a7f8091a2b3c4d5e6f708192a3b";
   const notes = ["Committed 3f9a1c2 on branch 'agent-instructions' (off origin/main)."];
   if (!push) {
-    notes.push("Nothing was pushed. Review it as a place (`worktrees new agent-instructions`), then push it and open a PR — or run again with --push to have worktrees do that.");
+    notes.push(r.has_origin === false
+      ? "Nothing was pushed (there is no origin remote). Review it in its place: `worktrees rules land` merges it into main, `worktrees rules abandon --yes` deletes it."
+      : "Nothing was pushed. Review it in its place: `worktrees rules land` pushes it and opens a PR, `worktrees rules abandon --yes` deletes it.");
     return { branch: "agent-instructions", base: "origin/main", commit, pushed: false, pr_url: null, left_alone: [], notes };
   }
   const url = "https://github.com/demo/casa-del-valle-monorepo/pull/412";
@@ -2881,7 +2907,28 @@ Phase 3: Frontend pane and mock harness
         pending: null,
         pending_on_origin: false,
       };
-      return clone({ repo, user_skills: mockUserSkills, rules: mockRulesStatus(root, repo) });
+      return clone({ repo: mockAgentReport(root, repo), user_skills: mockUserSkills, rules: mockRulesStatus(root, repo) });
+    }
+    case "rules_review": {
+      // core's `open_lane`: `new agent-instructions` with the brief, the agent
+      // launched — the same create path (and pi refusal) as `new_place`.
+      const root = args.repo as string;
+      if (!mockAgentRepos[root]?.pending) return { ok: false, code: 1, output: "there is no 'agent-instructions' branch to review" };
+      const r = await mockInvoke("new_place", { repo: root, branch: "agent-instructions", provider: args.provider, model: args.model }) as { ok: boolean; code: number; slug?: string; output: string };
+      return { ...r, slug: r.slug ?? "agent-instructions", output: `brief: .planning/brief.md\n${r.output}`, warnings: [] };
+    }
+    case "rules_lane_remove": {
+      // core's `retire_merged`: re-asks GitHub, then removes the place and the
+      // branch. Anything but MERGED removes nothing.
+      const root = args.repo as string;
+      const slug = mockLanePlace(root);
+      if (!mockPrMerged[root]) return { ok: false, code: 1, output: "the pull request for 'agent-instructions' is OPEN, not merged — nothing was removed", warnings: [] };
+      const pv = findProject(root);
+      if (pv?.snapshot && slug) pv.snapshot.places = pv.snapshot.places.filter((p) => p.slug !== slug);
+      if (mockAgentRepos[root]) mockAgentRepos[root] = { ...mockAgentRepos[root], pending: null, pending_on_origin: false };
+      delete mockPrMerged[root];
+      emitEvent("places:changed", {});
+      return { ok: true, code: 0, output: `removed worktree ${slug}\ndeleted branch agent-instructions\nThe pull request is merged. The review place is removed; this session ends now.`, warnings: [] };
     }
     case "agent_setup_fix": {
       const root = args.repo as string;

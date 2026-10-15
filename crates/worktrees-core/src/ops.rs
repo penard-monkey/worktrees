@@ -1672,6 +1672,39 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
     Ok(())
 }
 
+/// Remove the place at `wt` WITHOUT ending its sessions, and return the
+/// sessions that belong to it — for a caller that runs inside one of them
+/// (`review::retire`) and must finish its git steps before its own session
+/// dies. `remove_one` kills first; that ordering would cut such a caller off
+/// halfway. No prompt and no dirty check: the caller has both.
+pub(crate) fn remove_tree(p: &Project, ui: &mut dyn Ui, wt: &str) -> Result<Vec<String>, i32> {
+    let slug = basename(wt);
+    let canonical = p.session_name(&slug);
+    let mut sessions: Vec<String> = Vec::new();
+    if let Some(s) = live_session(p, &slug, wt, None) {
+        sessions.push(s);
+    }
+    for provider in crate::provider::PROVIDERS.iter().rev() {
+        let s = provider.sidecar_name(&canonical);
+        if tmux::session_exists(&s) && !sessions.contains(&s) {
+            sessions.push(s);
+        }
+    }
+    for s in tmux::session_names() {
+        if tmux::shell_sidecar_index(&canonical, &s).is_some() && !sessions.contains(&s) {
+            sessions.push(s);
+        }
+    }
+    compose_down(p, ui, &slug, wt);
+    if !git::git_status(&p.main_root, &["worktree", "remove", "--force", wt]) {
+        ui.error(&format!("git worktree remove refused {slug} — nothing was deleted"));
+        return Err(1);
+    }
+    ui.info(&format!("removed worktree {slug}"));
+    let _ = git::git(&p.main_root, &["worktree", "prune"]);
+    Ok(sessions)
+}
+
 // ── relink / doctor — the `[[file]]` surface (proposal §7) ───────────────────
 // Both go through materialize's probe → plan → (apply | report). ONE code path:
 // `relink` applies the plan, `doctor` reads the same plan as a report, and

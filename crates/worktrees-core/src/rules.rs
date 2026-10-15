@@ -675,7 +675,7 @@ fn relabel(diff: &str, old_path: &str, new_path: &str) -> String {
         .collect()
 }
 
-/// `worktrees rules [status|diff|apply [--push] [--force]] [--json]`.
+/// `worktrees rules [status|diff|apply [--push] [--force] [--review]|review [--review]|land|abandon --yes] [--json]`.
 pub fn cmd_rules(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, rest: &[String]) -> i32 {
     let json = rest.iter().any(|a| a == "--json");
     let has = |f: &str| rest.iter().any(|a| a == f);
@@ -702,7 +702,7 @@ pub fn cmd_rules(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, rest: 
                 if s.pending_on_origin {
                     ui.plain(&format!("  branch '{b}' is waiting to be merged"));
                 } else {
-                    ui.plain(&format!("  branch '{b}' is committed locally — review it (`worktrees new {b}`), push it and open a PR"));
+                    ui.plain(&format!("  branch '{b}' is committed locally — review it (`worktrees rules review`), then `worktrees rules land` or `worktrees rules abandon --yes`"));
                 }
             } else if s.applicable {
                 let rules_todo = [&s.block, &s.skill].iter().any(|f| matches!(f.state, State::Absent | State::Outdated)) || !s.config;
@@ -740,12 +740,21 @@ pub fn cmd_rules(p: &crate::project::Project, ui: &mut dyn crate::ui::Ui, rest: 
                 } else {
                     for n in &o.notes { ui.info(n); }
                 }
+                // A local commit gets its review lane; `--review` also starts
+                // the agent there and then.
+                if o.commit.is_some() && !o.pushed {
+                    return crate::review::cli_lane(p, ui, has("--review"));
+                }
                 0
             }
             Err(e) => { ui.error(&e); 1 }
         },
+        // The lane for a branch that already exists (`--review`: start the agent).
+        "review" => crate::review::cli_lane(p, ui, has("--review")),
+        "land" => crate::review::land(p, ui),
+        "abandon" => crate::review::abandon(p, ui, has("--yes") || has("-y")),
         other => {
-            ui.error(&format!("rules: unknown verb '{other}' (status | diff | apply)"));
+            ui.error(&format!("rules: unknown verb '{other}' (status | diff | apply | review | land | abandon)"));
             1
         }
     }

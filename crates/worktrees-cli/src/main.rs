@@ -40,9 +40,13 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees plan level [inherit|off|full|show <path> [--scope place|main]]  this project's planning
   worktrees plan hook session|prompt    Claude's plan hook (prints nothing unless planning is full)
   worktrees agent-setup [status|fix|link-skills]  CLAUDE.md/AGENTS.md + skills for every agent (--json;
-                                        fix commits locally, --push pushes and opens the PR)
+                                        fix commits locally and opens a review place, --push
+                                        pushes and opens the PR)
   worktrees rules [status|diff|apply]   the worktrees way of working, written into this repo: a managed
-                                        AGENTS.md block + the close-out skill (apply: --push, --force)
+                                        AGENTS.md block + the close-out skill (apply: --push, --force;
+                                        --review starts the review lane's agent)
+  worktrees rules review|land|abandon   the agent-instructions branch: open its review place, apply it
+                                        (merge, or push + PR), or delete it (abandon needs --yes)
   worktrees init                        suggest a .worktrees.toml for this repo (--print, -y)
   worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
