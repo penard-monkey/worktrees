@@ -484,6 +484,41 @@ const mockAgentRepos: Record<string, MockAgentReport> = {
     pending_on_origin: false,
   },
 };
+// The worktrees rules per project (`rules::Status`), keyed like the reports.
+// casa-del-valle has none yet (the apply path); a project not listed reads as
+// current, so the default sheet shows nothing to do.
+type MockRulesFound = { state: string; version: number | null; detail?: string };
+const MOCK_RULES_VERSION = 1;
+const mockRules: Record<string, { block: MockRulesFound; skill: MockRulesFound; config: boolean; blocked: string | null }> = {
+  [CDV_ROOT]: { block: { state: "absent", version: null }, skill: { state: "absent", version: null }, config: false, blocked: null },
+  [WT_ROOT]: { block: { state: "outdated", version: 0 }, skill: { state: "foreign", version: null }, config: true, blocked: null },
+};
+function mockRulesStatus(root: string, repo: MockAgentReport) {
+  const r = mockRules[root] ?? {
+    block: { state: "current", version: MOCK_RULES_VERSION }, skill: { state: "current", version: MOCK_RULES_VERSION }, config: true, blocked: null,
+  };
+  const writable = (f: MockRulesFound) => f.state === "absent" || f.state === "outdated";
+  return {
+    reference: repo.reference, version: MOCK_RULES_VERSION, file: r.blocked ? null : "AGENTS.md",
+    block: r.block, skill: r.skill, config: r.config, blocked: r.blocked,
+    applicable: repo.fixable || (!r.blocked && writable(r.block)) || writable(r.skill) || (!r.config && r.skill.state !== "foreign"),
+    pending: repo.pending, pending_on_origin: repo.pending_on_origin,
+  };
+}
+/** The outcome both mock commits share — the real ones share `publish`. */
+function mockCommitOutcome(root: string, push: boolean) {
+  const r = mockAgentRepos[root] ?? { reference: "origin/main", dirs: [], skills: [], fixable: false, conflicts: false, pending: null, pending_on_origin: false };
+  mockAgentRepos[root] = { ...r, pending: "agent-instructions", pending_on_origin: push };
+  const commit = "3f9a1c2d4e5b6a7f8091a2b3c4d5e6f708192a3b";
+  const notes = ["Committed 3f9a1c2 on branch 'agent-instructions' (off origin/main)."];
+  if (!push) {
+    notes.push("Nothing was pushed. Review it as a place (`worktrees new agent-instructions`), then push it and open a PR — or run again with --push to have worktrees do that.");
+    return { branch: "agent-instructions", base: "origin/main", commit, pushed: false, pr_url: null, left_alone: [], notes };
+  }
+  const url = "https://github.com/demo/casa-del-valle-monorepo/pull/412";
+  notes.push(`Opened ${url} — merge it to finish.`);
+  return { branch: "agent-instructions", base: "origin/main", commit, pushed: true, pr_url: url, left_alone: [], notes };
+}
 const mockUserSkills: { name: string; status: string }[] = [
   { name: "close-out", status: "linked" },
   { name: "find-skills", status: "missing" },
@@ -2825,26 +2860,34 @@ Phase 3: Frontend pane and mock harness
         pending: null,
         pending_on_origin: false,
       };
-      return clone({ repo, user_skills: mockUserSkills });
+      return clone({ repo, user_skills: mockUserSkills, rules: mockRulesStatus(root, repo) });
     }
     case "agent_setup_fix": {
       const root = args.repo as string;
       const r = mockAgentRepos[root];
       emitEvent("places:changed", {});
-      if (r?.pending) throw new Error("a branch named 'agent-instructions' already exists — merge its PR first");
+      if (r?.pending) throw new Error("a branch named 'agent-instructions' already exists — merge it first");
       if (!r?.fixable) {
         return { branch: "agent-instructions", base: "origin/main", commit: null, pushed: false, pr_url: null, left_alone: [],
           notes: ["origin/main already has its agent instructions set up."] };
       }
       // Like the real backend: the default branch does not change until the PR
       // merges, so the report stays `fixable` and only `pending` retires the offer.
-      mockAgentRepos[root] = { ...r, pending: "agent-instructions", pending_on_origin: true };
-      const url = "https://github.com/demo/casa-del-valle-monorepo/pull/412";
-      return {
-        branch: "agent-instructions", base: "origin/main", commit: "3f9a1c2d4e5b6a7f8091a2b3c4d5e6f708192a3b",
-        pushed: true, pr_url: url, left_alone: [],
-        notes: ["Committed 3f9a1c2 on branch 'agent-instructions' (off origin/main).", `Opened ${url} — merge it to finish.`],
-      };
+      // Local unless `push`, like `agentfiles::fix`.
+      return mockCommitOutcome(root, args.push === true);
+    }
+    case "rules_apply": {
+      const root = args.repo as string;
+      const r = mockAgentRepos[root];
+      emitEvent("places:changed", {});
+      if (r?.pending) throw new Error("a branch named 'agent-instructions' already exists — merge it first");
+      const st = mockRulesStatus(root, r ?? { reference: "origin/main", dirs: [], skills: [], fixable: false, conflicts: false, pending: null, pending_on_origin: false });
+      const forced = args.force === true && [st.block, st.skill].some((f) => f.state === "edited");
+      if (!st.applicable && !forced) {
+        return { branch: "agent-instructions", base: "origin/main", commit: null, pushed: false, pr_url: null, left_alone: [],
+          notes: [`origin/main already carries the worktrees rules (v${MOCK_RULES_VERSION}).`] };
+      }
+      return mockCommitOutcome(root, args.push === true);
     }
     case "agent_guidance_status":
       return mockGuidance();

@@ -94,11 +94,15 @@ const count = (h, a) => todoCount(projectTodos(h, a));
   if (!/waiting to merge/.test(rows.find((r) => r.id === "agent-pending")?.label ?? "")) fail("a pushed fix must read as a PR waiting to merge");
   else ok("pending on origin → 'waiting to merge'");
   // A branch that never left the machine has NO PR — never say one is waiting.
+  // And since Fix/Apply commit locally BY DEFAULT, it is the normal result,
+  // not a failed push: worded as a next step, at info, never as an error.
   const local = projectTodos(null, agent({ ...fixable.repo, pending: "agent-instructions", pending_on_origin: false }));
   const lrow = local.find((r) => r.id === "agent-pending");
-  if (!lrow || /waiting to merge/.test(lrow.label) || !/never pushed/.test(lrow.label)) {
-    fail(`local-only pending branch reads "${lrow?.label}" — it must say it was never pushed, not that a PR waits`);
-  } else ok("pending locally only → 'never pushed'");
+  if (!lrow || /waiting to merge/.test(lrow.label) || !/committed locally/.test(lrow.label) || /never pushed|failed/.test(lrow.label)) {
+    fail(`local-only pending branch reads "${lrow?.label}" — it must say it is committed locally (a next step), not that a PR waits or that a push failed`);
+  } else ok("pending locally only → 'committed locally'");
+  if (lrow && lrow.sev !== "info") fail(`local-only pending branch is "${lrow.sev}" — the default result of Fix/Apply is not a warning`);
+  else ok("a local-only pending branch is info, not a warning");
   if (todoCount(local) !== 0) fail("a local-only pending branch must still count 0 (Fix would refuse: the branch exists)");
   else ok("a local-only pending branch counts 0");
 }
@@ -180,6 +184,40 @@ const count = (h, a) => todoCount(projectTodos(h, a));
   } else ok("a clean project has nothing to do");
   if (projectTodos(undefined, undefined).length !== 0) fail("unknown health/agent (not probed yet) must produce nothing");
   else ok("nothing probed yet → nothing to do");
+}
+
+// ── 4b. the worktrees rules suggest, they never count ──────────────────────
+// Opt-in and absent everywhere on day one: a count would badge every project
+// the moment the feature shipped. A row, so the sheet suggests it; never a
+// number. And while `agent-instructions` is pending, the pending row speaks
+// for the branch — Apply would refuse.
+{
+  const found = (state, version = null) => ({ state, version });
+  const rules = (over = {}) => ({
+    reference: "origin/main", version: 1, file: "AGENTS.md", block: found("absent"), skill: found("absent"),
+    config: false, blocked: null, applicable: true, pending: null, pending_on_origin: false, ...over,
+  });
+  const withRules = (r, repo = {}) => ({ ...agent({ dirs: [{ dir: "", kind: "stub" }], ...repo }), rules: r });
+  const absent = projectTodos(null, withRules(rules()));
+  if (!absent.some((t) => t.id === "rules-apply" && t.n === 0 && t.section === "rules")) fail(`absent rules: ${JSON.stringify(absent)} — expected a 0-count rules-apply row`);
+  else ok("absent rules → a suggestion row that counts 0");
+  if (todoCount(absent) !== 0 || needsRepair(absent)) fail("absent rules must not count or offer Repair — every project would be badged");
+  else ok("absent rules add nothing to the count");
+  const old = projectTodos(null, withRules(rules({ block: found("outdated", 0) })));
+  if (!old.some((t) => t.id === "rules-outdated" && t.n === 0)) fail("outdated rules: no 0-count rules-outdated row");
+  else ok("outdated rules → an update row that counts 0");
+  const cur = projectTodos(null, withRules(rules({ block: found("current", 1), skill: found("current", 1), config: true, applicable: false })));
+  if (cur.length !== 0) fail(`current rules produced a to-do: ${JSON.stringify(cur)}`);
+  else ok("current rules → nothing to do");
+  const edited = projectTodos(null, withRules(rules({ block: found("edited", 1), skill: found("foreign"), config: true, applicable: false })));
+  if (edited.length !== 0) fail("hand-edited rules are the user's choice, not a to-do");
+  else ok("hand-edited rules → nothing to do");
+  const blocked = projectTodos(null, withRules(rules({ blocked: "CLAUDE.md and AGENTS.md differ" })));
+  if (blocked.some((t) => t.id === "rules-apply")) fail("a blocked root must not be offered an apply");
+  else ok("a blocked root gets no apply row");
+  const pend = projectTodos(null, withRules(rules({ pending: "agent-instructions" }), { pending: "agent-instructions", pending_on_origin: false }));
+  if (pend.some((t) => t.id.startsWith("rules-"))) fail("pending agent-instructions: a rules row would offer an apply that refuses");
+  else ok("a pending agent-instructions branch suppresses the rules rows");
 }
 
 // ── 5. the surfaces read this module, not their own arithmetic ─────────────

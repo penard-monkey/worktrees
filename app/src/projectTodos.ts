@@ -26,6 +26,11 @@
 // - a doctor that could not RUN. Its count is not a fact (no findings were
 //   measured), so it is a row and a reason to offer Repair, never a number.
 //
+// The worktrees RULES (ADR 0002) are a row with n = 0 even though Apply can
+// clear them: they are opt-in, every project starts without them, and counting
+// them would badge every project the moment this shipped. The row is the
+// per-project suggestion; the number stays what is BROKEN.
+//
 // The USER'S own skills (~/.claude/skills) are machine-wide and deliberately NOT
 // here: a per-project to-do about them would stand under every project at once.
 // They are an after-update offer instead (`offers.ts`, `codex-skills`).
@@ -42,7 +47,10 @@ export type TodoId =
   | "agent-dirs"
   | "agent-skills"
   | "agent-pending"
-  | "agent-diverged";
+  | "agent-diverged"
+  | "rules-apply"
+  | "rules-outdated"
+  | "rules-damaged";
 
 /** What the row's own button does. `null`: the row only points at its section. */
 export type TodoAction = "relink" | "force" | "provision" | "agent-fix" | null;
@@ -52,7 +60,7 @@ export type Todo = {
   label: string;
   action: TodoAction;
   /** The ProjectSheet section that explains it in full. */
-  section: "health" | "agent" | "strays";
+  section: "health" | "agent" | "strays" | "rules";
   /** What this row adds to the project's count. 0 = informational. */
   n: number;
   sev: "error" | "warn" | "info";
@@ -141,15 +149,16 @@ export function projectTodos(
   const repo = agent?.repo;
   if (repo) {
     if (repo.pending) {
-      // `pending` only says the branch EXISTS. Whether there is anything to
-      // wait for depends on where: a push that failed (or no origin, no gh)
-      // leaves a local branch and no PR at all.
+      // `pending` only says the branch EXISTS. On origin it is a PR to merge;
+      // local only is the DEFAULT result of Fix / Apply (they push only when
+      // asked), so it reads as the next step, at info — not as a failed push.
+      // No "Fix" in the noun: Apply rules writes the same branch.
       out.push({
         id: "agent-pending",
         label: repo.pending_on_origin
-          ? `Fix PR waiting to merge (branch ${repo.pending})`
-          : `Fix branch '${repo.pending}' was committed but never pushed — push it, or delete it to redo`,
-        action: null, section: "agent", n: 0, sev: repo.pending_on_origin ? "info" : "warn",
+          ? `PR waiting to merge (branch ${repo.pending})`
+          : `Branch '${repo.pending}' is committed locally — review it as a place, then push it and open a PR`,
+        action: null, section: "agent", n: 0, sev: "info",
       });
     } else if (repo.fixable) {
       const claudeOnly = repo.dirs.filter((d) => d.kind === "claude-only").length;
@@ -162,15 +171,36 @@ export function projectTodos(
           : claudeOnly > 0
             ? `Move ${claudeOnly} CLAUDE.md file${s(claudeOnly)} to AGENTS.md`
             : `Add a CLAUDE.md stub beside ${agentsOnly} AGENTS.md file${s(agentsOnly)}`;
-        out.push({ id: "agent-dirs", label: `${label} (opens a PR)`, action: "agent-fix", section: "agent", n: dirs, sev: "warn" });
+        out.push({ id: "agent-dirs", label: `${label} (on its own branch)`, action: "agent-fix", section: "agent", n: dirs, sev: "warn" });
       }
       if (skills > 0) {
         // Rolled into the SAME Fix PR — the label says so, and the sheet shows
         // the button once, so two rows never read as two pushes.
         out.push({
           id: "agent-skills",
-          label: `Link ${skills} repo skill${s(skills)} for Codex (${dirs > 0 ? "same PR" : "opens a PR"})`,
+          label: `Link ${skills} repo skill${s(skills)} for Codex (${dirs > 0 ? "same commit" : "on its own branch"})`,
           action: "agent-fix", section: "agent", n: skills, sev: "warn",
+        });
+      }
+    }
+    // The rules ride the same branch: while it is pending, the row above
+    // already says what to do next, and Apply would refuse.
+    const rules = agent?.rules;
+    if (rules && !repo.pending && !rules.pending) {
+      if (rules.block.state === "malformed" || rules.skill.state === "malformed") {
+        out.push({
+          id: "rules-damaged", label: "The worktrees rules' markers are damaged — fix them by hand",
+          action: null, section: "rules", n: 0, sev: "warn",
+        });
+      } else if (rules.block.state === "outdated" || rules.skill.state === "outdated") {
+        out.push({
+          id: "rules-outdated", label: `The worktrees rules are from an older worktrees — Apply updates them to v${rules.version}`,
+          action: null, section: "rules", n: 0, sev: "info",
+        });
+      } else if (rules.block.state === "absent" && !rules.blocked) {
+        out.push({
+          id: "rules-apply", label: "Teach every agent here how this repo is worked on — apply the worktrees rules",
+          action: null, section: "rules", n: 0, sev: "info",
         });
       }
     }
