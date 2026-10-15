@@ -343,10 +343,7 @@ pub fn draft_from_screen(screen: &str) -> Option<String> {
     // the shape of a wrapped draft. Reading it would put "No, exit Yes, I trust
     // this folder" on the row as an unsent prompt. (A menu drawn inside a box —
     // the permission prompt — is already immune: its lines start with `│`.)
-    let start = stripped
-        .iter()
-        .enumerate()
-        .rposition(|(i, l)| prompt_body(l).is_some() && i > 0 && is_box_edge(stripped[i - 1].trim()))?;
+    let start = prompt_start(&stripped)?;
     if body_starts_dim(raw[start]) {
         return None;
     }
@@ -376,6 +373,25 @@ pub fn draft_from_screen(screen: &str) -> Option<String> {
         return Some(out);
     }
     Some(text)
+}
+
+/// Whether `screen` shows claude's input box at all — the question
+/// `draft_from_screen` cannot answer, because its `None` means both "an empty
+/// box" and "no box I recognise". A caller about to TYPE into the pane needs
+/// the difference: a selector, a dialog or a layout this reader does not know
+/// is not an empty composer.
+pub fn prompt_box_on_screen(screen: &str) -> bool {
+    let stripped: Vec<String> = screen.lines().map(strip_escapes).collect();
+    prompt_start(&stripped).is_some()
+}
+
+/// The LAST line that is the top row inside claude's input box: a prompt line
+/// whose line above is the box's own edge (see `draft_from_screen`).
+fn prompt_start(stripped: &[String]) -> Option<usize> {
+    stripped
+        .iter()
+        .enumerate()
+        .rposition(|(i, l)| prompt_body(l).is_some() && i > 0 && is_box_edge(stripped[i - 1].trim()))
 }
 
 /// The text after the prompt character, when `line` IS a prompt line.
@@ -777,6 +793,23 @@ mod tests {
     // its colour, the prompt line opens on a `39m` reset, and the one thing
     // that tells claude's SUGGESTION from the user's typing is the `2m` (dim)
     // between the prompt's no-break space and the first character.
+
+    #[test]
+    fn a_prompt_box_is_told_apart_from_a_screen_without_one() {
+        assert!(prompt_box_on_screen("─────\n❯ \n─────\n"));
+        // A real idle claude: titled top rule, status line under the box.
+        assert!(prompt_box_on_screen("\
+✻ Baked for 1m 11s · done 1:42 PM
+─────────────────────────────── Marisol WhatsApp contract discussion ─
+❯\u{a0}
+──────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
+"));
+        assert!(prompt_box_on_screen("─────\n\u{1b}[39m❯\u{a0}\u{1b}[2msuggested\u{1b}[0m\n─────\n"));
+        // The trust selector: a `❯` with no box edge above it.
+        assert!(!prompt_box_on_screen("Do you trust this folder?\n\n❯ No, exit\n  Yes, I trust this folder\n"));
+        assert!(!prompt_box_on_screen("$ ls\nCargo.toml\n$ "));
+    }
 
     #[test]
     fn claudes_own_suggestion_is_not_a_draft() {

@@ -4954,6 +4954,20 @@ function App() {
   }, [sel?.repo, sel?.slug, liveHere.join(","), settings.default_provider, refresh]);
   // With nothing live, `agentSession` is null and this names nobody.
   const planProvider: Harness = selectedAgents?.[activeProvider].up ? activeProvider : liveHere[0] ?? activeProvider;
+  // The Plan tab's "Ask (main)": the orchestrator of the selected place's OWN
+  // project, and the agent live in it. A snapshot from before
+  // `agent_sessions` existed is the default harness on `tmux_session`, as
+  // `selectedAgents` reads it. Null on (main) itself — it has no one to ask.
+  const mainOfSel = selected && !selected.is_main && sel
+    ? ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.is_main) ?? null
+    : null;
+  const mainHarness: Harness | null = mainOfSel
+    ? (mainOfSel.agent_sessions ? liveAgent(mainOfSel) : mainOfSel.tmux_session.up ? HARNESSES[0] : null)
+    : null;
+  const mainSession = mainOfSel && mainHarness
+    ? mainOfSel.agent_sessions?.[mainHarness].name ?? mainOfSel.tmux_session.name
+    : null;
+  const [askingMain, setAskingMain] = useState(false);
   // The status chip's host, declared HERE and not up with `statusOnTile`,
   // because the footer renders under `selected && sel` — and `selected` is a
   // LOOKUP into the workspace, so it is null for the seconds between a restored
@@ -8236,6 +8250,32 @@ function App() {
                       >
                         {/* The Files tab's own rail icon: it says WHERE this goes. */}
                         <Icons.Folder size={13} />
+                      </button>
+                    )}
+                    {planPath && mainOfSel && (
+                      <button
+                        className="ctrl sm"
+                        data-track="dock.plan.ask_main"
+                        disabled={!mainSession || askingMain}
+                        title={mainSession && mainHarness
+                          ? `Put a fixed prompt at (main)'s ${HARNESS_LABEL[mainHarness]} prompt asking it to review this place's progress and update its brief and plan. Switches to (main); nothing is sent until you press Enter there.`
+                          : mainOfSel.tmux_session.up
+                            ? "(main)'s session is up but no agent is running in it — start an agent session in (main) first"
+                            : "(main) has no session — open it first"}
+                        onClick={() => {
+                          if (!mainSession || askingMain) return;
+                          setAskingMain(true);
+                          const repo = sel.repo;
+                          invoke("plan_ask_main", { root: selected.path, session: mainSession, provider: mainHarness })
+                            .then(() => {
+                              setNotice("Prompt pasted into (main) — press Enter there to send it.");
+                              selectSlug(repo, mainOfSel.slug);
+                            })
+                            .catch(fail)
+                            .finally(() => setAskingMain(false));
+                        }}
+                      >
+                        Ask (main)
                       </button>
                     )}
                     <button

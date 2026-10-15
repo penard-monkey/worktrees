@@ -819,8 +819,15 @@ pub fn paste_to_ai(session: &str, ai_word: &str, text: &str) -> Result<(), Strin
     // 21 live sessions to find out why; the next time should be one log line.
     let pane = ai_pane(session, ai_word)
         .ok_or_else(|| format!("no {ai_word} running in session {session} (panes: {})", pane_summary(session)))?;
+    paste_into(&pane, text)
+}
+
+/// `paste_to_ai`'s paste, into a pane the caller already resolved — so a
+/// caller that READ the pane first (to check its composer) pastes into the
+/// same `%id` it read, not into whatever a second lookup finds.
+pub fn paste_into(pane: &PaneId, text: &str) -> Result<(), String> {
     let buf = format!("worktrees-drop-{}", std::process::id());
-    let [set_argv, paste_argv, del_argv] = paste_commands(&buf, &pane, text);
+    let [set_argv, paste_argv, del_argv] = paste_commands(&buf, pane, text);
     let set = tmux(&set_argv).map_err(|e| e.to_string())?;
     if !set.status.success() {
         return Err(String::from_utf8_lossy(&set.stderr).trim().to_string());

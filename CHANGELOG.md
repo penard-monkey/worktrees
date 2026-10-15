@@ -46,6 +46,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `config.toml` (`max_live_agents`, `max_live = { claude = 12 }`,
   `min_free_memory_pct`, `max_swap_used_pct`; 0 turns one off); a repository
   cannot set them.
+- **"Ask (main)" in the Plan tab.** On a place with a plan or a brief, the
+  dock header's new button puts a fixed prompt at `(main)`'s agent asking the
+  orchestrator to read where this place actually is and bring its own plan
+  and this place's brief up to date, then tell the place's agent what
+  changed. The app switches to `(main)` and nothing is sent until you press
+  Enter there. It refuses rather than paste when `(main)` already has unsent
+  text at its prompt or is asking you something, and says so when `(main)`
+  has no agent running.
 
 ### Changed
 - **`worktrees agent-setup fix` commits locally and pushes nothing unless you

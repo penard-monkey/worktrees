@@ -5672,6 +5672,117 @@ async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), St
     Ok(())
 }
 
+/// The Plan tab's "Ask (main)": paste `ops::plan_update_prompt(<slug>)` into
+/// `(main)`'s agent, asking the orchestrator to update what it steers for this
+/// place, and leave it there for the user to send.
+///
+/// The same contract as `plan_prompt` — fixed text, a paste with no Enter, an
+/// honest error when no agent is there — with two differences. The SLUG is
+/// ours: it is derived from `root` (guarded, and required to be a direct child
+/// of the project's `.worktrees/`), so `(main)` itself has nothing to ask and
+/// nothing the frontend typed reaches the prompt. And the composer being
+/// pasted into is one the user is NOT looking at, so it is read first: unsent
+/// text there would have the prompt glued onto it, and a modal (`waiting`)
+/// would take the paste as its answer. Both refuse rather than guess.
+///
+/// `session` and `provider` are (main)'s, from `ls` like `plan_prompt`'s:
+/// (main) may sit on an adopted session whose name is not the canonical one.
+#[tauri::command]
+async fn plan_ask_main(app: AppHandle, root: String, session: String, provider: Option<String>) -> Result<(), String> {
+    let dir = guard_under_projects(&app, &root)?;
+    let project = Project::discover(&dir).map_err(|e| e.to_string())?;
+    let canon = |p: &Path| std::fs::canonicalize(p).ok();
+    let place = canon(&dir).ok_or_else(|| format!("not a directory: {root}"))?;
+    if place.parent().map(Path::to_path_buf) != canon(Path::new(&project.wt_root)) {
+        return Err("only a place under .worktrees/ can ask (main) about its plan".into());
+    }
+    let slug = place.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let prompt = ops::plan_update_prompt(&slug)
+        .ok_or_else(|| format!("refusing to put the place name {slug:?} in a prompt — it is not a plain directory name"))?;
+    let ai_word = provider.as_deref().unwrap_or(harness::default_adapter().provider().id);
+    let Some(adapter) = harness::by_id(ai_word) else { return Err("unknown agent provider".into()) };
+    let prov = adapter.provider();
+    let pane = tmux::ai_pane(&session, prov.match_word)
+        .ok_or_else(|| format!("no {} running in (main)'s session {session}", prov.match_word))?;
+    let plain = tmux::capture(&pane).ok_or_else(|| format!("could not read (main)'s screen in {session}"))?;
+    let styled = if prov.id == provider::CLAUDE.id {
+        let o = tmux::tmux(&["capture-pane", "-e", "-p", "-t", pane.as_str()]).map_err(|e| e.to_string())?;
+        if !o.status.success() {
+            return Err(format!("could not read (main)'s screen in {session}"));
+        }
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    } else {
+        String::new()
+    };
+    // Keyed on the PANE being pasted into (the probe's `tmux` carries its
+    // `%id`), or on the peer name pane-0 claude is launched with — never on
+    // the repo-root cwd, which a claude in some other terminal shares.
+    let claude_waiting = prov.id == provider::CLAUDE.id
+        && worktrees_core::agent::live_probes().iter().any(|p| {
+            let here = p.tmux.as_deref().and_then(worktrees_core::agent::pane_id) == Some(pane.as_str())
+                || p.name.as_deref() == Some(session.as_str());
+            here && worktrees_core::agent::effective_state(p) == "waiting"
+        });
+    let pi_screen = (prov.id == provider::PI.id).then(|| worktrees_core::pi::screen_of(&session));
+    if let Some(why) = ask_main_refusal(prov.id, &plain, &styled, claude_waiting, pi_screen) {
+        return Err(why);
+    }
+    // The pane that was read, not a second lookup that could find another.
+    tmux::paste_into(&pane, &prompt)?;
+    applog("info", &format!("plan_ask_main: pasted into {session} for {slug}"));
+    Ok(())
+}
+
+/// Why (main)'s composer cannot take a paste right now, or `None`. Pure, so the
+/// rule is testable on captured screens: `plain` is `capture-pane -p`, `styled`
+/// is `-e` (claude only — its own suggestion is drawn DIM, and only the styled
+/// capture tells it from typing), `pi` is pi's screen read when (main) runs pi.
+fn ask_main_refusal(
+    provider_id: &str,
+    plain: &str,
+    styled: &str,
+    claude_waiting: bool,
+    pi: Option<Option<worktrees_core::pi::PiScreen>>,
+) -> Option<String> {
+    const DRAFT: &str = "(main) has unsent text at its prompt — send or clear it there first, then ask again.";
+    const MODAL: &str = "(main) is asking you something — answer it there first, then ask again.";
+    // An input box this reader does not recognise is NOT an empty one: a
+    // selector, a dialog or a new layout would take the paste as input.
+    const UNREAD: &str = "couldn't read (main)'s prompt — is a menu or dialog open there?";
+    if provider_id == provider::CLAUDE.id {
+        if claude_waiting {
+            return Some(MODAL.into());
+        }
+        if !worktrees_core::agent::prompt_box_on_screen(styled) {
+            return Some(UNREAD.into());
+        }
+        if worktrees_core::agent::draft_from_screen(styled).is_some() {
+            return Some(DRAFT.into());
+        }
+    } else if provider_id == provider::CODEX.id {
+        use worktrees_core::codex::Composer;
+        if worktrees_core::codex::waiting_on_screen(plain) {
+            return Some(MODAL.into());
+        }
+        match worktrees_core::codex::composer_on_screen(plain) {
+            None => return Some(UNREAD.into()),
+            Some(Composer::Text(_)) => return Some(DRAFT.into()),
+            Some(Composer::Empty) => {}
+        }
+    } else if provider_id == provider::PI.id {
+        use worktrees_core::pi::PiScreen;
+        match pi.flatten() {
+            Some(PiScreen::TrustModal) => {
+                return Some("pi in (main) is asking whether to trust this project — answer that there first.".into())
+            }
+            Some(PiScreen::Gone) => return Some("pi is not running in (main)".into()),
+            None => return Some("could not read pi's screen in (main)".into()),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The staleness facts, as the frontend already holds them in `Place`.
 ///
 /// Passed in rather than recomputed. Every field is in the `Place` the dock is
@@ -8699,6 +8810,7 @@ pub fn run() {
             list_docs,
             place_plan,
             plan_prompt,
+            plan_ask_main,
             open_docs_viewer,
             read_file_base64,
             write_file,
@@ -8786,6 +8898,41 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+
+    /// "Ask (main)" pastes into a composer the user is not looking at, so the
+    /// paste is refused where it would glue onto typing or answer a modal —
+    /// and goes through on an empty prompt, for each provider that has a
+    /// reader for its composer.
+    #[test]
+    fn ask_main_refuses_a_draft_or_a_modal_and_takes_an_empty_prompt() {
+        use super::ask_main_refusal;
+        use worktrees_core::pi::PiScreen;
+        let empty = "─────────\n❯ \n─────────\n  ⏵⏵ auto mode on\n";
+        let typed = "─────────\n❯ half a thought\n─────────\n  ⏵⏵ auto mode on\n";
+        assert_eq!(ask_main_refusal("claude", empty, empty, false, None), None);
+        assert!(ask_main_refusal("claude", typed, typed, false, None).unwrap().contains("unsent text"));
+        assert!(ask_main_refusal("claude", empty, empty, true, None).unwrap().contains("asking you"));
+        // Claude's own DIM suggestion is not typing — only the `-e` capture
+        // can tell, so plain and styled differ here on purpose.
+        let sugg_plain = "─────\n❯\u{a0}suggested\n─────\n";
+        let sugg_styled = "─────\n\u{1b}[2m❯\u{a0}suggested\u{1b}[0m\n─────\n";
+        assert_eq!(ask_main_refusal("claude", sugg_plain, sugg_styled, false, None), None);
+        // No input box at all (a selector, the trust prompt) is not "empty".
+        let selector = "Do you trust this folder?\n\n❯ No, exit\n  Yes, I trust this folder\n";
+        assert!(ask_main_refusal("claude", selector, selector, false, None).unwrap().contains("couldn't read"));
+
+        let c_empty = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/empty.txt");
+        let c_typed = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/typed.txt");
+        assert_eq!(ask_main_refusal("codex", c_empty, "", false, None), None);
+        assert!(ask_main_refusal("codex", c_typed, "", false, None).unwrap().contains("unsent text"));
+        assert!(ask_main_refusal("codex", "not a codex screen", "", false, None).unwrap().contains("couldn't read"));
+        let c_modal = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/probe-approval.txt");
+        assert!(ask_main_refusal("codex", c_modal, "", false, None).unwrap().contains("asking you"));
+
+        assert_eq!(ask_main_refusal("pi", "", "", false, Some(Some(PiScreen::Other))), None);
+        assert!(ask_main_refusal("pi", "", "", false, Some(Some(PiScreen::TrustModal))).is_some());
+        assert!(ask_main_refusal("pi", "", "", false, Some(None)).is_some());
+    }
     /// Two callers that both force (`max_age 0`), the second arriving while the
     /// first is mid-fetch, spend ONE fetch: the queued one finds a conclusion
     /// reached after it asked. A start-stamped conclusion predates it and the
