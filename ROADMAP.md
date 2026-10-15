@@ -29,6 +29,7 @@ this repo's settings in `.claude/close-out.md`).
   the lane opens and its agent explains; say "apply" (no remote: main
   fast-forwards and the session ends last); repeat and say "abandon"; and with an
   origin, land → PR → merge → To do "Remove the place".
+  _From: [2026-10-15 rules-review-lane](docs/sessions/2026-10-15-rules-review-lane/summary.md)_
 
 - **`ops::write_brief` writes through a TRACKED `.planning` symlink.**
   `std::fs::write(wt/.planning/brief.md)` follows a `.planning -> elsewhere`
@@ -37,7 +38,15 @@ this repo's settings in `.claude/close-out.md`).
   below), but #502 makes the write automatic on Apply / Fix from the app.
   Fix shape: lstat `.planning` and refuse (or write beside it) when it is a
   link, the same constant-path gate the docs walk got.
-  _From: #502 review (fable, 2026-10-15)_
+  _From: [2026-10-15 rules-review-lane](docs/sessions/2026-10-15-rules-review-lane/summary.md)_
+
+- **`a_real_size_change_still_reaches_the_shell` (app pty test) flaked once.**
+  It failed in one full `cargo test -p app --lib` run with "the trap shell never
+  came up" (lib.rs ~10608) and then passed on rerun. It spawns a real shell on a
+  pty and waits on a deadline, so it is probably the same scheduler-stall family
+  as `proc_cwd_follows_a_live_shell_into_a_new_directory` below. Widen the
+  deadline or poll for readiness instead of a fixed wait.
+  _From: [2026-10-15 rules-review-lane](docs/sessions/2026-10-15-rules-review-lane/summary.md)_
 
 - **Drop AGENTS.md's "personal copy outranks" paragraph.** The global
   `~/.claude/skills/close-out` is retired (claude-skills #1, link removed by
