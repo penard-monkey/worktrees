@@ -201,11 +201,29 @@ const count = (h, a) => todoCount(projectTodos(h, a));
   const absent = projectTodos(null, withRules(rules()));
   if (!absent.some((t) => t.id === "rules-apply" && t.n === 0 && t.section === "rules")) fail(`absent rules: ${JSON.stringify(absent)} — expected a 0-count rules-apply row`);
   else ok("absent rules → a suggestion row that counts 0");
-  if (todoCount(absent) !== 0 || needsRepair(absent)) fail("absent rules must not count or offer Repair — every project would be badged");
+  if (todoCount(absent) !== 0) fail("absent rules must not count — every project would be badged");
   else ok("absent rules add nothing to the count");
+  // …but they do put "Repair / upgrade…" in the project menu (no number):
+  // that is where Apply lives, and a row nobody can reach is no suggestion.
+  if (!needsRepair(absent)) fail("absent rules must offer Repair / upgrade (uncounted) — the menu is how Apply is reached");
+  else ok("absent rules offer Repair, with no count");
   const old = projectTodos(null, withRules(rules({ block: found("outdated", 0) })));
   if (!old.some((t) => t.id === "rules-outdated" && t.n === 0)) fail("outdated rules: no 0-count rules-outdated row");
   else ok("outdated rules → an update row that counts 0");
+  if (todoCount(old) !== 0 || !needsRepair(old)) fail("outdated rules must offer Repair / upgrade without counting");
+  else ok("outdated rules offer Repair, with no count");
+  // A blocked root's block is judged but never written (core `applicable`, the
+  // sheet's `rulesTodo`): with the skill current, Apply is disabled, so an
+  // outdated block there must not send you to it.
+  const blockedOld = projectTodos(null, withRules(rules({ blocked: "CLAUDE.md and AGENTS.md differ", block: found("outdated", 0), skill: found("current", 1), config: true, applicable: false })));
+  if (blockedOld.some((t) => t.id === "rules-outdated") || needsRepair(blockedOld)) fail(`blocked root + outdated block: ${JSON.stringify(blockedOld)} — Repair would land on a disabled Apply`);
+  else ok("a blocked root's outdated block offers no update row and no Repair");
+  const blockedSkill = projectTodos(null, withRules(rules({ blocked: "CLAUDE.md and AGENTS.md differ", block: found("outdated", 0), skill: found("outdated", 0), config: true })));
+  if (!blockedSkill.some((t) => t.id === "rules-outdated") || !needsRepair(blockedSkill)) fail("blocked root + outdated SKILL: Apply can still update the skill — the row and Repair must stay");
+  else ok("a blocked root with an outdated skill still offers the update");
+  const damaged = projectTodos(null, withRules(rules({ block: found("malformed") })));
+  if (!damaged.some((t) => t.id === "rules-damaged") || needsRepair(damaged)) fail("damaged markers are fixed by hand — they must not surface Repair");
+  else ok("damaged rules stay manual: no Repair");
   const cur = projectTodos(null, withRules(rules({ block: found("current", 1), skill: found("current", 1), config: true, applicable: false })));
   if (cur.length !== 0) fail(`current rules produced a to-do: ${JSON.stringify(cur)}`);
   else ok("current rules → nothing to do");
@@ -218,6 +236,8 @@ const count = (h, a) => todoCount(projectTodos(h, a));
   const pend = projectTodos(null, withRules(rules({ pending: "agent-instructions" }), { pending: "agent-instructions", pending_on_origin: false }));
   if (pend.some((t) => t.id.startsWith("rules-"))) fail("pending agent-instructions: a rules row would offer an apply that refuses");
   else ok("a pending agent-instructions branch suppresses the rules rows");
+  if (needsRepair(pend)) fail("pending agent-instructions: Repair would open on an Apply that refuses");
+  else ok("a pending agent-instructions branch does not surface Repair");
 }
 
 // ── 5. the surfaces read this module, not their own arithmetic ─────────────

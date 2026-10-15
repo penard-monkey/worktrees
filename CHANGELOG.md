@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **A project the worktrees rules can be applied to (or updated in) now shows
+  "Repair / upgrade…" in its right-click menu**, with no number beside it, so
+  Apply is one menu item away instead of buried in Project settings. The rules
+  stay opt-in: they never add to the project's count or badge. Damaged markers
+  (fixed by hand), an outdated block in a root worktrees cannot write to, and a
+  pending `agent-instructions` branch do not offer it.
+
 ## [0.42.0] - 2026-10-15
 
 ### Added
