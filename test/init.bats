@@ -123,6 +123,35 @@ wt_stdout_to() {
   [ ! -e "$REPO/.worktrees.toml" ]
 }
 
+@test "init: -y writes the documented template even with nothing to declare" {
+  # The app's "Write .worktrees.toml" button is this path, and the repo it
+  # exists for is exactly this one: no gitignored credential, no ports, no
+  # compose. It used to exit 0 having written nothing and report success, so
+  # the button greyed out, came back, and the file never appeared.
+  rm "$REPO/.env"
+  run_wt init -y
+  [ "$status" -eq 0 ]
+  [ -e "$REPO/.worktrees.toml" ]
+  # `grep -qF <<<`, not `[[ ]]`: a standalone `[[ ]]` does NOT abort a bats
+  # test, so a string assertion written that way only fails when it happens to
+  # be the test's last line. See the ROADMAP item.
+  grep -qF "wrote" <<<"$output"
+  # All-comments, and still a file worktrees can read back — the round trip is
+  # the point of writing a template rather than prose.
+  run_wt doctor --config-only
+  [ "$status" -eq 0 ]
+}
+
+@test "init: with nothing to declare, the plain run names the way to get one" {
+  # Being told "nothing to configure" while wanting the template anyway was a
+  # dead end outside `--print`.
+  rm "$REPO/.env"
+  run_wt init
+  [ "$status" -eq 0 ]
+  grep -qF "worktrees init -y" <<<"$output"
+  [ ! -e "$REPO/.worktrees.toml" ]
+}
+
 @test "init: a TRACKED .env is not a candidate — three questions, not one" {
   # present + named like a credential, but committed: linking it would be
   # pointless, and it is not the silent-failure class this file is for.

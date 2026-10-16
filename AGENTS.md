@@ -193,6 +193,21 @@ pattern-substitution REPLACEMENT keeps its quote characters there —
 Homebrew bash 5 and fails in CI on one OS only. Use `sed` for quote surgery, and
 reproduce with a dir holding `bash -> /bin/bash` first on PATH for the bats run.
 
+**A standalone `[[ ]]` does NOT fail a bats test — `[ ]` does.** Measured on
+bats 1.12.0 here: a false `[ 1 -eq 2 ]` in the middle of a test aborts it, and
+a false `[[ "$output" == *"NOPE"* ]]` in the same position passes. Only a
+`[[ ]]` that happens to be the test's LAST line decides anything, because then
+its status is the body's. **572 of this suite's 755 `[[ ]]` assertions are not
+the last line**, so they currently assert nothing — every one of them is a
+string check on `$output`, which is exactly what the suite leans on. The tell
+is brutal: such a test passes identically with the feature deleted, so "the
+bats suite is green" says less than it looks. Write string assertions as
+`grep -qF "needle" <<<"$output"` (a simple command, so errexit sees it; a
+herestring, so there is no pipeline and no SIGPIPE games), or load the
+`bats-assert` submodule that is already vendored at `test/lib/bats-assert` and
+never wired up. Found while adding a test that passed before the fix existed;
+see ROADMAP.
+
 **Killing a bats run writes a `not ok` into its log.** A `pkill` (or a branch
 switch under a running suite) fails the in-flight test inside `common_setup`
 and prints `bats warning: Executed N instead of expected 340 tests`. A later
