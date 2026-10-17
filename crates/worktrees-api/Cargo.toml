@@ -1,0 +1,15 @@
+[package]
+name = "worktrees-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The command layer over worktrees-core: what the Tauri app and `worktrees serve` both call."
+
+[dependencies]
+worktrees-core = { path = "../worktrees-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Deliberately NO tauri: this crate exists so the command layer can be called
+# by something that is not a window. A `tauri` dependency here would re-create
+# the coupling the extraction removes, and `cargo tree -p worktrees-api` is the
+# check. NO tokio/axum either — the transport belongs to the caller, not here.
