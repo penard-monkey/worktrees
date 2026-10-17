@@ -20,6 +20,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # The engine, in-process (no subprocess, no WORKTREES_BIN). See MIGRATION.md Inc 4.
 worktrees-core = { workspace = true }
+# The command layer. Handler bodies live here so `worktrees serve` can call the
+# same commands without a window; this crate keeps the Tauri wrappers.
+worktrees-api = { workspace = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"

@@ -6,7 +6,7 @@ license.workspace = true
 description = "The command layer over worktrees-core: what the Tauri app and `worktrees serve` both call."
 
 [dependencies]
-worktrees-core = { path = "../worktrees-core" }
+worktrees-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Deliberately NO tauri: this crate exists so the command layer can be called

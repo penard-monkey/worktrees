@@ -68,6 +68,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tokio",
+ "worktrees-api",
  "worktrees-core",
 ]
 

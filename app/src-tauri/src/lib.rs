@@ -20,6 +20,8 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use worktrees_core::ui::CaptureUi;
 use worktrees_core::{git, harness, mcpsetup, mention, ops, provider, store, sync, sysclock, tmux, Project, Ui};
+// Pure helper, shared with the extracted command layer so both answer alike.
+use worktrees_api::util::fmt_utc;
 
 // The documentation viewer: one supervised child, N places, and a port. Its own
 // file because it is the only part of this backend that can hand a document to
@@ -35,20 +37,36 @@ mod winstate;
 use worktrees_core::codex_usage;
 
 // ── app log ──────────────────────────────────────────────────────────────────
-// Plain append-only file at the platform's log location (macOS: ~/Library/Logs/
-// <identifier>/app.log — Console.app finds it). Deliberately AppHandle-free so
-// the panic hook can use it. Every op failure, frontend error, and panic lands
-// here; Settings → Logs opens the folder / tails it.
+// The sink behind `worktrees_api::log`: a plain append-only file at the
+// platform's log location (macOS: ~/Library/Logs/<identifier>/app.log —
+// Console.app finds it). Deliberately AppHandle-free so the panic hook can use
+// it. Every op failure, frontend error, and panic lands here; Settings → Logs
+// opens the folder / tails it.
 
+/// The identifier to log under when nothing has said otherwise — what a
+/// `tauri build` bundle carries.
 const APP_IDENT: &str = "net.casadelvalle.worktrees";
+
+/// The identifier this PROCESS is actually running as, which is not always
+/// `APP_IDENT`: `sandbox.sh --app` passes
+/// `--config '{"identifier":"net.casadelvalle.worktrees.sbx"}'`, and while the
+/// log read a `const` instead, every sandbox wrote into the REAL app's log —
+/// the gap AGENTS.md records under `sandbox.sh`. Resolved once at startup from
+/// the live config. A `OnceLock` and not a parameter because the panic hook
+/// has no handle to pass one.
+static IDENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn ident() -> &'static str {
+    IDENT.get().map(String::as_str).unwrap_or(APP_IDENT)
+}
 
 fn log_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     if cfg!(target_os = "macos") {
-        PathBuf::from(home).join("Library/Logs").join(APP_IDENT)
+        PathBuf::from(home).join("Library/Logs").join(ident())
     } else {
         // XDG-ish fallback (linux dev)
-        PathBuf::from(home).join(".local/share").join(APP_IDENT).join("logs")
+        PathBuf::from(home).join(".local/share").join(ident()).join("logs")
     }
 }
 
@@ -56,179 +74,112 @@ fn log_file() -> PathBuf {
     log_dir().join("app.log")
 }
 
-/// epoch → "YYYY-MM-DD HH:MM:SS" UTC (civil-from-days; avoids a chrono dep).
-fn fmt_utc(epoch: i64) -> String {
-    let (days, secs) = (epoch.div_euclid(86_400), epoch.rem_euclid(86_400));
-    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    // Howard Hinnant's civil_from_days
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mth <= 2 { y + 1 } else { y };
-    format!("{y:04}-{mth:02}-{d:02} {h:02}:{m:02}:{s:02}")
+/// The app's log sink. `worktrees_api::log::install` takes one of these at
+/// startup, and from then on every `crate::log::log` in the command layer —
+/// and `applog` below — lands in this file.
+struct AppLog;
+
+impl worktrees_api::log::LogSink for AppLog {
+    fn log(&self, level: &str, msg: &str) {
+        let dir = log_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let path = log_file();
+        // single-slot rotation at ~1MB so the log can't grow unbounded
+        if std::fs::metadata(&path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+            let _ = std::fs::rename(&path, dir.join("app.log.1"));
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let ts = fmt_utc(sysclock::now_epoch());
+            let _ = writeln!(f, "{ts}Z [{level}] {msg}");
+        }
+    }
+
+    fn location(&self) -> Option<(PathBuf, PathBuf)> {
+        Some((log_dir(), log_file()))
+    }
 }
 
+/// Unchanged for its ~150 call sites, and now one line: the log moved to
+/// `worktrees_api::log` so that handlers extracted out of this file keep
+/// logging without carrying a handle for it.
 fn applog(level: &str, msg: &str) {
-    let dir = log_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let path = log_file();
-    // single-slot rotation at ~1MB so the log can't grow unbounded
-    if std::fs::metadata(&path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
-        let _ = std::fs::rename(&path, dir.join("app.log.1"));
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let ts = fmt_utc(sysclock::now_epoch());
-        let _ = writeln!(f, "{ts}Z [{level}] {msg}");
-    }
-}
-
-#[derive(Serialize)]
-struct LogInfo {
-    dir: String,
-    file: String,
+    worktrees_api::log::log(level, msg);
 }
 
 #[tauri::command]
-async fn log_info() -> Result<LogInfo, String> {
-    Ok(LogInfo { dir: log_dir().to_string_lossy().into(), file: log_file().to_string_lossy().into() })
+async fn log_info() -> Result<worktrees_api::meta::LogInfo, String> {
+    Ok(worktrees_api::meta::log_info())
 }
 
-/// Frontend errors land in the same file, tagged `ui:`.
 #[tauri::command]
 async fn log_event(level: String, msg: String) -> Result<(), String> {
-    let lv = match level.as_str() {
-        "error" | "warn" | "info" => level.as_str(),
-        _ => "info",
-    };
-    let mut m = msg;
-    m.truncate(4000);
-    applog(lv, &format!("ui: {m}"));
+    worktrees_api::meta::log_event(&level, msg);
     Ok(())
 }
 
-/// The CHANGELOG ships inside the binary — the "What's new" sheet renders the
-/// sections between the last-seen and current versions with zero network.
-#[derive(Serialize)]
-struct ChangelogInfo {
-    version: String,
-    changelog: String,
-}
-
 #[tauri::command]
-async fn get_changelog() -> Result<ChangelogInfo, String> {
-    Ok(ChangelogInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        changelog: include_str!("../../../CHANGELOG.md").to_string(),
-    })
+async fn get_changelog() -> Result<worktrees_api::meta::ChangelogInfo, String> {
+    Ok(worktrees_api::meta::get_changelog())
 }
 
 #[tauri::command]
 async fn log_tail(lines: Option<usize>) -> Result<String, String> {
-    let n = lines.unwrap_or(200).min(2000);
-    let text = std::fs::read_to_string(log_file()).unwrap_or_default();
-    let all: Vec<&str> = text.lines().collect();
-    let start = all.len().saturating_sub(n);
-    Ok(all[start..].join("\n"))
+    Ok(worktrees_api::meta::log_tail(lines))
 }
 
 // ── AI profiles + the skill store ────────────────────────────────────────────
-//
-// Thin wrappers: core owns profiles.json and the skill store (the CLI reads the
-// same files), so these must never keep their own copy of that state.
+// Bodies in `worktrees_api::profiles`.
 
 #[tauri::command]
 async fn profiles_info(repo: String) -> Result<serde_json::Value, String> {
-    // Filesystem probes per profile (`ever_launched`) live here rather than in
-    // `snapshot`, because this is called on sheet-open and that is on the 3s poll.
-    serde_json::to_value(worktrees_core::profile::info_for(&repo)).map_err(|e| e.to_string())
+    worktrees_api::profiles::profiles_info(repo)
 }
 
 #[tauri::command]
 async fn save_profile(profile: serde_json::Value) -> Result<String, String> {
-    let p: worktrees_core::profile::Profile =
-        serde_json::from_value(profile).map_err(|e| format!("invalid profile: {e}"))?;
-    worktrees_core::profile::save(p).inspect_err(|e| applog("error", &format!("save_profile: {e}")))
+    worktrees_api::profiles::save_profile(profile)
 }
 
 #[tauri::command]
 async fn new_profile_id(name: String) -> Result<String, String> {
-    let taken: Vec<String> = worktrees_core::profile::read_lenient().profiles.keys().cloned().collect();
-    Ok(worktrees_core::profile::new_id_from(&name, &taken))
-}
-
-/// What deleting a profile actually costs, reported rather than done silently.
-#[derive(Serialize)]
-struct ProfileRemoval {
-    /// The materialized dir is LEFT ON DISK — it holds the session transcripts.
-    dir: Option<String>,
-    /// The keychain item's service name, when it was recorded — so the message
-    /// can name what to look for instead of sending the user hunting.
-    keychain_service: Option<String>,
-    /// A keychain item may remain. worktrees never touches credentials (that is
-    /// the invariant that made this whole feature safe), so it cannot delete one
-    /// either — the UI tells the user where it is instead of pretending.
-    keychain_hint: bool,
+    worktrees_api::profiles::new_profile_id(name)
 }
 
 #[tauri::command]
-async fn delete_profile(id: String) -> Result<ProfileRemoval, String> {
-    let dir = worktrees_core::profile::profile_dir(&id).map(|d| d.to_string_lossy().into_owned());
-    let launched = worktrees_core::profile::ever_launched(&id);
-    let keychain_service = worktrees_core::profile::remove(&id)
-        .inspect_err(|e| applog("error", &format!("delete_profile: {e}")))?;
-    Ok(ProfileRemoval { dir, keychain_service, keychain_hint: launched })
+async fn delete_profile(id: String) -> Result<worktrees_api::profiles::ProfileRemoval, String> {
+    worktrees_api::profiles::delete_profile(id)
 }
 
 #[tauri::command]
 async fn set_project_profile(repo: String, id: Option<String>) -> Result<(), String> {
-    worktrees_core::profile::assign(&repo, id.as_deref())
-        .inspect_err(|e| applog("error", &format!("set_project_profile: {e}")))
+    worktrees_api::profiles::set_project_profile(repo, id)
 }
 
 #[tauri::command]
 async fn set_default_profile(id: Option<String>) -> Result<(), String> {
-    worktrees_core::profile::set_default(id.as_deref())
-        .inspect_err(|e| applog("error", &format!("set_default_profile: {e}")))
+    worktrees_api::profiles::set_default_profile(id)
 }
 
 #[tauri::command]
 async fn skills_list() -> Result<serde_json::Value, String> {
-    serde_json::to_value(worktrees_core::skillstore::list()).map_err(|e| e.to_string())
+    worktrees_api::profiles::skills_list()
 }
 
-/// Read a candidate skill directory WITHOUT installing it — the review step.
 #[tauri::command]
 async fn skill_inspect(path: String) -> Result<serde_json::Value, String> {
-    let i = worktrees_core::skillstore::inspect(Path::new(&path))?;
-    Ok(serde_json::json!({
-        "name": i.name, "description": i.description,
-        "capabilities": i.capabilities, "files": i.files, "bytes": i.bytes,
-        "skill_md": i.skill_md,
-    }))
+    worktrees_api::profiles::skill_inspect(path)
 }
 
 #[tauri::command]
 async fn skill_install_local(path: String) -> Result<serde_json::Value, String> {
-    let e = worktrees_core::skillstore::install_local(Path::new(&path))
-        .inspect_err(|e| applog("error", &format!("skill_install_local: {e}")))?;
-    serde_json::to_value(e).map_err(|e| e.to_string())
+    worktrees_api::profiles::skill_install_local(path)
 }
 
-/// Clone, inspect, discard. Installs nothing — see `skill_install_git`.
 #[tauri::command]
 async fn skill_preview_git(url: String, rev: Option<String>) -> Result<serde_json::Value, String> {
-    let p = worktrees_core::skillstore::preview_git(&url, rev.as_deref().unwrap_or(""))
-        .inspect_err(|e| applog("warn", &format!("skill_preview_git: {e}")))?;
-    serde_json::to_value(p).map_err(|e| e.to_string())
+    worktrees_api::profiles::skill_preview_git(url, rev)
 }
 
-/// Install at the sha the user reviewed. Refuses if the branch moved.
 #[tauri::command]
 async fn skill_install_git(
     url: String,
@@ -236,20 +187,12 @@ async fn skill_install_git(
     sha: String,
     name: String,
 ) -> Result<serde_json::Value, String> {
-    let e = worktrees_core::skillstore::install_git_pinned(
-        &url,
-        rev.as_deref().unwrap_or(""),
-        &sha,
-        &name,
-    )
-    .inspect_err(|e| applog("error", &format!("skill_install_git: {e}")))?;
-    serde_json::to_value(e).map_err(|e| e.to_string())
+    worktrees_api::profiles::skill_install_git(url, rev, sha, name)
 }
 
 #[tauri::command]
 async fn skill_remove(name: String) -> Result<Vec<String>, String> {
-    worktrees_core::skillstore::remove(&name)
-        .inspect_err(|e| applog("error", &format!("skill_remove: {e}")))
+    worktrees_api::profiles::skill_remove(name)
 }
 
 // ── state: core-derived places + declared overlay + reconciled lifecycle ─────
@@ -8410,6 +8353,10 @@ fn fixup_gui_locale() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // FIRST: the app's log sink, before anything can want to log. `applog`,
+    // the panic hook below, and every handler now extracted into
+    // `worktrees-api` all route through it.
+    worktrees_api::log::install(std::sync::Arc::new(AppLog));
     // panics land in the log too (chained: the default stderr hook still runs)
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -8444,6 +8391,13 @@ pub fn run() {
             // rather than as a reason to fail. A per-module sink would make
             // this a list to keep in step with every reader core gains.
             worktrees_core::logsink::install(|level, msg| applog(level, msg));
+            // The identifier this process is really running as. `sandbox.sh
+            // --app` overrides it via `--config`, and `log_dir()` reads this
+            // rather than the `APP_IDENT` const so a sandbox stops writing
+            // into the real app's log. Lines emitted ABOVE this point (the
+            // startup line) still land under the default identifier — this is
+            // the earliest an app handle exists to ask.
+            let _ = IDENT.set(_app.config().identifier.clone());
             Ok(())
         })
         .manage(Terminals::default())

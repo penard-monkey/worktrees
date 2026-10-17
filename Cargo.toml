@@ -24,3 +24,4 @@ toml = { version = "1", default-features = false, features = ["parse", "serde"] 
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 worktrees-core = { path = "crates/worktrees-core" }
+worktrees-api = { path = "crates/worktrees-api" }

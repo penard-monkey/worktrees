@@ -24,11 +24,13 @@
 //! Two deviations from the plan's sketch, both found by reading the code
 //! rather than the design:
 //!
-//! - The plan wrote `Ctx { config_dir, events }`. `import_app_projects` needs
-//!   `applog` as well, and so will every handler that reports a background
-//!   failure, so the seam carries logging too. One trait with both, rather
-//!   than two traits, because the app and the server each implement all of it
-//!   or none of it.
+//! - The plan wrote `Ctx { config_dir, events }`, and a first cut here put
+//!   logging on the same trait because `import_app_projects` needs `applog`.
+//!   Measuring it killed that: 150 `applog` call sites, 59 of the 143 handler
+//!   bodies, plus the helpers under them. Threading a `Ctx` into every
+//!   function that might warn is churn in service of something none of them
+//!   vary by, so the log is a process-global installed sink (`log`) — which
+//!   is exactly what `applog` already was — and `Host` carries events alone.
 //! - `snapshot()` is NOT pure core, which the measured dependency list hides:
 //!   it reaches `watch_lane`, and that writes the process-global codex/pi
 //!   watch registries. Handlers touching those cannot move until the registry
@@ -36,20 +38,26 @@
 //!   extraction that is not mechanical, and it is better known now than at
 //!   handler 90.
 
+pub mod log;
+pub mod meta;
+pub mod util;
+pub mod profiles;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Everything the command layer needs from whoever is hosting it.
+/// Where an event goes. Tauri implements it with `app.emit`; `worktrees serve`
+/// implements it with a frame broadcast.
 ///
-/// Tauri implements it with `app.emit` + the app's `applog`; `worktrees serve`
-/// implements it with a frame broadcast + its own log. Nothing here returns a
-/// value to the host: an event is fire-and-forget by construction, so a slow
-/// or dead client cannot stall a command.
+/// Logging is deliberately NOT here — see the `log` module. A log belongs to
+/// the process, an event belongs to a client, and the two have different
+/// lifetimes: the app logs from its panic hook, long after any `Ctx` is gone.
+///
+/// Nothing here returns a value to the host: an event is fire-and-forget by
+/// construction, so a slow or dead client cannot stall a command.
 pub trait Host: Send + Sync {
     /// Push an event to the client(s). Tauri's `app.emit`.
     fn emit(&self, event: &str, payload: serde_json::Value);
-    /// Append one line to the host's log. `level` is `info` / `warn` / `error`.
-    fn log(&self, level: &str, msg: &str);
 }
 
 /// An ordered byte stream to one client — a terminal attach, a dock shell.
@@ -87,8 +95,10 @@ impl Ctx {
         self.config_dir.join("projects.json")
     }
 
+    /// Convenience for call sites that already hold a `Ctx`; identical to
+    /// `log::log`, which is what the helpers below them call.
     pub fn log(&self, level: &str, msg: &str) {
-        self.host.log(level, msg);
+        log::log(level, msg);
     }
 
     pub fn emit(&self, event: &str, payload: serde_json::Value) {
@@ -113,19 +123,27 @@ mod tests {
         fn emit(&self, event: &str, payload: serde_json::Value) {
             self.events.lock().unwrap().push((event.into(), payload));
         }
+    }
+
+    impl log::LogSink for Recorder {
         fn log(&self, level: &str, msg: &str) {
             self.logs.lock().unwrap().push((level.into(), msg.into()));
         }
     }
 
     #[test]
-    fn a_ctx_can_be_built_and_recorded_against_without_a_window() {
+    fn a_ctx_can_be_built_and_emitted_through_without_a_window() {
         let rec = Arc::new(Recorder::default());
         let ctx = Ctx::new(PathBuf::from("/tmp/wt-cfg"), rec.clone());
-        ctx.log("info", "hello");
         ctx.emit("sessions:busy", serde_json::json!({"slug": "x"}));
         assert_eq!(ctx.projects_file(), PathBuf::from("/tmp/wt-cfg/projects.json"));
-        assert_eq!(rec.logs.lock().unwrap().len(), 1);
         assert_eq!(rec.events.lock().unwrap()[0].0, "sessions:busy");
+    }
+
+    /// Logging before any sink is installed must be a no-op rather than a
+    /// panic: every unit test below reaches a handler with no host at all.
+    #[test]
+    fn logging_without_an_installed_sink_is_silent() {
+        log::warn("nobody is listening");
     }
 }
