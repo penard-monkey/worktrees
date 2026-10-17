@@ -230,6 +230,13 @@ fn frontmatter_end(text: &str) -> Option<usize> {
     None
 }
 
+/// The generic `.claude/close-out.md` apply writes for `project`. The file is
+/// the repository's to edit afterwards, so this is only ever what was FIRST
+/// written there — which is exactly what the review brief needs to recognise.
+pub fn close_out_config(project: &str) -> String {
+    CLOSE_OUT_CONFIG.replace("{project}", project)
+}
+
 pub fn managed_state(text: Option<&str>, shipped: &str) -> Found {
     let Some(text) = text else { return Found::new(State::Absent, None) };
     let mut stamp = None;
@@ -337,7 +344,10 @@ fn target(entries: &[Entry], root_kind: Option<&DirKind>, read: &dyn Fn(&str) ->
 
 /// A blob's text EXACTLY — `agentfiles::git_env` trims the trailing newline,
 /// which would move a managed file's hash and read every one as edited.
-fn blob(root: &str, spec: &str) -> Option<String> {
+/// `spec` is anything `cat-file blob` takes: a bare sha, or `<rev>:<path>`.
+/// `review.rs` reads the branch side's bytes through it, because a brief that
+/// vouches for a file has to have looked at one.
+pub(crate) fn blob(root: &str, spec: &str) -> Option<String> {
     let out = std::process::Command::new("git").arg("-C").arg(root).args(["cat-file", "blob", spec]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -508,7 +518,7 @@ fn rules_changes(i: &Inspected, project: &str, force: bool) -> (Vec<Change>, Vec
     if let Some(l) = &i.config_link {
         left.push(format!("{CONFIG_PATH}: `{l}` is a symlink; worktrees does not write through it — left alone"));
     } else if !s.config && s.skill.state != State::Foreign {
-        v.push(Change::Write { path: CONFIG_PATH.into(), content: CLOSE_OUT_CONFIG.replace("{project}", project) });
+        v.push(Change::Write { path: CONFIG_PATH.into(), content: close_out_config(project) });
     }
     (v, left)
 }
