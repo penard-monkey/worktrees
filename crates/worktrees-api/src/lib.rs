@@ -44,6 +44,7 @@ pub mod projects;
 pub mod watch;
 pub mod workspace;
 pub mod util;
+pub mod ops;
 pub mod profiles;
 
 use std::path::PathBuf;
