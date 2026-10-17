@@ -224,7 +224,7 @@ pub fn start(
                     // spin into a retry.
                     if !said {
                         said = true;
-                        crate::applog("error", &format!("docs server: accept failed: {e}"));
+                        crate::log::log("error", &format!("docs server: accept failed: {e}"));
                     }
                     tokio::time::sleep(ACCEPT_RETRY).await;
                     continue;
@@ -1424,7 +1424,8 @@ mod tests {
     #[test]
     fn the_deep_link_is_the_fragment_the_page_routes_on() {
         let src = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../viewer/Viewer.tsx"),
+            // `CARGO_MANIFEST_DIR` is this crate now, not `app/src-tauri`.
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../app/viewer/Viewer.tsx"),
         )
         .expect("app/viewer/Viewer.tsx — the page's router; renamed?");
         let body = src
@@ -1461,7 +1462,7 @@ mod tests {
     #[test]
     fn the_shell_mounts_where_the_bundle_looks() {
         let src = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../viewer/main.tsx"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../app/viewer/main.tsx"),
         )
         .expect("app/viewer/main.tsx — the bundle's entry point; renamed?");
         let want = src

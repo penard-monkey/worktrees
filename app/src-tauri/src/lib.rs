@@ -32,8 +32,6 @@ use worktrees_api::watch::{
 // file because it is the only part of this backend that can hand a document to
 // something outside the app, and every rule in it is a refusal — the security
 // surface is worth reading in one piece.
-mod docserver;
-mod viewer;
 mod winstate;
 // Moved to worktrees-core so the LAUNCH path can read it too: a harness that
 // wants to weigh remaining quota before starting a session runs in the CLI and
@@ -1100,6 +1098,7 @@ fn file_mtime_ms(p: &Path) -> u64 {
 // `guard_under_projects`, `project_roots` and `under_roots` are the command
 // layer's now (`worktrees_api::projects`) — the containment boundary has to
 // hold for a caller that is not this WebView.
+use worktrees_api::viewer;
 use worktrees_api::projects::{guard_under_projects, project_roots, read_projects, under_roots};
 // Types and helpers the sections still in this file share with the ones that
 // have moved. Each goes away as its own section follows.

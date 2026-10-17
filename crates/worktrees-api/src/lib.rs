@@ -39,6 +39,7 @@
 //!   handler 90.
 
 pub mod config;
+pub mod docserver;
 pub mod editors;
 pub mod log;
 pub mod meta;
@@ -48,6 +49,7 @@ pub mod status;
 pub mod watch;
 pub mod workspace;
 pub mod util;
+pub mod viewer;
 pub mod ops;
 pub mod profiles;
 
